@@ -4145,7 +4145,7 @@ namespace {
                 TU_ARMA(EnumVariant, ve) {
                     const auto& tyi = m_crate.get_typeitem_by_path(sp, ve.path.m_path);
                     MIR_ASSERT(mir_res, tyi.is_Enum(), "");
-                    const auto* enm_p = &tyi.as_Enum();
+                    const auto* enm_p = &*tyi.as_Enum();
 
                     ::HIR::TypeRef  tmp;
                     const auto& ty = mir_res.get_lvalue_type(tmp, e.dst);

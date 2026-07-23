@@ -1114,35 +1114,35 @@
                 ),
             (Module,
                 m_out.write_tag(1);
-                serialise_module(e);
+                serialise_module(*e);
                 ),
             (TypeAlias,
                 m_out.write_tag(2);
-                serialise(e);
+                serialise(*e);
                 ),
             (Enum,
                 m_out.write_tag(3);
-                serialise(e);
+                serialise(*e);
                 ),
             (Struct,
                 m_out.write_tag(4);
-                serialise(e);
+                serialise(*e);
                 ),
             (Trait,
                 m_out.write_tag(5);
-                serialise(e);
+                serialise(*e);
                 ),
             (Union,
                 m_out.write_tag(6);
-                serialise(e);
+                serialise(*e);
                 ),
             (ExternType,
                 m_out.write_tag(7);
-                serialise(e);
+                serialise(*e);
                 ),
             (TraitAlias,
                 m_out.write_tag(8);
-                serialise(e);
+                serialise(*e);
                 )
             )
         }

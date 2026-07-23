@@ -727,21 +727,21 @@ namespace {
                 return ::HIR::TypeItem::make_Import({ mv$(spath), is_variant, static_cast<unsigned int>(m_in.read_count()) });
                 }
             case 1:
-                return ::HIR::TypeItem( deserialise_module() );
+                return ::HIR::TypeItem( box$(deserialise_module()) );
             case 2:
-                return ::HIR::TypeItem( deserialise_typealias() );
+                return ::HIR::TypeItem( box$(deserialise_typealias()) );
             case 3:
-                return ::HIR::TypeItem( deserialise_enum() );
+                return ::HIR::TypeItem( box$(deserialise_enum()) );
             case 4:
-                return ::HIR::TypeItem( deserialise_struct() );
+                return ::HIR::TypeItem( box$(deserialise_struct()) );
             case 5:
-                return ::HIR::TypeItem( deserialise_trait() );
+                return ::HIR::TypeItem( box$(deserialise_trait()) );
             case 6:
-                return ::HIR::TypeItem( deserialise_union() );
+                return ::HIR::TypeItem( box$(deserialise_union()) );
             case 7:
-                return ::HIR::TypeItem( deserialise_externtype() );
+                return ::HIR::TypeItem( box$(deserialise_externtype()) );
             case 8:
-                return ::HIR::TypeItem( deserialise_traitalias() );
+                return ::HIR::TypeItem( box$(deserialise_traitalias()) );
             default:
                 BUG(Span(), "Bad tag for HIR::TypeItem - " << tag);
             }
@@ -756,13 +756,13 @@ namespace {
                 return ::HIR::ValueItem::make_Import({ mv$(spath), is_variant, static_cast<unsigned int>(m_in.read_count()) });
                 }
             case 1:
-                return ::HIR::ValueItem( deserialise_constant() );
+                return ::HIR::ValueItem( box$(deserialise_constant()) );
             case 2:
-                return ::HIR::ValueItem( deserialise_static() );
+                return ::HIR::ValueItem( box$(deserialise_static()) );
             case 3:
                 return ::HIR::ValueItem::make_StructConstant({ deserialise_simplepath() });
             case 4:
-                return ::HIR::ValueItem( deserialise_function() );
+                return ::HIR::ValueItem( box$(deserialise_function()) );
             case 5:
                 return ::HIR::ValueItem::make_StructConstructor({ deserialise_simplepath() });
             default:
@@ -783,7 +783,7 @@ namespace {
             case HIR::MacroItem::TAG_MacroRules:
                 return deserialise_macrorulesptr();
             case HIR::MacroItem::TAG_ProcMacro:
-                return deserialise_procmacro();
+                return box$(deserialise_procmacro());
             }
 
             TODO(Span(), "Bad tag for MacroItem - " << tag);
@@ -1724,9 +1724,9 @@ namespace {
         ::HIR::Module   rv;
 
         // m_traits doesn't need to be serialised
-        rv.m_value_items = deserialise_istrumap< ::std::unique_ptr< ::HIR::VisEnt< ::HIR::ValueItem> > >();
-        rv.m_mod_items = deserialise_istrumap< ::std::unique_ptr< ::HIR::VisEnt< ::HIR::TypeItem> > >();
-        rv.m_macro_items = deserialise_istrumap< ::std::unique_ptr< ::HIR::VisEnt< ::HIR::MacroItem> > >();
+        rv.m_value_items = deserialise_istrumap< ::HIR::VisEnt< ::HIR::ValueItem> >();
+        rv.m_mod_items   = deserialise_istrumap< ::HIR::VisEnt< ::HIR::TypeItem > >();
+        rv.m_macro_items = deserialise_istrumap< ::HIR::VisEnt< ::HIR::MacroItem> >();
 
         return rv;
     }
