@@ -760,7 +760,8 @@ namespace {
             else TU_IFLET( ::HIR::TypeItem, (it->second.ent), Enum, enm,
                 if( &node == &path.components().back() ) {
                     is_enum = true;
-                    return &enm;
+                    const ::HIR::Enum* enm_p = &*enm;
+                    return enm_p;
                 }
                 BUG(sp, "");
             )
