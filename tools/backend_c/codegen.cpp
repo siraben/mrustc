@@ -312,6 +312,12 @@ void Codegen_C::emit_function(const RcString& name, const ModuleTree& tree, cons
                 TU_ARMA(SetDropFlag, se) {
                     LOG_TODO(stmt);
                     }
+                TU_ARMA(LoadDropFlag, se) {
+                    LOG_TODO(stmt);
+                    }
+                TU_ARMA(SaveDropFlag, se) {
+                    LOG_TODO(stmt);
+                    }
                 TU_ARMA(Drop, se) {
                     const auto& ty = this->get_lvalue_type(se.slot);
                     if( se.flag_idx != ~0u ) {
