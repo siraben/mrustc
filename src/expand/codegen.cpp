@@ -468,6 +468,13 @@ class CHandler_Link:
                             if( ii.data.is_Function() || ii.data.is_Static() ) {
                                 link.contained_names.push_back( ii.name );
                             }
+                            else if( ii.data.is_Type() ) {
+                            }
+                            else if( ii.data.is_None() ) {
+                            }
+                            else {
+                                TODO(sp, "#[link] item kind unknown: " << ii.data.tag_str());
+                            }
                         }
                         link.mod_path_nodes = path.nodes;
                         link.mod_path_nodes.pop_back(); // Remove the "" at the end
@@ -503,6 +510,9 @@ class CHandler_Link:
             }
             if( emit )
             {
+                if(link.name == "api-ms-win-core-synch-l1-2-0") {
+                    WARNING(lex.point_span(), W0000, "winapi synch [ty=" << (int)link.kind << "]: " << link.contained_names << " " << b->items().size());
+                }
                 b->m_libraries.push_back(std::move(link));
             }
             lex.getTokenCheck(TOK_PAREN_CLOSE);

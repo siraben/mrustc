@@ -1897,6 +1897,9 @@ void Expand_ExternBlock(const ExpandState& es, ::AST::Module& mod, ::AST::Extern
         auto attrs = mv$(i.attrs);
         auto vis = i.vis;
 
+        Expand_Attrs_CfgAttr(attrs);
+        Expand_Attrs(es, attrs, AttrStage::Pre,  path, mod, idx, vis, i.data);
+
         auto dat = std::move(i.data);
         TU_MATCH_HDRA( (dat), { )
         default:
@@ -1951,6 +1954,8 @@ void Expand_ExternBlock(const ExpandState& es, ::AST::Module& mod, ::AST::Extern
             dat.as_MacroInv() = mv$(mi_owned);
             }
         }
+
+        Expand_Attrs(es, attrs, AttrStage::Post,  path, mod, idx, vis, dat);
 
         {
             auto& i = block.items()[idx];
@@ -2190,12 +2195,6 @@ void Expand_Mod(const ExpandState& es, ::AST::AbsolutePath modpath, ::AST::Modul
             }
         TU_ARMA(ExternBlock, e) {
             Expand_ExternBlock(es, mod, e);
-            // HACK: Just convert inner items into outer items
-            auto items = mv$( e.items() );
-            for(auto& i2 : items)
-            {
-                mod.m_items.push_back( box$(i2) );
-            }
             }
         TU_ARMA(Impl, e) {
             Expand_Impl(es, modpath, mod,  e);
@@ -2439,14 +2438,27 @@ void Expand_Mod_IndexAnon(::AST::Crate& crate, ::AST::Module& mod)
 {
     TRACE_FUNCTION_F("mod=" << mod.path());
 
-    for(auto& i : mod.m_items)
+    //for(auto& i : mod.m_items)
+    for(size_t ii = 0; ii < mod.m_items.size(); ii ++)
     {
+        auto& i = mod.m_items[ii];
         DEBUG("- " << i->data.tag_str() << " '" << i->name << "'");
         if(auto* e = i->data.opt_Module())
         {
             Expand_Mod_IndexAnon(crate, *e);
 
             // TODO: Also ensure that all #[macro_export] macros end up in parent
+        }
+
+        // HACK: Just convert inner items into outer items to simplify later passes
+        // Done after the above expand, so `#[link]` handling can see them
+        if(auto* e = i->data.opt_ExternBlock())
+        {
+            auto items = mv$( e->items() );
+            for(auto& i2 : items)
+            {
+                mod.m_items.push_back( box$(i2) );
+            }
         }
     }
 
