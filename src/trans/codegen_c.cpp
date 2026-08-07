@@ -2897,6 +2897,31 @@ namespace {
                     break;
                 }
             }
+            if( m_compiler == Compiler::Msvc && item.m_linkage.name != "" ) {
+                // HACK: On MVSC, these functions don't exist - so stub then to be the disabled builtin
+                if(false
+                    || item.m_linkage.name == "acosf128"
+                    || item.m_linkage.name == "asinf128"
+                    || item.m_linkage.name == "atan2f128"
+                    || item.m_linkage.name == "atanf128"
+                    || item.m_linkage.name == "cbrtf128"
+                    || item.m_linkage.name == "coshf128"
+                    || item.m_linkage.name == "erfcf128"
+                    || item.m_linkage.name == "erff128"
+                    || item.m_linkage.name == "expm1f128"
+                    || item.m_linkage.name == "hypotf128"
+                    || item.m_linkage.name == "lgammaf128_r"
+                    || item.m_linkage.name == "log1pf128"
+                    || item.m_linkage.name == "sinhf128"
+                    || item.m_linkage.name == "tanf128"
+                    || item.m_linkage.name == "tanhf128"
+                    || item.m_linkage.name == "tgammaf128"
+                    )
+                {
+                    m_of << " { f128_disabled(); abort(); }";
+                    return ;
+                }
+            }
             m_of << ";\n";
 
             m_mir_res = nullptr;
