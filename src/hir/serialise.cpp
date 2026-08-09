@@ -114,6 +114,16 @@
                 serialise(i);
         }
         template<typename T>
+        void serialise_vec_c(const ::std::vector<T>& vec, ::std::function<void(const T&)> cb)
+        {
+            TRACE_FUNCTION_F("<" << typeid(T).name() << "> size=" << vec.size());
+            auto _ = m_out.open_object(typeid(::std::vector<T>).name());
+            m_out.write_count(vec.size());
+            for(const auto& i : vec) {
+                cb(i);
+            }
+        }
+        template<typename T>
         void serialise(const ::std::vector<T>& vec)
         {
             serialise_vec(vec);
@@ -942,7 +952,8 @@
                 serialise_vec(e);
                 }
             TU_ARMA(String, e) {
-                serialise_vec(e);
+                //serialise_vec(e);
+                serialise_vec_c<RcString>(e, [&](const RcString& s){ m_out.write_string(s.size(), s.c_str()); });
                 }
             TU_ARMA(ByteString, e) {
                 serialise_vec(e);
@@ -1085,7 +1096,7 @@
                 m_out.write( e.data(), e.size() );
                 ),
             (StaticString,
-                m_out.write_string(e);
+                m_out.write_string(e.size(), e.c_str());
                 ),
             (Const,
                 ASSERT_BUG(Span(), monomorphise_path_needed(*e.p), "Unexpected Constant: " << *e.p);

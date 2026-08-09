@@ -1409,7 +1409,7 @@ namespace MIR { namespace eval {
                 dst.write_ptr(state, EncodedLiteral::PTR_BASE, ConstantPtr::allocate(e2.data(), e2.size()));
             }
             TU_ARM(c, StaticString, e2) {
-                dst.write_ptr(state, EncodedLiteral::PTR_BASE, ConstantPtr::allocate(e2.data(), e2.size()));
+                dst.write_ptr(state, EncodedLiteral::PTR_BASE, ConstantPtr::allocate(e2.c_str(), e2.size()));
                 dst.slice(Target_GetPointerBits()/8).write_uint(state, Target_GetPointerBits(), e2.size());
             }
             TU_ARM(c, Const, e2) {

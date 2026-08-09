@@ -2632,7 +2632,7 @@ namespace {
                 m_builder.set_result(node.span(), ::MIR::RValue::make_Constant( ::MIR::Constant::make_Bool({e}) ));
                 }
             TU_ARMA(String, e) {
-                m_builder.set_result(node.span(), ::MIR::RValue::make_Constant( ::MIR::Constant(e) ));
+                m_builder.set_result(node.span(), ::MIR::RValue::make_Constant( ::MIR::Constant(RcString(e)) ));
                 }
             TU_ARMA(CString, e) {
                 auto s = e.v;
@@ -2649,7 +2649,7 @@ namespace {
                 m_builder.end_block(::MIR::Terminator::make_Call({
                     cast__ok, cast__panic,
                     res.clone(), ::MIR::CallTarget::make_Intrinsic({ "transmute", mv$(transmute_params) }),
-                    make_vec1( ::MIR::Param( ::MIR::Constant(std::move(s)) ) )
+                    make_vec1( ::MIR::Param( ::MIR::Constant(RcString(s)) ) )
                     }));
                 m_builder.set_cur_block(cast__panic);
                 emit_unwind(node.span());

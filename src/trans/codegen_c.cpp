@@ -2661,6 +2661,10 @@ namespace {
         {
             print_escaped_string_inner(s.c_str(), s.c_str() + s.size());
         }
+        void print_escaped_string(const RcString& s)
+        {
+            print_escaped_string_inner(s.c_str(), s.c_str() + s.size());
+        }
         void print_escaped_string(const std::vector<uint8_t>& s)
         {
             const char* start =  reinterpret_cast<const char*>(s.data());

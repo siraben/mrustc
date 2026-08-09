@@ -691,7 +691,7 @@ namespace {
                 m_in.read( bytes.data(), bytes.size() );
                 return ::MIR::Constant::make_Bytes( mv$(bytes) );
                 }
-            _(StaticString, m_in.read_string() )
+            _(StaticString, RcString(m_in.read_string()) )  // NOTE: Not using `read_istring` to avoid polluting the interning map
             _(Const,  { box$(deserialise_path()) } )
             _(Generic,  deserialise_genericref())
             _(Function, { box$(deserialise_path()) } )
@@ -1691,7 +1691,7 @@ namespace {
         #define _(x, ...)    case ::MIR::SwitchValues::TAG_##x: return ::MIR::SwitchValues::make_##x( __VA_ARGS__ );
         _(Unsigned, deserialise_vec_c<uint64_t>([&](){ return m_in.read_u64c(); }))
         _(Signed  , deserialise_vec_c< int64_t>([&](){ return m_in.read_i64c(); }))
-        _(String  , deserialise_vec<::std::string>())
+        _(String  , deserialise_vec_c<RcString>([&](){ return RcString(m_in.read_string()); }))
         _(ByteString, deserialise_vec<::std::vector<uint8_t>>())
         #undef _
         default:
