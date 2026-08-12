@@ -387,6 +387,20 @@ static const CmImportBinding *cm_find_binding_const(
     return NULL;
 }
 
+static int cm_module_is_ancestor(const CmImportResolverState *state,
+    CmModuleId ancestor, CmModuleId module)
+{
+    while (module != CM_MODULE_NONE) {
+        const CmImportModuleState *entry;
+
+        if (module == ancestor) return 1;
+        entry = cm_import_module_const(state, module);
+        if (entry == NULL) break;
+        module = entry->parent;
+    }
+    return 0;
+}
+
 static int cm_add_binding(CmImportModuleState *module,
     const CmResolvedBinding *value, int priority)
 {
@@ -1008,9 +1022,12 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
 
                     source_binding = (const CmImportBinding *)cm_vec_at_const(
                         &source->namespaces[namespace_index], index);
-                    if (source_binding == NULL ||
-                        !source_binding->value.is_public ||
-                        source_binding->value.is_ambiguous) continue;
+                    if (source_binding == NULL
+                        || source_binding->value.is_ambiguous
+                        || (!source_binding->value.is_public
+                            && (leaf->is_public
+                                || !cm_module_is_ancestor(state,
+                                    scope.module, leaf->module)))) continue;
                     imported = source_binding->value;
                     imported.module = leaf->module;
                     imported.import_declaration = leaf->declaration;
