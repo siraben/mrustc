@@ -1620,11 +1620,10 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
     uint32_t index;
 
     if (body == NULL || (body->owned_storage != NULL) != stored
-        || (semantic_results == NULL
-            ? body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE
-            : (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
-                && body->semantic_evidence
-                    != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE))
+        || (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE
+            && body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
+            && body->semantic_evidence
+                != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE)
         || body->basic_block_count == 0u || body->basic_blocks == NULL) {
         return 0;
     }
@@ -2372,6 +2371,7 @@ CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
 {
     if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
     if (!cm_mir_context_valid(context) || hir == NULL || body == NULL
+        || body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE
         || out_id == NULL || (context->hir_owner != NULL
             && context->hir_owner != hir)) {
         return CM_MIR_INVALID_ARGUMENT;

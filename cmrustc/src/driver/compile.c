@@ -14,6 +14,7 @@
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/semantic_item.h"
 #include "cm/hir/semantic_results.h"
+#include "../hir/instance_internal.h"
 #include "cm/macro/expand.h"
 #include "cm/mir/lower.h"
 #include "cm/mir/model.h"
@@ -158,6 +159,7 @@ typedef enum CmCompileMirVisitState {
 } CmCompileMirVisitState;
 
 typedef struct CmCompileReachableInstance {
+    CmHirCanonicalInstance identity;
     CmHirDefId definition;
     CmHirTypeId substitution;
     uint32_t substitution_count;
@@ -171,6 +173,7 @@ typedef struct CmCompileReachableInstance {
 typedef struct CmCompileReachableEdge {
     size_t callee;
     CmHirExprId expression;
+    CmHirCanonicalInstance callee_identity;
 } CmCompileReachableEdge;
 
 typedef struct CmCompileSemanticOwner {
@@ -240,23 +243,15 @@ static int cm_compile_type_is_u32(const CmHirContext *hir,
         && type->data.integer_type.kind == CM_HIR_INT_U32;
 }
 
-static int cm_compile_instance_key_equal(
-    const CmCompileReachableInstance *instance, CmHirDefId definition,
-    const CmHirTypeId *substitutions, uint32_t substitution_count)
-{
-    return instance != NULL
-        && cm_hir_def_id_equal(instance->definition, definition)
-        && instance->substitution_count == substitution_count
-        && (substitution_count == 0u
-            || instance->substitution == substitutions[0]);
-}
-
 static int cm_compile_intern_exact(CmCompileExactState *state,
     const CmHirItem *item, const CmHirTypeId *substitutions,
     uint32_t substitution_count, size_t *out_instance,
     char *message, size_t message_capacity)
 {
     CmCompileReachableInstance instance;
+    CmHirCanonicalInstance identity;
+    CmHirInstanceSpec spec;
+    CmHirGenericArg argument;
     size_t index;
 
     if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
@@ -271,18 +266,42 @@ static int cm_compile_intern_exact(CmCompileExactState *state,
             "unsupported or invalid reachable function instance");
         return 0;
     }
+    cm_hir_instance_spec_init(&spec);
+    memset(&argument, 0, sizeof(argument));
+    spec.selected_callable = item->definition;
+    if (substitution_count != 0u) {
+        argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+        argument.data.type = substitutions[0];
+        spec.item_arguments = &argument;
+        spec.item_argument_count = 1u;
+    }
+    cm_hir_canonical_instance_init(&identity);
+    if (cm_hir_canonical_instance_encode(state->hir,
+            item->definition.crate_id, &spec, &identity)
+            != CM_HIR_INSTANCE_OK
+        || identity.body != item->data.function_item.body) {
+        cm_hir_canonical_instance_destroy(&identity);
+        (void)snprintf(message, message_capacity,
+            "reachable function instance is not canonical");
+        return 0;
+    }
     for (index = 0u; index < state->instances.len; ++index) {
         const CmCompileReachableInstance *candidate;
+        int equal;
 
         candidate = (const CmCompileReachableInstance *)cm_vec_at_const(
             &state->instances, index);
-        if (cm_compile_instance_key_equal(candidate, item->definition,
-                substitutions, substitution_count)) {
+        equal = 0;
+        if (candidate != NULL
+            && cm_hir_canonical_instance_equal(&candidate->identity,
+                &identity, &equal) == CM_HIR_INSTANCE_OK && equal) {
+            cm_hir_canonical_instance_destroy(&identity);
             *out_instance = index;
             return 1;
         }
     }
     memset(&instance, 0, sizeof(instance));
+    instance.identity = identity;
     instance.definition = item->definition;
     instance.substitution_count = substitution_count;
     if (substitution_count != 0u) {
@@ -434,6 +453,20 @@ static int cm_compile_discover_expression_callees(
                 expression->data.call.type_substitutions,
                 expression->data.call.type_substitution_count,
                 &edge.callee, message, message_capacity)) {
+            const CmCompileReachableInstance *callee_instance;
+
+            callee_instance =
+                (const CmCompileReachableInstance *)cm_vec_at_const(
+                    &state->instances, edge.callee);
+            cm_hir_canonical_instance_init(&edge.callee_identity);
+            if (callee_instance == NULL
+                || cm_hir_canonical_instance_clone(&edge.callee_identity,
+                    &callee_instance->identity) != CM_HIR_INSTANCE_OK) {
+                cm_hir_canonical_instance_destroy(&edge.callee_identity);
+                (void)snprintf(message, message_capacity,
+                    "reachable call target identity cannot be retained");
+                return 0;
+            }
             edge.expression = expression_id;
             (void)cm_vec_push(&state->edges, &edge);
             return 1;
@@ -859,6 +892,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     int temporary_exists;
     int write_failed;
     size_t written;
+    size_t cleanup_index;
     CmVec exact_root_items;
     CmVec exact_root_instances;
     CmVec exact_root_bodies;
@@ -1207,6 +1241,26 @@ cleanup:
     cm_str_buf_destroy(&c_output);
     cm_semantic_session_destroy(&legacy_semantic);
     cm_compile_destroy_semantic_owners(&exact_state);
+    for (cleanup_index = 0u; cleanup_index < exact_state.edges.len;
+         ++cleanup_index) {
+        CmCompileReachableEdge *edge;
+
+        edge = (CmCompileReachableEdge *)cm_vec_at(&exact_state.edges,
+            cleanup_index);
+        if (edge != NULL) {
+            cm_hir_canonical_instance_destroy(&edge->callee_identity);
+        }
+    }
+    for (cleanup_index = 0u; cleanup_index < exact_state.instances.len;
+         ++cleanup_index) {
+        CmCompileReachableInstance *instance;
+
+        instance = (CmCompileReachableInstance *)cm_vec_at(
+            &exact_state.instances, cleanup_index);
+        if (instance != NULL) {
+            cm_hir_canonical_instance_destroy(&instance->identity);
+        }
+    }
     cm_vec_destroy(&exact_state.edges);
     cm_vec_destroy(&exact_state.instances);
     cm_vec_destroy(&exact_root_bodies);

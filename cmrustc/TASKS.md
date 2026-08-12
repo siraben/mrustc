@@ -1378,6 +1378,14 @@ recursive SCCs do not depend on callee insertion order. The compile driver's
 open-session/ungated generic fallback must then migrate to that admitted graph
 before it can count as monomorphization evidence.
 
+The compile driver's current acyclic reachability worklist now owns and
+deduplicates canonical free-function instance identities, and every discovered
+edge retains a cloned canonical callee identity. Flat `DefId + optional u32`
+fields remain only as temporary lowering material. This is representation
+preparation, not semantic authority: generic closures still use the explicitly
+tracked open-session fallback until the closed exact-instance admission above
+can authenticate callers and callees together.
+
 ## M6: Build orchestration
 
 | ID | State | Task | Acceptance |
