@@ -819,6 +819,7 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     const CmHirItem *selected;
     const CmSemanticResults *semantic_results;
     CmSemanticBodyView semantic_body;
+    CmSemanticResultsStatus semantic_status;
     size_t allocation_size;
 
     if (key == NULL || key->state != NULL || admission == NULL
@@ -833,12 +834,20 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     }
     selected = cm_instance_item(hir, spec->selected_callable);
     semantic_results = cm_semantic_admission_results(admission);
+    semantic_status = semantic_results == NULL
+        ? CM_SEMANTIC_RESULTS_NOT_FOUND
+        : cm_semantic_results_body(semantic_results, admission,
+            selected == NULL ? CM_HIR_BODY_NONE
+                : selected->data.function_item.body, &semantic_body);
+    if (semantic_status == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && semantic_results != NULL && selected != NULL) {
+        semantic_status = cm_semantic_results_instance_body(
+            semantic_results, admission, spec, &semantic_body);
+    }
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
         || selected->data.function_item.body == CM_HIR_BODY_NONE
         || semantic_results == NULL
-        || cm_semantic_results_body(semantic_results, admission,
-            selected->data.function_item.body, &semantic_body)
-                != CM_SEMANTIC_RESULTS_OK
+        || semantic_status != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(semantic_body.owner,
             spec->selected_callable)) {
         return CM_HIR_INSTANCE_INVALID_RELATION;

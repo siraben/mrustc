@@ -45,6 +45,17 @@ typedef struct CmSemanticExpressionRecord {
     CmHirBinaryOperator primitive_operator;
 } CmSemanticExpressionRecord;
 
+typedef struct CmSemanticInstanceRecord {
+    CmHirCanonicalInstance identity;
+    CmSemanticBodyRecord body;
+    CmSemanticExpressionRecord *expressions;
+    size_t expression_count;
+    unsigned char *type_bytes;
+    size_t type_bytes_len;
+    CmSemanticTypeRecord *signature_parameters;
+    size_t signature_parameter_count;
+} CmSemanticInstanceRecord;
+
 struct CmSemanticResults {
     const CmHirContext *hir;
     CmHirCrateId local_crate;
@@ -62,6 +73,8 @@ struct CmSemanticResults {
     CmSemanticTypeRecord *call_parameters;
     size_t call_parameter_count;
     size_t admitted_body_count;
+    CmSemanticInstanceRecord *instances;
+    size_t instance_count;
     int sealed;
 };
 
@@ -91,6 +104,25 @@ typedef struct CmSemanticResultsBodyStageState {
 static CmSemanticResultsStatus cm_results_validate(
     const CmSemanticResults *results,
     const CmSemanticAdmission *admission);
+
+static const CmSemanticInstanceRecord *cm_results_find_instance(
+    const CmSemanticResults *results,
+    const CmHirCanonicalInstance *identity)
+{
+    size_t index;
+
+    if (results == NULL || identity == NULL) return NULL;
+    for (index = 0u; index < results->instance_count; ++index) {
+        int equal;
+
+        if (cm_hir_canonical_instance_equal(
+                &results->instances[index].identity, identity, &equal)
+                == CM_HIR_INSTANCE_OK && equal) {
+            return &results->instances[index];
+        }
+    }
+    return NULL;
+}
 
 static const CmHirItem *cm_results_item(const CmHirContext *hir,
     CmHirDefId definition)
@@ -1126,6 +1158,81 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
+    CmSemanticResults *results, CmSemanticSession *session,
+    const CmHirCanonicalInstance *instance,
+    const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage)
+{
+    CmSemanticResultsBodyStageState *state;
+    CmSemanticInstanceRecord *combined;
+    CmSemanticInstanceRecord *record;
+    size_t bytes;
+    size_t expression_index;
+
+    state = stage == NULL ? NULL
+        : (CmSemanticResultsBodyStageState *)stage->state;
+    if (results == NULL || results->sealed || session == NULL
+        || instance == NULL || check == NULL
+        || check->status != CM_SEMANTIC_BODY_OK || state == NULL
+        || !cm_semantic_session_is_current(session)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (cm_semantic_session_hir(session) != results->hir
+        || state->hir != results->hir || state->body != instance->body
+        || check->body != instance->body
+        || !cm_hir_def_id_equal(state->owner, instance->definition)
+        || !cm_hir_def_id_equal(cm_semantic_session_exact_owner(session),
+            instance->definition)
+        || cm_results_find_instance(results, instance) != NULL) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    for (expression_index = 0u;
+         expression_index < state->expression_count; ++expression_index) {
+        if (state->expressions[expression_index].present
+            && state->expressions[expression_index].has_direct_callable) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    if (!cm_size_add(results->instance_count, 1u, &bytes)
+        || !cm_size_mul(bytes, sizeof(*combined), &bytes)) {
+        return CM_SEMANTIC_RESULTS_OVERFLOW;
+    }
+    combined = (CmSemanticInstanceRecord *)cm_alloc_zeroed(1u, bytes);
+    if (results->instance_count != 0u) {
+        memcpy(combined, results->instances,
+            results->instance_count * sizeof(*combined));
+    }
+    record = &combined[results->instance_count];
+    cm_hir_canonical_instance_init(&record->identity);
+    if (cm_hir_canonical_instance_clone(&record->identity, instance)
+            != CM_HIR_INSTANCE_OK) {
+        cm_free(combined);
+        return CM_SEMANTIC_RESULTS_OVERFLOW;
+    }
+    record->body.present = 1;
+    record->body.owner = state->owner;
+    record->body.expression_count = state->body_expression_count;
+    record->body.signature_return_offset =
+        state->signature_return.type_offset;
+    record->body.signature_return_size = state->signature_return.type_size;
+    record->body.signature_parameter_count =
+        (uint32_t)state->signature_parameter_count;
+    record->expressions = state->expressions;
+    record->expression_count = state->expression_count;
+    record->type_bytes = state->type_bytes;
+    record->type_bytes_len = state->type_bytes_len;
+    record->signature_parameters = state->signature_parameters;
+    record->signature_parameter_count = state->signature_parameter_count;
+    state->expressions = NULL;
+    state->type_bytes = NULL;
+    state->signature_parameters = NULL;
+    cm_free(results->instances);
+    results->instances = combined;
+    results->instance_count += 1u;
+    cm_semantic_results_body_stage_destroy(stage);
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
 {
     const CmHirContext *hir;
@@ -1295,9 +1402,41 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
+    CmSemanticResults *results, size_t instance_count)
+{
+    const CmHirContext *hir;
+
+    if (results == NULL || results->sealed || instance_count == 0u
+        || results->admitted_body_count != 0u
+        || results->instance_count != instance_count) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    hir = results->hir;
+    if (hir == NULL || hir->storage.lifetime_id != results->storage_lifetime_id
+        || hir->semantic_generation != results->semantic_generation
+        || hir->rewind_generation != results->rewind_generation) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
+    results->sealed = 1;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
 void cm_semantic_results_destroy(CmSemanticResults *results)
 {
+    size_t index;
+
     if (results == NULL) return;
+    for (index = 0u; index < results->instance_count; ++index) {
+        CmSemanticInstanceRecord *record;
+
+        record = &results->instances[index];
+        cm_free(record->signature_parameters);
+        cm_free(record->type_bytes);
+        cm_free(record->expressions);
+        cm_hir_canonical_instance_destroy(&record->identity);
+    }
+    cm_free(results->instances);
     cm_free(results->call_parameters);
     cm_free(results->signature_parameters);
     cm_free(results->type_bytes);
@@ -1305,6 +1444,127 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
     cm_free(results->bodies);
     memset(results, 0, sizeof(*results));
     cm_free(results);
+}
+
+static CmSemanticResultsStatus cm_results_query_instance(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec,
+    const CmSemanticInstanceRecord **out_record)
+{
+    CmHirCanonicalInstance identity;
+    const CmSemanticInstanceRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (spec == NULL || out_record == NULL) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    cm_hir_canonical_instance_init(&identity);
+    if (cm_hir_canonical_instance_encode(results->hir,
+            results->local_crate, spec, &identity) != CM_HIR_INSTANCE_OK) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    record = cm_results_find_instance(results, &identity);
+    cm_hir_canonical_instance_destroy(&identity);
+    if (record == NULL) return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    *out_record = record;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_body(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, CmSemanticBodyView *out_view)
+{
+    const CmSemanticInstanceRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_query_instance(results, admission, spec, &record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    out_view->body = record->identity.body;
+    out_view->owner = record->identity.definition;
+    out_view->expression_count = record->body.expression_count;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_expression(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticExpressionView *out_view)
+{
+    const CmSemanticInstanceRecord *instance;
+    const CmSemanticExpressionRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->direct_callable = cm_hir_def_id_none();
+    status = cm_results_query_instance(results, admission, spec, &instance);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > instance->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &instance->expressions[(size_t)expression - 1u];
+    if (!record->present || record->body != instance->identity.body) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    out_view->expression = expression;
+    out_view->body = record->body;
+    out_view->unadjusted_type.bytes = instance->type_bytes
+        + record->type_offset;
+    out_view->unadjusted_type.size = record->type_size;
+    out_view->adjusted_type = out_view->unadjusted_type;
+    out_view->has_primitive_operator = record->has_primitive_operator;
+    out_view->primitive_operator = record->primitive_operator;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_signature(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec,
+    CmSemanticFunctionSignatureView *out_view)
+{
+    const CmSemanticInstanceRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->definition = cm_hir_def_id_none();
+    status = cm_results_query_instance(results, admission, spec, &record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    out_view->definition = record->identity.definition;
+    out_view->body = record->identity.body;
+    out_view->parameter_count = record->body.signature_parameter_count;
+    out_view->return_type.bytes = record->type_bytes
+        + record->body.signature_return_offset;
+    out_view->return_type.size = record->body.signature_return_size;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_signature_parameter(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    const CmSemanticInstanceRecord *record;
+    const CmSemanticTypeRecord *type;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_query_instance(results, admission, spec, &record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (parameter >= record->body.signature_parameter_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    type = &record->signature_parameters[
+        record->body.signature_parameter_start + parameter];
+    out_view->bytes = record->type_bytes + type->type_offset;
+    out_view->size = type->type_size;
+    return CM_SEMANTIC_RESULTS_OK;
 }
 
 CmSemanticResultsStatus cm_semantic_results_signature(

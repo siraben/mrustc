@@ -4,6 +4,7 @@
 #include "cm/hir/model.h"
 
 struct CmSemanticAdmission;
+struct CmHirInstanceSpec;
 typedef struct CmSemanticResults CmSemanticResults;
 
 typedef enum CmSemanticResultsStatus {
@@ -64,6 +65,26 @@ typedef struct CmSemanticDirectCallView {
     uint32_t parameter_count;
     CmSemanticTypeView return_type;
 } CmSemanticDirectCallView;
+
+CmSemanticResultsStatus cm_semantic_results_instance_body(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, CmSemanticBodyView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_expression(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticExpressionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_signature(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec,
+    CmSemanticFunctionSignatureView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_signature_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, uint32_t parameter,
+    CmSemanticTypeView *out_view);
 
 /* The returned results object and all views are borrowed from admission. */
 const CmSemanticResults *cm_semantic_admission_results(

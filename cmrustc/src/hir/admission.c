@@ -3,6 +3,7 @@
 #include "semantic_results_internal.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/instance.h"
 
 #include <string.h>
 
@@ -52,6 +53,20 @@ static int cm_admission_state_current(const CmSemanticAdmissionState *state)
         && hir->semantic_generation == state->semantic_generation
         && hir->rewind_generation == state->rewind_generation
         && cm_hir_get_crate(hir, state->local_crate) != NULL;
+}
+
+static const CmHirItem *cm_admission_item(const CmHirContext *hir,
+    CmHirDefId definition)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+
+    record = hir == NULL ? NULL : cm_hir_lookup_definition(hir, definition);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM
+            || record->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, record->entity.item_id);
+    return item != NULL && cm_hir_def_id_equal(item->definition, definition)
+        ? item : NULL;
 }
 
 static CmHirStatus cm_admission_rollback(CmHirContext *hir,
@@ -409,6 +424,186 @@ cleanup:
     cm_hir_crate_finalization_destroy(&finalization);
     cm_semantic_results_destroy(semantic_results);
     cm_free(body_ids);
+    return result;
+}
+
+CmSemanticAdmissionResult cm_semantic_admit_typed_leaf_instances(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
+    size_t instance_count)
+{
+    CmSemanticAdmissionResult result;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticResults *semantic_results;
+    CmSemanticResultsBodyStage stage;
+    CmSemanticAdmissionState *state;
+    CmHirCanonicalInstance *identities;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    if (admission == NULL || admission->state != NULL || hir == NULL
+        || local_crate == CM_HIR_CRATE_NONE || instances == NULL
+        || instance_count == 0u
+        || cm_hir_get_crate(hir, local_crate) == NULL
+        || instance_count > (size_t)-1 / sizeof(*identities)) return result;
+    memset(&finalization, 0, sizeof(finalization));
+    memset(&session, 0, sizeof(session));
+    cm_semantic_results_body_stage_init(&stage);
+    semantic_results = NULL;
+    state = NULL;
+    identities = (CmHirCanonicalInstance *)cm_alloc_zeroed(instance_count,
+        sizeof(*identities));
+    for (index = 0u; index < instance_count; ++index) {
+        const CmHirItem *item;
+        const CmHirBody *body;
+        const CmHirInstanceSpec *spec;
+        CmHirInstanceStatus instance_status;
+        size_t previous;
+
+        spec = instances[index].spec;
+        if (spec == NULL) goto cleanup_instances;
+        result.owner = spec->selected_callable;
+        result.body = instances[index].body;
+        item = cm_admission_item(hir, spec->selected_callable);
+        body = cm_hir_get_body(hir, instances[index].body);
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->definition.crate_id != local_crate
+            || !cm_hir_def_id_is_none(item->parent_definition)
+            || item->predicate_scope_count != 0u
+            || item->predicate_count != 0u
+            || item->outlives_predicate_count != 0u
+            || item->data.function_item.body != instances[index].body
+            || body == NULL || body->state != CM_HIR_BODY_TYPED
+            || body->root_expression == CM_HIR_EXPR_NONE
+            || !cm_hir_def_id_equal(body->owner, item->definition)) {
+            goto cleanup_instances;
+        }
+        instance_status = cm_hir_canonical_instance_encode(hir, local_crate,
+            spec, &identities[index]);
+        if (instance_status != CM_HIR_INSTANCE_OK
+            || identities[index].body != instances[index].body) {
+            goto cleanup_instances;
+        }
+        for (previous = 0u; previous < index; ++previous) {
+            int equal;
+
+            if (cm_hir_canonical_instance_equal(&identities[previous],
+                    &identities[index], &equal) != CM_HIR_INSTANCE_OK
+                || equal) goto cleanup_instances;
+        }
+    }
+    result.hir_status = cm_hir_crate_finalization_init(&finalization, hir,
+        local_crate);
+    if (result.hir_status != CM_HIR_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_FINALIZATION_FAILURE;
+        goto cleanup_instances;
+    }
+    {
+        CmProjectionNormalizeLimits limits;
+
+        limits.max_nodes = 4096u;
+        limits.max_projection_steps = 256u;
+        result.item_result =
+            cm_semantic_item_check_finalized_local_trait_impls(
+                &finalization, limits);
+    }
+    if (result.item_result.status != CM_SEMANTIC_ITEM_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_ITEM_FAILURE;
+        goto cleanup_instances;
+    }
+    if (cm_semantic_results_begin(hir, local_crate, &semantic_results)
+            != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
+        goto cleanup_instances;
+    }
+    for (index = 0u; index < instance_count; ++index) {
+        const CmHirInstanceSpec *spec;
+        CmSemanticSessionOptions options;
+        CmSemanticResultsStatus results_status;
+        const CmHirTypeId *substitutions;
+        uint32_t substitution_count;
+        uint32_t argument;
+
+        spec = instances[index].spec;
+        result.owner = spec->selected_callable;
+        result.body = instances[index].body;
+        substitution_count = spec->item_argument_count;
+        substitutions = substitution_count == 0u ? NULL
+            : (const CmHirTypeId *)cm_alloc(
+                substitution_count * sizeof(*substitutions));
+        for (argument = 0u; argument < substitution_count; ++argument) {
+            if (spec->item_arguments[argument].kind
+                    != CM_HIR_GENERIC_ARG_TYPE) {
+                cm_free((void *)substitutions);
+                goto cleanup_instances;
+            }
+            ((CmHirTypeId *)substitutions)[argument] =
+                spec->item_arguments[argument].data.type;
+        }
+        cm_semantic_session_options_init(&options);
+        options.local_crate = local_crate;
+        options.exact_owner = spec->selected_callable;
+        options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+        options.finalization = &finalization;
+        result.session_status = cm_semantic_session_init(&session, hir,
+            &options);
+        if (result.session_status != CM_TRAIT_SOLVER_PROVEN) {
+            cm_free((void *)substitutions);
+            result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
+            goto cleanup_instances;
+        }
+        result.body_result = cm_semantic_body_check_instance_with_writeback(
+            &session, instances[index].body, substitutions,
+            substitution_count, cm_semantic_results_stage_checked_body,
+            &stage);
+        cm_free((void *)substitutions);
+        if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
+            goto cleanup_instances;
+        }
+        results_status = cm_semantic_results_commit_checked_instance(
+            semantic_results, &session, &identities[index],
+            &result.body_result, &stage);
+        cm_semantic_session_destroy(&session);
+        if (results_status != CM_SEMANTIC_RESULTS_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+            result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+                ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+            goto cleanup_instances;
+        }
+    }
+    if (cm_semantic_results_seal_leaf_instances(semantic_results,
+            instance_count) != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = CM_HIR_INVARIANT_VIOLATION;
+        goto cleanup_instances;
+    }
+    state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u, sizeof(*state));
+    state->hir = hir;
+    state->local_crate = local_crate;
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->results = semantic_results;
+    semantic_results = NULL;
+    admission->state = state;
+    result.status = CM_SEMANTIC_ADMISSION_OK;
+    result.item_result.status = CM_SEMANTIC_ITEM_OK;
+    result.body_result.status = CM_SEMANTIC_BODY_OK;
+    result.body_result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
+    result.session_status = CM_TRAIT_SOLVER_PROVEN;
+
+cleanup_instances:
+    cm_semantic_results_body_stage_destroy(&stage);
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_semantic_results_destroy(semantic_results);
+    for (index = 0u; index < instance_count; ++index) {
+        cm_hir_canonical_instance_destroy(&identities[index]);
+    }
+    cm_free(identities);
     return result;
 }
 

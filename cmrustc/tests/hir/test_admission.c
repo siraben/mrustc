@@ -684,6 +684,170 @@ static void test_reachable_admission_rejects_untyped_and_generic(void)
     fixture_destroy(&f);
 }
 
+static void test_leaf_instance_admission_is_exact(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticReachableInstance reachable;
+    CmHirInstanceSpec spec;
+    CmHirInstanceSpec missing_spec;
+    CmHirGenericArg argument;
+    CmHirGenericArg missing_argument;
+    CmSemanticAdmissionResult result;
+    const CmSemanticResults *results;
+    CmSemanticBodyView body_view;
+    CmSemanticFunctionSignatureView signature;
+    CmSemanticExpressionView expression;
+    CmSemanticTypeView parameter;
+    CmHirInstanceKey key;
+    const CmHirItem *generic;
+    const CmHirItem *plain;
+    const CmHirBody *body;
+    CmHirTypeId u32_type;
+    CmHirTypeId bool_type;
+    size_t index;
+    int equal;
+
+    fixture_init(&f,
+        "fn generic<T>(x: T) -> T { x } "
+        "fn plain(x: u32) -> u32 { x } "
+        "fn flag(x: bool) -> bool { x }");
+    generic = find_free_function(&f.hir, "generic");
+    plain = find_free_function(&f.hir, "plain");
+    assert(generic != NULL && plain != NULL);
+    lower_function(&f, generic);
+    u32_type = CM_HIR_TYPE_NONE;
+    bool_type = CM_HIR_TYPE_NONE;
+    for (index = 0u; index < f.hir.types.len; ++index) {
+        const CmHirType *type;
+
+        type = cm_hir_get_type(&f.hir, (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U32) {
+            u32_type = (CmHirTypeId)(index + 1u);
+        } else if (type != NULL && type->kind == CM_HIR_TYPE_BOOL_KIND) {
+            bool_type = (CmHirTypeId)(index + 1u);
+        }
+    }
+    assert(u32_type != CM_HIR_TYPE_NONE && bool_type != CM_HIR_TYPE_NONE);
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = u32_type;
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = generic->definition;
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    reachable.body = generic->data.function_item.body;
+    reachable.spec = &spec;
+    memset(&admission, 0, sizeof(admission));
+    memset(&key, 0, sizeof(key));
+    result = cm_semantic_admit_typed_leaf_instances(&admission, &f.hir,
+        1u, &reachable, 1u);
+    results = cm_semantic_admission_results(&admission);
+    body = cm_hir_get_body(&f.hir, reachable.body);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && results != NULL && body != NULL
+        && cm_semantic_results_body_count(results, &admission) == 0u
+        && cm_semantic_results_instance_body(results, &admission, &spec,
+            &body_view) == CM_SEMANTIC_RESULTS_OK
+        && body_view.body == reachable.body
+        && cm_hir_def_id_equal(body_view.owner, generic->definition)
+        && cm_semantic_results_instance_signature(results, &admission,
+            &spec, &signature) == CM_SEMANTIC_RESULTS_OK
+        && signature.parameter_count == 1u
+        && cm_semantic_results_instance_signature_parameter(results,
+            &admission, &spec, 0u, &parameter)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&signature.return_type, &parameter,
+            &equal) == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, body->root_expression, &expression)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&expression.adjusted_type, &parameter,
+            &equal) == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_hir_instance_key_init(&key, &admission, &spec)
+            == CM_HIR_INSTANCE_OK);
+    cm_hir_instance_key_destroy(&key);
+    missing_argument = argument;
+    missing_argument.data.type = bool_type;
+    missing_spec = spec;
+    missing_spec.item_arguments = &missing_argument;
+    assert(cm_semantic_results_instance_body(results, &admission,
+            &missing_spec, &body_view) == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_hir_instance_key_init(&key, &admission, &missing_spec)
+            == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
+    cm_semantic_admission_destroy(&admission);
+
+    reachable.body = plain->data.function_item.body;
+    assert(cm_semantic_admit_typed_leaf_instances(&admission, &f.hir,
+        1u, &reachable, 1u).status
+            == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
+static void test_leaf_instance_admission_rejects_calls_and_bounds(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticReachableInstance reachable;
+    CmHirInstanceSpec spec;
+    CmHirGenericArg argument;
+    const CmHirItem *calls;
+    const CmHirItem *bounded;
+    CmHirTypeId u32_type;
+    size_t index;
+
+    fixture_init(&f,
+        "trait Missing {} "
+        "fn helper(x: u32) -> u32 { x } "
+        "fn calls(x: u32) -> u32 { helper(x) } "
+        "fn bounded<T: Missing>(x: T) -> T { x } "
+        "fn concrete(x: u32) -> u32 { x }");
+    calls = find_free_function(&f.hir, "calls");
+    bounded = find_free_function(&f.hir, "bounded");
+    assert(calls != NULL && bounded != NULL);
+    lower_function(&f, calls);
+    lower_function(&f, bounded);
+    u32_type = CM_HIR_TYPE_NONE;
+    for (index = 0u; index < f.hir.types.len; ++index) {
+        const CmHirType *type;
+
+        type = cm_hir_get_type(&f.hir, (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U32) {
+            u32_type = (CmHirTypeId)(index + 1u);
+            break;
+        }
+    }
+    assert(u32_type != CM_HIR_TYPE_NONE);
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = u32_type;
+    cm_hir_instance_spec_init(&spec);
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    reachable.spec = &spec;
+    memset(&admission, 0, sizeof(admission));
+
+    spec.selected_callable = calls->definition;
+    spec.item_arguments = NULL;
+    spec.item_argument_count = 0u;
+    reachable.body = calls->data.function_item.body;
+    assert(cm_semantic_admit_typed_leaf_instances(&admission, &f.hir,
+        1u, &reachable, 1u).status == CM_SEMANTIC_ADMISSION_HIR_FAILURE
+        && admission.state == NULL);
+
+    spec.selected_callable = bounded->definition;
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    reachable.body = bounded->data.function_item.body;
+    assert(cm_semantic_admit_typed_leaf_instances(&admission, &f.hir,
+        1u, &reachable, 1u).status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
 static void test_reachable_admission_scope_is_enforced(void)
 {
     Fixture f;
@@ -838,6 +1002,8 @@ int main(void)
     test_reachable_admission_subset_and_mir();
     test_reachable_admission_requires_closed_unique_set();
     test_reachable_admission_rejects_untyped_and_generic();
+    test_leaf_instance_admission_is_exact();
+    test_leaf_instance_admission_rejects_calls_and_bounds();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();
     test_invalid_api();

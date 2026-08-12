@@ -37,6 +37,12 @@ typedef struct CmSemanticReachableBody {
     CmHirBodyId body;
 } CmSemanticReachableBody;
 
+struct CmHirInstanceSpec;
+typedef struct CmSemanticReachableInstance {
+    CmHirBodyId body;
+    const struct CmHirInstanceSpec *spec;
+} CmSemanticReachableInstance;
+
 /*
  * Transactionally lower and admit every supported local free-function or
  * concrete trait-impl method body.
@@ -57,6 +63,17 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
     CmSemanticAdmission *admission, CmHirContext *hir,
     CmHirCrateId local_crate, const CmSemanticReachableBody *bodies,
     size_t body_count);
+
+/*
+ * Admit exact already-typed free-function instances. This first exact slice
+ * is deliberately leaf-only and predicate-free: bodies containing calls or
+ * owner predicates are rejected until exact call/obligation proof records
+ * carry canonical instance identity.
+ */
+CmSemanticAdmissionResult cm_semantic_admit_typed_leaf_instances(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
+    size_t instance_count);
 void cm_semantic_admission_destroy(CmSemanticAdmission *admission);
 int cm_semantic_admission_is_current(const CmSemanticAdmission *admission);
 const CmHirContext *cm_semantic_admission_hir(
