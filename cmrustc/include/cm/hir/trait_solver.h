@@ -32,6 +32,7 @@ typedef enum CmTraitProofOrigin {
 } CmTraitProofOrigin;
 
 #define CM_TRAIT_PROOF_FACT_NONE ((size_t)-1)
+#define CM_TRAIT_PROOF_EQUALITY_NONE UINT32_MAX
 
 typedef enum CmTraitImplHeadKind {
     CM_TRAIT_IMPL_HEAD_WILDCARD = 0,
@@ -88,6 +89,9 @@ typedef struct CmTraitSelectionResult {
     CmTraitProofOrigin proof_origin;
     /* Set only when proof_origin is PARAM_ENV. */
     size_t param_env_fact_index;
+    /* Set only for a PARAM_ENV projection-equality proof; implemented-trait
+     * environment proofs retain CM_TRAIT_PROOF_EQUALITY_NONE. */
+    uint32_t param_env_equality_index;
     CmHirDefId impl_definition;
     CmHirItemId impl_item;
     /* Set only by a committed projection-equality proof. */

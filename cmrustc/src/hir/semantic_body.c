@@ -1604,8 +1604,17 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                     return cm_semantic_body_fail_snapshot(result, typeck,
                         &snapshot, call_expressions);
                 }
-                if (cm_hir_def_id_is_none(
-                        selection.impl_associated_definition)) {
+                if ((selection.proof_origin == CM_TRAIT_PROOF_IMPL
+                        && cm_hir_def_id_is_none(
+                            selection.impl_associated_definition))
+                    || (selection.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+                        && (selection.param_env_fact_index
+                                == CM_TRAIT_PROOF_FACT_NONE
+                            || selection.param_env_equality_index
+                                == CM_TRAIT_PROOF_EQUALITY_NONE))
+                    || (selection.proof_origin != CM_TRAIT_PROOF_IMPL
+                        && selection.proof_origin
+                            != CM_TRAIT_PROOF_PARAM_ENV)) {
                     result.status = CM_SEMANTIC_BODY_INVALID;
                     result.solver_kind = CM_TRAIT_SOLVER_INVALID;
                     return cm_semantic_body_fail_snapshot(result, typeck,

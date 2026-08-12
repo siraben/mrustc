@@ -148,6 +148,8 @@ static void assert_invalid_result(CmTraitSelectionResult result)
     assert(result.kind == CM_TRAIT_SOLVER_INVALID);
     assert(result.proof_origin == CM_TRAIT_PROOF_NONE);
     assert(result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE);
+    assert(result.param_env_equality_index
+        == CM_TRAIT_PROOF_EQUALITY_NONE);
     assert(cm_hir_def_id_is_none(result.impl_definition));
     assert(result.impl_item == CM_HIR_ITEM_NONE);
     assert(cm_hir_def_id_is_none(result.impl_associated_definition));

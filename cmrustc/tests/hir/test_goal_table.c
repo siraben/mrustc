@@ -427,6 +427,84 @@ static CmHirDefId add_owner_with_bool_fact(TestFixture *fixture,
     return definition;
 }
 
+static CmHirDefId add_owner_with_bool_equality(TestFixture *fixture,
+    CmHirDefId fact_trait, CmHirDefId associated_definition,
+    CmHirTypeId equality_value, const char *name)
+{
+    CmHirDefId definition;
+    CmHirAssociatedTypeEquality equality;
+    CmHirTraitPredicate predicate;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_TRAIT, test_span(1u, 20u),
+        &definition) == CM_HIR_OK);
+    memset(&equality, 0, sizeof(equality));
+    equality.associated_type = associated_definition;
+    equality.value = equality_value;
+    equality.span = test_span(6u, 8u);
+    memset(&predicate, 0, sizeof(predicate));
+    predicate.subject = fixture->bool_hir;
+    predicate.trait_type.definition = fact_trait;
+    predicate.equalities = &equality;
+    predicate.equality_count = 1u;
+    predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
+    predicate.span = test_span(4u, 10u);
+    init_item(&item, CM_HIR_ITEM_TRAIT, definition, fixture->root,
+        cm_hir_intern(&fixture->hir, name));
+    item.predicates = &predicate;
+    item.predicate_count = 1u;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
+static CmHirDefId add_owner_with_equalities(TestFixture *fixture,
+    CmHirDefId fact_trait, CmHirDefId associated_definition,
+    const CmHirTypeId *subjects, const CmHirTypeId *values,
+    uint32_t equality_count, int block_first, const char *name)
+{
+    CmHirDefId definition;
+    CmHirAssociatedTypeEquality equalities[2];
+    CmHirTraitPredicate predicates[2];
+    CmInternId bound_lifetime;
+    CmHirItem item;
+    CmHirItemId item_id;
+    uint32_t index;
+
+    assert(equality_count != 0u && equality_count <= 2u);
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_TRAIT, test_span(1u, 20u),
+        &definition) == CM_HIR_OK);
+    memset(equalities, 0, sizeof(equalities));
+    memset(predicates, 0, sizeof(predicates));
+    bound_lifetime = cm_hir_intern(&fixture->hir, "blocked");
+    for (index = 0u; index < equality_count; ++index) {
+        equalities[index].associated_type = associated_definition;
+        equalities[index].value = values[index];
+        equalities[index].span = test_span(6u + index, 8u + index);
+        predicates[index].subject = subjects[index];
+        predicates[index].trait_type.definition = fact_trait;
+        predicates[index].equalities = &equalities[index];
+        predicates[index].equality_count = 1u;
+        predicates[index].modifier = CM_HIR_PREDICATE_REQUIRED;
+        predicates[index].span = test_span(4u + index, 10u + index);
+    }
+    if (block_first) {
+        predicates[0].binder.lifetimes = &bound_lifetime;
+        predicates[0].binder.lifetime_count = 1u;
+        predicates[0].binder.span = predicates[0].span;
+    }
+    init_item(&item, CM_HIR_ITEM_TRAIT, definition, fixture->root,
+        cm_hir_intern(&fixture->hir, name));
+    item.predicates = predicates;
+    item.predicate_count = equality_count;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static void fixture_init(TestFixture *fixture, int recursive_candidate)
 {
     memset(fixture, 0, sizeof(*fixture));
@@ -511,6 +589,7 @@ static void assert_cached_nonproven_clean(CmTraitSelectionResult result)
     assert(result.kind != CM_TRAIT_SOLVER_PROVEN);
     assert(result.proof_origin == CM_TRAIT_PROOF_NONE);
     assert(result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE);
+    assert(result.param_env_equality_index == CM_TRAIT_PROOF_EQUALITY_NONE);
     assert(cm_hir_def_id_is_none(result.impl_definition));
     assert(result.impl_item == CM_HIR_ITEM_NONE);
     assert(cm_hir_def_id_is_none(result.impl_associated_definition));
@@ -1431,6 +1510,411 @@ static void test_projection_equality_commit_and_rollback(void)
     fixture_destroy(&fixture);
 }
 
+static size_t find_equality_fact(const CmParamEnv *environment,
+    CmHirDefId trait_definition, CmHirDefId associated_definition)
+{
+    size_t fact_index;
+
+    for (fact_index = 0u;
+         fact_index < cm_param_env_fact_count(environment); ++fact_index) {
+        const CmParamEnvFact *fact;
+
+        fact = cm_param_env_fact(environment, fact_index);
+        if (fact != NULL
+            && fact->kind == CM_PARAM_ENV_FACT_IMPLEMENTED
+            && cm_hir_def_id_equal(fact->data.implemented.trait_type
+                    .definition, trait_definition)
+            && fact->data.implemented.equality_count == 1u
+            && fact->data.implemented.equalities != NULL
+            && cm_hir_def_id_equal(fact->data.implemented.equalities[0]
+                    .associated_type, associated_definition)) {
+            return fact_index;
+        }
+    }
+    return (size_t)-1;
+}
+
+static void test_projection_parameter_environment_precedence(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmTraitGoalTableLimits limits;
+    CmTraitGoal goal;
+    CmTraitSelectionResult result;
+    CmHirDefId environment_trait;
+    CmHirDefId environment_associated;
+    CmHirDefId projection_trait;
+    CmHirDefId projection_associated;
+    CmHirDefId impl_definition;
+    CmHirDefId impl_associated_definition;
+    CmHirTypeId projection_hir;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId expected;
+    CmTypeckTypeId resolved;
+    size_t equality_fact_index;
+    size_t type_count;
+
+    /* An unrelated equality must not suppress ordinary impl fallback. */
+    memset(&limits, 0, sizeof(limits));
+    fixture_init(&fixture, 0);
+    environment_trait = add_trait(&fixture, "EnvironmentProject");
+    environment_associated = add_trait_associated(&fixture,
+        environment_trait, "EnvironmentAssoc");
+    projection_trait = add_trait(&fixture, "FallbackProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "FallbackAssoc");
+    fixture.owner_trait = add_owner_with_bool_equality(&fixture,
+        environment_trait, environment_associated, fixture.u8_hir,
+        "FallbackOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    impl_definition = add_bool_impl(&fixture, projection_trait);
+    impl_associated_definition = add_impl_associated(&fixture,
+        impl_definition, projection_associated, fixture.u8_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        runtime.u8_type);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+        && result.param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && cm_hir_def_id_equal(result.impl_definition, impl_definition)
+        && cm_hir_def_id_equal(result.impl_associated_definition,
+            impl_associated_definition));
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* A matching environment equality is authoritative over an impl. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "PrecedenceProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "PrecedenceAssoc");
+    fixture.owner_trait = add_owner_with_bool_equality(&fixture,
+        projection_trait, projection_associated, fixture.u8_hir,
+        "PrecedenceOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    impl_definition = add_bool_impl(&fixture, projection_trait);
+    (void)add_impl_associated(&fixture, impl_definition,
+        projection_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    equality_fact_index = find_equality_fact(&runtime.environment,
+        projection_trait, projection_associated);
+    assert(equality_fact_index != (size_t)-1);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &expected) == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type, expected);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && result.param_env_fact_index == equality_fact_index
+        && result.param_env_equality_index == 0u
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && cm_hir_def_id_is_none(result.impl_associated_definition));
+    assert(cm_typeck_resolve(&runtime.typeck, expected, &resolved)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_get_type(&runtime.typeck, resolved) != NULL
+        && cm_typeck_get_type(&runtime.typeck, resolved)->kind
+            == CM_TYPECK_TYPE_INTEGER
+        && cm_typeck_get_type(&runtime.typeck, resolved)->data.integer_type
+            == CM_HIR_INT_U8);
+
+    /* A relevant equality that conflicts with the expected type must not
+     * fall through to an impl whose associated value happens to match. */
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        runtime.bool_type);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_NO_SOLUTION);
+    assert_cached_nonproven_clean(result);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+}
+
+static void test_projection_parameter_environment_candidates(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmTraitGoalTableLimits limits;
+    CmTraitGoal goal;
+    CmTraitSelectionResult result;
+    CmHirDefId projection_trait;
+    CmHirDefId projection_associated;
+    CmHirDefId impl_definition;
+    CmHirTypeId subjects[2];
+    CmHirTypeId values[2];
+    CmHirTypeId projection_hir;
+    CmTypeckType inference_projection;
+    CmTypeckTypeId inference_self;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId expected;
+    CmTypeckTypeId resolved;
+    size_t first_fact_index;
+    size_t fact_index;
+    size_t matching_fact_index;
+    size_t type_count;
+
+    memset(&limits, 0, sizeof(limits));
+
+    /* A concrete environment equality cannot select while projection Self is
+     * still an inference variable. Probing must not bind that variable. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "DeferredSelfProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "DeferredSelfAssoc");
+    subjects[0] = fixture.bool_hir;
+    values[0] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 1u, 0,
+        "DeferredSelfOwner");
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &inference_self) == CM_TYPECK_OK);
+    memset(&inference_projection, 0, sizeof(inference_projection));
+    inference_projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    inference_projection.span = test_span(21u, 24u);
+    inference_projection.data.projection_type.self_type = inference_self;
+    inference_projection.data.projection_type.trait_type.definition =
+        projection_trait;
+    inference_projection.data.projection_type.associated_type.definition =
+        projection_associated;
+    assert(cm_typeck_add_type(&runtime.typeck, &inference_projection,
+        &projection_type) == CM_TYPECK_OK);
+    assert_unbound(&runtime.typeck, inference_self);
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        runtime.u8_type);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_INFERENCE);
+    assert_cached_nonproven_clean(result);
+    assert_unbound(&runtime.typeck, inference_self);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* Two applicable LHS equalities are ambiguous independent of RHS. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "DuplicateProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "DuplicateAssoc");
+    subjects[0] = fixture.bool_hir;
+    subjects[1] = fixture.bool_hir;
+    values[0] = fixture.u8_hir;
+    values[1] = fixture.bool_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 2u, 0,
+        "DuplicateOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &expected) == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type, expected);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.supported_match_count == 2u);
+    assert_cached_nonproven_clean(result);
+    assert_unbound(&runtime.typeck, expected);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* Identical applicable equalities are idempotent. The first fact is the
+     * deterministic evidence source, while every probe remains isolated. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "IdempotentProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "IdempotentAssoc");
+    subjects[0] = fixture.bool_hir;
+    subjects[1] = fixture.bool_hir;
+    values[0] = fixture.u8_hir;
+    values[1] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 2u, 0,
+        "IdempotentOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    first_fact_index = find_equality_fact(&runtime.environment,
+        projection_trait, projection_associated);
+    assert(first_fact_index != (size_t)-1);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &expected) == CM_TYPECK_OK);
+    assert_unbound(&runtime.typeck, expected);
+    goal = projection_goal(fixture.owner_trait, projection_type, expected);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && result.param_env_fact_index == first_fact_index
+        && result.param_env_equality_index == 0u
+        && result.supported_match_count == 2u
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && cm_hir_def_id_is_none(result.impl_associated_definition));
+    assert(cm_typeck_resolve(&runtime.typeck, expected, &resolved)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_get_type(&runtime.typeck, resolved) != NULL
+        && cm_typeck_get_type(&runtime.typeck, resolved)->kind
+            == CM_TYPECK_TYPE_INTEGER
+        && cm_typeck_get_type(&runtime.typeck, resolved)->data.integer_type
+            == CM_HIR_INT_U8);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* A failed LHS probe must roll back before replaying a later winner. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "ProbeProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "ProbeAssoc");
+    subjects[0] = fixture.u8_hir;
+    subjects[1] = fixture.bool_hir;
+    values[0] = fixture.bool_hir;
+    values[1] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 2u, 0,
+        "ProbeOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    first_fact_index = find_equality_fact(&runtime.environment,
+        projection_trait, projection_associated);
+    matching_fact_index = (size_t)-1;
+    for (fact_index = first_fact_index + 1u;
+         fact_index < cm_param_env_fact_count(&runtime.environment);
+         ++fact_index) {
+        const CmParamEnvFact *fact;
+
+        fact = cm_param_env_fact(&runtime.environment, fact_index);
+        if (fact != NULL
+            && fact->kind == CM_PARAM_ENV_FACT_IMPLEMENTED
+            && cm_hir_def_id_equal(fact->data.implemented.trait_type
+                    .definition, projection_trait)
+            && fact->data.implemented.equality_count == 1u
+            && fact->data.implemented.equalities != NULL
+            && cm_hir_def_id_equal(fact->data.implemented.equalities[0]
+                    .associated_type, projection_associated)) {
+            matching_fact_index = fact_index;
+            break;
+        }
+    }
+    assert(first_fact_index != (size_t)-1
+        && matching_fact_index != (size_t)-1);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &expected) == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type, expected);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && result.param_env_fact_index == matching_fact_index
+        && result.param_env_equality_index == 0u
+        && result.supported_match_count == 1u
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && cm_hir_def_id_is_none(result.impl_associated_definition));
+    assert(cm_typeck_resolve(&runtime.typeck, expected, &resolved)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_get_type(&runtime.typeck, resolved) != NULL
+        && cm_typeck_get_type(&runtime.typeck, resolved)->kind
+            == CM_TYPECK_TYPE_INTEGER
+        && cm_typeck_get_type(&runtime.typeck, resolved)->data.integer_type
+            == CM_HIR_INT_U8);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* A blocked equality with a concrete nonmatching LHS is irrelevant and
+     * must neither suppress nor contaminate the valid bool impl. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture,
+        "NonmatchingBlockedEqualityProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "NonmatchingBlockedEqualityAssoc");
+    subjects[0] = fixture.u8_hir;
+    values[0] = fixture.bool_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 1u, 1,
+        "NonmatchingBlockedEqualityOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    impl_definition = add_bool_impl(&fixture, projection_trait);
+    (void)add_impl_associated(&fixture, impl_definition,
+        projection_associated, fixture.u8_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    assert(cm_typeck_new_variable(&runtime.typeck, CM_HIR_INFER_GENERAL,
+        test_span(21u, 22u), &expected) == CM_TYPECK_OK);
+    assert_unbound(&runtime.typeck, expected);
+    goal = projection_goal(fixture.owner_trait, projection_type, expected);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+        && result.param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && result.blocking_match_count == 0u
+        && cm_hir_def_id_equal(result.impl_definition, impl_definition)
+        && !cm_hir_def_id_is_none(result.impl_associated_definition));
+    assert(cm_typeck_resolve(&runtime.typeck, expected, &resolved)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_get_type(&runtime.typeck, resolved) != NULL
+        && cm_typeck_get_type(&runtime.typeck, resolved)->kind
+            == CM_TYPECK_TYPE_INTEGER
+        && cm_typeck_get_type(&runtime.typeck, resolved)->data.integer_type
+            == CM_HIR_INT_U8);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* A relevant blocked equality suppresses an otherwise usable impl. */
+    fixture_init(&fixture, 0);
+    projection_trait = add_trait(&fixture, "BlockedEqualityProject");
+    projection_associated = add_trait_associated(&fixture,
+        projection_trait, "BlockedEqualityAssoc");
+    subjects[0] = fixture.bool_hir;
+    values[0] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture,
+        projection_trait, projection_associated, subjects, values, 1u, 1,
+        "BlockedEqualityOwner");
+    projection_hir = add_projection_type(&fixture, projection_trait,
+        projection_associated, fixture.bool_hir);
+    impl_definition = add_bool_impl(&fixture, projection_trait);
+    (void)add_impl_associated(&fixture, impl_definition,
+        projection_associated, fixture.u8_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        runtime.u8_type);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
+        &runtime.substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.blocking_match_count == 1u);
+    assert_cached_nonproven_clean(result);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+}
+
 static void test_projection_equality_ambiguity_order(void)
 {
     int reverse;
@@ -1879,6 +2363,8 @@ int main(void)
     test_predicate_nonproof_lattice_and_unconstrained();
     test_proven_and_nonproof_candidate_order();
     test_projection_equality_commit_and_rollback();
+    test_projection_parameter_environment_precedence();
+    test_projection_parameter_environment_candidates();
     test_projection_equality_ambiguity_order();
     test_projection_equality_defaults_and_foreign_metadata();
     test_projection_trait_argument_reallocation();
