@@ -2,15 +2,18 @@
 
 #include "cm/compile.h"
 
+#include "cm/alloc.h"
 #include "cm/buf.h"
 #include "cm/codegen/c.h"
 #include "cm/driver/cfg.h"
+#include "cm/hir/admission.h"
 #include "cm/hir/body.h"
 #include "cm/hir/lower.h"
 #include "cm/hir/metadata.h"
 #include "cm/hir/module_map.h"
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/semantic_item.h"
+#include "cm/hir/semantic_results.h"
 #include "cm/macro/expand.h"
 #include "cm/mir/lower.h"
 #include "cm/mir/model.h"
@@ -167,6 +170,7 @@ typedef struct CmCompileReachableInstance {
 
 typedef struct CmCompileReachableEdge {
     size_t callee;
+    CmHirExprId expression;
 } CmCompileReachableEdge;
 
 typedef struct CmCompileSemanticOwner {
@@ -184,6 +188,7 @@ typedef struct CmCompileExactState {
     CmVec instances;
     CmVec edges;
     CmVec semantic_owners;
+    const CmSemanticAdmission *admission;
 } CmCompileExactState;
 
 static int cm_compile_item_has_attribute(const CmHirContext *hir,
@@ -429,6 +434,7 @@ static int cm_compile_discover_expression_callees(
                 expression->data.call.type_substitutions,
                 expression->data.call.type_substitution_count,
                 &edge.callee, message, message_capacity)) {
+            edge.expression = expression_id;
             (void)cm_vec_push(&state->edges, &edge);
             return 1;
         }
@@ -626,6 +632,117 @@ static void cm_compile_destroy_semantic_owners(
     cm_vec_destroy(&state->semantic_owners);
 }
 
+static int cm_compile_closure_is_monomorphic(
+    const CmCompileExactState *state)
+{
+    size_t index;
+
+    for (index = 0u; index < state->instances.len; ++index) {
+        const CmCompileReachableInstance *instance;
+
+        instance = (const CmCompileReachableInstance *)cm_vec_at_const(
+            &state->instances, index);
+        if (instance == NULL || instance->substitution_count != 0u) return 0;
+    }
+    return state->instances.len != 0u;
+}
+
+static int cm_compile_admit_monomorphic_closure(CmCompileExactState *state,
+    CmHirCrateId local_crate, CmSemanticAdmission *admission,
+    char *message, size_t message_capacity)
+{
+    CmSemanticReachableBody *reachable;
+    CmSemanticAdmissionResult admission_result;
+    const CmSemanticResults *results;
+    size_t instance_index;
+
+    if (state->instances.len > (size_t)-1 / sizeof(*reachable)) return 0;
+    reachable = (CmSemanticReachableBody *)cm_alloc(
+        state->instances.len * sizeof(*reachable));
+    for (instance_index = 0u; instance_index < state->instances.len;
+         ++instance_index) {
+        const CmCompileReachableInstance *instance;
+
+        instance = (const CmCompileReachableInstance *)cm_vec_at_const(
+            &state->instances, instance_index);
+        if (instance == NULL || instance->substitution_count != 0u) {
+            cm_free(reachable);
+            return 0;
+        }
+        reachable[instance_index].owner = instance->definition;
+        reachable[instance_index].body = instance->body;
+    }
+    admission_result = cm_semantic_admit_typed_reachable_bodies(admission,
+        state->hir, local_crate, reachable, state->instances.len);
+    cm_free(reachable);
+    if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+        if (admission_result.status == CM_SEMANTIC_ADMISSION_ITEM_FAILURE) {
+            (void)snprintf(message, message_capacity, "%s",
+                cm_semantic_item_status_name(
+                    admission_result.item_result.status));
+        } else if (admission_result.status
+                == CM_SEMANTIC_ADMISSION_BODY_FAILURE) {
+            (void)snprintf(message, message_capacity, "%s",
+                cm_semantic_body_status_name(
+                    admission_result.body_result.status));
+        } else {
+            (void)snprintf(message, message_capacity,
+                "reachable semantic admission failed: %s",
+                cm_semantic_admission_status_name(admission_result.status));
+        }
+        return 0;
+    }
+    results = cm_semantic_admission_results(admission);
+    if (results == NULL) {
+        (void)snprintf(message, message_capacity,
+            "reachable semantic admission published no results");
+        return 0;
+    }
+    for (instance_index = 0u; instance_index < state->instances.len;
+         ++instance_index) {
+        const CmCompileReachableInstance *caller;
+        size_t edge_index;
+
+        caller = (const CmCompileReachableInstance *)cm_vec_at_const(
+            &state->instances, instance_index);
+        if (caller == NULL) return 0;
+        for (edge_index = 0u; edge_index < caller->edge_count; ++edge_index) {
+            const CmCompileReachableEdge *edge;
+            const CmCompileReachableInstance *callee;
+            const CmHirExpr *expression;
+            CmSemanticDirectCallView call;
+
+            edge = (const CmCompileReachableEdge *)cm_vec_at_const(
+                &state->edges, caller->edge_start + edge_index);
+            callee = edge == NULL ? NULL
+                : (const CmCompileReachableInstance *)cm_vec_at_const(
+                    &state->instances, edge->callee);
+            expression = edge == NULL ? NULL
+                : cm_hir_get_expr(state->hir, edge->expression);
+            if (edge == NULL || callee == NULL || expression == NULL
+                || expression->owner_body != caller->body
+                || expression->kind != CM_HIR_EXPR_CALL
+                || cm_semantic_results_direct_call(results, admission,
+                    caller->body, edge->expression,
+                    &call) != CM_SEMANTIC_RESULTS_OK
+                || call.body != caller->body
+                || call.expression != edge->expression
+                || call.parameter_count
+                    != expression->data.call.argument_count
+                || !cm_hir_def_id_equal(call.callee,
+                    expression->data.call.callee)
+                || !cm_hir_def_id_equal(call.callee,
+                    callee->definition)) {
+                (void)snprintf(message, message_capacity,
+                    "reachable semantic call graph is inconsistent");
+                return 0;
+            }
+        }
+    }
+    state->admission = admission;
+    return 1;
+}
+
 static int cm_compile_lower_reachable_instance(CmCompileExactState *state,
     size_t instance_index, CmMirBodyId *out_body,
     char *message, size_t message_capacity)
@@ -683,8 +800,11 @@ static int cm_compile_lower_reachable_instance(CmCompileExactState *state,
     }
     substitutions = instance->substitution_count == 0u
         ? NULL : &instance->substitution;
-    mir_result = cm_mir_lower_instance(state->mir, state->hir,
-        instance->body, substitutions, instance->substitution_count);
+    mir_result = state->admission == NULL
+        ? cm_mir_lower_instance(state->mir, state->hir, instance->body,
+            substitutions, instance->substitution_count)
+        : cm_mir_lower_admitted_instance(state->mir, state->admission,
+            instance->body, NULL, 0u);
     if (mir_result.error_count != 0u
         || mir_result.body == CM_MIR_BODY_NONE) {
         (void)snprintf(message, message_capacity, "%s",
@@ -744,6 +864,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmVec exact_root_bodies;
     CmCompileExactState exact_state;
     CmSemanticSession legacy_semantic;
+    CmSemanticAdmission reachable_admission;
     int use_legacy_entry;
 
     result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
@@ -771,6 +892,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     cm_vec_init(&exact_root_bodies, sizeof(CmMirBodyId));
     memset(&exact_state, 0, sizeof(exact_state));
     memset(&legacy_semantic, 0, sizeof(legacy_semantic));
+    memset(&reachable_admission, 0, sizeof(reachable_admission));
     cm_vec_init(&exact_state.instances,
         sizeof(CmCompileReachableInstance));
     cm_vec_init(&exact_state.edges, sizeof(CmCompileReachableEdge));
@@ -976,24 +1098,38 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
         /* Global barrier: the complete reachable HIR closure is now typed. */
         {
             char message[160];
-            CmSemanticItemResult item_result;
 
             memset(message, 0, sizeof(message));
-            item_result = cm_semantic_item_check_local_trait_impls(&hir,
-                hir_result.crate_id);
-            if (item_result.status != CM_SEMANTIC_ITEM_OK) {
-                result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                    cm_semantic_item_status_name(item_result.status));
-                goto cleanup;
-            }
-            if (!cm_compile_init_semantic_owners(&exact_state,
-                    hir_result.crate_id, message, sizeof(message))
-                || !cm_compile_validate_reachable_semantics(&exact_state,
-                    message, sizeof(message))) {
-                result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                    message[0] == '\0'
-                        ? "reachable semantic validation failed" : message);
-                goto cleanup;
+            if (cm_compile_closure_is_monomorphic(&exact_state)) {
+                if (!cm_compile_admit_monomorphic_closure(&exact_state,
+                        hir_result.crate_id, &reachable_admission, message,
+                        sizeof(message))) {
+                    result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                        message[0] == '\0'
+                            ? "reachable semantic admission failed"
+                            : message);
+                    goto cleanup;
+                }
+            } else {
+                CmSemanticItemResult item_result;
+
+                item_result = cm_semantic_item_check_local_trait_impls(&hir,
+                    hir_result.crate_id);
+                if (item_result.status != CM_SEMANTIC_ITEM_OK) {
+                    result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                        cm_semantic_item_status_name(item_result.status));
+                    goto cleanup;
+                }
+                if (!cm_compile_init_semantic_owners(&exact_state,
+                        hir_result.crate_id, message, sizeof(message))
+                    || !cm_compile_validate_reachable_semantics(&exact_state,
+                        message, sizeof(message))) {
+                    result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                        message[0] == '\0'
+                            ? "reachable semantic validation failed"
+                            : message);
+                    goto cleanup;
+                }
             }
         }
         /* Every reachable call obligation is proven before any MIR exists. */
@@ -1077,6 +1213,7 @@ cleanup:
     cm_vec_destroy(&exact_root_instances);
     cm_vec_destroy(&exact_root_items);
     cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&reachable_admission);
     cm_hir_module_map_destroy(&module_map);
     cm_hir_context_destroy(&hir);
     cm_import_resolver_destroy(&imports);
