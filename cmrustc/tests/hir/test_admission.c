@@ -381,8 +381,12 @@ static void test_mir_admission_gates(void)
         NULL, 0u);
     assert(lower_result.error_count == 1u
         && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
-        && cm_mir_body_count(&mir) == body_count);
+        && cm_mir_body_count(&mir) == body_count
+        && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+            2u) == CM_MIR_INVALID_ADMISSION);
     caller_expression->data.call.callee.index -= 100u;
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        2u) == CM_MIR_OK);
 
     stored = cm_mir_get_body(&mir, 1u);
     assert(stored != NULL);
