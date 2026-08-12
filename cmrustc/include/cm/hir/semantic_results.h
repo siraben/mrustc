@@ -50,6 +50,21 @@ typedef struct CmSemanticExpressionView {
     CmHirBinaryOperator primitive_operator;
 } CmSemanticExpressionView;
 
+typedef struct CmSemanticFunctionSignatureView {
+    CmHirDefId definition;
+    CmHirBodyId body;
+    uint32_t parameter_count;
+    CmSemanticTypeView return_type;
+} CmSemanticFunctionSignatureView;
+
+typedef struct CmSemanticDirectCallView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    CmHirDefId callee;
+    uint32_t parameter_count;
+    CmSemanticTypeView return_type;
+} CmSemanticDirectCallView;
+
 /* The returned results object and all views are borrowed from admission. */
 const CmSemanticResults *cm_semantic_admission_results(
     const struct CmSemanticAdmission *admission);
@@ -77,6 +92,23 @@ CmSemanticResultsStatus cm_semantic_results_expression(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression,
     CmSemanticExpressionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_signature(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmSemanticFunctionSignatureView *out_view);
+CmSemanticResultsStatus cm_semantic_results_signature_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    uint32_t parameter, CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_direct_call(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, CmSemanticDirectCallView *out_view);
+CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, uint32_t parameter,
+    CmSemanticTypeView *out_view);
 CmSemanticResultsStatus cm_semantic_type_view_equal(
     const CmSemanticTypeView *left, const CmSemanticTypeView *right,
     int *out_equal);

@@ -12,9 +12,27 @@ typedef enum CmSemanticBodyWritebackStatus {
     CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
 } CmSemanticBodyWritebackStatus;
 
+typedef struct CmSemanticCheckedCallFacts {
+    CmHirExprId expression;
+    CmHirDefId callee;
+    CmTypeckTypeId return_type;
+    const CmTypeckTypeId *parameter_types;
+    uint32_t parameter_count;
+} CmSemanticCheckedCallFacts;
+
+typedef struct CmSemanticCheckedBodyFacts {
+    const CmTypeckTypeId *expression_terms;
+    size_t expression_term_count;
+    CmTypeckTypeId signature_return_type;
+    const CmTypeckTypeId *signature_parameter_types;
+    uint32_t signature_parameter_count;
+    const CmSemanticCheckedCallFacts *calls;
+    size_t call_count;
+} CmSemanticCheckedBodyFacts;
+
 typedef CmSemanticBodyWritebackStatus (*CmSemanticBodyWritebackFn)(
     void *context, CmSemanticSession *session, CmHirBodyId body,
-    const CmTypeckTypeId *expression_terms, size_t expression_term_count);
+    const CmSemanticCheckedBodyFacts *facts);
 
 CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
     CmSemanticSession *session, CmHirBodyId body,

@@ -103,9 +103,43 @@ static void test_successful_results(void)
     saw_binary = 0;
     for (body_index = 0u; body_index < 2u; ++body_index) {
         CmSemanticBodyView body_view;
+        CmSemanticFunctionSignatureView signature_view;
+        const CmHirBody *body;
+        const CmHirDefinition *owner_definition;
+        const CmHirItem *owner_item;
+        uint32_t signature_parameter_index;
         uint32_t body_expressions;
         assert(cm_semantic_results_body_at(results, &admission,
             body_index, &body_view) == CM_SEMANTIC_RESULTS_OK);
+        body = cm_hir_get_body(&fixture.hir, body_view.body);
+        owner_definition = body == NULL ? NULL
+            : cm_hir_lookup_definition(&fixture.hir, body->owner);
+        owner_item = owner_definition == NULL
+                || owner_definition->kind != CM_HIR_DEFINITION_ITEM
+            ? NULL : cm_hir_get_item(&fixture.hir,
+                owner_definition->entity.item_id);
+        assert(body != NULL && owner_item != NULL
+            && owner_item->kind == CM_HIR_ITEM_FUNCTION
+            && cm_semantic_results_signature(results, &admission,
+                body_view.body, &signature_view) == CM_SEMANTIC_RESULTS_OK
+            && cm_hir_def_id_equal(signature_view.definition,
+                body_view.owner)
+            && signature_view.body == body_view.body
+            && signature_view.parameter_count
+                == owner_item->data.function_item.signature.parameter_count
+            && signature_view.return_type.bytes != NULL
+            && signature_view.return_type.size != 0u);
+        for (signature_parameter_index = 0u;
+             signature_parameter_index < signature_view.parameter_count;
+             ++signature_parameter_index) {
+            CmSemanticTypeView parameter_view;
+
+            assert(cm_semantic_results_signature_parameter(results,
+                &admission, body_view.body, signature_parameter_index,
+                &parameter_view) == CM_SEMANTIC_RESULTS_OK
+                && parameter_view.bytes != NULL
+                && parameter_view.size != 0u);
+        }
         body_expressions = 0u;
         for (expression_index = 0u;
                 expression_index < fixture.hir.expressions.len;
@@ -129,9 +163,46 @@ static void test_successful_results(void)
                     == CM_SEMANTIC_RESULTS_OK
                 && equal);
             if (expression->kind == CM_HIR_EXPR_CALL) {
+                CmSemanticDirectCallView call_view;
+                uint32_t parameter_index;
+
                 assert(expression_view.has_direct_callable
                     && cm_hir_def_id_equal(expression_view.direct_callable,
                         expression->data.call.callee));
+                assert(cm_semantic_results_direct_call(results, &admission,
+                    body_view.body, (CmHirExprId)(expression_index + 1u),
+                    &call_view) == CM_SEMANTIC_RESULTS_OK
+                    && call_view.body == body_view.body
+                    && call_view.expression
+                        == (CmHirExprId)(expression_index + 1u)
+                    && cm_hir_def_id_equal(call_view.callee,
+                        expression_view.direct_callable)
+                    && call_view.parameter_count
+                        == expression->data.call.argument_count
+                    && cm_semantic_type_view_equal(
+                        &call_view.return_type,
+                        &expression_view.adjusted_type, &equal)
+                        == CM_SEMANTIC_RESULTS_OK
+                    && equal);
+                for (parameter_index = 0u;
+                     parameter_index < call_view.parameter_count;
+                     ++parameter_index) {
+                    CmSemanticTypeView parameter_view;
+                    CmSemanticExpressionView argument_view;
+
+                    assert(cm_semantic_results_direct_call_parameter(
+                        results, &admission, body_view.body,
+                        call_view.expression, parameter_index,
+                        &parameter_view) == CM_SEMANTIC_RESULTS_OK
+                        && cm_semantic_results_expression(results,
+                            &admission, body_view.body,
+                            expression->data.call.arguments[parameter_index],
+                            &argument_view) == CM_SEMANTIC_RESULTS_OK
+                        && cm_semantic_type_view_equal(&parameter_view,
+                            &argument_view.adjusted_type, &equal)
+                            == CM_SEMANTIC_RESULTS_OK
+                        && equal);
+                }
                 saw_call = 1;
             }
             if (expression->kind == CM_HIR_EXPR_BINARY) {
@@ -192,6 +263,8 @@ static void test_same_generation_foreign_admission(void)
     const CmSemanticResults *first_results;
     const CmSemanticResults *second_results;
     CmSemanticBodyView body_view;
+    CmSemanticFunctionSignatureView signature_view;
+    CmSemanticDirectCallView call_view;
 
     fixture_init(&fixture, "fn okay() -> u32 { 1u32 }");
     memset(&first, 0, sizeof(first));
@@ -207,6 +280,10 @@ static void test_same_generation_foreign_admission(void)
     assert(!cm_semantic_results_is_current(first_results, &second)
         && cm_semantic_results_body_at(first_results, &second, 0u,
             &body_view) == CM_SEMANTIC_RESULTS_FOREIGN
+        && cm_semantic_results_signature(first_results, &second, 1u,
+            &signature_view) == CM_SEMANTIC_RESULTS_FOREIGN
+        && cm_semantic_results_direct_call(first_results, &second, 1u, 1u,
+            &call_view) == CM_SEMANTIC_RESULTS_FOREIGN
         && !cm_semantic_results_is_current(second_results, &first)
         && cm_semantic_results_body_at(second_results, &first, 0u,
             &body_view) == CM_SEMANTIC_RESULTS_FOREIGN);
@@ -314,6 +391,7 @@ static void test_writeback_distinguishes_unsolved_terms(void)
     CmTypeckTypeId terms[8];
     CmTypeckTypeId variable;
     CmTypeckTypeId projection_type;
+    CmSemanticCheckedBodyFacts facts;
     size_t expression_index;
 
     fixture_init(&fixture, "fn value() -> u32 { 1u32 }");
@@ -336,6 +414,9 @@ static void test_writeback_distinguishes_unsolved_terms(void)
         == CM_TRAIT_SOLVER_PROVEN);
     typeck = cm_semantic_session_typeck(&session);
     assert(typeck != NULL);
+    memset(&facts, 0, sizeof(facts));
+    facts.expression_terms = terms;
+    facts.expression_term_count = fixture.hir.expressions.len;
 
     cm_semantic_results_body_stage_init(&stage);
     assert(cm_typeck_new_variable(typeck, CM_HIR_INFER_GENERAL,
@@ -351,8 +432,9 @@ static void test_writeback_distinguishes_unsolved_terms(void)
         terms[expression_index] = expression->owner_body == 1u
             ? variable : CM_TYPECK_TYPE_NONE;
     }
+    facts.signature_return_type = variable;
     assert(cm_semantic_results_stage_checked_body(&stage, &session, 1u,
-        terms, fixture.hir.expressions.len)
+        &facts)
             == CM_SEMANTIC_BODY_WRITEBACK_DEFERRED_INFERENCE
         && stage.state == NULL);
 
@@ -371,8 +453,9 @@ static void test_writeback_distinguishes_unsolved_terms(void)
             terms[expression_index] = projection_type;
         }
     }
+    facts.signature_return_type = projection_type;
     assert(cm_semantic_results_stage_checked_body(&stage, &session, 1u,
-        terms, fixture.hir.expressions.len)
+        &facts)
             == CM_SEMANTIC_BODY_WRITEBACK_PENDING_PROJECTION
         && stage.state == NULL);
 

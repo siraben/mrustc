@@ -14,7 +14,7 @@ CmSemanticResultsStatus cm_semantic_results_begin(
 void cm_semantic_results_body_stage_init(CmSemanticResultsBodyStage *stage);
 CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     void *context, CmSemanticSession *session, CmHirBodyId body,
-    const CmTypeckTypeId *expression_terms, size_t expression_term_count);
+    const CmSemanticCheckedBodyFacts *facts);
 CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     CmSemanticResults *results, CmSemanticSession *session,
     const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage);

@@ -53,13 +53,18 @@ typedef struct WritebackProbe {
 
 static CmSemanticBodyWritebackStatus probe_writeback(void *context,
     CmSemanticSession *session, CmHirBodyId body,
-    const CmTypeckTypeId *expression_terms, size_t expression_term_count)
+    const CmSemanticCheckedBodyFacts *facts)
 {
     WritebackProbe *probe;
     const CmTypeckContext *typeck;
+    const CmTypeckTypeId *expression_terms;
+    size_t expression_term_count;
     size_t index;
 
     probe = (WritebackProbe *)context;
+    expression_terms = facts == NULL ? NULL : facts->expression_terms;
+    expression_term_count = facts == NULL ? 0u
+        : facts->expression_term_count;
     assert(probe != NULL && session != NULL
         && cm_semantic_session_is_current(session)
         && cm_semantic_session_hir(session) == probe->hir

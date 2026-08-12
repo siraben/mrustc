@@ -322,9 +322,11 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions,
     CmTypeckGenericArg *owner_arguments,
     CmTypeckGenericArg *callee_arguments,
-    CmTypeckTypeId *expression_terms, CmVec *deferred_equalities)
+    CmTypeckTypeId *expression_terms, CmVec *deferred_equalities,
+    CmSemanticCheckedBodyFacts *facts)
 {
     CmTypeckStatus rollback;
+    size_t call_index;
 
     rollback = cm_typeck_rollback(typeck, snapshot);
     if (rollback != CM_TYPECK_OK) {
@@ -335,6 +337,14 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     cm_free(owner_arguments);
     cm_free(callee_arguments);
     cm_free(expression_terms);
+    if (facts != NULL) {
+        for (call_index = 0u; call_index < facts->call_count; ++call_index) {
+            cm_free((void *)facts->calls[call_index].parameter_types);
+        }
+        cm_free((void *)facts->calls);
+        cm_free((void *)facts->signature_parameter_types);
+        memset(facts, 0, sizeof(*facts));
+    }
     cm_vec_destroy(deferred_equalities);
     return result;
 }
@@ -342,7 +352,7 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
 #define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
     cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
         call_expressions, owner_arguments, callee_arguments, expression_terms, \
-        &deferred_equalities)
+        &deferred_equalities, &checked_facts)
 
 static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
     uint32_t count, CmTypeckGenericArg **out_arguments)
@@ -645,7 +655,8 @@ static CmSemanticBodyStatus cm_semantic_body_expression_term(
 static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     CmSemanticBodyConstraints *constraints, CmHirExprId expression_id,
     const CmHirExpr *expression, const CmHirItem *callee,
-    const CmTypeckInstantiation *callee_instantiation)
+    const CmTypeckInstantiation *callee_instantiation,
+    CmSemanticCheckedCallFacts *facts)
 {
     const CmHirFunctionSignature *signature;
     CmTypeckTypeId actual_type;
@@ -654,7 +665,11 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     uint32_t index;
 
     if (constraints == NULL || expression == NULL
-        || callee_instantiation == NULL) return CM_SEMANTIC_BODY_INVALID;
+        || callee_instantiation == NULL || facts == NULL
+        || ((facts->parameter_types == NULL)
+            != (expression->data.call.argument_count == 0u))) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
     signature = callee == NULL ? NULL : &callee->data.function_item.signature;
     if (signature == NULL
         || signature->parameter_count != expression->data.call.argument_count
@@ -669,6 +684,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     status = cm_semantic_body_instantiate_type(constraints,
         signature->return_type, callee_instantiation, &declared_type);
     if (status != CM_SEMANTIC_BODY_OK) return status;
+    facts->expression = expression_id;
+    facts->callee = callee->definition;
+    facts->return_type = declared_type;
+    facts->parameter_count = signature->parameter_count;
     status = cm_semantic_body_unify_terms(constraints, actual_type,
         declared_type);
     if (status != CM_SEMANTIC_BODY_OK) return status;
@@ -690,9 +709,83 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
             signature->parameters[index].type, callee_instantiation,
             &declared_type);
         if (status != CM_SEMANTIC_BODY_OK) return status;
+        ((CmTypeckTypeId *)facts->parameter_types)[index] = declared_type;
         status = cm_semantic_body_unify_terms(constraints, actual_type,
             declared_type);
         if (status != CM_SEMANTIC_BODY_OK) return status;
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
+    CmSemanticBodyConstraints *constraints,
+    CmSemanticCheckedBodyFacts *facts)
+{
+    CmProjectionNormalizeResult normalization;
+    size_t call_index;
+    uint32_t parameter_index;
+
+    if (constraints == NULL || facts == NULL
+        || facts->signature_return_type == CM_TYPECK_TYPE_NONE
+        || (facts->signature_parameter_count != 0u
+            && facts->signature_parameter_types == NULL)
+        || (facts->call_count != 0u && facts->calls == NULL)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    normalization = cm_semantic_body_normalize(constraints,
+        facts->signature_return_type);
+    if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+        return cm_semantic_body_normalize_status(constraints,
+            &normalization);
+    }
+    facts->signature_return_type = normalization.type;
+    for (parameter_index = 0u;
+         parameter_index < facts->signature_parameter_count;
+         ++parameter_index) {
+        CmTypeckTypeId *type;
+
+        type = &((CmTypeckTypeId *)facts->signature_parameter_types)[
+            parameter_index];
+        normalization = cm_semantic_body_normalize(constraints, *type);
+        if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+            return cm_semantic_body_normalize_status(constraints,
+                &normalization);
+        }
+        *type = normalization.type;
+    }
+    for (call_index = 0u; call_index < facts->call_count; ++call_index) {
+        CmSemanticCheckedCallFacts *call;
+
+        call = &((CmSemanticCheckedCallFacts *)facts->calls)[call_index];
+        if (call->expression == CM_HIR_EXPR_NONE
+            || cm_hir_def_id_is_none(call->callee)
+            || call->return_type == CM_TYPECK_TYPE_NONE
+            || (call->parameter_count != 0u
+                && call->parameter_types == NULL)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        constraints->failed_expression = call->expression;
+        constraints->failed_callee = call->callee;
+        normalization = cm_semantic_body_normalize(constraints,
+            call->return_type);
+        if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+            return cm_semantic_body_normalize_status(constraints,
+                &normalization);
+        }
+        call->return_type = normalization.type;
+        for (parameter_index = 0u;
+             parameter_index < call->parameter_count; ++parameter_index) {
+            CmTypeckTypeId *type;
+
+            type = &((CmTypeckTypeId *)call->parameter_types)[
+                parameter_index];
+            normalization = cm_semantic_body_normalize(constraints, *type);
+            if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+                return cm_semantic_body_normalize_status(constraints,
+                    &normalization);
+            }
+            *type = normalization.type;
+        }
     }
     return CM_SEMANTIC_BODY_OK;
 }
@@ -1374,10 +1467,16 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmTypeckTypeId *expression_terms;
     size_t expression_term_bytes;
     uint32_t owner_argument_index;
+    CmSemanticCheckedBodyFacts checked_facts;
+    CmSemanticCheckedCallFacts *checked_calls;
+    CmTypeckTypeId *signature_parameter_types;
+    size_t checked_call_bytes;
+    size_t signature_parameter_bytes;
 
     (void)definition_mode;
 
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body_id);
+    memset(&checked_facts, 0, sizeof(checked_facts));
     if (session == NULL || !cm_semantic_session_is_current(session)) {
         result.status = session != NULL && session->state != NULL
             ? CM_SEMANTIC_BODY_STALE : CM_SEMANTIC_BODY_INVALID;
@@ -1424,6 +1523,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     owner_arguments = NULL;
     callee_arguments = NULL;
     expression_terms = NULL;
+    checked_calls = NULL;
+    signature_parameter_types = NULL;
     result.status = cm_semantic_body_collect_calls(hir, body_id,
         body->root_expression, &call_expressions, &call_expression_count);
     if (result.status != CM_SEMANTIC_BODY_OK) return result;
@@ -1435,6 +1536,29 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
     expression_terms = (CmTypeckTypeId *)cm_alloc_zeroed(1u,
         expression_term_bytes);
+    if (!cm_size_mul(call_expression_count, sizeof(*checked_calls),
+            &checked_call_bytes)
+        || !cm_size_mul((size_t)owner_item->data.function_item.signature
+                .parameter_count, sizeof(*signature_parameter_types),
+            &signature_parameter_bytes)) {
+        result.status = CM_SEMANTIC_BODY_OVERFLOW;
+        cm_free(call_expressions);
+        cm_free(expression_terms);
+        return result;
+    }
+    checked_calls = checked_call_bytes == 0u ? NULL
+        : (CmSemanticCheckedCallFacts *)cm_alloc_zeroed(1u,
+            checked_call_bytes);
+    signature_parameter_types = signature_parameter_bytes == 0u ? NULL
+        : (CmTypeckTypeId *)cm_alloc_zeroed(1u,
+            signature_parameter_bytes);
+    checked_facts.expression_terms = expression_terms;
+    checked_facts.expression_term_count = hir->expressions.len;
+    checked_facts.signature_parameter_types = signature_parameter_types;
+    checked_facts.signature_parameter_count =
+        owner_item->data.function_item.signature.parameter_count;
+    checked_facts.calls = checked_calls;
+    checked_facts.call_count = call_expression_count;
     memset(&snapshot, 0, sizeof(snapshot));
     typeck_status = cm_typeck_snapshot(typeck, &snapshot);
     if (typeck_status != CM_TYPECK_OK) {
@@ -1442,6 +1566,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         result.typeck_status = typeck_status;
         cm_free(call_expressions);
         cm_free(expression_terms);
+        cm_free(checked_calls);
+        cm_free(signature_parameter_types);
         return result;
     }
     cm_vec_init(&deferred_equalities, sizeof(CmSemanticBodyEquality));
@@ -1579,6 +1705,26 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     constraints.owner_instantiation = &owner_instantiation;
     constraints.substitution = &environment_substitution;
 
+    result.status = cm_semantic_body_instantiate_type(&constraints,
+        owner_item->data.function_item.signature.return_type,
+        &owner_instantiation, &checked_facts.signature_return_type);
+    if (result.status != CM_SEMANTIC_BODY_OK) {
+        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+            call_expressions);
+    }
+    for (owner_argument_index = 0u;
+         owner_argument_index < checked_facts.signature_parameter_count;
+         ++owner_argument_index) {
+        result.status = cm_semantic_body_instantiate_type(&constraints,
+            owner_item->data.function_item.signature.parameters[
+                owner_argument_index].type, &owner_instantiation,
+            &signature_parameter_types[owner_argument_index]);
+        if (result.status != CM_SEMANTIC_BODY_OK) {
+            return cm_semantic_body_fail_snapshot(result, typeck,
+                &snapshot, call_expressions);
+        }
+    }
+
     result.status = cm_semantic_body_constrain(&constraints, owner_item);
     if (result.status != CM_SEMANTIC_BODY_OK) {
         result.expression = constraints.failed_expression;
@@ -1714,8 +1860,17 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             return cm_semantic_body_fail_snapshot(result, typeck,
                 &snapshot, call_expressions);
         }
+        checked_calls[call_index].parameter_count =
+            expression->data.call.argument_count;
+        if (expression->data.call.argument_count != 0u) {
+            checked_calls[call_index].parameter_types =
+                (CmTypeckTypeId *)cm_alloc_zeroed(
+                    expression->data.call.argument_count,
+                    sizeof(CmTypeckTypeId));
+        }
         result.status = cm_semantic_body_check_call_signature(&constraints,
-            expression_id, expression, callee, &callee_instantiation);
+            expression_id, expression, callee, &callee_instantiation,
+            &checked_calls[call_index]);
         if (result.status != CM_SEMANTIC_BODY_OK) {
             result.expression = constraints.failed_expression;
             result.callee = constraints.failed_callee;
@@ -1920,6 +2075,10 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     if (result.status == CM_SEMANTIC_BODY_OK) {
         result.status = cm_semantic_body_normalize_expressions(&constraints);
     }
+    if (result.status == CM_SEMANTIC_BODY_OK) {
+        result.status = cm_semantic_body_normalize_checked_facts(
+            &constraints, &checked_facts);
+    }
     if (result.status != CM_SEMANTIC_BODY_OK) {
         result.expression = constraints.failed_expression;
         result.callee = constraints.failed_callee;
@@ -1933,7 +2092,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         CmSemanticBodyWritebackStatus writeback_status;
 
         writeback_status = writeback(writeback_context, session, body_id,
-            expression_terms, hir->expressions.len);
+            &checked_facts);
         if (writeback_status != CM_SEMANTIC_BODY_WRITEBACK_OK) {
             result.status = writeback_status
                     == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
@@ -1960,6 +2119,12 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         cm_free(owner_arguments);
         cm_free(callee_arguments);
         cm_free(expression_terms);
+        for (call_index = 0u; call_index < checked_facts.call_count;
+             ++call_index) {
+            cm_free((void *)checked_facts.calls[call_index].parameter_types);
+        }
+        cm_free(checked_calls);
+        cm_free(signature_parameter_types);
         cm_vec_destroy(&deferred_equalities);
         return result;
     }
@@ -1967,6 +2132,12 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     cm_free(owner_arguments);
     cm_free(callee_arguments);
     cm_free(expression_terms);
+    for (call_index = 0u; call_index < checked_facts.call_count;
+         ++call_index) {
+        cm_free((void *)checked_facts.calls[call_index].parameter_types);
+    }
+    cm_free(checked_calls);
+    cm_free(signature_parameter_types);
     cm_vec_destroy(&deferred_equalities);
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_OK, body_id);
     result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
