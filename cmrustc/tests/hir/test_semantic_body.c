@@ -1078,6 +1078,99 @@ static void test_positive_impl_and_missing_metadata(void)
     fixture_destroy(&fixture);
 }
 
+static void test_intrinsic_body_projection_normalization(void)
+{
+    TestFixture fixture;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
+    CmHirItem *owner;
+    CmHirBody *body;
+    CmHirExpr *root;
+    CmHirTypeId projection;
+    CmHirDefId missing_associated;
+    CmTypeckTypeId resolved;
+    const CmTypeckType *resolved_type;
+    WritebackProbe probe;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    projection = add_projection_type(&fixture, fixture.present_trait,
+        fixture.present_associated, fixture.u32_type);
+    owner = mutable_item(&fixture, fixture.present_callee);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)fixture.present_callee_body - 1u);
+    root = body == NULL ? NULL : (CmHirExpr *)cm_vec_at(
+        &fixture.hir.expressions, (size_t)body->root_expression - 1u);
+    assert(owner != NULL && body != NULL && root != NULL
+        && owner->data.function_item.signature.parameter_count == 1u
+        && body->local_count == 1u);
+    owner->data.function_item.signature.parameters[0].type = projection;
+    owner->data.function_item.signature.return_type = projection;
+    body->locals[0].type = projection;
+    body->expected_type = projection;
+    root->type = projection;
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.present_callee);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_callee_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_callee_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u
+        && probe.owned_term_count == 1u
+        && cm_typeck_resolve(typeck, probe.first_owned_term, &resolved)
+            == CM_TYPECK_OK);
+    resolved_type = cm_typeck_get_type(typeck, resolved);
+    assert(resolved_type != NULL
+        && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+        && resolved_type->data.integer_type == CM_HIR_INT_U8);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture);
+    missing_associated = add_trait_associated(&fixture,
+        fixture.missing_trait, "MissingOutput");
+    projection = add_projection_type(&fixture, fixture.missing_trait,
+        missing_associated, fixture.u32_type);
+    owner = mutable_item(&fixture, fixture.present_callee);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)fixture.present_callee_body - 1u);
+    root = body == NULL ? NULL : (CmHirExpr *)cm_vec_at(
+        &fixture.hir.expressions, (size_t)body->root_expression - 1u);
+    assert(owner != NULL && body != NULL && root != NULL);
+    owner->data.function_item.signature.parameters[0].type = projection;
+    owner->data.function_item.signature.return_type = projection;
+    body->locals[0].type = projection;
+    body->expected_type = projection;
+    root->type = projection;
+    options = session_options(&fixture, fixture.present_callee);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    type_count = cm_typeck_type_count(typeck);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_callee_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_callee_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_DEFERRED_METADATA
+        && result.solver_kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && probe.invocation_count == 0u
+        && cm_typeck_type_count(typeck) == type_count);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_projection_equality_proof_mismatch_and_rollback(void)
 {
     TestFixture fixture;
@@ -1779,6 +1872,7 @@ static void test_invalid_api_and_status_names(void)
 int main(void)
 {
     test_positive_impl_and_missing_metadata();
+    test_intrinsic_body_projection_normalization();
     test_projection_equality_proof_mismatch_and_rollback();
     test_projection_fail_closed_shapes_and_overlap();
     test_projection_equality_order();

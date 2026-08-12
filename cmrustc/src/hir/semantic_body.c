@@ -7,6 +7,8 @@
 #include <string.h>
 
 #define CM_SEMANTIC_BODY_TYPE_DEPTH ((size_t)128u)
+#define CM_SEMANTIC_BODY_NORMALIZE_NODES ((size_t)4096u)
+#define CM_SEMANTIC_BODY_NORMALIZE_PROJECTIONS ((size_t)256u)
 
 typedef enum CmSemanticTypeScan {
     CM_SEMANTIC_TYPE_OK = 0,
@@ -152,7 +154,16 @@ static CmSemanticTypeScan cm_semantic_scan_type(const CmHirContext *hir,
     case CM_HIR_TYPE_INFER_KIND:
         return CM_SEMANTIC_TYPE_INFERENCE;
     case CM_HIR_TYPE_PROJECTION_KIND:
-        return CM_SEMANTIC_TYPE_PROJECTION;
+        return cm_semantic_scan_merge(CM_SEMANTIC_TYPE_PROJECTION,
+            cm_semantic_scan_merge(
+                cm_semantic_scan_type(hir,
+                    type->data.projection_type.self_type, depth + 1u),
+                cm_semantic_scan_merge(
+                    cm_semantic_scan_named(hir,
+                        &type->data.projection_type.trait_type, depth + 1u),
+                    cm_semantic_scan_named(hir,
+                        &type->data.projection_type.associated_type,
+                        depth + 1u))));
     case CM_HIR_TYPE_REFERENCE_KIND:
         return cm_semantic_scan_merge(
             cm_semantic_scan_region(&type->data.reference_type.region),
@@ -434,19 +445,210 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     return CM_SEMANTIC_BODY_OK;
 }
 
+typedef struct CmSemanticBodyEquality {
+    CmTypeckTypeId left;
+    CmTypeckTypeId right;
+    CmHirExprId expression;
+    int resolved;
+} CmSemanticBodyEquality;
+
 typedef struct CmSemanticBodyConstraints {
+    CmSemanticSession *session;
     CmTypeckContext *typeck;
     const CmHirContext *hir;
     const CmHirBody *body;
     CmHirBodyId body_id;
     const CmTypeckInstantiation *owner_instantiation;
+    const CmParamEnvSubstitution *substitution;
+    CmProjectionNormalizeLimits normalize_limits;
+    CmVec deferred_equalities;
     unsigned char *defined_locals;
     unsigned char *seen_parameters;
     CmTypeckTypeId *expression_terms;
     size_t expression_term_count;
     CmHirExprId failed_expression;
     CmTypeckStatus typeck_status;
+    CmTraitSolverResultKind solver_kind;
 } CmSemanticBodyConstraints;
+
+static CmSemanticBodyStatus cm_semantic_body_normalize_status(
+    CmSemanticBodyConstraints *constraints,
+    const CmProjectionNormalizeResult *normalization)
+{
+    if (constraints == NULL || normalization == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    constraints->typeck_status = normalization->typeck_status;
+    constraints->solver_kind = normalization->kind;
+    return cm_semantic_solver_status(normalization->kind);
+}
+
+static CmProjectionNormalizeResult cm_semantic_body_normalize(
+    CmSemanticBodyConstraints *constraints, CmTypeckTypeId type)
+{
+    return cm_semantic_session_normalize_type(constraints->session,
+        constraints->typeck, constraints->substitution, type,
+        constraints->normalize_limits);
+}
+
+static CmSemanticBodyStatus cm_semantic_body_try_equality(
+    CmSemanticBodyConstraints *constraints, CmTypeckTypeId left,
+    CmTypeckTypeId right, int *out_deferred)
+{
+    CmTypeckSnapshot snapshot;
+    CmProjectionNormalizeResult left_normalized;
+    CmProjectionNormalizeResult right_normalized;
+    CmSemanticBodyStatus semantic_status;
+    CmTypeckStatus status;
+
+    if (constraints == NULL || out_deferred == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    *out_deferred = 0;
+    memset(&snapshot, 0, sizeof(snapshot));
+    status = cm_typeck_snapshot(constraints->typeck, &snapshot);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    left_normalized = cm_semantic_body_normalize(constraints, left);
+    if (left_normalized.kind == CM_TRAIT_SOLVER_DEFERRED_INFERENCE) {
+        *out_deferred = 1;
+        semantic_status = CM_SEMANTIC_BODY_OK;
+        goto rollback;
+    }
+    if (left_normalized.kind != CM_TRAIT_SOLVER_PROVEN) {
+        semantic_status = cm_semantic_body_normalize_status(constraints,
+            &left_normalized);
+        goto rollback;
+    }
+    right_normalized = cm_semantic_body_normalize(constraints, right);
+    if (right_normalized.kind == CM_TRAIT_SOLVER_DEFERRED_INFERENCE) {
+        *out_deferred = 1;
+        semantic_status = CM_SEMANTIC_BODY_OK;
+        goto rollback;
+    }
+    if (right_normalized.kind != CM_TRAIT_SOLVER_PROVEN) {
+        semantic_status = cm_semantic_body_normalize_status(constraints,
+            &right_normalized);
+        goto rollback;
+    }
+    status = cm_typeck_unify(constraints->typeck, left_normalized.type,
+        right_normalized.type);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        semantic_status = cm_semantic_typeck_status(status);
+        goto rollback;
+    }
+    status = cm_typeck_commit(constraints->typeck, &snapshot);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return CM_SEMANTIC_BODY_OK;
+
+rollback:
+    status = cm_typeck_rollback(constraints->typeck, &snapshot);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return semantic_status;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_unify_terms(
+    CmSemanticBodyConstraints *constraints, CmTypeckTypeId left,
+    CmTypeckTypeId right)
+{
+    CmSemanticBodyEquality equality;
+    CmSemanticBodyStatus status;
+    int deferred;
+
+    status = cm_semantic_body_try_equality(constraints, left, right,
+        &deferred);
+    if (status != CM_SEMANTIC_BODY_OK || !deferred) return status;
+    memset(&equality, 0, sizeof(equality));
+    equality.left = left;
+    equality.right = right;
+    equality.expression = constraints->failed_expression;
+    (void)cm_vec_push(&constraints->deferred_equalities, &equality);
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_retry_equalities(
+    CmSemanticBodyConstraints *constraints)
+{
+    size_t unresolved;
+    size_t pass;
+
+    if (constraints == NULL) return CM_SEMANTIC_BODY_INVALID;
+    unresolved = constraints->deferred_equalities.len;
+    for (pass = 0u; unresolved != 0u
+            && pass < constraints->deferred_equalities.len; ++pass) {
+        size_t index;
+        size_t progress;
+
+        progress = 0u;
+        for (index = 0u; index < constraints->deferred_equalities.len;
+             ++index) {
+            CmSemanticBodyEquality *equality;
+            CmSemanticBodyStatus status;
+            int deferred;
+
+            equality = (CmSemanticBodyEquality *)cm_vec_at(
+                &constraints->deferred_equalities, index);
+            if (equality == NULL || equality->resolved) continue;
+            constraints->failed_expression = equality->expression;
+            status = cm_semantic_body_try_equality(constraints,
+                equality->left, equality->right, &deferred);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            if (!deferred) {
+                equality->resolved = 1;
+                --unresolved;
+                ++progress;
+            }
+        }
+        if (progress == 0u) break;
+    }
+    return unresolved == 0u ? CM_SEMANTIC_BODY_OK
+        : CM_SEMANTIC_BODY_DEFERRED_INFERENCE;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_normalize_expressions(
+    CmSemanticBodyConstraints *constraints)
+{
+    size_t index;
+
+    if (constraints == NULL) return CM_SEMANTIC_BODY_INVALID;
+    for (index = 0u; index < constraints->expression_term_count; ++index) {
+        const CmHirExpr *expression;
+        CmProjectionNormalizeResult normalization;
+
+        expression = cm_hir_get_expr(constraints->hir,
+            (CmHirExprId)(index + 1u));
+        if (expression == NULL) return CM_SEMANTIC_BODY_INVALID;
+        if (expression->owner_body != constraints->body_id) {
+            if (constraints->expression_terms[index]
+                    != CM_TYPECK_TYPE_NONE) {
+                return CM_SEMANTIC_BODY_INVALID;
+            }
+            continue;
+        }
+        if (constraints->expression_terms[index]
+                == CM_TYPECK_TYPE_NONE) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        constraints->failed_expression = (CmHirExprId)(index + 1u);
+        normalization = cm_semantic_body_normalize(constraints,
+            constraints->expression_terms[index]);
+        if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+            return cm_semantic_body_normalize_status(constraints,
+                &normalization);
+        }
+        constraints->expression_terms[index] = normalization.type;
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
 
 static CmSemanticBodyStatus cm_semantic_body_instantiate_type(
     CmSemanticBodyConstraints *constraints, CmHirTypeId hir_type,
@@ -459,7 +661,10 @@ static CmSemanticBodyStatus cm_semantic_body_instantiate_type(
         return CM_SEMANTIC_BODY_INVALID;
     }
     scan = cm_semantic_scan_type(constraints->hir, hir_type, 0u);
-    if (scan != CM_SEMANTIC_TYPE_OK) return cm_semantic_scan_status(scan);
+    if (scan != CM_SEMANTIC_TYPE_OK
+        && scan != CM_SEMANTIC_TYPE_PROJECTION) {
+        return cm_semantic_scan_status(scan);
+    }
     status = cm_typeck_instantiate_hir_type(constraints->typeck, hir_type,
         instantiation, out_type);
     if (status != CM_TYPECK_OK) {
@@ -477,7 +682,6 @@ static CmSemanticBodyStatus cm_semantic_body_unify_types(
     CmTypeckTypeId left_type;
     CmTypeckTypeId right_type;
     CmSemanticBodyStatus semantic_status;
-    CmTypeckStatus status;
 
     semantic_status = cm_semantic_body_instantiate_type(constraints, left,
         left_instantiation, &left_type);
@@ -485,12 +689,7 @@ static CmSemanticBodyStatus cm_semantic_body_unify_types(
     semantic_status = cm_semantic_body_instantiate_type(constraints, right,
         right_instantiation, &right_type);
     if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
-    status = cm_typeck_unify(constraints->typeck, left_type, right_type);
-    if (status != CM_TYPECK_OK) {
-        constraints->typeck_status = status;
-        return cm_semantic_typeck_status(status);
-    }
-    return CM_SEMANTIC_BODY_OK;
+    return cm_semantic_body_unify_terms(constraints, left_type, right_type);
 }
 
 static CmSemanticBodyStatus cm_semantic_body_expression_term(
@@ -518,7 +717,6 @@ static CmSemanticBodyStatus cm_semantic_body_unify_expression_type(
     CmTypeckTypeId expression_type;
     CmTypeckTypeId declared_type;
     CmSemanticBodyStatus semantic_status;
-    CmTypeckStatus status;
 
     semantic_status = cm_semantic_body_expression_term(constraints,
         expression, &expression_type);
@@ -526,13 +724,8 @@ static CmSemanticBodyStatus cm_semantic_body_unify_expression_type(
     semantic_status = cm_semantic_body_instantiate_type(constraints,
         hir_type, instantiation, &declared_type);
     if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
-    status = cm_typeck_unify(constraints->typeck, expression_type,
+    return cm_semantic_body_unify_terms(constraints, expression_type,
         declared_type);
-    if (status != CM_TYPECK_OK) {
-        constraints->typeck_status = status;
-        return cm_semantic_typeck_status(status);
-    }
-    return CM_SEMANTIC_BODY_OK;
 }
 
 static CmSemanticBodyStatus cm_semantic_body_unify_expressions(
@@ -542,7 +735,6 @@ static CmSemanticBodyStatus cm_semantic_body_unify_expressions(
     CmTypeckTypeId left_type;
     CmTypeckTypeId right_type;
     CmSemanticBodyStatus semantic_status;
-    CmTypeckStatus status;
 
     semantic_status = cm_semantic_body_expression_term(constraints, left,
         &left_type);
@@ -550,12 +742,7 @@ static CmSemanticBodyStatus cm_semantic_body_unify_expressions(
     semantic_status = cm_semantic_body_expression_term(constraints, right,
         &right_type);
     if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
-    status = cm_typeck_unify(constraints->typeck, left_type, right_type);
-    if (status != CM_TYPECK_OK) {
-        constraints->typeck_status = status;
-        return cm_semantic_typeck_status(status);
-    }
-    return CM_SEMANTIC_BODY_OK;
+    return cm_semantic_body_unify_terms(constraints, left_type, right_type);
 }
 
 static int cm_semantic_body_integer_kind(const CmHirContext *hir,
@@ -927,12 +1114,14 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
 }
 
 static CmSemanticBodyStatus cm_semantic_body_constrain(
-    CmTypeckContext *typeck, const CmHirContext *hir,
+    CmSemanticSession *session, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution, const CmHirContext *hir,
     const CmHirBody *body, CmHirBodyId body_id,
     const CmHirItem *owner_item,
     const CmTypeckInstantiation *owner_instantiation,
     CmTypeckTypeId *expression_terms, size_t expression_term_count,
-    CmHirExprId *out_expression, CmTypeckStatus *out_typeck_status)
+    CmHirExprId *out_expression, CmTypeckStatus *out_typeck_status,
+    CmTraitSolverResultKind *out_solver_kind)
 {
     CmSemanticBodyConstraints constraints;
     const CmHirExpr *root;
@@ -943,28 +1132,39 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     size_t bitmap_size;
     size_t parameter_bitmap_size;
 
-    if (typeck == NULL || hir == NULL || body == NULL || owner_item == NULL
+    if (session == NULL || typeck == NULL || substitution == NULL
+        || hir == NULL || body == NULL || owner_item == NULL
         || owner_instantiation == NULL || expression_terms == NULL
         || expression_term_count != hir->expressions.len
         || out_expression == NULL
-        || out_typeck_status == NULL) return CM_SEMANTIC_BODY_INVALID;
+        || out_typeck_status == NULL || out_solver_kind == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
     *out_expression = CM_HIR_EXPR_NONE;
     *out_typeck_status = CM_TYPECK_OK;
+    *out_solver_kind = CM_TRAIT_SOLVER_INVALID;
     if ((body->local_count == 0u) != (body->locals == NULL)
         || body->parameter_count
             != owner_item->data.function_item.signature.parameter_count) {
         return CM_SEMANTIC_BODY_INVALID;
     }
     memset(&constraints, 0, sizeof(constraints));
+    constraints.session = session;
     constraints.typeck = typeck;
     constraints.hir = hir;
     constraints.body = body;
     constraints.body_id = body_id;
     constraints.owner_instantiation = owner_instantiation;
+    constraints.substitution = substitution;
+    constraints.normalize_limits.max_nodes =
+        CM_SEMANTIC_BODY_NORMALIZE_NODES;
+    constraints.normalize_limits.max_projection_steps =
+        CM_SEMANTIC_BODY_NORMALIZE_PROJECTIONS;
     constraints.expression_terms = expression_terms;
     constraints.expression_term_count = expression_term_count;
     constraints.failed_expression = body->root_expression;
     constraints.typeck_status = CM_TYPECK_OK;
+    constraints.solver_kind = CM_TRAIT_SOLVER_INVALID;
     if (!cm_size_mul((size_t)(body->local_count == 0u
                 ? 1u : body->local_count), sizeof(*constraints.defined_locals),
             &bitmap_size)
@@ -973,6 +1173,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
             sizeof(*constraints.seen_parameters), &parameter_bitmap_size)) {
         return CM_SEMANTIC_BODY_OVERFLOW;
     }
+    cm_vec_init(&constraints.deferred_equalities,
+        sizeof(CmSemanticBodyEquality));
     constraints.defined_locals = (unsigned char *)cm_alloc_zeroed(
         1u, bitmap_size);
     constraints.seen_parameters = (unsigned char *)cm_alloc_zeroed(
@@ -1041,13 +1243,21 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
             body->root_expression, body->expected_type,
             owner_instantiation);
     }
+    if (status == CM_SEMANTIC_BODY_OK) {
+        status = cm_semantic_body_retry_equalities(&constraints);
+    }
+    if (status == CM_SEMANTIC_BODY_OK) {
+        status = cm_semantic_body_normalize_expressions(&constraints);
+    }
 finish:
     if (status != CM_SEMANTIC_BODY_OK) {
         *out_expression = constraints.failed_expression;
         *out_typeck_status = constraints.typeck_status;
+        *out_solver_kind = constraints.solver_kind;
     }
     cm_free(constraints.defined_locals);
     cm_free(constraints.seen_parameters);
+    cm_vec_destroy(&constraints.deferred_equalities);
     return status;
 }
 
@@ -1350,9 +1560,11 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         environment_substitution.enclosing = &enclosing_instantiation;
     }
 
-    result.status = cm_semantic_body_constrain(typeck, hir, body, body_id,
-        owner_item, &owner_instantiation, expression_terms,
-        hir->expressions.len, &result.expression, &result.typeck_status);
+    result.status = cm_semantic_body_constrain(session, typeck,
+        &environment_substitution, hir, body, body_id, owner_item,
+        &owner_instantiation, expression_terms,
+        hir->expressions.len, &result.expression, &result.typeck_status,
+        &result.solver_kind);
     if (result.status != CM_SEMANTIC_BODY_OK) {
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
