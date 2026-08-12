@@ -1,5 +1,7 @@
 #include "cm/hir/semantic_body.h"
 
+#include "cm/alloc.h"
+
 #include <string.h>
 
 #define CM_SEMANTIC_BODY_TYPE_DEPTH ((size_t)128u)
@@ -292,9 +294,9 @@ static int cm_semantic_type_only_owner(const CmHirContext *hir,
         && cm_hir_def_id_equal(parameter->owner, item->definition);
 }
 
-static CmSemanticBodyResult cm_semantic_body_fail_snapshot(
+static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmSemanticBodyResult result, CmTypeckContext *typeck,
-    CmTypeckSnapshot *snapshot)
+    CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions)
 {
     CmTypeckStatus rollback;
 
@@ -303,13 +305,107 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot(
         result.status = CM_SEMANTIC_BODY_TYPECK_FAILURE;
         result.typeck_status = rollback;
     }
+    cm_free(call_expressions);
     return result;
 }
 
-CmSemanticBodyResult cm_semantic_body_check_calls(
+#define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
+    cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
+        call_expressions)
+
+static CmSemanticBodyStatus cm_semantic_body_walk(
+    const CmHirContext *hir, CmHirBodyId body, CmHirExprId id,
+    unsigned char *seen, CmHirExprId *calls, size_t *count)
+{
+    const CmHirExpr *e;
+    uint32_t i;
+    if (id == CM_HIR_EXPR_NONE || (size_t)id > hir->expressions.len)
+        return CM_SEMANTIC_BODY_INVALID;
+    e = cm_hir_get_expr(hir, id);
+    if (e == NULL || e->owner_body != body || cm_hir_get_type(hir, e->type) == NULL)
+        return CM_SEMANTIC_BODY_INVALID;
+    if (seen[(size_t)id - 1u] == 1u) return CM_SEMANTIC_BODY_INVALID;
+    if (seen[(size_t)id - 1u] == 2u) return CM_SEMANTIC_BODY_OK;
+    seen[(size_t)id - 1u] = 1u;
+    switch (e->kind) {
+    case CM_HIR_EXPR_INTEGER: case CM_HIR_EXPR_LOCAL: break;
+    case CM_HIR_EXPR_BLOCK:
+        if (e->data.block.tail_expression == CM_HIR_EXPR_NONE
+            || (e->data.block.statement_count != 0u
+                && e->data.block.statements == NULL)) return CM_SEMANTIC_BODY_INVALID;
+        for (i = 0u; i < e->data.block.statement_count; ++i) {
+            if (e->data.block.statements[i].kind != CM_HIR_STATEMENT_LET
+                || cm_semantic_body_walk(hir, body,
+                    e->data.block.statements[i].data.let_statement.initializer,
+                    seen, calls, count) != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        }
+        if (cm_semantic_body_walk(hir, body, e->data.block.tail_expression,
+                seen, calls, count) != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        break;
+    case CM_HIR_EXPR_CALL:
+        if (e->data.call.argument_count != 0u && e->data.call.arguments == NULL)
+            return CM_SEMANTIC_BODY_INVALID;
+        for (i = 0u; i < e->data.call.argument_count; ++i)
+            if (cm_semantic_body_walk(hir, body, e->data.call.arguments[i],
+                    seen, calls, count) != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        if (*count >= hir->expressions.len) return CM_SEMANTIC_BODY_OVERFLOW;
+        calls[(*count)++] = id;
+        break;
+    case CM_HIR_EXPR_BINARY:
+        if (cm_semantic_body_walk(hir, body, e->data.binary.left, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK
+            || cm_semantic_body_walk(hir, body, e->data.binary.right, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        break;
+    case CM_HIR_EXPR_AGGREGATE:
+        if (e->data.aggregate.field_count != 0u && e->data.aggregate.fields == NULL)
+            return CM_SEMANTIC_BODY_INVALID;
+        for (i = 0u; i < e->data.aggregate.field_count; ++i)
+            if (cm_semantic_body_walk(hir, body, e->data.aggregate.fields[i].value,
+                    seen, calls, count) != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        break;
+    case CM_HIR_EXPR_FIELD:
+        if (cm_semantic_body_walk(hir, body, e->data.field.base, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        break;
+    case CM_HIR_EXPR_IF:
+        if (cm_semantic_body_walk(hir, body, e->data.if_expr.condition, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK
+            || cm_semantic_body_walk(hir, body, e->data.if_expr.then_expression, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK
+            || cm_semantic_body_walk(hir, body, e->data.if_expr.else_expression, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
+        break;
+    default: return CM_SEMANTIC_BODY_INVALID;
+    }
+    seen[(size_t)id - 1u] = 2u;
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_collect_calls(
+    const CmHirContext *hir, CmHirBodyId body, CmHirExprId root,
+    CmHirExprId **out_calls, size_t *out_count)
+{
+    unsigned char *seen;
+    CmHirExprId *calls;
+    CmSemanticBodyStatus status;
+    if (hir == NULL || out_calls == NULL || out_count == NULL
+        || root == CM_HIR_EXPR_NONE || hir->expressions.len == 0u)
+        return CM_SEMANTIC_BODY_INVALID;
+    seen = (unsigned char *)cm_alloc_zeroed(hir->expressions.len, sizeof(unsigned char));
+    calls = (CmHirExprId *)cm_alloc_zeroed(hir->expressions.len, sizeof(CmHirExprId));
+    *out_count = 0u;
+    status = cm_semantic_body_walk(hir, body, root, seen, calls, out_count);
+    cm_free(seen);
+    if (status != CM_SEMANTIC_BODY_OK) { cm_free(calls); return status; }
+    *out_calls = calls;
+    return status;
+}
+
+static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticSession *session, CmHirBodyId body_id,
     const CmHirTypeId *owner_type_substitutions,
-    uint32_t owner_type_substitution_count)
+    uint32_t owner_type_substitution_count, int definition_mode)
 {
     CmSemanticBodyResult result;
     const CmHirContext *hir;
@@ -321,8 +417,12 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     CmTypeckGenericArg owner_arguments[1];
     CmTypeckInstantiation owner_instantiation;
     CmParamEnvSubstitution environment_substitution;
-    size_t expression_index;
+    CmHirExprId *call_expressions;
+    size_t call_expression_count;
+    size_t call_index;
     CmTypeckStatus typeck_status;
+
+    (void)definition_mode;
 
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body_id);
     if (session == NULL || !cm_semantic_session_is_current(session)) {
@@ -346,8 +446,12 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             cm_semantic_session_enclosing_owner(session))
         || (owner_type_substitution_count == 0u)
             != (owner_type_substitutions == NULL)
-        || !cm_semantic_type_only_owner(hir, owner_item,
-            owner_type_substitution_count)) {
+        || (definition_mode
+            ? (owner_type_substitution_count != 0u
+                || !cm_semantic_type_only_owner(hir, owner_item,
+                    owner_item->generic_parameter_count))
+            : !cm_semantic_type_only_owner(hir, owner_item,
+                owner_type_substitution_count))) {
         return result;
     }
     typeck = cm_semantic_session_typeck(session);
@@ -355,48 +459,69 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
         result.status = CM_SEMANTIC_BODY_STALE;
         return result;
     }
+    result.status = cm_semantic_body_collect_calls(hir, body_id,
+        body->root_expression, &call_expressions, &call_expression_count);
+    if (result.status != CM_SEMANTIC_BODY_OK) return result;
     memset(&snapshot, 0, sizeof(snapshot));
     typeck_status = cm_typeck_snapshot(typeck, &snapshot);
     if (typeck_status != CM_TYPECK_OK) {
         result.status = cm_semantic_typeck_status(typeck_status);
         result.typeck_status = typeck_status;
+        cm_free(call_expressions);
         return result;
     }
 
     memset(owner_arguments, 0, sizeof(owner_arguments));
     memset(&owner_instantiation, 0, sizeof(owner_instantiation));
     owner_instantiation.parameter_owner = owner;
-    if (owner_type_substitution_count != 0u) {
-        CmSemanticTypeScan scan;
-
-        scan = cm_semantic_scan_type(hir, owner_type_substitutions[0], 0u);
-        result.status = cm_semantic_scan_status(scan);
-        if (result.status != CM_SEMANTIC_BODY_OK) {
-            return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
-        }
+    if (owner_item->generic_parameter_count != 0u) {
         owner_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
-        typeck_status = cm_typeck_import_hir_type(typeck,
-            owner_type_substitutions[0], &owner_arguments[0].data.type);
+        if (!definition_mode) {
+            CmSemanticTypeScan scan;
+            scan = cm_semantic_scan_type(hir, owner_type_substitutions[0], 0u);
+            result.status = cm_semantic_scan_status(scan);
+            if (result.status != CM_SEMANTIC_BODY_OK)
+                return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                    call_expressions);
+            typeck_status = cm_typeck_import_hir_type(typeck,
+                owner_type_substitutions[0], &owner_arguments[0].data.type);
+        } else {
+            const CmHirGenericParam *parameter;
+            CmTypeckType rigid_type;
+            parameter = cm_hir_get_generic_param(hir,
+                owner_item->generic_parameter_start);
+            if (parameter == NULL) {
+                result.status = CM_SEMANTIC_BODY_INVALID;
+                return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                    call_expressions);
+            }
+            memset(&rigid_type, 0, sizeof(rigid_type));
+            rigid_type.kind = CM_TYPECK_TYPE_PARAMETER;
+            rigid_type.span = parameter->span;
+            rigid_type.data.parameter_type.parameter =
+                owner_item->generic_parameter_start;
+            typeck_status = cm_typeck_add_type(typeck, &rigid_type,
+                &owner_arguments[0].data.type);
+        }
         if (typeck_status != CM_TYPECK_OK) {
             result.status = cm_semantic_typeck_status(typeck_status);
             result.typeck_status = typeck_status;
-            return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+            return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                call_expressions);
         }
         owner_instantiation.arguments = owner_arguments;
         owner_instantiation.argument_count = 1u;
     }
     if (!cm_typeck_instantiation_is_valid(typeck, &owner_instantiation)) {
         result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
-        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot);
+        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+            call_expressions);
     }
     memset(&environment_substitution, 0,
         sizeof(environment_substitution));
     environment_substitution.exact = &owner_instantiation;
 
-    for (expression_index = 0u; expression_index < hir->expressions.len;
-         ++expression_index) {
+    for (call_index = 0u; call_index < call_expression_count; ++call_index) {
         const CmHirExpr *expression;
         CmHirExprId expression_id;
         const CmHirItem *callee;
@@ -404,18 +529,21 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
         CmTypeckInstantiation callee_instantiation;
         uint32_t predicate_index;
 
-        expression = (const CmHirExpr *)cm_vec_at_const(&hir->expressions,
-            expression_index);
-        expression_id = (CmHirExprId)(expression_index + 1u);
+        expression_id = call_expressions[call_index];
+        expression = cm_hir_get_expr(hir, expression_id);
         if (expression == NULL || expression->owner_body != body_id
-            || expression->kind != CM_HIR_EXPR_CALL) continue;
+            || expression->kind != CM_HIR_EXPR_CALL) {
+            result.status = CM_SEMANTIC_BODY_INVALID;
+            return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                call_expressions);
+        }
         result.expression = expression_id;
         result.callee = expression->data.call.callee;
         callee = cm_semantic_body_item(hir, expression->data.call.callee);
         if (callee == NULL || callee->kind != CM_HIR_ITEM_FUNCTION) {
             result.status = CM_SEMANTIC_BODY_INVALID;
-            return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+            return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                call_expressions);
         }
         if (!cm_hir_def_id_is_none(callee->parent_definition)
             || (expression->data.call.type_substitution_count != 0u
@@ -426,7 +554,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 expression->data.call.type_substitution_count)) {
             result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
             return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+                &snapshot, call_expressions);
         }
         if ((callee->predicate_scope_count == 0u)
                 != (callee->predicate_scopes == NULL)
@@ -436,17 +564,17 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 != (callee->outlives_predicates == NULL)) {
             result.status = CM_SEMANTIC_BODY_INVALID;
             return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+                &snapshot, call_expressions);
         }
         if (callee->predicate_scope_count != 0u) {
             result.status = CM_SEMANTIC_BODY_PENDING_HIGHER_RANKED;
             return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+                &snapshot, call_expressions);
         }
         if (callee->outlives_predicate_count != 0u) {
             result.status = CM_SEMANTIC_BODY_PENDING_OUTLIVES;
             return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+                &snapshot, call_expressions);
         }
         memset(callee_arguments, 0, sizeof(callee_arguments));
         memset(&callee_instantiation, 0, sizeof(callee_instantiation));
@@ -459,7 +587,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             result.status = cm_semantic_scan_status(scan);
             if (result.status != CM_SEMANTIC_BODY_OK) {
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             callee_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
             typeck_status = cm_typeck_instantiate_hir_type(typeck,
@@ -469,7 +597,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 result.status = cm_semantic_typeck_status(typeck_status);
                 result.typeck_status = typeck_status;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             callee_instantiation.arguments = callee_arguments;
             callee_instantiation.argument_count = 1u;
@@ -478,7 +606,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 &callee_instantiation)) {
             result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
             return cm_semantic_body_fail_snapshot(result, typeck,
-                &snapshot);
+                &snapshot, call_expressions);
         }
 
         for (predicate_index = 0u;
@@ -498,24 +626,24 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                     != (predicate->binder.lifetimes == NULL)) {
                 result.status = CM_SEMANTIC_BODY_INVALID;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             if (predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
                 || predicate->binder.lifetime_count != 0u) {
                 result.status = CM_SEMANTIC_BODY_PENDING_HIGHER_RANKED;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             if (predicate->modifier != CM_HIR_PREDICATE_REQUIRED) {
                 result.status = CM_SEMANTIC_BODY_PENDING_MODIFIER;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             if ((predicate->equality_count == 0u)
                     != (predicate->equalities == NULL)) {
                 result.status = CM_SEMANTIC_BODY_INVALID;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             scan = cm_semantic_scan_merge(
                 cm_semantic_scan_type(hir, predicate->subject, 0u),
@@ -523,7 +651,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             result.status = cm_semantic_scan_status(scan);
             if (result.status != CM_SEMANTIC_BODY_OK) {
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             memset(&goal, 0, sizeof(goal));
             goal.kind = CM_TRAIT_GOAL_IMPLEMENTED;
@@ -540,7 +668,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 result.status = cm_semantic_typeck_status(typeck_status);
                 result.typeck_status = typeck_status;
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             selection = cm_semantic_session_solve_goal(session,
                 typeck, &environment_substitution, &goal);
@@ -549,7 +677,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             result.status = cm_semantic_solver_status(selection.kind);
             if (result.status != CM_SEMANTIC_BODY_OK) {
                 return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
+                    &snapshot, call_expressions);
             }
             implemented_self = goal.data.implemented.self_type;
             implemented_trait = goal.data.implemented.trait_type;
@@ -566,12 +694,12 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 if (scan == CM_SEMANTIC_TYPE_PROJECTION) {
                     result.status = CM_SEMANTIC_BODY_UNSUPPORTED;
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
                 result.status = cm_semantic_scan_status(scan);
                 if (result.status != CM_SEMANTIC_BODY_OK) {
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
                 typeck_status = cm_typeck_instantiate_hir_type(typeck,
                     equality->value, &callee_instantiation,
@@ -580,7 +708,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                     result.status = cm_semantic_typeck_status(typeck_status);
                     result.typeck_status = typeck_status;
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
                 memset(&projection, 0, sizeof(projection));
                 projection.kind = CM_TYPECK_TYPE_PROJECTION;
@@ -597,7 +725,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                     result.status = cm_semantic_typeck_status(typeck_status);
                     result.typeck_status = typeck_status;
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
                 memset(&goal, 0, sizeof(goal));
                 goal.kind = CM_TRAIT_GOAL_PROJECTION_EQUALITY;
@@ -612,14 +740,14 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 result.status = cm_semantic_solver_status(selection.kind);
                 if (result.status != CM_SEMANTIC_BODY_OK) {
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
                 if (cm_hir_def_id_is_none(
                         selection.impl_associated_definition)) {
                     result.status = CM_SEMANTIC_BODY_INVALID;
                     result.solver_kind = CM_TRAIT_SOLVER_INVALID;
                     return cm_semantic_body_fail_snapshot(result, typeck,
-                        &snapshot);
+                        &snapshot, call_expressions);
                 }
             }
         }
@@ -629,11 +757,28 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
         result.status = CM_SEMANTIC_BODY_TYPECK_FAILURE;
         result.typeck_status = typeck_status;
         (void)cm_typeck_rollback(typeck, &snapshot);
+        cm_free(call_expressions);
         return result;
     }
+    cm_free(call_expressions);
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_OK, body_id);
     result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
     return result;
+}
+
+CmSemanticBodyResult cm_semantic_body_check_calls(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirTypeId *owner_type_substitutions,
+    uint32_t owner_type_substitution_count)
+{
+    return cm_semantic_body_check_calls_mode(session, body,
+        owner_type_substitutions, owner_type_substitution_count, 0);
+}
+
+CmSemanticBodyResult cm_semantic_body_check_definition(
+    CmSemanticSession *session, CmHirBodyId body)
+{
+    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1);
 }
 
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status)

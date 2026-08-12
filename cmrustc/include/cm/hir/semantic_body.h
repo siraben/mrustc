@@ -53,6 +53,10 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     const CmHirTypeId *owner_type_substitutions,
     uint32_t owner_type_substitution_count);
 
+/* Check a generic body with rigid definition-mode parameters. */
+CmSemanticBodyResult cm_semantic_body_check_definition(
+    CmSemanticSession *session, CmHirBodyId body);
+
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status);
 
 #endif
