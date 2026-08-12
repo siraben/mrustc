@@ -317,6 +317,7 @@ static void test_environment_facts_and_solver(void)
     int saw_supertrait;
     int saw_equality_pending;
     int saw_outlives_pending;
+    size_t equality_fact_index;
 
     fixture_init(&fixture);
     memset(&environment, 0, sizeof(environment));
@@ -325,6 +326,7 @@ static void test_environment_facts_and_solver(void)
     assert(cm_param_env_fact_count(&environment) == 5u);
     assert(cm_param_env_pending_count(&environment) == 2u);
     saw_equality_pending = 0;
+    equality_fact_index = (size_t)-1;
     saw_outlives_pending = 0;
     for (fact_index = 0u;
          fact_index < cm_param_env_pending_count(&environment);
@@ -351,6 +353,7 @@ static void test_environment_facts_and_solver(void)
                     && cm_hir_def_id_equal(fact->data.implemented
                             .equalities[0].associated_type,
                         fixture.bound_associated_type));
+                equality_fact_index = fact_index;
             }
             saw_predicate = 1;
         } else if (fact->provenance
@@ -365,6 +368,7 @@ static void test_environment_facts_and_solver(void)
         }
     }
     assert(saw_predicate && saw_outlives && saw_self && saw_supertrait);
+    assert(equality_fact_index != (size_t)-1);
 
     memset(&index, 0, sizeof(index));
     assert(cm_trait_impl_index_init(&index, &fixture.hir,
@@ -386,6 +390,39 @@ static void test_environment_facts_and_solver(void)
     exact.self_type = bool_type;
     substitution.exact = &exact;
     substitution.enclosing = NULL;
+
+    {
+        CmParamEnvEqualityInstance equality_instance;
+        CmTypeckStatus equality_typeck_status;
+        size_t before;
+
+        before = cm_typeck_type_count(&typeck);
+        assert(cm_param_env_instantiate_equality(&environment,
+                equality_fact_index, 0u, &typeck, &substitution,
+                &equality_instance, &equality_typeck_status)
+                == CM_PARAM_ENV_READY
+            && equality_typeck_status == CM_TYPECK_OK
+            && equality_instance.fact_index == equality_fact_index
+            && equality_instance.equality_index == 0u
+            && equality_instance.provenance
+                == CM_PARAM_ENV_PROVENANCE_EXACT_PREDICATE
+            && cm_hir_def_id_equal(equality_instance.source_owner,
+                fixture.generic_trait)
+            && cm_hir_def_id_equal(equality_instance.trait_type.definition,
+                fixture.bound_trait)
+            && cm_hir_def_id_equal(equality_instance.associated_type,
+                fixture.bound_associated_type)
+            && cm_typeck_get_type(&typeck, equality_instance.subject)
+                != NULL
+            && cm_typeck_get_type(&typeck, equality_instance.value) != NULL);
+        assert(cm_param_env_instantiate_equality(&environment,
+                equality_fact_index, 1u, &typeck, &substitution,
+                &equality_instance, &equality_typeck_status)
+                == CM_PARAM_ENV_INVALID
+            && equality_instance.subject == CM_TYPECK_TYPE_NONE
+            && equality_instance.value == CM_TYPECK_TYPE_NONE
+            && cm_typeck_type_count(&typeck) >= before);
+    }
 
     memset(&goal, 0, sizeof(goal));
     goal.owner = fixture.generic_trait;

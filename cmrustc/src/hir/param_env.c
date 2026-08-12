@@ -766,6 +766,112 @@ CmParamEnvStatus cm_param_env_instantiate_implemented(
     return CM_PARAM_ENV_TYPECK_FAILURE;
 }
 
+CmParamEnvStatus cm_param_env_instantiate_equality(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmParamEnvEqualityInstance *out_equality,
+    CmTypeckStatus *out_typeck_status)
+{
+    const CmTypeckInstantiation *instantiation;
+    const CmParamEnvState *state;
+    const CmParamEnvFact *fact;
+    const CmHirAssociatedTypeEquality *equality;
+    const CmHirItem *trait_item;
+    const CmHirItem *associated_item;
+    CmParamEnvEqualityInstance result;
+    CmTypeckSnapshot snapshot;
+    CmTypeckStatus status;
+
+    if (out_equality != NULL) memset(out_equality, 0, sizeof(*out_equality));
+    if (out_typeck_status != NULL) {
+        *out_typeck_status = CM_TYPECK_INVALID_ARGUMENT;
+    }
+    state = cm_param_env_state_const(environment);
+    fact = cm_param_env_fact(environment, fact_index);
+    if (!cm_param_env_state_current(state)) return CM_PARAM_ENV_STALE;
+    if (fact == NULL || fact->kind != CM_PARAM_ENV_FACT_IMPLEMENTED
+        || typeck == NULL || cm_typeck_hir_context(typeck) != state->hir
+        || out_equality == NULL
+        || equality_index >= fact->data.implemented.equality_count
+        || fact->data.implemented.equalities == NULL
+        || fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
+        if (fact != NULL && (fact->blocker_flags
+                & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u) {
+            return CM_PARAM_ENV_OVERFLOW;
+        }
+        return fact != NULL && fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+            ? CM_PARAM_ENV_UNSUPPORTED : CM_PARAM_ENV_INVALID;
+    }
+    instantiation = cm_param_env_choose_instantiation(state, fact,
+        substitution);
+    if (!cm_typeck_instantiation_is_valid(typeck, instantiation)
+        || !cm_hir_def_id_equal(instantiation->parameter_owner,
+            fact->parameter_owner)
+        || (!cm_hir_def_id_is_none(fact->self_owner)
+            && (instantiation->self_type == CM_TYPECK_TYPE_NONE
+                || !cm_hir_def_id_equal(instantiation->self_owner,
+                    fact->self_owner)))) return CM_PARAM_ENV_INVALID;
+    equality = &fact->data.implemented.equalities[equality_index];
+    trait_item = cm_param_env_find_item(state->hir,
+        fact->data.implemented.trait_type.definition);
+    associated_item = cm_param_env_find_item(state->hir,
+        equality->associated_type);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || associated_item == NULL
+        || associated_item->kind != CM_HIR_ITEM_TYPE_ALIAS
+        || !cm_hir_def_id_equal(associated_item->parent_definition,
+            trait_item->definition)
+        || associated_item->data.type_alias_item.target != CM_HIR_TYPE_NONE) {
+        return CM_PARAM_ENV_INVALID;
+    }
+    memset(&result, 0, sizeof(result));
+    result.fact_index = fact_index;
+    result.equality_index = equality_index;
+    result.provenance = fact->provenance;
+    result.source_owner = fact->source_owner;
+    result.associated_type = equality->associated_type;
+    result.span = equality->span;
+    status = cm_typeck_snapshot(typeck, &snapshot);
+    if (status != CM_TYPECK_OK) return CM_PARAM_ENV_TYPECK_FAILURE;
+    if (fact->data.implemented.subject == CM_HIR_TYPE_NONE) {
+        result.subject = instantiation->self_type;
+    } else {
+        status = cm_typeck_instantiate_hir_type(typeck,
+            fact->data.implemented.subject, instantiation,
+            &result.subject);
+    }
+    if (status == CM_TYPECK_OK
+        && fact->provenance == CM_PARAM_ENV_PROVENANCE_TRAIT_SELF) {
+        result.trait_type.definition =
+            fact->data.implemented.trait_type.definition;
+        result.trait_type.arguments =
+            (CmTypeckGenericArg *)instantiation->arguments;
+        result.trait_type.argument_count = instantiation->argument_count;
+    } else if (status == CM_TYPECK_OK) {
+        status = cm_typeck_instantiate_hir_named(typeck,
+            &fact->data.implemented.trait_type, instantiation,
+            &result.trait_type);
+    }
+    if (status == CM_TYPECK_OK) {
+        status = cm_typeck_instantiate_hir_type(typeck, equality->value,
+            instantiation, &result.value);
+    }
+    if (status == CM_TYPECK_OK) status = cm_typeck_commit(typeck, &snapshot);
+    else (void)cm_typeck_rollback(typeck, &snapshot);
+    if (out_typeck_status != NULL) *out_typeck_status = status;
+    if (status == CM_TYPECK_OK) {
+        *out_equality = result;
+        return CM_PARAM_ENV_READY;
+    }
+    if (status == CM_TYPECK_OVERFLOW) return CM_PARAM_ENV_OVERFLOW;
+    if (status == CM_TYPECK_UNSUPPORTED_HIR_TYPE
+        || status == CM_TYPECK_UNSUPPORTED_CONSTANT) {
+        return CM_PARAM_ENV_UNSUPPORTED;
+    }
+    return CM_PARAM_ENV_TYPECK_FAILURE;
+}
+
 const char *cm_param_env_status_name(CmParamEnvStatus status)
 {
     switch (status) {

@@ -94,6 +94,19 @@ typedef struct CmParamEnvSubstitution {
     const CmTypeckInstantiation *enclosing;
 } CmParamEnvSubstitution;
 
+/* Session-owned instantiation of one exact associated-type equality fact. */
+typedef struct CmParamEnvEqualityInstance {
+    size_t fact_index;
+    uint32_t equality_index;
+    CmParamEnvFactProvenance provenance;
+    CmHirDefId source_owner;
+    CmTypeckTypeId subject;
+    CmTypeckNamedType trait_type;
+    CmHirDefId associated_type;
+    CmTypeckTypeId value;
+    CmSpan span;
+} CmParamEnvEqualityInstance;
+
 CmParamEnvStatus cm_param_env_init(CmParamEnv *environment,
     const CmHirContext *hir, CmHirDefId exact_owner);
 void cm_param_env_destroy(CmParamEnv *environment);
@@ -118,6 +131,18 @@ CmParamEnvStatus cm_param_env_instantiate_implemented(
     const CmParamEnv *environment, size_t fact_index,
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     CmTypeckTypeId *out_subject, CmTypeckNamedType *out_trait,
+    CmTypeckStatus *out_typeck_status);
+
+/*
+ * Transactionally instantiate one associated equality retained by an
+ * implemented fact. The returned terms borrow `typeck`; provenance and
+ * definition identities remain stable while the environment is current.
+ */
+CmParamEnvStatus cm_param_env_instantiate_equality(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmParamEnvEqualityInstance *out_equality,
     CmTypeckStatus *out_typeck_status);
 
 const char *cm_param_env_status_name(CmParamEnvStatus status);
