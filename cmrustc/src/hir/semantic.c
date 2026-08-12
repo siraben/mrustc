@@ -50,6 +50,49 @@ static CmTraitSelectionResult cm_semantic_result(
     return result;
 }
 
+typedef struct CmSemanticNormalizeEvaluator {
+    CmTraitGoalTable *table;
+    const CmParamEnvSubstitution *substitution;
+} CmSemanticNormalizeEvaluator;
+
+static CmTraitSelectionResult cm_semantic_normalize_implemented(
+    void *context, CmTypeckContext *typeck,
+    const CmImplementedTraitGoal *implemented)
+{
+    CmSemanticNormalizeEvaluator *recursive;
+    CmTraitGoal goal;
+
+    recursive = (CmSemanticNormalizeEvaluator *)context;
+    if (recursive == NULL || recursive->table == NULL
+        || recursive->substitution == NULL || implemented == NULL) {
+        return cm_semantic_result(CM_TRAIT_SOLVER_INVALID);
+    }
+    memset(&goal, 0, sizeof(goal));
+    goal.kind = CM_TRAIT_GOAL_IMPLEMENTED;
+    goal.data.implemented = *implemented;
+    return cm_trait_goal_table_solve(recursive->table, typeck,
+        recursive->substitution, &goal);
+}
+
+static CmTraitSelectionResult cm_semantic_normalize_projection(
+    void *context, CmTypeckContext *typeck,
+    const CmProjectionEqualityGoal *projection)
+{
+    CmSemanticNormalizeEvaluator *recursive;
+    CmTraitGoal goal;
+
+    recursive = (CmSemanticNormalizeEvaluator *)context;
+    if (recursive == NULL || recursive->table == NULL
+        || recursive->substitution == NULL || projection == NULL) {
+        return cm_semantic_result(CM_TRAIT_SOLVER_INVALID);
+    }
+    memset(&goal, 0, sizeof(goal));
+    goal.kind = CM_TRAIT_GOAL_PROJECTION_EQUALITY;
+    goal.data.projection_equality = *projection;
+    return cm_trait_goal_table_solve(recursive->table, typeck,
+        recursive->substitution, &goal);
+}
+
 static int cm_semantic_limits_valid(CmTraitGoalTableLimits limits)
 {
     return limits.max_goal_depth != 0u
@@ -286,4 +329,33 @@ CmTraitSelectionResult cm_semantic_session_solve_implemented(
     }
     return cm_semantic_session_solve_goal(session, term_owner,
         substitution, goal);
+}
+
+CmProjectionNormalizeResult cm_semantic_session_normalize_type(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
+    CmProjectionNormalizeLimits limits)
+{
+    CmSemanticSessionState *state;
+    CmSemanticNormalizeEvaluator recursive;
+    CmTraitGoalEvaluator evaluator;
+    CmProjectionNormalizeResult result;
+
+    memset(&result, 0, sizeof(result));
+    result.kind = CM_TRAIT_SOLVER_INVALID;
+    result.type = CM_TYPECK_TYPE_NONE;
+    state = cm_semantic_state(session);
+    if (!cm_semantic_state_is_current(state)
+        || term_owner != &state->typeck || substitution == NULL) {
+        return result;
+    }
+    recursive.table = &state->table;
+    recursive.substitution = substitution;
+    memset(&evaluator, 0, sizeof(evaluator));
+    evaluator.context = &recursive;
+    evaluator.evaluate = cm_semantic_normalize_implemented;
+    evaluator.evaluate_projection = cm_semantic_normalize_projection;
+    return cm_projection_normalize_type(&state->index,
+        &state->environment, &state->typeck, substitution,
+        state->exact_owner, type, &evaluator, limits);
 }

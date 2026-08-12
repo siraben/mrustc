@@ -116,6 +116,7 @@ HIR_PROJECTION_NORMALIZER_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/projection_normalizer.o
 HIR_SEMANTIC_OBJECTS := \
 	$(HIR_GOAL_TABLE_OBJECTS) \
+	$(BUILD_DIR)/obj/hir/projection_normalizer.o \
 	$(BUILD_DIR)/obj/hir/semantic.o
 HIR_SEMANTIC_BODY_OBJECTS := \
 	$(HIR_SEMANTIC_OBJECTS) \

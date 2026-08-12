@@ -2,6 +2,7 @@
 #define CMRUSTC_CM_HIR_SEMANTIC_H
 
 #include "cm/hir/goal_table.h"
+#include "cm/hir/projection_normalizer.h"
 
 /*
  * One semantic-pass session over one observed HIR generation.  The session
@@ -67,5 +68,14 @@ CmTraitSelectionResult cm_semantic_session_solve_goal(
 CmTraitSelectionResult cm_semantic_session_solve_implemented(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal);
+
+/*
+ * Normalize one session-owned term using the session's authenticated index,
+ * environment, and canonical recursive goal table. Every non-proof is atomic.
+ */
+CmProjectionNormalizeResult cm_semantic_session_normalize_type(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
+    CmProjectionNormalizeLimits limits);
 
 #endif

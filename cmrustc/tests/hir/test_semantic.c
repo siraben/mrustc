@@ -13,6 +13,7 @@ typedef struct TestFixture {
     CmHirDefId bound_trait;
     CmHirDefId associated_owner;
     CmHirTypeId bool_hir;
+    CmHirTypeId u8_hir;
 } TestFixture;
 
 static CmSpan test_span(uint32_t start, uint32_t end)
@@ -87,6 +88,69 @@ static CmHirDefId add_associated_owner(TestFixture *fixture)
     return definition;
 }
 
+static CmHirDefId add_trait_associated(TestFixture *fixture,
+    CmHirDefId trait_definition, const char *name)
+{
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition(&fixture->hir,
+        fixture->crate_id, test_span(3u, 8u), &definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, fixture->root,
+        cm_hir_intern(&fixture->hir, name));
+    item.parent_definition = trait_definition;
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    item.data.type_alias_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
+static void add_bool_impl_associated(TestFixture *fixture,
+    CmHirDefId trait_definition, CmHirDefId associated_definition,
+    CmHirTypeId target)
+{
+    CmHirDefId impl_definition;
+    CmHirDefId definition;
+    const CmHirItem *trait_associated;
+    CmHirItem item;
+    CmHirItemId item_id;
+    size_t item_index;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_IMPL, test_span(1u, 20u),
+        &impl_definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_IMPL, impl_definition, fixture->root,
+        CM_INTERN_ID_NONE);
+    item.data.impl_item.self_type = fixture->bool_hir;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition(&fixture->hir,
+        fixture->crate_id, test_span(4u, 9u), &definition) == CM_HIR_OK);
+    trait_associated = NULL;
+    for (item_index = 0u; item_index < fixture->hir.items.len;
+         ++item_index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(
+            &fixture->hir.items, item_index);
+        if (candidate != NULL && cm_hir_def_id_equal(candidate->definition,
+                associated_definition)) {
+            trait_associated = candidate;
+            break;
+        }
+    }
+    assert(trait_associated != NULL);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, fixture->root,
+        trait_associated->name);
+    item.parent_definition = impl_definition;
+    item.data.type_alias_item.target = target;
+    item.data.type_alias_item.trait_item_definition = associated_definition;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+}
+
 static void fixture_init(TestFixture *fixture)
 {
     memset(fixture, 0, sizeof(*fixture));
@@ -96,6 +160,8 @@ static void fixture_init(TestFixture *fixture)
         test_span(0u, 30u), &fixture->crate_id, &fixture->root) == CM_HIR_OK);
     fixture->bool_hir = add_scalar(&fixture->hir,
         CM_HIR_TYPE_BOOL_KIND, CM_HIR_INT_U8);
+    fixture->u8_hir = add_scalar(&fixture->hir,
+        CM_HIR_TYPE_INTEGER_KIND, CM_HIR_INT_U8);
     fixture->owner_trait = add_trait(fixture, "Owner");
     fixture->bound_trait = add_trait(fixture, "Bound");
     fixture->associated_owner = add_associated_owner(fixture);
@@ -524,6 +590,75 @@ static void test_complete_session_authentication(void)
     fixture_destroy(&fixture);
 }
 
+static void test_session_projection_normalization(void)
+{
+    TestFixture fixture;
+    CmHirDefId associated;
+    CmSemanticSessionOptions options;
+    CmSemanticSession session;
+    CmTypeckContext *typeck;
+    CmTypeckInstantiation exact;
+    CmParamEnvSubstitution substitution;
+    CmTypeckType projection;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId projection_type;
+    CmProjectionNormalizeResult result;
+    const CmTypeckType *normalized;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    associated = add_trait_associated(&fixture, fixture.bound_trait,
+        "Output");
+    add_bool_impl_associated(&fixture, fixture.bound_trait, associated,
+        fixture.u8_hir);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.owner_trait);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL
+        && cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
+            == CM_TYPECK_OK);
+    cm_typeck_instantiation_init(typeck, &exact);
+    exact.parameter_owner = fixture.owner_trait;
+    exact.self_owner = fixture.owner_trait;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = test_span(8u, 12u);
+    projection.data.projection_type.self_type = bool_type;
+    projection.data.projection_type.trait_type.definition =
+        fixture.bound_trait;
+    projection.data.projection_type.associated_type.definition = associated;
+    assert(cm_typeck_add_type(typeck, &projection, &projection_type)
+        == CM_TYPECK_OK);
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_session_normalize_type(&session, typeck,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 0u});
+    assert(result.kind == CM_TRAIT_SOLVER_OVERFLOW
+        && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_PROJECTION_LIMIT
+        && result.type == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(typeck) == type_count);
+    result = cm_semantic_session_normalize_type(&session, typeck,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 1u});
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.projection_step_count == 1u);
+    normalized = cm_typeck_get_type(typeck, result.type);
+    assert(normalized != NULL && normalized->kind == CM_TYPECK_TYPE_INTEGER
+        && normalized->data.integer_type == CM_HIR_INT_U8);
+    result = cm_semantic_session_normalize_type(&session, NULL,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 1u});
+    assert(result.kind == CM_TRAIT_SOLVER_INVALID
+        && result.type == CM_TYPECK_TYPE_NONE);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_open_session_solve_and_accessors();
@@ -532,6 +667,7 @@ int main(void)
     test_foreign_and_malformed_data_rejected();
     test_append_and_rewind_staleness();
     test_complete_session_authentication();
+    test_session_projection_normalization();
     puts("hir semantic session tests passed");
     return 0;
 }
