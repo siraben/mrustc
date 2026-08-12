@@ -4894,13 +4894,6 @@ static void test_argument_impl_trait_method_parity(void)
             "explicit generic arity differs") != NULL);
     cm_hir_context_destroy(&context);
 
-    result = lower_source(
-        "trait Send {} trait Copy {} trait Consumer { fn consume(value: impl Send); }"
-        "impl Consumer for u8 { fn consume(value: impl Copy) {} }",
-        &context, NULL);
-    fprintf(stderr, "BOUND mismatch count=%u kind=%s msg=%s\\n", result.error_count,
-        cm_hir_lower_error_kind_name(result.first_error.kind), result.first_error.message);
-    cm_hir_context_destroy(&context);
 }
 
 static void test_argument_impl_trait_foreign_rejected(void)
