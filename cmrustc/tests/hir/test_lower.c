@@ -4873,6 +4873,34 @@ static void test_argument_impl_trait_method_parity(void)
         && cm_hir_def_id_equal(impl_method->data.function_item.trait_item_definition,
             trait_method->definition));
     cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Send {} trait Consumer { fn consume(value: impl Send); }"
+        "impl Consumer for u8 { fn consume<T: Send>(value: T) {} }",
+        &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "explicit generic arity differs") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Send {} trait Consumer { fn consume<T: Send>(value: T); }"
+        "impl Consumer for u8 { fn consume(value: impl Send) {} }",
+        &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "explicit generic arity differs") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Send {} trait Copy {} trait Consumer { fn consume(value: impl Send); }"
+        "impl Consumer for u8 { fn consume(value: impl Copy) {} }",
+        &context, NULL);
+    fprintf(stderr, "BOUND mismatch count=%u kind=%s msg=%s\\n", result.error_count,
+        cm_hir_lower_error_kind_name(result.first_error.kind), result.first_error.message);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_argument_impl_trait_foreign_rejected(void)
@@ -6001,7 +6029,7 @@ static void test_conditionally_const_generic_parameter_bound(void)
 
 int main(void)
 {
-    if (0) test_argument_impl_trait_method_parity();
+    test_argument_impl_trait_method_parity();
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();

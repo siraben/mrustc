@@ -5597,8 +5597,17 @@ static int cm_lower_const_generic_default(CmLowerState *state,
     return 1;
 }
 
+/* Publish defaults in dependency order.  Trait method declarations need to
+ * see defaults on ordinary ADTs (e.g. ControlFlow<B, C = ()>), but aliases and
+ * const defaults may depend on later item/projection binding. */
+enum {
+    CM_LOWER_DEFAULTS_REMAINING = 0,
+    CM_LOWER_DEFAULTS_TRAIT = 1,
+    CM_LOWER_DEFAULTS_ADT_TYPES = 2
+};
+
 static int cm_lower_predeclare_all_generic_defaults(CmLowerState *state,
-    int trait_defaults)
+    int defaults_kind)
 {
     size_t record_index;
 
@@ -5631,7 +5640,18 @@ static int cm_lower_predeclare_all_generic_defaults(CmLowerState *state,
                 "generic-default predeclaration lost its AST item");
             return 0;
         }
-        if ((ast_item->kind == CM_AST_ITEM_TRAIT) != trait_defaults) {
+        if (defaults_kind == CM_LOWER_DEFAULTS_TRAIT
+                && ast_item->kind != CM_AST_ITEM_TRAIT) {
+            continue;
+        }
+        if (defaults_kind == CM_LOWER_DEFAULTS_ADT_TYPES
+                && (ast_item->kind != CM_AST_ITEM_STRUCT
+                    && ast_item->kind != CM_AST_ITEM_UNION
+                    && ast_item->kind != CM_AST_ITEM_ENUM)) {
+            continue;
+        }
+        if (defaults_kind == CM_LOWER_DEFAULTS_REMAINING
+                && ast_item->kind == CM_AST_ITEM_TRAIT) {
             continue;
         }
         for (parameter_index = 0u;
@@ -5644,6 +5664,17 @@ static int cm_lower_predeclare_all_generic_defaults(CmLowerState *state,
             CmHirStatus status;
 
             ast_parameter = &ast_item->generic_parameters[parameter_index];
+            if (defaults_kind == CM_LOWER_DEFAULTS_ADT_TYPES
+                    && ast_parameter->default_type == CM_AST_TYPE_NONE) {
+                continue;
+            }
+            if (defaults_kind == CM_LOWER_DEFAULTS_REMAINING
+                    && (ast_parameter->default_type != CM_AST_TYPE_NONE
+                        && (ast_item->kind == CM_AST_ITEM_STRUCT
+                            || ast_item->kind == CM_AST_ITEM_UNION
+                            || ast_item->kind == CM_AST_ITEM_ENUM))) {
+                continue;
+            }
             if (ast_parameter->default_type == CM_AST_TYPE_NONE
                 && ast_parameter->default_const_expr
                     == CM_AST_EXPR_NONE) {
@@ -6467,6 +6498,7 @@ static int cm_lower_function_item(CmLowerState *state,
     if (record->parent_kind == CM_LOWER_PARENT_IMPL) {
         const CmHirItem *parent_impl;
         const CmHirItem *trait_method;
+        const CmLowerItemRecord *trait_method_record;
         uint32_t matches;
 
         parent_impl = cm_lower_bound_item(state, record->parent_definition);
@@ -6504,6 +6536,36 @@ static int cm_lower_function_item(CmLowerState *state,
                     CM_HIR_OK,
                     "impl method generic arity differs from trait method");
                 return 0;
+            }
+            trait_method_record = cm_lower_find_record_by_definition(state,
+                trait_method->definition);
+            if (trait_method_record != NULL) {
+                const CmAstItem *trait_ast_method;
+
+                trait_ast_method = cm_ast_get_item(trait_method_record->ast,
+                    trait_method_record->ast_id);
+                if (trait_ast_method == NULL
+                    || trait_ast_method->kind != CM_AST_ITEM_FUNCTION) {
+                    cm_free(locals);
+                    cm_free(parameters);
+                    cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                        ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                        CM_HIR_INVARIANT_VIOLATION,
+                        "trait method declaration lost its AST provenance");
+                    return 0;
+                }
+                /* APIT is universal, but the impl must still spell APIT. */
+                if (trait_ast_method->generic_parameter_count
+                        != ast_item->generic_parameter_count) {
+                    cm_free(locals);
+                    cm_free(parameters);
+                    cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
+                        ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                        CM_HIR_OK,
+                        "impl method explicit generic arity differs from "
+                        "trait method");
+                    return 0;
+                }
             }
             trait_item_definition = trait_method->definition;
         }
