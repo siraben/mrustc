@@ -2172,6 +2172,20 @@ CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
         writeback, writeback_context);
 }
 
+CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirTypeId *owner_type_substitutions,
+    uint32_t owner_type_substitution_count,
+    CmSemanticBodyWritebackFn writeback, void *writeback_context)
+{
+    if (writeback == NULL) {
+        return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
+    }
+    return cm_semantic_body_check_calls_mode(session, body,
+        owner_type_substitutions, owner_type_substitution_count, 0,
+        writeback, writeback_context);
+}
+
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status)
 {
     switch (status) {

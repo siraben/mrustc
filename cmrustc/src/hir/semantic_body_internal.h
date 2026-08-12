@@ -37,5 +37,10 @@ typedef CmSemanticBodyWritebackStatus (*CmSemanticBodyWritebackFn)(
 CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
     CmSemanticSession *session, CmHirBodyId body,
     CmSemanticBodyWritebackFn writeback, void *writeback_context);
+CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirTypeId *owner_type_substitutions,
+    uint32_t owner_type_substitution_count,
+    CmSemanticBodyWritebackFn writeback, void *writeback_context);
 
 #endif

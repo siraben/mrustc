@@ -73,6 +73,62 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
         && expression_term_count == probe->hir->expressions.len);
     typeck = cm_semantic_session_typeck(session);
     assert(typeck != NULL);
+    if (probe->require_integer_kind) {
+        CmTypeckTypeId resolved;
+        const CmTypeckType *resolved_type;
+        size_t call_index;
+        uint32_t parameter_index;
+
+        assert(facts->signature_return_type != CM_TYPECK_TYPE_NONE
+            && facts->signature_parameter_count != 0u
+            && facts->signature_parameter_types != NULL
+            && cm_typeck_resolve(typeck, facts->signature_return_type,
+                &resolved) == CM_TYPECK_OK);
+        resolved_type = cm_typeck_get_type(typeck, resolved);
+        assert(resolved_type != NULL
+            && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+            && resolved_type->data.integer_type
+                == probe->expected_integer_kind);
+        for (parameter_index = 0u;
+             parameter_index < facts->signature_parameter_count;
+             ++parameter_index) {
+            assert(cm_typeck_resolve(typeck,
+                    facts->signature_parameter_types[parameter_index],
+                    &resolved) == CM_TYPECK_OK);
+            resolved_type = cm_typeck_get_type(typeck, resolved);
+            assert(resolved_type != NULL
+                && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+                && resolved_type->data.integer_type
+                    == probe->expected_integer_kind);
+        }
+        for (call_index = 0u; call_index < facts->call_count; ++call_index) {
+            const CmSemanticCheckedCallFacts *call;
+
+            call = &facts->calls[call_index];
+            assert(call->return_type != CM_TYPECK_TYPE_NONE
+                && (call->parameter_count == 0u)
+                    == (call->parameter_types == NULL)
+                && cm_typeck_resolve(typeck, call->return_type,
+                    &resolved) == CM_TYPECK_OK);
+            resolved_type = cm_typeck_get_type(typeck, resolved);
+            assert(resolved_type != NULL
+                && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+                && resolved_type->data.integer_type
+                    == probe->expected_integer_kind);
+            for (parameter_index = 0u;
+                 parameter_index < call->parameter_count;
+                 ++parameter_index) {
+                assert(cm_typeck_resolve(typeck,
+                        call->parameter_types[parameter_index], &resolved)
+                    == CM_TYPECK_OK);
+                resolved_type = cm_typeck_get_type(typeck, resolved);
+                assert(resolved_type != NULL
+                    && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+                    && resolved_type->data.integer_type
+                        == probe->expected_integer_kind);
+            }
+        }
+    }
     probe->invocation_count += 1u;
     probe->owned_term_count = 0u;
     probe->first_owned_term = CM_TYPECK_TYPE_NONE;
@@ -1485,6 +1541,64 @@ static void test_callee_environment_cannot_self_prove(void)
     fixture_destroy(&fixture);
 }
 
+static void test_concrete_instance_writeback(void)
+{
+    TestFixture fixture;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmHirTypeId substitution;
+    WritebackProbe probe;
+    size_t type_count;
+    CmTypeckContext *typeck;
+
+    fixture_init(&fixture);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.present_callee);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    substitution = fixture.u32_type;
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_callee_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    probe.require_integer_kind = 1;
+    probe.expected_integer_kind = CM_HIR_INT_U32;
+    result = cm_semantic_body_check_instance_with_writeback(&session,
+        fixture.present_callee_body, &substitution, 1u,
+        probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN
+        && probe.invocation_count == 1u
+        && probe.owned_term_count == 1u);
+    cm_semantic_session_destroy(&session);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.missing_caller);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    type_count = cm_typeck_type_count(typeck);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.missing_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = cm_semantic_body_check_instance_with_writeback(&session,
+        fixture.missing_body, NULL, 0u, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_DEFERRED_METADATA
+        && result.expression == fixture.missing_call
+        && cm_hir_def_id_equal(result.callee, fixture.missing_callee)
+        && result.predicate_index == 0u
+        && result.solver_kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && probe.invocation_count == 0u
+        && cm_typeck_type_count(typeck) == type_count);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_pending_shapes_and_atomicity(void)
 {
     TestFixture fixture;
@@ -1958,6 +2072,7 @@ int main(void)
     test_projection_fail_closed_shapes_and_overlap();
     test_projection_equality_order();
     test_callee_environment_cannot_self_prove();
+    test_concrete_instance_writeback();
     test_pending_shapes_and_atomicity();
     test_two_parameter_nested_substitution_and_rollback();
     test_whole_body_constraints_and_rollback();

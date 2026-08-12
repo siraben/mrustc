@@ -1,4 +1,4 @@
-#include "cm/hir/instance.h"
+#include "instance_internal.h"
 
 #include "cm/alloc.h"
 #include "cm/hir/semantic_results.h"
@@ -649,6 +649,154 @@ static CmHirInstanceStatus cm_instance_encode_spec(CmInstanceBuffer *buffer,
         : status;
 }
 
+static int cm_canonical_instance_is_empty(
+    const CmHirCanonicalInstance *instance)
+{
+    return instance != NULL
+        && cm_hir_def_id_is_none(instance->definition)
+        && instance->body == CM_HIR_BODY_NONE
+        && instance->bytes == NULL && instance->size == 0u;
+}
+
+static int cm_canonical_instance_is_valid(
+    const CmHirCanonicalInstance *instance)
+{
+    return instance != NULL
+        && !cm_hir_def_id_is_none(instance->definition)
+        && instance->body != CM_HIR_BODY_NONE
+        && instance->bytes != NULL && instance->size != 0u;
+}
+
+void cm_hir_canonical_instance_init(CmHirCanonicalInstance *instance)
+{
+    if (instance == NULL) return;
+    memset(instance, 0, sizeof(*instance));
+    instance->definition = cm_hir_def_id_none();
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_encode(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirInstanceSpec *spec, CmHirCanonicalInstance *out_instance)
+{
+    const CmHirItem *selected;
+    CmHirCanonicalInstance encoded;
+    CmInstanceBuffer sizing;
+    CmInstanceBuffer output;
+    CmHirInstanceStatus status;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || spec == NULL
+        || !cm_canonical_instance_is_empty(out_instance)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    selected = cm_instance_item(hir, spec->selected_callable);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION) {
+        return CM_HIR_INSTANCE_INVALID_ID;
+    }
+    if (selected->data.function_item.body == CM_HIR_BODY_NONE) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = cm_instance_encode_spec(&sizing, hir, local_crate, spec);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+
+    cm_hir_canonical_instance_init(&encoded);
+    encoded.bytes = (unsigned char *)cm_alloc(sizing.len);
+    memset(&output, 0, sizeof(output));
+    output.data = encoded.bytes;
+    output.cap = sizing.len;
+    status = cm_instance_encode_spec(&output, hir, local_crate, spec);
+    if (status != CM_HIR_INSTANCE_OK || output.len != sizing.len) {
+        cm_hir_canonical_instance_destroy(&encoded);
+        return status == CM_HIR_INSTANCE_OK
+            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+    }
+    encoded.definition = selected->definition;
+    encoded.body = selected->data.function_item.body;
+    encoded.size = output.len;
+    *out_instance = encoded;
+    return CM_HIR_INSTANCE_OK;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_clone(
+    CmHirCanonicalInstance *out_instance,
+    const CmHirCanonicalInstance *source)
+{
+    CmHirCanonicalInstance copy;
+
+    if (!cm_canonical_instance_is_empty(out_instance)
+        || !cm_canonical_instance_is_valid(source)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    cm_hir_canonical_instance_init(&copy);
+    copy.bytes = (unsigned char *)cm_alloc(source->size);
+    memcpy(copy.bytes, source->bytes, source->size);
+    copy.definition = source->definition;
+    copy.body = source->body;
+    copy.size = source->size;
+    *out_instance = copy;
+    return CM_HIR_INSTANCE_OK;
+}
+
+void cm_hir_canonical_instance_destroy(CmHirCanonicalInstance *instance)
+{
+    if (instance == NULL) return;
+    cm_free(instance->bytes);
+    cm_hir_canonical_instance_init(instance);
+}
+
+static int cm_instance_compare_u32(uint32_t left, uint32_t right)
+{
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_compare(
+    const CmHirCanonicalInstance *left,
+    const CmHirCanonicalInstance *right, int *out_order)
+{
+    size_t shared;
+    int comparison;
+
+    if (out_order == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    *out_order = 0;
+    if (!cm_canonical_instance_is_valid(left)
+        || !cm_canonical_instance_is_valid(right)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    comparison = cm_instance_compare_u32(left->definition.crate_id,
+        right->definition.crate_id);
+    if (comparison == 0) {
+        comparison = cm_instance_compare_u32(left->definition.index,
+            right->definition.index);
+    }
+    if (comparison == 0) {
+        comparison = cm_instance_compare_u32(left->body, right->body);
+    }
+    shared = left->size < right->size ? left->size : right->size;
+    if (comparison == 0) {
+        comparison = memcmp(left->bytes, right->bytes, shared);
+    }
+    if (comparison == 0 && left->size != right->size) {
+        comparison = left->size < right->size ? -1 : 1;
+    }
+    *out_order = comparison < 0 ? -1 : comparison > 0 ? 1 : 0;
+    return CM_HIR_INSTANCE_OK;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_equal(
+    const CmHirCanonicalInstance *left,
+    const CmHirCanonicalInstance *right, int *out_equal)
+{
+    CmHirInstanceStatus status;
+    int order;
+
+    if (out_equal == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    *out_equal = 0;
+    status = cm_hir_canonical_instance_compare(left, right, &order);
+    if (status == CM_HIR_INSTANCE_OK) *out_equal = order == 0;
+    return status;
+}
+
 void cm_hir_instance_spec_init(CmHirInstanceSpec *spec)
 {
     if (spec == NULL) return;
@@ -665,8 +813,7 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
 {
     const CmHirContext *hir;
     CmHirCrateId local_crate;
-    CmInstanceBuffer sizing;
-    CmInstanceBuffer output;
+    CmHirCanonicalInstance canonical;
     CmHirInstanceKeyState *state;
     CmHirInstanceStatus status;
     const CmHirItem *selected;
@@ -696,29 +843,25 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
             spec->selected_callable)) {
         return CM_HIR_INSTANCE_INVALID_RELATION;
     }
-    memset(&sizing, 0, sizeof(sizing));
-    sizing.sizing = 1;
-    status = cm_instance_encode_spec(&sizing, hir, local_crate, spec);
+    cm_hir_canonical_instance_init(&canonical);
+    status = cm_hir_canonical_instance_encode(hir, local_crate, spec,
+        &canonical);
     if (status != CM_HIR_INSTANCE_OK) return status;
-    if (!cm_size_add(sizeof(*state) - 1u, sizing.len,
-            &allocation_size)) return CM_HIR_INSTANCE_OVERFLOW;
+    if (!cm_size_add(sizeof(*state) - 1u, canonical.size,
+            &allocation_size)) {
+        cm_hir_canonical_instance_destroy(&canonical);
+        return CM_HIR_INSTANCE_OVERFLOW;
+    }
     state = (CmHirInstanceKeyState *)cm_alloc(allocation_size);
     memset(state, 0, sizeof(*state) - 1u);
-    memset(&output, 0, sizeof(output));
-    output.data = state->encoded;
-    output.cap = sizing.len;
-    status = cm_instance_encode_spec(&output, hir, local_crate, spec);
-    if (status != CM_HIR_INSTANCE_OK || output.len != sizing.len) {
-        cm_free(state);
-        return status == CM_HIR_INSTANCE_OK
-            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
-    }
+    memcpy(state->encoded, canonical.bytes, canonical.size);
     state->hir = hir;
     state->local_crate = local_crate;
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
-    state->encoded_size = sizing.len;
+    state->encoded_size = canonical.size;
+    cm_hir_canonical_instance_destroy(&canonical);
     key->state = state;
     return CM_HIR_INSTANCE_OK;
 }

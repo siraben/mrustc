@@ -297,6 +297,8 @@ $(HIR_SEMANTIC_ITEM_TEST_PROGRAM): tests/hir/test_semantic_item.c $(HIR_SEMANTIC
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(HIR_SEMANTIC_ITEM_OBJECTS) $(BASE_OBJECTS) $(LDLIBS)
 
+$(BUILD_DIR)/obj/hir/instance.o: src/hir/instance_internal.h
+
 $(HIR_INSTANCE_TEST_PROGRAM): tests/hir/test_instance.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBRARY_OBJECTS) $(LDLIBS)
