@@ -91,6 +91,54 @@ static CmHirTypeId add_integer_type(CmHirContext *hir,
     return id;
 }
 
+static CmHirTypeId add_parameter_type(CmHirContext *hir,
+    CmHirGenericParamId parameter)
+{
+    CmHirType type;
+    CmHirTypeId id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = test_span(2u, 5u);
+    type.data.parameter_type.parameter = parameter;
+    assert(cm_hir_add_type(hir, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
+static CmHirTypeId add_static_reference_type(CmHirContext *hir,
+    CmHirTypeId pointee)
+{
+    CmHirType type;
+    CmHirTypeId id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(2u, 5u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_STATIC;
+    type.data.reference_type.pointee = pointee;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(hir, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
+static CmHirTypeId add_pair_type(CmHirContext *hir, CmHirTypeId first,
+    CmHirTypeId second)
+{
+    CmHirType type;
+    CmHirTypeId elements[2];
+    CmHirTypeId id;
+
+    elements[0] = first;
+    elements[1] = second;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(2u, 5u);
+    type.data.tuple_type.elements = elements;
+    type.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(hir, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
 static CmHirStatus add_local_expression(CmHirContext *hir,
     CmHirBodyId body, uint32_t local_index, CmHirTypeId type, CmSpan span,
     CmHirExprId *out_expression)
@@ -373,6 +421,145 @@ static CmHirDefId add_caller(TestFixture *fixture, const char *name,
     assert(cm_hir_set_body_root_expression(&fixture->hir, *out_body,
         *out_call) == CM_HIR_OK);
     return definition;
+}
+
+static CmHirDefId add_two_parameter_nested_caller(TestFixture *fixture,
+    CmHirBodyId *out_body, CmHirExprId *out_call,
+    CmHirExprId *out_second_argument)
+{
+    CmHirDefId callee_definition;
+    CmHirDefId caller_definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId callee_parameters[2];
+    CmHirGenericParamId caller_parameters[2];
+    CmHirTypeId callee_types[4];
+    CmHirTypeId caller_types[4];
+    CmHirFunctionParameter parameters[2];
+    CmHirLocal locals[2];
+    CmHirBody body;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId arguments[2];
+    uint32_t index;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_FUNCTION, test_span(600u, 639u),
+        &callee_definition) == CM_HIR_OK);
+    for (index = 0u; index < 2u; ++index) {
+        memset(&generic, 0, sizeof(generic));
+        generic.kind = CM_HIR_GENERIC_TYPE;
+        generic.owner = callee_definition;
+        generic.index = index;
+        generic.name = cm_hir_intern(&fixture->hir,
+            index == 0u ? "A" : "B");
+        generic.span = test_span(601u + index, 602u + index);
+        assert(cm_hir_add_generic_param(&fixture->hir, &generic,
+            &callee_parameters[index]) == CM_HIR_OK);
+    }
+    callee_types[0] = add_parameter_type(&fixture->hir,
+        callee_parameters[0]);
+    callee_types[1] = add_parameter_type(&fixture->hir,
+        callee_parameters[1]);
+    callee_types[2] = add_static_reference_type(&fixture->hir,
+        callee_types[0]);
+    callee_types[3] = add_pair_type(&fixture->hir, callee_types[1],
+        callee_types[2]);
+    memset(parameters, 0, sizeof(parameters));
+    parameters[0].name = cm_hir_intern(&fixture->hir, "left");
+    parameters[0].type = callee_types[2];
+    parameters[0].span = test_span(610u, 614u);
+    parameters[0].binding_kind = CM_HIR_BINDING_NAMED;
+    parameters[1].name = cm_hir_intern(&fixture->hir, "right");
+    parameters[1].type = callee_types[1];
+    parameters[1].span = test_span(615u, 619u);
+    parameters[1].binding_kind = CM_HIR_BINDING_NAMED;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, callee_definition,
+        fixture->root, "nested_swap", &fixture->hir);
+    item.span = test_span(600u, 639u);
+    item.generic_parameter_start = callee_parameters[0];
+    item.generic_parameter_count = 2u;
+    item.data.function_item.signature.parameters = parameters;
+    item.data.function_item.signature.parameter_count = 2u;
+    item.data.function_item.signature.return_type = callee_types[3];
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_FUNCTION, test_span(640u, 679u),
+        &caller_definition) == CM_HIR_OK);
+    for (index = 0u; index < 2u; ++index) {
+        memset(&generic, 0, sizeof(generic));
+        generic.kind = CM_HIR_GENERIC_TYPE;
+        generic.owner = caller_definition;
+        generic.index = index;
+        generic.name = cm_hir_intern(&fixture->hir,
+            index == 0u ? "X" : "Y");
+        generic.span = test_span(641u + index, 642u + index);
+        assert(cm_hir_add_generic_param(&fixture->hir, &generic,
+            &caller_parameters[index]) == CM_HIR_OK);
+    }
+    caller_types[0] = add_parameter_type(&fixture->hir,
+        caller_parameters[0]);
+    caller_types[1] = add_parameter_type(&fixture->hir,
+        caller_parameters[1]);
+    caller_types[2] = add_static_reference_type(&fixture->hir,
+        caller_types[0]);
+    caller_types[3] = add_pair_type(&fixture->hir, caller_types[1],
+        caller_types[2]);
+    memset(parameters, 0, sizeof(parameters));
+    memset(locals, 0, sizeof(locals));
+    for (index = 0u; index < 2u; ++index) {
+        parameters[index].name = cm_hir_intern(&fixture->hir,
+            index == 0u ? "x" : "y");
+        parameters[index].type = index == 0u
+            ? caller_types[2] : caller_types[1];
+        parameters[index].span = test_span(650u + index * 3u,
+            652u + index * 3u);
+        parameters[index].binding_kind = CM_HIR_BINDING_NAMED;
+        locals[index].name = parameters[index].name;
+        locals[index].type = parameters[index].type;
+        locals[index].span = parameters[index].span;
+        locals[index].parameter_index = index;
+    }
+    memset(&body, 0, sizeof(body));
+    body.owner = caller_definition;
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = caller_types[3];
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 2u;
+    body.source = 1u;
+    body.source_expression_id = 640u;
+    body.span = test_span(640u, 679u);
+    assert(cm_hir_add_body(&fixture->hir, &body, out_body) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, caller_definition,
+        fixture->root, "nested_caller", &fixture->hir);
+    item.span = body.span;
+    item.generic_parameter_start = caller_parameters[0];
+    item.generic_parameter_count = 2u;
+    item.data.function_item.signature.parameters = parameters;
+    item.data.function_item.signature.parameter_count = 2u;
+    item.data.function_item.signature.return_type = caller_types[3];
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = *out_body;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    assert(add_local_expression(&fixture->hir, *out_body, 0u,
+        caller_types[2], test_span(660u, 663u), &arguments[0]) == CM_HIR_OK);
+    assert(add_local_expression(&fixture->hir, *out_body, 1u,
+        caller_types[1], test_span(664u, 667u), &arguments[1]) == CM_HIR_OK);
+    assert(add_call_expression(&fixture->hir, *out_body, callee_definition,
+        caller_types, 2u, arguments, 2u, caller_types[3],
+        test_span(658u, 670u), out_call) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture->hir, *out_body,
+        *out_call) == CM_HIR_OK);
+    *out_second_argument = arguments[1];
+    return caller_definition;
 }
 
 static void fixture_init(TestFixture *fixture)
@@ -859,6 +1046,58 @@ static void test_pending_shapes_and_atomicity(void)
     fixture_destroy(&fixture);
 }
 
+static void test_two_parameter_nested_substitution_and_rollback(void)
+{
+    TestFixture fixture;
+    CmHirDefId caller;
+    CmHirBodyId body;
+    CmHirExprId call;
+    CmHirExprId second_argument;
+    CmHirExpr *argument;
+    CmHirTypeId original_type;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    caller = add_two_parameter_nested_caller(&fixture, &body, &call,
+        &second_argument);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, caller);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.expression == CM_HIR_EXPR_NONE
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    type_count = cm_typeck_type_count(typeck);
+
+    argument = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)second_argument - 1u);
+    assert(argument != NULL && call != CM_HIR_EXPR_NONE);
+    original_type = argument->type;
+    argument->type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && result.expression == call
+        && cm_typeck_type_count(typeck) == type_count);
+    result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && cm_typeck_type_count(typeck) == type_count);
+    argument->type = original_type;
+    result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_malformed_foreign_and_stale(void)
 {
     TestFixture fixture;
@@ -960,6 +1199,7 @@ int main(void)
     test_projection_equality_order();
     test_callee_environment_cannot_self_prove();
     test_pending_shapes_and_atomicity();
+    test_two_parameter_nested_substitution_and_rollback();
     test_malformed_foreign_and_stale();
     test_invalid_api_and_status_names();
     puts("hir semantic body tests passed");

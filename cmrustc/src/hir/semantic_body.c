@@ -281,22 +281,32 @@ static CmSemanticBodyStatus cm_semantic_solver_status(
 static int cm_semantic_type_only_owner(const CmHirContext *hir,
     const CmHirItem *item, uint32_t count)
 {
-    const CmHirGenericParam *parameter;
+    uint32_t index;
 
     if (item == NULL || item->generic_parameter_count != count
-        || count > 1u) return 0;
+        || (count == 0u) != (item->generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE)) return 0;
     if (count == 0u) return item->generic_parameter_start
         == CM_HIR_GENERIC_PARAM_NONE;
-    parameter = cm_hir_get_generic_param(hir,
-        item->generic_parameter_start);
-    return parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
-        && parameter->index == 0u
-        && cm_hir_def_id_equal(parameter->owner, item->definition);
+    if (count - 1u > UINT32_MAX - item->generic_parameter_start) return 0;
+    for (index = 0u; index < count; ++index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(hir,
+            item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+            || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                item->definition)) return 0;
+    }
+    return 1;
 }
 
 static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmSemanticBodyResult result, CmTypeckContext *typeck,
-    CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions)
+    CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions,
+    CmTypeckGenericArg *owner_arguments,
+    CmTypeckGenericArg *callee_arguments)
 {
     CmTypeckStatus rollback;
 
@@ -306,12 +316,103 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
         result.typeck_status = rollback;
     }
     cm_free(call_expressions);
+    cm_free(owner_arguments);
+    cm_free(callee_arguments);
     return result;
 }
 
 #define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
     cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
-        call_expressions)
+        call_expressions, owner_arguments, callee_arguments)
+
+static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
+    uint32_t count, CmTypeckGenericArg **out_arguments)
+{
+    size_t bytes;
+
+    if (out_arguments == NULL) return CM_SEMANTIC_BODY_INVALID;
+    *out_arguments = NULL;
+    if (count == 0u) return CM_SEMANTIC_BODY_OK;
+    if (!cm_size_mul((size_t)count, sizeof(**out_arguments), &bytes)) {
+        return CM_SEMANTIC_BODY_OVERFLOW;
+    }
+    *out_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(1u, bytes);
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
+    CmTypeckContext *typeck, const CmHirContext *hir,
+    const CmHirExpr *expression, const CmHirItem *callee,
+    const CmTypeckInstantiation *owner_instantiation,
+    const CmTypeckInstantiation *callee_instantiation,
+    CmTypeckStatus *out_typeck_status)
+{
+    const CmHirFunctionSignature *signature;
+    CmSemanticTypeScan scan;
+    CmTypeckTypeId actual_type;
+    CmTypeckTypeId declared_type;
+    CmTypeckStatus status;
+    uint32_t index;
+
+    if (out_typeck_status == NULL) return CM_SEMANTIC_BODY_INVALID;
+    *out_typeck_status = CM_TYPECK_OK;
+    signature = callee == NULL ? NULL : &callee->data.function_item.signature;
+    if (expression == NULL || signature == NULL
+        || signature->parameter_count != expression->data.call.argument_count
+        || (signature->parameter_count == 0u)
+            != (signature->parameters == NULL)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    scan = cm_semantic_scan_merge(
+        cm_semantic_scan_type(hir, expression->type, 0u),
+        cm_semantic_scan_type(hir, signature->return_type, 0u));
+    if (scan != CM_SEMANTIC_TYPE_OK) return cm_semantic_scan_status(scan);
+    status = cm_typeck_instantiate_hir_type(typeck, expression->type,
+        owner_instantiation, &actual_type);
+    if (status == CM_TYPECK_OK) {
+        status = cm_typeck_instantiate_hir_type(typeck,
+            signature->return_type, callee_instantiation, &declared_type);
+    }
+    if (status == CM_TYPECK_OK) {
+        status = cm_typeck_unify(typeck, actual_type, declared_type);
+    }
+    if (status != CM_TYPECK_OK) {
+        *out_typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        const CmHirExpr *argument;
+
+        argument = cm_hir_get_expr(hir,
+            expression->data.call.arguments[index]);
+        if (argument == NULL
+            || argument->owner_body != expression->owner_body) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        scan = cm_semantic_scan_merge(
+            cm_semantic_scan_type(hir, argument->type, 0u),
+            cm_semantic_scan_type(hir,
+                signature->parameters[index].type, 0u));
+        if (scan != CM_SEMANTIC_TYPE_OK) {
+            return cm_semantic_scan_status(scan);
+        }
+        status = cm_typeck_instantiate_hir_type(typeck, argument->type,
+            owner_instantiation, &actual_type);
+        if (status == CM_TYPECK_OK) {
+            status = cm_typeck_instantiate_hir_type(typeck,
+                signature->parameters[index].type,
+                callee_instantiation, &declared_type);
+        }
+        if (status == CM_TYPECK_OK) {
+            status = cm_typeck_unify(typeck, actual_type, declared_type);
+        }
+        if (status != CM_TYPECK_OK) {
+            *out_typeck_status = status;
+            return cm_semantic_typeck_status(status);
+        }
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
 
 static CmSemanticBodyStatus cm_semantic_body_walk(
     const CmHirContext *hir, CmHirBodyId body, CmHirExprId id,
@@ -414,13 +515,15 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmHirDefId owner;
     CmTypeckContext *typeck;
     CmTypeckSnapshot snapshot;
-    CmTypeckGenericArg owner_arguments[1];
+    CmTypeckGenericArg *owner_arguments;
+    CmTypeckGenericArg *callee_arguments;
     CmTypeckInstantiation owner_instantiation;
     CmParamEnvSubstitution environment_substitution;
     CmHirExprId *call_expressions;
     size_t call_expression_count;
     size_t call_index;
     CmTypeckStatus typeck_status;
+    uint32_t owner_argument_index;
 
     (void)definition_mode;
 
@@ -459,6 +562,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         result.status = CM_SEMANTIC_BODY_STALE;
         return result;
     }
+    owner_arguments = NULL;
+    callee_arguments = NULL;
     result.status = cm_semantic_body_collect_calls(hir, body_id,
         body->root_expression, &call_expressions, &call_expression_count);
     if (result.status != CM_SEMANTIC_BODY_OK) return result;
@@ -471,46 +576,66 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         return result;
     }
 
-    memset(owner_arguments, 0, sizeof(owner_arguments));
     memset(&owner_instantiation, 0, sizeof(owner_instantiation));
     owner_instantiation.parameter_owner = owner;
+    result.status = cm_semantic_body_allocate_arguments(
+        owner_item->generic_parameter_count, &owner_arguments);
+    if (result.status != CM_SEMANTIC_BODY_OK) {
+        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+            call_expressions);
+    }
     if (owner_item->generic_parameter_count != 0u) {
-        owner_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
-        if (!definition_mode) {
-            CmSemanticTypeScan scan;
-            scan = cm_semantic_scan_type(hir, owner_type_substitutions[0], 0u);
-            result.status = cm_semantic_scan_status(scan);
-            if (result.status != CM_SEMANTIC_BODY_OK)
-                return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
-                    call_expressions);
-            typeck_status = cm_typeck_import_hir_type(typeck,
-                owner_type_substitutions[0], &owner_arguments[0].data.type);
-        } else {
+        for (owner_argument_index = 0u;
+             owner_argument_index < owner_item->generic_parameter_count;
+             ++owner_argument_index) {
             const CmHirGenericParam *parameter;
-            CmTypeckType rigid_type;
+
             parameter = cm_hir_get_generic_param(hir,
-                owner_item->generic_parameter_start);
-            if (parameter == NULL) {
+                owner_item->generic_parameter_start + owner_argument_index);
+            if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+                || parameter->index != owner_argument_index
+                || !cm_hir_def_id_equal(parameter->owner, owner)) {
                 result.status = CM_SEMANTIC_BODY_INVALID;
                 return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
                     call_expressions);
             }
-            memset(&rigid_type, 0, sizeof(rigid_type));
-            rigid_type.kind = CM_TYPECK_TYPE_PARAMETER;
-            rigid_type.span = parameter->span;
-            rigid_type.data.parameter_type.parameter =
-                owner_item->generic_parameter_start;
-            typeck_status = cm_typeck_add_type(typeck, &rigid_type,
-                &owner_arguments[0].data.type);
-        }
-        if (typeck_status != CM_TYPECK_OK) {
-            result.status = cm_semantic_typeck_status(typeck_status);
-            result.typeck_status = typeck_status;
-            return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
-                call_expressions);
+            owner_arguments[owner_argument_index].kind =
+                CM_HIR_GENERIC_ARG_TYPE;
+            if (!definition_mode) {
+                CmSemanticTypeScan scan;
+
+                scan = cm_semantic_scan_type(hir,
+                    owner_type_substitutions[owner_argument_index], 0u);
+                result.status = cm_semantic_scan_status(scan);
+                if (result.status != CM_SEMANTIC_BODY_OK) {
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot, call_expressions);
+                }
+                typeck_status = cm_typeck_import_hir_type(typeck,
+                    owner_type_substitutions[owner_argument_index],
+                    &owner_arguments[owner_argument_index].data.type);
+            } else {
+                CmTypeckType rigid_type;
+
+                memset(&rigid_type, 0, sizeof(rigid_type));
+                rigid_type.kind = CM_TYPECK_TYPE_PARAMETER;
+                rigid_type.span = parameter->span;
+                rigid_type.data.parameter_type.parameter =
+                    owner_item->generic_parameter_start
+                        + owner_argument_index;
+                typeck_status = cm_typeck_add_type(typeck, &rigid_type,
+                    &owner_arguments[owner_argument_index].data.type);
+            }
+            if (typeck_status != CM_TYPECK_OK) {
+                result.status = cm_semantic_typeck_status(typeck_status);
+                result.typeck_status = typeck_status;
+                return cm_semantic_body_fail_snapshot(result, typeck,
+                    &snapshot, call_expressions);
+            }
         }
         owner_instantiation.arguments = owner_arguments;
-        owner_instantiation.argument_count = 1u;
+        owner_instantiation.argument_count =
+            owner_item->generic_parameter_count;
     }
     if (!cm_typeck_instantiation_is_valid(typeck, &owner_instantiation)) {
         result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
@@ -525,9 +650,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         const CmHirExpr *expression;
         CmHirExprId expression_id;
         const CmHirItem *callee;
-        CmTypeckGenericArg callee_arguments[1];
         CmTypeckInstantiation callee_instantiation;
         uint32_t predicate_index;
+        uint32_t callee_argument_index;
 
         expression_id = call_expressions[call_index];
         expression = cm_hir_get_expr(hir, expression_id);
@@ -576,35 +701,59 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             return cm_semantic_body_fail_snapshot(result, typeck,
                 &snapshot, call_expressions);
         }
-        memset(callee_arguments, 0, sizeof(callee_arguments));
+        cm_free(callee_arguments);
+        callee_arguments = NULL;
         memset(&callee_instantiation, 0, sizeof(callee_instantiation));
         callee_instantiation.parameter_owner = callee->definition;
+        result.status = cm_semantic_body_allocate_arguments(
+            callee->generic_parameter_count, &callee_arguments);
+        if (result.status != CM_SEMANTIC_BODY_OK) {
+            return cm_semantic_body_fail_snapshot(result, typeck,
+                &snapshot, call_expressions);
+        }
         if (expression->data.call.type_substitution_count != 0u) {
-            CmSemanticTypeScan scan;
+            for (callee_argument_index = 0u;
+                 callee_argument_index
+                    < expression->data.call.type_substitution_count;
+                 ++callee_argument_index) {
+                CmSemanticTypeScan scan;
 
-            scan = cm_semantic_scan_type(hir,
-                expression->data.call.type_substitutions[0], 0u);
-            result.status = cm_semantic_scan_status(scan);
-            if (result.status != CM_SEMANTIC_BODY_OK) {
-                return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot, call_expressions);
-            }
-            callee_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
-            typeck_status = cm_typeck_instantiate_hir_type(typeck,
-                expression->data.call.type_substitutions[0],
-                &owner_instantiation, &callee_arguments[0].data.type);
-            if (typeck_status != CM_TYPECK_OK) {
-                result.status = cm_semantic_typeck_status(typeck_status);
-                result.typeck_status = typeck_status;
-                return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot, call_expressions);
+                scan = cm_semantic_scan_type(hir,
+                    expression->data.call.type_substitutions[
+                        callee_argument_index], 0u);
+                result.status = cm_semantic_scan_status(scan);
+                if (result.status != CM_SEMANTIC_BODY_OK) {
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot, call_expressions);
+                }
+                callee_arguments[callee_argument_index].kind =
+                    CM_HIR_GENERIC_ARG_TYPE;
+                typeck_status = cm_typeck_instantiate_hir_type(typeck,
+                    expression->data.call.type_substitutions[
+                        callee_argument_index], &owner_instantiation,
+                    &callee_arguments[callee_argument_index].data.type);
+                if (typeck_status != CM_TYPECK_OK) {
+                    result.status = cm_semantic_typeck_status(typeck_status);
+                    result.typeck_status = typeck_status;
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot, call_expressions);
+                }
             }
             callee_instantiation.arguments = callee_arguments;
-            callee_instantiation.argument_count = 1u;
+            callee_instantiation.argument_count =
+                expression->data.call.type_substitution_count;
         }
         if (!cm_typeck_instantiation_is_valid(typeck,
                 &callee_instantiation)) {
             result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
+            return cm_semantic_body_fail_snapshot(result, typeck,
+                &snapshot, call_expressions);
+        }
+        result.status = cm_semantic_body_check_call_signature(typeck, hir,
+            expression, callee, &owner_instantiation,
+            &callee_instantiation, &typeck_status);
+        if (result.status != CM_SEMANTIC_BODY_OK) {
+            result.typeck_status = typeck_status;
             return cm_semantic_body_fail_snapshot(result, typeck,
                 &snapshot, call_expressions);
         }
@@ -758,9 +907,13 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         result.typeck_status = typeck_status;
         (void)cm_typeck_rollback(typeck, &snapshot);
         cm_free(call_expressions);
+        cm_free(owner_arguments);
+        cm_free(callee_arguments);
         return result;
     }
     cm_free(call_expressions);
+    cm_free(owner_arguments);
+    cm_free(callee_arguments);
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_OK, body_id);
     result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
     return result;

@@ -4699,48 +4699,174 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
     return 0;
 }
 
-static int cm_hir_call_type_substitute(const CmHirContext *context,
+static int cm_hir_call_region_matches(const CmHirRegion *declared,
+    const CmHirRegion *actual)
+{
+    if (declared == NULL || actual == NULL
+        || declared->kind != actual->kind) return 0;
+    return declared->kind == CM_HIR_REGION_STATIC
+        || declared->kind == CM_HIR_REGION_ERASED;
+}
+
+static int cm_hir_call_type_matches(const CmHirContext *context,
     const CmHirItem *callee, const CmHirTypeId *substitutions,
     uint32_t substitution_count, CmHirTypeId declared,
-    CmHirTypeId *out_instantiated)
+    CmHirTypeId actual, size_t depth, int substitute_parameters)
 {
-    const CmHirType *type;
+    const CmHirType *declared_type;
+    const CmHirType *actual_type;
     const CmHirGenericParam *parameter;
+    uint32_t index;
 
-    type = cm_hir_get_type(context, declared);
-    if (type == NULL) return 0;
-    if (type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+    if (context == NULL || callee == NULL
+        || depth > context->types.len) return 0;
+    declared_type = cm_hir_get_type(context, declared);
+    actual_type = cm_hir_get_type(context, actual);
+    if (declared_type == NULL || actual_type == NULL) return 0;
+    if (declared_type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+        if (!substitute_parameters) {
+            return actual_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                && declared_type->data.parameter_type.parameter
+                    == actual_type->data.parameter_type.parameter;
+        }
         parameter = cm_hir_get_generic_param(context,
-            type->data.parameter_type.parameter);
+            declared_type->data.parameter_type.parameter);
         if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
             || !cm_hir_def_id_equal(parameter->owner, callee->definition)
             || parameter->index >= substitution_count) {
             return 0;
         }
-        *out_instantiated = substitutions[parameter->index];
-        return 1;
+        return cm_hir_call_type_matches(context, callee, substitutions,
+            substitution_count, substitutions[parameter->index], actual,
+            depth + 1u, 0);
     }
-    /*
-     * This first call slice deliberately substitutes only direct `T`
-     * positions. Primitive leaves are independent of the callee parameters;
-     * nested generic applications remain unsupported rather than guessed.
-     */
-    if (callee->generic_parameter_count != 0u) {
-        switch (type->kind) {
-        case CM_HIR_TYPE_NEVER_KIND:
-        case CM_HIR_TYPE_UNIT_KIND:
-        case CM_HIR_TYPE_BOOL_KIND:
-        case CM_HIR_TYPE_CHAR_KIND:
-        case CM_HIR_TYPE_STR_KIND:
-        case CM_HIR_TYPE_INTEGER_KIND:
-        case CM_HIR_TYPE_FLOAT_KIND:
-            break;
-        default:
+    if (declared_type->kind != actual_type->kind) return 0;
+    switch (declared_type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return declared_type->data.integer_type.kind
+            == actual_type->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return declared_type->data.float_type.kind
+            == actual_type->data.float_type.kind;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return declared_type->data.reference_type.mutability
+                == actual_type->data.reference_type.mutability
+            && cm_hir_call_region_matches(
+                &declared_type->data.reference_type.region,
+                &actual_type->data.reference_type.region)
+            && cm_hir_call_type_matches(context, callee, substitutions,
+                substitution_count,
+                declared_type->data.reference_type.pointee,
+                actual_type->data.reference_type.pointee, depth + 1u,
+                substitute_parameters);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return declared_type->data.raw_pointer_type.mutability
+                == actual_type->data.raw_pointer_type.mutability
+            && cm_hir_call_type_matches(context, callee, substitutions,
+                substitution_count,
+                declared_type->data.raw_pointer_type.pointee,
+                actual_type->data.raw_pointer_type.pointee, depth + 1u,
+                substitute_parameters);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (declared_type->data.tuple_type.element_count
+                != actual_type->data.tuple_type.element_count
+            || (declared_type->data.tuple_type.element_count == 0u)
+                != (declared_type->data.tuple_type.elements == NULL)
+            || (actual_type->data.tuple_type.element_count == 0u)
+                != (actual_type->data.tuple_type.elements == NULL)) {
             return 0;
         }
+        for (index = 0u;
+             index < declared_type->data.tuple_type.element_count; ++index) {
+            if (!cm_hir_call_type_matches(context, callee, substitutions,
+                    substitution_count,
+                    declared_type->data.tuple_type.elements[index],
+                    actual_type->data.tuple_type.elements[index],
+                    depth + 1u, substitute_parameters)) return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_hir_call_type_matches(context, callee, substitutions,
+            substitution_count, declared_type->data.slice_type.element,
+            actual_type->data.slice_type.element, depth + 1u,
+            substitute_parameters);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (declared_type->data.fn_pointer_type.parameter_count
+                != actual_type->data.fn_pointer_type.parameter_count
+            || declared_type->data.fn_pointer_type.abi
+                != actual_type->data.fn_pointer_type.abi
+            || declared_type->data.fn_pointer_type.safety
+                != actual_type->data.fn_pointer_type.safety
+            || declared_type->data.fn_pointer_type.is_variadic
+                != actual_type->data.fn_pointer_type.is_variadic
+            || (declared_type->data.fn_pointer_type.parameter_count == 0u)
+                != (declared_type->data.fn_pointer_type.parameters == NULL)
+            || (actual_type->data.fn_pointer_type.parameter_count == 0u)
+                != (actual_type->data.fn_pointer_type.parameters == NULL)
+            || !cm_hir_call_type_matches(context, callee, substitutions,
+                substitution_count,
+                declared_type->data.fn_pointer_type.return_type,
+                actual_type->data.fn_pointer_type.return_type,
+                depth + 1u, substitute_parameters)) return 0;
+        for (index = 0u; index
+                < declared_type->data.fn_pointer_type.parameter_count;
+             ++index) {
+            if (!cm_hir_call_type_matches(context, callee, substitutions,
+                    substitution_count,
+                    declared_type->data.fn_pointer_type.parameters[index],
+                    actual_type->data.fn_pointer_type.parameters[index],
+                    depth + 1u, substitute_parameters)) return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_ADT_KIND:
+        if (!cm_hir_def_id_equal(
+                declared_type->data.named_type.definition,
+                actual_type->data.named_type.definition)
+            || declared_type->data.named_type.argument_count
+                != actual_type->data.named_type.argument_count
+            || (declared_type->data.named_type.argument_count == 0u)
+                != (declared_type->data.named_type.arguments == NULL)
+            || (actual_type->data.named_type.argument_count == 0u)
+                != (actual_type->data.named_type.arguments == NULL)) {
+            return 0;
+        }
+        for (index = 0u;
+             index < declared_type->data.named_type.argument_count; ++index) {
+            const CmHirGenericArg *declared_argument;
+            const CmHirGenericArg *actual_argument;
+
+            declared_argument = &declared_type->data.named_type.arguments[index];
+            actual_argument = &actual_type->data.named_type.arguments[index];
+            if (declared_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+                || actual_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+                || !cm_hir_call_type_matches(context, callee,
+                    substitutions, substitution_count,
+                    declared_argument->data.type,
+                    actual_argument->data.type, depth + 1u,
+                    substitute_parameters)) return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_ARRAY_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_SELF_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_CLOSURE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return 0;
     }
-    *out_instantiated = declared;
-    return 1;
+    return 0;
 }
 
 static int cm_hir_call_expression_valid(const CmHirContext *context,
@@ -4749,7 +4875,6 @@ static int cm_hir_call_expression_valid(const CmHirContext *context,
     const CmHirItem *callee;
     const CmHirFunctionSignature *signature;
     uint32_t index;
-    CmHirTypeId instantiated;
 
     callee = cm_hir_bound_definition_item(context,
         expression->data.call.callee);
@@ -4783,12 +4908,10 @@ static int cm_hir_call_expression_valid(const CmHirContext *context,
     }
     signature = &callee->data.function_item.signature;
     if (signature->parameter_count != expression->data.call.argument_count
-        || !cm_hir_call_type_substitute(context, callee,
+        || !cm_hir_call_type_matches(context, callee,
             expression->data.call.type_substitutions,
             expression->data.call.type_substitution_count,
-            signature->return_type, &instantiated)
-        || !cm_hir_body_type_equal(context, instantiated,
-            expression->type)) {
+            signature->return_type, expression->type, 0u, 1)) {
         return 0;
     }
     for (index = 0u; index < signature->parameter_count; ++index) {
@@ -4801,12 +4924,10 @@ static int cm_hir_call_expression_valid(const CmHirContext *context,
             || argument->span.source != expression->span.source
             || argument->span.start < expression->span.start
             || argument->span.end > expression->span.end
-            || !cm_hir_call_type_substitute(context, callee,
+            || !cm_hir_call_type_matches(context, callee,
                 expression->data.call.type_substitutions,
                 expression->data.call.type_substitution_count,
-                signature->parameters[index].type, &instantiated)
-            || !cm_hir_body_type_equal(context, argument->type,
-                instantiated)) {
+                signature->parameters[index].type, argument->type, 0u, 1)) {
             return 0;
         }
     }
