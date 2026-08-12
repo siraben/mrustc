@@ -130,8 +130,15 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
         result.hir_status = hir_status;
         goto rollback;
     }
-    result.item_result = cm_semantic_item_check_local_trait_impls(hir,
-        local_crate);
+    {
+        CmProjectionNormalizeLimits normalize_limits;
+
+        normalize_limits.max_nodes = 4096u;
+        normalize_limits.max_projection_steps = 256u;
+        result.item_result =
+            cm_semantic_item_check_finalized_local_trait_impls(
+                &finalization, normalize_limits);
+    }
     if (result.item_result.status != CM_SEMANTIC_ITEM_OK) {
         result.owner = cm_hir_def_id_is_none(result.item_result.impl_member)
             ? result.item_result.impl_definition

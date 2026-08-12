@@ -123,8 +123,7 @@ HIR_SEMANTIC_BODY_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/body_owner.o \
 	$(BUILD_DIR)/obj/hir/semantic_body.o
 HIR_SEMANTIC_ITEM_OBJECTS := \
-	$(BUILD_DIR)/obj/hir/model.o \
-	$(BUILD_DIR)/obj/hir/typeck.o \
+	$(HIR_SEMANTIC_OBJECTS) \
 	$(BUILD_DIR)/obj/hir/semantic_item.o
 LIBRARY_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/obj/%.o,$(LIBRARY_SOURCES))
 BASE_TEST_SOURCES := $(sort $(wildcard tests/base/test_*.c))

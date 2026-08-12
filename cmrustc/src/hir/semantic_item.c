@@ -29,6 +29,7 @@ static CmSemanticItemResult cm_semantic_item_result(
     result.trait_member = cm_hir_def_id_none();
     result.parameter_index = CM_SEMANTIC_ITEM_PARAMETER_NONE;
     result.typeck_status = CM_TYPECK_OK;
+    result.solver_kind = CM_TRAIT_SOLVER_INVALID;
     return result;
 }
 
@@ -162,7 +163,18 @@ static CmSemanticItemTypeScan cm_semantic_item_scan_type(
     }
     case CM_HIR_TYPE_INFER_KIND: return CM_SEMANTIC_ITEM_TYPE_GENERIC;
     case CM_HIR_TYPE_PROJECTION_KIND:
-        return CM_SEMANTIC_ITEM_TYPE_PROJECTION;
+        return cm_semantic_item_scan_merge(CM_SEMANTIC_ITEM_TYPE_PROJECTION,
+            cm_semantic_item_scan_merge(
+                cm_semantic_item_scan_type(hir,
+                    type->data.projection_type.self_type, local_crate,
+                    parameter_owner, depth + 1u),
+                cm_semantic_item_scan_merge(
+                    cm_semantic_item_scan_named(hir,
+                        &type->data.projection_type.trait_type, local_crate,
+                        parameter_owner, depth + 1u),
+                    cm_semantic_item_scan_named(hir,
+                        &type->data.projection_type.associated_type,
+                        local_crate, parameter_owner, depth + 1u))));
     case CM_HIR_TYPE_REFERENCE_KIND:
         result = type->data.reference_type.region.kind
                 == CM_HIR_REGION_STATIC
@@ -455,9 +467,19 @@ static CmSemanticItemStatus cm_semantic_item_compare_method(
         CM_SEMANTIC_ITEM_RETURN_TYPE_MISMATCH, out_typeck);
 }
 
+static CmSemanticItemStatus cm_semantic_item_compare_finalized_method(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCrateFinalization *finalization,
+    CmProjectionNormalizeLimits limits, const CmHirItem *impl_item,
+    const CmHirItem *trait_method, const CmHirItem *impl_method,
+    uint32_t *out_parameter, CmTypeckStatus *out_typeck,
+    CmTraitSolverResultKind *out_solver);
+
 static CmSemanticItemResult cm_semantic_item_check_impl(
     const CmHirContext *hir, CmHirCrateId local_crate,
-    const CmHirItem *impl_item)
+    const CmHirItem *impl_item,
+    const CmHirCrateFinalization *finalization,
+    CmProjectionNormalizeLimits normalize_limits)
 {
     CmSemanticItemResult result;
     const CmHirItem *trait_item;
@@ -641,10 +663,15 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
                 result.status = CM_SEMANTIC_ITEM_WRONG_ASSOCIATION;
                 goto cleanup;
             }
-            result.status = cm_semantic_item_compare_method(hir,
-                local_crate, impl_item, trait_member, impl_member,
-                &typeck, &trait_instantiation, self_type,
-                &result.parameter_index, &result.typeck_status);
+            result.status = finalization == NULL
+                ? cm_semantic_item_compare_method(hir,
+                    local_crate, impl_item, trait_member, impl_member,
+                    &typeck, &trait_instantiation, self_type,
+                    &result.parameter_index, &result.typeck_status)
+                : cm_semantic_item_compare_finalized_method(hir,
+                    local_crate, finalization, normalize_limits, impl_item,
+                    trait_member, impl_member, &result.parameter_index,
+                    &result.typeck_status, &result.solver_kind);
             if (result.status != CM_SEMANTIC_ITEM_OK) goto cleanup;
         } else {
             result.status = CM_SEMANTIC_ITEM_UNSUPPORTED;
@@ -708,10 +735,328 @@ CmSemanticItemResult cm_semantic_item_check_local_trait_impls(
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
             || item->definition.crate_id != local_crate
             || !item->data.impl_item.has_trait) continue;
-        result = cm_semantic_item_check_impl(hir, local_crate, item);
+        result = cm_semantic_item_check_impl(hir, local_crate, item,
+            NULL, (CmProjectionNormalizeLimits){0u, 0u});
         if (result.status != CM_SEMANTIC_ITEM_OK) return result;
     }
     return cm_semantic_item_result(CM_SEMANTIC_ITEM_OK);
+}
+
+CmSemanticItemResult cm_semantic_item_check_finalized_local_trait_impls(
+    const CmHirCrateFinalization *finalization,
+    CmProjectionNormalizeLimits normalize_limits)
+{
+    CmSemanticItemResult result;
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+    size_t index;
+
+    result = cm_semantic_item_result(CM_SEMANTIC_ITEM_INVALID);
+    if (!cm_hir_crate_finalization_is_current(finalization)
+        || normalize_limits.max_nodes == 0u
+        || normalize_limits.max_projection_steps == 0u) return result;
+    hir = cm_hir_crate_finalization_hir(finalization);
+    local_crate = cm_hir_crate_finalization_crate(finalization);
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE) return result;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+            || item->definition.crate_id != local_crate
+            || !item->data.impl_item.has_trait) continue;
+        result = cm_semantic_item_check_impl(hir, local_crate, item,
+            finalization, normalize_limits);
+        if (result.status != CM_SEMANTIC_ITEM_OK) return result;
+    }
+    result = cm_semantic_item_result(CM_SEMANTIC_ITEM_OK);
+    result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
+    return result;
+}
+
+static CmSemanticItemStatus cm_semantic_item_solver_status(
+    CmTraitSolverResultKind kind)
+{
+    switch (kind) {
+    case CM_TRAIT_SOLVER_PROVEN: return CM_SEMANTIC_ITEM_OK;
+    case CM_TRAIT_SOLVER_DEFERRED_INFERENCE:
+        return CM_SEMANTIC_ITEM_PENDING_GENERIC;
+    case CM_TRAIT_SOLVER_DEFERRED_METADATA:
+        return CM_SEMANTIC_ITEM_PENDING_CROSS_CRATE;
+    case CM_TRAIT_SOLVER_AMBIGUOUS:
+        return CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION;
+    case CM_TRAIT_SOLVER_NO_SOLUTION:
+    case CM_TRAIT_SOLVER_NEGATIVE:
+        return CM_SEMANTIC_ITEM_PENDING_PROJECTION;
+    case CM_TRAIT_SOLVER_UNSUPPORTED:
+        return CM_SEMANTIC_ITEM_UNSUPPORTED;
+    case CM_TRAIT_SOLVER_OVERFLOW: return CM_SEMANTIC_ITEM_OVERFLOW;
+    case CM_TRAIT_SOLVER_TYPECK_FAILURE:
+        return CM_SEMANTIC_ITEM_TYPECK_FAILURE;
+    case CM_TRAIT_SOLVER_INVALID:
+        return CM_SEMANTIC_ITEM_INVALID;
+    }
+    return CM_SEMANTIC_ITEM_INVALID;
+}
+
+static CmSemanticItemStatus cm_semantic_item_compare_normalized_type(
+    CmSemanticSession *session, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmProjectionNormalizeLimits limits, CmHirTypeId expected,
+    CmHirTypeId actual,
+    const CmTypeckInstantiation *trait_instantiation,
+    const CmTypeckInstantiation *impl_instantiation,
+    CmSemanticItemStatus mismatch, CmTypeckStatus *out_typeck,
+    CmTraitSolverResultKind *out_solver)
+{
+    CmTypeckSnapshot snapshot;
+    CmProjectionNormalizeResult normalization;
+    CmTypeckTypeId expected_type;
+    CmTypeckTypeId actual_type;
+    CmTypeckStatus typeck_status;
+    CmSemanticItemStatus status;
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    typeck_status = cm_typeck_snapshot(typeck, &snapshot);
+    if (typeck_status != CM_TYPECK_OK) goto typeck_failure;
+    typeck_status = cm_typeck_instantiate_hir_type(typeck, expected,
+        trait_instantiation, &expected_type);
+    if (typeck_status != CM_TYPECK_OK) goto rollback_typeck_failure;
+    typeck_status = cm_typeck_instantiate_hir_type(typeck, actual,
+        impl_instantiation, &actual_type);
+    if (typeck_status != CM_TYPECK_OK) goto rollback_typeck_failure;
+    normalization = cm_semantic_session_normalize_type(session, typeck,
+        substitution, expected_type, limits);
+    *out_solver = normalization.kind;
+    *out_typeck = normalization.typeck_status;
+    if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+        status = normalization.kind == CM_TRAIT_SOLVER_NO_SOLUTION
+                || normalization.kind == CM_TRAIT_SOLVER_NEGATIVE
+                || normalization.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+            ? mismatch : cm_semantic_item_solver_status(normalization.kind);
+        goto rollback;
+    }
+    expected_type = normalization.type;
+    normalization = cm_semantic_session_normalize_type(session, typeck,
+        substitution, actual_type, limits);
+    *out_solver = normalization.kind;
+    *out_typeck = normalization.typeck_status;
+    if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+        status = normalization.kind == CM_TRAIT_SOLVER_NO_SOLUTION
+                || normalization.kind == CM_TRAIT_SOLVER_NEGATIVE
+                || normalization.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+            ? mismatch : cm_semantic_item_solver_status(normalization.kind);
+        goto rollback;
+    }
+    actual_type = normalization.type;
+    typeck_status = cm_typeck_unify(typeck, expected_type, actual_type);
+    *out_typeck = typeck_status;
+    if (typeck_status != CM_TYPECK_OK) {
+        status = typeck_status == CM_TYPECK_TYPE_MISMATCH
+                || typeck_status == CM_TYPECK_KIND_CONFLICT
+            ? mismatch : cm_semantic_item_typeck_failure(typeck_status);
+        goto rollback;
+    }
+    typeck_status = cm_typeck_commit(typeck, &snapshot);
+    *out_typeck = typeck_status;
+    return typeck_status == CM_TYPECK_OK ? CM_SEMANTIC_ITEM_OK
+        : cm_semantic_item_typeck_failure(typeck_status);
+
+rollback_typeck_failure:
+    *out_typeck = typeck_status;
+    status = cm_semantic_item_typeck_failure(typeck_status);
+rollback:
+    typeck_status = cm_typeck_rollback(typeck, &snapshot);
+    if (typeck_status != CM_TYPECK_OK) {
+        *out_typeck = typeck_status;
+        return cm_semantic_item_typeck_failure(typeck_status);
+    }
+    return status;
+
+typeck_failure:
+    *out_typeck = typeck_status;
+    return cm_semantic_item_typeck_failure(typeck_status);
+}
+
+static CmSemanticItemStatus cm_semantic_item_compare_finalized_method(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCrateFinalization *finalization,
+    CmProjectionNormalizeLimits limits, const CmHirItem *impl_item,
+    const CmHirItem *trait_method, const CmHirItem *impl_method,
+    uint32_t *out_parameter, CmTypeckStatus *out_typeck,
+    CmTraitSolverResultKind *out_solver)
+{
+    const CmHirFunctionSignature *expected;
+    const CmHirFunctionSignature *actual;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmTypeckContext *typeck;
+    CmTypeckInstantiation trait_instantiation;
+    CmTypeckInstantiation impl_instantiation;
+    CmTypeckInstantiation impl_enclosing;
+    CmTypeckGenericArg *trait_arguments;
+    CmParamEnvSubstitution substitution;
+    CmSemanticItemStatus status;
+    uint32_t index;
+
+    status = cm_semantic_item_declaration_shape(trait_method);
+    if (status != CM_SEMANTIC_ITEM_OK) return status;
+    status = cm_semantic_item_declaration_shape(impl_method);
+    if (status != CM_SEMANTIC_ITEM_OK) return status;
+    if (trait_method->generic_parameter_count != 0u
+        || impl_method->generic_parameter_count != 0u) {
+        return CM_SEMANTIC_ITEM_PENDING_GENERIC;
+    }
+    expected = &trait_method->data.function_item.signature;
+    actual = &impl_method->data.function_item.signature;
+    if (expected->receiver != actual->receiver) {
+        return CM_SEMANTIC_ITEM_RECEIVER_MISMATCH;
+    }
+    if (expected->parameter_count != actual->parameter_count) {
+        return CM_SEMANTIC_ITEM_PARAMETER_COUNT_MISMATCH;
+    }
+    if (expected->abi != actual->abi) return CM_SEMANTIC_ITEM_ABI_MISMATCH;
+    if (expected->safety != actual->safety) {
+        return CM_SEMANTIC_ITEM_SAFETY_MISMATCH;
+    }
+    if (expected->is_const != actual->is_const) {
+        return CM_SEMANTIC_ITEM_CONST_MISMATCH;
+    }
+    if (expected->is_async != actual->is_async) {
+        return CM_SEMANTIC_ITEM_ASYNC_MISMATCH;
+    }
+    if (expected->is_variadic != actual->is_variadic) {
+        return CM_SEMANTIC_ITEM_VARIADIC_MISMATCH;
+    }
+    memset(&session, 0, sizeof(session));
+    cm_semantic_session_options_init(&options);
+    options.local_crate = local_crate;
+    options.exact_owner = impl_method->definition;
+    options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = finalization;
+    *out_solver = cm_semantic_session_init(&session, hir, &options);
+    if (*out_solver != CM_TRAIT_SOLVER_PROVEN) {
+        return cm_semantic_item_solver_status(*out_solver);
+    }
+    if (cm_semantic_session_hir(&session) != hir
+        || cm_semantic_session_local_crate(&session) != local_crate
+        || cm_semantic_session_universe(&session)
+            != CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE
+        || !cm_hir_def_id_equal(cm_semantic_session_exact_owner(&session),
+            impl_method->definition)
+        || !cm_hir_def_id_equal(
+            cm_semantic_session_enclosing_owner(&session),
+            impl_item->definition)
+        || !cm_hir_def_id_equal(impl_method->parent_definition,
+            impl_item->definition)
+        || !cm_hir_def_id_equal(
+            impl_method->data.function_item.trait_item_definition,
+            trait_method->definition)) {
+        cm_semantic_session_destroy(&session);
+        return CM_SEMANTIC_ITEM_INVALID;
+    }
+    typeck = cm_semantic_session_typeck(&session);
+    trait_arguments = NULL;
+    if (impl_item->data.impl_item.trait_type.argument_count != 0u) {
+        trait_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
+            impl_item->data.impl_item.trait_type.argument_count,
+            sizeof(*trait_arguments));
+    }
+    cm_typeck_instantiation_init(typeck, &impl_enclosing);
+    impl_enclosing.parameter_owner = impl_item->definition;
+    impl_enclosing.self_owner = impl_item->definition;
+    *out_typeck = cm_typeck_import_hir_type(typeck,
+        impl_item->data.impl_item.self_type, &impl_enclosing.self_type);
+    if (*out_typeck != CM_TYPECK_OK) {
+        status = cm_semantic_item_typeck_failure(*out_typeck);
+        goto cleanup;
+    }
+    cm_typeck_instantiation_init(typeck, &trait_instantiation);
+    trait_instantiation.parameter_owner =
+        impl_item->data.impl_item.trait_type.definition;
+    trait_instantiation.self_owner =
+        impl_item->data.impl_item.trait_type.definition;
+    trait_instantiation.self_type = impl_enclosing.self_type;
+    for (index = 0u;
+         index < impl_item->data.impl_item.trait_type.argument_count;
+         ++index) {
+        const CmHirGenericArg *argument;
+
+        argument = &impl_item->data.impl_item.trait_type.arguments[index];
+        if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
+            status = CM_SEMANTIC_ITEM_PENDING_GENERIC;
+            goto cleanup;
+        }
+        trait_arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+        *out_typeck = cm_typeck_import_hir_type(typeck,
+            argument->data.type, &trait_arguments[index].data.type);
+        if (*out_typeck != CM_TYPECK_OK) {
+            status = cm_semantic_item_typeck_failure(*out_typeck);
+            goto cleanup;
+        }
+    }
+    trait_instantiation.arguments = trait_arguments;
+    trait_instantiation.argument_count =
+        impl_item->data.impl_item.trait_type.argument_count;
+    cm_typeck_instantiation_init(typeck, &impl_instantiation);
+    impl_instantiation.parameter_owner = impl_method->definition;
+    impl_instantiation.self_owner = impl_item->definition;
+    impl_instantiation.self_type = impl_enclosing.self_type;
+    if (!cm_typeck_instantiation_is_valid(typeck, &trait_instantiation)
+        || !cm_typeck_instantiation_is_valid(typeck, &impl_instantiation)
+        || !cm_typeck_instantiation_is_valid(typeck, &impl_enclosing)) {
+        status = CM_SEMANTIC_ITEM_INVALID;
+        goto cleanup;
+    }
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &impl_instantiation;
+    substitution.enclosing = &impl_enclosing;
+    status = CM_SEMANTIC_ITEM_OK;
+    for (index = 0u; index < expected->parameter_count; ++index) {
+        CmSemanticItemTypeScan scan;
+
+        scan = cm_semantic_item_scan_merge(
+            cm_semantic_item_scan_type(hir, expected->parameters[index].type,
+                local_crate, trait_method->parent_definition, 0u),
+            cm_semantic_item_scan_type(hir, actual->parameters[index].type,
+                local_crate, cm_hir_def_id_none(), 0u));
+        if (scan != CM_SEMANTIC_ITEM_TYPE_OK
+            && scan != CM_SEMANTIC_ITEM_TYPE_PROJECTION) {
+            status = cm_semantic_item_scan_status(scan);
+            *out_parameter = index;
+            break;
+        }
+        status = cm_semantic_item_compare_normalized_type(&session, typeck,
+            &substitution, limits, expected->parameters[index].type,
+            actual->parameters[index].type, &trait_instantiation,
+            &impl_instantiation, CM_SEMANTIC_ITEM_PARAMETER_TYPE_MISMATCH,
+            out_typeck, out_solver);
+        if (status != CM_SEMANTIC_ITEM_OK) {
+            *out_parameter = index;
+            break;
+        }
+    }
+    if (status == CM_SEMANTIC_ITEM_OK) {
+        CmSemanticItemTypeScan scan;
+
+        scan = cm_semantic_item_scan_merge(
+            cm_semantic_item_scan_type(hir, expected->return_type,
+                local_crate, trait_method->parent_definition, 0u),
+            cm_semantic_item_scan_type(hir, actual->return_type,
+                local_crate, cm_hir_def_id_none(), 0u));
+        status = scan != CM_SEMANTIC_ITEM_TYPE_OK
+                && scan != CM_SEMANTIC_ITEM_TYPE_PROJECTION
+            ? cm_semantic_item_scan_status(scan)
+            : cm_semantic_item_compare_normalized_type(&session, typeck,
+                &substitution, limits, expected->return_type,
+                actual->return_type, &trait_instantiation,
+                &impl_instantiation, CM_SEMANTIC_ITEM_RETURN_TYPE_MISMATCH,
+                out_typeck, out_solver);
+    }
+cleanup:
+    cm_free(trait_arguments);
+    cm_semantic_session_destroy(&session);
+    return status;
 }
 
 const char *cm_semantic_item_status_name(CmSemanticItemStatus status)

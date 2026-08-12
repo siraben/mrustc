@@ -58,6 +58,23 @@ static CmHirTypeId add_leaf_type(TestFixture *fixture, CmHirTypeKind kind)
     return id;
 }
 
+static CmHirTypeId add_projection_type(TestFixture *fixture)
+{
+    CmHirType type;
+    CmHirTypeId id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PROJECTION_KIND;
+    type.span = test_span(2u, 4u);
+    type.data.projection_type.self_type = fixture->u32_type;
+    type.data.projection_type.trait_type.definition =
+        fixture->trait_definition;
+    type.data.projection_type.associated_type.definition =
+        fixture->trait_type;
+    assert(cm_hir_add_type(&fixture->hir, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
 static CmHirDefId reserve_item(TestFixture *fixture, CmHirItemKind kind,
     uint32_t start)
 {
@@ -339,6 +356,61 @@ static void test_positive_and_signature_mismatches(void)
         fixture.crate_id);
     assert(result.status == CM_SEMANTIC_ITEM_VARIADIC_MISMATCH);
     method->data.function_item.signature = saved;
+    fixture_destroy(&fixture);
+}
+
+static void test_finalized_projection_signature(void)
+{
+    TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmProjectionNormalizeLimits limits;
+    CmSemanticItemResult result;
+    CmHirItem *trait_method;
+    CmHirTypeId projection;
+
+    fixture_init(&fixture, 1, 1);
+    projection = add_projection_type(&fixture);
+    trait_method = mutable_item(&fixture, fixture.trait_method);
+    trait_method->data.function_item.signature.parameters[0].type =
+        projection;
+    trait_method->data.function_item.signature.return_type = projection;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_PROJECTION);
+
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    limits.max_nodes = 4096u;
+    limits.max_projection_steps = 256u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+
+    mutable_item(&fixture, fixture.impl_method)
+        ->data.function_item.signature.return_type = fixture.bool_type;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_RETURN_TYPE_MISMATCH
+        && cm_hir_def_id_equal(result.impl_member, fixture.impl_method)
+        && cm_hir_def_id_equal(result.trait_member, fixture.trait_method));
+    mutable_item(&fixture, fixture.impl_method)
+        ->data.function_item.signature.return_type = fixture.u32_type;
+
+    limits.max_nodes = 0u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_INVALID);
+    limits.max_nodes = 4096u;
+    cm_hir_crate_finalization_destroy(&finalization);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    (void)add_leaf_type(&fixture, CM_HIR_TYPE_UNIT_KIND);
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_INVALID);
+    cm_hir_crate_finalization_destroy(&finalization);
     fixture_destroy(&fixture);
 }
 
@@ -726,7 +798,7 @@ static void test_pending_and_invalid(void)
     method->data.function_item.signature.return_type = fixture.bool_type;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
-    assert(result.status == CM_SEMANTIC_ITEM_PENDING_PROJECTION);
+    assert(result.status == CM_SEMANTIC_ITEM_INVALID);
     fixture_destroy(&fixture);
 
     result = cm_semantic_item_check_local_trait_impls(NULL,
@@ -743,6 +815,7 @@ static void test_pending_and_invalid(void)
 int main(void)
 {
     test_positive_and_signature_mismatches();
+    test_finalized_projection_signature();
     test_default_method_rules();
     test_trait_argument_and_self_instantiation();
     test_foreign_parameter_terms_are_pending();

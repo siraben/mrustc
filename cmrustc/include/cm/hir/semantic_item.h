@@ -1,7 +1,7 @@
 #ifndef CMRUSTC_CM_HIR_SEMANTIC_ITEM_H
 #define CMRUSTC_CM_HIR_SEMANTIC_ITEM_H
 
-#include "cm/hir/typeck.h"
+#include "cm/hir/semantic.h"
 
 typedef enum CmSemanticItemStatus {
     CM_SEMANTIC_ITEM_OK = 0,
@@ -41,6 +41,7 @@ typedef struct CmSemanticItemResult {
     CmHirDefId trait_member;
     uint32_t parameter_index;
     CmTypeckStatus typeck_status;
+    CmTraitSolverResultKind solver_kind;
 } CmSemanticItemResult;
 
 #define CM_SEMANTIC_ITEM_PARAMETER_NONE ((uint32_t)UINT32_MAX)
@@ -51,6 +52,14 @@ typedef struct CmSemanticItemResult {
  */
 CmSemanticItemResult cm_semantic_item_check_local_trait_impls(
     const CmHirContext *hir, CmHirCrateId local_crate);
+
+/*
+ * COMPLETE-universe item validation. Projection-bearing method signatures
+ * are normalized through one exact-member semantic session before comparison.
+ */
+CmSemanticItemResult cm_semantic_item_check_finalized_local_trait_impls(
+    const CmHirCrateFinalization *finalization,
+    CmProjectionNormalizeLimits normalize_limits);
 
 const char *cm_semantic_item_status_name(CmSemanticItemStatus status);
 
