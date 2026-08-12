@@ -1,4 +1,5 @@
 #include "cm/hir/semantic_body.h"
+#include "cm/hir/body.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@ typedef struct TestFixture {
     CmHirModuleId root;
     CmHirTypeId u32_type;
     CmHirTypeId u8_type;
+    CmHirTypeId bool_type;
     CmHirTypeId infer_type;
     CmHirDefId present_trait;
     CmHirDefId missing_trait;
@@ -173,6 +175,111 @@ static CmHirStatus add_call_expression(CmHirContext *hir,
     expression.data.call.type_substitution_count = substitution_count;
     expression.data.call.arguments = (CmHirExprId *)arguments;
     expression.data.call.argument_count = argument_count;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_integer_expression(CmHirContext *hir,
+    CmHirBodyId body, CmHirTypeId type, uint64_t value, CmSpan span,
+    CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_INTEGER;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.integer.low_bits = value;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_block_expression(CmHirContext *hir,
+    CmHirBodyId body, const CmHirStatement *statements,
+    uint32_t statement_count, CmHirExprId tail, CmHirTypeId type,
+    CmSpan span, CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BLOCK;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.block.statements = (CmHirStatement *)statements;
+    expression.data.block.statement_count = statement_count;
+    expression.data.block.tail_expression = tail;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_binary_expression(CmHirContext *hir,
+    CmHirBodyId body, CmHirBinaryOperator operator_kind,
+    CmHirExprId left, CmHirExprId right, CmHirTypeId type, CmSpan span,
+    CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BINARY;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.binary.operator_kind = operator_kind;
+    expression.data.binary.left = left;
+    expression.data.binary.right = right;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_if_expression(CmHirContext *hir,
+    CmHirBodyId body, CmHirExprId condition, CmHirExprId then_expression,
+    CmHirExprId else_expression, CmHirTypeId type, CmSpan span,
+    CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_IF;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.if_expr.condition = condition;
+    expression.data.if_expr.then_expression = then_expression;
+    expression.data.if_expr.else_expression = else_expression;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_aggregate_expression(CmHirContext *hir,
+    CmHirBodyId body, CmHirDefId definition,
+    const CmHirAggregateFieldValue *fields, uint32_t field_count,
+    CmHirTypeId type, CmSpan span, CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_AGGREGATE;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.aggregate.definition = definition;
+    expression.data.aggregate.fields = (CmHirAggregateFieldValue *)fields;
+    expression.data.aggregate.field_count = field_count;
+    return cm_hir_add_expr(hir, &expression, out_expression);
+}
+
+static CmHirStatus add_field_expression(CmHirContext *hir,
+    CmHirBodyId body, CmHirExprId base, CmHirDefId definition,
+    uint32_t field_index, CmHirTypeId type, CmSpan span,
+    CmHirExprId *out_expression)
+{
+    CmHirExpr expression;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_FIELD;
+    expression.owner_body = body;
+    expression.type = type;
+    expression.span = span;
+    expression.data.field.base = base;
+    expression.data.field.definition = definition;
+    expression.data.field.field_index = field_index;
     return cm_hir_add_expr(hir, &expression, out_expression);
 }
 
@@ -562,6 +669,172 @@ static CmHirDefId add_two_parameter_nested_caller(TestFixture *fixture,
     return caller_definition;
 }
 
+typedef struct ConstraintBody {
+    CmHirDefId owner;
+    CmHirBodyId body;
+    CmHirExprId root;
+    CmHirExprId initializer_left;
+    CmHirExprId initializer;
+    CmHirExprId condition;
+    CmHirExprId then_block;
+    CmHirExprId else_block;
+    CmHirDefId aggregate_definition;
+    CmHirExprId aggregate;
+    CmHirExprId field_expression;
+    CmHirExprId if_expression;
+} ConstraintBody;
+
+static ConstraintBody add_constraint_body(TestFixture *fixture)
+{
+    ConstraintBody built;
+    CmHirFunctionParameter parameters[2];
+    CmHirField aggregate_field;
+    CmHirLocal locals[3];
+    CmHirBody body;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirStatement statement;
+    CmHirExprId one;
+    CmHirExprId condition_left;
+    CmHirExprId condition_right;
+    CmHirExprId then_tail;
+    CmHirExprId aggregate_value;
+    CmHirType aggregate_type_value;
+    CmHirTypeId aggregate_type;
+    CmHirAggregateFieldValue aggregate_field_value;
+
+    memset(&built, 0, sizeof(built));
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_STRUCT, test_span(680u, 699u),
+        &built.aggregate_definition) == CM_HIR_OK);
+    memset(&aggregate_field, 0, sizeof(aggregate_field));
+    aggregate_field.name = cm_hir_intern(&fixture->hir, "value");
+    aggregate_field.type = fixture->u32_type;
+    aggregate_field.visibility.kind = CM_HIR_VIS_PRIVATE;
+    aggregate_field.visibility.restriction = cm_hir_def_id_none();
+    aggregate_field.span = test_span(685u, 690u);
+    init_item(&item, CM_HIR_ITEM_STRUCT, built.aggregate_definition,
+        fixture->root, "Boxed", &fixture->hir);
+    item.span = test_span(680u, 699u);
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_NAMED;
+    item.data.aggregate_item.fields = &aggregate_field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    memset(&aggregate_type_value, 0, sizeof(aggregate_type_value));
+    aggregate_type_value.kind = CM_HIR_TYPE_ADT_KIND;
+    aggregate_type_value.span = test_span(680u, 699u);
+    aggregate_type_value.data.named_type.definition =
+        built.aggregate_definition;
+    assert(cm_hir_add_type(&fixture->hir, &aggregate_type_value,
+        &aggregate_type) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_FUNCTION, test_span(700u, 780u),
+        &built.owner) == CM_HIR_OK);
+    memset(parameters, 0, sizeof(parameters));
+    parameters[0].name = cm_hir_intern(&fixture->hir, "left");
+    parameters[0].type = fixture->u32_type;
+    parameters[0].span = test_span(701u, 704u);
+    parameters[0].binding_kind = CM_HIR_BINDING_NAMED;
+    parameters[1].name = cm_hir_intern(&fixture->hir, "right");
+    parameters[1].type = fixture->u32_type;
+    parameters[1].span = test_span(705u, 708u);
+    parameters[1].binding_kind = CM_HIR_BINDING_NAMED;
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = parameters[0].name;
+    locals[0].type = parameters[0].type;
+    locals[0].span = parameters[0].span;
+    locals[0].parameter_index = 0u;
+    locals[1].name = parameters[1].name;
+    locals[1].type = parameters[1].type;
+    locals[1].span = parameters[1].span;
+    locals[1].parameter_index = 1u;
+    locals[2].name = cm_hir_intern(&fixture->hir, "sum");
+    locals[2].type = fixture->u32_type;
+    locals[2].span = test_span(710u, 718u);
+    locals[2].parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
+    memset(&body, 0, sizeof(body));
+    body.owner = built.owner;
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = fixture->u32_type;
+    body.locals = locals;
+    body.local_count = 3u;
+    body.parameter_count = 2u;
+    body.source = 1u;
+    body.source_expression_id = 700u;
+    body.span = test_span(700u, 780u);
+    assert(cm_hir_add_body(&fixture->hir, &body, &built.body) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, built.owner, fixture->root,
+        "constraint_body", &fixture->hir);
+    item.span = body.span;
+    item.data.function_item.signature.parameters = parameters;
+    item.data.function_item.signature.parameter_count = 2u;
+    item.data.function_item.signature.return_type = fixture->u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = built.body;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(add_local_expression(&fixture->hir, built.body, 0u,
+        fixture->u32_type, test_span(711u, 712u),
+        &built.initializer_left) == CM_HIR_OK);
+    assert(add_integer_expression(&fixture->hir, built.body,
+        fixture->u32_type, 1u, test_span(713u, 714u), &one) == CM_HIR_OK);
+    assert(add_binary_expression(&fixture->hir, built.body,
+        CM_HIR_BINARY_ADD, built.initializer_left, one, fixture->u32_type,
+        test_span(710u, 715u), &built.initializer) == CM_HIR_OK);
+    assert(add_local_expression(&fixture->hir, built.body, 1u,
+        fixture->u32_type, test_span(721u, 722u), &condition_left)
+        == CM_HIR_OK);
+    assert(add_integer_expression(&fixture->hir, built.body,
+        fixture->u32_type, 0u, test_span(723u, 724u), &condition_right)
+        == CM_HIR_OK);
+    assert(add_binary_expression(&fixture->hir, built.body,
+        CM_HIR_BINARY_EQUAL, condition_left, condition_right,
+        fixture->bool_type, test_span(720u, 725u), &built.condition)
+        == CM_HIR_OK);
+    assert(add_local_expression(&fixture->hir, built.body, 2u,
+        fixture->u32_type, test_span(731u, 732u), &then_tail) == CM_HIR_OK);
+    assert(add_block_expression(&fixture->hir, built.body, NULL, 0u,
+        then_tail, fixture->u32_type, test_span(730u, 735u),
+        &built.then_block) == CM_HIR_OK);
+    assert(add_local_expression(&fixture->hir, built.body, 0u,
+        fixture->u32_type, test_span(741u, 742u), &aggregate_value)
+        == CM_HIR_OK);
+    memset(&aggregate_field_value, 0, sizeof(aggregate_field_value));
+    aggregate_field_value.field_index = 0u;
+    aggregate_field_value.value = aggregate_value;
+    aggregate_field_value.span = test_span(741u, 742u);
+    assert(add_aggregate_expression(&fixture->hir, built.body,
+        built.aggregate_definition, &aggregate_field_value, 1u,
+        aggregate_type, test_span(740u, 743u), &built.aggregate)
+        == CM_HIR_OK);
+    assert(add_field_expression(&fixture->hir, built.body,
+        built.aggregate, built.aggregate_definition, 0u,
+        fixture->u32_type, test_span(740u, 744u),
+        &built.field_expression) == CM_HIR_OK);
+    assert(add_block_expression(&fixture->hir, built.body, NULL, 0u,
+        built.field_expression, fixture->u32_type, test_span(740u, 745u),
+        &built.else_block) == CM_HIR_OK);
+    assert(add_if_expression(&fixture->hir, built.body,
+        built.condition, built.then_block, built.else_block,
+        fixture->u32_type, test_span(720u, 746u), &built.if_expression)
+        == CM_HIR_OK);
+    memset(&statement, 0, sizeof(statement));
+    statement.kind = CM_HIR_STATEMENT_LET;
+    statement.span = test_span(709u, 718u);
+    statement.data.let_statement.local_index = 2u;
+    statement.data.let_statement.initializer = built.initializer;
+    assert(add_block_expression(&fixture->hir, built.body, &statement, 1u,
+        built.if_expression, fixture->u32_type, test_span(709u, 750u),
+        &built.root) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture->hir, built.body,
+        built.root) == CM_HIR_OK);
+    return built;
+}
+
 static void fixture_init(TestFixture *fixture)
 {
     CmHirAssociatedTypeEquality equality;
@@ -575,6 +848,7 @@ static void fixture_init(TestFixture *fixture)
     fixture->u32_type = add_type(&fixture->hir,
         CM_HIR_TYPE_INTEGER_KIND);
     fixture->u8_type = add_integer_type(&fixture->hir, CM_HIR_INT_U8);
+    fixture->bool_type = add_type(&fixture->hir, CM_HIR_TYPE_BOOL_KIND);
     fixture->infer_type = add_type(&fixture->hir, CM_HIR_TYPE_INFER_KIND);
     fixture->present_trait = add_trait(fixture, "Present");
     fixture->missing_trait = add_trait(fixture, "Missing");
@@ -1086,13 +1360,152 @@ static void test_two_parameter_nested_substitution_and_rollback(void)
     result = cm_semantic_body_check_definition(&session, body);
     assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
         && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
-        && result.expression == call
+        && result.expression == second_argument
         && cm_typeck_type_count(typeck) == type_count);
     result = cm_semantic_body_check_definition(&session, body);
     assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
         && cm_typeck_type_count(typeck) == type_count);
     argument->type = original_type;
     result = cm_semantic_body_check_definition(&session, body);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
+static void test_whole_body_constraints_and_rollback(void)
+{
+    TestFixture fixture;
+    ConstraintBody built;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
+    CmHirBody *body;
+    CmHirExpr *root;
+    CmHirExpr *initializer_left;
+    CmHirExpr *initializer;
+    CmHirExpr *condition;
+    CmHirExpr *then_block;
+    CmHirExpr *else_block;
+    CmHirExpr *aggregate;
+    CmHirExpr *field_expression;
+    CmHirExpr *if_expression;
+    CmHirTypeId saved_type;
+    CmHirExprId saved_expression;
+    uint32_t saved_local;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    built = add_constraint_body(&fixture);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)built.body - 1u);
+    root = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.root - 1u);
+    initializer_left = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.initializer_left - 1u);
+    initializer = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.initializer - 1u);
+    condition = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.condition - 1u);
+    then_block = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.then_block - 1u);
+    else_block = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.else_block - 1u);
+    aggregate = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.aggregate - 1u);
+    field_expression = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.field_expression - 1u);
+    if_expression = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)built.if_expression - 1u);
+    assert(body != NULL && root != NULL && initializer_left != NULL
+        && initializer != NULL && condition != NULL && then_block != NULL
+        && else_block != NULL && aggregate != NULL
+        && field_expression != NULL && if_expression != NULL);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, built.owner);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    type_count = cm_typeck_type_count(typeck);
+
+    saved_local = initializer_left->data.local.local_index;
+    initializer_left->data.local.local_index = body->local_count;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && result.expression == built.initializer_left
+        && cm_typeck_type_count(typeck) == type_count);
+    initializer_left->data.local.local_index = saved_local;
+
+    saved_local = body->locals[1].parameter_index;
+    body->locals[1].parameter_index = 0u;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && cm_typeck_type_count(typeck) == type_count);
+    body->locals[1].parameter_index = saved_local;
+
+    saved_type = initializer->type;
+    initializer->type = fixture.u8_type;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && result.expression == built.initializer
+        && cm_typeck_type_count(typeck) == type_count);
+    initializer->type = saved_type;
+
+    saved_type = root->type;
+    root->type = fixture.u8_type;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && result.expression == built.root
+        && cm_typeck_type_count(typeck) == type_count);
+    root->type = saved_type;
+
+    saved_type = condition->type;
+    condition->type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && result.expression == built.condition
+        && cm_typeck_type_count(typeck) == type_count);
+    condition->type = saved_type;
+
+    saved_type = else_block->type;
+    else_block->type = fixture.u8_type;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && result.expression == built.else_block
+        && cm_typeck_type_count(typeck) == type_count);
+    else_block->type = saved_type;
+
+    saved_local = aggregate->data.aggregate.fields[0].field_index;
+    aggregate->data.aggregate.fields[0].field_index = 1u;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && result.expression == built.aggregate
+        && cm_typeck_type_count(typeck) == type_count);
+    aggregate->data.aggregate.fields[0].field_index = saved_local;
+
+    saved_type = field_expression->type;
+    field_expression->type = fixture.u8_type;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && result.expression == built.field_expression
+        && cm_typeck_type_count(typeck) == type_count);
+    field_expression->type = saved_type;
+
+    saved_expression = if_expression->data.if_expr.then_expression;
+    if_expression->data.if_expr.then_expression = built.condition;
+    result = cm_semantic_body_check_definition(&session, built.body);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && result.expression == built.if_expression
+        && cm_typeck_type_count(typeck) == type_count);
+    if_expression->data.if_expr.then_expression = saved_expression;
+
+    result = cm_semantic_body_check_definition(&session, built.body);
     assert(result.status == CM_SEMANTIC_BODY_OK);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
@@ -1200,6 +1613,7 @@ int main(void)
     test_callee_environment_cannot_self_prove();
     test_pending_shapes_and_atomicity();
     test_two_parameter_nested_substitution_and_rollback();
+    test_whole_body_constraints_and_rollback();
     test_malformed_foreign_and_stale();
     test_invalid_api_and_status_names();
     puts("hir semantic body tests passed");

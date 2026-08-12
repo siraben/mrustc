@@ -205,8 +205,10 @@ static CmSemanticTypeScan cm_semantic_scan_type(const CmHirContext *hir,
         return cm_hir_get_generic_param(hir,
                 type->data.parameter_type.parameter) == NULL
             ? CM_SEMANTIC_TYPE_INVALID : CM_SEMANTIC_TYPE_OK;
+    /* Authentication and substitution of Self require the private body
+     * instantiation and are therefore checked by instantiate_hir_type. */
     case CM_HIR_TYPE_SELF_KIND:
-        return CM_SEMANTIC_TYPE_UNSUPPORTED;
+        return CM_SEMANTIC_TYPE_OK;
     case CM_HIR_TYPE_ERROR_KIND:
         return CM_SEMANTIC_TYPE_INVALID;
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
@@ -414,6 +416,553 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
         }
     }
     return CM_SEMANTIC_BODY_OK;
+}
+
+typedef struct CmSemanticBodyConstraints {
+    CmTypeckContext *typeck;
+    const CmHirContext *hir;
+    const CmHirBody *body;
+    CmHirBodyId body_id;
+    const CmTypeckInstantiation *owner_instantiation;
+    unsigned char *defined_locals;
+    unsigned char *seen_parameters;
+    CmHirExprId failed_expression;
+    CmTypeckStatus typeck_status;
+} CmSemanticBodyConstraints;
+
+static CmSemanticBodyStatus cm_semantic_body_instantiate_type(
+    CmSemanticBodyConstraints *constraints, CmHirTypeId hir_type,
+    const CmTypeckInstantiation *instantiation, CmTypeckTypeId *out_type)
+{
+    CmSemanticTypeScan scan;
+    CmTypeckStatus status;
+
+    if (constraints == NULL || instantiation == NULL || out_type == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    scan = cm_semantic_scan_type(constraints->hir, hir_type, 0u);
+    if (scan != CM_SEMANTIC_TYPE_OK) return cm_semantic_scan_status(scan);
+    status = cm_typeck_instantiate_hir_type(constraints->typeck, hir_type,
+        instantiation, out_type);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_unify_types(
+    CmSemanticBodyConstraints *constraints, CmHirTypeId left,
+    const CmTypeckInstantiation *left_instantiation, CmHirTypeId right,
+    const CmTypeckInstantiation *right_instantiation)
+{
+    CmTypeckTypeId left_type;
+    CmTypeckTypeId right_type;
+    CmSemanticBodyStatus semantic_status;
+    CmTypeckStatus status;
+
+    semantic_status = cm_semantic_body_instantiate_type(constraints, left,
+        left_instantiation, &left_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    semantic_status = cm_semantic_body_instantiate_type(constraints, right,
+        right_instantiation, &right_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    status = cm_typeck_unify(constraints->typeck, left_type, right_type);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static int cm_semantic_body_integer_kind(const CmHirContext *hir,
+    CmHirTypeId type_id, CmHirIntType kind)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == kind;
+}
+
+static int cm_semantic_body_bool_type(const CmHirContext *hir,
+    CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_BOOL_KIND;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
+    CmSemanticBodyConstraints *constraints, CmHirExprId expression_id,
+    uint32_t visible_local_count, size_t depth)
+{
+    const CmHirExpr *expression;
+    CmSemanticBodyStatus status;
+    CmTypeckTypeId ignored_type;
+    uint32_t index;
+
+    if (constraints == NULL || expression_id == CM_HIR_EXPR_NONE
+        || depth >= constraints->hir->expressions.len) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    expression = cm_hir_get_expr(constraints->hir, expression_id);
+    if (expression == NULL
+        || expression->owner_body != constraints->body_id) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    constraints->failed_expression = expression_id;
+    status = cm_semantic_body_instantiate_type(constraints,
+        expression->type, constraints->owner_instantiation, &ignored_type);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+
+    switch (expression->kind) {
+    case CM_HIR_EXPR_INTEGER:
+        return cm_hir_get_type(constraints->hir, expression->type)->kind
+                == CM_HIR_TYPE_INTEGER_KIND
+            ? CM_SEMANTIC_BODY_OK : CM_SEMANTIC_BODY_INVALID;
+    case CM_HIR_EXPR_LOCAL:
+        if (expression->data.local.local_index >= visible_local_count
+            || expression->data.local.local_index
+                >= constraints->body->local_count) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        return cm_semantic_body_unify_types(constraints, expression->type,
+            constraints->owner_instantiation,
+            constraints->body->locals[expression->data.local.local_index]
+                .type,
+            constraints->owner_instantiation);
+    case CM_HIR_EXPR_BLOCK:
+    {
+        uint32_t nested_visible;
+
+        if (expression->data.block.tail_expression == CM_HIR_EXPR_NONE
+            || (expression->data.block.statement_count == 0u)
+                != (expression->data.block.statements == NULL)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        nested_visible = visible_local_count;
+        for (index = 0u; index < expression->data.block.statement_count;
+             ++index) {
+            const CmHirStatement *statement;
+            uint32_t local_index;
+
+            statement = &expression->data.block.statements[index];
+            local_index = statement->data.let_statement.local_index;
+            if (statement->kind != CM_HIR_STATEMENT_LET
+                || local_index != nested_visible
+                || local_index >= constraints->body->local_count
+                || constraints->body->locals[local_index].parameter_index
+                    != CM_HIR_PARAMETER_INDEX_NONE
+                || constraints->defined_locals[local_index] != 0u) {
+                return CM_SEMANTIC_BODY_INVALID;
+            }
+            status = cm_semantic_body_constrain_expression(constraints,
+                statement->data.let_statement.initializer,
+                nested_visible, depth + 1u);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            constraints->failed_expression =
+                statement->data.let_statement.initializer;
+            status = cm_semantic_body_unify_types(constraints,
+                cm_hir_get_expr(constraints->hir,
+                    statement->data.let_statement.initializer)->type,
+                constraints->owner_instantiation,
+                constraints->body->locals[local_index].type,
+                constraints->owner_instantiation);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            constraints->defined_locals[local_index] = 1u;
+            ++nested_visible;
+        }
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.block.tail_expression, nested_visible,
+            depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        constraints->failed_expression = expression_id;
+        return cm_semantic_body_unify_types(constraints, expression->type,
+            constraints->owner_instantiation,
+            cm_hir_get_expr(constraints->hir,
+                expression->data.block.tail_expression)->type,
+            constraints->owner_instantiation);
+    }
+    case CM_HIR_EXPR_CALL:
+        if ((expression->data.call.argument_count == 0u)
+                != (expression->data.call.arguments == NULL)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        for (index = 0u; index < expression->data.call.argument_count;
+             ++index) {
+            status = cm_semantic_body_constrain_expression(constraints,
+                expression->data.call.arguments[index], visible_local_count,
+                depth + 1u);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+        }
+        return CM_SEMANTIC_BODY_OK;
+    case CM_HIR_EXPR_BINARY:
+    {
+        const CmHirExpr *left;
+        const CmHirExpr *right;
+        int arithmetic;
+        int comparison;
+        int operands_u32;
+        int operands_usize;
+
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.binary.left, visible_local_count, depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.binary.right, visible_local_count, depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        left = cm_hir_get_expr(constraints->hir,
+            expression->data.binary.left);
+        right = cm_hir_get_expr(constraints->hir,
+            expression->data.binary.right);
+        if (left == NULL || right == NULL) return CM_SEMANTIC_BODY_INVALID;
+        arithmetic = expression->data.binary.operator_kind
+                == CM_HIR_BINARY_ADD
+            || expression->data.binary.operator_kind
+                == CM_HIR_BINARY_SUBTRACT;
+        comparison = expression->data.binary.operator_kind
+                == CM_HIR_BINARY_EQUAL
+            || expression->data.binary.operator_kind
+                == CM_HIR_BINARY_LESS;
+        operands_u32 = cm_semantic_body_integer_kind(constraints->hir,
+                left->type, CM_HIR_INT_U32)
+            && cm_semantic_body_integer_kind(constraints->hir,
+                right->type, CM_HIR_INT_U32);
+        operands_usize = cm_semantic_body_integer_kind(constraints->hir,
+                left->type, CM_HIR_INT_USIZE)
+            && cm_semantic_body_integer_kind(constraints->hir,
+                right->type, CM_HIR_INT_USIZE);
+        if ((!arithmetic && !comparison)
+            || (expression->data.binary.operator_kind
+                    == CM_HIR_BINARY_EQUAL && !operands_u32)
+            || (expression->data.binary.operator_kind
+                    == CM_HIR_BINARY_LESS && !operands_usize)
+            || (arithmetic && !operands_u32 && !operands_usize)
+            || (comparison
+                && !cm_semantic_body_bool_type(constraints->hir,
+                    expression->type))) {
+            constraints->failed_expression = expression_id;
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        constraints->failed_expression = expression_id;
+        status = cm_semantic_body_unify_types(constraints, left->type,
+            constraints->owner_instantiation, right->type,
+            constraints->owner_instantiation);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        if (arithmetic) {
+            status = cm_semantic_body_unify_types(constraints,
+                expression->type, constraints->owner_instantiation,
+                left->type, constraints->owner_instantiation);
+        }
+        return status;
+    }
+    case CM_HIR_EXPR_AGGREGATE:
+    {
+        const CmHirType *aggregate_type;
+        const CmHirItem *aggregate;
+        const CmHirModule *aggregate_module;
+        CmTypeckInstantiation aggregate_instantiation;
+
+        aggregate_type = cm_hir_get_type(constraints->hir,
+            expression->type);
+        aggregate = cm_semantic_body_item(constraints->hir,
+            expression->data.aggregate.definition);
+        aggregate_module = aggregate == NULL ? NULL
+            : cm_hir_get_module(constraints->hir, aggregate->owner_module);
+        if (aggregate_type == NULL
+            || aggregate_type->kind != CM_HIR_TYPE_ADT_KIND
+            || aggregate_type->data.named_type.argument_count != 0u
+            || aggregate_type->data.named_type.arguments != NULL
+            || !cm_hir_def_id_equal(
+                aggregate_type->data.named_type.definition,
+                expression->data.aggregate.definition)
+            || aggregate == NULL || aggregate->kind != CM_HIR_ITEM_STRUCT
+            || expression->data.aggregate.definition.crate_id
+                != constraints->body->owner.crate_id
+            || aggregate_module == NULL
+            || aggregate_module->crate_id
+                != expression->data.aggregate.definition.crate_id
+            || !cm_hir_def_id_is_none(aggregate->parent_definition)
+            || aggregate->generic_parameter_count != 0u
+            || aggregate->data.aggregate_item.form
+                != CM_HIR_AGGREGATE_NAMED
+            || aggregate->data.aggregate_item.field_count
+                != expression->data.aggregate.field_count
+            || (expression->data.aggregate.field_count == 0u)
+                != (expression->data.aggregate.fields == NULL)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        memset(&aggregate_instantiation, 0,
+            sizeof(aggregate_instantiation));
+        aggregate_instantiation.parameter_owner = aggregate->definition;
+        if (!cm_typeck_instantiation_is_valid(constraints->typeck,
+                &aggregate_instantiation)) {
+            return CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
+        }
+        for (index = 0u; index < expression->data.aggregate.field_count;
+             ++index) {
+            const CmHirAggregateFieldValue *field;
+            const CmHirExpr *value;
+            uint32_t prior;
+
+            field = &expression->data.aggregate.fields[index];
+            if (field->field_index
+                >= aggregate->data.aggregate_item.field_count) {
+                return CM_SEMANTIC_BODY_INVALID;
+            }
+            for (prior = 0u; prior < index; ++prior) {
+                if (expression->data.aggregate.fields[prior].field_index
+                        == field->field_index) {
+                    return CM_SEMANTIC_BODY_INVALID;
+                }
+            }
+            status = cm_semantic_body_constrain_expression(constraints,
+                field->value, visible_local_count, depth + 1u);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            value = cm_hir_get_expr(constraints->hir, field->value);
+            constraints->failed_expression = expression_id;
+            status = cm_semantic_body_unify_types(constraints, value->type,
+                constraints->owner_instantiation,
+                aggregate->data.aggregate_item.fields[field->field_index]
+                    .type,
+                &aggregate_instantiation);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+        }
+        return CM_SEMANTIC_BODY_OK;
+    }
+    case CM_HIR_EXPR_FIELD:
+    {
+        const CmHirExpr *base;
+        const CmHirType *base_type;
+        const CmHirItem *aggregate;
+        const CmHirModule *aggregate_module;
+        CmTypeckInstantiation aggregate_instantiation;
+
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.field.base, visible_local_count, depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        base = cm_hir_get_expr(constraints->hir,
+            expression->data.field.base);
+        base_type = base == NULL ? NULL
+            : cm_hir_get_type(constraints->hir, base->type);
+        aggregate = cm_semantic_body_item(constraints->hir,
+            expression->data.field.definition);
+        aggregate_module = aggregate == NULL ? NULL
+            : cm_hir_get_module(constraints->hir, aggregate->owner_module);
+        if (base_type == NULL || base_type->kind != CM_HIR_TYPE_ADT_KIND
+            || base_type->data.named_type.argument_count != 0u
+            || base_type->data.named_type.arguments != NULL
+            || !cm_hir_def_id_equal(base_type->data.named_type.definition,
+                expression->data.field.definition)
+            || aggregate == NULL || aggregate->kind != CM_HIR_ITEM_STRUCT
+            || expression->data.field.definition.crate_id
+                != constraints->body->owner.crate_id
+            || aggregate_module == NULL
+            || aggregate_module->crate_id
+                != expression->data.field.definition.crate_id
+            || !cm_hir_def_id_is_none(aggregate->parent_definition)
+            || aggregate->generic_parameter_count != 0u
+            || aggregate->data.aggregate_item.form
+                != CM_HIR_AGGREGATE_NAMED
+            || expression->data.field.field_index
+                >= aggregate->data.aggregate_item.field_count) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        memset(&aggregate_instantiation, 0,
+            sizeof(aggregate_instantiation));
+        aggregate_instantiation.parameter_owner = aggregate->definition;
+        if (!cm_typeck_instantiation_is_valid(constraints->typeck,
+                &aggregate_instantiation)) {
+            return CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
+        }
+        constraints->failed_expression = expression_id;
+        return cm_semantic_body_unify_types(constraints, expression->type,
+            constraints->owner_instantiation,
+            aggregate->data.aggregate_item
+                .fields[expression->data.field.field_index].type,
+            &aggregate_instantiation);
+    }
+    case CM_HIR_EXPR_IF:
+    {
+        const CmHirExpr *condition;
+        const CmHirExpr *then_expression;
+        const CmHirExpr *else_expression;
+
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.if_expr.condition, visible_local_count,
+            depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.if_expr.then_expression, visible_local_count,
+            depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.if_expr.else_expression, visible_local_count,
+            depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        condition = cm_hir_get_expr(constraints->hir,
+            expression->data.if_expr.condition);
+        then_expression = cm_hir_get_expr(constraints->hir,
+            expression->data.if_expr.then_expression);
+        else_expression = cm_hir_get_expr(constraints->hir,
+            expression->data.if_expr.else_expression);
+        if (condition == NULL || then_expression == NULL
+            || else_expression == NULL
+            || !cm_semantic_body_bool_type(constraints->hir,
+                condition->type)
+            || condition->kind != CM_HIR_EXPR_BINARY
+            || then_expression->kind != CM_HIR_EXPR_BLOCK
+            || else_expression->kind != CM_HIR_EXPR_BLOCK
+            || then_expression->data.block.statement_count != 0u
+            || then_expression->data.block.statements != NULL
+            || else_expression->data.block.statement_count != 0u
+            || else_expression->data.block.statements != NULL
+            || (!cm_semantic_body_integer_kind(constraints->hir,
+                    expression->type, CM_HIR_INT_U32)
+                && !cm_semantic_body_integer_kind(constraints->hir,
+                    expression->type, CM_HIR_INT_USIZE))
+            || condition->data.binary.operator_kind
+                != (cm_semantic_body_integer_kind(constraints->hir,
+                        expression->type, CM_HIR_INT_U32)
+                    ? CM_HIR_BINARY_EQUAL : CM_HIR_BINARY_LESS)) {
+            constraints->failed_expression = expression_id;
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        constraints->failed_expression = expression_id;
+        status = cm_semantic_body_unify_types(constraints,
+            then_expression->type, constraints->owner_instantiation,
+            else_expression->type, constraints->owner_instantiation);
+        if (status == CM_SEMANTIC_BODY_OK) {
+            status = cm_semantic_body_unify_types(constraints,
+                expression->type, constraints->owner_instantiation,
+                then_expression->type, constraints->owner_instantiation);
+        }
+        return status;
+    }
+    }
+    return CM_SEMANTIC_BODY_INVALID;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_constrain(
+    CmTypeckContext *typeck, const CmHirContext *hir,
+    const CmHirBody *body, CmHirBodyId body_id,
+    const CmHirItem *owner_item,
+    const CmTypeckInstantiation *owner_instantiation,
+    CmHirExprId *out_expression, CmTypeckStatus *out_typeck_status)
+{
+    CmSemanticBodyConstraints constraints;
+    const CmHirExpr *root;
+    CmSemanticBodyStatus status;
+    uint32_t initial_local_count;
+    uint32_t index;
+    uint32_t previous_parameter_index;
+    size_t bitmap_size;
+    size_t parameter_bitmap_size;
+
+    if (typeck == NULL || hir == NULL || body == NULL || owner_item == NULL
+        || owner_instantiation == NULL || out_expression == NULL
+        || out_typeck_status == NULL) return CM_SEMANTIC_BODY_INVALID;
+    *out_expression = CM_HIR_EXPR_NONE;
+    *out_typeck_status = CM_TYPECK_OK;
+    if ((body->local_count == 0u) != (body->locals == NULL)
+        || body->parameter_count
+            != owner_item->data.function_item.signature.parameter_count) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    memset(&constraints, 0, sizeof(constraints));
+    constraints.typeck = typeck;
+    constraints.hir = hir;
+    constraints.body = body;
+    constraints.body_id = body_id;
+    constraints.owner_instantiation = owner_instantiation;
+    constraints.failed_expression = body->root_expression;
+    constraints.typeck_status = CM_TYPECK_OK;
+    if (!cm_size_mul((size_t)(body->local_count == 0u
+                ? 1u : body->local_count), sizeof(*constraints.defined_locals),
+            &bitmap_size)
+        || !cm_size_mul((size_t)(body->parameter_count == 0u
+                ? 1u : body->parameter_count),
+            sizeof(*constraints.seen_parameters), &parameter_bitmap_size)) {
+        return CM_SEMANTIC_BODY_OVERFLOW;
+    }
+    constraints.defined_locals = (unsigned char *)cm_alloc_zeroed(
+        1u, bitmap_size);
+    constraints.seen_parameters = (unsigned char *)cm_alloc_zeroed(
+        1u, parameter_bitmap_size);
+    initial_local_count = body->local_count;
+    previous_parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
+    for (index = 0u; index < body->local_count; ++index) {
+        if (body->locals[index].parameter_index
+                == CM_HIR_PARAMETER_INDEX_NONE) {
+            initial_local_count = index;
+            break;
+        }
+        if (body->locals[index].parameter_index >= body->parameter_count) {
+            status = CM_SEMANTIC_BODY_INVALID;
+            goto finish;
+        }
+        if (previous_parameter_index != CM_HIR_PARAMETER_INDEX_NONE
+            && body->locals[index].parameter_index
+                <= previous_parameter_index) {
+            status = CM_SEMANTIC_BODY_INVALID;
+            goto finish;
+        }
+        if (constraints.seen_parameters[
+                body->locals[index].parameter_index]
+                != 0u) {
+            status = CM_SEMANTIC_BODY_INVALID;
+            goto finish;
+        }
+        constraints.seen_parameters[
+            body->locals[index].parameter_index] = 1u;
+        status = cm_semantic_body_unify_types(&constraints,
+            body->locals[index].type, owner_instantiation,
+            owner_item->data.function_item.signature.parameters[
+                body->locals[index].parameter_index].type,
+            owner_instantiation);
+        if (status != CM_SEMANTIC_BODY_OK) goto finish;
+        previous_parameter_index = body->locals[index].parameter_index;
+    }
+    for (index = initial_local_count; index < body->local_count; ++index) {
+        if (body->locals[index].parameter_index
+                != CM_HIR_PARAMETER_INDEX_NONE) {
+            status = CM_SEMANTIC_BODY_INVALID;
+            goto finish;
+        }
+    }
+    root = cm_hir_get_expr(hir, body->root_expression);
+    if (root == NULL || root->owner_body != body_id) {
+        status = CM_SEMANTIC_BODY_INVALID;
+        goto finish;
+    }
+    status = cm_semantic_body_constrain_expression(&constraints,
+        body->root_expression, initial_local_count, 0u);
+    if (status == CM_SEMANTIC_BODY_OK) {
+        for (index = initial_local_count; index < body->local_count;
+             ++index) {
+            if (constraints.defined_locals[index] == 0u) {
+                constraints.failed_expression = body->root_expression;
+                status = CM_SEMANTIC_BODY_INVALID;
+                break;
+            }
+        }
+    }
+    if (status == CM_SEMANTIC_BODY_OK) {
+        constraints.failed_expression = body->root_expression;
+        status = cm_semantic_body_unify_types(&constraints, root->type,
+            owner_instantiation, body->expected_type,
+            owner_instantiation);
+    }
+finish:
+    if (status != CM_SEMANTIC_BODY_OK) {
+        *out_expression = constraints.failed_expression;
+        *out_typeck_status = constraints.typeck_status;
+    }
+    cm_free(constraints.defined_locals);
+    cm_free(constraints.seen_parameters);
+    return status;
 }
 
 static CmSemanticBodyStatus cm_semantic_body_walk(
@@ -700,6 +1249,14 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     if (owner_kind
             == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD) {
         environment_substitution.enclosing = &enclosing_instantiation;
+    }
+
+    result.status = cm_semantic_body_constrain(typeck, hir, body, body_id,
+        owner_item, &owner_instantiation, &result.expression,
+        &result.typeck_status);
+    if (result.status != CM_SEMANTIC_BODY_OK) {
+        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+            call_expressions);
     }
 
     for (call_index = 0u; call_index < call_expression_count; ++call_index) {
