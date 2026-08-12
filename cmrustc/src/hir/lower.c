@@ -12,6 +12,8 @@
 extern int vsnprintf(char *buffer, size_t size, const char *format,
     va_list arguments);
 
+#define CM_LOWER_APIT_MAX_DEPTH ((size_t)1024u)
+
 typedef enum CmLowerParentKind {
     CM_LOWER_PARENT_NONE = 0,
     CM_LOWER_PARENT_TRAIT,
@@ -77,6 +79,13 @@ typedef struct CmLowerGenericRecord {
     CmHirGenericParamKind kind;
 } CmLowerGenericRecord;
 
+typedef struct CmLowerApitRecord {
+    const CmAst *ast;
+    CmHirDefId owner;
+    CmAstTypeId ast_type;
+    CmHirGenericParamId hir_id;
+} CmLowerApitRecord;
+
 typedef struct CmLowerVariantRecord {
     CmHirDefId enumeration;
     CmHirDefId definition;
@@ -103,6 +112,7 @@ typedef struct CmLowerState {
     CmVec variant_records;
     CmVec macro_records;
     CmVec generic_records;
+    CmVec apit_records;
     CmVec expanded_source_ids;
     CmVec expected_module_bindings;
     const CmHirItem *active_item;
@@ -126,6 +136,9 @@ static void cm_lower_find_inherited_associated_type(
     CmInternId ast_name, CmLowerAssociatedTarget *out_target,
     uint32_t *out_matches);
 static int cm_lower_ast_path_storage_valid(const CmAstPath *path);
+static int cm_lower_validate_impl_trait_type(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
+    const CmAstType *ast_type, int *out_relaxed_sized);
 static int cm_lower_lifetime_binder_is_valid(
     const CmAstLifetimeBinder *binder, CmAstSpan bound_span,
     const CmAstType *trait_type);
@@ -417,6 +430,26 @@ static const CmLowerGenericRecord *cm_lower_find_generic(
             &state->generic_records, index);
         if (cm_hir_def_id_equal(record->owner, owner)
             && cm_lower_strings_equal(state, record->ast_name, ast_name)) {
+            return record;
+        }
+    }
+    return NULL;
+}
+
+static const CmLowerApitRecord *cm_lower_find_apit(
+    const CmLowerState *state, const CmAst *ast, CmHirDefId owner,
+    CmAstTypeId ast_type)
+{
+    size_t index;
+
+    for (index = 0u; index < state->apit_records.len; ++index) {
+        const CmLowerApitRecord *record;
+
+        record = (const CmLowerApitRecord *)cm_vec_at_const(
+            &state->apit_records, index);
+        if (record != NULL && record->ast == ast
+            && cm_hir_def_id_equal(record->owner, owner)
+            && record->ast_type == ast_type) {
             return record;
         }
     }
@@ -4018,6 +4051,96 @@ static int cm_lower_lifetime_binder_is_valid(
     return 1;
 }
 
+static int cm_lower_validate_impl_trait_type(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
+    const CmAstType *ast_type, int *out_relaxed_sized)
+{
+    CmSpan span;
+    uint32_t index;
+    int relaxed_sized;
+    int saw_trait;
+
+    if (out_relaxed_sized != NULL) *out_relaxed_sized = 0;
+    span = ast_type == NULL
+        ? cm_lower_span(state, (CmAstSpan){ 0u, 0u })
+        : cm_lower_span(state, ast_type->span);
+    if (ast_type == NULL || ast_type->kind != CM_AST_TYPE_IMPL_TRAIT
+        || ast_type->bound_count == 0u || ast_type->bounds == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "opaque impl trait type has no bound storage");
+        return 0;
+    }
+    relaxed_sized = 0;
+    saw_trait = 0;
+    for (index = 0u; index < ast_type->bound_count; ++index) {
+        const CmAstTypeBound *bound;
+        const CmAstType *bound_type;
+        const CmAstPath *bound_path;
+        int has_lifetime;
+
+        bound = &ast_type->bounds[index];
+        has_lifetime = bound->lifetime != CM_INTERN_ID_NONE;
+        bound_type = cm_ast_get_type(state->ast, bound->trait_type);
+        bound_path = bound_type == NULL
+            || bound_type->kind != CM_AST_TYPE_PATH ? NULL
+            : cm_ast_get_path(state->ast, bound_type->path);
+        if ((has_lifetime && bound->trait_type != CM_AST_TYPE_NONE)
+            || (has_lifetime
+                && (bound->binder.lifetime_count != 0u
+                    || bound->binder.lifetimes != NULL
+                    || bound->binder.span.start != 0u
+                    || bound->binder.span.end != 0u))
+            || (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED
+                && bound->modifier != CM_AST_TYPE_BOUND_RELAXED
+                && bound->modifier
+                    != CM_AST_TYPE_BOUND_CONDITIONALLY_CONST)
+            || (has_lifetime
+                && (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED
+                    || cm_lower_ast_string(state, bound->lifetime)
+                        == NULL))
+            || (!has_lifetime
+                && (bound_type == NULL
+                    || bound_type->kind != CM_AST_TYPE_PATH
+                    || !cm_lower_ast_path_storage_valid(bound_path)
+                    || !cm_lower_lifetime_binder_is_valid(&bound->binder,
+                        bound->span, bound_type)))
+            || bound->span.start >= bound->span.end
+            || bound->span.start < ast_type->span.start
+            || bound->span.end > ast_type->span.end
+            || (index != 0u
+                && ast_type->bounds[index - 1u].span.end
+                    >= bound->span.start)
+            || (bound->modifier == CM_AST_TYPE_BOUND_RELAXED
+                && (has_lifetime
+                    || !cm_lower_ast_type_is_plain_sized_path(state,
+                        bound->trait_type)))) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "opaque impl trait bound storage is invalid");
+            return 0;
+        }
+        if (bound->modifier == CM_AST_TYPE_BOUND_RELAXED) {
+            if (relaxed_sized) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                    ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "opaque impl trait has duplicate relaxed Sized bounds");
+                return 0;
+            }
+            relaxed_sized = 1;
+        }
+        if (!has_lifetime) saw_trait = 1;
+    }
+    if (!saw_trait) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "opaque impl trait must include at least one trait bound");
+        return 0;
+    }
+    if (out_relaxed_sized != NULL) *out_relaxed_sized = relaxed_sized;
+    return 1;
+}
+
 static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
     CmHirModuleId module, CmHirDefId owner)
 {
@@ -4254,59 +4377,36 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             return result;
         }
     case CM_AST_TYPE_IMPL_TRAIT:
-        if (ast_type->bound_count == 0u || ast_type->bounds == NULL) {
-            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "opaque impl trait type has no bound storage");
+    {
+        const CmLowerApitRecord *apit;
+        const CmHirGenericParam *parameter;
+
+        if (!cm_lower_validate_impl_trait_type(state, CM_AST_ITEM_NONE,
+                ast_type_id, ast_type, NULL)) {
             return CM_HIR_TYPE_NONE;
         }
-        for (index = 0u; index < ast_type->bound_count; ++index) {
-            const CmAstType *bound_type;
-            int has_lifetime;
-
-            has_lifetime = ast_type->bounds[index].lifetime
-                != CM_INTERN_ID_NONE;
-            bound_type = cm_ast_get_type(state->ast,
-                ast_type->bounds[index].trait_type);
-            if ((has_lifetime
-                    && ast_type->bounds[index].trait_type
-                        != CM_AST_TYPE_NONE)
-                || (has_lifetime
-                    && (ast_type->bounds[index].binder.lifetime_count != 0u
-                        || ast_type->bounds[index].binder.lifetimes != NULL
-                        || ast_type->bounds[index].binder.span.start != 0u
-                        || ast_type->bounds[index].binder.span.end != 0u))
-                || (ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_REQUIRED
-                    && ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_RELAXED
-                    && ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_CONDITIONALLY_CONST)
-                || (has_lifetime && ast_type->bounds[index].modifier
-                    != CM_AST_TYPE_BOUND_REQUIRED)
-                || (!has_lifetime
-                    && (bound_type == NULL
-                        || bound_type->kind != CM_AST_TYPE_PATH
-                        || !cm_lower_lifetime_binder_is_valid(
-                            &ast_type->bounds[index].binder,
-                            ast_type->bounds[index].span, bound_type)))
-                || ast_type->bounds[index].span.start
-                    >= ast_type->bounds[index].span.end
-                || ast_type->bounds[index].span.start < ast_type->span.start
-                || ast_type->bounds[index].span.end > ast_type->span.end
-                || (index != 0u
-                    && ast_type->bounds[index - 1u].span.end
-                        >= ast_type->bounds[index].span.start)) {
-                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
-                    CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
-                    CM_HIR_OK, "opaque impl trait bound storage is invalid");
-                return CM_HIR_TYPE_NONE;
-            }
+        apit = cm_lower_find_apit(state, state->ast, owner, ast_type_id);
+        parameter = apit == NULL ? NULL
+            : cm_hir_get_generic_param(state->hir, apit->hir_id);
+        if (apit != NULL && parameter != NULL
+            && parameter->kind == CM_HIR_GENERIC_TYPE
+            && cm_hir_def_id_equal(parameter->owner, owner)) {
+            type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+            type.data.parameter_type.parameter = apit->hir_id;
+            return cm_lower_add_type(state, &type, ast_type_id);
+        }
+        if (apit != NULL) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                CM_HIR_INVALID_ID,
+                "argument impl trait lost its synthetic generic parameter");
+            return CM_HIR_TYPE_NONE;
         }
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
             CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
             "opaque impl trait types are not lowered yet");
         return CM_HIR_TYPE_NONE;
+    }
     case CM_AST_TYPE_DYN_TRAIT:
         if (ast_type->bound_count == 0u || ast_type->bounds == NULL) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
@@ -4380,6 +4480,246 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
     return CM_HIR_TYPE_NONE;
 }
 
+static int cm_lower_predeclare_apit_type(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
+    CmLowerItemRecord *record, uint32_t explicit_count, size_t depth);
+
+static int cm_lower_predeclare_apit_arguments(CmLowerState *state,
+    CmAstItemId ast_item_id, const CmAstGenericArg *arguments,
+    uint32_t argument_count, CmLowerItemRecord *record,
+    uint32_t explicit_count, size_t depth)
+{
+    uint32_t index;
+
+    if (depth > CM_LOWER_APIT_MAX_DEPTH) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_INVALID_ID,
+            "argument impl trait path graph contains a cycle");
+        return 0;
+    }
+    if ((argument_count != 0u && arguments == NULL)
+        || (argument_count == 0u && arguments != NULL)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "argument impl trait traversal found invalid path storage");
+        return 0;
+    }
+    for (index = 0u; index < argument_count && !state->failed; ++index) {
+        const CmAstGenericArg *argument;
+
+        argument = &arguments[index];
+        if (!cm_lower_predeclare_apit_arguments(state, ast_item_id,
+                argument->name_arguments, argument->name_argument_count,
+                record, explicit_count, depth + 1u)) {
+            return 0;
+        }
+        if (argument->type != CM_AST_TYPE_NONE
+            && !cm_lower_predeclare_apit_type(state, ast_item_id,
+                argument->type, record, explicit_count, depth + 1u)) {
+            return 0;
+        }
+    }
+    return !state->failed;
+}
+
+static int cm_lower_predeclare_apit_path(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstPathId ast_path_id,
+    CmLowerItemRecord *record, uint32_t explicit_count, size_t depth)
+{
+    const CmAstPath *path;
+    uint32_t index;
+
+    if (depth > CM_LOWER_APIT_MAX_DEPTH) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            CM_AST_TYPE_NONE, ast_path_id, CM_HIR_INVALID_ID,
+            "argument impl trait path graph contains a cycle");
+        return 0;
+    }
+    path = cm_ast_get_path(state->ast, ast_path_id);
+    if (!cm_lower_ast_path_storage_valid(path)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            CM_AST_TYPE_NONE, ast_path_id, CM_HIR_INVALID_ID,
+            "argument impl trait traversal found invalid path storage");
+        return 0;
+    }
+    for (index = 0u; index < path->segment_count && !state->failed;
+         ++index) {
+        if (!cm_lower_predeclare_apit_arguments(state, ast_item_id,
+                path->segments[index].arguments,
+                path->segments[index].argument_count, record,
+                explicit_count, depth + 1u)) {
+            return 0;
+        }
+    }
+    return !state->failed;
+}
+
+static int cm_lower_predeclare_one_apit(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
+    const CmAstType *ast_type, CmLowerItemRecord *record,
+    uint32_t explicit_count)
+{
+    CmHirGenericParam parameter;
+    CmLowerApitRecord apit_record;
+    CmHirStatus status;
+    char name[32];
+    unsigned long ordinal;
+    int name_length;
+    int relaxed_sized;
+
+    if (cm_lower_find_apit(state, state->ast, record->definition,
+            ast_type_id) != NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, ast_type->span), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "argument impl trait AST type is reused");
+        return 0;
+    }
+    if (record->is_foreign) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+            cm_lower_span(state, ast_type->span), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "foreign functions cannot have argument impl trait generics");
+        return 0;
+    }
+    if (!cm_lower_validate_impl_trait_type(state, ast_item_id,
+            ast_type_id, ast_type, &relaxed_sized)) {
+        return 0;
+    }
+    if (record->generic_parameter_count < explicit_count
+        || record->generic_parameter_count == UINT32_MAX) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, ast_type->span), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+            "argument impl trait generic index overflow");
+        return 0;
+    }
+    ordinal = (unsigned long)(record->generic_parameter_count
+        - explicit_count);
+    name_length = snprintf(name, sizeof(name), "$APIT%lu", ordinal);
+    if (name_length < 0 || (size_t)name_length >= sizeof(name)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, ast_type->span), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+            "argument impl trait synthetic name overflow");
+        return 0;
+    }
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = record->definition;
+    parameter.index = record->generic_parameter_count;
+    parameter.name = cm_hir_intern(state->hir, name);
+    parameter.span = cm_lower_span(state, ast_type->span);
+    parameter.is_relaxed_sized = relaxed_sized;
+    status = cm_hir_add_generic_param(state->hir, &parameter,
+        &apit_record.hir_id);
+    if (status != CM_HIR_OK) {
+        cm_lower_fail_hir(state, parameter.span, ast_item_id, status,
+            "cannot add argument impl trait generic parameter");
+        return 0;
+    }
+    apit_record.ast = state->ast;
+    apit_record.owner = record->definition;
+    apit_record.ast_type = ast_type_id;
+    if (record->generic_parameter_count == 0u) {
+        record->generic_parameter_start = apit_record.hir_id;
+    }
+    record->generic_parameter_count += 1u;
+    (void)cm_vec_push(&state->apit_records, &apit_record);
+    return 1;
+}
+
+static int cm_lower_predeclare_apit_type(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
+    CmLowerItemRecord *record, uint32_t explicit_count, size_t depth)
+{
+    const CmAstType *ast_type;
+    uint32_t index;
+
+    if (depth > CM_LOWER_APIT_MAX_DEPTH) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_INVALID_ID,
+            "argument impl trait type graph contains a cycle");
+        return 0;
+    }
+    ast_type = cm_ast_get_type(state->ast, ast_type_id);
+    if (ast_type == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }), ast_item_id,
+            ast_type_id, CM_AST_PATH_NONE, CM_HIR_INVALID_ID,
+            "function parameter refers to an invalid AST type ID");
+        return 0;
+    }
+    switch (ast_type->kind) {
+    case CM_AST_TYPE_PATH:
+        return cm_lower_predeclare_apit_path(state, ast_item_id,
+            ast_type->path, record, explicit_count, depth + 1u);
+    case CM_AST_TYPE_PROJECTION:
+        if (!cm_lower_predeclare_apit_type(state, ast_item_id,
+                ast_type->projection.self_type, record, explicit_count,
+                depth + 1u)
+            || !cm_lower_predeclare_apit_path(state, ast_item_id,
+                ast_type->projection.trait_path, record, explicit_count,
+                depth + 1u)
+            || !cm_lower_predeclare_apit_arguments(state, ast_item_id,
+                ast_type->projection.associated.arguments,
+                ast_type->projection.associated.argument_count, record,
+                explicit_count, depth + 1u)) {
+            return 0;
+        }
+        return 1;
+    case CM_AST_TYPE_REFERENCE:
+    case CM_AST_TYPE_POINTER:
+    case CM_AST_TYPE_SLICE:
+    case CM_AST_TYPE_ARRAY:
+        return cm_lower_predeclare_apit_type(state, ast_item_id,
+            ast_type->child, record, explicit_count, depth + 1u);
+    case CM_AST_TYPE_TUPLE:
+    case CM_AST_TYPE_FUNCTION:
+        if ((ast_type->element_count != 0u && ast_type->elements == NULL)
+            || (ast_type->element_count == 0u
+                && ast_type->elements != NULL)) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                cm_lower_span(state, ast_type->span), ast_item_id,
+                ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "argument impl trait traversal found invalid type storage");
+            return 0;
+        }
+        for (index = 0u; index < ast_type->element_count
+                && !state->failed; ++index) {
+            if (!cm_lower_predeclare_apit_type(state, ast_item_id,
+                    ast_type->elements[index], record, explicit_count,
+                    depth + 1u)) {
+                return 0;
+            }
+        }
+        if (ast_type->kind == CM_AST_TYPE_FUNCTION) {
+            return cm_lower_predeclare_apit_type(state, ast_item_id,
+                ast_type->child, record, explicit_count, depth + 1u);
+        }
+        return !state->failed;
+    case CM_AST_TYPE_IMPL_TRAIT:
+        return cm_lower_predeclare_one_apit(state, ast_item_id,
+            ast_type_id, ast_type, record, explicit_count);
+    case CM_AST_TYPE_INFER:
+    case CM_AST_TYPE_NEVER:
+    case CM_AST_TYPE_DYN_TRAIT:
+    case CM_AST_TYPE_OTHER:
+    case CM_AST_TYPE_MACRO:
+        return 1;
+    }
+    cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+        cm_lower_span(state, ast_type->span), ast_item_id, ast_type_id,
+        CM_AST_PATH_NONE, CM_HIR_OK,
+        "argument impl trait traversal found an unknown type kind");
+    return 0;
+}
+
 static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     CmLowerItemRecord *record)
@@ -4395,6 +4735,16 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "generic parameter count has no parameter storage");
+        return 0;
+    }
+    if (ast_item->kind == CM_AST_ITEM_FUNCTION
+        && ((ast_item->data.function_item.parameter_count != 0u
+                && ast_item->data.function_item.parameters == NULL)
+            || (ast_item->data.function_item.parameter_count == 0u
+                && ast_item->data.function_item.parameters != NULL))) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function parameter count and storage disagree");
         return 0;
     }
     if (ast_item->where_clause != CM_INTERN_ID_NONE
@@ -4708,6 +5058,21 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
         }
         record->generic_parameter_count += 1u;
         (void)cm_vec_push(&state->generic_records, &generic_record);
+    }
+    if (ast_item->kind == CM_AST_ITEM_FUNCTION) {
+        const CmAstFunction *function;
+
+        function = &ast_item->data.function_item;
+        for (index = 0u; index < function->parameter_count
+                && !state->failed; ++index) {
+            if (!function->parameters[index].is_self
+                && function->parameters[index].type != CM_AST_TYPE_NONE
+                && !cm_lower_predeclare_apit_type(state, ast_item_id,
+                    function->parameters[index].type, record,
+                    ast_item->generic_parameter_count, 0u)) {
+                return 0;
+            }
+        }
     }
     return 1;
 }
@@ -6131,7 +6496,7 @@ static int cm_lower_function_item(CmLowerState *state,
                 return 0;
             }
             if (trait_method->generic_parameter_count
-                    != ast_item->generic_parameter_count) {
+                    != record->generic_parameter_count) {
                 cm_free(locals);
                 cm_free(parameters);
                 cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
@@ -7579,6 +7944,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     int has_inline_predicate;
     uint32_t parameter_index;
     uint32_t where_index;
+    size_t apit_index;
     CmSpan item_span;
     const CmHirItem *previous_active_item;
 
@@ -7625,6 +7991,43 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 return 0;
             }
             total_count += 1u;
+            has_inline_predicate = 1;
+        }
+    }
+    for (apit_index = 0u; apit_index < state->apit_records.len;
+         ++apit_index) {
+        const CmLowerApitRecord *apit;
+        const CmAstType *apit_type;
+        uint32_t bound_index;
+
+        apit = (const CmLowerApitRecord *)cm_vec_at_const(
+            &state->apit_records, apit_index);
+        if (apit == NULL || apit->ast != state->ast
+            || !cm_hir_def_id_equal(apit->owner, record->definition)) {
+            continue;
+        }
+        apit_type = cm_ast_get_type(state->ast, apit->ast_type);
+        if (!cm_lower_validate_impl_trait_type(state, ast_item_id,
+                apit->ast_type, apit_type, NULL)) {
+            return 0;
+        }
+        for (bound_index = 0u; bound_index < apit_type->bound_count;
+             ++bound_index) {
+            const CmAstTypeBound *bound;
+            uint32_t *count;
+
+            bound = &apit_type->bounds[bound_index];
+            if (bound->modifier == CM_AST_TYPE_BOUND_RELAXED) continue;
+            count = bound->lifetime == CM_INTERN_ID_NONE
+                ? &total_count : &outlives_total_count;
+            if (*count == UINT32_MAX) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    item_span, ast_item_id, apit->ast_type,
+                    CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+                    "argument impl trait predicate count overflow");
+                return 0;
+            }
+            *count += 1u;
             has_inline_predicate = 1;
         }
     }
@@ -7808,6 +8211,78 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                     NULL,
                     bound->modifier
                             == CM_AST_GENERIC_BOUND_CONDITIONALLY_CONST
+                        ? CM_HIR_PREDICATE_CONST_IF_CONST
+                        : CM_HIR_PREDICATE_REQUIRED,
+                    &predicates[predicate_count])) {
+                break;
+            }
+            predicate_count += 1u;
+            hir_item->predicate_count = predicate_count;
+        }
+    }
+    for (apit_index = 0u;
+         apit_index < state->apit_records.len && !state->failed;
+         ++apit_index) {
+        const CmLowerApitRecord *apit;
+        const CmAstType *apit_type;
+        const CmHirGenericParam *generic;
+        CmHirType subject_type;
+        CmHirTypeId subject;
+        uint32_t bound_index;
+
+        apit = (const CmLowerApitRecord *)cm_vec_at_const(
+            &state->apit_records, apit_index);
+        if (apit == NULL || apit->ast != state->ast
+            || !cm_hir_def_id_equal(apit->owner, record->definition)) {
+            continue;
+        }
+        apit_type = cm_ast_get_type(state->ast, apit->ast_type);
+        generic = cm_hir_get_generic_param(state->hir, apit->hir_id);
+        if (apit_type == NULL || generic == NULL
+            || generic->kind != CM_HIR_GENERIC_TYPE
+            || !cm_hir_def_id_equal(generic->owner, record->definition)) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, item_span,
+                ast_item_id, apit->ast_type, CM_AST_PATH_NONE,
+                CM_HIR_INVALID_ID,
+                "argument impl trait lost its authenticated generic");
+            break;
+        }
+        memset(&subject_type, 0, sizeof(subject_type));
+        subject_type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+        subject_type.span = cm_lower_span(state, apit_type->span);
+        subject_type.data.parameter_type.parameter = apit->hir_id;
+        subject = cm_lower_add_type(state, &subject_type,
+            apit->ast_type);
+        for (bound_index = 0u;
+             bound_index < apit_type->bound_count && !state->failed;
+             ++bound_index) {
+            const CmAstTypeBound *bound;
+
+            bound = &apit_type->bounds[bound_index];
+            if (bound->modifier == CM_AST_TYPE_BOUND_RELAXED) continue;
+            if (bound->lifetime != CM_INTERN_ID_NONE) {
+                CmHirOutlivesPredicate *predicate;
+
+                predicate = &outlives_predicates[
+                    outlives_predicate_count];
+                predicate->subject_kind = CM_HIR_OUTLIVES_TYPE;
+                predicate->subject.type = subject;
+                predicate->span = cm_lower_span(state, bound->span);
+                if (!cm_lower_lifetime(state, bound->lifetime,
+                        record->definition, predicate->span,
+                        &predicate->bound)) {
+                    break;
+                }
+                outlives_predicate_count += 1u;
+                hir_item->outlives_predicate_count =
+                    outlives_predicate_count;
+                continue;
+            }
+            if (!cm_lower_one_trait_predicate(state, ast_item_id, record,
+                    subject, bound->trait_type,
+                    cm_lower_span(state, bound->span), &bound->binder,
+                    bound->modifier
+                            == CM_AST_TYPE_BOUND_CONDITIONALLY_CONST
                         ? CM_HIR_PREDICATE_CONST_IF_CONST
                         : CM_HIR_PREDICATE_REQUIRED,
                     &predicates[predicate_count])) {
@@ -8294,7 +8769,7 @@ static int cm_lower_associated_type_bound(CmLowerState *state,
             associated_record.definition;
         out_bound->equalities[equality_count].value = cm_lower_type(state,
             argument->type, record->owner_module,
-            record->parent_definition);
+            record->definition);
         out_bound->equalities[equality_count].span = cm_lower_span(state,
             argument->span);
         equality_count += 1u;
@@ -13735,6 +14210,7 @@ CmHirLowerResult cm_hir_lower_crate(CmHirContext *context, const CmAst *ast,
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
+    cm_vec_init(&state.apit_records, sizeof(CmLowerApitRecord));
     cm_vec_init(&state.expanded_source_ids, sizeof(CmAstItemId));
     crate_span.source = options->source;
     crate_span.start = 0u;
@@ -13806,6 +14282,7 @@ CmHirLowerResult cm_hir_lower_crate(CmHirContext *context, const CmAst *ast,
 
 finish:
     cm_vec_destroy(&state.expanded_source_ids);
+    cm_vec_destroy(&state.apit_records);
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);
@@ -13848,6 +14325,7 @@ CmHirLowerResult cm_hir_lower_expanded_crate(CmHirContext *context,
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
+    cm_vec_init(&state.apit_records, sizeof(CmLowerApitRecord));
     cm_vec_init(&state.expanded_source_ids, sizeof(CmAstItemId));
     crate_span.source = options->source;
     crate_span.start = 0u;
@@ -13930,6 +14408,7 @@ CmHirLowerResult cm_hir_lower_expanded_crate(CmHirContext *context,
 
 finish:
     cm_vec_destroy(&state.expanded_source_ids);
+    cm_vec_destroy(&state.apit_records);
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);
@@ -14029,6 +14508,7 @@ CmHirLowerResult cm_hir_lower_module_graph(CmHirContext *context,
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
+    cm_vec_init(&state.apit_records, sizeof(CmLowerApitRecord));
     cm_vec_init(&state.expanded_source_ids, sizeof(CmAstItemId));
     cm_vec_init(&state.expected_module_bindings,
         sizeof(CmHirModuleMapEntry));
@@ -14112,6 +14592,7 @@ finish:
     cm_vec_destroy(&traversal);
     cm_vec_destroy(&state.expected_module_bindings);
     cm_vec_destroy(&state.expanded_source_ids);
+    cm_vec_destroy(&state.apit_records);
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);

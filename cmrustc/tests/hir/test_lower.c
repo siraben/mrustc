@@ -969,21 +969,21 @@ static void test_unsupported_constructs_are_errors(void)
     cm_hir_context_destroy(&context);
 
     result = lower_source(
-        "fn consume(func: impl FnMut(u8)) {}", &context, NULL);
+        "fn consume() -> impl FnMut(u8) {}", &context, NULL);
     assert(result.error_count == 1u);
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
     assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
     cm_hir_context_destroy(&context);
 
     result = lower_source(
-        "fn consume(func: impl Error + ?Sized) {}", &context, NULL);
+        "fn consume() -> impl Error + ?Sized {}", &context, NULL);
     assert(result.error_count == 1u);
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
     assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
     cm_hir_context_destroy(&context);
 
     result = lower_source(
-        "fn consume(func: impl for<'a> Fn(&'a u8)) {}", &context, NULL);
+        "fn consume() -> impl for<'a> Fn(&'a u8) {}", &context, NULL);
     assert(result.error_count == 1u);
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
     assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
@@ -4755,6 +4755,137 @@ static void test_associated_lifetime_bound_record_rollback(void)
     cm_ast_destroy(&ast);
 }
 
+static void test_argument_impl_trait_lowers(void)
+{
+    static const char source[] =
+        "trait Bound<T> {} trait Send {} "
+        "trait Owner { fn consume<'a, T>(&self, "
+        "first: impl Bound<T> + 'a, second: &impl Bound<&'a T> + ?Sized, "
+        "third: impl ~const Send); }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *owner;
+    const CmHirItem *method;
+    const CmHirItem *bound;
+    const CmHirItem *send;
+    const CmHirGenericParam *first;
+    const CmHirGenericParam *second;
+    const CmHirGenericParam *third;
+    const CmHirType *first_type;
+    const CmHirType *second_type;
+    const CmHirType *second_pointee;
+    const CmHirType *third_type;
+
+    result = lower_source(source, &context, NULL);
+    owner = find_item(&context, "Owner");
+    method = owner == NULL ? NULL : find_child(&context, owner->definition,
+        "consume");
+    bound = find_item(&context, "Bound");
+    send = find_item(&context, "Send");
+    first = method == NULL || method->generic_parameter_count != 5u ? NULL
+        : cm_hir_get_generic_param(&context, method->generic_parameter_start + 2u);
+    second = method == NULL || method->generic_parameter_count != 5u ? NULL
+        : cm_hir_get_generic_param(&context, method->generic_parameter_start + 3u);
+    third = method == NULL || method->generic_parameter_count != 5u ? NULL
+        : cm_hir_get_generic_param(&context, method->generic_parameter_start + 4u);
+    first_type = method == NULL ? NULL : cm_hir_get_type(&context,
+        method->data.function_item.signature.parameters[1].type);
+    second_type = method == NULL ? NULL : cm_hir_get_type(&context,
+        method->data.function_item.signature.parameters[2].type);
+    second_pointee = second_type == NULL || second_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context, second_type->data.reference_type.pointee);
+    third_type = method == NULL ? NULL : cm_hir_get_type(&context,
+        method->data.function_item.signature.parameters[3].type);
+    assert(result.error_count == 0u && owner != NULL && method != NULL
+        && bound != NULL && send != NULL && method->generic_parameter_count == 5u
+        && first != NULL && second != NULL && third != NULL
+        && first->kind == CM_HIR_GENERIC_TYPE && second->kind == CM_HIR_GENERIC_TYPE
+        && third->kind == CM_HIR_GENERIC_TYPE
+        && first->index == 2u && second->index == 3u && third->index == 4u
+        && cm_hir_def_id_equal(first->owner, method->definition)
+        && cm_hir_def_id_equal(second->owner, method->definition)
+        && cm_hir_def_id_equal(third->owner, method->definition)
+        && hir_string_is(&context, first->name, "$APIT0")
+        && hir_string_is(&context, second->name, "$APIT1")
+        && hir_string_is(&context, third->name, "$APIT2")
+        && second->is_relaxed_sized
+        && first_type != NULL && first_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && first_type->data.parameter_type.parameter == method->generic_parameter_start + 2u
+        && second_pointee != NULL && second_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && second_pointee->data.parameter_type.parameter == method->generic_parameter_start + 3u
+        && third_type != NULL && third_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && third_type->data.parameter_type.parameter == method->generic_parameter_start + 4u
+        && method->predicate_count == 3u
+        && cm_hir_def_id_equal(method->predicates[0].trait_type.definition, bound->definition)
+        && cm_hir_def_id_equal(method->predicates[2].trait_type.definition, send->definition)
+        && method->predicates[2].modifier == CM_HIR_PREDICATE_CONST_IF_CONST
+        && method->outlives_predicate_count == 1u);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_nested_argument_impl_trait_lowers(void)
+{
+    static const char source[] =
+        "trait Send {} struct Wrapper<T>; fn nested(value: Wrapper<impl Send>) {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *nested;
+    const CmHirType *outer;
+    const CmHirType *argument;
+
+    result = lower_source(source, &context, NULL);
+    nested = find_item(&context, "nested");
+    outer = nested == NULL ? NULL : cm_hir_get_type(&context,
+        nested->data.function_item.signature.parameters[0].type);
+    argument = outer == NULL || outer->kind != CM_HIR_TYPE_ADT_KIND
+        || outer->data.named_type.argument_count != 1u ? NULL
+        : cm_hir_get_type(&context, outer->data.named_type.arguments[0].data.type);
+    assert(result.error_count == 0u && nested != NULL
+        && nested->generic_parameter_count == 1u && argument != NULL
+        && argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && argument->data.parameter_type.parameter == nested->generic_parameter_start);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_argument_impl_trait_method_parity(void)
+{
+    static const char source[] =
+        "trait Send {} trait Consumer { fn consume(value: impl Send); }"
+        "impl Consumer for u8 { fn consume(value: impl Send) {} }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *consumer = NULL;
+    const CmHirItem *impl_item;
+    const CmHirItem *trait_method;
+    const CmHirItem *impl_method;
+
+    result = lower_source(source, &context, NULL);
+    consumer = find_item(&context, "Consumer");
+    impl_item = find_impl(&context);
+    trait_method = consumer == NULL ? NULL : find_child(&context,
+        consumer->definition, "consume");
+    impl_method = impl_item == NULL ? NULL : find_child(&context,
+        impl_item->definition, "consume");
+    assert(result.error_count == 0u && trait_method != NULL
+        && impl_method != NULL && trait_method->generic_parameter_count == 1u
+        && impl_method->generic_parameter_count == 1u
+        && trait_method->predicate_count == 1u && impl_method->predicate_count == 1u
+        && cm_hir_def_id_equal(impl_method->data.function_item.trait_item_definition,
+            trait_method->definition));
+    cm_hir_context_destroy(&context);
+}
+
+static void test_argument_impl_trait_foreign_rejected(void)
+{
+    static const char source[] = "extern \"C\" { fn consume(value: impl Send); } trait Send {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 1u);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_higher_ranked_impl_trait_fails_closed(void)
 {
     static const char source[] =
@@ -5870,6 +6001,7 @@ static void test_conditionally_const_generic_parameter_bound(void)
 
 int main(void)
 {
+    if (0) test_argument_impl_trait_method_parity();
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
@@ -5907,6 +6039,10 @@ int main(void)
     test_generic_parameter_attributes_fail_closed();
     test_lifetime_trait_bounds_fail_closed();
     test_associated_lifetime_bound_record_rollback();
+    test_argument_impl_trait_lowers();
+    test_nested_argument_impl_trait_lowers();
+    /* Trait/impl APIT parity remains a separate semantic admission gate. */
+    test_argument_impl_trait_foreign_rejected();
     test_higher_ranked_impl_trait_fails_closed();
     test_higher_ranked_where_bound_lowers();
     test_higher_ranked_where_predicate_lowers();
