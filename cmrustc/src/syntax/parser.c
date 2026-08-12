@@ -990,14 +990,22 @@ static CmAstTypeId cm_parser_parse_type(CmParser *parser)
 
         type.kind = CM_AST_TYPE_TUPLE;
         cm_vec_init(&elements, sizeof(CmAstTypeId));
-        while (cm_parser_kind(parser) != CM_TOKEN_RPAREN &&
-               cm_parser_kind(parser) != CM_TOKEN_EOF) {
+        if (cm_parser_kind(parser) != CM_TOKEN_RPAREN
+            && cm_parser_kind(parser) != CM_TOKEN_EOF) {
             CmAstTypeId element;
 
             element = cm_parser_parse_type(parser);
+            if (cm_parser_kind(parser) == CM_TOKEN_RPAREN) {
+                cm_parser_bump(parser);
+                cm_vec_destroy(&elements);
+                return element;
+            }
             (void)cm_vec_push(&elements, &element);
-            if (!cm_parser_eat(parser, CM_TOKEN_COMMA)) {
-                break;
+            while (cm_parser_eat(parser, CM_TOKEN_COMMA)
+                   && cm_parser_kind(parser) != CM_TOKEN_RPAREN
+                   && cm_parser_kind(parser) != CM_TOKEN_EOF) {
+                element = cm_parser_parse_type(parser);
+                (void)cm_vec_push(&elements, &element);
             }
         }
         (void)cm_parser_expect(parser, CM_TOKEN_RPAREN,

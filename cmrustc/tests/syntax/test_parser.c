@@ -4046,6 +4046,52 @@ static int test_structured_impl_trait_type(void)
     return ok;
 }
 
+static int test_parenthesized_and_singleton_tuple_types(void)
+{
+    static const char source[] =
+        "fn shapes(grouped: (u8), singleton: (u16,)) {}";
+    const CmAstItemId *root_id;
+    const CmAstItem *function;
+    const CmAstType *grouped;
+    const CmAstType *singleton;
+    const CmAstType *element;
+    CmAst ast;
+    CmParseResult result;
+    int ok;
+
+    cm_ast_init(&ast);
+    result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
+        CM_EDITION_2024);
+    root_id = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 0u);
+    function = root_id == NULL ? NULL : cm_ast_get_item(&ast, *root_id);
+    grouped = function == NULL || function->kind != CM_AST_ITEM_FUNCTION
+            || function->data.function_item.parameter_count != 2u
+            || function->data.function_item.parameters == NULL
+        ? NULL : cm_ast_get_type(&ast,
+            function->data.function_item.parameters[0].type);
+    singleton = grouped == NULL ? NULL : cm_ast_get_type(&ast,
+        function->data.function_item.parameters[1].type);
+    element = singleton == NULL || singleton->kind != CM_AST_TYPE_TUPLE
+            || singleton->element_count != 1u
+            || singleton->elements == NULL
+        ? NULL : cm_ast_get_type(&ast, singleton->elements[0]);
+    ok = result.error_count == 0u
+        && grouped != NULL && grouped->kind == CM_AST_TYPE_PATH
+        && ast_span_is(source, grouped->span, "u8")
+        && singleton != NULL && singleton->kind == CM_AST_TYPE_TUPLE
+        && singleton->tuple_provenance == CM_AST_TUPLE_SOURCE
+        && ast_span_is(source, singleton->span, "(u16,)")
+        && element != NULL && element->kind == CM_AST_TYPE_PATH
+        && ast_span_is(source, element->span, "u16");
+    if (!ok) {
+        fprintf(stderr,
+            "parenthesized/singleton tuple type AST was incorrect: %s\n",
+            result.first_error.message);
+    }
+    cm_ast_destroy(&ast);
+    return ok;
+}
+
 static int test_conditionally_const_impl_trait_bounds(void)
 {
     static const char source[] =
@@ -4340,7 +4386,6 @@ static int test_structured_dyn_trait_type(void)
     const CmAstItemId *root_id;
     const CmAstItem *function;
     const CmAstType *reference;
-    const CmAstType *group;
     const CmAstType *dynamic;
     int ok;
 
@@ -4354,11 +4399,8 @@ static int test_structured_dyn_trait_type(void)
             || function->data.function_item.parameters == NULL
         ? NULL : cm_ast_get_type(&ast,
             function->data.function_item.parameters[0].type);
-    group = reference == NULL || reference->kind != CM_AST_TYPE_REFERENCE
+    dynamic = reference == NULL || reference->kind != CM_AST_TYPE_REFERENCE
         ? NULL : cm_ast_get_type(&ast, reference->child);
-    dynamic = group == NULL || group->kind != CM_AST_TYPE_TUPLE
-            || group->element_count != 1u || group->elements == NULL
-        ? NULL : cm_ast_get_type(&ast, group->elements[0]);
     ok = result.error_count == 0u && dynamic != NULL
         && dynamic->kind == CM_AST_TYPE_DYN_TRAIT
         && dynamic->bound_count == 3u && dynamic->bounds != NULL
@@ -4398,7 +4440,6 @@ static int test_relaxed_impl_trait_type_bound(void)
     const CmAstItemId *root_id;
     const CmAstItem *function;
     const CmAstType *reference;
-    const CmAstType *group;
     const CmAstType *opaque;
     int ok;
 
@@ -4412,11 +4453,8 @@ static int test_relaxed_impl_trait_type_bound(void)
             || function->data.function_item.parameters == NULL
         ? NULL : cm_ast_get_type(&ast,
             function->data.function_item.parameters[0].type);
-    group = reference == NULL || reference->kind != CM_AST_TYPE_REFERENCE
+    opaque = reference == NULL || reference->kind != CM_AST_TYPE_REFERENCE
         ? NULL : cm_ast_get_type(&ast, reference->child);
-    opaque = group == NULL || group->kind != CM_AST_TYPE_TUPLE
-            || group->element_count != 1u || group->elements == NULL
-        ? NULL : cm_ast_get_type(&ast, group->elements[0]);
     ok = result.error_count == 0u && opaque != NULL
         && opaque->kind == CM_AST_TYPE_IMPL_TRAIT
         && opaque->bound_count == 2u && opaque->bounds != NULL
@@ -5337,6 +5375,7 @@ int main(int argc, char **argv)
         && test_nonblock_match_arm_requires_comma()
         && test_method_turbofish_arguments()
         && test_structured_impl_trait_type()
+        && test_parenthesized_and_singleton_tuple_types()
         && test_conditionally_const_impl_trait_bounds()
         && test_unsafe_function_pointer_type()
         && test_higher_ranked_impl_trait_type()
