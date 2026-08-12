@@ -10936,7 +10936,6 @@ static void test_generated_failure_is_transactional(void)
         "trait First: Second {} trait Second: Third {} "
             "trait Third: First {}",
         "trait Consumer: NotATrait {} struct NotATrait;",
-        "trait T {} struct S; impl const T for S {}",
         "trait Good<T> {} fn staged<F>() where "
             "for<'a> F: Good<&'a u8> + Missing<&'a u8> {}"
     };
@@ -10955,7 +10954,6 @@ static void test_generated_failure_is_transactional(void)
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_WRONG_NAMESPACE,
-        CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNRESOLVED_PATH
     };
     size_t index;

@@ -711,16 +711,15 @@ static void test_auto_trait_and_negative_impl_lowering(void)
     static const char source[] =
         "trait PointeeSized {} "
         "pub unsafe auto trait Send {} "
-        "impl<T: PointeeSized> !Send for *const T {} "
-        "unsafe impl Send for u8 {}";
+        "impl<T: PointeeSized> const !Send for *const T {} "
+        "unsafe impl const Send for u8 {}";
     static const char *const rejected[] = {
-        "trait Marker {} impl !Marker for u8 {}",
-        "unsafe auto trait Marker {} unsafe impl !Marker for u8 {}",
+        "trait Marker {} impl const !Marker for u8 {}",
+        "unsafe auto trait Marker {} unsafe impl const !Marker for u8 {}",
         "auto trait Marker { fn f(); }",
         "auto trait Marker<T> {}",
         "trait Bound {} auto trait Marker: Bound {}",
         "auto trait Marker {} impl !Marker for u8 { fn f() {} }",
-        "auto trait Marker {} impl const !Marker for u8 {}",
         "auto trait Marker {} impl<T> !Marker for *const T {} "
             "impl<U> !Marker for *const U {}",
         "unsafe auto trait Marker {} impl !Marker for u8 {} "
@@ -733,7 +732,6 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
@@ -849,7 +847,11 @@ static void test_auto_trait_and_negative_impl_lowering(void)
     impl_ast_item = impl_ast_id == NULL ? NULL
         : (CmAstItem *)cm_vec_at(&ast.items, (size_t)*impl_ast_id - 1u);
     assert(impl_ast_item != NULL && impl_ast_item->kind == CM_AST_ITEM_IMPL
-        && impl_ast_item->data.impl_item.is_negative);
+        && impl_ast_item->data.impl_item.is_negative
+        && impl_ast_item->data.impl_item.is_const == 1);
+    impl_ast_item->data.impl_item.is_const = 99;
+    expect_invalid_ast_lowering(&ast, &options, "invalid const flag");
+    impl_ast_item->data.impl_item.is_const = 1;
     saved_trait_type = impl_ast_item->data.impl_item.trait_type;
     impl_ast_item->data.impl_item.trait_type = CM_AST_TYPE_NONE;
     cm_hir_context_init(&context);

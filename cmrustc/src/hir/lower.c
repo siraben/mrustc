@@ -8208,7 +8208,7 @@ static int cm_lower_associated_type_bound(CmLowerState *state,
     }
     if (!cm_lower_trait_positional_arguments(state, ast_item_id,
             last_segment, &trait_target, record->owner_module,
-            record->parent_definition, *projection_subject, 1, 0, span,
+            record->definition, *projection_subject, 1, 0, span,
             &out_bound->trait_type.arguments,
             &out_bound->trait_type.argument_count)) {
         return 0;
@@ -8878,18 +8878,24 @@ static int cm_lower_impl_item(CmLowerState *state,
             "impl has an invalid polarity flag");
         return 0;
     }
+    if (ast_item->data.impl_item.is_const != 0
+        && ast_item->data.impl_item.is_const != 1) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "impl has an invalid const flag");
+        return 0;
+    }
     if (ast_item->visibility.kind != CM_AST_VIS_INHERITED) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "impl blocks cannot have explicit visibility");
         return 0;
     }
-    if (ast_item->data.impl_item.is_const) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
-            ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "const impls are not supported in the bounded HIR slice");
-        return 0;
-    }
+    /*
+     * Match the mrustc oracle: `impl const` is accepted by the parser and
+     * deliberately erased before HIR.  The ordinary inherent/trait,
+     * polarity, and safety checks below remain authoritative.
+     */
     if (ast_item->data.impl_item.self_type == CM_AST_TYPE_NONE) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
