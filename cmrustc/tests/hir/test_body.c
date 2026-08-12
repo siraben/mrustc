@@ -193,6 +193,55 @@ static CmHirBodyLowerResult lower_fixture_body(TestFixture *fixture)
         &fixture->map);
 }
 
+static CmHirLocalBodiesResult lower_fixture_local_bodies(
+    TestFixture *fixture)
+{
+    const CmHirCrate *crate_value;
+
+    crate_value = cm_hir_get_crate(&fixture->hir, 1u);
+    assert(crate_value != NULL);
+    return cm_hir_lower_local_bodies(&fixture->hir, 1u, &fixture->graph,
+        fixture->graph_result.revision, &fixture->imports, &fixture->map);
+}
+
+static void test_all_local_bodies_transaction(void)
+{
+    TestFixture fixture;
+    CmHirLocalBodiesResult result;
+    const CmHirItem *first;
+    const CmHirItem *second;
+    size_t expression_count;
+
+    fixture_init_named(&fixture,
+        "fn first() -> i32 { 7 } fn second() -> i32 { true }", "first");
+    first = find_function(&fixture.hir, "first");
+    second = find_function(&fixture.hir, "second");
+    assert(first != NULL && second != NULL);
+    expression_count = fixture.hir.expressions.len;
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_BODY_FAILURE
+        && result.body == second->data.function_item.body
+        && result.body_result.status != CM_HIR_BODY_LOWER_OK
+        && fixture.hir.expressions.len == expression_count
+        && cm_hir_get_body(&fixture.hir,
+            first->data.function_item.body)->state == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir,
+            second->data.function_item.body)->state == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&fixture);
+
+    fixture_init_named(&fixture,
+        "fn first() -> i32 { 7 } fn second() -> i32 { 9 }", "first");
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_OK
+        && cm_hir_get_body(&fixture.hir,
+            find_function(&fixture.hir, "first")->data.function_item.body)
+                ->state == CM_HIR_BODY_TYPED
+        && cm_hir_get_body(&fixture.hir,
+            find_function(&fixture.hir, "second")->data.function_item.body)
+                ->state == CM_HIR_BODY_TYPED);
+    fixture_destroy(&fixture);
+}
+
 static char *read_dump(FILE *stream)
 {
     long length;
@@ -3225,6 +3274,7 @@ static void test_owned_local_and_instantiated_call_model(void)
 
 int main(void)
 {
+    test_all_local_bodies_transaction();
     test_exact_i32_body();
     test_source_backed_named_aggregate_body();
     test_nested_and_empty_named_aggregate_bodies();

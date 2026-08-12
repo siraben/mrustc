@@ -28,6 +28,25 @@ typedef struct CmHirBodyLowerResult {
     CmHirStatus hir_status;
 } CmHirBodyLowerResult;
 
+typedef enum CmHirLocalBodiesStatus {
+    CM_HIR_LOCAL_BODIES_OK = 0,
+    CM_HIR_LOCAL_BODIES_INVALID_ARGUMENT,
+    CM_HIR_LOCAL_BODIES_SOURCE_MISMATCH,
+    CM_HIR_LOCAL_BODIES_INVALID_HIR,
+    CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER,
+    CM_HIR_LOCAL_BODIES_BODY_FAILURE,
+    CM_HIR_LOCAL_BODIES_HIR_FAILURE
+} CmHirLocalBodiesStatus;
+
+typedef struct CmHirLocalBodiesResult {
+    CmHirLocalBodiesStatus status;
+    CmHirItemId item;
+    CmHirDefId owner;
+    CmHirBodyId body;
+    CmHirBodyLowerResult body_result;
+    CmHirStatus hir_status;
+} CmHirLocalBodiesResult;
+
 /*
  * Append fully typed body-owned expressions.  These APIs perform no type
  * inference: the caller supplies the exact local/call result type, and the
@@ -98,6 +117,18 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
     const CmHirModuleMap *modules);
 
+/*
+ * Transactionally publish every supported top-level local function body in
+ * stable HIR item order. The complete local body/item relation is validated
+ * before mutation. Associated function bodies and const/static initializers
+ * are explicit unsupported owner kinds and are never silently skipped.
+ */
+CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
+    CmHirCrateId local_crate, const CmModuleGraph *graph,
+    CmModuleGraphRevision revision, const CmImportResolver *imports,
+    const CmHirModuleMap *modules);
+
 const char *cm_hir_body_lower_status_name(CmHirBodyLowerStatus status);
+const char *cm_hir_local_bodies_status_name(CmHirLocalBodiesStatus status);
 
 #endif

@@ -2560,6 +2560,273 @@ fail_body_transaction:
     return result;
 }
 
+static CmHirLocalBodiesResult cm_hir_local_bodies_result(
+    CmHirLocalBodiesStatus status)
+{
+    CmHirLocalBodiesResult result;
+
+    memset(&result, 0, sizeof(result));
+    result.status = status;
+    result.item = CM_HIR_ITEM_NONE;
+    result.owner = cm_hir_def_id_none();
+    result.body = CM_HIR_BODY_NONE;
+    result.body_result = cm_hir_body_result(
+        CM_HIR_BODY_LOWER_INVALID_ARGUMENT, CM_HIR_BODY_NONE,
+        (CmSpan){ 0u, 0u, 0u });
+    result.hir_status = CM_HIR_OK;
+    return result;
+}
+
+static CmHirBodyId cm_hir_local_item_body(const CmHirItem *item)
+{
+    if (item->kind == CM_HIR_ITEM_FUNCTION)
+        return item->data.function_item.body;
+    if (item->kind == CM_HIR_ITEM_CONST || item->kind == CM_HIR_ITEM_STATIC)
+        return item->data.value_item.body;
+    return CM_HIR_BODY_NONE;
+}
+
+static int cm_hir_local_item_identity_valid(const CmHirContext *context,
+    CmHirCrateId local_crate, CmHirItemId item_id, const CmHirItem *item)
+{
+    const CmHirDefinition *definition;
+    const CmHirModule *module;
+
+    if (item == NULL || item->definition.crate_id != local_crate) return 0;
+    definition = cm_hir_lookup_definition(context, item->definition);
+    module = cm_hir_get_module(context, item->owner_module);
+    return definition != NULL
+        && cm_hir_def_id_equal(definition->id, item->definition)
+        && definition->kind == CM_HIR_DEFINITION_ITEM
+        && definition->state == CM_HIR_DEFINITION_BOUND
+        && definition->entity.item_id == item_id
+        && module != NULL && module->crate_id == local_crate;
+}
+
+static int cm_hir_local_body_shape_valid(const CmHirContext *context,
+    CmHirBodyId body_id, const CmHirBody *body)
+{
+    const CmHirExpr *root;
+
+    if (body == NULL || body->source == 0u
+        || body->source_expression_id == 0u
+        || body->span.source != body->source
+        || body->span.start > body->span.end
+        || cm_hir_get_type(context, body->expected_type) == NULL
+        || (body->local_count != 0u && body->locals == NULL)
+        || body->error_reason != CM_INTERN_ID_NONE) return 0;
+    if (body->state == CM_HIR_BODY_UNLOWERED)
+        return body->root_expression == CM_HIR_EXPR_NONE;
+    if (body->state != CM_HIR_BODY_TYPED
+        || body->root_expression == CM_HIR_EXPR_NONE) return 0;
+    root = cm_hir_get_expr(context, body->root_expression);
+    return root != NULL && root->owner_body == body_id
+        && root->type == body->expected_type
+        && root->span.source == body->source
+        && root->span.start >= body->span.start
+        && root->span.end <= body->span.end;
+}
+
+static CmHirStatus cm_hir_local_bodies_rollback(CmHirContext *context,
+    CmHirContextMark *mark, const CmHirBody *journal, size_t body_count)
+{
+    if (context->bodies.len < body_count
+        || (body_count != 0u && journal == NULL))
+        return CM_HIR_INVARIANT_VIOLATION;
+    if (body_count != 0u)
+        memcpy(context->bodies.data, journal,
+            body_count * sizeof(*journal));
+    return cm_hir_context_rewind(context, mark);
+}
+
+CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
+    CmHirCrateId local_crate, const CmModuleGraph *graph,
+    CmModuleGraphRevision revision, const CmImportResolver *imports,
+    const CmHirModuleMap *modules)
+{
+    CmHirLocalBodiesResult result;
+    const CmHirCrate *crate_value;
+    CmModuleId graph_root;
+    CmHirModuleMapStatus map_status;
+    CmHirItemId *body_owners;
+    CmHirBody *journal;
+    CmHirContextMark mark;
+    size_t body_bytes;
+    size_t item_index;
+    size_t body_index;
+    size_t captured_body_count;
+    CmHirStatus hir_status;
+    int mark_active;
+
+    result = cm_hir_local_bodies_result(
+        CM_HIR_LOCAL_BODIES_INVALID_ARGUMENT);
+    if (context == NULL || graph == NULL || imports == NULL || modules == NULL
+        || local_crate == CM_HIR_CRATE_NONE
+        || revision == CM_MODULE_GRAPH_REVISION_NONE) return result;
+    crate_value = cm_hir_get_crate(context, local_crate);
+    if (crate_value == NULL || crate_value->root_module == CM_HIR_MODULE_NONE) {
+        result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+        return result;
+    }
+    if (!cm_import_resolver_matches_graph(imports, graph)
+        || cm_import_resolver_revision(imports) != revision) {
+        result.status = CM_HIR_LOCAL_BODIES_SOURCE_MISMATCH;
+        return result;
+    }
+    map_status = cm_hir_module_map_lookup_module(modules, graph, revision,
+        context, crate_value->root_module, &graph_root);
+    if (map_status != CM_HIR_MODULE_MAP_OK || graph_root == CM_MODULE_NONE) {
+        result.status = CM_HIR_LOCAL_BODIES_SOURCE_MISMATCH;
+        return result;
+    }
+    captured_body_count = context->bodies.len;
+    if (context->items.len > (size_t)UINT32_MAX
+        || captured_body_count > (size_t)UINT32_MAX
+        || !cm_size_mul(captured_body_count, sizeof(*journal), &body_bytes)) {
+        result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
+        return result;
+    }
+    body_owners = (CmHirItemId *)cm_alloc_zeroed(
+        captured_body_count == 0u ? 1u : captured_body_count,
+        sizeof(*body_owners));
+    journal = NULL;
+    mark_active = 0;
+
+    for (item_index = 0u; item_index < context->items.len; ++item_index) {
+        const CmHirItem *item;
+        const CmHirModule *owner_module;
+        CmHirItemId item_id;
+        CmHirBodyId body_id;
+        const CmHirBody *body;
+
+        item_id = (CmHirItemId)(item_index + 1u);
+        item = cm_hir_get_item(context, item_id);
+        if (item == NULL) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            result.item = item_id;
+            goto finish;
+        }
+        owner_module = cm_hir_get_module(context, item->owner_module);
+        if (item->definition.crate_id != local_crate) {
+            if (owner_module != NULL && owner_module->crate_id == local_crate) {
+                result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+                result.item = item_id;
+                result.owner = item->definition;
+                goto finish;
+            }
+            continue;
+        }
+        if (!cm_hir_local_item_identity_valid(context, local_crate,
+                item_id, item)) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            result.item = item_id;
+            result.owner = item->definition;
+            goto finish;
+        }
+        body_id = cm_hir_local_item_body(item);
+        if (body_id == CM_HIR_BODY_NONE) continue;
+        result.item = item_id;
+        result.owner = item->definition;
+        result.body = body_id;
+        if (item->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_hir_def_id_is_none(item->parent_definition)) {
+            result.status = CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER;
+            goto finish;
+        }
+        if ((size_t)body_id > captured_body_count
+            || body_owners[(size_t)body_id - 1u] != CM_HIR_ITEM_NONE) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            goto finish;
+        }
+        body = cm_hir_get_body(context, body_id);
+        if (body == NULL
+            || !cm_hir_def_id_equal(body->owner, item->definition)
+            || !cm_hir_local_body_shape_valid(context, body_id, body)) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            goto finish;
+        }
+        body_owners[(size_t)body_id - 1u] = item_id;
+        result = cm_hir_local_bodies_result(CM_HIR_LOCAL_BODIES_OK);
+    }
+    for (body_index = 0u; body_index < captured_body_count; ++body_index) {
+        const CmHirBody *body;
+
+        body = cm_hir_get_body(context, (CmHirBodyId)(body_index + 1u));
+        if (body == NULL) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            result.body = (CmHirBodyId)(body_index + 1u);
+            goto finish;
+        }
+        if (body->owner.crate_id == local_crate
+            && body_owners[body_index] == CM_HIR_ITEM_NONE) {
+            result.status = CM_HIR_LOCAL_BODIES_INVALID_HIR;
+            result.owner = body->owner;
+            result.body = (CmHirBodyId)(body_index + 1u);
+            goto finish;
+        }
+    }
+
+    journal = body_bytes == 0u ? NULL : (CmHirBody *)cm_alloc(body_bytes);
+    if (body_bytes != 0u) memcpy(journal, context->bodies.data, body_bytes);
+    memset(&mark, 0, sizeof(mark));
+    hir_status = cm_hir_context_mark(context, &mark);
+    if (hir_status != CM_HIR_OK) {
+        result.status = CM_HIR_LOCAL_BODIES_HIR_FAILURE;
+        result.hir_status = hir_status;
+        goto finish;
+    }
+    mark_active = 1;
+    for (item_index = 0u; item_index < context->items.len; ++item_index) {
+        const CmHirItem *item;
+        const CmHirBody *body;
+        CmHirItemId item_id;
+        CmHirBodyId body_id;
+
+        item_id = (CmHirItemId)(item_index + 1u);
+        item = cm_hir_get_item(context, item_id);
+        if (item == NULL || item->definition.crate_id != local_crate
+            || item->kind != CM_HIR_ITEM_FUNCTION) continue;
+        body_id = item->data.function_item.body;
+        if (body_id == CM_HIR_BODY_NONE) continue;
+        body = cm_hir_get_body(context, body_id);
+        if (body != NULL && body->state == CM_HIR_BODY_TYPED) continue;
+        result.item = item_id;
+        result.owner = item->definition;
+        result.body = body_id;
+        result.body_result = cm_hir_lower_body(context, body_id, graph,
+            revision, imports, modules);
+        if (result.body_result.status != CM_HIR_BODY_LOWER_OK) {
+            result.status = CM_HIR_LOCAL_BODIES_BODY_FAILURE;
+            goto rollback;
+        }
+    }
+    hir_status = cm_hir_context_commit(context, &mark);
+    if (hir_status != CM_HIR_OK) {
+        result.status = CM_HIR_LOCAL_BODIES_HIR_FAILURE;
+        result.hir_status = hir_status;
+        goto rollback;
+    }
+    mark_active = 0;
+    result = cm_hir_local_bodies_result(CM_HIR_LOCAL_BODIES_OK);
+    goto finish;
+
+rollback:
+    if (mark_active) {
+        hir_status = cm_hir_local_bodies_rollback(context, &mark, journal,
+            captured_body_count);
+        mark_active = 0;
+        if (hir_status != CM_HIR_OK) {
+            result.status = CM_HIR_LOCAL_BODIES_HIR_FAILURE;
+            result.hir_status = hir_status;
+        }
+    }
+finish:
+    cm_free(journal);
+    cm_free(body_owners);
+    return result;
+}
+
 const char *cm_hir_body_lower_status_name(CmHirBodyLowerStatus status)
 {
     switch (status) {
@@ -2591,4 +2858,19 @@ const char *cm_hir_body_lower_status_name(CmHirBodyLowerStatus status)
         return "HIR failure";
     }
     return "unknown body lowering status";
+}
+
+const char *cm_hir_local_bodies_status_name(CmHirLocalBodiesStatus status)
+{
+    switch (status) {
+    case CM_HIR_LOCAL_BODIES_OK: return "ok";
+    case CM_HIR_LOCAL_BODIES_INVALID_ARGUMENT: return "invalid argument";
+    case CM_HIR_LOCAL_BODIES_SOURCE_MISMATCH: return "source mismatch";
+    case CM_HIR_LOCAL_BODIES_INVALID_HIR: return "invalid HIR";
+    case CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER:
+        return "unsupported body owner";
+    case CM_HIR_LOCAL_BODIES_BODY_FAILURE: return "body lowering failure";
+    case CM_HIR_LOCAL_BODIES_HIR_FAILURE: return "HIR failure";
+    }
+    return "unknown local body lowering status";
 }
