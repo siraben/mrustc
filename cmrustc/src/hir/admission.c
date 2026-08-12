@@ -1,5 +1,7 @@
 #include "cm/hir/admission.h"
 
+#include "semantic_results_internal.h"
+
 #include "cm/alloc.h"
 
 #include <string.h>
@@ -10,6 +12,7 @@ typedef struct CmSemanticAdmissionState {
     uint64_t storage_lifetime_id;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
+    CmSemanticResults *results;
 } CmSemanticAdmissionState;
 
 static CmSemanticAdmissionResult cm_admission_result(
@@ -75,6 +78,9 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     CmHirCrateFinalization finalization;
     CmSemanticSession session;
     CmHirStatus hir_status;
+    CmSemanticResultsStatus results_status;
+    CmSemanticResults *semantic_results;
+    CmSemanticAdmissionState *state;
     int mark_active;
 
     result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
@@ -103,6 +109,8 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     mark_active = 1;
     memset(&finalization, 0, sizeof(finalization));
     memset(&session, 0, sizeof(session));
+    semantic_results = NULL;
+    state = NULL;
 
     result.local_bodies = cm_hir_lower_local_bodies(hir, local_crate,
         graph, revision, imports, modules);
@@ -163,6 +171,16 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
             goto rollback;
         }
     }
+    state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u,
+        sizeof(*state));
+    results_status = cm_semantic_results_create(hir, local_crate,
+        &semantic_results);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto rollback;
+    }
     hir_status = cm_hir_context_commit(hir, &mark);
     if (hir_status != CM_HIR_OK) {
         result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
@@ -171,17 +189,13 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     }
     mark_active = 0;
     cm_hir_crate_finalization_destroy(&finalization);
-    {
-        CmSemanticAdmissionState *state;
-        state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u,
-            sizeof(*state));
-        state->hir = hir;
-        state->local_crate = local_crate;
-        state->storage_lifetime_id = hir->storage.lifetime_id;
-        state->semantic_generation = hir->semantic_generation;
-        state->rewind_generation = hir->rewind_generation;
-        admission->state = state;
-    }
+    state->hir = hir;
+    state->local_crate = local_crate;
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->results = semantic_results;
+    admission->state = state;
     cm_free(journal);
     result.status = CM_SEMANTIC_ADMISSION_OK;
     result.local_bodies.status = CM_HIR_LOCAL_BODIES_OK;
@@ -201,6 +215,8 @@ rollback:
             result.hir_status = hir_status;
         }
     }
+    cm_semantic_results_destroy(semantic_results);
+    cm_free(state);
     cm_free(journal);
     return result;
 }
@@ -209,10 +225,21 @@ void cm_semantic_admission_destroy(CmSemanticAdmission *admission)
 {
     if (admission == NULL) return;
     if (admission->state != NULL) {
+        CmSemanticAdmissionState *state;
+        state = (CmSemanticAdmissionState *)admission->state;
+        cm_semantic_results_destroy(state->results);
         memset(admission->state, 0, sizeof(CmSemanticAdmissionState));
         cm_free(admission->state);
     }
     admission->state = NULL;
+}
+
+const CmSemanticResults *cm_semantic_admission_results(
+    const CmSemanticAdmission *admission)
+{
+    const CmSemanticAdmissionState *state = admission == NULL ? NULL
+        : (const CmSemanticAdmissionState *)admission->state;
+    return cm_admission_state_current(state) ? state->results : NULL;
 }
 
 int cm_semantic_admission_is_current(const CmSemanticAdmission *admission)
