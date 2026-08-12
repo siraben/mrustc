@@ -24,9 +24,16 @@ typedef struct CmCompileResult {
     char message[256];
 } CmCompileResult;
 
+enum CmCompileCmhirKind {
+    CM_COMPILE_CMHIR_DECLARATION = 0,
+    CM_COMPILE_CMHIR_SEMANTIC
+};
+
 typedef struct CmCompileCmhirDependency {
     const char *extern_name;
     const char *path;
+    /* Selects the exact accepted wire version; never auto-detected. */
+    enum CmCompileCmhirKind kind;
 } CmCompileCmhirDependency;
 
 /*
@@ -59,6 +66,17 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
     enum cm_edition edition, const CmTargetDesc *target,
     const CmCompileCmhirDependency *dependencies,
     size_t dependency_count);
+
+/*
+ * Explicit variant of cm_compile_emit_cmhir. Semantic mode publishes exact
+ * cmhir-meta-v1.1 and accepts only dependencies whose per-entry kind also
+ * selects v1.1. Its transported trait universe remains OPEN.
+ */
+CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
+    const char *output_path, const char *crate_name,
+    enum cm_edition edition, const CmTargetDesc *target,
+    const CmCompileCmhirDependency *dependencies,
+    size_t dependency_count, enum CmCompileCmhirKind output_kind);
 
 const char *cm_compile_status_name(CmCompileStatus status);
 

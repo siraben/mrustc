@@ -1085,11 +1085,11 @@ cleanup:
     return result;
 }
 
-CmCompileResult cm_compile_emit_cmhir(const char *input_path,
+CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
     const char *output_path, const char *crate_name,
     enum cm_edition edition, const CmTargetDesc *target,
     const CmCompileCmhirDependency *dependencies,
-    size_t dependency_count)
+    size_t dependency_count, enum CmCompileCmhirKind output_kind)
 {
     CmCompileResult result;
     CmSourceSet sources;
@@ -1127,6 +1127,8 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
     if (input_path == NULL || input_path[0] == '\0'
         || output_path == NULL || output_path[0] == '\0'
         || !cm_compile_identifier_valid(crate_name) || target == NULL
+        || (output_kind != CM_COMPILE_CMHIR_DECLARATION
+            && output_kind != CM_COMPILE_CMHIR_SEMANTIC)
         || strcmp(input_path, output_path) == 0
         || (dependency_count != 0u && dependencies == NULL)
         || dependency_count > (size_t)UINT32_MAX
@@ -1142,6 +1144,10 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
                 dependencies[dependency_index].extern_name)
             || dependencies[dependency_index].path == NULL
             || dependencies[dependency_index].path[0] == '\0'
+            || (dependencies[dependency_index].kind
+                    != CM_COMPILE_CMHIR_DECLARATION
+                && dependencies[dependency_index].kind
+                    != CM_COMPILE_CMHIR_SEMANTIC)
             || strcmp(output_path,
                 dependencies[dependency_index].path) == 0) return result;
         for (prior_index = 0u; prior_index < dependency_index;
@@ -1236,10 +1242,25 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
                 "dependency and output paths identify the same file");
             goto cleanup_cmhir;
         }
-        metadata_result = cm_hir_metadata_decode_artifact(&hir,
-            &dependency_artifacts[dependency_index], metadata_file->bytes,
-            metadata_file->length,
-            dependencies[dependency_index].extern_name, metadata_source);
+        if (dependencies[dependency_index].kind
+                == CM_COMPILE_CMHIR_SEMANTIC) {
+            metadata_result = cm_hir_metadata_decode_semantic_artifact(&hir,
+                &dependency_artifacts[dependency_index],
+                metadata_file->bytes, metadata_file->length,
+                dependencies[dependency_index].extern_name,
+                metadata_source);
+        } else if (dependencies[dependency_index].kind
+                == CM_COMPILE_CMHIR_DECLARATION) {
+            metadata_result = cm_hir_metadata_decode_artifact(&hir,
+                &dependency_artifacts[dependency_index],
+                metadata_file->bytes, metadata_file->length,
+                dependencies[dependency_index].extern_name,
+                metadata_source);
+        } else {
+            result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+                "invalid cmhir dependency kind");
+            goto cleanup_cmhir;
+        }
         if (metadata_result.status != CM_HIR_METADATA_ARTIFACT_OK) {
             result = cm_compile_result(CM_COMPILE_METADATA,
                 "cmhir dependency decode failed");
@@ -1306,8 +1327,10 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
             cm_hir_library_status_name(library_result.status));
         goto cleanup_cmhir;
     }
-    metadata_result = cm_hir_metadata_encode_artifact(&encoded,
-        &output_artifact);
+    metadata_result = output_kind == CM_COMPILE_CMHIR_SEMANTIC
+        ? cm_hir_metadata_encode_semantic_artifact(&encoded,
+            &output_artifact)
+        : cm_hir_metadata_encode_artifact(&encoded, &output_artifact);
     if (metadata_result.status != CM_HIR_METADATA_ARTIFACT_OK
         || encoded.len == 0u) {
         result = cm_compile_result(CM_COMPILE_METADATA,
@@ -1375,6 +1398,17 @@ cleanup_cmhir:
     cm_module_graph_destroy(&graph);
     cm_source_set_destroy(&sources);
     return result;
+}
+
+CmCompileResult cm_compile_emit_cmhir(const char *input_path,
+    const char *output_path, const char *crate_name,
+    enum cm_edition edition, const CmTargetDesc *target,
+    const CmCompileCmhirDependency *dependencies,
+    size_t dependency_count)
+{
+    return cm_compile_emit_cmhir_kind(input_path, output_path, crate_name,
+        edition, target, dependencies, dependency_count,
+        CM_COMPILE_CMHIR_DECLARATION);
 }
 
 const char *cm_compile_status_name(CmCompileStatus status)

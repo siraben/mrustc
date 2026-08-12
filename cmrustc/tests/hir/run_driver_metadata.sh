@@ -30,6 +30,11 @@ transitive=$temporary_directory/transitive.cmhir
 preserved=$temporary_directory/preserved.cmhir
 expected=$temporary_directory/expected
 corrupted=$temporary_directory/corrupted.cmhir
+semantic_producer_source=$fixture_root/driver-metadata-semantic-producer.rs
+semantic_consumer_source=$fixture_root/driver-metadata-semantic-consumer.rs
+semantic_first=$temporary_directory/semantic-first.cmhir
+semantic_second=$temporary_directory/semantic-second.cmhir
+semantic_consumer=$temporary_directory/semantic-consumer.cmhir
 
 "$cmrustc" --edition 2024 --emit-cmhir "$producer_source" \
     --crate-name producer -o "$producer_first"
@@ -37,6 +42,44 @@ corrupted=$temporary_directory/corrupted.cmhir
     --crate-name producer -o "$producer_second"
 test -s "$producer_first"
 cmp -s "$producer_first" "$producer_second"
+
+# Semantic metadata is an explicit exact-v1.1 file kind. It transports only
+# the supported self-contained local-trait universe and remains deterministic.
+"$cmrustc" --edition 2024 --emit-semantic-cmhir \
+    "$semantic_producer_source" --crate-name semantic_dep \
+    -o "$semantic_first"
+"$cmrustc" --edition 2024 --emit-semantic-cmhir \
+    "$semantic_producer_source" --crate-name semantic_dep \
+    -o "$semantic_second"
+test -s "$semantic_first"
+cmp -s "$semantic_first" "$semantic_second"
+"$cmrustc" --edition 2024 --emit-semantic-cmhir \
+    "$semantic_consumer_source" --crate-name semantic_consumer \
+    --extern-semantic-cmhir dep "$semantic_first" \
+    -o "$semantic_consumer"
+test -s "$semantic_consumer"
+
+# Neither exact decoder may silently auto-detect the other file kind.
+if "$cmrustc" --edition 2024 --emit-semantic-cmhir \
+    "$semantic_consumer_source" --crate-name wrong_v10 \
+    --extern-semantic-cmhir dep "$producer_first" \
+    -o "$temporary_directory/wrong-v10.cmhir" \
+    >"$temporary_directory/wrong-v10.stdout" \
+    2>"$temporary_directory/wrong-v10.stderr"; then
+    echo "v1.1 dependency mode unexpectedly accepted v1.0 bytes" >&2
+    exit 1
+fi
+test ! -e "$temporary_directory/wrong-v10.cmhir"
+if "$cmrustc" --edition 2024 --emit-cmhir \
+    "$semantic_consumer_source" --crate-name wrong_v11 \
+    --extern-cmhir dep "$semantic_first" \
+    -o "$temporary_directory/wrong-v11.cmhir" \
+    >"$temporary_directory/wrong-v11.stdout" \
+    2>"$temporary_directory/wrong-v11.stderr"; then
+    echo "v1.0 dependency mode unexpectedly accepted v1.1 bytes" >&2
+    exit 1
+fi
+test ! -e "$temporary_directory/wrong-v11.cmhir"
 
 # This is a fresh driver process. Loading the same bytes first as `filler`
 # prepopulates its HIR context; loading them again as `dep` must remap all

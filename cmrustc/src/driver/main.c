@@ -28,6 +28,10 @@ static void cm_print_usage(FILE *stream)
           "                          emit private declaration metadata\n"
           "    --extern-cmhir NAME FILE\n"
           "                          load one private metadata dependency\n"
+          "  --emit-semantic-cmhir FILE --crate-name NAME -o FILE\n"
+          "                          emit exact v1.1 OPEN semantic metadata\n"
+          "    --extern-semantic-cmhir NAME FILE\n"
+          "                          load exact v1.1 semantic metadata\n"
           "  --edition YEAR          select 2015, 2018, 2021, or 2024\n"
           "  --run PROGRAM [ARG...]  run a child process without a shell\n",
         stream);
@@ -264,7 +268,8 @@ static int cm_probe_sources(int count, char **paths)
 }
 
 static int cm_emit_cmhir_cli(int argc, char **argv, int action_index,
-    enum cm_edition edition, const CmTargetDesc *target)
+    enum cm_edition edition, const CmTargetDesc *target,
+    enum CmCompileCmhirKind output_kind)
 {
     const char *input_path;
     const char *output_path;
@@ -308,6 +313,21 @@ static int cm_emit_cmhir_cli(int argc, char **argv, int action_index,
             }
             dependencies[dependency_count].extern_name = argv[index + 1];
             dependencies[dependency_count].path = argv[index + 2];
+            dependencies[dependency_count].kind =
+                CM_COMPILE_CMHIR_DECLARATION;
+            dependency_count += 1u;
+            index += 3;
+        } else if (strcmp(argv[index], "--extern-semantic-cmhir") == 0) {
+            if (index + 2 >= argc) {
+                fputs("cmrustc: --extern-semantic-cmhir requires "
+                      "'NAME FILE'\n", stderr);
+                free(dependencies);
+                return 2;
+            }
+            dependencies[dependency_count].extern_name = argv[index + 1];
+            dependencies[dependency_count].path = argv[index + 2];
+            dependencies[dependency_count].kind =
+                CM_COMPILE_CMHIR_SEMANTIC;
             dependency_count += 1u;
             index += 3;
         } else if (strcmp(argv[index], "-o") == 0) {
@@ -332,8 +352,8 @@ static int cm_emit_cmhir_cli(int argc, char **argv, int action_index,
         free(dependencies);
         return 2;
     }
-    result = cm_compile_emit_cmhir(input_path, output_path, crate_name,
-        edition, target, dependencies, dependency_count);
+    result = cm_compile_emit_cmhir_kind(input_path, output_path, crate_name,
+        edition, target, dependencies, dependency_count, output_kind);
     free(dependencies);
     if (result.status != CM_COMPILE_OK) {
         fprintf(stderr, "cmrustc: %s: %s\n",
@@ -426,7 +446,11 @@ int cm_driver_main(int argc, char **argv)
             }
             return 0;
         } else if (strcmp(argument, "--emit-cmhir") == 0) {
-            return cm_emit_cmhir_cli(argc, argv, index, edition, target);
+            return cm_emit_cmhir_cli(argc, argv, index, edition, target,
+                CM_COMPILE_CMHIR_DECLARATION);
+        } else if (strcmp(argument, "--emit-semantic-cmhir") == 0) {
+            return cm_emit_cmhir_cli(argc, argv, index, edition, target,
+                CM_COMPILE_CMHIR_SEMANTIC);
         } else if (strcmp(argument, "--run") == 0) {
             CmProcessStatus status;
 
