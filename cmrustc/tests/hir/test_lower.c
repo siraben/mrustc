@@ -997,6 +997,14 @@ static void test_unsupported_constructs_are_errors(void)
     assert(strstr(result.first_error.message, "dynamic trait") != NULL);
     cm_hir_context_destroy(&context);
 
+    result = lower_source(
+        "trait Error {} fn source(error: &(dyn Error + 'static)) {}",
+        &context, NULL);
+    assert(result.error_count == 1u);
+    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
+    assert(strstr(result.first_error.message, "dynamic trait") != NULL);
+    cm_hir_context_destroy(&context);
+
     result = lower_source("#[repr(C)] struct Bad;", &context, NULL);
     assert(result.error_count == 1u);
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM);
