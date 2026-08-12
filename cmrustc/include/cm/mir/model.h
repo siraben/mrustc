@@ -137,6 +137,12 @@ typedef struct CmMirInstance {
     uint32_t substitution_count;
 } CmMirInstance;
 
+typedef enum CmMirSemanticEvidenceKind {
+    CM_MIR_SEMANTIC_EVIDENCE_NONE = 0,
+    CM_MIR_SEMANTIC_EVIDENCE_BODY,
+    CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+} CmMirSemanticEvidenceKind;
+
 typedef enum CmMirStatementKind {
     CM_MIR_STATEMENT_ASSIGN = 0
 } CmMirStatementKind;
@@ -199,6 +205,8 @@ typedef struct CmMirBody {
     CmMirInstance instance;
     CmHirDefId owner;
     CmHirBodyId source_body;
+    /* Selects the sealed semantic-results namespace used for publication. */
+    CmMirSemanticEvidenceKind semantic_evidence;
     CmMirLocal *locals;
     uint32_t local_count;
     CmMirBasicBlock *basic_blocks;

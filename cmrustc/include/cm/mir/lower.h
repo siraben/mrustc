@@ -52,6 +52,9 @@ CmMirLowerResult cm_mir_lower_instance(CmMirContext *context,
 CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
     const CmSemanticAdmission *admission, CmHirBodyId body);
 
+/* Query only the exact-instance semantic namespace, including when the
+ * instance has zero arguments. The temporary flat substitution API supports
+ * local free-function type arguments only. */
 CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
     const CmSemanticAdmission *admission, CmHirBodyId body,
     const CmHirTypeId *substitutions, uint32_t substitution_count);

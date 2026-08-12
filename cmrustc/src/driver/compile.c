@@ -803,8 +803,8 @@ static int cm_compile_lower_reachable_instance(CmCompileExactState *state,
     mir_result = state->admission == NULL
         ? cm_mir_lower_instance(state->mir, state->hir, instance->body,
             substitutions, instance->substitution_count)
-        : cm_mir_lower_admitted_instance(state->mir, state->admission,
-            instance->body, NULL, 0u);
+        : cm_mir_lower_admitted_body(state->mir, state->admission,
+            instance->body);
     if (mir_result.error_count != 0u
         || mir_result.body == CM_MIR_BODY_NONE) {
         (void)snprintf(message, message_capacity, "%s",
