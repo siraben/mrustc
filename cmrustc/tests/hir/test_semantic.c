@@ -189,7 +189,7 @@ static void test_open_session_solve_and_accessors(void)
     assert(typeck != NULL);
     assert(cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(typeck, &exact);
     exact.parameter_owner = fixture.owner_trait;
     exact.self_owner = fixture.owner_trait;
     exact.self_type = bool_type;
@@ -341,7 +341,7 @@ static void test_foreign_and_malformed_data_rejected(void)
     typeck = cm_semantic_session_typeck(&session);
     assert(cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(typeck, &exact);
     exact.parameter_owner = fixture.owner_trait;
     exact.self_owner = fixture.owner_trait;
     exact.self_type = bool_type;
@@ -397,7 +397,7 @@ static void test_append_and_rewind_staleness(void)
     typeck = cm_semantic_session_typeck(&session);
     assert(cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(typeck, &exact);
     exact.parameter_owner = fixture.owner_trait;
     exact.self_owner = fixture.owner_trait;
     exact.self_type = bool_type;
@@ -468,7 +468,7 @@ static void test_complete_session_authentication(void)
     assert(typeck != NULL);
     assert(cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(typeck, &exact);
     exact.parameter_owner = fixture.owner_trait;
     exact.self_owner = fixture.owner_trait;
     exact.self_type = bool_type;

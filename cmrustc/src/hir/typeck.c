@@ -418,6 +418,19 @@ void cm_typeck_context_destroy(CmTypeckContext *context)
     context->state = NULL;
 }
 
+void cm_typeck_instantiation_init(const CmTypeckContext *context,
+    CmTypeckInstantiation *instantiation)
+{
+    const CmTypeckState *state;
+
+    if (instantiation == NULL) return;
+    memset(instantiation, 0, sizeof(*instantiation));
+    state = cm_typeck_state_const(context);
+    if (!cm_typeck_state_is_current(state)) return;
+    instantiation->typeck_state = state;
+    instantiation->typeck_lifetime_id = state->lifetime_id;
+}
+
 CmTypeckStatus cm_typeck_snapshot(CmTypeckContext *context,
     CmTypeckSnapshot *out_snapshot)
 {
@@ -661,6 +674,44 @@ const CmHirContext *cm_typeck_hir_context(const CmTypeckContext *context)
 
     state = cm_typeck_state_const(context);
     return !cm_typeck_state_is_current(state) ? NULL : state->hir;
+}
+
+int cm_typeck_adt_is_valid(const CmTypeckContext *context,
+    const CmTypeckNamedType *adt)
+{
+    const CmTypeckState *state;
+    const CmHirDefinition *definition;
+    const CmHirItem *item;
+    uint32_t index;
+
+    state = cm_typeck_state_const(context);
+    if (!cm_typeck_state_is_current(state)
+        || !cm_typeck_named_valid(state, adt)) return 0;
+    definition = cm_hir_lookup_definition(state->hir, adt->definition);
+    if (definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM) {
+        return 0;
+    }
+    item = cm_hir_get_item(state->hir, definition->entity.item_id);
+    if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+            && item->kind != CM_HIR_ITEM_ENUM
+            && item->kind != CM_HIR_ITEM_UNION)
+        || item->generic_parameter_count != adt->argument_count) return 0;
+    for (index = 0u; index < adt->argument_count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            item->generic_parameter_start + index);
+        expected = parameter == NULL ? (CmHirGenericArgKind)-1
+            : parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter->kind == CM_HIR_GENERIC_TYPE
+                    ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, item->definition)
+            || adt->arguments[index].kind != expected) return 0;
+    }
+    return 1;
 }
 
 static CmTypeckStatus cm_typeck_import_type_inner_impl(CmTypeckState *state,
@@ -1022,6 +1073,8 @@ static int cm_typeck_instantiation_valid_inner(const CmTypeckState *state,
     uint32_t index;
 
     if (instantiation == NULL
+        || instantiation->typeck_state != state
+        || instantiation->typeck_lifetime_id != state->lifetime_id
         || cm_hir_def_id_is_none(instantiation->parameter_owner)
         || (instantiation->argument_count == 0u)
             != (instantiation->arguments == NULL)

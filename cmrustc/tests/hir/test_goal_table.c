@@ -543,6 +543,7 @@ static void runtime_init(TestRuntime *runtime, TestFixture *fixture,
         &runtime->bool_type) == CM_TYPECK_OK);
     assert(cm_typeck_import_hir_type(&runtime->typeck, fixture->u8_hir,
         &runtime->u8_type) == CM_TYPECK_OK);
+    cm_typeck_instantiation_init(&runtime->typeck, &runtime->exact);
     runtime->exact.parameter_owner = fixture->owner_trait;
     runtime->exact.self_owner = fixture->owner_trait;
     runtime->exact.self_type = runtime->bool_type;

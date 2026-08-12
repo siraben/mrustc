@@ -1052,7 +1052,7 @@ static void test_transactional_hir_instantiation(void)
     arguments[2].data.constant.kind = CM_HIR_CONST_VALUE;
     arguments[2].data.constant.type = fixture.usize_type;
     arguments[2].data.constant.data.value.low_bits = UINT64_C(9);
-    memset(&instantiation, 0, sizeof(instantiation));
+    cm_typeck_instantiation_init(&fixture.typeck, &instantiation);
     instantiation.parameter_owner = fixture.definitions[0];
     instantiation.arguments = arguments;
     instantiation.argument_count = 3u;
@@ -1143,7 +1143,7 @@ static void test_instantiation_rejection_is_atomic(void)
     memset(&argument, 0, sizeof(argument));
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     argument.data.type = fixture.u32_type;
-    memset(&instantiation, 0, sizeof(instantiation));
+    cm_typeck_instantiation_init(&fixture.typeck, &instantiation);
     instantiation.parameter_owner = fixture.definitions[0];
     instantiation.arguments = &argument;
     instantiation.argument_count = 1u;
@@ -1275,7 +1275,7 @@ static void test_instantiation_memoizes_shared_hir_dag(void)
     memset(&argument, 0, sizeof(argument));
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     argument.data.type = fixture.u32_type;
-    memset(&instantiation, 0, sizeof(instantiation));
+    cm_typeck_instantiation_init(&fixture.typeck, &instantiation);
     instantiation.parameter_owner = fixture.definitions[0];
     instantiation.arguments = &argument;
     instantiation.argument_count = 1u;

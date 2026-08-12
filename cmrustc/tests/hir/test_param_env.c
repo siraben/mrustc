@@ -499,7 +499,7 @@ static void test_environment_facts_and_solver(void)
     memset(&generic_argument, 0, sizeof(generic_argument));
     generic_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     generic_argument.data.type = u8_type;
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = fixture.generic_trait;
     exact.arguments = &generic_argument;
     exact.argument_count = 1u;
@@ -622,13 +622,13 @@ static void test_environment_facts_and_solver(void)
     exact_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     exact_argument.data.type = bool_type;
     enclosing_argument = exact_argument;
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = owner;
     exact.arguments = &exact_argument;
     exact.argument_count = 1u;
     exact.self_owner = fixture.outer_trait;
     exact.self_type = bool_type;
-    memset(&enclosing, 0, sizeof(enclosing));
+    cm_typeck_instantiation_init(&typeck, &enclosing);
     enclosing.parameter_owner = fixture.outer_trait;
     enclosing.arguments = &enclosing_argument;
     enclosing.argument_count = 1u;
@@ -719,7 +719,7 @@ static void test_blocker_granularity(void)
     cm_typeck_context_init(&typeck, &fixture.hir);
     assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = owner;
     exact.self_owner = owner;
     exact.self_type = bool_type;
@@ -797,7 +797,7 @@ static void test_blocker_granularity(void)
     cm_typeck_context_init(&typeck, &fixture.hir);
     assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
         == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = owner;
     exact.self_owner = owner;
     exact.self_type = bool_type;
@@ -852,7 +852,7 @@ static void test_blocker_granularity(void)
         == CM_TYPECK_OK);
     assert(cm_typeck_import_hir_type(&typeck, projection_hir,
         &projection_type) == CM_TYPECK_OK);
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = owner;
     exact.self_owner = owner;
     exact.self_type = bool_type;
@@ -920,13 +920,13 @@ static void test_mixed_owner_and_staleness(void)
     exact_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     exact_argument.data.type = u8_type;
     enclosing_argument = exact_argument;
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = fixture.associated_type;
     exact.arguments = &exact_argument;
     exact.argument_count = 1u;
     exact.self_owner = fixture.outer_trait;
     exact.self_type = bool_type;
-    memset(&enclosing, 0, sizeof(enclosing));
+    cm_typeck_instantiation_init(&typeck, &enclosing);
     enclosing.parameter_owner = fixture.outer_trait;
     enclosing.arguments = &enclosing_argument;
     enclosing.argument_count = 1u;
@@ -1045,7 +1045,7 @@ static void test_dependency_overflow_is_not_projection(void)
     memset(&argument, 0, sizeof(argument));
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     argument.data.type = u8_type;
-    memset(&exact, 0, sizeof(exact));
+    cm_typeck_instantiation_init(&typeck, &exact);
     exact.parameter_owner = deep_trait;
     exact.arguments = &argument;
     exact.argument_count = 1u;

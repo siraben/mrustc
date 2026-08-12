@@ -412,7 +412,7 @@ static CmSemanticItemStatus cm_semantic_item_compare_method(
     if (expected->is_variadic != actual->is_variadic) {
         return CM_SEMANTIC_ITEM_VARIADIC_MISMATCH;
     }
-    memset(&impl_instantiation, 0, sizeof(impl_instantiation));
+    cm_typeck_instantiation_init(typeck, &impl_instantiation);
     impl_instantiation.parameter_owner = impl_method->definition;
     impl_instantiation.self_owner = impl_item->definition;
     impl_instantiation.self_type = self_type;
@@ -528,7 +528,7 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         trait_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
             trait_item->generic_parameter_count, sizeof(*trait_arguments));
     }
-    memset(&trait_instantiation, 0, sizeof(trait_instantiation));
+    cm_typeck_instantiation_init(&typeck, &trait_instantiation);
     trait_instantiation.parameter_owner = trait_item->definition;
     for (argument_index = 0u;
          argument_index < trait_item->generic_parameter_count;

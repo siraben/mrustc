@@ -77,6 +77,9 @@ typedef struct CmTypeckNamedType {
  * trait/impl Self have different owners.
  */
 typedef struct CmTypeckInstantiation {
+    /* Authenticated owner of every scratch TypeId stored below. */
+    const void *typeck_state;
+    uint64_t typeck_lifetime_id;
     CmHirDefId parameter_owner;
     const CmTypeckGenericArg *arguments;
     uint32_t argument_count;
@@ -167,6 +170,9 @@ void cm_typeck_context_init(CmTypeckContext *context,
 void cm_typeck_context_track_hir_semantic_generation(
     CmTypeckContext *context);
 void cm_typeck_context_destroy(CmTypeckContext *context);
+/* Initialize an empty instantiation capability for this exact session. */
+void cm_typeck_instantiation_init(const CmTypeckContext *context,
+    CmTypeckInstantiation *instantiation);
 
 CmTypeckStatus cm_typeck_snapshot(CmTypeckContext *context,
     CmTypeckSnapshot *out_snapshot);
@@ -208,6 +214,9 @@ const CmTypeckType *cm_typeck_get_type(const CmTypeckContext *context,
 size_t cm_typeck_type_count(const CmTypeckContext *context);
 /* Source identity for clients that combine scratch terms with HIR indexes. */
 const CmHirContext *cm_typeck_hir_context(const CmTypeckContext *context);
+/* Authenticate a nominal ADT definition, arity, and ordered argument kinds. */
+int cm_typeck_adt_is_valid(const CmTypeckContext *context,
+    const CmTypeckNamedType *adt);
 /* Authenticate every owner, argument kind, term, and optional Self binding. */
 int cm_typeck_instantiation_is_valid(const CmTypeckContext *context,
     const CmTypeckInstantiation *instantiation);

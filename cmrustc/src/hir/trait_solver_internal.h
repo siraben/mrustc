@@ -26,4 +26,10 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
     const CmProjectionTargetGoal *goal,
     const CmTraitGoalEvaluator *evaluator);
 
+/* Shared authentication for arbitrary typeck semantic passes. */
+CmTraitSolverResultKind cm_trait_solver_validate_session(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    CmHirDefId owner);
+
 #endif

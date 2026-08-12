@@ -778,8 +778,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
                 != (expression->data.aggregate.fields == NULL)) {
             return CM_SEMANTIC_BODY_INVALID;
         }
-        memset(&aggregate_instantiation, 0,
-            sizeof(aggregate_instantiation));
+        cm_typeck_instantiation_init(constraints->typeck,
+            &aggregate_instantiation);
         aggregate_instantiation.parameter_owner = aggregate->definition;
         if (!cm_typeck_instantiation_is_valid(constraints->typeck,
                 &aggregate_instantiation)) {
@@ -852,8 +852,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
                 >= aggregate->data.aggregate_item.field_count) {
             return CM_SEMANTIC_BODY_INVALID;
         }
-        memset(&aggregate_instantiation, 0,
-            sizeof(aggregate_instantiation));
+        cm_typeck_instantiation_init(constraints->typeck,
+            &aggregate_instantiation);
         aggregate_instantiation.parameter_owner = aggregate->definition;
         if (!cm_typeck_instantiation_is_valid(constraints->typeck,
                 &aggregate_instantiation)) {
@@ -1238,8 +1238,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         return result;
     }
 
-    memset(&owner_instantiation, 0, sizeof(owner_instantiation));
-    memset(&enclosing_instantiation, 0, sizeof(enclosing_instantiation));
+    cm_typeck_instantiation_init(typeck, &owner_instantiation);
+    cm_typeck_instantiation_init(typeck, &enclosing_instantiation);
     owner_instantiation.parameter_owner = owner;
     if (owner_kind
             == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD) {
@@ -1415,7 +1415,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         }
         cm_free(callee_arguments);
         callee_arguments = NULL;
-        memset(&callee_instantiation, 0, sizeof(callee_instantiation));
+        cm_typeck_instantiation_init(typeck, &callee_instantiation);
         callee_instantiation.parameter_owner = callee->definition;
         result.status = cm_semantic_body_allocate_arguments(
             callee->generic_parameter_count, &callee_arguments);

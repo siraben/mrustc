@@ -1428,7 +1428,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
     }
     item = cm_hir_get_item(state->hir, entry->item);
     impl_arguments = NULL;
-    memset(&instantiation, 0, sizeof(instantiation));
+    cm_typeck_instantiation_init(typeck, &instantiation);
     memset(&candidate_trait, 0, sizeof(candidate_trait));
     candidate_self = CM_TYPECK_TYPE_NONE;
     associated_evidence = cm_hir_def_id_none();
@@ -2689,6 +2689,40 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
         target_result.target = CM_TYPECK_TYPE_NONE;
     }
     return target_result;
+}
+
+CmTraitSolverResultKind cm_trait_solver_validate_session(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    CmHirDefId owner)
+{
+    const CmTraitImplIndexState *index_state;
+    CmHirDefId enclosing_owner;
+
+    index_state = cm_trait_index_state_const(index);
+    if (!cm_trait_index_is_current(index_state)
+        || !cm_param_env_is_current(environment)
+        || cm_param_env_hir(environment) != index_state->hir
+        || typeck == NULL
+        || cm_typeck_hir_context(typeck) != index_state->hir
+        || !cm_hir_def_id_equal(owner,
+            cm_param_env_exact_owner(environment))
+        || substitution == NULL || substitution->exact == NULL
+        || !cm_typeck_instantiation_is_valid(typeck, substitution->exact)
+        || !cm_hir_def_id_equal(substitution->exact->parameter_owner,
+            owner)) return CM_TRAIT_SOLVER_INVALID;
+    enclosing_owner = cm_param_env_enclosing_owner(environment);
+    if (!cm_hir_def_id_is_none(enclosing_owner)) {
+        if (substitution->enclosing == NULL
+            || !cm_typeck_instantiation_is_valid(typeck,
+                substitution->enclosing)
+            || !cm_hir_def_id_equal(
+                substitution->enclosing->parameter_owner,
+                enclosing_owner)) return CM_TRAIT_SOLVER_INVALID;
+    } else if (substitution->enclosing != NULL) {
+        return CM_TRAIT_SOLVER_INVALID;
+    }
+    return CM_TRAIT_SOLVER_PROVEN;
 }
 
 CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
