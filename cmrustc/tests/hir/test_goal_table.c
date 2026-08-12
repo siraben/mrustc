@@ -1486,12 +1486,31 @@ static void test_projection_equality_commit_and_rollback(void)
     goal = projection_goal(fixture.owner_trait, projection_type,
         runtime.bool_type);
     type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_solver_solve_projection_equality(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal.data.projection_equality, NULL);
+    assert(result.kind == CM_TRAIT_SOLVER_NO_SOLUTION
+        && result.supported_match_count == 1u
+        && result.blocking_match_count == 0u
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH);
+    assert_cached_nonproven_clean(result);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
         &runtime.substitution, &goal);
     assert(result.kind == CM_TRAIT_SOLVER_NO_SOLUTION);
     assert_cached_nonproven_clean(result);
     assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     assert(cm_trait_goal_table_entry_count(&runtime.table) == 1u);
+
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        projection_type);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_solver_solve_projection_equality(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal.data.projection_equality, NULL);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED);
+    assert_cached_nonproven_clean(result);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
 
     goal = implemented_goal(fixture.owner_trait, trait_definition,
         projection_type);
@@ -1635,9 +1654,13 @@ static void test_projection_parameter_environment_precedence(void)
     type_count = cm_typeck_type_count(&runtime.typeck);
     result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
         &runtime.substitution, &goal);
-    assert(result.kind == CM_TRAIT_SOLVER_NO_SOLUTION);
+    assert(result.kind == CM_TRAIT_SOLVER_NO_SOLUTION
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 0u
+        && result.typeck_status == CM_TYPECK_OK);
     assert_cached_nonproven_clean(result);
     assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
 }
@@ -1731,6 +1754,16 @@ static void test_projection_parameter_environment_candidates(void)
         && result.supported_match_count == 2u);
     assert_cached_nonproven_clean(result);
     assert_unbound(&runtime.typeck, expected);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+
+    goal = projection_goal(fixture.owner_trait, projection_type,
+        runtime.u8_type);
+    result = cm_trait_solver_solve_projection_equality(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal.data.projection_equality, NULL);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.supported_match_count == 1u);
+    assert_cached_nonproven_clean(result);
     assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
@@ -2201,6 +2234,14 @@ static void test_projection_equality_recursion_and_blockers(void)
         &outer_type) == CM_TYPECK_OK);
     goal = projection_goal(fixture.owner_trait, outer_type,
         runtime.u8_type);
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = cm_trait_solver_solve_projection_equality(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal.data.projection_equality, NULL);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.blocking_match_count == 1u);
+    assert_cached_nonproven_clean(result);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
         &runtime.substitution, &goal);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN);
@@ -2260,7 +2301,8 @@ static void test_projection_equality_recursion_and_blockers(void)
     type_count = cm_typeck_type_count(&runtime.typeck);
     result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
         &runtime.substitution, &goal);
-    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.blocking_match_count == 1u);
     assert_cached_nonproven_clean(result);
     assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     runtime_destroy(&runtime);
@@ -2422,6 +2464,25 @@ static void test_projection_target_selection(void)
                 .trait_type.definition, inner_trait)
         && cm_hir_def_id_equal(resolved_type->data.projection_type
                 .associated_type.definition, inner_associated));
+    /* Equality mode keeps this projection-valued bound blocked even though
+     * raw target mode materializes it for the structural normalizer. */
+    {
+        CmTraitGoal equality;
+        CmTraitSelectionResult equality_result;
+
+        equality = projection_goal(fixture.owner_trait, projection_type,
+            runtime.u8_type);
+        type_count = cm_typeck_type_count(&runtime.typeck);
+        equality_result = cm_trait_solver_solve_projection_equality(
+            &runtime.index, &runtime.environment, &runtime.typeck,
+            &runtime.substitution, &equality.data.projection_equality,
+            NULL);
+        assert(equality_result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+            && equality_result.supported_match_count == 0u
+            && equality_result.blocking_match_count == 1u);
+        assert_cached_nonproven_clean(equality_result);
+        assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    }
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
 

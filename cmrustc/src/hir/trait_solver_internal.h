@@ -6,6 +6,8 @@
 typedef struct CmProjectionTargetGoal {
     CmHirDefId owner;
     CmTypeckTypeId projection_type;
+    /* NONE materializes a raw target; otherwise preserve equality behavior. */
+    CmTypeckTypeId expected_type;
 } CmProjectionTargetGoal;
 
 typedef struct CmProjectionTargetResult {

@@ -1346,11 +1346,8 @@ static CmTraitMatchResult cm_trait_match_projection_target(
         return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
             CM_TYPECK_INVALID_ID);
     }
-    if (projection_goal->expected_type == CM_TYPECK_TYPE_NONE) {
-        if (expose_evidence && out_target != NULL) {
-            *out_target = instantiated_target;
-        }
-    } else if (resolved_target_type->kind == CM_TYPECK_TYPE_PROJECTION) {
+    if (projection_goal->expected_type != CM_TYPECK_TYPE_NONE
+        && resolved_target_type->kind == CM_TYPECK_TYPE_PROJECTION) {
         if (evaluator == NULL || evaluator->evaluate_projection == NULL) {
             return cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
                 CM_TYPECK_OK);
@@ -1364,7 +1361,7 @@ static CmTraitMatchResult cm_trait_match_projection_target(
         if (nested.kind != CM_TRAIT_SOLVER_PROVEN) {
             return cm_trait_match_evaluation(&nested);
         }
-    } else {
+    } else if (projection_goal->expected_type != CM_TYPECK_TYPE_NONE) {
         scan = cm_trait_scan_typeck_type(typeck, resolved_target);
         if (scan == CM_TRAIT_TYPE_SCAN_PROJECTION
             || scan == CM_TRAIT_TYPE_SCAN_UNSUPPORTED) {
@@ -1396,6 +1393,9 @@ static CmTraitMatchResult cm_trait_match_projection_target(
     }
     if (expose_evidence && out_associated_definition != NULL) {
         *out_associated_definition = target.impl_associated_definition;
+    }
+    if (expose_evidence && out_target != NULL) {
+        *out_target = instantiated_target;
     }
     return cm_trait_match_result(CM_TRAIT_MATCH_YES, CM_TYPECK_OK);
 }
@@ -2064,100 +2064,13 @@ static CmTraitMatchResult cm_trait_match_environment_fact(
     return match;
 }
 
-static CmTraitMatchResult cm_trait_match_environment_equality(
+static CmTraitMatchResult cm_trait_match_environment_equality_target(
     const CmParamEnv *environment, size_t fact_index,
     uint32_t equality_index, CmTypeckContext *typeck,
     const CmParamEnvSubstitution *substitution,
     CmTypeckTypeId projection_self,
     const CmTypeckNamedType *projection_trait,
     CmTypeckTypeId expected_type, int keep_bindings,
-    int *out_lhs_applies)
-{
-    CmParamEnvEqualityInstance candidate;
-    CmTypeckSnapshot snapshot;
-    CmTypeckStatus typeck_status;
-    CmParamEnvStatus env_status;
-    CmTraitMatchResult match;
-    CmTypeckStatus close_status;
-    int lhs_applies;
-
-    if (out_lhs_applies != NULL) *out_lhs_applies = 0;
-    lhs_applies = 0;
-    typeck_status = cm_typeck_snapshot(typeck, &snapshot);
-    if (typeck_status != CM_TYPECK_OK) {
-        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-            typeck_status);
-    }
-    env_status = cm_param_env_instantiate_equality(environment, fact_index,
-        equality_index, typeck, substitution, &candidate, &typeck_status);
-    if (env_status == CM_PARAM_ENV_READY) {
-        typeck_status = cm_typeck_unify(typeck, candidate.subject,
-            projection_self);
-        if (typeck_status == CM_TYPECK_OK) {
-            match = cm_trait_match_typeck_named(typeck,
-                &candidate.trait_type, projection_trait);
-        } else if (typeck_status == CM_TYPECK_TYPE_MISMATCH
-            || typeck_status == CM_TYPECK_KIND_CONFLICT
-            || typeck_status == CM_TYPECK_OCCURS_CHECK) {
-            match = cm_trait_match_result(CM_TRAIT_MATCH_NO,
-                typeck_status);
-        } else if (typeck_status == CM_TYPECK_OVERFLOW) {
-            match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
-                typeck_status);
-        } else {
-            match = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-                typeck_status);
-        }
-        if (match.kind == CM_TRAIT_MATCH_YES) {
-            lhs_applies = 1;
-            typeck_status = cm_typeck_unify(typeck, candidate.value,
-                expected_type);
-            if (typeck_status == CM_TYPECK_TYPE_MISMATCH
-                || typeck_status == CM_TYPECK_KIND_CONFLICT
-                || typeck_status == CM_TYPECK_OCCURS_CHECK) {
-                match = cm_trait_match_result(CM_TRAIT_MATCH_NO,
-                    typeck_status);
-            } else if (typeck_status == CM_TYPECK_OVERFLOW) {
-                match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
-                    typeck_status);
-            } else if (typeck_status != CM_TYPECK_OK) {
-                match = cm_trait_match_result(
-                    CM_TRAIT_MATCH_TYPECK_FAILURE, typeck_status);
-            }
-        }
-    } else if (env_status == CM_PARAM_ENV_UNSUPPORTED) {
-        match = cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
-            typeck_status);
-    } else if (env_status == CM_PARAM_ENV_OVERFLOW) {
-        match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
-            typeck_status);
-    } else {
-        match = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-            typeck_status);
-    }
-    if (keep_bindings && match.kind == CM_TRAIT_MATCH_YES) {
-        close_status = cm_typeck_commit(typeck, &snapshot);
-        if (close_status != CM_TYPECK_OK) {
-            return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-                close_status);
-        }
-    } else {
-        close_status = cm_typeck_rollback(typeck, &snapshot);
-        if (close_status != CM_TYPECK_OK) {
-            return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-                close_status);
-        }
-    }
-    if (out_lhs_applies != NULL) *out_lhs_applies = lhs_applies;
-    return match;
-}
-
-static CmTraitMatchResult cm_trait_match_environment_equality_target(
-    const CmParamEnv *environment, size_t fact_index,
-    uint32_t equality_index, CmTypeckContext *typeck,
-    const CmParamEnvSubstitution *substitution,
-    CmTypeckTypeId projection_self,
-    const CmTypeckNamedType *projection_trait, int keep_bindings,
     int *out_lhs_applies, CmTypeckTypeId *out_target)
 {
     CmParamEnvEqualityInstance candidate;
@@ -2197,7 +2110,25 @@ static CmTraitMatchResult cm_trait_match_environment_equality_target(
             match = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
                 typeck_status);
         }
-        if (match.kind == CM_TRAIT_MATCH_YES) lhs_applies = 1;
+        if (match.kind == CM_TRAIT_MATCH_YES) {
+            lhs_applies = 1;
+            if (expected_type != CM_TYPECK_TYPE_NONE) {
+                typeck_status = cm_typeck_unify(typeck, candidate.value,
+                    expected_type);
+                if (typeck_status == CM_TYPECK_TYPE_MISMATCH
+                    || typeck_status == CM_TYPECK_KIND_CONFLICT
+                    || typeck_status == CM_TYPECK_OCCURS_CHECK) {
+                    match = cm_trait_match_result(CM_TRAIT_MATCH_NO,
+                        typeck_status);
+                } else if (typeck_status == CM_TYPECK_OVERFLOW) {
+                    match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
+                        typeck_status);
+                } else if (typeck_status != CM_TYPECK_OK) {
+                    match = cm_trait_match_result(
+                        CM_TRAIT_MATCH_TYPECK_FAILURE, typeck_status);
+                }
+            }
+        }
     } else if (env_status == CM_PARAM_ENV_UNSUPPORTED) {
         match = cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
             typeck_status);
@@ -2274,62 +2205,6 @@ static int cm_trait_blocked_equality_head_may_apply(
         }
     }
     return 1;
-}
-
-static CmTraitMatchResult cm_trait_environment_equalities_compatible(
-    const CmParamEnv *environment, size_t left_fact,
-    uint32_t left_equality, size_t right_fact, uint32_t right_equality,
-    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution)
-{
-    CmParamEnvEqualityInstance left;
-    CmParamEnvEqualityInstance right;
-    CmTypeckSnapshot snapshot;
-    CmTypeckStatus status;
-    CmTypeckStatus close_status;
-    CmParamEnvStatus env_status;
-    CmTraitMatchResult result;
-
-    status = cm_typeck_snapshot(typeck, &snapshot);
-    if (status != CM_TYPECK_OK) {
-        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-            status);
-    }
-    env_status = cm_param_env_instantiate_equality(environment, left_fact,
-        left_equality, typeck, substitution, &left, &status);
-    if (env_status == CM_PARAM_ENV_READY) {
-        env_status = cm_param_env_instantiate_equality(environment,
-            right_fact, right_equality, typeck, substitution, &right,
-            &status);
-    }
-    if (env_status == CM_PARAM_ENV_READY) {
-        status = cm_typeck_unify(typeck, left.value, right.value);
-        if (status == CM_TYPECK_OK) {
-            result = cm_trait_match_result(CM_TRAIT_MATCH_YES, status);
-        } else if (status == CM_TYPECK_TYPE_MISMATCH
-            || status == CM_TYPECK_KIND_CONFLICT
-            || status == CM_TYPECK_OCCURS_CHECK) {
-            result = cm_trait_match_result(CM_TRAIT_MATCH_NO, status);
-        } else if (status == CM_TYPECK_OVERFLOW) {
-            result = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
-                status);
-        } else {
-            result = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-                status);
-        }
-    } else if (env_status == CM_PARAM_ENV_OVERFLOW) {
-        result = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW, status);
-    } else if (env_status == CM_PARAM_ENV_UNSUPPORTED) {
-        result = cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED, status);
-    } else {
-        result = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-            status);
-    }
-    close_status = cm_typeck_rollback(typeck, &snapshot);
-    if (close_status != CM_TYPECK_OK) {
-        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
-            close_status);
-    }
-    return result;
 }
 
 static CmTraitMatchResult cm_trait_environment_equality_targets_compatible(
@@ -2668,6 +2543,16 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
                 target_result.selection.typeck_status = CM_TYPECK_OVERFLOW;
                 return target_result;
             }
+            if (goal->expected_type != CM_TYPECK_TYPE_NONE
+                && (equality_blockers
+                    & CM_PARAM_ENV_BLOCK_PROJECTION) != 0u) {
+                if (cm_trait_blocked_equality_head_may_apply(
+                        index_state->hir, fact, typeck, projection_self,
+                        &projection_trait)) {
+                    result.blocking_match_count += 1u;
+                }
+                continue;
+            }
             if ((equality_blockers
                     & ~(unsigned int)CM_PARAM_ENV_BLOCK_PROJECTION) != 0u
                 && cm_trait_blocked_equality_head_may_apply(
@@ -2692,7 +2577,8 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
             lhs_applies = 0;
             match = cm_trait_match_environment_equality_target(environment,
                 fact_index, equality_index, typeck, substitution,
-                projection_self, &projection_trait, 0, &lhs_applies, NULL);
+                projection_self, &projection_trait, goal->expected_type,
+                0, &lhs_applies, NULL);
             if (lhs_applies) {
                 if (reference_fact_index == CM_TRAIT_PROOF_FACT_NONE) {
                     reference_fact_index = fact_index;
@@ -2765,8 +2651,8 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
         lhs_applies = 0;
         replay = cm_trait_match_environment_equality_target(environment,
             winner_fact_index, winner_equality_index, typeck,
-            substitution, projection_self, &projection_trait, 1,
-            &lhs_applies, &target_result.target);
+            substitution, projection_self, &projection_trait,
+            goal->expected_type, 1, &lhs_applies, &target_result.target);
         if (replay.kind == CM_TRAIT_MATCH_YES && lhs_applies) {
             result.kind = CM_TRAIT_SOLVER_PROVEN;
             result.proof_origin = CM_TRAIT_PROOF_PARAM_ENV;
@@ -2795,7 +2681,7 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
         return target_result;
     }
     projection_goal.associated_definition = associated_item->definition;
-    projection_goal.expected_type = CM_TYPECK_TYPE_NONE;
+    projection_goal.expected_type = goal->expected_type;
     target_result.selection = cm_trait_solver_select_inner(index, typeck,
         projection_self, &projection_trait, goal->owner, evaluator,
         &projection_goal, &target_result.target);
@@ -2815,7 +2701,8 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
     const CmHirItem *trait_item;
     const CmHirItem *associated_item;
     const CmTypeckType *projection;
-    CmTraitProjectionMatchGoal projection_goal;
+    CmProjectionTargetGoal target_goal;
+    CmProjectionTargetResult target_result;
     CmTraitSelectionResult result;
     CmTraitTypeScan expected_scan;
     CmTraitSolverResultKind projection_validation;
@@ -2825,13 +2712,6 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
     CmTypeckTypeId projection_self;
     CmTypeckStatus typeck_status;
     CmHirDefId enclosing_owner;
-    size_t applicable_equality_count;
-    size_t reference_fact_index;
-    uint32_t reference_equality_index;
-    int conflicting_equalities;
-    size_t winner_fact_index;
-    uint32_t winner_equality_index;
-    size_t fact_index;
 
     result = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
     index_state = cm_trait_index_state_const(index);
@@ -2938,155 +2818,12 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
     }
     if (expected_scan == CM_TRAIT_TYPE_SCAN_INVALID) return result;
 
-    result = cm_trait_result(CM_TRAIT_SOLVER_NO_SOLUTION);
-    applicable_equality_count = 0u;
-    reference_fact_index = CM_TRAIT_PROOF_FACT_NONE;
-    reference_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
-    conflicting_equalities = 0;
-    winner_fact_index = CM_TRAIT_PROOF_FACT_NONE;
-    winner_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
-    for (fact_index = 0u;
-         fact_index < cm_param_env_fact_count(environment); ++fact_index) {
-        const CmParamEnvFact *fact;
-        uint32_t equality_index;
-
-        fact = cm_param_env_fact(environment, fact_index);
-        if (fact == NULL || fact->kind != CM_PARAM_ENV_FACT_IMPLEMENTED
-            || !cm_hir_def_id_equal(
-                fact->data.implemented.trait_type.definition,
-                projection_trait.definition)) continue;
-        for (equality_index = 0u;
-             equality_index < fact->data.implemented.equality_count;
-             ++equality_index) {
-            CmTraitMatchResult match;
-            int lhs_applies;
-            unsigned int equality_blockers;
-
-            if (fact->data.implemented.equalities == NULL
-                || fact->data.implemented.equality_blocker_flags == NULL) {
-                result.kind = CM_TRAIT_SOLVER_INVALID;
-                return result;
-            }
-            if (!cm_hir_def_id_equal(fact->data.implemented
-                    .equalities[equality_index].associated_type,
-                    projection_associated_definition)) continue;
-            equality_blockers = fact->head_blocker_flags
-                | fact->data.implemented
-                    .equality_blocker_flags[equality_index];
-            if ((equality_blockers
-                    & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u
-                && cm_trait_blocked_equality_head_may_apply(
-                    index_state->hir, fact, typeck, projection_self,
-                    &projection_trait)) {
-                result.kind = CM_TRAIT_SOLVER_OVERFLOW;
-                result.typeck_status = CM_TYPECK_OVERFLOW;
-                return result;
-            }
-            if (equality_blockers != CM_PARAM_ENV_BLOCK_NONE
-                && cm_trait_blocked_equality_head_may_apply(
-                    index_state->hir, fact, typeck, projection_self,
-                    &projection_trait)) {
-                result.blocking_match_count += 1u;
-                continue;
-            } else if (equality_blockers != CM_PARAM_ENV_BLOCK_NONE) {
-                continue;
-            }
-            lhs_applies = 0;
-            match = cm_trait_match_environment_equality(environment,
-                fact_index, equality_index, typeck, substitution,
-                projection_self, &projection_trait, goal->expected_type,
-                0, &lhs_applies);
-            if (lhs_applies) {
-                if (reference_fact_index == CM_TRAIT_PROOF_FACT_NONE) {
-                    reference_fact_index = fact_index;
-                    reference_equality_index = equality_index;
-                } else {
-                    CmTraitMatchResult compatibility;
-
-                    compatibility =
-                        cm_trait_environment_equalities_compatible(
-                            environment, reference_fact_index,
-                            reference_equality_index, fact_index,
-                            equality_index, typeck, substitution);
-                    if (compatibility.kind == CM_TRAIT_MATCH_NO) {
-                        conflicting_equalities = 1;
-                    } else if (compatibility.kind
-                            == CM_TRAIT_MATCH_OVERFLOW) {
-                        result.kind = CM_TRAIT_SOLVER_OVERFLOW;
-                        result.typeck_status = compatibility.typeck_status;
-                        return result;
-                    } else if (compatibility.kind
-                            != CM_TRAIT_MATCH_YES) {
-                        result.kind = compatibility.kind
-                                == CM_TRAIT_MATCH_UNSUPPORTED
-                            ? CM_TRAIT_SOLVER_UNSUPPORTED
-                            : CM_TRAIT_SOLVER_TYPECK_FAILURE;
-                        result.typeck_status = compatibility.typeck_status;
-                        return result;
-                    }
-                }
-                applicable_equality_count += 1u;
-            }
-            if (match.kind == CM_TRAIT_MATCH_YES) {
-                result.supported_match_count += 1u;
-                if (winner_fact_index == CM_TRAIT_PROOF_FACT_NONE) {
-                    winner_fact_index = fact_index;
-                    winner_equality_index = equality_index;
-                }
-            } else if (match.kind == CM_TRAIT_MATCH_UNSUPPORTED) {
-                result.blocking_match_count += 1u;
-            } else if (match.kind == CM_TRAIT_MATCH_OVERFLOW) {
-                result.kind = CM_TRAIT_SOLVER_OVERFLOW;
-                result.typeck_status = match.typeck_status;
-                return result;
-            } else if (match.kind == CM_TRAIT_MATCH_TYPECK_FAILURE) {
-                result.kind = CM_TRAIT_SOLVER_TYPECK_FAILURE;
-                result.typeck_status = match.typeck_status;
-                return result;
-            }
-        }
-    }
-    if (result.blocking_match_count != 0u) {
-        result.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
-        return result;
-    }
-    if (conflicting_equalities) {
-        result.kind = CM_TRAIT_SOLVER_AMBIGUOUS;
-        return result;
-    }
-    if (winner_fact_index != CM_TRAIT_PROOF_FACT_NONE) {
-        CmTraitMatchResult replay;
-        int lhs_applies;
-
-        lhs_applies = 0;
-        replay = cm_trait_match_environment_equality(environment,
-            winner_fact_index, winner_equality_index, typeck,
-            substitution, projection_self, &projection_trait,
-            goal->expected_type, 1, &lhs_applies);
-        if (replay.kind == CM_TRAIT_MATCH_YES && lhs_applies) {
-            result.kind = CM_TRAIT_SOLVER_PROVEN;
-            result.proof_origin = CM_TRAIT_PROOF_PARAM_ENV;
-            result.param_env_fact_index = winner_fact_index;
-            result.param_env_equality_index = winner_equality_index;
-            return result;
-        }
-        result.kind = replay.kind == CM_TRAIT_MATCH_OVERFLOW
-            ? CM_TRAIT_SOLVER_OVERFLOW : CM_TRAIT_SOLVER_TYPECK_FAILURE;
-        result.typeck_status = replay.typeck_status;
-        return result;
-    }
-    if (applicable_equality_count != 0u) return result;
-    if (trait_item->definition.crate_id != index_state->local_crate
-        || associated_item->definition.crate_id
-            != index_state->local_crate) {
-        result.kind = CM_TRAIT_SOLVER_DEFERRED_METADATA;
-        return result;
-    }
-    projection_goal.associated_definition = associated_item->definition;
-    projection_goal.expected_type = goal->expected_type;
-    return cm_trait_solver_select_inner(index, typeck,
-        projection_self, &projection_trait, goal->owner, evaluator,
-        &projection_goal, NULL);
+    target_goal.owner = goal->owner;
+    target_goal.projection_type = resolved_projection;
+    target_goal.expected_type = goal->expected_type;
+    target_result = cm_trait_solver_select_projection_target(index,
+        environment, typeck, substitution, &target_goal, evaluator);
+    return target_result.selection;
 }
 
 const char *cm_trait_solver_result_name(CmTraitSolverResultKind result)
