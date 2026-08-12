@@ -5,6 +5,7 @@
 
 typedef enum CmMirLowerErrorKind {
     CM_MIR_LOWER_INVALID_ARGUMENT = 0,
+    CM_MIR_LOWER_INVALID_ADMISSION,
     CM_MIR_LOWER_INVALID_HIR,
     CM_MIR_LOWER_UNSUPPORTED_BODY_STATE,
     CM_MIR_LOWER_UNSUPPORTED_TYPE,
@@ -46,6 +47,13 @@ CmMirLowerResult cm_mir_lower_body(CmMirContext *context,
  */
 CmMirLowerResult cm_mir_lower_instance(CmMirContext *context,
     const CmHirContext *hir, CmHirBodyId body,
+    const CmHirTypeId *substitutions, uint32_t substitution_count);
+
+CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
+    const CmSemanticAdmission *admission, CmHirBodyId body);
+
+CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
+    const CmSemanticAdmission *admission, CmHirBodyId body,
     const CmHirTypeId *substitutions, uint32_t substitution_count);
 
 const char *cm_mir_lower_error_kind_name(CmMirLowerErrorKind kind);

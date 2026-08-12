@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 
+#include "cm/hir/admission.h"
 #include "cm/hir/model.h"
 #include "cm/vec.h"
 
@@ -22,7 +23,8 @@ typedef enum CmMirStatus {
     CM_MIR_INVALID_ARGUMENT,
     CM_MIR_INVALID_ID,
     CM_MIR_ID_EXHAUSTED,
-    CM_MIR_INVARIANT_VIOLATION
+    CM_MIR_INVARIANT_VIOLATION,
+    CM_MIR_INVALID_ADMISSION
 } CmMirStatus;
 
 typedef enum CmMirLocalKind {
@@ -209,6 +211,11 @@ typedef struct CmMirContext {
     CmVec bodies;
     /* Identity only; exact bodies retain no borrowed HIR storage. */
     const CmHirContext *hir_owner;
+    /* Nonzero only after a successful admission-gated publication. */
+    CmHirCrateId admitted_crate;
+    uint64_t admitted_storage_lifetime_id;
+    uint64_t admitted_semantic_generation;
+    uint64_t admitted_rewind_generation;
     /* Zero is the legacy target-neutral state; usize requires 32 or 64. */
     unsigned int pointer_bits;
 } CmMirContext;
@@ -239,9 +246,19 @@ CmMirStatus cm_mir_add_body(CmMirContext *context, const CmMirBody *body,
 CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
     const CmHirContext *hir, const CmMirBody *body, CmMirBodyId *out_id);
 
+/* Publish only under current, exact local-crate semantic evidence. */
+CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    CmMirBodyId *out_id);
+
 /* Revalidate one already-published exact body without mutating either model. */
 CmMirStatus cm_mir_validate_monomorphized_body(
     const CmMirContext *context, const CmHirContext *hir, CmMirBodyId id);
+
+/* Revalidate only a context latched to this exact admitted generation. */
+CmMirStatus cm_mir_validate_admitted_monomorphized_body(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id);
 
 /* Resolve one already-published exact instance by its complete key. */
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,

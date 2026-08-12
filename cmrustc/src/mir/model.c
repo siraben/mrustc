@@ -14,7 +14,57 @@ static int cm_mir_context_valid(const CmMirContext *context)
             || context->pointer_bits == 64u)
         && context->bodies.elem_size == sizeof(CmMirBody)
         && context->bodies.len <= context->bodies.cap
-        && (context->bodies.cap == 0u) == (context->bodies.data == NULL);
+        && (context->bodies.cap == 0u) == (context->bodies.data == NULL)
+        && ((context->admitted_crate == CM_HIR_CRATE_NONE
+                && context->admitted_storage_lifetime_id == UINT64_C(0)
+                && context->admitted_semantic_generation == UINT64_C(0)
+                && context->admitted_rewind_generation == UINT64_C(0))
+            || (context->admitted_crate != CM_HIR_CRATE_NONE
+                && context->hir_owner != NULL
+                && context->admitted_storage_lifetime_id != UINT64_C(0)
+                && context->admitted_semantic_generation != UINT64_C(0)
+                && context->admitted_rewind_generation != UINT64_C(0)));
+}
+
+static int cm_mir_admission_identity(const CmSemanticAdmission *admission,
+    const CmHirContext **out_hir, CmHirCrateId *out_crate)
+{
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+
+    if (!cm_semantic_admission_is_current(admission)) return 0;
+    hir = cm_semantic_admission_hir(admission);
+    crate_id = cm_semantic_admission_crate(admission);
+    if (hir == NULL || crate_id == CM_HIR_CRATE_NONE
+        || cm_semantic_admission_generation(admission)
+            != hir->semantic_generation) return 0;
+    *out_hir = hir;
+    *out_crate = crate_id;
+    return 1;
+}
+
+static int cm_mir_context_accepts_admission(const CmMirContext *context,
+    const CmHirContext *hir, CmHirCrateId crate_id)
+{
+    if (!cm_mir_context_valid(context)) return 0;
+    if (context->admitted_crate == CM_HIR_CRATE_NONE) {
+        return context->bodies.len == 0u && context->hir_owner == NULL;
+    }
+    return context->hir_owner == hir
+        && context->admitted_crate == crate_id
+        && context->admitted_storage_lifetime_id == hir->storage.lifetime_id
+        && context->admitted_semantic_generation == hir->semantic_generation
+        && context->admitted_rewind_generation == hir->rewind_generation;
+}
+
+static void cm_mir_context_latch_admission(CmMirContext *context,
+    const CmHirContext *hir, CmHirCrateId crate_id)
+{
+    context->hir_owner = hir;
+    context->admitted_crate = crate_id;
+    context->admitted_storage_lifetime_id = hir->storage.lifetime_id;
+    context->admitted_semantic_generation = hir->semantic_generation;
+    context->admitted_rewind_generation = hir->rewind_generation;
 }
 
 static int cm_mir_instance_is_empty(const CmMirInstance *instance)
@@ -2022,6 +2072,37 @@ CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
     return CM_MIR_OK;
 }
 
+CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    CmMirBodyId *out_id)
+{
+    const CmHirContext *hir;
+    const CmHirBody *source_body;
+    CmHirCrateId crate_id;
+    CmMirStatus status;
+
+    if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
+    if (context == NULL || body == NULL || out_id == NULL) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_admission_identity(admission, &hir, &crate_id)
+        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    source_body = cm_hir_get_body(hir, body->source_body);
+    if (source_body == NULL || source_body->owner.crate_id != crate_id
+        || body->owner.crate_id != crate_id
+        || body->instance.definition.crate_id != crate_id) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    status = cm_mir_add_monomorphized_body(context, hir, body, out_id);
+    if (status == CM_MIR_OK
+        && context->admitted_crate == CM_HIR_CRATE_NONE) {
+        cm_mir_context_latch_admission(context, hir, crate_id);
+    }
+    return status;
+}
+
 CmMirStatus cm_mir_validate_monomorphized_body(
     const CmMirContext *context, const CmHirContext *hir, CmMirBodyId id)
 {
@@ -2035,6 +2116,22 @@ CmMirStatus cm_mir_validate_monomorphized_body(
     if (body == NULL) return CM_MIR_INVALID_ID;
     return cm_mir_exact_body_shape_valid(context, hir, body, 1)
         ? CM_MIR_OK : CM_MIR_INVARIANT_VIOLATION;
+}
+
+CmMirStatus cm_mir_validate_admitted_monomorphized_body(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id)
+{
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+
+    if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
+    if (!cm_mir_admission_identity(admission, &hir, &crate_id)
+        || context->admitted_crate == CM_HIR_CRATE_NONE
+        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    return cm_mir_validate_monomorphized_body(context, hir, id);
 }
 
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,
@@ -2091,6 +2188,7 @@ const char *cm_mir_status_name(CmMirStatus status)
     case CM_MIR_INVALID_ID: return "invalid id";
     case CM_MIR_ID_EXHAUSTED: return "id exhausted";
     case CM_MIR_INVARIANT_VIOLATION: return "invariant violation";
+    case CM_MIR_INVALID_ADMISSION: return "invalid admission";
     }
     return "unknown MIR status";
 }

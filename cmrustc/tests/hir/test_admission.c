@@ -1,5 +1,6 @@
 #include "cm/hir/admission.h"
 #include "cm/hir/lower.h"
+#include "cm/mir/lower.h"
 #include "cm/source.h"
 
 #include <assert.h>
@@ -148,6 +149,124 @@ static void test_semantic_failure_rolls_back(void)
     fixture_destroy(&f);
 }
 
+static void test_mir_admission_gates(void)
+{
+    Fixture f, foreign;
+    CmSemanticAdmission admission, foreign_admission, missing;
+    CmSemanticAdmissionResult admission_result;
+    CmMirContext mir, copied, rejected;
+    CmMirLowerResult lower_result;
+    const CmMirBody *stored;
+    CmMirBody candidate;
+    CmMirBodyId copied_id;
+    CmHirType type;
+    CmHirTypeId type_id;
+    size_t body_count;
+
+    fixture_init(&f,
+        "fn first(x: u32) -> u32 { x } "
+        "fn second(x: u32) -> u32 { x }");
+    fixture_init(&foreign, "fn foreign(x: u32) -> u32 { x }");
+    memset(&admission, 0, sizeof(admission));
+    memset(&foreign_admission, 0, sizeof(foreign_admission));
+    memset(&missing, 0, sizeof(missing));
+    assert(admit(&f, &admission).status == CM_SEMANTIC_ADMISSION_OK);
+    assert(admit(&foreign, &foreign_admission).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    cm_mir_context_init(&mir);
+    cm_mir_context_init(&copied);
+    cm_mir_context_init(&rejected);
+
+    lower_result = cm_mir_lower_admitted_instance(&mir, &missing, 1u,
+        NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && lower_result.first_error.mir_status == CM_MIR_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    lower_result = cm_mir_lower_admitted_instance(NULL, &admission, 1u,
+        NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ARGUMENT);
+
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission, 1u,
+        NULL, 0u);
+    assert(lower_result.error_count == 0u);
+    assert(lower_result.lowered_body_count == 1u);
+    assert(cm_mir_body_count(&mir) == 1u);
+    assert(mir.hir_owner == &f.hir && mir.admitted_crate == 1u);
+    assert(mir.admitted_storage_lifetime_id == f.hir.storage.lifetime_id);
+    assert(mir.admitted_semantic_generation == f.hir.semantic_generation);
+    assert(mir.admitted_rewind_generation == f.hir.rewind_generation);
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        lower_result.body) == CM_MIR_OK);
+
+    stored = cm_mir_get_body(&mir, lower_result.body);
+    assert(stored != NULL);
+    candidate = *stored;
+    candidate.owned_storage = NULL;
+    assert(cm_mir_add_admitted_monomorphized_body(&copied, &admission,
+        &candidate, &copied_id) == CM_MIR_OK
+        && copied_id == 1u && cm_mir_body_count(&copied) == 1u);
+
+    candidate.basic_blocks = NULL;
+    copied_id = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&rejected, &admission,
+        &candidate, &copied_id) == CM_MIR_INVARIANT_VIOLATION
+        && copied_id == CM_MIR_BODY_NONE
+        && cm_mir_body_count(&rejected) == 0u
+        && rejected.admitted_crate == CM_HIR_CRATE_NONE);
+    candidate = *stored;
+    candidate.owned_storage = NULL;
+    candidate.owner.crate_id = 2u;
+    assert(cm_mir_add_admitted_monomorphized_body(&rejected, &admission,
+        &candidate, &copied_id) == CM_MIR_INVALID_ADMISSION
+        && cm_mir_body_count(&rejected) == 0u);
+
+    body_count = cm_mir_body_count(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir,
+        &foreign_admission, 1u, NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == body_count);
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_BOOL_KIND;
+    type.span = (CmSpan){ f.source, 0u, 1u };
+    assert(cm_hir_add_type(&f.hir, &type, &type_id) == CM_HIR_OK);
+    assert(!cm_semantic_admission_is_current(&admission));
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission, 2u,
+        NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == body_count
+        && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+            1u) == CM_MIR_INVALID_ADMISSION);
+
+    cm_mir_context_destroy(&rejected);
+    cm_mir_context_destroy(&copied);
+    cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&foreign_admission);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&foreign);
+    fixture_destroy(&f);
+
+    fixture_init(&f,
+        "trait Missing {} "
+        "fn bounded<T: Missing>(x: T) -> T { x } "
+        "fn bad(x: u32) -> u32 { bounded::<u32>(x) }");
+    memset(&admission, 0, sizeof(admission));
+    admission_result = admit(&f, &admission);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_BODY_FAILURE);
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission, 2u,
+        NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_context_destroy(&mir);
+    fixture_destroy(&f);
+}
+
 static void test_invalid_api(void)
 {
     CmSemanticAdmission admission;
@@ -169,6 +288,7 @@ int main(void)
     test_success_and_stale();
     test_body_failure_rolls_back();
     test_semantic_failure_rolls_back();
+    test_mir_admission_gates();
     test_invalid_api();
     puts("hir semantic admission tests passed");
     return 0;

@@ -1795,11 +1795,117 @@ CmMirLowerResult cm_mir_lower_instance(CmMirContext *context,
     return result;
 }
 
+static const CmHirContext *cm_mir_lower_admitted_hir(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmHirBodyId body_id, CmHirCrateId *out_crate)
+{
+    const CmHirContext *hir;
+    const CmHirBody *body;
+    CmHirCrateId crate_id;
+
+    if (!cm_semantic_admission_is_current(admission)) return NULL;
+    hir = cm_semantic_admission_hir(admission);
+    crate_id = cm_semantic_admission_crate(admission);
+    body = hir == NULL ? NULL : cm_hir_get_body(hir, body_id);
+    if (body == NULL || crate_id == CM_HIR_CRATE_NONE
+        || body->owner.crate_id != crate_id
+        || cm_semantic_admission_generation(admission)
+            != hir->semantic_generation) return NULL;
+    if (context->admitted_crate == CM_HIR_CRATE_NONE) {
+        if (context->bodies.len != 0u || context->hir_owner != NULL
+            || context->admitted_storage_lifetime_id != UINT64_C(0)
+            || context->admitted_semantic_generation != UINT64_C(0)
+            || context->admitted_rewind_generation != UINT64_C(0)) {
+            return NULL;
+        }
+    } else if (context->hir_owner != hir
+        || context->admitted_crate != crate_id
+        || context->admitted_storage_lifetime_id != hir->storage.lifetime_id
+        || context->admitted_semantic_generation != hir->semantic_generation
+        || context->admitted_rewind_generation != hir->rewind_generation) {
+        return NULL;
+    }
+    *out_crate = crate_id;
+    return hir;
+}
+
+static void cm_mir_lower_latch_admission(CmMirContext *context,
+    const CmHirContext *hir, CmHirCrateId crate_id)
+{
+    context->hir_owner = hir;
+    context->admitted_crate = crate_id;
+    context->admitted_storage_lifetime_id = hir->storage.lifetime_id;
+    context->admitted_semantic_generation = hir->semantic_generation;
+    context->admitted_rewind_generation = hir->rewind_generation;
+}
+
+static CmMirLowerResult cm_mir_lower_admission_failure(CmHirBodyId body_id)
+{
+    CmMirLowerResult result;
+    memset(&result, 0, sizeof(result));
+    cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ADMISSION, body_id,
+        CM_HIR_EXPR_NONE, CM_MIR_INVALID_ADMISSION,
+        "MIR lowering requires current matching semantic admission");
+    return result;
+}
+
+CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
+    const CmSemanticAdmission *admission, CmHirBodyId body_id)
+{
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+    CmMirLowerResult result;
+
+    if (context == NULL) {
+        memset(&result, 0, sizeof(result));
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
+            CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
+            "invalid admitted HIR-to-MIR lowering destination");
+        return result;
+    }
+    hir = cm_mir_lower_admitted_hir(context, admission, body_id, &crate_id);
+    if (hir == NULL) return cm_mir_lower_admission_failure(body_id);
+    result = cm_mir_lower_body(context, hir, body_id);
+    if (result.error_count == 0u
+        && context->admitted_crate == CM_HIR_CRATE_NONE) {
+        cm_mir_lower_latch_admission(context, hir, crate_id);
+    }
+    return result;
+}
+
+CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
+    const CmSemanticAdmission *admission, CmHirBodyId body_id,
+    const CmHirTypeId *substitutions, uint32_t substitution_count)
+{
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+    CmMirLowerResult result;
+
+    if (context == NULL) {
+        memset(&result, 0, sizeof(result));
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
+            CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
+            "invalid admitted HIR-to-MIR lowering destination");
+        return result;
+    }
+    hir = cm_mir_lower_admitted_hir(context, admission, body_id, &crate_id);
+    if (hir == NULL) return cm_mir_lower_admission_failure(body_id);
+    result = cm_mir_lower_instance(context, hir, body_id, substitutions,
+        substitution_count);
+    if (result.error_count == 0u
+        && context->admitted_crate == CM_HIR_CRATE_NONE) {
+        cm_mir_lower_latch_admission(context, hir, crate_id);
+    }
+    return result;
+}
+
 const char *cm_mir_lower_error_kind_name(CmMirLowerErrorKind kind)
 {
     switch (kind) {
     case CM_MIR_LOWER_INVALID_ARGUMENT:
         return "invalid argument";
+    case CM_MIR_LOWER_INVALID_ADMISSION:
+        return "invalid admission";
     case CM_MIR_LOWER_INVALID_HIR:
         return "invalid HIR";
     case CM_MIR_LOWER_UNSUPPORTED_BODY_STATE:
