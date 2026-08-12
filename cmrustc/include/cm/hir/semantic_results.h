@@ -112,6 +112,10 @@ CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
 CmSemanticResultsStatus cm_semantic_type_view_equal(
     const CmSemanticTypeView *left, const CmSemanticTypeView *right,
     int *out_equal);
+CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmSemanticTypeView *view, CmHirTypeId type, int *out_equal);
 const char *cm_semantic_results_status_name(CmSemanticResultsStatus status);
 
 #endif

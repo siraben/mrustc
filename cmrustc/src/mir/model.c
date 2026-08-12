@@ -707,6 +707,21 @@ static int cm_mir_semantic_view_equal(const CmSemanticTypeView *left,
         && equal;
 }
 
+static int cm_mir_semantic_view_matches_hir(
+    const CmMirTreeMatch *match, const CmSemanticTypeView *view,
+    CmHirTypeId type)
+{
+    int equal;
+
+    equal = 0;
+    return match != NULL && match->semantic_results != NULL
+        && match->admission != NULL
+        && cm_semantic_type_view_matches_monomorphic_hir(
+            match->semantic_results, match->admission, view, type, &equal)
+                == CM_SEMANTIC_RESULTS_OK
+        && equal;
+}
+
 static int cm_mir_place_equal(const CmHirContext *hir,
     const CmMirPlace *left, const CmMirPlace *right)
 {
@@ -1296,6 +1311,11 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                     &semantic_expression.adjusted_type)) {
                 return 0;
             }
+            if (!cm_mir_semantic_view_matches_hir(match,
+                    &semantic_call.return_type,
+                    match->body->locals[destination].type)) {
+                return 0;
+            }
         }
         for (index = 0u;
              index < expression->data.call.type_substitution_count;
@@ -1334,7 +1354,10 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                     || !cm_mir_semantic_view_equal(&call_parameter,
                         &signature_parameter)
                     || !cm_mir_semantic_view_equal(&call_parameter,
-                        &argument_expression.adjusted_type)) {
+                        &argument_expression.adjusted_type)
+                    || !cm_mir_semantic_view_matches_hir(match,
+                        &call_parameter,
+                        terminator->data.call.arguments[index].type)) {
                     return 0;
                 }
             }

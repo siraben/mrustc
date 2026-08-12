@@ -129,6 +129,15 @@ static void test_successful_results(void)
                 == owner_item->data.function_item.signature.parameter_count
             && signature_view.return_type.bytes != NULL
             && signature_view.return_type.size != 0u);
+        {
+            int matches;
+
+            assert(cm_semantic_type_view_matches_monomorphic_hir(results,
+                &admission, &signature_view.return_type,
+                owner_item->data.function_item.signature.return_type,
+                &matches) == CM_SEMANTIC_RESULTS_OK
+                && matches);
+        }
         for (signature_parameter_index = 0u;
              signature_parameter_index < signature_view.parameter_count;
              ++signature_parameter_index) {
@@ -139,6 +148,16 @@ static void test_successful_results(void)
                 &parameter_view) == CM_SEMANTIC_RESULTS_OK
                 && parameter_view.bytes != NULL
                 && parameter_view.size != 0u);
+            {
+                int matches;
+
+                assert(cm_semantic_type_view_matches_monomorphic_hir(
+                    results, &admission, &parameter_view,
+                    owner_item->data.function_item.signature.parameters[
+                        signature_parameter_index].type,
+                    &matches) == CM_SEMANTIC_RESULTS_OK
+                    && matches);
+            }
         }
         body_expressions = 0u;
         for (expression_index = 0u;

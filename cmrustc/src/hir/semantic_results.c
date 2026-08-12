@@ -3,6 +3,7 @@
 #include "cm/alloc.h"
 #include "cm/hir/admission.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #define CM_RESULTS_TYPE_DEPTH ((size_t)128u)
@@ -1448,6 +1449,117 @@ CmSemanticResultsStatus cm_semantic_type_view_equal(
         && (left->size == 0u
             || memcmp(left->bytes, right->bytes, left->size) == 0);
     return CM_SEMANTIC_RESULTS_OK;
+}
+
+static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
+    CmHirTypeId type_id, size_t depth)
+{
+    const CmHirType *type;
+    uint32_t index;
+
+    if (hir == NULL || depth >= CM_RESULTS_TYPE_DEPTH) return 0;
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return 0;
+    switch (type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_INTEGER_KIND:
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return 1;
+    case CM_HIR_TYPE_ADT_KIND:
+        if (cm_hir_def_id_is_none(type->data.named_type.definition)
+            || (type->data.named_type.argument_count == 0u)
+                != (type->data.named_type.arguments == NULL)) return 0;
+        for (index = 0u; index < type->data.named_type.argument_count;
+             ++index) {
+            const CmHirGenericArg *argument;
+
+            argument = &type->data.named_type.arguments[index];
+            if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
+                if (!cm_results_hir_type_is_monomorphic(hir,
+                        argument->data.type, depth + 1u)) return 0;
+            } else if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
+                if (argument->data.lifetime.kind != CM_HIR_REGION_STATIC
+                    && argument->data.lifetime.kind
+                        != CM_HIR_REGION_ERASED) return 0;
+            } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+                if (argument->data.constant.kind != CM_HIR_CONST_VALUE
+                    || !cm_results_hir_type_is_monomorphic(hir,
+                        argument->data.constant.type, depth + 1u)) return 0;
+            } else {
+                return 0;
+            }
+        }
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission,
+    const CmSemanticTypeView *view, CmHirTypeId type, int *out_equal)
+{
+    CmTypeckContext typeck;
+    CmTypeckTypeId imported;
+    CmResultsBuffer sizing;
+    CmResultsBuffer output;
+    unsigned char *bytes;
+    CmSemanticResultsStatus status;
+    uintptr_t view_start;
+    uintptr_t bytes_start;
+    uintptr_t bytes_end;
+
+    if (out_equal == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    *out_equal = 0;
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (view == NULL || view->bytes == NULL || view->size == 0u
+        || !cm_results_hir_type_is_monomorphic(results->hir, type, 0u)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    view_start = (uintptr_t)view->bytes;
+    bytes_start = (uintptr_t)results->type_bytes;
+    bytes_end = bytes_start + results->type_bytes_len;
+    if (view_start < bytes_start || view_start > bytes_end
+        || view->size > (size_t)(bytes_end - view_start)) {
+        return CM_SEMANTIC_RESULTS_FOREIGN;
+    }
+    memset(&typeck, 0, sizeof(typeck));
+    cm_typeck_context_init(&typeck, results->hir);
+    cm_typeck_context_track_hir_semantic_generation(&typeck);
+    if (cm_typeck_import_hir_type(&typeck, type, &imported)
+            != CM_TYPECK_OK) {
+        cm_typeck_context_destroy(&typeck);
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = cm_results_typeck_type(&sizing, results->hir, &typeck,
+        imported, 0u);
+    bytes = status != CM_SEMANTIC_RESULTS_OK || sizing.len == 0u ? NULL
+        : (unsigned char *)cm_alloc(sizing.len);
+    if (status == CM_SEMANTIC_RESULTS_OK) {
+        memset(&output, 0, sizeof(output));
+        output.data = bytes;
+        output.cap = sizing.len;
+        status = cm_results_typeck_type(&output, results->hir, &typeck,
+            imported, 0u);
+        if (status == CM_SEMANTIC_RESULTS_OK && output.len != sizing.len) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    if (status == CM_SEMANTIC_RESULTS_OK) {
+        *out_equal = view->size == sizing.len
+            && memcmp(view->bytes, bytes, sizing.len) == 0;
+    }
+    cm_free(bytes);
+    cm_typeck_context_destroy(&typeck);
+    return status;
 }
 
 const char *cm_semantic_results_status_name(CmSemanticResultsStatus status)
