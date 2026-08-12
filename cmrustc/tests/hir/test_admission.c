@@ -292,15 +292,20 @@ static void test_mir_admission_gates(void)
     CmMirContext mir, copied, rejected;
     CmMirLowerResult lower_result;
     const CmMirBody *stored;
+    const CmMirBody *caller_body;
+    const CmHirBody *caller_hir_body;
+    CmHirExpr *caller_expression;
+    size_t expression_index;
     CmMirBody candidate;
     CmMirBodyId copied_id;
+    CmHirDefId first_definition;
     CmHirType type;
     CmHirTypeId type_id;
     size_t body_count;
 
     fixture_init(&f,
         "fn first(x: u32) -> u32 { x } "
-        "fn second(x: u32) -> u32 { x }");
+        "fn second(x: u32) -> u32 { first(x) }");
     fixture_init(&foreign, "fn foreign(x: u32) -> u32 { x }");
     memset(&admission, 0, sizeof(admission));
     memset(&foreign_admission, 0, sizeof(foreign_admission));
@@ -334,8 +339,52 @@ static void test_mir_admission_gates(void)
     assert(mir.admitted_rewind_generation == f.hir.rewind_generation);
     assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
         lower_result.body) == CM_MIR_OK);
-
     stored = cm_mir_get_body(&mir, lower_result.body);
+    assert(stored != NULL);
+    first_definition = stored->instance.definition;
+
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission, 2u,
+        NULL, 0u);
+    assert(lower_result.error_count == 0u
+        && lower_result.lowered_body_count == 1u
+        && cm_mir_body_count(&mir) == 2u);
+    caller_body = cm_mir_get_body(&mir, lower_result.body);
+    assert(caller_body != NULL && caller_body->basic_block_count >= 2u
+        && caller_body->basic_blocks[0].terminator.kind
+            == CM_MIR_TERMINATOR_CALL
+        && cm_hir_def_id_equal(
+            caller_body->basic_blocks[0].terminator.data.call.callee
+                .definition,
+            first_definition));
+
+    caller_hir_body = cm_hir_get_body(&f.hir, 2u);
+    caller_expression = NULL;
+    for (expression_index = 0u;
+         caller_hir_body != NULL && expression_index < f.hir.expressions.len;
+         ++expression_index) {
+        CmHirExpr *candidate_expression;
+
+        candidate_expression = (CmHirExpr *)cm_hir_get_expr(&f.hir,
+            (CmHirExprId)(expression_index + 1u));
+        if (candidate_expression != NULL
+            && candidate_expression->owner_body == 2u
+            && candidate_expression->kind == CM_HIR_EXPR_CALL) {
+            caller_expression = candidate_expression;
+            break;
+        }
+    }
+    assert(caller_expression != NULL
+        && caller_expression->kind == CM_HIR_EXPR_CALL);
+    caller_expression->data.call.callee.index += 100u;
+    body_count = cm_mir_body_count(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission, 2u,
+        NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == body_count);
+    caller_expression->data.call.callee.index -= 100u;
+
+    stored = cm_mir_get_body(&mir, 1u);
     assert(stored != NULL);
     candidate = *stored;
     candidate.owned_storage = NULL;
