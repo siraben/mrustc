@@ -47,6 +47,8 @@ typedef struct WritebackProbe {
     CmTypeckTypeId binding_variable;
     CmTypeckTypeId added_term;
     int mutate_typeck;
+    int require_integer_kind;
+    CmHirIntType expected_integer_kind;
 } WritebackProbe;
 
 static CmSemanticBodyWritebackStatus probe_writeback(void *context,
@@ -84,6 +86,14 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
             && cm_typeck_resolve(typeck, expression_terms[index], &resolved)
                 == CM_TYPECK_OK
             && cm_typeck_get_type(typeck, resolved) != NULL);
+        if (probe->require_integer_kind) {
+            const CmTypeckType *resolved_type;
+
+            resolved_type = cm_typeck_get_type(typeck, resolved);
+            assert(resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+                && resolved_type->data.integer_type
+                    == probe->expected_integer_kind);
+        }
         if (probe->first_owned_term == CM_TYPECK_TYPE_NONE) {
             probe->first_owned_term = expression_terms[index];
         }
@@ -1171,6 +1181,66 @@ static void test_intrinsic_body_projection_normalization(void)
     fixture_destroy(&fixture);
 }
 
+static void test_projected_call_substitution_writeback(void)
+{
+    TestFixture fixture;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmHirItem *callee;
+    CmHirItem *caller;
+    CmHirBody *body;
+    CmHirExpr *call;
+    CmHirExpr *argument;
+    CmHirTypeId projection;
+    WritebackProbe probe;
+
+    fixture_init(&fixture);
+    projection = add_projection_type(&fixture, fixture.present_trait,
+        fixture.present_associated, fixture.u32_type);
+    callee = mutable_item(&fixture, fixture.present_callee);
+    caller = mutable_item(&fixture, fixture.present_caller);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)fixture.present_body - 1u);
+    call = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)fixture.present_call - 1u);
+    argument = call == NULL || call->data.call.argument_count != 1u
+        ? NULL : (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+            (size_t)call->data.call.arguments[0] - 1u);
+    assert(callee != NULL && caller != NULL && body != NULL
+        && call != NULL && argument != NULL && body->local_count == 1u);
+    /* Isolate substitution/signature normalization from the callee bound. */
+    callee->predicates = NULL;
+    callee->predicate_count = 0u;
+    caller->data.function_item.signature.parameters[0].type =
+        fixture.u8_type;
+    caller->data.function_item.signature.return_type = fixture.u8_type;
+    body->locals[0].type = fixture.u8_type;
+    body->expected_type = fixture.u8_type;
+    argument->type = fixture.u8_type;
+    call->type = fixture.u8_type;
+    call->data.call.type_substitutions[0] = projection;
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.present_caller);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    probe.require_integer_kind = 1;
+    probe.expected_integer_kind = CM_HIR_INT_U8;
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN
+        && probe.invocation_count == 1u
+        && probe.owned_term_count == 2u);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_projection_equality_proof_mismatch_and_rollback(void)
 {
     TestFixture fixture;
@@ -1255,8 +1325,13 @@ static void test_projection_fail_closed_shapes_and_overlap(void)
     type_count = cm_typeck_type_count(typeck);
     result = cm_semantic_body_check_calls(&session, fixture.projected_body,
         NULL, 0u);
-    assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
-        && cm_typeck_type_count(typeck) == type_count);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    result = cm_semantic_body_check_calls(&session, fixture.projected_body,
+        NULL, 0u);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_typeck_type_count(typeck) >= type_count);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
 
@@ -1873,6 +1948,7 @@ int main(void)
 {
     test_positive_impl_and_missing_metadata();
     test_intrinsic_body_projection_normalization();
+    test_projected_call_substitution_writeback();
     test_projection_equality_proof_mismatch_and_rollback();
     test_projection_fail_closed_shapes_and_overlap();
     test_projection_equality_order();
