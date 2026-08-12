@@ -146,6 +146,8 @@ static CmTraitGoal projection_goal(CmHirDefId owner,
 static void assert_invalid_result(CmTraitSelectionResult result)
 {
     assert(result.kind == CM_TRAIT_SOLVER_INVALID);
+    assert(result.proof_origin == CM_TRAIT_PROOF_NONE);
+    assert(result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE);
     assert(cm_hir_def_id_is_none(result.impl_definition));
     assert(result.impl_item == CM_HIR_ITEM_NONE);
     assert(cm_hir_def_id_is_none(result.impl_associated_definition));
@@ -196,7 +198,10 @@ static void test_open_session_solve_and_accessors(void)
         bool_type);
     result = cm_semantic_session_solve_implemented(&session, typeck,
         &substitution, &goal);
-    assert(result.kind == CM_TRAIT_SOLVER_PROVEN);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && result.param_env_fact_index != CM_TRAIT_PROOF_FACT_NONE
+        && cm_hir_def_id_is_none(result.impl_definition));
 
     goal = implemented_goal(fixture.owner_trait, fixture.bound_trait,
         bool_type);

@@ -100,6 +100,7 @@ static CmTraitSelectionResult cm_goal_result(CmTraitSolverResultKind kind)
 
     memset(&result, 0, sizeof(result));
     result.kind = kind;
+    result.param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
     result.impl_definition = cm_hir_def_id_none();
     result.impl_item = CM_HIR_ITEM_NONE;
     result.impl_associated_definition = cm_hir_def_id_none();
@@ -1446,6 +1447,8 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
         result.impl_definition = cm_hir_def_id_none();
         result.impl_item = CM_HIR_ITEM_NONE;
         result.impl_associated_definition = cm_hir_def_id_none();
+        result.proof_origin = CM_TRAIT_PROOF_NONE;
+        result.param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
         entry->result = result;
         entry->state = CM_GOAL_ENTRY_COMPLETE;
     } else if (entry != NULL) {

@@ -24,6 +24,15 @@ typedef enum CmTraitImplUniverse {
     CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE
 } CmTraitImplUniverse;
 
+/* Authenticated source of one committed proof. */
+typedef enum CmTraitProofOrigin {
+    CM_TRAIT_PROOF_NONE = 0,
+    CM_TRAIT_PROOF_PARAM_ENV,
+    CM_TRAIT_PROOF_IMPL
+} CmTraitProofOrigin;
+
+#define CM_TRAIT_PROOF_FACT_NONE ((size_t)-1)
+
 typedef enum CmTraitImplHeadKind {
     CM_TRAIT_IMPL_HEAD_WILDCARD = 0,
     CM_TRAIT_IMPL_HEAD_NEVER,
@@ -75,6 +84,10 @@ typedef struct CmTraitImplIndex {
 
 typedef struct CmTraitSelectionResult {
     CmTraitSolverResultKind kind;
+    /* Non-PROVEN results always report NONE and no fact/impl identity. */
+    CmTraitProofOrigin proof_origin;
+    /* Set only when proof_origin is PARAM_ENV. */
+    size_t param_env_fact_index;
     CmHirDefId impl_definition;
     CmHirItemId impl_item;
     /* Set only by a committed projection-equality proof. */

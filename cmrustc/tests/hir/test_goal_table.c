@@ -509,6 +509,8 @@ static CmTraitGoal projection_goal(CmHirDefId owner,
 static void assert_cached_nonproven_clean(CmTraitSelectionResult result)
 {
     assert(result.kind != CM_TRAIT_SOLVER_PROVEN);
+    assert(result.proof_origin == CM_TRAIT_PROOF_NONE);
+    assert(result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE);
     assert(cm_hir_def_id_is_none(result.impl_definition));
     assert(result.impl_item == CM_HIR_ITEM_NONE);
     assert(cm_hir_def_id_is_none(result.impl_associated_definition));

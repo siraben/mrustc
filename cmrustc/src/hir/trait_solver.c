@@ -61,6 +61,7 @@ static CmTraitSelectionResult cm_trait_result(CmTraitSolverResultKind kind)
 
     memset(&result, 0, sizeof(result));
     result.kind = kind;
+    result.param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
     result.impl_definition = cm_hir_def_id_none();
     result.impl_item = CM_HIR_ITEM_NONE;
     result.impl_associated_definition = cm_hir_def_id_none();
@@ -1874,6 +1875,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
             return result;
         }
         result.kind = CM_TRAIT_SOLVER_PROVEN;
+        result.proof_origin = CM_TRAIT_PROOF_IMPL;
         result.impl_definition = winner->impl_definition;
         result.impl_item = winner->item;
         return result;
@@ -2132,6 +2134,8 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
             typeck, substitution, goal, 1);
         if (replay.kind == CM_TRAIT_MATCH_YES) {
             result.kind = CM_TRAIT_SOLVER_PROVEN;
+            result.proof_origin = CM_TRAIT_PROOF_PARAM_ENV;
+            result.param_env_fact_index = winner_index;
             return result;
         }
         result.kind = replay.kind == CM_TRAIT_MATCH_OVERFLOW

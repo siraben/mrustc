@@ -41,6 +41,7 @@ static CmTraitSelectionResult cm_semantic_result(
 
     memset(&result, 0, sizeof(result));
     result.kind = kind;
+    result.param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
     result.impl_definition = cm_hir_def_id_none();
     result.impl_item = CM_HIR_ITEM_NONE;
     result.impl_associated_definition = cm_hir_def_id_none();

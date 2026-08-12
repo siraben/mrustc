@@ -649,6 +649,8 @@ static void test_type_only_generic_selection(void)
     result = cm_trait_solver_select(&impl_index, &typeck, tuple_type,
         &query);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && result.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
         && result.supported_match_count == 1u
         && !cm_hir_def_id_is_none(result.impl_definition));
 
