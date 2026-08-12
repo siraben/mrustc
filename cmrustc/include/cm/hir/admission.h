@@ -32,6 +32,11 @@ typedef struct CmSemanticAdmissionResult {
 /* Process-local evidence for one completely admitted HIR generation. */
 typedef struct CmSemanticAdmission { void *state; } CmSemanticAdmission;
 
+typedef struct CmSemanticReachableBody {
+    CmHirDefId owner;
+    CmHirBodyId body;
+} CmSemanticReachableBody;
+
 /*
  * Transactionally lower and admit every supported local free-function or
  * concrete trait-impl method body.
@@ -41,6 +46,17 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     CmHirCrateId local_crate, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
     const CmHirModuleMap *modules);
+
+/*
+ * Admit one closed set of already-typed, monomorphic local function bodies.
+ * Generic functions and associated functions are not accepted. Unlisted
+ * bodies remain outside the capability and may remain unlowered. Local trait
+ * impl signatures are still finalized and checked for the complete crate.
+ */
+CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate, const CmSemanticReachableBody *bodies,
+    size_t body_count);
 void cm_semantic_admission_destroy(CmSemanticAdmission *admission);
 int cm_semantic_admission_is_current(const CmSemanticAdmission *admission);
 const CmHirContext *cm_semantic_admission_hir(

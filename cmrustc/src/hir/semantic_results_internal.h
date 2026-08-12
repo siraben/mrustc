@@ -21,6 +21,9 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
 void cm_semantic_results_body_stage_destroy(
     CmSemanticResultsBodyStage *stage);
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results);
+CmSemanticResultsStatus cm_semantic_results_seal_reachable(
+    CmSemanticResults *results, const CmHirBodyId *bodies,
+    size_t body_count);
 void cm_semantic_results_destroy(CmSemanticResults *results);
 
 #endif

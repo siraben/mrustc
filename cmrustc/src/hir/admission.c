@@ -248,6 +248,170 @@ rollback:
     return result;
 }
 
+CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate, const CmSemanticReachableBody *bodies,
+    size_t body_count)
+{
+    CmSemanticAdmissionResult result;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticResults *semantic_results;
+    CmSemanticResultsBodyStage body_stage;
+    CmSemanticAdmissionState *state;
+    CmHirBodyId *body_ids;
+    CmSemanticResultsStatus results_status;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    if (admission == NULL || admission->state != NULL || hir == NULL
+        || local_crate == CM_HIR_CRATE_NONE || bodies == NULL
+        || body_count == 0u || cm_hir_get_crate(hir, local_crate) == NULL
+        || body_count > (size_t)-1 / sizeof(*body_ids)) return result;
+    memset(&finalization, 0, sizeof(finalization));
+    memset(&session, 0, sizeof(session));
+    semantic_results = NULL;
+    state = NULL;
+    body_ids = (CmHirBodyId *)cm_alloc(body_count * sizeof(*body_ids));
+    cm_semantic_results_body_stage_init(&body_stage);
+    for (index = 0u; index < body_count; ++index) {
+        const CmHirDefinition *definition;
+        const CmHirItem *item;
+        const CmHirBody *body;
+        size_t previous;
+
+        result.owner = bodies[index].owner;
+        result.body = bodies[index].body;
+        definition = cm_hir_lookup_definition(hir, bodies[index].owner);
+        result.item = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+            ? CM_HIR_ITEM_NONE : definition->entity.item_id;
+        item = definition == NULL
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+                || definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        body = cm_hir_get_body(hir, bodies[index].body);
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->definition.crate_id != local_crate
+            || !cm_hir_def_id_equal(item->definition,
+                bodies[index].owner)
+            || !cm_hir_def_id_is_none(item->parent_definition)
+            || item->generic_parameter_count != 0u
+            || item->data.function_item.body != bodies[index].body
+            || body == NULL || body->state != CM_HIR_BODY_TYPED
+            || body->root_expression == CM_HIR_EXPR_NONE
+            || !cm_hir_def_id_equal(body->owner, item->definition)) {
+            goto cleanup;
+        }
+        for (previous = 0u; previous < index; ++previous) {
+            if (body_ids[previous] == bodies[index].body
+                || cm_hir_def_id_equal(bodies[previous].owner,
+                    bodies[index].owner)) goto cleanup;
+        }
+        body_ids[index] = bodies[index].body;
+    }
+    result.hir_status = cm_hir_crate_finalization_init(&finalization, hir,
+        local_crate);
+    if (result.hir_status != CM_HIR_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_FINALIZATION_FAILURE;
+        goto cleanup;
+    }
+    {
+        CmProjectionNormalizeLimits limits;
+
+        limits.max_nodes = 4096u;
+        limits.max_projection_steps = 256u;
+        result.item_result =
+            cm_semantic_item_check_finalized_local_trait_impls(
+                &finalization, limits);
+    }
+    if (result.item_result.status != CM_SEMANTIC_ITEM_OK) {
+        result.owner = cm_hir_def_id_is_none(result.item_result.impl_member)
+            ? result.item_result.impl_definition
+            : result.item_result.impl_member;
+        result.status = CM_SEMANTIC_ADMISSION_ITEM_FAILURE;
+        goto cleanup;
+    }
+    results_status = cm_semantic_results_begin(hir, local_crate,
+        &semantic_results);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto cleanup;
+    }
+    for (index = 0u; index < body_count; ++index) {
+        CmSemanticSessionOptions options;
+        const CmHirDefinition *definition;
+
+        result.owner = bodies[index].owner;
+        result.body = bodies[index].body;
+        definition = cm_hir_lookup_definition(hir, bodies[index].owner);
+        result.item = definition == NULL ? CM_HIR_ITEM_NONE
+            : definition->entity.item_id;
+        cm_semantic_session_options_init(&options);
+        options.local_crate = local_crate;
+        options.exact_owner = bodies[index].owner;
+        options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+        options.finalization = &finalization;
+        result.session_status = cm_semantic_session_init(&session, hir,
+            &options);
+        if (result.session_status != CM_TRAIT_SOLVER_PROVEN) {
+            result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
+            goto cleanup;
+        }
+        result.body_result =
+            cm_semantic_body_check_definition_with_writeback(&session,
+                bodies[index].body, cm_semantic_results_stage_checked_body,
+                &body_stage);
+        if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
+            goto cleanup;
+        }
+        results_status = cm_semantic_results_commit_checked_body(
+            semantic_results, &session, &result.body_result, &body_stage);
+        cm_semantic_session_destroy(&session);
+        if (results_status != CM_SEMANTIC_RESULTS_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+            result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+                ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+            goto cleanup;
+        }
+    }
+    results_status = cm_semantic_results_seal_reachable(semantic_results,
+        body_ids, body_count);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto cleanup;
+    }
+    state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u,
+        sizeof(*state));
+    state->hir = hir;
+    state->local_crate = local_crate;
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->results = semantic_results;
+    admission->state = state;
+    semantic_results = NULL;
+    result.status = CM_SEMANTIC_ADMISSION_OK;
+    result.item_result.status = CM_SEMANTIC_ITEM_OK;
+    result.body_result.status = CM_SEMANTIC_BODY_OK;
+    result.body_result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
+    result.session_status = CM_TRAIT_SOLVER_PROVEN;
+
+cleanup:
+    cm_semantic_results_body_stage_destroy(&body_stage);
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_semantic_results_destroy(semantic_results);
+    cm_free(body_ids);
+    return result;
+}
+
 void cm_semantic_admission_destroy(CmSemanticAdmission *admission)
 {
     if (admission == NULL) return;

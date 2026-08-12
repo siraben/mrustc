@@ -94,6 +94,42 @@ static const CmHirItem *find_impl_method(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_free_function(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *stored_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        stored_name = item == NULL ? NULL
+            : cm_interner_get(&hir->strings, item->name);
+        if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+            && cm_hir_def_id_is_none(item->parent_definition)
+            && stored_name != NULL && stored_name->len == length
+            && memcmp(stored_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static void lower_function(Fixture *f, const CmHirItem *function)
+{
+    CmHirBodyLowerResult result;
+
+    assert(function != NULL
+        && function->data.function_item.body != CM_HIR_BODY_NONE);
+    result = cm_hir_lower_body(&f->hir,
+        function->data.function_item.body, &f->graph,
+        f->graph_result.revision, &f->imports, &f->modules);
+    assert(result.status == CM_HIR_BODY_LOWER_OK);
+}
+
 static void test_success_and_stale(void)
 {
     Fixture f;
@@ -455,6 +491,145 @@ static void test_mir_admission_gates(void)
     fixture_destroy(&f);
 }
 
+static void test_reachable_admission_subset_and_mir(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableBody reachable;
+    CmSemanticBodyView body_view;
+    CmMirContext mir;
+    CmMirLowerResult lower_result;
+    const CmHirItem *chosen;
+    const CmHirItem *unsupported;
+    const CmSemanticResults *results;
+
+    fixture_init(&f,
+        "fn chosen(x: u32) -> u32 { x + 1u32 } "
+        "fn unsupported<T>(x: T) -> T { x }");
+    chosen = find_free_function(&f.hir, "chosen");
+    unsupported = find_free_function(&f.hir, "unsupported");
+    assert(chosen != NULL && unsupported != NULL);
+    lower_function(&f, chosen);
+    assert(cm_hir_get_body(&f.hir,
+            unsupported->data.function_item.body)->state
+        == CM_HIR_BODY_UNLOWERED);
+
+    reachable.owner = chosen->definition;
+    reachable.body = chosen->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, &reachable, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_is_current(&admission)
+        && results != NULL
+        && cm_semantic_results_body_count(results, &admission) == 1u
+        && cm_semantic_results_body(results, &admission, reachable.body,
+            &body_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_body(results, &admission,
+            unsupported->data.function_item.body, &body_view)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_hir_get_body(&f.hir,
+            unsupported->data.function_item.body)->state
+            == CM_HIR_BODY_UNLOWERED);
+
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission,
+        reachable.body, NULL, 0u);
+    assert(lower_result.error_count == 0u
+        && lower_result.body != CM_MIR_BODY_NONE
+        && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+            lower_result.body) == CM_MIR_OK);
+    cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
+static void test_reachable_admission_requires_closed_unique_set(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableBody reachable[2];
+    const CmHirItem *callee;
+    const CmHirItem *caller;
+    const CmSemanticResults *results;
+
+    fixture_init(&f,
+        "fn callee(x: u32) -> u32 { x + 1u32 } "
+        "fn caller(x: u32) -> u32 { callee(x) }");
+    callee = find_free_function(&f.hir, "callee");
+    caller = find_free_function(&f.hir, "caller");
+    assert(callee != NULL && caller != NULL);
+    lower_function(&f, callee);
+    lower_function(&f, caller);
+    reachable[0].owner = caller->definition;
+    reachable[0].body = caller->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_HIR_FAILURE
+        && admission.state == NULL
+        && cm_semantic_admission_results(&admission) == NULL);
+
+    reachable[1].owner = callee->definition;
+    reachable[1].body = callee->data.function_item.body;
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, reachable, 2u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && results != NULL
+        && cm_semantic_results_body_count(results, &admission) == 2u);
+    cm_semantic_admission_destroy(&admission);
+
+    reachable[1] = reachable[0];
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, reachable, 2u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    reachable[0].owner = callee->definition;
+    reachable[0].body = caller->data.function_item.body;
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
+static void test_reachable_admission_rejects_untyped_and_generic(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableBody reachable;
+    const CmHirItem *generic;
+    const CmHirItem *plain;
+
+    fixture_init(&f,
+        "fn plain(x: u32) -> u32 { x } "
+        "fn generic<T>(x: T) -> T { x }");
+    plain = find_free_function(&f.hir, "plain");
+    generic = find_free_function(&f.hir, "generic");
+    assert(plain != NULL && generic != NULL);
+    memset(&admission, 0, sizeof(admission));
+    reachable.owner = plain->definition;
+    reachable.body = plain->data.function_item.body;
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+
+    lower_function(&f, generic);
+    reachable.owner = generic->definition;
+    reachable.body = generic->data.function_item.body;
+    result = cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
 static void test_invalid_api(void)
 {
     CmSemanticAdmission admission;
@@ -480,6 +655,9 @@ int main(void)
     test_generic_impl_method_is_rejected_atomically();
     test_impl_method_body_failure_is_atomic();
     test_mir_admission_gates();
+    test_reachable_admission_subset_and_mir();
+    test_reachable_admission_requires_closed_unique_set();
+    test_reachable_admission_rejects_untyped_and_generic();
     test_invalid_api();
     puts("hir semantic admission tests passed");
     return 0;

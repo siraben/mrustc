@@ -622,6 +622,19 @@ static CmSemanticResultsStatus cm_results_validate_membership(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+static int cm_results_type_bytes_equal(const CmSemanticResults *results,
+    size_t left_offset, size_t left_size, size_t right_offset,
+    size_t right_size)
+{
+    if (results == NULL || left_size != right_size
+        || left_offset > results->type_bytes_len
+        || left_size > results->type_bytes_len - left_offset
+        || right_offset > results->type_bytes_len
+        || right_size > results->type_bytes_len - right_offset) return 0;
+    return left_size == 0u || memcmp(results->type_bytes + left_offset,
+        results->type_bytes + right_offset, left_size) == 0;
+}
+
 CmSemanticResultsStatus cm_semantic_results_begin(
     const CmHirContext *hir, CmHirCrateId local_crate,
     CmSemanticResults **out_results)
@@ -1153,6 +1166,125 @@ CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
     results->sealed = 1;
     return CM_SEMANTIC_RESULTS_OK;
 
+}
+
+CmSemanticResultsStatus cm_semantic_results_seal_reachable(
+    CmSemanticResults *results, const CmHirBodyId *bodies,
+    size_t body_count)
+{
+    const CmHirContext *hir;
+    unsigned char *selected;
+    size_t index;
+    CmSemanticResultsStatus status;
+
+    if (results == NULL || results->sealed || bodies == NULL
+        || body_count == 0u || body_count != results->admitted_body_count) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    hir = results->hir;
+    if (hir == NULL || hir->storage.lifetime_id != results->storage_lifetime_id
+        || hir->semantic_generation != results->semantic_generation
+        || hir->rewind_generation != results->rewind_generation) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
+    selected = results->body_count == 0u ? NULL
+        : (unsigned char *)cm_alloc_zeroed(results->body_count, 1u);
+    for (index = 0u; index < body_count; ++index) {
+        CmHirBodyId body;
+
+        body = bodies[index];
+        if (body == CM_HIR_BODY_NONE || (size_t)body > results->body_count
+            || selected[(size_t)body - 1u] != 0u
+            || !results->bodies[(size_t)body - 1u].present) {
+            cm_free(selected);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        selected[(size_t)body - 1u] = 1u;
+    }
+    for (index = 0u; index < results->body_count; ++index) {
+        if ((selected[index] != 0u) != results->bodies[index].present) {
+            cm_free(selected);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    status = cm_results_validate_membership(results, hir);
+    if (status != CM_SEMANTIC_RESULTS_OK) {
+        cm_free(selected);
+        return status;
+    }
+    for (index = 0u; index < results->expression_count; ++index) {
+        const CmSemanticExpressionRecord *expression;
+        const CmHirDefinition *definition;
+        const CmHirItem *callee;
+        const CmSemanticBodyRecord *callee_record;
+        CmHirBodyId callee_body;
+        uint32_t parameter;
+
+        expression = &results->expressions[index];
+        if (!expression->present || !expression->has_direct_callable) {
+            continue;
+        }
+        definition = cm_hir_lookup_definition(hir,
+            expression->direct_callable);
+        callee = definition == NULL
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+                || definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        callee_body = callee == NULL || callee->kind != CM_HIR_ITEM_FUNCTION
+            ? CM_HIR_BODY_NONE : callee->data.function_item.body;
+        if (callee_body == CM_HIR_BODY_NONE
+            || (size_t)callee_body > results->body_count
+            || selected[(size_t)callee_body - 1u] == 0u
+            || callee->definition.crate_id != results->local_crate
+            || !cm_hir_def_id_equal(callee->definition,
+                expression->direct_callable)) {
+            cm_free(selected);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        callee_record = &results->bodies[(size_t)callee_body - 1u];
+        if (!callee_record->present
+            || !cm_hir_def_id_equal(callee_record->owner,
+                expression->direct_callable)
+            || expression->call_parameter_count
+                != callee_record->signature_parameter_count
+            || !cm_results_type_bytes_equal(results,
+                expression->call_return_offset,
+                expression->call_return_size,
+                callee_record->signature_return_offset,
+                callee_record->signature_return_size)) {
+            cm_free(selected);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        for (parameter = 0u;
+             parameter < expression->call_parameter_count; ++parameter) {
+            const CmSemanticTypeRecord *call_type;
+            const CmSemanticTypeRecord *signature_type;
+            size_t call_index;
+            size_t signature_index;
+
+            if (!cm_size_add(expression->call_parameter_start,
+                    (size_t)parameter, &call_index)
+                || call_index >= results->call_parameter_count
+                || !cm_size_add(callee_record->signature_parameter_start,
+                    (size_t)parameter, &signature_index)
+                || signature_index >= results->signature_parameter_count) {
+                cm_free(selected);
+                return CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+            call_type = &results->call_parameters[call_index];
+            signature_type = &results->signature_parameters[signature_index];
+            if (!cm_results_type_bytes_equal(results,
+                    call_type->type_offset, call_type->type_size,
+                    signature_type->type_offset,
+                    signature_type->type_size)) {
+                cm_free(selected);
+                return CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+        }
+    }
+    cm_free(selected);
+    results->sealed = 1;
+    return CM_SEMANTIC_RESULTS_OK;
 }
 
 void cm_semantic_results_destroy(CmSemanticResults *results)
