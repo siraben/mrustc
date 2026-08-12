@@ -67,6 +67,32 @@ static CmSemanticAdmissionResult admit(Fixture *f,
         &f->graph, f->graph_result.revision, &f->imports, &f->modules);
 }
 
+static const CmHirItem *find_impl_method(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *stored_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        stored_name = item == NULL ? NULL
+            : cm_interner_get(&hir->strings, item->name);
+        if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+            && !cm_hir_def_id_is_none(item->parent_definition)
+            && !cm_hir_def_id_is_none(
+                item->data.function_item.trait_item_definition)
+            && stored_name != NULL && stored_name->len == length
+            && memcmp(stored_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static void test_success_and_stale(void)
 {
     Fixture f;
@@ -146,6 +172,113 @@ static void test_semantic_failure_rolls_back(void)
         && f.hir.types.len == types
         && cm_hir_get_body(&f.hir, 1u)->state == CM_HIR_BODY_UNLOWERED
         && cm_hir_get_body(&f.hir, 2u)->state == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&f);
+}
+
+static void test_concrete_impl_method_is_admitted(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    const CmHirItem *method;
+    const CmHirBody *body;
+
+    fixture_init(&f,
+        "fn plus_one(x: u32) -> u32 { x + 1u32 } "
+        "trait Value { fn value(x: u32) -> u32; } "
+        "impl Value for u32 { "
+        "    fn value(x: u32) -> u32 { plus_one(x) } "
+        "} "
+        "pub fn main() -> u32 { 0u32 }");
+    method = find_impl_method(&f.hir, "value");
+    assert(method != NULL
+        && cm_hir_body_function_owner_kind(&f.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD);
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    body = cm_hir_get_body(&f.hir, method->data.function_item.body);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && result.local_bodies.status == CM_HIR_LOCAL_BODIES_OK
+        && result.item_result.status == CM_SEMANTIC_ITEM_OK
+        && result.body_result.status == CM_SEMANTIC_BODY_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
+static void test_generic_impl_method_is_rejected_atomically(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    const CmHirItem *method;
+    size_t expressions;
+    size_t types;
+
+    fixture_init(&f,
+        "trait Value { fn value() -> u32; } "
+        "struct Wrap<T> { value: T } "
+        "impl<T> Value for Wrap<T> { fn value() -> u32 { 1u32 } } "
+        "pub fn main() -> u32 { 0u32 }");
+    method = find_impl_method(&f.hir, "value");
+    assert(method != NULL
+        && cm_hir_body_function_owner_kind(&f.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    expressions = f.hir.expressions.len;
+    types = f.hir.types.len;
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_LOCAL_BODIES_FAILURE
+        && result.local_bodies.status
+            == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
+        && cm_hir_def_id_equal(result.owner, method->definition)
+        && result.body == method->data.function_item.body
+        && admission.state == NULL
+        && f.hir.expressions.len == expressions
+        && f.hir.types.len == types
+        && cm_hir_get_body(&f.hir,
+            method->data.function_item.body)->state
+                == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&f);
+}
+
+static void test_impl_method_body_failure_is_atomic(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    const CmHirItem *method;
+    size_t expressions;
+    size_t types;
+
+    fixture_init(&f,
+        "trait Missing {} "
+        "fn bounded<T: Missing>(x: T) -> T { x } "
+        "trait Value { fn value(x: u32) -> u32; } "
+        "impl Value for u32 { "
+        "    fn value(x: u32) -> u32 { bounded::<u32>(x) } "
+        "} "
+        "pub fn main() -> u32 { 0u32 }");
+    method = find_impl_method(&f.hir, "value");
+    assert(method != NULL);
+    expressions = f.hir.expressions.len;
+    types = f.hir.types.len;
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_BODY_FAILURE
+        && cm_hir_def_id_equal(result.owner, method->definition)
+        && result.body == method->data.function_item.body
+        && result.local_bodies.status == CM_HIR_LOCAL_BODIES_OK
+        && result.item_result.status == CM_SEMANTIC_ITEM_OK
+        && result.session_status == CM_TRAIT_SOLVER_PROVEN
+        && result.body_result.status != CM_SEMANTIC_BODY_OK
+        && admission.state == NULL
+        && f.hir.expressions.len == expressions
+        && f.hir.types.len == types
+        && cm_hir_get_body(&f.hir,
+            method->data.function_item.body)->state
+                == CM_HIR_BODY_UNLOWERED);
     fixture_destroy(&f);
 }
 
@@ -288,6 +421,9 @@ int main(void)
     test_success_and_stale();
     test_body_failure_rolls_back();
     test_semantic_failure_rolls_back();
+    test_concrete_impl_method_is_admitted();
+    test_generic_impl_method_is_rejected_atomically();
+    test_impl_method_body_failure_is_atomic();
     test_mir_admission_gates();
     test_invalid_api();
     puts("hir semantic admission tests passed");

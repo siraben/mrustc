@@ -1,5 +1,7 @@
 #include "cm/hir/semantic_body.h"
 
+#include "cm/hir/body.h"
+
 #include "cm/alloc.h"
 
 #include <string.h>
@@ -512,12 +514,15 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     const CmHirContext *hir;
     const CmHirBody *body;
     const CmHirItem *owner_item;
+    const CmHirItem *enclosing_item;
     CmHirDefId owner;
+    CmHirBodyFunctionOwnerKind owner_kind;
     CmTypeckContext *typeck;
     CmTypeckSnapshot snapshot;
     CmTypeckGenericArg *owner_arguments;
     CmTypeckGenericArg *callee_arguments;
     CmTypeckInstantiation owner_instantiation;
+    CmTypeckInstantiation enclosing_instantiation;
     CmParamEnvSubstitution environment_substitution;
     CmHirExprId *call_expressions;
     size_t call_expression_count;
@@ -538,15 +543,24 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     owner = cm_semantic_session_exact_owner(session);
     owner_item = body == NULL ? NULL
         : cm_semantic_body_item(hir, body->owner);
+    owner_kind = cm_hir_body_function_owner_kind(hir, owner_item);
+    enclosing_item = owner_kind
+            == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD
+        ? cm_semantic_body_item(hir, owner_item->parent_definition) : NULL;
     if (hir == NULL || body == NULL || owner_item == NULL
         || owner_item->kind != CM_HIR_ITEM_FUNCTION
+        || owner_kind == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED
         || body->state != CM_HIR_BODY_TYPED
         || body->root_expression == CM_HIR_EXPR_NONE
         || owner_item->data.function_item.body != body_id
         || !cm_hir_def_id_equal(body->owner, owner)
-        || !cm_hir_def_id_is_none(owner_item->parent_definition)
-        || !cm_hir_def_id_is_none(
-            cm_semantic_session_enclosing_owner(session))
+        || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+            ? !cm_hir_def_id_is_none(
+                cm_semantic_session_enclosing_owner(session))
+            : enclosing_item == NULL
+                || enclosing_item->kind != CM_HIR_ITEM_IMPL
+                || !cm_hir_def_id_equal(owner_item->parent_definition,
+                    cm_semantic_session_enclosing_owner(session)))
         || (owner_type_substitution_count == 0u)
             != (owner_type_substitutions == NULL)
         || (definition_mode
@@ -577,7 +591,37 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
 
     memset(&owner_instantiation, 0, sizeof(owner_instantiation));
+    memset(&enclosing_instantiation, 0, sizeof(enclosing_instantiation));
     owner_instantiation.parameter_owner = owner;
+    if (owner_kind
+            == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD) {
+        CmSemanticTypeScan scan;
+
+        scan = cm_semantic_scan_merge(
+            cm_semantic_scan_type(hir,
+                enclosing_item->data.impl_item.self_type, 0u),
+            cm_semantic_scan_named(hir,
+                &enclosing_item->data.impl_item.trait_type, 0u));
+        result.status = cm_semantic_scan_status(scan);
+        if (result.status != CM_SEMANTIC_BODY_OK) {
+            return cm_semantic_body_fail_snapshot(result, typeck,
+                &snapshot, call_expressions);
+        }
+        typeck_status = cm_typeck_import_hir_type(typeck,
+            enclosing_item->data.impl_item.self_type,
+            &owner_instantiation.self_type);
+        if (typeck_status != CM_TYPECK_OK) {
+            result.status = cm_semantic_typeck_status(typeck_status);
+            result.typeck_status = typeck_status;
+            return cm_semantic_body_fail_snapshot(result, typeck,
+                &snapshot, call_expressions);
+        }
+        owner_instantiation.self_owner = enclosing_item->definition;
+        enclosing_instantiation.parameter_owner =
+            enclosing_item->definition;
+        enclosing_instantiation.self_owner = enclosing_item->definition;
+        enclosing_instantiation.self_type = owner_instantiation.self_type;
+    }
     result.status = cm_semantic_body_allocate_arguments(
         owner_item->generic_parameter_count, &owner_arguments);
     if (result.status != CM_SEMANTIC_BODY_OK) {
@@ -642,9 +686,21 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
     }
+    if (owner_kind
+            == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD
+        && !cm_typeck_instantiation_is_valid(typeck,
+            &enclosing_instantiation)) {
+        result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
+        return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+            call_expressions);
+    }
     memset(&environment_substitution, 0,
         sizeof(environment_substitution));
     environment_substitution.exact = &owner_instantiation;
+    if (owner_kind
+            == CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD) {
+        environment_substitution.enclosing = &enclosing_instantiation;
+    }
 
     for (call_index = 0u; call_index < call_expression_count; ++call_index) {
         const CmHirExpr *expression;

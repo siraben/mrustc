@@ -55,6 +55,7 @@ RESOLVE_SOURCES := \
 HIR_SOURCES := \
 	src/hir/admission.c \
 	src/hir/body.c \
+	src/hir/body_owner.c \
 	src/hir/finalization.c \
 	src/hir/goal_table.c \
 	src/hir/layout.c \
@@ -112,6 +113,7 @@ HIR_SEMANTIC_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/semantic.o
 HIR_SEMANTIC_BODY_OBJECTS := \
 	$(HIR_SEMANTIC_OBJECTS) \
+	$(BUILD_DIR)/obj/hir/body_owner.o \
 	$(BUILD_DIR)/obj/hir/semantic_body.o
 HIR_SEMANTIC_ITEM_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/model.o \

@@ -41,7 +41,7 @@ typedef struct CmSemanticBodyResult {
 /*
  * Check every CALL expression owned by one already-typed body.  `session`
  * must be owned by that body's caller definition.  The caller instance is
- * exact and currently admits zero or one type-only substitution.
+ * exact and admits declaration-ordered type-only substitutions.
  *
  * Callee predicates are instantiated from each call, but goals and the
  * parameter environment are always caller-owned.  In particular, this API
@@ -53,7 +53,11 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     const CmHirTypeId *owner_type_substitutions,
     uint32_t owner_type_substitution_count);
 
-/* Check a generic body with rigid definition-mode parameters. */
+/*
+ * Check a body with rigid definition-mode parameters. Concrete trait-impl
+ * methods authenticate the session's enclosing impl and expose its imported
+ * Self type through exact-method and enclosing-impl instantiations.
+ */
 CmSemanticBodyResult cm_semantic_body_check_definition(
     CmSemanticSession *session, CmHirBodyId body);
 

@@ -2236,6 +2236,11 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         return cm_hir_body_result(CM_HIR_BODY_LOWER_INVALID_BODY,
             body_id, body->span);
     }
+    if (cm_hir_body_function_owner_kind(context, owner_item)
+            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED) {
+        return cm_hir_body_result(CM_HIR_BODY_LOWER_UNSUPPORTED_BODY,
+            body_id, body->span);
+    }
     graph_module = CM_MODULE_NONE;
     map_status = cm_hir_module_map_lookup_module(modules, graph, revision,
         context, owner_item->owner_module, &graph_module);
@@ -2729,8 +2734,8 @@ CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
         result.item = item_id;
         result.owner = item->definition;
         result.body = body_id;
-        if (item->kind != CM_HIR_ITEM_FUNCTION
-            || !cm_hir_def_id_is_none(item->parent_definition)) {
+        if (cm_hir_body_function_owner_kind(context, item)
+                == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED) {
             result.status = CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER;
             goto finish;
         }

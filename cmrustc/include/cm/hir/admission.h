@@ -32,6 +32,10 @@ typedef struct CmSemanticAdmissionResult {
 /* Process-local evidence for one completely admitted HIR generation. */
 typedef struct CmSemanticAdmission { void *state; } CmSemanticAdmission;
 
+/*
+ * Transactionally lower and admit every supported local free-function or
+ * concrete trait-impl method body.
+ */
 CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     CmSemanticAdmission *admission, CmHirContext *hir,
     CmHirCrateId local_crate, const CmModuleGraph *graph,
