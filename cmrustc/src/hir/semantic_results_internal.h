@@ -9,6 +9,11 @@ typedef struct CmSemanticResultsBodyStage {
     void *state;
 } CmSemanticResultsBodyStage;
 
+typedef struct CmSemanticCanonicalCallInput {
+    CmHirExprId expression;
+    const CmHirCanonicalInstance *callee;
+} CmSemanticCanonicalCallInput;
+
 CmSemanticResultsStatus cm_semantic_results_begin(
     const CmHirContext *hir, CmHirCrateId local_crate,
     CmSemanticResults **out_results);
@@ -22,7 +27,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
 CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     CmSemanticResults *results, CmSemanticSession *session,
     const CmHirCanonicalInstance *instance,
-    const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage);
+    const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage,
+    const CmSemanticCanonicalCallInput *calls, size_t call_count);
 void cm_semantic_results_body_stage_destroy(
     CmSemanticResultsBodyStage *stage);
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results);
@@ -30,6 +36,8 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
     CmSemanticResults *results, const CmHirBodyId *bodies,
     size_t body_count);
 CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
+    CmSemanticResults *results, size_t instance_count);
+CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
     CmSemanticResults *results, size_t instance_count);
 void cm_semantic_results_destroy(CmSemanticResults *results);
 

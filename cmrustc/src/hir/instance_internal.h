@@ -19,6 +19,10 @@ void cm_hir_canonical_instance_init(CmHirCanonicalInstance *instance);
 CmHirInstanceStatus cm_hir_canonical_instance_encode(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirInstanceSpec *spec, CmHirCanonicalInstance *out_instance);
+CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirInstanceSpec *caller, const CmHirExpr *call,
+    CmHirCanonicalInstance *out_instance);
 CmHirInstanceStatus cm_hir_canonical_instance_clone(
     CmHirCanonicalInstance *out_instance,
     const CmHirCanonicalInstance *source);

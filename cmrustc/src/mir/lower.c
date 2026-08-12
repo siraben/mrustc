@@ -449,6 +449,7 @@ typedef struct CmMirFlowPlan {
     const CmMirInstance *instance;
     const CmSemanticAdmission *admission;
     const CmSemanticResults *semantic_results;
+    CmMirSemanticEvidenceKind semantic_evidence;
     CmHirTypeId expected_type;
     CmHirExprId allowed_if_expression;
     CmVec seen;
@@ -465,6 +466,178 @@ typedef struct CmMirFlowPlan {
     CmHirExprId error_expression;
     CmMirStatus error_status;
 } CmMirFlowPlan;
+
+typedef struct CmMirLowerSemanticInstanceQuery {
+    CmHirGenericArg *arguments;
+    CmHirInstanceSpec spec;
+} CmMirLowerSemanticInstanceQuery;
+
+static int cm_mir_lower_semantic_instance_query_init(
+    CmMirLowerSemanticInstanceQuery *query, const CmMirInstance *instance)
+{
+    uint32_t index;
+
+    memset(query, 0, sizeof(*query));
+    if (instance == NULL
+        || (instance->substitution_count == 0u)
+            != (instance->substitutions == NULL)) return 0;
+    if (instance->substitution_count != 0u) {
+        query->arguments = (CmHirGenericArg *)cm_alloc_zeroed(
+            instance->substitution_count, sizeof(*query->arguments));
+    }
+    cm_hir_instance_spec_init(&query->spec);
+    query->spec.selected_callable = instance->definition;
+    query->spec.item_arguments = query->arguments;
+    query->spec.item_argument_count = instance->substitution_count;
+    for (index = 0u; index < instance->substitution_count; ++index) {
+        query->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+        query->arguments[index].data.type = instance->substitutions[index];
+    }
+    return 1;
+}
+
+static void cm_mir_lower_semantic_instance_query_destroy(
+    CmMirLowerSemanticInstanceQuery *query)
+{
+    if (query == NULL) return;
+    cm_free(query->arguments);
+    memset(query, 0, sizeof(*query));
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
+    const CmMirFlowPlan *plan, CmHirExprId expression,
+    CmSemanticExpressionView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_expression(plan->semantic_results,
+            plan->admission, plan->item->data.function_item.body,
+            expression, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller,
+            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    status = cm_semantic_results_instance_expression(plan->semantic_results,
+        plan->admission, &caller.spec, expression, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_signature_query(
+    const CmMirFlowPlan *plan, const CmMirBody *callee,
+    CmSemanticFunctionSignatureView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery query;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_signature(plan->semantic_results,
+            plan->admission, callee->source_body, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&query,
+            &callee->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    status = cm_semantic_results_instance_signature(plan->semantic_results,
+        plan->admission, &query.spec, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&query);
+    return status;
+}
+
+static CmSemanticResultsStatus
+cm_mir_flow_semantic_signature_parameter_query(
+    const CmMirFlowPlan *plan, const CmMirBody *callee, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery query;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_signature_parameter(
+            plan->semantic_results, plan->admission, callee->source_body,
+            parameter, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&query,
+            &callee->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    status = cm_semantic_results_instance_signature_parameter(
+        plan->semantic_results, plan->admission, &query.spec, parameter,
+        out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&query);
+    return status;
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_call_query(
+    const CmMirFlowPlan *plan, const CmMirBody *callee,
+    CmHirExprId expression, CmSemanticDirectCallView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmMirLowerSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_direct_call(plan->semantic_results,
+            plan->admission, plan->item->data.function_item.body,
+            expression, out_view);
+    }
+    memset(&caller, 0, sizeof(caller));
+    memset(&target, 0, sizeof(target));
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller,
+            plan->instance)
+        || !cm_mir_lower_semantic_instance_query_init(&target,
+            &callee->instance)) {
+        cm_mir_lower_semantic_instance_query_destroy(&caller);
+        cm_mir_lower_semantic_instance_query_destroy(&target);
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_direct_call(
+        plan->semantic_results, plan->admission, &caller.spec, expression,
+        &target.spec, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&target);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
+    const CmMirFlowPlan *plan, const CmMirBody *callee,
+    CmHirExprId expression, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmMirLowerSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_direct_call_parameter(
+            plan->semantic_results, plan->admission,
+            plan->item->data.function_item.body, expression, parameter,
+            out_view);
+    }
+    memset(&caller, 0, sizeof(caller));
+    memset(&target, 0, sizeof(target));
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller,
+            plan->instance)
+        || !cm_mir_lower_semantic_instance_query_init(&target,
+            &callee->instance)) {
+        cm_mir_lower_semantic_instance_query_destroy(&caller);
+        cm_mir_lower_semantic_instance_query_destroy(&target);
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_direct_call_parameter(
+        plan->semantic_results, plan->admission, &caller.spec, expression,
+        &target.spec, parameter, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&target);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
 
 typedef struct CmMirFlowOutput {
     const CmMirFlowPlan *plan;
@@ -864,7 +1037,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         memset(&semantic_call, 0, sizeof(semantic_call));
         memset(&semantic_callee_signature, 0,
             sizeof(semantic_callee_signature));
-        if (plan->semantic_results != NULL) {
+        if (plan->semantic_results != NULL
+            && plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
             if (plan->admission == NULL
                 || plan->instance->substitution_count != 0u
                 || expression->data.call.type_substitution_count != 0u
@@ -924,8 +1098,21 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 expression_id, CM_MIR_OK);
         }
         if (plan->semantic_results != NULL
-            && (cm_semantic_results_signature(plan->semantic_results,
-                    plan->admission, callee_body->source_body,
+            && (plan->admission == NULL
+                || cm_mir_flow_semantic_call_query(plan, callee_body,
+                    expression_id, &semantic_call)
+                    != CM_SEMANTIC_RESULTS_OK
+                || semantic_call.parameter_count
+                    != expression->data.call.argument_count
+                || !cm_hir_def_id_equal(semantic_call.callee,
+                    expression->data.call.callee)
+                || cm_mir_flow_semantic_expression_query(plan,
+                    expression_id, &semantic_expression)
+                    != CM_SEMANTIC_RESULTS_OK
+                || !cm_mir_semantic_types_equal(
+                    &semantic_call.return_type,
+                    &semantic_expression.adjusted_type)
+                || cm_mir_flow_semantic_signature_query(plan, callee_body,
                     &semantic_callee_signature)
                     != CM_SEMANTIC_RESULTS_OK
                 || !cm_hir_def_id_equal(
@@ -962,19 +1149,15 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                     expression->data.call.arguments[index], CM_MIR_OK);
             }
             if (plan->semantic_results != NULL
-                && (cm_semantic_results_direct_call_parameter(
-                        plan->semantic_results, plan->admission,
-                        plan->item->data.function_item.body, expression_id,
-                        index, &semantic_parameter)
+                && (cm_mir_flow_semantic_call_parameter_query(plan,
+                        callee_body, expression_id, index,
+                        &semantic_parameter)
                         != CM_SEMANTIC_RESULTS_OK
-                    || cm_semantic_results_signature_parameter(
-                        plan->semantic_results, plan->admission,
-                        callee_body->source_body, index,
+                    || cm_mir_flow_semantic_signature_parameter_query(plan,
+                        callee_body, index,
                         &semantic_callee_parameter)
                         != CM_SEMANTIC_RESULTS_OK
-                    || cm_semantic_results_expression(
-                        plan->semantic_results, plan->admission,
-                        plan->item->data.function_item.body,
+                    || cm_mir_flow_semantic_expression_query(plan,
                         expression->data.call.arguments[index],
                         &semantic_argument) != CM_SEMANTIC_RESULTS_OK
                     || !cm_mir_semantic_types_equal(&semantic_parameter,
@@ -1667,6 +1850,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     plan.instance = &body.instance;
     plan.admission = admission;
     plan.semantic_results = semantic_results;
+    plan.semantic_evidence = semantic_evidence;
     plan.expected_type = return_type;
     plan.allowed_if_expression = terminal_id;
     cm_vec_init(&plan.seen, sizeof(CmHirExprId));

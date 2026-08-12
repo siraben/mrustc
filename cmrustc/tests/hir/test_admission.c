@@ -948,6 +948,122 @@ static void test_leaf_instance_admission_rejects_calls_and_bounds(void)
     fixture_destroy(&f);
 }
 
+static void test_exact_instance_closure_authenticates_generic_calls(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable[2];
+    CmSemanticReachableInstanceCall edge;
+    CmSemanticReachableInstanceCall duplicate_edges[2];
+    CmHirInstanceSpec caller_spec;
+    CmHirInstanceSpec callee_spec;
+    CmHirInstanceSpec wrong_callee_spec;
+    CmHirGenericArg caller_argument;
+    CmHirGenericArg callee_argument;
+    CmHirGenericArg wrong_argument;
+    const CmHirItem *caller;
+    const CmHirItem *phantom;
+    const CmSemanticResults *results;
+    CmSemanticDirectCallView call;
+    CmSemanticTypeView parameter;
+    CmHirExprId call_expression;
+    CmHirTypeId u32_type;
+    CmHirTypeId bool_type;
+    size_t index;
+
+    fixture_init(&f,
+        "fn phantom<T>(x: T) -> T { x } "
+        "fn caller(x: u32) -> u32 { phantom::<u32>(x) } "
+        "fn bool_value(x: bool) -> bool { x }");
+    caller = find_free_function(&f.hir, "caller");
+    phantom = find_free_function(&f.hir, "phantom");
+    assert(caller != NULL && phantom != NULL);
+    lower_function(&f, phantom);
+    lower_function(&f, caller);
+    call_expression = find_body_call(&f.hir,
+        caller->data.function_item.body);
+    assert(call_expression != CM_HIR_EXPR_NONE);
+    u32_type = CM_HIR_TYPE_NONE;
+    bool_type = CM_HIR_TYPE_NONE;
+    for (index = 0u; index < f.hir.types.len; ++index) {
+        const CmHirType *type;
+
+        type = cm_hir_get_type(&f.hir, (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U32) {
+            u32_type = (CmHirTypeId)(index + 1u);
+        } else if (type != NULL && type->kind == CM_HIR_TYPE_BOOL_KIND) {
+            bool_type = (CmHirTypeId)(index + 1u);
+        }
+    }
+    assert(u32_type != CM_HIR_TYPE_NONE && bool_type != CM_HIR_TYPE_NONE);
+    memset(&caller_argument, 0, sizeof(caller_argument));
+    memset(&callee_argument, 0, sizeof(callee_argument));
+    memset(&wrong_argument, 0, sizeof(wrong_argument));
+    caller_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    caller_argument.data.type = u32_type;
+    callee_argument = caller_argument;
+    wrong_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    wrong_argument.data.type = bool_type;
+    cm_hir_instance_spec_init(&caller_spec);
+    caller_spec.selected_callable = caller->definition;
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = phantom->definition;
+    callee_spec.item_arguments = &callee_argument;
+    callee_spec.item_argument_count = 1u;
+    wrong_callee_spec = callee_spec;
+    wrong_callee_spec.item_arguments = &wrong_argument;
+    reachable[0].body = caller->data.function_item.body;
+    reachable[0].spec = &caller_spec;
+    reachable[1].body = phantom->data.function_item.body;
+    reachable[1].spec = &callee_spec;
+    edge.caller = &caller_spec;
+    edge.expression = call_expression;
+    edge.callee = &callee_spec;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, &edge, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_direct_call(results, &admission,
+            &caller_spec, call_expression, &callee_spec, &call)
+            == CM_SEMANTIC_RESULTS_OK
+        && call.expression == call_expression
+        && call.parameter_count == 1u
+        && cm_hir_def_id_equal(call.callee, phantom->definition)
+        && cm_semantic_results_instance_direct_call_parameter(results,
+            &admission, &caller_spec, call_expression, &callee_spec, 0u,
+            &parameter) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_direct_call(results, &admission,
+            &caller_spec, call_expression, &wrong_callee_spec, &call)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_semantic_admission_destroy(&admission);
+
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, NULL, 0u).status
+            == CM_SEMANTIC_ADMISSION_HIR_FAILURE
+        && admission.state == NULL);
+    duplicate_edges[0] = edge;
+    duplicate_edges[1] = edge;
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, duplicate_edges, 2u).status
+            == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 1u, &edge, 1u).status
+            == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+
+    reachable[1].spec = &wrong_callee_spec;
+    edge.callee = &wrong_callee_spec;
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, &edge, 1u).status
+            == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
 static void test_reachable_admission_scope_is_enforced(void)
 {
     Fixture f;
@@ -1105,6 +1221,7 @@ int main(void)
     test_leaf_instance_admission_is_exact();
     test_leaf_instance_admitted_mir_is_exact();
     test_leaf_instance_admission_rejects_calls_and_bounds();
+    test_exact_instance_closure_authenticates_generic_calls();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();
     test_invalid_api();

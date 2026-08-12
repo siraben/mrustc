@@ -1348,16 +1348,20 @@ conservative borrowing; then CTFE and broad validated MIR. No later pass may
 consume partially typed local HIR or reinterpret an unsupported semantic state
 as proof.
 
-Exact generic leaf instances now cross the admitted HIR-to-MIR boundary for
-predicate-free, call-free local free functions with type-only item arguments.
-MIR publication and replay query the selected instance's canonical semantic
-body, signature, parameters, and expressions; an unselected substitution
-cannot fall back to definition-level facts. Semantic type-view authentication
-also recognizes each sealed instance-owned byte arena. This is deliberately a
-narrow bridge: stored MIR identity is still `DefId + CmHirTypeId[]`, generic
-calls lack canonical callee evidence, and recursive/SCC publication is absent.
-M4 remains active until the all-local semantic barrier and the pass sequence
-above replace these bounded slices.
+Exact acyclic free-function closures now cross the admitted HIR-to-MIR
+boundary with type-only item arguments and the currently supported proven
+callee predicates. Admission derives every
+callee's canonical identity from the authenticated caller instance and the HIR
+call substitutions, requires both endpoints in the closed set, rejects
+duplicate or omitted edges atomically, and seals cross-instance return and
+parameter types. Exact direct-call queries are consumed by both MIR lowering
+and replay; an unselected or phantom substitution cannot fall back to a
+definition-level `DefId`. Semantic type-view authentication recognizes each
+sealed instance-owned byte arena. This remains a bounded bridge: stored MIR
+identity is still `DefId + CmHirTypeId[]`, the driver materializes only its
+existing optional-u32 substitution subset, and recursive/SCC publication is
+absent. M4 remains active until the all-local semantic barrier and the pass
+sequence above replace these bounded slices.
 
 ## M5: MIR, monomorphization, and TCC C backend
 
@@ -1371,20 +1375,16 @@ above replace these bounded slices.
 | M5-06 | TODO | Runtime shims: atomics/TLS/u128/panic | Core/std runtime probes pass |
 | M5-07 | TODO | External C/link driver | No-core and core-linked executables run |
 
-For M5-03, the next authority checkpoint is a closed worklist keyed by owned
-canonical instances, exact semantic call edges carrying canonical callee
-identity, and transactional reserve/define/validate/commit publication so
-recursive SCCs do not depend on callee insertion order. The compile driver's
-open-session/ungated generic fallback must then migrate to that admitted graph
-before it can count as monomorphization evidence.
-
-The compile driver's current acyclic reachability worklist now owns and
-deduplicates canonical free-function instance identities, and every discovered
-edge retains a cloned canonical callee identity. Flat `DefId + optional u32`
-fields remain only as temporary lowering material. This is representation
-preparation, not semantic authority: generic closures still use the explicitly
-tracked open-session fallback until the closed exact-instance admission above
-can authenticate callers and callees together.
+For M5-03, the compile driver's acyclic worklist now owns and deduplicates
+canonical free-function identities, retains canonical callee identity on every
+edge, admits the entire reachable set through one closed exact-instance
+semantic transaction, and lowers/revalidates every node with exact evidence.
+The former open-session/raw-MIR generic fallback is gone. Flat `DefId +
+optional u32` remains temporary lowering material, so this is still bounded
+monomorphization evidence rather than the completed task. The next authority
+checkpoint is transactional reserve/define/validate/commit publication for
+recursive SCCs, followed by general substitutions and the full semantic/MIR
+pass sequence.
 
 ## M6: Build orchestration
 

@@ -85,6 +85,18 @@ CmSemanticResultsStatus cm_semantic_results_instance_signature_parameter(
     const struct CmSemanticAdmission *admission,
     const struct CmHirInstanceSpec *spec, uint32_t parameter,
     CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_direct_call(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    const struct CmHirInstanceSpec *expected_callee,
+    CmSemanticDirectCallView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_direct_call_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    const struct CmHirInstanceSpec *expected_callee, uint32_t parameter,
+    CmSemanticTypeView *out_view);
 
 /* The returned results object and all views are borrowed from admission. */
 const CmSemanticResults *cm_semantic_admission_results(

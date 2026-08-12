@@ -43,6 +43,12 @@ typedef struct CmSemanticReachableInstance {
     const struct CmHirInstanceSpec *spec;
 } CmSemanticReachableInstance;
 
+typedef struct CmSemanticReachableInstanceCall {
+    const struct CmHirInstanceSpec *caller;
+    CmHirExprId expression;
+    const struct CmHirInstanceSpec *callee;
+} CmSemanticReachableInstanceCall;
+
 /*
  * Transactionally lower and admit every supported local free-function or
  * concrete trait-impl method body.
@@ -74,6 +80,11 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_leaf_instances(
     CmSemanticAdmission *admission, CmHirContext *hir,
     CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
     size_t instance_count);
+CmSemanticAdmissionResult cm_semantic_admit_typed_instance_closure(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
+    size_t instance_count, const CmSemanticReachableInstanceCall *calls,
+    size_t call_count);
 void cm_semantic_admission_destroy(CmSemanticAdmission *admission);
 int cm_semantic_admission_is_current(const CmSemanticAdmission *admission);
 const CmHirContext *cm_semantic_admission_hir(

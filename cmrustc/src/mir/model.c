@@ -745,14 +745,28 @@ static CmSemanticResultsStatus cm_mir_semantic_signature_query(
     const CmHirInstanceSpec *instance,
     CmSemanticFunctionSignatureView *out_view)
 {
+    CmMirSemanticInstanceQuery query;
+    CmSemanticResultsStatus status;
+
     if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
         return cm_semantic_results_signature(results, admission,
             body->source_body, out_view);
     }
-    return body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        ? cm_semantic_results_instance_signature(results, admission,
-            instance, out_view)
-        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    if (body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (instance != NULL) {
+        return cm_semantic_results_instance_signature(results, admission,
+            instance, out_view);
+    }
+    if (!cm_mir_semantic_instance_query_init(&query, body)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_signature(results, admission,
+        &query.spec, out_view);
+    cm_mir_semantic_instance_query_destroy(&query);
+    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_signature_parameter_query(
@@ -761,14 +775,28 @@ static CmSemanticResultsStatus cm_mir_semantic_signature_parameter_query(
     const CmHirInstanceSpec *instance, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
+    CmMirSemanticInstanceQuery query;
+    CmSemanticResultsStatus status;
+
     if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
         return cm_semantic_results_signature_parameter(results, admission,
             body->source_body, parameter, out_view);
     }
-    return body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        ? cm_semantic_results_instance_signature_parameter(results,
-            admission, instance, parameter, out_view)
-        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    if (body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (instance != NULL) {
+        return cm_semantic_results_instance_signature_parameter(results,
+            admission, instance, parameter, out_view);
+    }
+    if (!cm_mir_semantic_instance_query_init(&query, body)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_signature_parameter(results,
+        admission, &query.spec, parameter, out_view);
+    cm_mir_semantic_instance_query_destroy(&query);
+    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_expression_query(
@@ -785,6 +813,60 @@ static CmSemanticResultsStatus cm_mir_semantic_expression_query(
         ? cm_semantic_results_instance_expression(results, admission,
             instance, expression, out_view)
         : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_direct_call_query(
+    const CmMirTreeMatch *match, const CmMirBody *callee,
+    CmHirExprId expression, CmSemanticDirectCallView *out_view)
+{
+    CmMirSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_direct_call(match->semantic_results,
+            match->admission, match->body->source_body, expression,
+            out_view);
+    }
+    memset(&target, 0, sizeof(target));
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_semantic_instance_query_init(&target, callee)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_direct_call(
+        match->semantic_results, match->admission,
+        match->semantic_instance, expression, &target.spec, out_view);
+    cm_mir_semantic_instance_query_destroy(&target);
+    return status;
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_direct_call_parameter_query(
+    const CmMirTreeMatch *match, const CmMirBody *callee,
+    CmHirExprId expression, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    CmMirSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_direct_call_parameter(
+            match->semantic_results, match->admission,
+            match->body->source_body, expression, parameter, out_view);
+    }
+    memset(&target, 0, sizeof(target));
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_semantic_instance_query_init(&target, callee)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_direct_call_parameter(
+        match->semantic_results, match->admission,
+        match->semantic_instance, expression, &target.spec, parameter,
+        out_view);
+    cm_mir_semantic_instance_query_destroy(&target);
+    return status;
 }
 
 static int cm_mir_semantic_view_equal(const CmSemanticTypeView *left,
@@ -939,11 +1021,6 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                     != CM_SEMANTIC_RESULTS_OK
             || !cm_mir_semantic_view_matches_hir(match,
                 &authenticated_expression.adjusted_type, instantiated))) {
-        return 0;
-    }
-    if (match->body->semantic_evidence
-            == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        && expression->kind == CM_HIR_EXPR_CALL) {
         return 0;
     }
     memset(out_operand, 0, sizeof(*out_operand));
@@ -1401,21 +1478,18 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         }
         if (match->semantic_results != NULL) {
             if (match->admission == NULL
-                || match->body->instance.substitution_count != 0u
-                || expression->data.call.type_substitution_count != 0u
                 || callee_body == NULL
-                || callee_body->instance.substitution_count != 0u
-                || cm_semantic_results_direct_call(
-                    match->semantic_results, match->admission,
-                    match->body->source_body, expression_id,
-                    &semantic_call) != CM_SEMANTIC_RESULTS_OK
-                || cm_semantic_results_signature(
-                    match->semantic_results, match->admission,
-                    callee_body->source_body, &semantic_signature)
+                || cm_mir_semantic_direct_call_query(match, callee_body,
+                    expression_id, &semantic_call)
                         != CM_SEMANTIC_RESULTS_OK
-                || cm_semantic_results_expression(
-                    match->semantic_results, match->admission,
-                    match->body->source_body, expression_id,
+                || cm_mir_semantic_signature_query(
+                    match->semantic_results, match->admission, callee_body,
+                    NULL,
+                    &semantic_signature)
+                        != CM_SEMANTIC_RESULTS_OK
+                || cm_mir_semantic_expression_query(
+                    match->semantic_results, match->admission, match->body,
+                    match->semantic_instance, expression_id,
                     &semantic_expression) != CM_SEMANTIC_RESULTS_OK
                 || !cm_hir_def_id_equal(semantic_call.callee,
                     terminator->data.call.callee.definition)
@@ -1458,17 +1532,16 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 CmSemanticTypeView signature_parameter;
                 CmSemanticExpressionView argument_expression;
 
-                if (cm_semantic_results_direct_call_parameter(
+                if (cm_mir_semantic_direct_call_parameter_query(match,
+                        callee_body, expression_id, index, &call_parameter)
+                        != CM_SEMANTIC_RESULTS_OK
+                    || cm_mir_semantic_signature_parameter_query(
                         match->semantic_results, match->admission,
-                        match->body->source_body, expression_id, index,
-                        &call_parameter) != CM_SEMANTIC_RESULTS_OK
-                    || cm_semantic_results_signature_parameter(
-                        match->semantic_results, match->admission,
-                        callee_body->source_body, index,
+                        callee_body, NULL, index,
                         &signature_parameter) != CM_SEMANTIC_RESULTS_OK
-                    || cm_semantic_results_expression(
+                    || cm_mir_semantic_expression_query(
                         match->semantic_results, match->admission,
-                        match->body->source_body,
+                        match->body, match->semantic_instance,
                         expression->data.call.arguments[index],
                         &argument_expression) != CM_SEMANTIC_RESULTS_OK
                     || !cm_mir_semantic_view_equal(&call_parameter,

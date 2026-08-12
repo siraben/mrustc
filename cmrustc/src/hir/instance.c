@@ -452,6 +452,71 @@ static CmHirInstanceStatus cm_instance_validate_arguments(
     return status;
 }
 
+static CmHirInstanceStatus cm_instance_encode_direct_call(
+    CmInstanceBuffer *buffer, const CmHirContext *hir,
+    CmHirCrateId local_crate, const CmHirInstanceSpec *caller,
+    const CmHirExpr *call)
+{
+    const CmHirItem *caller_item;
+    const CmHirItem *callee;
+    CmInstanceSubstitution caller_substitution;
+    CmHirInstanceStatus status;
+    uint32_t index;
+
+    caller_item = cm_instance_item(hir, caller->selected_callable);
+    callee = call == NULL || call->kind != CM_HIR_EXPR_CALL ? NULL
+        : cm_instance_item(hir, call->data.call.callee);
+    if (caller_item == NULL || caller_item->kind != CM_HIR_ITEM_FUNCTION
+        || caller_item->definition.crate_id != local_crate
+        || !cm_hir_def_id_is_none(caller_item->parent_definition)
+        || callee == NULL || callee->kind != CM_HIR_ITEM_FUNCTION
+        || callee->definition.crate_id != local_crate
+        || !cm_hir_def_id_is_none(callee->parent_definition)
+        || call->owner_body != caller_item->data.function_item.body
+        || callee->generic_parameter_count
+            != call->data.call.type_substitution_count
+        || (call->data.call.type_substitution_count != 0u
+            && call->data.call.type_substitutions == NULL)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&caller_substitution, 0, sizeof(caller_substitution));
+    caller_substitution.owner = caller_item->definition;
+    caller_substitution.arguments = caller->item_arguments;
+    caller_substitution.argument_count = caller->item_argument_count;
+    status = cm_instance_u8(buffer, CM_INSTANCE_FORMAT_VERSION);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, callee->definition);
+    }
+    for (index = 0u; status == CM_HIR_INSTANCE_OK && index < 4u; ++index) {
+        status = cm_instance_def(buffer, cm_hir_def_id_none());
+    }
+    if (status == CM_HIR_INSTANCE_OK) status = cm_instance_u8(buffer, 1u);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_u32(buffer,
+            call->data.call.type_substitution_count);
+    }
+    for (index = 0u; status == CM_HIR_INSTANCE_OK
+            && index < call->data.call.type_substitution_count; ++index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(hir,
+            callee->generic_parameter_start + index);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+            || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                callee->definition)) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        status = cm_instance_u8(buffer, CM_HIR_GENERIC_ARG_TYPE);
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_encode_type(buffer, hir,
+                call->data.call.type_substitutions[index],
+                &caller_substitution, 0u);
+        }
+    }
+    return status;
+}
+
 static CmHirInstanceStatus cm_instance_encode_spec(CmInstanceBuffer *buffer,
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirInstanceSpec *spec)
@@ -713,6 +778,57 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode(
     }
     encoded.definition = selected->definition;
     encoded.body = selected->data.function_item.body;
+    encoded.size = output.len;
+    *out_instance = encoded;
+    return CM_HIR_INSTANCE_OK;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirInstanceSpec *caller, const CmHirExpr *call,
+    CmHirCanonicalInstance *out_instance)
+{
+    const CmHirItem *callee;
+    CmHirCanonicalInstance caller_identity;
+    CmHirCanonicalInstance encoded;
+    CmInstanceBuffer sizing;
+    CmInstanceBuffer output;
+    CmHirInstanceStatus status;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || caller == NULL
+        || call == NULL || !cm_canonical_instance_is_empty(out_instance)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    cm_hir_canonical_instance_init(&caller_identity);
+    status = cm_hir_canonical_instance_encode(hir, local_crate, caller,
+        &caller_identity);
+    cm_hir_canonical_instance_destroy(&caller_identity);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    callee = call->kind == CM_HIR_EXPR_CALL
+        ? cm_instance_item(hir, call->data.call.callee) : NULL;
+    if (callee == NULL || callee->kind != CM_HIR_ITEM_FUNCTION
+        || callee->data.function_item.body == CM_HIR_BODY_NONE) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = cm_instance_encode_direct_call(&sizing, hir, local_crate,
+        caller, call);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    cm_hir_canonical_instance_init(&encoded);
+    encoded.bytes = (unsigned char *)cm_alloc(sizing.len);
+    memset(&output, 0, sizeof(output));
+    output.data = encoded.bytes;
+    output.cap = sizing.len;
+    status = cm_instance_encode_direct_call(&output, hir, local_crate,
+        caller, call);
+    if (status != CM_HIR_INSTANCE_OK || output.len != sizing.len) {
+        cm_hir_canonical_instance_destroy(&encoded);
+        return status == CM_HIR_INSTANCE_OK
+            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+    }
+    encoded.definition = callee->definition;
+    encoded.body = callee->data.function_item.body;
     encoded.size = output.len;
     *out_instance = encoded;
     return CM_HIR_INSTANCE_OK;
