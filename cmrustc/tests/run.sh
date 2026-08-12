@@ -154,6 +154,8 @@ cmp "$symlink_input" tests/codegen/fixtures/no-core-exit.rs
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_identity_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
+    tests/codegen/run_generic_chain_acceptance.sh
+CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_identity_add_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_u32_add_acceptance.sh

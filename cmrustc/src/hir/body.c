@@ -232,6 +232,24 @@ static int cm_hir_body_is_bool(const CmHirContext *context,
     return type != NULL && type->kind == CM_HIR_TYPE_BOOL_KIND;
 }
 
+static const CmHirGenericParam *cm_hir_body_owned_type_parameter(
+    const CmHirContext *context, const CmHirItem *owner_item,
+    CmHirTypeId type_id)
+{
+    const CmHirType *type;
+    const CmHirGenericParam *parameter;
+
+    type = cm_hir_get_type(context, type_id);
+    parameter = type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        ? NULL : cm_hir_get_generic_param(context,
+            type->data.parameter_type.parameter);
+    return owner_item != NULL && parameter != NULL
+        && parameter->kind == CM_HIR_GENERIC_TYPE
+        && cm_hir_def_id_equal(parameter->owner, owner_item->definition)
+        && parameter->index < owner_item->generic_parameter_count
+        ? parameter : NULL;
+}
+
 static CmHirTypeId cm_hir_body_find_bool_type(
     const CmHirContext *context)
 {
@@ -931,13 +949,17 @@ static CmHirBodyLowerStatus cm_hir_body_resolve_scalar_call(
     const CmAstExpr *callee_ast;
     const CmAstPathSegment *callee_segment;
     const CmHirItem *callee_item;
+    const CmHirGenericParam *expected_parameter;
     uint32_t index;
 
     memset(out_plan, 0, sizeof(*out_plan));
+    expected_parameter = cm_hir_body_owned_type_parameter(context,
+        owner_item, expected_type);
     if (call->data.call.argument_count == 0u
         || call->data.call.argument_count > 2u
         || call->data.call.arguments == NULL
-        || !cm_hir_body_is_wrapping_unsigned(context, expected_type)) {
+        || (!cm_hir_body_is_wrapping_unsigned(context, expected_type)
+            && expected_parameter == NULL)) {
         return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
     }
     callee_ast = cm_ast_get_expr(ast, call->data.call.callee);
@@ -995,13 +1017,34 @@ static CmHirBodyLowerStatus cm_hir_body_resolve_scalar_call(
         out_plan->substitution_count = 0u;
     } else if (cm_hir_body_exact_identity_signature(context,
             callee_item)) {
+        const CmAstType *substitution;
+        const CmAstPathSegment *substitution_segment;
+        int valid_substitution;
+
+        substitution = callee_segment->argument_count == 1u
+                && callee_segment->arguments != NULL
+                && callee_segment->arguments[0].kind == CM_AST_GENERIC_TYPE
+            ? cm_ast_get_type(ast, callee_segment->arguments[0].type)
+            : NULL;
+        substitution_segment = substitution == NULL
+                || substitution->kind != CM_AST_TYPE_PATH
+            ? NULL : cm_hir_body_exact_path_segment(ast,
+                substitution->path);
+        valid_substitution = substitution != NULL
+            && (cm_hir_body_is_u32(context, expected_type)
+                ? cm_hir_body_ast_type_is_integer(ast,
+                    callee_segment->arguments[0].type, CM_HIR_INT_U32)
+                : expected_parameter != NULL
+                    && substitution_segment != NULL
+                    && substitution_segment->argument_count == 0u
+                    && cm_hir_body_ast_hir_text_equal(ast,
+                        substitution_segment->name, context,
+                        expected_parameter->name));
         if (call->data.call.argument_count != 1u
             || callee_segment->argument_count != 1u
             || callee_segment->arguments == NULL
             || callee_segment->arguments[0].kind != CM_AST_GENERIC_TYPE
-            || !cm_hir_body_is_u32(context, expected_type)
-            || !cm_hir_body_ast_type_is_integer(ast,
-                callee_segment->arguments[0].type, CM_HIR_INT_U32)) {
+            || !valid_substitution) {
             return CM_HIR_BODY_LOWER_INVALID_SUBSTITUTION;
         }
         out_plan->argument_types[0] = expected_type;

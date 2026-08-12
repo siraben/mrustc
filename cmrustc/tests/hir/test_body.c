@@ -1210,6 +1210,82 @@ static void test_graph_identity_call_bodies(void)
     fixture_destroy(&fixture);
 }
 
+static void test_graph_generic_identity_call_body(void)
+{
+    static const char source[] =
+        "fn identity<T>(x: T) -> T { x }\n"
+        "fn caller<T>(x: T) -> T { identity::<T>(x) }\n";
+    TestFixture fixture;
+    const CmHirItem *identity;
+    const CmHirItem *caller;
+    const CmHirBody *caller_body;
+    const CmHirExpr *root;
+    const CmHirExpr *call;
+    const CmHirExpr *argument;
+    CmHirBodyLowerResult result;
+
+    fixture_init_named(&fixture, source, "caller");
+    identity = find_function(&fixture.hir, "identity");
+    caller = find_function(&fixture.hir, "caller");
+    assert(identity != NULL && caller != NULL
+        && identity->generic_parameter_count == 1u
+        && caller->generic_parameter_count == 1u);
+    result = cm_hir_lower_body(&fixture.hir,
+        identity->data.function_item.body, &fixture.graph,
+        fixture.graph_result.revision, &fixture.imports, &fixture.map);
+    assert(result.status == CM_HIR_BODY_LOWER_OK);
+    result = cm_hir_lower_body(&fixture.hir,
+        caller->data.function_item.body, &fixture.graph,
+        fixture.graph_result.revision, &fixture.imports, &fixture.map);
+    assert(result.status == CM_HIR_BODY_LOWER_OK);
+    caller_body = cm_hir_get_body(&fixture.hir,
+        caller->data.function_item.body);
+    root = caller_body == NULL ? NULL : cm_hir_get_expr(&fixture.hir,
+        caller_body->root_expression);
+    call = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir, root->data.block.tail_expression);
+    argument = call == NULL || call->kind != CM_HIR_EXPR_CALL
+            || call->data.call.argument_count != 1u
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            call->data.call.arguments[0]);
+    assert(caller_body != NULL && caller_body->state == CM_HIR_BODY_TYPED
+        && call != NULL && call->kind == CM_HIR_EXPR_CALL
+        && cm_hir_def_id_equal(call->data.call.callee,
+            identity->definition)
+        && call->type == caller_body->expected_type
+        && call->data.call.type_substitution_count == 1u
+        && call->data.call.type_substitutions[0]
+            == caller_body->expected_type
+        && argument != NULL && argument->kind == CM_HIR_EXPR_LOCAL
+        && argument->type == caller_body->expected_type);
+    fixture_destroy(&fixture);
+}
+
+static void test_graph_generic_identity_call_rejects_wrong_parameter(void)
+{
+    static const char source[] =
+        "fn identity<T>(x: T) -> T { x }\n"
+        "fn caller<T, U>(x: T) -> T { identity::<U>(x) }\n";
+    TestFixture fixture;
+    const CmHirItem *caller;
+    CmHirBodyLowerResult result;
+    size_t expressions_before;
+
+    fixture_init_named(&fixture, source, "caller");
+    caller = find_function(&fixture.hir, "caller");
+    assert(caller != NULL && caller->generic_parameter_count == 2u);
+    expressions_before = fixture.hir.expressions.len;
+    result = cm_hir_lower_body(&fixture.hir,
+        caller->data.function_item.body, &fixture.graph,
+        fixture.graph_result.revision, &fixture.imports, &fixture.map);
+    assert(result.status == CM_HIR_BODY_LOWER_INVALID_SUBSTITUTION
+        && fixture.hir.expressions.len == expressions_before
+        && cm_hir_get_body(&fixture.hir,
+            caller->data.function_item.body)->state
+            == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&fixture);
+}
+
 static void test_graph_identity_call_recursive_argument(void)
 {
     static const char source[] =
@@ -3289,6 +3365,8 @@ int main(void)
     test_aggregate_payload_oom_is_transactional();
     test_graph_function_body();
     test_graph_identity_call_bodies();
+    test_graph_generic_identity_call_body();
+    test_graph_generic_identity_call_rejects_wrong_parameter();
     test_graph_identity_call_recursive_argument();
     test_graph_monomorphic_call_computed_arguments();
     test_graph_contextual_unsuffixed_call_argument();
