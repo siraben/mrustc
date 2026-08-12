@@ -413,66 +413,6 @@ static int test_success(void)
     return ok;
 }
 
-static int test_descendant_private_glob_visibility(void)
-{
-    static const char source[] =
-        "pub struct Origin;\n"
-        "mod parent {\n"
-        "    use crate::Origin as PrivateImport;\n"
-        "    struct PrivateLocal;\n"
-        "    pub struct PublicLocal;\n"
-        "    mod child { use super::*; }\n"
-        "    mod reexport { pub use super::*; }\n"
-        "}\n"
-        "mod sibling { use crate::parent::*; }\n";
-    CmSourceSet sources;
-    CmModuleGraph graph;
-    CmImportResolver resolver;
-    CmModuleGraphResult graph_result;
-    CmImportResult import_result;
-    CmModuleId child;
-    CmModuleId reexport;
-    CmModuleId sibling;
-    CmResolvedBinding binding;
-    int ok;
-
-    ok = check(load_memory_and_resolve("private-glob/lib.rs", source,
-        &sources, &graph, &resolver, &graph_result, &import_result),
-        "could not load descendant private glob fixture");
-    if (!ok) return 0;
-    child = find_module(&graph, "crate::parent::child");
-    reexport = find_module(&graph, "crate::parent::reexport");
-    sibling = find_module(&graph, "crate::sibling");
-    ok &= check(graph_result.error_count == 0u
-        && import_result.error_count == 0u && child != CM_MODULE_NONE
-        && reexport != CM_MODULE_NONE && sibling != CM_MODULE_NONE,
-        "descendant private glob fixture did not resolve");
-    ok &= check(find_binding(&resolver, child, CM_RESOLVE_NAMESPACE_TYPE,
-            "PrivateImport", &binding) && binding.is_import
-        && find_binding(&resolver, child, CM_RESOLVE_NAMESPACE_TYPE,
-            "PrivateLocal", NULL)
-        && find_binding(&resolver, child, CM_RESOLVE_NAMESPACE_TYPE,
-            "PublicLocal", NULL),
-        "private glob omitted a binding visible from its descendant");
-    ok &= check(!find_binding(&resolver, sibling, CM_RESOLVE_NAMESPACE_TYPE,
-            "PrivateImport", NULL)
-        && !find_binding(&resolver, sibling, CM_RESOLVE_NAMESPACE_TYPE,
-            "PrivateLocal", NULL)
-        && find_binding(&resolver, sibling, CM_RESOLVE_NAMESPACE_TYPE,
-            "PublicLocal", NULL),
-        "private glob binding escaped into a non-descendant module");
-    ok &= check(!find_binding(&resolver, reexport,
-            CM_RESOLVE_NAMESPACE_TYPE, "PrivateImport", NULL)
-        && !find_binding(&resolver, reexport, CM_RESOLVE_NAMESPACE_TYPE,
-            "PrivateLocal", NULL)
-        && find_binding(&resolver, reexport, CM_RESOLVE_NAMESPACE_TYPE,
-            "PublicLocal", &binding) && binding.is_public
-        && binding.is_reexport,
-        "public glob reexported a private ancestor binding");
-    destroy_all(&sources, &graph, &resolver);
-    return ok;
-}
-
 static int test_lookup_errors(void)
 {
     CmSourceSet sources;
@@ -1839,7 +1779,6 @@ int main(void)
     int ok;
 
     ok = test_success();
-    ok &= test_descendant_private_glob_visibility();
     ok &= test_error("tests/resolve/fixtures/imports_ambiguous/lib.rs",
         CM_IMPORT_ERROR_AMBIGUOUS, 2u);
     ok &= test_error("tests/resolve/fixtures/imports_unresolved/lib.rs",

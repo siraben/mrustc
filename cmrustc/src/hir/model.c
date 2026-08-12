@@ -28,14 +28,24 @@ static void *cm_hir_get_id_mut(CmVec *arena, uint32_t id)
     return cm_vec_at(arena, (size_t)id - 1u);
 }
 
-static CmHirStatus cm_hir_push(CmVec *arena, const void *value,
-    uint32_t *out_id)
+void cm_hir_context_record_semantic_mutation(CmHirContext *context)
+{
+    if (context == NULL) return;
+    context->semantic_generation += UINT64_C(1);
+    if (context->semantic_generation == 0u) {
+        context->semantic_generation = UINT64_C(1);
+    }
+}
+
+static CmHirStatus cm_hir_push(CmHirContext *context, CmVec *arena,
+    const void *value, uint32_t *out_id)
 {
     if (arena->len >= (size_t)UINT32_MAX) {
         return CM_HIR_ID_EXHAUSTED;
     }
     (void)cm_vec_push(arena, value);
     *out_id = (uint32_t)arena->len;
+    cm_hir_context_record_semantic_mutation(context);
     return CM_HIR_OK;
 }
 
@@ -129,6 +139,7 @@ void cm_hir_context_init(CmHirContext *context)
     cm_vec_init(&context->definitions, sizeof(CmHirDefinition));
     cm_vec_init(&context->prebound_associated_types,
         sizeof(CmHirPreboundAssociatedType));
+    context->semantic_generation = UINT64_C(1);
     context->rewind_generation = UINT64_C(1);
 }
 
@@ -231,6 +242,7 @@ CmHirStatus cm_hir_context_rewind(CmHirContext *context,
     if (context->rewind_generation == 0u) {
         context->rewind_generation = UINT64_C(1);
     }
+    cm_hir_context_record_semantic_mutation(context);
     mark->context = NULL;
     mark->active = 0;
     return CM_HIR_OK;
@@ -403,7 +415,8 @@ static CmHirStatus cm_hir_reserve_definition(CmHirContext *context,
     definition.kind = kind;
     definition.state = CM_HIR_DEFINITION_RESERVED;
     definition.span = span;
-    status = cm_hir_push(&context->definitions, &definition, &ignored_id);
+    status = cm_hir_push(context, &context->definitions, &definition,
+        &ignored_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -525,7 +538,7 @@ CmHirStatus cm_hir_create_crate(CmHirContext *context, CmInternId name,
     crate_value.edition = edition;
     crate_value.span = span;
     crate_value.next_definition_index = 2u;
-    status = cm_hir_push(&context->crates, &crate_value, &crate_id);
+    status = cm_hir_push(context, &context->crates, &crate_value, &crate_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -536,7 +549,7 @@ CmHirStatus cm_hir_create_crate(CmHirContext *context, CmInternId name,
     module.span = span;
     module.definition.crate_id = crate_id;
     module.definition.index = 1u;
-    status = cm_hir_push(&context->modules, &module, &module_id);
+    status = cm_hir_push(context, &context->modules, &module, &module_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -549,7 +562,8 @@ CmHirStatus cm_hir_create_crate(CmHirContext *context, CmInternId name,
     definition.state = CM_HIR_DEFINITION_BOUND;
     definition.span = span;
     definition.entity.module_id = module_id;
-    status = cm_hir_push(&context->definitions, &definition, &definition_id);
+    status = cm_hir_push(context, &context->definitions, &definition,
+        &definition_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -592,7 +606,7 @@ CmHirStatus cm_hir_add_module(CmHirContext *context, CmHirCrateId crate_id,
     module.definition = definition_id;
     module.name = name;
     module.span = span;
-    status = cm_hir_push(&context->modules, &module, out_id);
+    status = cm_hir_push(context, &context->modules, &module, out_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -666,6 +680,9 @@ CmHirStatus cm_hir_set_crate_inner_attributes(CmHirContext *context,
     crate_value->inner_attributes = (CmHirAttribute *)cm_hir_copy_array(
         context, attributes, attribute_count, sizeof(CmHirAttribute));
     crate_value->inner_attribute_count = attribute_count;
+    if (attribute_count != 0u) {
+        cm_hir_context_record_semantic_mutation(context);
+    }
     return CM_HIR_OK;
 }
 
@@ -689,6 +706,9 @@ CmHirStatus cm_hir_set_module_inner_attributes(CmHirContext *context,
     module->inner_attributes = (CmHirAttribute *)cm_hir_copy_array(context,
         attributes, attribute_count, sizeof(CmHirAttribute));
     module->inner_attribute_count = attribute_count;
+    if (attribute_count != 0u) {
+        cm_hir_context_record_semantic_mutation(context);
+    }
     return CM_HIR_OK;
 }
 
@@ -715,6 +735,9 @@ CmHirStatus cm_hir_set_module_outer_attributes(CmHirContext *context,
     module->outer_attributes = (CmHirAttribute *)cm_hir_copy_array(context,
         attributes, attribute_count, sizeof(CmHirAttribute));
     module->outer_attribute_count = attribute_count;
+    if (attribute_count != 0u) {
+        cm_hir_context_record_semantic_mutation(context);
+    }
     return CM_HIR_OK;
 }
 
@@ -849,6 +872,7 @@ CmHirStatus cm_hir_set_module_imports(CmHirContext *context,
     }
     module->imports = copies;
     module->import_count = import_count;
+    cm_hir_context_record_semantic_mutation(context);
     return CM_HIR_OK;
 }
 
@@ -1415,7 +1439,7 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
     default:
         break;
     }
-    return cm_hir_push(&context->types, &copy, out_id);
+    return cm_hir_push(context, &context->types, &copy, out_id);
 }
 
 static int cm_hir_visibility_valid(const CmHirContext *context,
@@ -2158,8 +2182,6 @@ static int cm_hir_predicate_type_in_scope(const CmHirContext *context,
     CmHirTypeId type_id, CmHirDefId owner_definition,
     CmHirDefId parent_definition, const CmHirLifetimeBinder *binder,
     size_t depth);
-static int cm_hir_body_type_equal(const CmHirContext *context,
-    CmHirTypeId left_id, CmHirTypeId right_id);
 
 static int cm_hir_predicate_parameter_in_scope(
     const CmHirContext *context, CmHirGenericParamId referenced,
@@ -2212,10 +2234,9 @@ static int cm_hir_predicate_named_in_scope(const CmHirContext *context,
     uint32_t index;
 
     for (index = 0u; index < named->argument_count; ++index) {
-        /* The argument helper counts the edge when it enters a HIR type. */
         if (!cm_hir_predicate_argument_in_scope(context,
                 &named->arguments[index], owner_definition,
-                parent_definition, binder, depth)) {
+                parent_definition, binder, depth + 1u)) {
             return 0;
         }
     }
@@ -2341,7 +2362,7 @@ static int cm_hir_predicate_argument_in_scope(const CmHirContext *context,
     case CM_HIR_GENERIC_ARG_CONST:
         return cm_hir_predicate_const_in_scope(context,
             &argument->data.constant, owner_definition, parent_definition,
-            binder, depth);
+            binder, depth + 1u);
     }
     return 0;
 }
@@ -2821,8 +2842,6 @@ static int cm_hir_associated_type_bound_valid(
         || !cm_hir_named_late_bound_free(context, &bound->trait_type, 0u)
         || !cm_hir_named_self_owner_valid(context, &bound->trait_type,
             owner->parent_definition, 0u)
-        || !cm_hir_predicate_named_in_scope(context, &bound->trait_type,
-            owner->definition, owner->parent_definition, NULL, 0u)
         || (bound->modifier == CM_HIR_ASSOC_BOUND_RELAXED
             && bound->equality_count != 0u)
         || (!cm_hir_def_id_is_none(owner->definition)
@@ -2854,26 +2873,6 @@ static int cm_hir_associated_type_bound_valid(
                 &bound->trait_type, trait_item))) {
         return 0;
     }
-    if (trait_item != NULL) {
-        uint32_t index;
-
-        for (index = 0u; index < bound->trait_type.argument_count; ++index) {
-            const CmHirGenericArg *argument;
-            const CmHirGenericParam *parameter;
-
-            argument = &bound->trait_type.arguments[index];
-            parameter = cm_hir_get_generic_param(context,
-                trait_item->generic_parameter_start + index);
-            if (argument->kind == CM_HIR_GENERIC_ARG_CONST
-                && (parameter == NULL
-                    || parameter->kind != CM_HIR_GENERIC_CONST
-                    || !cm_hir_body_type_equal(context,
-                        argument->data.constant.type,
-                        parameter->declared_type))) {
-                return 0;
-            }
-        }
-    }
     if (!cm_hir_associated_equalities_valid(context, owner,
             owner->definition, bound->trait_type.definition,
             bound->equalities, bound->equality_count, candidate,
@@ -2883,12 +2882,7 @@ static int cm_hir_associated_type_bound_valid(
 
         for (index = 0u; index < bound->equality_count; ++index) {
             if (!cm_hir_type_late_bound_free(context,
-                    bound->equalities[index].value, 0u)
-                || !cm_hir_predicate_type_in_scope(context,
-                    bound->equalities[index].value, owner->definition,
-                    owner->parent_definition, NULL, 0u)) {
-                return 0;
-            }
+                    bound->equalities[index].value, 0u)) return 0;
         }
     }
     return 1;
@@ -4063,7 +4057,7 @@ static CmHirStatus cm_hir_add_item_internal(CmHirContext *context,
             if (status != CM_HIR_OK) return status;
         }
     }
-    status = cm_hir_push(&context->items, &copy, out_id);
+    status = cm_hir_push(context, &context->items, &copy, out_id);
     if (status != CM_HIR_OK) {
         return status;
     }
@@ -4186,8 +4180,8 @@ CmHirStatus cm_hir_prebind_trait_associated_type_declaration(
     prebound.owner_module = item->owner_module;
     prebound.name = item->name;
     prebound.span = item->span;
-    return cm_hir_push(&context->prebound_associated_types, &prebound,
-        &ignored_id);
+    return cm_hir_push(context, &context->prebound_associated_types,
+        &prebound, &ignored_id);
 }
 
 static int cm_hir_default_argument_in_scope(const CmHirContext *context,
@@ -4196,6 +4190,8 @@ static int cm_hir_default_argument_in_scope(const CmHirContext *context,
 static int cm_hir_default_type_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index, CmHirTypeId type_id,
     size_t depth);
+static int cm_hir_body_type_equal(const CmHirContext *context,
+    CmHirTypeId left_id, CmHirTypeId right_id);
 
 static int cm_hir_default_parameter_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
@@ -4403,7 +4399,8 @@ CmHirStatus cm_hir_add_generic_param(CmHirContext *context,
             return CM_HIR_INVARIANT_VIOLATION;
         }
     }
-    return cm_hir_push(&context->generic_parameters, parameter, out_id);
+    return cm_hir_push(context, &context->generic_parameters, parameter,
+        out_id);
 }
 
 CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
@@ -4462,6 +4459,7 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     }
     parameter->has_default = 1;
     parameter->default_argument = *argument;
+    cm_hir_context_record_semantic_mutation(context);
     return CM_HIR_OK;
 }
 
@@ -4564,7 +4562,7 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     copy = *body;
     copy.locals = (CmHirLocal *)cm_hir_copy_array(context, body->locals,
         body->local_count, sizeof(CmHirLocal));
-    status = cm_hir_push(&context->bodies, &copy, out_id);
+    status = cm_hir_push(context, &context->bodies, &copy, out_id);
     if (status == CM_HIR_OK && body->state == CM_HIR_BODY_TYPED) {
         cm_hir_claim_expression_tree(context, body->root_expression,
             *out_id);
@@ -5284,7 +5282,7 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
         }
         break;
     }
-    return cm_hir_push(&context->expressions, &copy, out_id);
+    return cm_hir_push(context, &context->expressions, &copy, out_id);
 }
 
 CmHirStatus cm_hir_add_owned_call_expr(CmHirContext *context,
@@ -5327,7 +5325,7 @@ CmHirStatus cm_hir_add_owned_call_expr(CmHirContext *context,
         || !cm_hir_call_expression_valid(context, expression)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
-    return cm_hir_push(&context->expressions, expression, out_id);
+    return cm_hir_push(context, &context->expressions, expression, out_id);
 }
 
 CmHirStatus cm_hir_add_owned_aggregate_expr(CmHirContext *context,
@@ -5363,7 +5361,7 @@ CmHirStatus cm_hir_add_owned_aggregate_expr(CmHirContext *context,
             body)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
-    return cm_hir_push(&context->expressions, expression, out_id);
+    return cm_hir_push(context, &context->expressions, expression, out_id);
 }
 
 CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
@@ -5395,6 +5393,7 @@ CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
     cm_hir_claim_expression_tree(context, root_expression, body_id);
     body->root_expression = root_expression;
     body->state = CM_HIR_BODY_TYPED;
+    cm_hir_context_record_semantic_mutation(context);
     return CM_HIR_OK;
 }
 

@@ -163,6 +163,9 @@ typedef struct CmTypeckFreezeResult {
 
 void cm_typeck_context_init(CmTypeckContext *context,
     const CmHirContext *hir);
+/* Make this context reject later proof-relevant HIR mutation. */
+void cm_typeck_context_track_hir_semantic_generation(
+    CmTypeckContext *context);
 void cm_typeck_context_destroy(CmTypeckContext *context);
 
 CmTypeckStatus cm_typeck_snapshot(CmTypeckContext *context,

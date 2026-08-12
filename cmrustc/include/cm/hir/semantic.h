@@ -16,6 +16,7 @@ typedef struct CmSemanticSessionOptions {
     CmHirCrateId local_crate;
     CmHirDefId exact_owner;
     CmTraitImplUniverse universe;
+    const CmHirCrateFinalization *finalization;
     CmTraitGoalTableLimits goal_limits;
 } CmSemanticSessionOptions;
 
@@ -53,10 +54,16 @@ CmTraitImplUniverse cm_semantic_session_universe(
 CmTypeckContext *cm_semantic_session_typeck(CmSemanticSession *session);
 
 /*
- * Solve the only canonical goal kind implemented today.  term_owner must be
- * the exact pointer returned by cm_semantic_session_typeck, authenticating all
- * scratch IDs in the substitution and goal before delegation to the table.
+ * Dispatch an authenticated implemented-trait or projection-equality goal to
+ * the session's canonical table.  term_owner must be the exact pointer
+ * returned by cm_semantic_session_typeck, authenticating all scratch IDs in
+ * the substitution and goal before delegation to the table.
  */
+CmTraitSelectionResult cm_semantic_session_solve_goal(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal);
+
+/* Compatibility entry point restricted to implemented-trait goals. */
 CmTraitSelectionResult cm_semantic_session_solve_implemented(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal);

@@ -1061,6 +1061,8 @@ int main(void)
     CmHirTypeId union_projection;
     CmHirTypeId generic_child_projection;
     CmHirType tuple;
+    CmHirType *malformed_projection_type;
+    CmHirGenericArg *malformed_argument;
     CmHirTypeId tuple_elements[2];
     CmHirGenericArg argument;
     CmHirProjectionResult result;
@@ -1146,9 +1148,29 @@ int main(void)
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     argument.data.type = u8_type;
     argument_projection = add_projection(&context, u8_type,
-        trait_definition, associated_definition, &argument, 1u, NULL, 0u);
+        trait_definition, associated_definition, NULL, 0u, NULL, 0u);
+    malformed_projection_type = (CmHirType *)cm_vec_at(&context.types,
+        (size_t)argument_projection - 1u);
+    malformed_argument = (CmHirGenericArg *)cm_arena_alloc(
+        &context.storage, sizeof(*malformed_argument), 16u);
+    *malformed_argument = argument;
+    assert(malformed_projection_type != NULL);
+    malformed_projection_type->data.projection_type.trait_type.arguments =
+        malformed_argument;
+    malformed_projection_type->data.projection_type.trait_type.argument_count =
+        1u;
     associated_argument_projection = add_projection(&context, u8_type,
-        trait_definition, associated_definition, NULL, 0u, &argument, 1u);
+        trait_definition, associated_definition, NULL, 0u, NULL, 0u);
+    malformed_projection_type = (CmHirType *)cm_vec_at(&context.types,
+        (size_t)associated_argument_projection - 1u);
+    malformed_argument = (CmHirGenericArg *)cm_arena_alloc(
+        &context.storage, sizeof(*malformed_argument), 16u);
+    *malformed_argument = argument;
+    assert(malformed_projection_type != NULL);
+    malformed_projection_type->data.projection_type.associated_type.arguments =
+        malformed_argument;
+    malformed_projection_type->data.projection_type.associated_type
+        .argument_count = 1u;
     memset(&tuple, 0, sizeof(tuple));
     tuple.kind = CM_HIR_TYPE_TUPLE_KIND;
     tuple.span = test_span(1u, 2u);
@@ -1163,7 +1185,7 @@ int main(void)
         associated_definition, NULL, 0u, NULL, 0u);
     generic_child_projection = add_projection(&context, char_type,
         generic_child_trait_definition, generic_child_associated_definition,
-        NULL, 0u, NULL, 0u);
+        NULL, 0u, &argument, 1u);
 
     u8_impl = add_impl(&context, crate_id, root_module, trait_definition,
         u8_type);

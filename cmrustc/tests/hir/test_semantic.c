@@ -130,6 +130,19 @@ static CmTraitGoal implemented_goal(CmHirDefId owner,
     return goal;
 }
 
+static CmTraitGoal projection_goal(CmHirDefId owner,
+    CmTypeckTypeId projection_type, CmTypeckTypeId expected_type)
+{
+    CmTraitGoal goal;
+
+    memset(&goal, 0, sizeof(goal));
+    goal.kind = CM_TRAIT_GOAL_PROJECTION_EQUALITY;
+    goal.data.projection_equality.owner = owner;
+    goal.data.projection_equality.projection_type = projection_type;
+    goal.data.projection_equality.expected_type = expected_type;
+    return goal;
+}
+
 static void assert_invalid_result(CmTraitSelectionResult result)
 {
     assert(result.kind == CM_TRAIT_SOLVER_INVALID);
@@ -149,6 +162,8 @@ static void test_open_session_solve_and_accessors(void)
     CmTypeckTypeId bool_type;
     CmTraitGoal goal;
     CmTraitSelectionResult result;
+    CmTypeckType projection;
+    CmTypeckTypeId projection_type;
     size_t type_count;
 
     fixture_init(&fixture);
@@ -189,6 +204,30 @@ static void test_open_session_solve_and_accessors(void)
     result = cm_semantic_session_solve_implemented(&session, typeck,
         &substitution, &goal);
     assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA);
+    assert(cm_typeck_type_count(typeck) == type_count);
+
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = test_span(3u, 8u);
+    projection.data.projection_type.self_type = bool_type;
+    projection.data.projection_type.trait_type.definition =
+        fixture.owner_trait;
+    projection.data.projection_type.associated_type.definition =
+        fixture.associated_owner;
+    assert(cm_typeck_add_type(typeck, &projection, &projection_type)
+        == CM_TYPECK_OK);
+    goal = projection_goal(fixture.owner_trait, projection_type, bool_type);
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_session_solve_goal(&session, typeck,
+        &substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE
+        && cm_hir_def_id_is_none(result.impl_associated_definition)
+        && cm_typeck_type_count(typeck) == type_count);
+    result = cm_semantic_session_solve_implemented(&session, typeck,
+        &substitution, &goal);
+    assert_invalid_result(result);
     assert(cm_typeck_type_count(typeck) == type_count);
 
     cm_semantic_session_destroy(&session);
@@ -366,7 +405,7 @@ static void test_append_and_rewind_staleness(void)
     result = cm_semantic_session_solve_implemented(&session, typeck,
         &substitution, &goal);
     assert_invalid_result(result);
-    assert(cm_typeck_type_count(typeck) == type_count);
+    assert(type_count != 0u && cm_typeck_type_count(typeck) == 0u);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
 
@@ -381,6 +420,103 @@ static void test_append_and_rewind_staleness(void)
     fixture_destroy(&fixture);
 }
 
+static void test_complete_session_authentication(void)
+{
+    TestFixture fixture;
+    TestFixture foreign;
+    CmHirCrateFinalization finalization;
+    CmSemanticSessionOptions options;
+    CmSemanticSession session;
+    CmTypeckContext *typeck;
+    CmTypeckInstantiation exact;
+    CmParamEnvSubstitution substitution;
+    CmTypeckTypeId bool_type;
+    CmTraitGoal goal;
+    CmTraitSelectionResult result;
+    CmHirAttribute attribute;
+    CmHirCrateId second_crate;
+    CmHirModuleId second_root;
+
+    fixture_init(&fixture);
+    fixture_init(&foreign);
+    assert(cm_hir_create_crate(&fixture.hir,
+        cm_hir_intern(&fixture.hir, "second"), CM_HIR_EDITION_2024,
+        test_span(0u, 30u), &second_crate, &second_root) == CM_HIR_OK);
+    assert(second_crate != fixture.crate_id
+        && second_root != CM_HIR_MODULE_NONE);
+    memset(&finalization, 0, sizeof(finalization));
+    memset(&session, 0, sizeof(session));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+
+    options = session_options(&fixture, fixture.owner_trait);
+    options.universe =
+        CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    assert(cm_semantic_session_universe(&session)
+        == CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    assert(cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
+        == CM_TYPECK_OK);
+    memset(&exact, 0, sizeof(exact));
+    exact.parameter_owner = fixture.owner_trait;
+    exact.self_owner = fixture.owner_trait;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    goal = implemented_goal(fixture.owner_trait, fixture.bound_trait,
+        bool_type);
+    result = cm_semantic_session_solve_implemented(&session, typeck,
+        &substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA);
+    cm_semantic_session_destroy(&session);
+
+    options = session_options(&fixture, fixture.owner_trait);
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_INVALID);
+    assert(session.state == NULL);
+
+    options = session_options(&foreign, foreign.owner_trait);
+    options.universe =
+        CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &foreign.hir, &options)
+        == CM_TRAIT_SOLVER_INVALID);
+    assert(session.state == NULL);
+
+    options = session_options(&fixture, fixture.owner_trait);
+    options.universe =
+        CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    options.local_crate = second_crate;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_INVALID);
+    assert(session.state == NULL);
+
+    memset(&attribute, 0, sizeof(attribute));
+    attribute.metadata = cm_hir_intern(&fixture.hir, "mutated");
+    attribute.span = test_span(1u, 2u);
+    attribute.source_attribute = 1u;
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, &attribute, 1u) == CM_HIR_OK);
+    options = session_options(&fixture, fixture.owner_trait);
+    options.universe =
+        CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_INVALID);
+    assert(session.state == NULL);
+
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&foreign);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_open_session_solve_and_accessors();
@@ -388,6 +524,7 @@ int main(void)
     test_atomic_initialization_failures();
     test_foreign_and_malformed_data_rejected();
     test_append_and_rewind_staleness();
+    test_complete_session_authentication();
     puts("hir semantic session tests passed");
     return 0;
 }

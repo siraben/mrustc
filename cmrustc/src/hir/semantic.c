@@ -136,8 +136,21 @@ CmTraitSolverResultKind cm_semantic_session_init(
     state->exact_owner = options->exact_owner;
     state->universe = options->universe;
 
-    result = cm_trait_impl_index_init(&state->index, hir,
-        options->local_crate, options->universe);
+    if (options->universe == CM_TRAIT_IMPL_UNIVERSE_OPEN
+        && options->finalization == NULL) {
+        result = cm_trait_impl_index_init(&state->index, hir,
+            options->local_crate, options->universe);
+    } else if (options->universe
+            == CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE
+        && options->finalization != NULL
+        && cm_hir_crate_finalization_hir(options->finalization) == hir
+        && cm_hir_crate_finalization_crate(options->finalization)
+            == options->local_crate) {
+        result = cm_trait_impl_index_init_complete(&state->index,
+            options->finalization);
+    } else {
+        result = CM_TRAIT_SOLVER_INVALID;
+    }
     if (result != CM_TRAIT_SOLVER_PROVEN) {
         cm_semantic_state_destroy(state);
         return result;
@@ -152,6 +165,7 @@ CmTraitSolverResultKind cm_semantic_session_init(
     state->enclosing_owner = cm_param_env_enclosing_owner(
         &state->environment);
     cm_typeck_context_init(&state->typeck, hir);
+    cm_typeck_context_track_hir_semantic_generation(&state->typeck);
     if (cm_typeck_hir_context(&state->typeck) != hir
         || !cm_semantic_limits_valid(options->goal_limits)) {
         cm_semantic_state_destroy(state);
@@ -243,7 +257,7 @@ CmTypeckContext *cm_semantic_session_typeck(CmSemanticSession *session)
     return !cm_semantic_state_is_current(state) ? NULL : &state->typeck;
 }
 
-CmTraitSelectionResult cm_semantic_session_solve_implemented(
+CmTraitSelectionResult cm_semantic_session_solve_goal(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal)
 {
@@ -252,9 +266,22 @@ CmTraitSelectionResult cm_semantic_session_solve_implemented(
     state = cm_semantic_state(session);
     if (!cm_semantic_state_is_current(state)
         || term_owner != &state->typeck || substitution == NULL
-        || goal == NULL || goal->kind != CM_TRAIT_GOAL_IMPLEMENTED) {
+        || goal == NULL
+        || (goal->kind != CM_TRAIT_GOAL_IMPLEMENTED
+            && goal->kind != CM_TRAIT_GOAL_PROJECTION_EQUALITY)) {
         return cm_semantic_result(CM_TRAIT_SOLVER_INVALID);
     }
     return cm_trait_goal_table_solve(&state->table, &state->typeck,
+        substitution, goal);
+}
+
+CmTraitSelectionResult cm_semantic_session_solve_implemented(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal)
+{
+    if (goal == NULL || goal->kind != CM_TRAIT_GOAL_IMPLEMENTED) {
+        return cm_semantic_result(CM_TRAIT_SOLVER_INVALID);
+    }
+    return cm_semantic_session_solve_goal(session, term_owner,
         substitution, goal);
 }

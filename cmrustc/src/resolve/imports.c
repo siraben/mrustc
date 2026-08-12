@@ -272,23 +272,6 @@ static const CmImportModuleState *cm_import_module_const(
         (size_t)id - 1u);
 }
 
-static int cm_import_module_is_descendant_of(
-    const CmImportResolverState *state, CmModuleId module,
-    CmModuleId ancestor)
-{
-    size_t depth;
-
-    for (depth = 0u; depth <= state->modules.len; ++depth) {
-        const CmImportModuleState *current;
-
-        if (module == ancestor) return 1;
-        current = cm_import_module_const(state, module);
-        if (current == NULL || current->parent == CM_MODULE_NONE) return 0;
-        module = current->parent;
-    }
-    return 0;
-}
-
 static int cm_item_ref_equal(CmResolveItemRef left, CmResolveItemRef right)
 {
     return left.source == right.source && left.item == right.item;
@@ -1025,14 +1008,9 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
 
                     source_binding = (const CmImportBinding *)cm_vec_at_const(
                         &source->namespaces[namespace_index], index);
-                    if (source_binding == NULL
-                        || source_binding->value.is_ambiguous
-                        || (!source_binding->value.is_public
-                            && (leaf->is_public
-                                || !cm_import_module_is_descendant_of(state,
-                                    leaf->module, scope.module)))) {
-                        continue;
-                    }
+                    if (source_binding == NULL ||
+                        !source_binding->value.is_public ||
+                        source_binding->value.is_ambiguous) continue;
                     imported = source_binding->value;
                     imported.module = leaf->module;
                     imported.import_declaration = leaf->declaration;

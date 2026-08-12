@@ -1201,6 +1201,128 @@ static void test_stale_index_fingerprints(void)
     fixture_destroy(&fixture);
 }
 
+static void test_finalized_complete_index(void)
+{
+    TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmTraitImplIndex index;
+    CmTypeckContext typeck;
+    CmTypeckTypeId self_type;
+    CmTypeckNamedType query;
+    CmTraitSelectionResult result;
+    CmHirAttribute attribute;
+    CmHirContextMark mark;
+    uint64_t generation;
+
+    fixture_init(&fixture);
+    memset(&finalization, 0, sizeof(finalization));
+    memset(&index, 0, sizeof(index));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    assert(cm_hir_crate_finalization_is_current(&finalization));
+    assert(cm_hir_crate_finalization_hir(&finalization) == &fixture.hir);
+    assert(cm_hir_crate_finalization_crate(&finalization)
+        == fixture.crate_id);
+    generation = cm_hir_crate_finalization_generation(&finalization);
+    assert(generation == fixture.hir.semantic_generation);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_INVALID_ARGUMENT);
+    assert(cm_trait_impl_index_init_complete(&index, &finalization)
+        == CM_TRAIT_SOLVER_PROVEN);
+    assert(cm_trait_impl_index_universe(&index)
+        == CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &self_type)
+        == CM_TYPECK_OK);
+    query = trait_query(fixture.exact_trait);
+    result = cm_trait_solver_select(&index, &typeck, self_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_hir_def_id_equal(result.impl_definition,
+            fixture.exact_impl));
+    query = trait_query(fixture.empty_trait);
+    result = cm_trait_solver_select(&index, &typeck, self_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA);
+
+    assert(cm_hir_intern(&fixture.hir, "not-semantic")
+        != CM_INTERN_ID_NONE);
+    assert(cm_hir_crate_finalization_is_current(&finalization));
+    assert(cm_trait_impl_index_is_current(&index));
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, NULL, 0u) == CM_HIR_OK);
+    assert(cm_hir_crate_finalization_is_current(&finalization));
+    memset(&attribute, 0, sizeof(attribute));
+    attribute.metadata = cm_hir_intern(&fixture.hir, "sealed");
+    attribute.span = test_span(1u, 2u);
+    attribute.source_attribute = 1u;
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, &attribute, 1u) == CM_HIR_OK);
+    assert(!cm_hir_crate_finalization_is_current(&finalization));
+    assert(!cm_trait_impl_index_is_current(&index));
+    assert(cm_hir_crate_finalization_generation(&finalization) == 0u);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    (void)add_scalar(&fixture.hir, CM_HIR_TYPE_INTEGER_KIND,
+        CM_HIR_INT_U32);
+    assert(!cm_hir_crate_finalization_is_current(&finalization));
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_context_mark(&fixture.hir, &mark) == CM_HIR_OK);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    assert(cm_hir_context_rewind(&fixture.hir, &mark) == CM_HIR_OK);
+    assert(!cm_hir_crate_finalization_is_current(&finalization));
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init_complete(&index, &finalization)
+        == CM_TRAIT_SOLVER_INVALID);
+    assert(index.state == NULL);
+    cm_trait_impl_index_destroy(&index);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+}
+
+static void test_finalization_local_completeness(void)
+{
+    TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmHirCrateId dependency_crate;
+    CmHirModuleId dependency_root;
+    CmHirDefId reserved;
+
+    fixture_init(&fixture);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_create_crate(&fixture.hir,
+        cm_hir_intern(&fixture.hir, "dependency"), CM_HIR_EDITION_2024,
+        test_span(0u, 10u), &dependency_crate, &dependency_root)
+        == CM_HIR_OK);
+    assert(dependency_root != CM_HIR_MODULE_NONE);
+    assert(cm_hir_reserve_item_definition(&fixture.hir, dependency_crate,
+        test_span(1u, 2u), &reserved) == CM_HIR_OK);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    cm_hir_crate_finalization_destroy(&finalization);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        (CmHirCrateId)(dependency_crate + 100u)) == CM_HIR_INVALID_ID);
+    assert(finalization.state == NULL);
+    assert(cm_hir_reserve_item_definition(&fixture.hir, fixture.crate_id,
+        test_span(2u, 3u), &reserved) == CM_HIR_OK);
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_INVARIANT_VIOLATION);
+    assert(finalization.state == NULL);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_index_and_selection();
@@ -1208,6 +1330,8 @@ int main(void)
     test_projection_overflow_and_invalid_query();
     test_const_scanning();
     test_stale_index_fingerprints();
+    test_finalized_complete_index();
+    test_finalization_local_completeness();
     puts("hir trait solver tests passed");
     return 0;
 }

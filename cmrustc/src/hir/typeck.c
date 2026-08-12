@@ -51,7 +51,9 @@ typedef struct CmTypeckState {
     uint64_t lifetime_id;
     uint64_t next_snapshot_id;
     uint64_t hir_storage_lifetime_id;
+    uint64_t hir_semantic_generation;
     uint64_t hir_rewind_generation;
+    int track_hir_semantic_generation;
     size_t import_depth;
 } CmTypeckState;
 
@@ -72,6 +74,9 @@ static int cm_typeck_state_is_current(const CmTypeckState *state)
 {
     return state != NULL && state->hir != NULL
         && state->hir_storage_lifetime_id == state->hir->storage.lifetime_id
+        && (!state->track_hir_semantic_generation
+            || state->hir_semantic_generation
+                == state->hir->semantic_generation)
         && state->hir_rewind_generation == state->hir->rewind_generation;
 }
 
@@ -380,8 +385,20 @@ void cm_typeck_context_init(CmTypeckContext *context,
         cm_typeck_next_lifetime_id++;
     state->next_snapshot_id = UINT64_C(1);
     state->hir_storage_lifetime_id = hir->storage.lifetime_id;
+    state->hir_semantic_generation = hir->semantic_generation;
     state->hir_rewind_generation = hir->rewind_generation;
     context->state = state;
+}
+
+void cm_typeck_context_track_hir_semantic_generation(
+    CmTypeckContext *context)
+{
+    CmTypeckState *state;
+
+    state = cm_typeck_state(context);
+    if (state == NULL || !cm_typeck_state_is_current(state)) return;
+    state->hir_semantic_generation = state->hir->semantic_generation;
+    state->track_hir_semantic_generation = 1;
 }
 
 void cm_typeck_context_destroy(CmTypeckContext *context)
@@ -2402,6 +2419,7 @@ CmTypeckFreezeResult cm_typeck_freeze_hir_type(CmTypeckContext *context,
         result.type = CM_HIR_TYPE_NONE;
         result.added_type_count = 0u;
     }
+    state->hir_semantic_generation = hir->semantic_generation;
     state->hir_rewind_generation = hir->rewind_generation;
     return result;
 }

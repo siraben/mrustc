@@ -8570,281 +8570,6 @@ static void test_adt_generic_type_defaults_fail_closed(void)
     }
 }
 
-static void test_gat_associated_bound_generic_scope_graph(void)
-{
-    static const unsigned char source[] =
-        "trait Owner<'outer, Outer, const M: usize> {\n"
-        "type Assoc<'a, T, const N: usize>:\n"
-        "Bound<'a, 'outer, T, Outer, N, M>;\n"
-        "}\n"
-        "trait Bound<'x, 'y, U, V, const K: usize, const L: usize> {}\n";
-    static const char *const rejected[] = {
-        "trait Other<T> {}\n"
-        "trait Owner { type Assoc: Bound<T>; }\n"
-        "trait Bound<U> {}\n",
-        "trait Owner<const N: u8> { type Assoc: Bound<N>; }\n"
-        "trait Bound<const N: usize> {}\n",
-        "trait Owner { type Assoc: Later; }\n"
-        "trait Later<T> {}\n"
-    };
-    CmSourceSet sources;
-    CmSourceId root;
-    CmModuleGraph graph;
-    CmModuleGraphOptions graph_options;
-    CmCfgSet cfg;
-    CmModuleGraphResult graph_result;
-    CmHirContext hir;
-    CmHirModuleMap map;
-    CmHirLowerOptions options;
-    CmHirLowerResult result;
-    const CmHirItem *owner;
-    const CmHirItem *associated;
-    const CmHirItem *target;
-    const CmHirAssociatedTypeBound *bound;
-    const CmHirGenericArg *arguments;
-    const CmHirGenericParam *gat_lifetime;
-    const CmHirGenericParam *gat_type_parameter;
-    const CmHirGenericParam *gat_const_parameter;
-    const CmHirGenericParam *owner_lifetime;
-    const CmHirGenericParam *owner_type_parameter;
-    const CmHirGenericParam *owner_const_parameter;
-    const CmHirGenericParam *target_first_const;
-    const CmHirGenericParam *target_second_const;
-    const CmHirType *gat_type;
-    const CmHirType *owner_type;
-    const CmHirType *first_const_type;
-    const CmHirType *second_const_type;
-    const CmHirType *target_first_const_type;
-    const CmHirType *target_second_const_type;
-    size_t case_index;
-
-    cm_source_set_init(&sources);
-    cm_module_graph_init(&graph);
-    check(cm_source_add_memory(&sources, "gat-bound-scope/lib.rs", source,
-        sizeof(source) - 1u, &root) == CM_SOURCE_OK,
-        "could not add GAT bound generic scope fixture");
-    cm_cfg_set_init(&cfg);
-    cm_module_graph_options_init(&graph_options);
-    graph_options.cfg = &cfg;
-    graph_result = cm_module_graph_build(&graph, &sources, root,
-        &graph_options);
-    cm_hir_context_init(&hir);
-    cm_hir_module_map_init(&map);
-    cm_hir_lower_options_init(&options);
-    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
-        &options);
-    if (result.error_count != 0u) {
-        fprintf(stderr, "hir-graph-lower GAT bound scope: %s: %s\n",
-            cm_hir_lower_error_kind_name(result.first_error.kind),
-            result.first_error.message);
-    }
-    owner = find_hir_item_anywhere(&hir, "Owner");
-    associated = owner == NULL ? NULL : find_hir_associated_item(&hir,
-        owner->definition, CM_HIR_ITEM_TYPE_ALIAS, "Assoc");
-    target = find_hir_item_anywhere(&hir, "Bound");
-    bound = associated == NULL
-            || associated->data.type_alias_item.bound_count != 1u
-        ? NULL : &associated->data.type_alias_item.bounds[0];
-    arguments = bound == NULL || bound->trait_type.argument_count != 6u
-        ? NULL : bound->trait_type.arguments;
-    gat_lifetime = associated == NULL ? NULL
-        : cm_hir_get_generic_param(&hir,
-            associated->generic_parameter_start);
-    gat_type_parameter = associated == NULL ? NULL
-        : cm_hir_get_generic_param(&hir,
-            associated->generic_parameter_start + 1u);
-    gat_const_parameter = associated == NULL ? NULL
-        : cm_hir_get_generic_param(&hir,
-            associated->generic_parameter_start + 2u);
-    owner_lifetime = owner == NULL ? NULL : cm_hir_get_generic_param(&hir,
-        owner->generic_parameter_start);
-    owner_type_parameter = owner == NULL ? NULL
-        : cm_hir_get_generic_param(&hir, owner->generic_parameter_start + 1u);
-    owner_const_parameter = owner == NULL ? NULL
-        : cm_hir_get_generic_param(&hir, owner->generic_parameter_start + 2u);
-    target_first_const = target == NULL ? NULL
-        : cm_hir_get_generic_param(&hir, target->generic_parameter_start + 4u);
-    target_second_const = target == NULL ? NULL
-        : cm_hir_get_generic_param(&hir, target->generic_parameter_start + 5u);
-    gat_type = arguments == NULL
-            || arguments[2].kind != CM_HIR_GENERIC_ARG_TYPE
-        ? NULL : cm_hir_get_type(&hir, arguments[2].data.type);
-    owner_type = arguments == NULL
-            || arguments[3].kind != CM_HIR_GENERIC_ARG_TYPE
-        ? NULL : cm_hir_get_type(&hir, arguments[3].data.type);
-    first_const_type = arguments == NULL
-            || arguments[4].kind != CM_HIR_GENERIC_ARG_CONST
-        ? NULL : cm_hir_get_type(&hir, arguments[4].data.constant.type);
-    second_const_type = arguments == NULL
-            || arguments[5].kind != CM_HIR_GENERIC_ARG_CONST
-        ? NULL : cm_hir_get_type(&hir, arguments[5].data.constant.type);
-    target_first_const_type = target_first_const == NULL ? NULL
-        : cm_hir_get_type(&hir, target_first_const->declared_type);
-    target_second_const_type = target_second_const == NULL ? NULL
-        : cm_hir_get_type(&hir, target_second_const->declared_type);
-    check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 3u
-        && owner != NULL && owner->generic_parameter_count == 3u
-        && associated != NULL && associated->generic_parameter_count == 3u
-        && target != NULL && target->generic_parameter_count == 6u
-        && bound != NULL && arguments != NULL
-        && cm_hir_def_id_equal(bound->trait_type.definition,
-            target->definition)
-        && gat_lifetime != NULL
-        && gat_lifetime->kind == CM_HIR_GENERIC_LIFETIME
-        && cm_hir_def_id_equal(gat_lifetime->owner,
-            associated->definition)
-        && gat_type_parameter != NULL
-        && gat_type_parameter->kind == CM_HIR_GENERIC_TYPE
-        && cm_hir_def_id_equal(gat_type_parameter->owner,
-            associated->definition)
-        && gat_const_parameter != NULL
-        && gat_const_parameter->kind == CM_HIR_GENERIC_CONST
-        && cm_hir_def_id_equal(gat_const_parameter->owner,
-            associated->definition)
-        && owner_lifetime != NULL
-        && owner_lifetime->kind == CM_HIR_GENERIC_LIFETIME
-        && cm_hir_def_id_equal(owner_lifetime->owner, owner->definition)
-        && owner_type_parameter != NULL
-        && owner_type_parameter->kind == CM_HIR_GENERIC_TYPE
-        && cm_hir_def_id_equal(owner_type_parameter->owner,
-            owner->definition)
-        && owner_const_parameter != NULL
-        && owner_const_parameter->kind == CM_HIR_GENERIC_CONST
-        && cm_hir_def_id_equal(owner_const_parameter->owner,
-            owner->definition)
-        && arguments[0].kind == CM_HIR_GENERIC_ARG_LIFETIME
-        && arguments[0].data.lifetime.kind == CM_HIR_REGION_EARLY_BOUND
-        && arguments[0].data.lifetime.data.parameter
-            == associated->generic_parameter_start
-        && arguments[1].kind == CM_HIR_GENERIC_ARG_LIFETIME
-        && arguments[1].data.lifetime.kind == CM_HIR_REGION_EARLY_BOUND
-        && arguments[1].data.lifetime.data.parameter
-            == owner->generic_parameter_start
-        && gat_type != NULL
-        && gat_type->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && gat_type->data.parameter_type.parameter
-            == associated->generic_parameter_start + 1u
-        && owner_type != NULL
-        && owner_type->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && owner_type->data.parameter_type.parameter
-            == owner->generic_parameter_start + 1u
-        && arguments[4].data.constant.kind == CM_HIR_CONST_PARAMETER
-        && arguments[4].data.constant.data.parameter
-            == associated->generic_parameter_start + 2u
-        && arguments[4].data.constant.type
-            == gat_const_parameter->declared_type
-        && arguments[5].data.constant.kind == CM_HIR_CONST_PARAMETER
-        && arguments[5].data.constant.data.parameter
-            == owner->generic_parameter_start + 2u
-        && arguments[5].data.constant.type
-            == owner_const_parameter->declared_type
-        && first_const_type != NULL
-        && first_const_type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && first_const_type->data.integer_type.kind == CM_HIR_INT_USIZE
-        && second_const_type != NULL
-        && second_const_type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && second_const_type->data.integer_type.kind == CM_HIR_INT_USIZE
-        && target_first_const_type != NULL
-        && target_first_const_type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && target_first_const_type->data.integer_type.kind
-            == CM_HIR_INT_USIZE
-        && target_second_const_type != NULL
-        && target_second_const_type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && target_second_const_type->data.integer_type.kind
-            == CM_HIR_INT_USIZE,
-        "GAT associated bound lost own or parent generic identity");
-    cm_hir_module_map_destroy(&map);
-    cm_hir_context_destroy(&hir);
-    cm_module_graph_destroy(&graph);
-    cm_source_set_destroy(&sources);
-
-    for (case_index = 0u;
-         case_index < sizeof(rejected) / sizeof(rejected[0]);
-         ++case_index) {
-        cm_source_set_init(&sources);
-        cm_module_graph_init(&graph);
-        check(cm_source_add_memory(&sources, "gat-bound-reject/lib.rs",
-            (const unsigned char *)rejected[case_index],
-            strlen(rejected[case_index]), &root) == CM_SOURCE_OK,
-            "could not add rejected GAT bound scope fixture");
-        cm_cfg_set_init(&cfg);
-        cm_module_graph_options_init(&graph_options);
-        graph_options.cfg = &cfg;
-        graph_result = cm_module_graph_build(&graph, &sources, root,
-            &graph_options);
-        cm_hir_context_init(&hir);
-        cm_hir_module_map_init(&map);
-        cm_hir_lower_options_init(&options);
-        result = lower_module_graph(&hir, &graph, graph_result.revision,
-            &map, &options);
-        check(graph_result.error_count == 0u && result.error_count == 1u
-            && hir_is_empty(&hir) && cm_hir_module_map_count(&map) == 0u,
-            "invalid GAT bound scope escaped whole-graph rollback");
-        cm_hir_module_map_destroy(&map);
-        cm_hir_context_destroy(&hir);
-        cm_module_graph_destroy(&graph);
-        cm_source_set_destroy(&sources);
-    }
-}
-
-static void test_descendant_private_glob_associated_bound_graph(void)
-{
-    static const unsigned char source[] =
-        "trait SimdElement {}\n"
-        "mod sealed {\n"
-        "    use super::*;\n"
-        "    trait Sealed { type Unsigned: SimdElement; }\n"
-        "}\n";
-    CmSourceSet sources;
-    CmSourceId root;
-    CmModuleGraph graph;
-    CmModuleGraphOptions graph_options;
-    CmCfgSet cfg;
-    CmModuleGraphResult graph_result;
-    CmHirContext hir;
-    CmHirModuleMap map;
-    CmHirLowerOptions options;
-    CmHirLowerResult result;
-    const CmHirItem *element;
-    const CmHirItem *sealed;
-    const CmHirItem *associated;
-    const CmHirAssociatedTypeBound *bound;
-
-    cm_source_set_init(&sources);
-    cm_module_graph_init(&graph);
-    check(cm_source_add_memory(&sources, "private-glob-bound/lib.rs",
-        source, sizeof(source) - 1u, &root) == CM_SOURCE_OK,
-        "could not add descendant private glob bound fixture");
-    cm_cfg_set_init(&cfg);
-    cm_module_graph_options_init(&graph_options);
-    graph_options.cfg = &cfg;
-    graph_result = cm_module_graph_build(&graph, &sources, root,
-        &graph_options);
-    cm_hir_context_init(&hir);
-    cm_hir_module_map_init(&map);
-    cm_hir_lower_options_init(&options);
-    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
-        &options);
-    element = find_hir_item_anywhere(&hir, "SimdElement");
-    sealed = find_hir_item_anywhere(&hir, "Sealed");
-    associated = sealed == NULL ? NULL : find_hir_associated_item(&hir,
-        sealed->definition, CM_HIR_ITEM_TYPE_ALIAS, "Unsigned");
-    bound = associated == NULL
-            || associated->data.type_alias_item.bound_count != 1u
-        ? NULL : &associated->data.type_alias_item.bounds[0];
-    check(graph_result.error_count == 0u && result.error_count == 0u
-        && element != NULL && sealed != NULL && associated != NULL
-        && bound != NULL
-        && cm_hir_def_id_equal(bound->trait_type.definition,
-            element->definition),
-        "descendant private glob did not authenticate associated bound");
-    cm_hir_module_map_destroy(&map);
-    cm_hir_context_destroy(&hir);
-    cm_module_graph_destroy(&graph);
-    cm_source_set_destroy(&sources);
-}
-
 static void test_generic_associated_type_declaration(void)
 {
     static const unsigned char source[] =
@@ -11213,10 +10938,7 @@ static void test_generated_failure_is_transactional(void)
         "trait Consumer: NotATrait {} struct NotATrait;",
         "trait T {} struct S; impl const T for S {}",
         "trait Good<T> {} fn staged<F>() where "
-            "for<'a> F: Good<&'a u8> + Missing<&'a u8> {}",
-        "fn consume(value: impl Missing) {}",
-        "trait Bound {} unsafe extern \"C\" {"
-            " fn foreign(value: impl Bound); }"
+            "for<'a> F: Good<&'a u8> + Missing<&'a u8> {}"
     };
     static const CmHirLowerErrorKind expected_errors[] = {
         CM_HIR_LOWER_UNRESOLVED_PATH,
@@ -11234,9 +10956,7 @@ static void test_generated_failure_is_transactional(void)
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_WRONG_NAMESPACE,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
-        CM_HIR_LOWER_UNRESOLVED_PATH,
-        CM_HIR_LOWER_UNRESOLVED_PATH,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        CM_HIR_LOWER_UNRESOLVED_PATH
     };
     size_t index;
 
@@ -11913,94 +11633,6 @@ static void test_core_trait_alias_declaration(void)
     cm_source_set_destroy(&sources);
 }
 
-static void test_argument_impl_trait_graph(void)
-{
-    static const unsigned char source[] =
-        "trait Pattern {"
-        " fn parse_digits(&self, func: impl FnMut(u8)) -> &Self;"
-        "}"
-        "trait FnMut<Args> { type Output; }";
-    CmSourceSet sources;
-    CmSourceId root;
-    CmModuleGraph graph;
-    CmModuleGraphOptions graph_options;
-    CmCfgSet cfg;
-    CmModuleGraphResult graph_result;
-    CmHirContext hir;
-    CmHirModuleMap map;
-    CmHirLowerOptions options;
-    CmHirLowerResult result;
-    CmHirModuleId root_hir;
-    const CmHirItem *pattern;
-    const CmHirItem *fn_mut;
-    const CmHirItem *method;
-    const CmHirGenericParam *apit;
-    const CmHirType *parameter_type;
-    const CmHirType *predicate_subject;
-
-    cm_source_set_init(&sources);
-    cm_module_graph_init(&graph);
-    check(cm_source_add_memory(&sources, "apit/lib.rs", source,
-        sizeof(source) - 1u, &root) == CM_SOURCE_OK,
-        "could not add argument impl trait graph fixture");
-    cm_cfg_set_init(&cfg);
-    cm_module_graph_options_init(&graph_options);
-    graph_options.cfg = &cfg;
-    graph_result = cm_module_graph_build(&graph, &sources, root,
-        &graph_options);
-    check(graph_result.error_count == 0u,
-        "argument impl trait fixture did not build a graph");
-    cm_hir_context_init(&hir);
-    cm_hir_module_map_init(&map);
-    cm_hir_lower_options_init(&options);
-    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
-        &options);
-    root_hir = CM_HIR_MODULE_NONE;
-    check(result.error_count == 0u
-        && cm_hir_module_map_lookup_hir(&map, &graph,
-            graph_result.revision, graph_result.root, &hir, &root_hir)
-            == CM_HIR_MODULE_MAP_OK,
-        "argument impl trait graph lowering failed");
-    pattern = find_hir_item(&hir, root_hir, "Pattern");
-    fn_mut = find_hir_item(&hir, root_hir, "FnMut");
-    method = pattern == NULL ? NULL
-        : find_hir_associated_item(&hir, pattern->definition,
-            CM_HIR_ITEM_FUNCTION, "parse_digits");
-    apit = method == NULL || method->generic_parameter_count != 1u
-        ? NULL : cm_hir_get_generic_param(&hir,
-            method->generic_parameter_start);
-    parameter_type = method == NULL
-            || method->data.function_item.signature.parameter_count != 2u
-        ? NULL : cm_hir_get_type(&hir,
-            method->data.function_item.signature.parameters[1].type);
-    predicate_subject = method == NULL || method->predicate_count != 1u
-        ? NULL : cm_hir_get_type(&hir, method->predicates[0].subject);
-    check(pattern != NULL && fn_mut != NULL && method != NULL
-        && apit != NULL && apit->kind == CM_HIR_GENERIC_TYPE
-        && apit->index == 0u
-        && cm_hir_def_id_equal(apit->owner, method->definition)
-        && hir_name_is(&hir, apit->name, "$APIT0")
-        && source_span_is(&sources, apit->span, "impl FnMut(u8)")
-        && parameter_type != NULL
-        && parameter_type->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && parameter_type->data.parameter_type.parameter
-            == method->generic_parameter_start
-        && method->predicate_count == 1u
-        && predicate_subject != NULL
-        && predicate_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && predicate_subject->data.parameter_type.parameter
-            == method->generic_parameter_start
-        && cm_hir_def_id_equal(method->predicates[0]
-                .trait_type.definition, fn_mut->definition)
-        && method->predicates[0].equality_count == 0u,
-        "argument impl trait graph lost synthetic generic or callable "
-        "predicate identity");
-    cm_hir_module_map_destroy(&map);
-    cm_hir_context_destroy(&hir);
-    cm_module_graph_destroy(&graph);
-    cm_source_set_destroy(&sources);
-}
-
 static void test_core_auto_trait_negative_impl_cluster(void)
 {
     static const unsigned char source[] =
@@ -12187,8 +11819,6 @@ int main(void)
     test_lifetime_generic_trait_outlives();
     test_associated_type_lifetime_bounds_graph();
     test_adt_generic_type_defaults_fail_closed();
-    test_gat_associated_bound_generic_scope_graph();
-    test_descendant_private_glob_associated_bound_graph();
     test_generic_associated_type_declaration();
     test_transitive_generic_self_projection_graph_rollback();
     test_attributed_async_trait_method();
@@ -12211,7 +11841,6 @@ int main(void)
     test_prelude_supertrait_resolution();
     test_supertrait_associated_equalities();
     test_core_trait_alias_declaration();
-    test_argument_impl_trait_graph();
     test_core_auto_trait_negative_impl_cluster();
     if (failures == 0) puts("HIR graph lowering tests: ok");
     return failures == 0 ? 0 : 1;

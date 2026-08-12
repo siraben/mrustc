@@ -806,6 +806,12 @@ typedef struct CmHirBody {
 } CmHirBody;
 
 typedef struct CmHirContext {
+    /*
+     * Storage is exposed for read-only traversal and implementation modules.
+     * External direct writes bypass model invariants and are not supported;
+     * every semantic write must use a public mutator or the compound-builder
+     * mutation hook below.
+     */
     CmArena storage;
     CmInterner strings;
     CmVec crates;
@@ -817,6 +823,8 @@ typedef struct CmHirContext {
     CmVec generic_parameters;
     CmVec definitions;
     CmVec prebound_associated_types;
+    /* Monotonic invalidation token for proof-relevant semantic mutation. */
+    uint64_t semantic_generation;
     /* Monotonic invalidation token for observers holding HIR identities. */
     uint64_t rewind_generation;
 } CmHirContext;
@@ -858,6 +866,12 @@ CmHirStatus cm_hir_context_rewind(CmHirContext *context,
     CmHirContextMark *mark);
 CmHirStatus cm_hir_context_commit(CmHirContext *context,
     CmHirContextMark *mark);
+
+/*
+ * Record a successful proof-relevant mutation performed by a compound HIR
+ * builder outside model.c.  Interning alone is deliberately not semantic.
+ */
+void cm_hir_context_record_semantic_mutation(CmHirContext *context);
 
 CmInternId cm_hir_intern(CmHirContext *context, const char *text);
 

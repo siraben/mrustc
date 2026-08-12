@@ -27,8 +27,8 @@ typedef struct CmParamEnvState {
     CmVec facts;
     CmVec pending;
     uint64_t storage_lifetime_id;
+    uint64_t semantic_generation;
     uint64_t rewind_generation;
-    size_t string_count;
     size_t crate_count;
     size_t module_count;
     size_t item_count;
@@ -65,8 +65,8 @@ static int cm_param_env_state_current(const CmParamEnvState *state)
     if (state == NULL || state->hir == NULL) return 0;
     hir = state->hir;
     return hir->storage.lifetime_id == state->storage_lifetime_id
+        && hir->semantic_generation == state->semantic_generation
         && hir->rewind_generation == state->rewind_generation
-        && hir->strings.entries.len == state->string_count
         && hir->crates.len == state->crate_count
         && hir->modules.len == state->module_count
         && hir->items.len == state->item_count
@@ -565,8 +565,8 @@ CmParamEnvStatus cm_param_env_init(CmParamEnv *environment,
     cm_vec_init(&state->facts, sizeof(CmParamEnvFact));
     cm_vec_init(&state->pending, sizeof(CmParamEnvPendingGoal));
     state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
-    state->string_count = hir->strings.entries.len;
     state->crate_count = hir->crates.len;
     state->module_count = hir->modules.len;
     state->item_count = hir->items.len;

@@ -3003,6 +3003,8 @@ static void test_owned_local_and_instantiated_call_model(void)
     CmHirExprId arguments[1];
     const CmHirExpr *stored_call;
     size_t expression_count;
+    size_t body_count;
+    uint64_t semantic_generation;
     FILE *stream;
     char *dump;
 
@@ -3080,8 +3082,14 @@ static void test_owned_local_and_instantiated_call_model(void)
     assert(cm_hir_body_add_local_expression(&hir, identity_body, 0u,
         parameter_type, (CmSpan){ 1u, 50u, 51u }, &identity_root)
         == CM_HIR_OK);
+    expression_count = hir.expressions.len;
+    body_count = hir.bodies.len;
+    semantic_generation = hir.semantic_generation;
     assert(cm_hir_set_body_root_expression(&hir, identity_body,
         identity_root) == CM_HIR_OK);
+    assert(hir.expressions.len == expression_count
+        && hir.bodies.len == body_count
+        && hir.semantic_generation == semantic_generation + UINT64_C(1));
 
     assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
         CM_HIR_ITEM_FUNCTION, (CmSpan){ 1u, 80u, 170u },
@@ -3191,8 +3199,14 @@ static void test_owned_local_and_instantiated_call_model(void)
         && stored_call->data.call.type_substitutions[0] == u32_type
         && stored_call->data.call.argument_count == 1u
         && stored_call->data.call.arguments[0] == probe_argument);
+    expression_count = hir.expressions.len;
+    body_count = hir.bodies.len;
+    semantic_generation = hir.semantic_generation;
     assert(cm_hir_set_body_root_expression(&hir, probe_body, probe_call)
         == CM_HIR_OK);
+    assert(hir.expressions.len == expression_count
+        && hir.bodies.len == body_count
+        && hir.semantic_generation == semantic_generation + UINT64_C(1));
 
     stream = tmpfile();
     assert(stream != NULL && cm_hir_dump(stream, &hir) == 0);

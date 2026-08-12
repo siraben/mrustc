@@ -1088,6 +1088,31 @@ static void test_recursive_candidate_and_staleness(void)
     fixture_destroy(&fixture);
 }
 
+static void test_same_length_semantic_staleness(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmTraitGoalTableLimits limits;
+    CmHirAttribute attribute;
+
+    memset(&limits, 0, sizeof(limits));
+    fixture_init(&fixture, 0);
+    runtime_init(&runtime, &fixture, limits);
+    memset(&attribute, 0, sizeof(attribute));
+    attribute.metadata = cm_hir_intern(&fixture.hir, "goal-table");
+    attribute.span = test_span(1u, 2u);
+    attribute.source_attribute = 1u;
+    assert(cm_trait_goal_table_is_current(&runtime.table));
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, NULL, 0u) == CM_HIR_OK);
+    assert(cm_trait_goal_table_is_current(&runtime.table));
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, &attribute, 1u) == CM_HIR_OK);
+    assert(!cm_trait_goal_table_is_current(&runtime.table));
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+}
+
 static void test_generic_predicate_proof_and_cycle_base(void)
 {
     TestFixture fixture;
@@ -1846,6 +1871,7 @@ int main(void)
     test_exact_depth_boundaries();
     test_bounded_dag_cycle_and_capacity();
     test_recursive_candidate_and_staleness();
+    test_same_length_semantic_staleness();
     test_generic_predicate_proof_and_cycle_base();
     test_generic_predicate_cycle_ambiguity_and_rollback();
     test_predicate_nonproof_lattice_and_unconstrained();

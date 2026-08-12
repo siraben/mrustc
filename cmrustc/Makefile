@@ -54,6 +54,7 @@ RESOLVE_SOURCES := \
 	src/resolve/imports.c
 HIR_SOURCES := \
 	src/hir/body.c \
+	src/hir/finalization.c \
 	src/hir/goal_table.c \
 	src/hir/layout.c \
 	src/hir/library.c \
@@ -96,6 +97,7 @@ HIR_TYPECK_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/typeck.o
 HIR_TRAIT_SOLVER_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/model.o \
+	$(BUILD_DIR)/obj/hir/finalization.o \
 	$(BUILD_DIR)/obj/hir/typeck.o \
 	$(BUILD_DIR)/obj/hir/type_alias.o \
 	$(BUILD_DIR)/obj/hir/projection.o \

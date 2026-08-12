@@ -488,6 +488,9 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             CmSemanticTypeScan scan;
             CmTraitGoal goal;
             CmTraitSelectionResult selection;
+            CmTypeckTypeId implemented_self;
+            CmTypeckNamedType implemented_trait;
+            uint32_t equality_index;
 
             predicate = &callee->predicates[predicate_index];
             result.predicate_index = predicate_index;
@@ -511,11 +514,6 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             if ((predicate->equality_count == 0u)
                     != (predicate->equalities == NULL)) {
                 result.status = CM_SEMANTIC_BODY_INVALID;
-                return cm_semantic_body_fail_snapshot(result, typeck,
-                    &snapshot);
-            }
-            if (predicate->equality_count != 0u) {
-                result.status = CM_SEMANTIC_BODY_PENDING_PROJECTION;
                 return cm_semantic_body_fail_snapshot(result, typeck,
                     &snapshot);
             }
@@ -544,7 +542,7 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
                 return cm_semantic_body_fail_snapshot(result, typeck,
                     &snapshot);
             }
-            selection = cm_semantic_session_solve_implemented(session,
+            selection = cm_semantic_session_solve_goal(session,
                 typeck, &environment_substitution, &goal);
             result.solver_kind = selection.kind;
             result.typeck_status = selection.typeck_status;
@@ -552,6 +550,77 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
             if (result.status != CM_SEMANTIC_BODY_OK) {
                 return cm_semantic_body_fail_snapshot(result, typeck,
                     &snapshot);
+            }
+            implemented_self = goal.data.implemented.self_type;
+            implemented_trait = goal.data.implemented.trait_type;
+            for (equality_index = 0u;
+                 equality_index < predicate->equality_count;
+                 ++equality_index) {
+                const CmHirAssociatedTypeEquality *equality;
+                CmTypeckType projection;
+                CmTypeckTypeId projection_type;
+                CmTypeckTypeId expected_type;
+
+                equality = &predicate->equalities[equality_index];
+                scan = cm_semantic_scan_type(hir, equality->value, 0u);
+                if (scan == CM_SEMANTIC_TYPE_PROJECTION) {
+                    result.status = CM_SEMANTIC_BODY_UNSUPPORTED;
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
+                result.status = cm_semantic_scan_status(scan);
+                if (result.status != CM_SEMANTIC_BODY_OK) {
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
+                typeck_status = cm_typeck_instantiate_hir_type(typeck,
+                    equality->value, &callee_instantiation,
+                    &expected_type);
+                if (typeck_status != CM_TYPECK_OK) {
+                    result.status = cm_semantic_typeck_status(typeck_status);
+                    result.typeck_status = typeck_status;
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
+                memset(&projection, 0, sizeof(projection));
+                projection.kind = CM_TYPECK_TYPE_PROJECTION;
+                projection.span = equality->span;
+                projection.data.projection_type.self_type =
+                    implemented_self;
+                projection.data.projection_type.trait_type =
+                    implemented_trait;
+                projection.data.projection_type.associated_type.definition =
+                    equality->associated_type;
+                typeck_status = cm_typeck_add_type(typeck, &projection,
+                    &projection_type);
+                if (typeck_status != CM_TYPECK_OK) {
+                    result.status = cm_semantic_typeck_status(typeck_status);
+                    result.typeck_status = typeck_status;
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
+                memset(&goal, 0, sizeof(goal));
+                goal.kind = CM_TRAIT_GOAL_PROJECTION_EQUALITY;
+                goal.data.projection_equality.owner = owner;
+                goal.data.projection_equality.projection_type =
+                    projection_type;
+                goal.data.projection_equality.expected_type = expected_type;
+                selection = cm_semantic_session_solve_goal(session, typeck,
+                    &environment_substitution, &goal);
+                result.solver_kind = selection.kind;
+                result.typeck_status = selection.typeck_status;
+                result.status = cm_semantic_solver_status(selection.kind);
+                if (result.status != CM_SEMANTIC_BODY_OK) {
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
+                if (cm_hir_def_id_is_none(
+                        selection.impl_associated_definition)) {
+                    result.status = CM_SEMANTIC_BODY_INVALID;
+                    result.solver_kind = CM_TRAIT_SOLVER_INVALID;
+                    return cm_semantic_body_fail_snapshot(result, typeck,
+                        &snapshot);
+                }
             }
         }
     }

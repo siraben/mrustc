@@ -8,7 +8,7 @@
 #define CM_GOAL_TABLE_DEFAULT_DEPTH 256u
 #define CM_GOAL_TABLE_DEFAULT_NODES 4096u
 #define CM_GOAL_TABLE_DEFAULT_ENTRIES 1024u
-#define CM_GOAL_KEY_VERSION 2u
+#define CM_GOAL_KEY_VERSION 3u
 
 typedef enum CmGoalCanonicalStatus {
     CM_GOAL_CANONICAL_OK = 0,
@@ -74,8 +74,8 @@ typedef struct CmTraitGoalTableState {
     CmTraitImplUniverse universe;
     CmHirCrateId local_crate;
     uint64_t hir_storage_lifetime_id;
+    uint64_t hir_semantic_generation;
     uint64_t hir_rewind_generation;
-    size_t hir_string_count;
     size_t hir_crate_count;
     size_t hir_module_count;
     size_t hir_item_count;
@@ -143,8 +143,8 @@ static int cm_goal_table_state_is_current(
     }
     hir = state->hir;
     return hir->storage.lifetime_id == state->hir_storage_lifetime_id
+        && hir->semantic_generation == state->hir_semantic_generation
         && hir->rewind_generation == state->hir_rewind_generation
-        && hir->strings.entries.len == state->hir_string_count
         && hir->crates.len == state->hir_crate_count
         && hir->modules.len == state->hir_module_count
         && hir->items.len == state->hir_item_count
@@ -1033,8 +1033,8 @@ static CmGoalCanonicalStatus cm_goal_make_key(
     cm_vec_clear(out_key);
     cm_goal_push_word(out_key, CM_GOAL_KEY_VERSION);
     cm_goal_push_word(out_key, table->hir_storage_lifetime_id);
+    cm_goal_push_word(out_key, table->hir_semantic_generation);
     cm_goal_push_word(out_key, table->hir_rewind_generation);
-    cm_goal_push_word(out_key, (uint64_t)table->hir_string_count);
     cm_goal_push_word(out_key, (uint64_t)table->hir_crate_count);
     cm_goal_push_word(out_key, (uint64_t)table->hir_module_count);
     cm_goal_push_word(out_key, (uint64_t)table->hir_item_count);
@@ -1231,8 +1231,8 @@ CmTraitSolverResultKind cm_trait_goal_table_init(CmTraitGoalTable *table,
     state->universe = cm_trait_impl_index_universe(index);
     state->local_crate = cm_trait_impl_index_local_crate(index);
     state->hir_storage_lifetime_id = hir->storage.lifetime_id;
+    state->hir_semantic_generation = hir->semantic_generation;
     state->hir_rewind_generation = hir->rewind_generation;
-    state->hir_string_count = hir->strings.entries.len;
     state->hir_crate_count = hir->crates.len;
     state->hir_module_count = hir->modules.len;
     state->hir_item_count = hir->items.len;

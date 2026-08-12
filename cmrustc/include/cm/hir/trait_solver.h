@@ -1,6 +1,7 @@
 #ifndef CMRUSTC_CM_HIR_TRAIT_SOLVER_H
 #define CMRUSTC_CM_HIR_TRAIT_SOLVER_H
 
+#include "cm/hir/finalization.h"
 #include "cm/hir/param_env.h"
 
 typedef enum CmTraitSolverResultKind {
@@ -19,7 +20,7 @@ typedef enum CmTraitSolverResultKind {
 
 typedef enum CmTraitImplUniverse {
     CM_TRAIT_IMPL_UNIVERSE_OPEN = 0,
-    /* Reserved until HIR exposes an authenticated finalization capability. */
+    /* Opt-in only through an authenticated current local-crate finalization. */
     CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE
 } CmTraitImplUniverse;
 
@@ -63,9 +64,10 @@ typedef struct CmTraitImplIndexEntry {
 } CmTraitImplIndexEntry;
 
 /*
- * Immutable snapshot of one HIR context's trait impls. Only OPEN is currently
- * accepted because mutable HIR has no authenticated finalization capability.
- * Consequently absence is always deferred metadata, never NO_SOLUTION.
+ * Immutable snapshot of one HIR context's trait impls. The legacy initializer
+ * accepts only OPEN; the finalization initializer opts into COMPLETE.  This
+ * increment deliberately preserves conservative absence semantics in both
+ * universes: no matching ordinary impl is deferred metadata, not NO_SOLUTION.
  */
 typedef struct CmTraitImplIndex {
     void *state;
@@ -115,6 +117,10 @@ typedef struct CmTraitGoalEvaluator {
 CmTraitSolverResultKind cm_trait_impl_index_init(CmTraitImplIndex *index,
     const CmHirContext *hir, CmHirCrateId local_crate,
     CmTraitImplUniverse universe);
+/* Opt in to a closed local-crate universe using current authenticated proof. */
+CmTraitSolverResultKind cm_trait_impl_index_init_complete(
+    CmTraitImplIndex *index,
+    const CmHirCrateFinalization *finalization);
 void cm_trait_impl_index_destroy(CmTraitImplIndex *index);
 
 int cm_trait_impl_index_is_current(const CmTraitImplIndex *index);

@@ -650,12 +650,39 @@ static void test_rewind_generation_stales_environment(void)
     cm_hir_context_destroy(&fixture.hir);
 }
 
+static void test_semantic_generation_stales_environment(void)
+{
+    TestFixture fixture;
+    CmParamEnv environment;
+    CmHirAttribute attribute;
+
+    fixture_init(&fixture);
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir,
+        fixture.generic_trait) == CM_PARAM_ENV_READY);
+    memset(&attribute, 0, sizeof(attribute));
+    attribute.metadata = cm_hir_intern(&fixture.hir, "environment");
+    attribute.span = test_span(1u, 2u);
+    attribute.source_attribute = 1u;
+    assert(cm_param_env_is_current(&environment));
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, NULL, 0u) == CM_HIR_OK);
+    assert(cm_param_env_is_current(&environment));
+    assert(cm_hir_set_crate_inner_attributes(&fixture.hir,
+        fixture.crate_id, &attribute, 1u) == CM_HIR_OK);
+    assert(!cm_param_env_is_current(&environment));
+    assert(cm_param_env_fact_count(&environment) == 0u);
+    cm_param_env_destroy(&environment);
+    cm_hir_context_destroy(&fixture.hir);
+}
+
 int main(void)
 {
     test_environment_facts_and_solver();
     test_mixed_owner_and_staleness();
     test_dependency_overflow_is_not_projection();
     test_rewind_generation_stales_environment();
+    test_semantic_generation_stales_environment();
     assert(strcmp(cm_param_env_status_name(CM_PARAM_ENV_READY), "ready")
         == 0);
     assert(strcmp(cm_param_env_pending_name(CM_PARAM_ENV_PENDING_OUTLIVES),

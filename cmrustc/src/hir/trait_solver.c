@@ -14,6 +14,7 @@ typedef struct CmTraitImplIndexState {
     const CmHirContext *hir;
     CmVec entries;
     uint64_t hir_storage_lifetime_id;
+    uint64_t hir_semantic_generation;
     uint64_t hir_rewind_generation;
     size_t hir_item_count;
     size_t hir_type_count;
@@ -84,6 +85,8 @@ static int cm_trait_index_is_current(const CmTraitImplIndexState *state)
     return state != NULL && state->hir != NULL
         && state->hir->storage.lifetime_id
             == state->hir_storage_lifetime_id
+        && state->hir->semantic_generation
+            == state->hir_semantic_generation
         && state->hir->rewind_generation == state->hir_rewind_generation
         && state->hir->items.len == state->hir_item_count
         && state->hir->types.len == state->hir_type_count
@@ -565,7 +568,8 @@ static int cm_trait_impl_predicates_supported(const CmHirContext *hir,
     return 1;
 }
 
-CmTraitSolverResultKind cm_trait_impl_index_init(CmTraitImplIndex *index,
+static CmTraitSolverResultKind cm_trait_impl_index_init_internal(
+    CmTraitImplIndex *index,
     const CmHirContext *hir, CmHirCrateId local_crate,
     CmTraitImplUniverse universe)
 {
@@ -574,13 +578,16 @@ CmTraitSolverResultKind cm_trait_impl_index_init(CmTraitImplIndex *index,
 
     if (index == NULL || index->state != NULL || hir == NULL
         || cm_hir_get_crate(hir, local_crate) == NULL
-        || universe != CM_TRAIT_IMPL_UNIVERSE_OPEN) {
+        || (universe != CM_TRAIT_IMPL_UNIVERSE_OPEN
+            && universe
+                != CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE)) {
         return CM_TRAIT_SOLVER_INVALID;
     }
     state = (CmTraitImplIndexState *)cm_alloc_zeroed(1u,
         sizeof(CmTraitImplIndexState));
     state->hir = hir;
     state->hir_storage_lifetime_id = hir->storage.lifetime_id;
+    state->hir_semantic_generation = hir->semantic_generation;
     state->hir_rewind_generation = hir->rewind_generation;
     state->hir_item_count = hir->items.len;
     state->hir_type_count = hir->types.len;
@@ -660,6 +667,36 @@ CmTraitSolverResultKind cm_trait_impl_index_init(CmTraitImplIndex *index,
     }
     index->state = state;
     return CM_TRAIT_SOLVER_PROVEN;
+}
+
+CmTraitSolverResultKind cm_trait_impl_index_init(CmTraitImplIndex *index,
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    CmTraitImplUniverse universe)
+{
+    if (universe != CM_TRAIT_IMPL_UNIVERSE_OPEN) {
+        return CM_TRAIT_SOLVER_INVALID;
+    }
+    return cm_trait_impl_index_init_internal(index, hir, local_crate,
+        universe);
+}
+
+CmTraitSolverResultKind cm_trait_impl_index_init_complete(
+    CmTraitImplIndex *index,
+    const CmHirCrateFinalization *finalization)
+{
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+
+    if (!cm_hir_crate_finalization_is_current(finalization)) {
+        return CM_TRAIT_SOLVER_INVALID;
+    }
+    hir = cm_hir_crate_finalization_hir(finalization);
+    local_crate = cm_hir_crate_finalization_crate(finalization);
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE) {
+        return CM_TRAIT_SOLVER_INVALID;
+    }
+    return cm_trait_impl_index_init_internal(index, hir, local_crate,
+        CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE);
 }
 
 void cm_trait_impl_index_destroy(CmTraitImplIndex *index)
