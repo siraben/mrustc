@@ -137,6 +137,14 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
         result.status = CM_SEMANTIC_ADMISSION_ITEM_FAILURE;
         goto rollback;
     }
+    results_status = cm_semantic_results_begin(hir, local_crate,
+        &semantic_results);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto rollback;
+    }
     for (item_index = 0u; item_index < hir->items.len; ++item_index) {
         const CmHirItem *item;
         CmSemanticSessionOptions options;
@@ -165,16 +173,23 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
         }
         result.body_result = cm_semantic_body_check_definition(&session,
             result.body);
-        cm_semantic_session_destroy(&session);
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
+            goto rollback;
+        }
+        results_status = cm_semantic_results_add_checked_body(
+            semantic_results, &session, &result.body_result);
+        cm_semantic_session_destroy(&session);
+        if (results_status != CM_SEMANTIC_RESULTS_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+            result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+                ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
             goto rollback;
         }
     }
     state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u,
         sizeof(*state));
-    results_status = cm_semantic_results_create(hir, local_crate,
-        &semantic_results);
+    results_status = cm_semantic_results_seal(semantic_results);
     if (results_status != CM_SEMANTIC_RESULTS_OK) {
         result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
         result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW

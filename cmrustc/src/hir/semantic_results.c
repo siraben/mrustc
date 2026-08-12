@@ -44,6 +44,7 @@ struct CmSemanticResults {
     unsigned char *type_bytes;
     size_t type_bytes_len;
     size_t admitted_body_count;
+    int sealed;
 };
 
 static CmSemanticResultsStatus cm_results_write(CmResultsBuffer *buffer,
@@ -336,7 +337,8 @@ static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
 static CmSemanticResultsStatus cm_results_collect_expression(
     CmSemanticResults *results, const CmHirContext *hir,
     CmHirBodyId body_id, CmHirExprId expression_id, unsigned char *seen,
-    CmResultsBuffer *types, uint32_t *body_expression_count, size_t depth)
+    CmResultsBuffer *types, uint32_t *body_expression_count, size_t depth,
+    int publish)
 {
     const CmHirExpr *expression;
     CmSemanticExpressionRecord *record;
@@ -368,12 +370,12 @@ static CmSemanticResultsStatus cm_results_collect_expression(
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.block.statements[index].data.let_statement
                     .initializer,
-                seen, types, body_expression_count, depth + 1u);
+                seen, types, body_expression_count, depth + 1u, publish);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.block.tail_expression, seen, types,
-            body_expression_count, depth + 1u);
+            body_expression_count, depth + 1u, publish);
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
     case CM_HIR_EXPR_CALL:
@@ -381,18 +383,18 @@ static CmSemanticResultsStatus cm_results_collect_expression(
              ++index) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.call.arguments[index], seen, types,
-                body_expression_count, depth + 1u);
+                body_expression_count, depth + 1u, publish);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         break;
     case CM_HIR_EXPR_BINARY:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.binary.left, seen, types,
-            body_expression_count, depth + 1u);
+            body_expression_count, depth + 1u, publish);
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.binary.right, seen, types,
-                body_expression_count, depth + 1u);
+                body_expression_count, depth + 1u, publish);
         }
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
@@ -401,29 +403,29 @@ static CmSemanticResultsStatus cm_results_collect_expression(
              ++index) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.aggregate.fields[index].value, seen, types,
-                body_expression_count, depth + 1u);
+                body_expression_count, depth + 1u, publish);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         break;
     case CM_HIR_EXPR_FIELD:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.field.base, seen, types,
-            body_expression_count, depth + 1u);
+            body_expression_count, depth + 1u, publish);
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
     case CM_HIR_EXPR_IF:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.if_expr.condition, seen, types,
-            body_expression_count, depth + 1u);
+            body_expression_count, depth + 1u, publish);
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.if_expr.then_expression, seen, types,
-                body_expression_count, depth + 1u);
+                body_expression_count, depth + 1u, publish);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.if_expr.else_expression, seen, types,
-                body_expression_count, depth + 1u);
+                body_expression_count, depth + 1u, publish);
         }
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
@@ -435,18 +437,20 @@ static CmSemanticResultsStatus cm_results_collect_expression(
     }
     record = &results->expressions[(size_t)expression_id - 1u];
     if (record->present) return CM_SEMANTIC_RESULTS_INVALID_HIR;
-    record->type_offset = types->len;
+    if (publish) record->type_offset = types->len;
     status = cm_results_type(types, hir, expression->type, 0u);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
-    record->type_size = types->len - record->type_offset;
-    record->present = 1;
-    record->body = body_id;
-    if (expression->kind == CM_HIR_EXPR_CALL) {
-        record->has_direct_callable = 1;
-        record->direct_callable = expression->data.call.callee;
-    } else if (expression->kind == CM_HIR_EXPR_BINARY) {
-        record->has_primitive_operator = 1;
-        record->primitive_operator = expression->data.binary.operator_kind;
+    if (publish) {
+        record->type_size = types->len - record->type_offset;
+        record->present = 1;
+        record->body = body_id;
+        if (expression->kind == CM_HIR_EXPR_CALL) {
+            record->has_direct_callable = 1;
+            record->direct_callable = expression->data.call.callee;
+        } else if (expression->kind == CM_HIR_EXPR_BINARY) {
+            record->has_primitive_operator = 1;
+            record->primitive_operator = expression->data.binary.operator_kind;
+        }
     }
     if (*body_expression_count == UINT32_MAX) {
         return CM_SEMANTIC_RESULTS_OVERFLOW;
@@ -485,19 +489,13 @@ static CmSemanticResultsStatus cm_results_validate_membership(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
-CmSemanticResultsStatus cm_semantic_results_create(
+CmSemanticResultsStatus cm_semantic_results_begin(
     const CmHirContext *hir, CmHirCrateId local_crate,
     CmSemanticResults **out_results)
 {
     CmSemanticResults *results;
-    CmResultsBuffer sizing;
-    CmResultsBuffer output;
-    unsigned char *seen;
-    CmSemanticResultsStatus status;
     size_t body_bytes;
     size_t expression_bytes;
-    size_t body_index;
-    size_t item_index;
 
     if (hir == NULL || local_crate == CM_HIR_CRATE_NONE
         || out_results == NULL || *out_results != NULL) {
@@ -517,87 +515,6 @@ CmSemanticResultsStatus cm_semantic_results_create(
     results->expressions = expression_bytes == 0u ? NULL
         : (CmSemanticExpressionRecord *)cm_alloc_zeroed(1u,
             expression_bytes);
-    seen = hir->expressions.len == 0u ? NULL
-        : (unsigned char *)cm_alloc_zeroed(hir->expressions.len, 1u);
-    memset(&sizing, 0, sizeof(sizing));
-    sizing.sizing = 1;
-    status = CM_SEMANTIC_RESULTS_OK;
-    for (item_index = 0u; status == CM_SEMANTIC_RESULTS_OK
-            && item_index < hir->items.len; ++item_index) {
-        const CmHirItem *item;
-        const CmHirBody *body;
-        CmSemanticBodyRecord *record;
-        CmHirBodyId body_id;
-
-        item = (const CmHirItem *)cm_vec_at_const(&hir->items, item_index);
-        if (item == NULL) {
-            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
-            break;
-        }
-        if (item->definition.crate_id != local_crate
-            || item->kind != CM_HIR_ITEM_FUNCTION
-            || item->data.function_item.body == CM_HIR_BODY_NONE) continue;
-        body_id = item->data.function_item.body;
-        body = cm_hir_get_body(hir, body_id);
-        if (body == NULL || !cm_hir_def_id_equal(body->owner,
-                item->definition)) {
-            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
-            break;
-        }
-        if (body->state != CM_HIR_BODY_TYPED
-            || body->root_expression == CM_HIR_EXPR_NONE) {
-            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
-            break;
-        }
-        record = &results->bodies[(size_t)body_id - 1u];
-        if (record->present) {
-            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
-            break;
-        }
-        record->present = 1;
-        results->admitted_body_count += 1u;
-        record->owner = body->owner;
-        status = cm_results_collect_expression(results, hir,
-            body_id, body->root_expression, seen,
-            &sizing, &record->expression_count, 0u);
-    }
-    if (status == CM_SEMANTIC_RESULTS_OK) {
-        status = cm_results_validate_membership(results, hir);
-    }
-    if (status != CM_SEMANTIC_RESULTS_OK) goto fail;
-    results->type_bytes = sizing.len == 0u ? NULL
-        : (unsigned char *)cm_alloc(sizing.len);
-    results->type_bytes_len = sizing.len;
-    if (expression_bytes != 0u) {
-        memset(results->expressions, 0, expression_bytes);
-    }
-    if (seen != NULL) memset(seen, 0, hir->expressions.len);
-    memset(&output, 0, sizeof(output));
-    output.data = results->type_bytes;
-    output.cap = sizing.len;
-    for (body_index = 0u; status == CM_SEMANTIC_RESULTS_OK
-            && body_index < hir->bodies.len; ++body_index) {
-        const CmHirBody *body;
-        CmSemanticBodyRecord *record;
-
-        record = &results->bodies[body_index];
-        if (!record->present) continue;
-        record->expression_count = 0u;
-        body = cm_hir_get_body(hir, (CmHirBodyId)(body_index + 1u));
-        status = cm_results_collect_expression(results, hir,
-            (CmHirBodyId)(body_index + 1u), body->root_expression, seen,
-            &output, &record->expression_count, 0u);
-    }
-    if (status == CM_SEMANTIC_RESULTS_OK) {
-        status = cm_results_validate_membership(results, hir);
-    }
-    if (status != CM_SEMANTIC_RESULTS_OK || output.len != sizing.len) {
-        if (status == CM_SEMANTIC_RESULTS_OK) {
-            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
-        }
-        goto fail;
-    }
-    cm_free(seen);
     results->hir = hir;
     results->local_crate = local_crate;
     results->storage_lifetime_id = hir->storage.lifetime_id;
@@ -605,11 +522,179 @@ CmSemanticResultsStatus cm_semantic_results_create(
     results->rewind_generation = hir->rewind_generation;
     *out_results = results;
     return CM_SEMANTIC_RESULTS_OK;
+}
 
-fail:
+CmSemanticResultsStatus cm_semantic_results_add_checked_body(
+    CmSemanticResults *results, CmSemanticSession *session,
+    const CmSemanticBodyResult *check)
+{
+    const CmHirContext *hir;
+    const CmHirBody *body;
+    CmSemanticBodyRecord *record;
+    CmResultsBuffer sizing;
+    CmResultsBuffer output;
+    unsigned char *seen;
+    unsigned char *body_type_bytes;
+    unsigned char *combined_type_bytes;
+    CmSemanticExpressionRecord *body_expressions;
+    CmSemanticResults body_results;
+    CmSemanticResultsStatus status;
+    size_t new_type_bytes_len;
+    size_t expression_bytes;
+    size_t expression_index;
+    uint32_t expression_count;
+    CmHirBodyId body_id;
+
+    if (results == NULL || session == NULL || results->sealed
+        || check == NULL || check->status != CM_SEMANTIC_BODY_OK
+        || check->body == CM_HIR_BODY_NONE
+        || !cm_semantic_session_is_current(session)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    body_id = check->body;
+    hir = cm_semantic_session_hir(session);
+    if (hir == NULL || hir != results->hir
+        || cm_semantic_session_local_crate(session) != results->local_crate
+        || hir->storage.lifetime_id != results->storage_lifetime_id
+        || hir->semantic_generation != results->semantic_generation
+        || hir->rewind_generation != results->rewind_generation
+        || (size_t)body_id > results->body_count) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
+    body = cm_hir_get_body(hir, body_id);
+    record = &results->bodies[(size_t)body_id - 1u];
+    if (body == NULL || body->state != CM_HIR_BODY_TYPED
+        || body->root_expression == CM_HIR_EXPR_NONE
+        || body->owner.crate_id != results->local_crate
+        || !cm_hir_def_id_equal(body->owner,
+            cm_semantic_session_exact_owner(session))
+        || record->present) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    if (!cm_size_mul(results->expression_count,
+            sizeof(*body_expressions), &expression_bytes)) {
+        return CM_SEMANTIC_RESULTS_OVERFLOW;
+    }
+    seen = results->expression_count == 0u ? NULL
+        : (unsigned char *)cm_alloc_zeroed(results->expression_count, 1u);
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    expression_count = 0u;
+    status = cm_results_collect_expression(results, hir, body_id,
+        body->root_expression, seen, &sizing, &expression_count, 0u, 0);
+    if (status != CM_SEMANTIC_RESULTS_OK) {
+        cm_free(seen);
+        return status;
+    }
+    if (!cm_size_add(results->type_bytes_len, sizing.len,
+            &new_type_bytes_len)) {
+        cm_free(seen);
+        return CM_SEMANTIC_RESULTS_OVERFLOW;
+    }
+    body_type_bytes = sizing.len == 0u ? NULL
+        : (unsigned char *)cm_alloc(sizing.len);
+    body_expressions = expression_bytes == 0u ? NULL
+        : (CmSemanticExpressionRecord *)cm_alloc_zeroed(1u,
+            expression_bytes);
+    memset(&body_results, 0, sizeof(body_results));
+    body_results.expression_count = results->expression_count;
+    body_results.expressions = body_expressions;
+    if (seen != NULL) memset(seen, 0, results->expression_count);
+    memset(&output, 0, sizeof(output));
+    output.data = body_type_bytes;
+    output.cap = sizing.len;
+    expression_count = 0u;
+    status = cm_results_collect_expression(&body_results, hir, body_id,
+        body->root_expression, seen, &output, &expression_count, 0u, 1);
     cm_free(seen);
-    cm_semantic_results_destroy(results);
-    return status;
+    if (status != CM_SEMANTIC_RESULTS_OK
+        || output.len != sizing.len) {
+        cm_free(body_expressions);
+        cm_free(body_type_bytes);
+        return status == CM_SEMANTIC_RESULTS_OK
+            ? CM_SEMANTIC_RESULTS_INVALID_HIR : status;
+    }
+    for (expression_index = 0u;
+            expression_index < results->expression_count;
+            ++expression_index) {
+        if (body_expressions[expression_index].present
+            && results->expressions[expression_index].present) {
+            cm_free(body_expressions);
+            cm_free(body_type_bytes);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    combined_type_bytes = new_type_bytes_len == 0u ? NULL
+        : (unsigned char *)cm_alloc(new_type_bytes_len);
+    if (results->type_bytes_len != 0u) {
+        memcpy(combined_type_bytes, results->type_bytes,
+            results->type_bytes_len);
+    }
+    if (sizing.len != 0u) {
+        memcpy(combined_type_bytes + results->type_bytes_len,
+            body_type_bytes, sizing.len);
+    }
+    for (expression_index = 0u;
+            expression_index < results->expression_count;
+            ++expression_index) {
+        if (!body_expressions[expression_index].present) continue;
+        body_expressions[expression_index].type_offset +=
+            results->type_bytes_len;
+        results->expressions[expression_index] =
+            body_expressions[expression_index];
+    }
+    cm_free(results->type_bytes);
+    results->type_bytes = combined_type_bytes;
+    results->type_bytes_len = new_type_bytes_len;
+    record->present = 1;
+    record->owner = body->owner;
+    record->expression_count = expression_count;
+    results->admitted_body_count += 1u;
+    cm_free(body_expressions);
+    cm_free(body_type_bytes);
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
+{
+    const CmHirContext *hir;
+    CmSemanticResultsStatus status;
+    size_t item_index;
+
+    if (results == NULL || results->sealed) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    hir = results->hir;
+    if (hir == NULL || hir->storage.lifetime_id != results->storage_lifetime_id
+        || hir->semantic_generation != results->semantic_generation
+        || hir->rewind_generation != results->rewind_generation) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
+    for (item_index = 0u; item_index < hir->items.len; ++item_index) {
+        const CmHirItem *item;
+        const CmHirBody *body;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, item_index);
+        if (item == NULL) return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        if (item->definition.crate_id != results->local_crate
+            || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->data.function_item.body == CM_HIR_BODY_NONE) continue;
+        if ((size_t)item->data.function_item.body > results->body_count
+            || !results->bodies[(size_t)item->data.function_item.body - 1u]
+                .present) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        body = cm_hir_get_body(hir, item->data.function_item.body);
+        if (body == NULL || !cm_hir_def_id_equal(body->owner,
+                item->definition)) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    status = cm_results_validate_membership(results, hir);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    results->sealed = 1;
+    return CM_SEMANTIC_RESULTS_OK;
+
 }
 
 void cm_semantic_results_destroy(CmSemanticResults *results)
@@ -631,6 +716,7 @@ static CmSemanticResultsStatus cm_results_validate(
     if (results == NULL || admission == NULL) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
+    if (!results->sealed) return CM_SEMANTIC_RESULTS_STALE;
     if (!cm_semantic_admission_is_current(admission)) {
         return CM_SEMANTIC_RESULTS_STALE;
     }

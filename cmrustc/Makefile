@@ -292,7 +292,7 @@ $(HIR_ADMISSION_TEST_PROGRAM): tests/hir/test_admission.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBRARY_OBJECTS) $(LDLIBS)
 
-$(HIR_SEMANTIC_RESULTS_TEST_PROGRAM): tests/hir/test_semantic_results.c $(LIBRARY_OBJECTS)
+$(HIR_SEMANTIC_RESULTS_TEST_PROGRAM): tests/hir/test_semantic_results.c src/hir/semantic_results_internal.h $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBRARY_OBJECTS) $(LDLIBS)
 

@@ -3,6 +3,8 @@
 #include "cm/hir/semantic_results.h"
 #include "cm/source.h"
 
+#include "../../src/hir/semantic_results_internal.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -244,12 +246,62 @@ static void test_generic_parameter_type_is_structural(void)
     fixture_destroy(&fixture);
 }
 
+static void test_partial_checked_draft_does_not_seal(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult admission_result;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult body_result;
+    CmSemanticResults *draft;
+    const CmHirBody *body;
+
+    fixture_init(&fixture,
+        "fn first() -> u32 { 1u32 } fn second() -> u32 { 2u32 }");
+    memset(&admission, 0, sizeof(admission));
+    admission_result = admit(&fixture, &admission);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+    body = cm_hir_get_body(&fixture.hir, 1u);
+    assert(body != NULL);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir, 1u)
+        == CM_HIR_OK);
+    memset(&session, 0, sizeof(session));
+    cm_semantic_session_options_init(&options);
+    options.local_crate = 1u;
+    options.exact_owner = body->owner;
+    options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    body_result = cm_semantic_body_check_definition(&session, 1u);
+    assert(body_result.status == CM_SEMANTIC_BODY_OK);
+    draft = NULL;
+    assert(cm_semantic_results_begin(&fixture.hir, 1u, &draft)
+            == CM_SEMANTIC_RESULTS_OK
+        && draft != NULL
+        && cm_semantic_results_add_checked_body(draft, &session,
+            &body_result) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_add_checked_body(draft, &session,
+            &body_result) == CM_SEMANTIC_RESULTS_INVALID_HIR
+        && cm_semantic_results_seal(draft)
+            == CM_SEMANTIC_RESULTS_INVALID_HIR);
+    cm_semantic_results_destroy(draft);
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_successful_results();
     test_stale_and_failure_publish_nothing();
     test_same_generation_foreign_admission();
     test_generic_parameter_type_is_structural();
+    test_partial_checked_draft_does_not_seal();
     puts("semantic results tests passed");
     return 0;
 }

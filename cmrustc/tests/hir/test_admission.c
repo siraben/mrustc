@@ -1,5 +1,6 @@
 #include "cm/hir/admission.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/semantic_results.h"
 #include "cm/mir/lower.h"
 #include "cm/source.h"
 
@@ -168,6 +169,7 @@ static void test_semantic_failure_rolls_back(void)
         && result.session_status == CM_TRAIT_SOLVER_PROVEN
         && result.body_result.status != CM_SEMANTIC_BODY_OK
         && admission.state == NULL
+        && cm_semantic_admission_results(&admission) == NULL
         && f.hir.expressions.len == expressions
         && f.hir.types.len == types
         && cm_hir_get_body(&f.hir, 1u)->state == CM_HIR_BODY_UNLOWERED
