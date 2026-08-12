@@ -1913,6 +1913,8 @@ CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
     uintptr_t view_start;
     uintptr_t bytes_start;
     uintptr_t bytes_end;
+    size_t instance_index;
+    int owned_view;
 
     if (out_equal == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     *out_equal = 0;
@@ -1924,9 +1926,25 @@ CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
     }
     view_start = (uintptr_t)view->bytes;
     bytes_start = (uintptr_t)results->type_bytes;
-    bytes_end = bytes_start + results->type_bytes_len;
-    if (view_start < bytes_start || view_start > bytes_end
-        || view->size > (size_t)(bytes_end - view_start)) {
+    owned_view = results->type_bytes_len <= UINTPTR_MAX - bytes_start;
+    bytes_end = owned_view ? bytes_start + results->type_bytes_len : 0u;
+    owned_view = owned_view && view_start >= bytes_start
+        && view_start <= bytes_end
+        && view->size <= (size_t)(bytes_end - view_start);
+    for (instance_index = 0u;
+         !owned_view && instance_index < results->instance_count;
+         ++instance_index) {
+        const CmSemanticInstanceRecord *record;
+
+        record = &results->instances[instance_index];
+        bytes_start = (uintptr_t)record->type_bytes;
+        owned_view = record->type_bytes_len <= UINTPTR_MAX - bytes_start;
+        bytes_end = owned_view ? bytes_start + record->type_bytes_len : 0u;
+        owned_view = owned_view && view_start >= bytes_start
+            && view_start <= bytes_end
+            && view->size <= (size_t)(bytes_end - view_start);
+    }
+    if (!owned_view) {
         return CM_SEMANTIC_RESULTS_FOREIGN;
     }
     memset(&typeck, 0, sizeof(typeck));

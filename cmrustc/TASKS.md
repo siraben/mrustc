@@ -1348,6 +1348,17 @@ conservative borrowing; then CTFE and broad validated MIR. No later pass may
 consume partially typed local HIR or reinterpret an unsupported semantic state
 as proof.
 
+Exact generic leaf instances now cross the admitted HIR-to-MIR boundary for
+predicate-free, call-free local free functions with type-only item arguments.
+MIR publication and replay query the selected instance's canonical semantic
+body, signature, parameters, and expressions; an unselected substitution
+cannot fall back to definition-level facts. Semantic type-view authentication
+also recognizes each sealed instance-owned byte arena. This is deliberately a
+narrow bridge: stored MIR identity is still `DefId + CmHirTypeId[]`, generic
+calls lack canonical callee evidence, and recursive/SCC publication is absent.
+M4 remains active until the all-local semantic barrier and the pass sequence
+above replace these bounded slices.
+
 ## M5: MIR, monomorphization, and TCC C backend
 
 | ID | State | Task | Acceptance |
@@ -1359,6 +1370,13 @@ as proof.
 | M5-05 | ACTIVE | Portable C emitter | No-core output passes TCC; full output passes source-built GCC |
 | M5-06 | TODO | Runtime shims: atomics/TLS/u128/panic | Core/std runtime probes pass |
 | M5-07 | TODO | External C/link driver | No-core and core-linked executables run |
+
+For M5-03, the next authority checkpoint is a closed worklist keyed by owned
+canonical instances, exact semantic call edges carrying canonical callee
+identity, and transactional reserve/define/validate/commit publication so
+recursive SCCs do not depend on callee insertion order. The compile driver's
+open-session/ungated generic fallback must then migrate to that admitted graph
+before it can count as monomorphization evidence.
 
 ## M6: Build orchestration
 

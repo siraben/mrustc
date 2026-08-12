@@ -1,4 +1,6 @@
 #include "cm/mir/lower.h"
+#include "cm/alloc.h"
+#include "cm/hir/instance.h"
 #include "cm/hir/semantic_results.h"
 
 #include <limits.h>
@@ -1506,7 +1508,8 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     const CmHirContext *hir, CmHirBodyId body_id,
     const CmHirTypeId *substitutions, uint32_t substitution_count,
     const CmSemanticAdmission *admission,
-    const CmSemanticResults *semantic_results)
+    const CmSemanticResults *semantic_results,
+    CmMirSemanticEvidenceKind semantic_evidence)
 {
     CmMirLowerResult result;
     const CmHirBody *hir_body;
@@ -1541,7 +1544,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
 
     memset(&result, 0, sizeof(result));
     if (context == NULL || hir == NULL || body_id == CM_HIR_BODY_NONE
-        || (substitution_count != 0u && substitutions == NULL)) {
+        || (substitution_count == 0u) != (substitutions == NULL)) {
         cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
             CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
             "invalid exact HIR-to-MIR lowering arguments");
@@ -1654,6 +1657,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     body.instance.substitution_count = substitution_count;
     body.owner = item->definition;
     body.source_body = body_id;
+    body.semantic_evidence = semantic_evidence;
 
     memset(&plan, 0, sizeof(plan));
     plan.context = context;
@@ -1900,7 +1904,7 @@ CmMirLowerResult cm_mir_lower_instance(CmMirContext *context,
     const CmHirTypeId *substitutions, uint32_t substitution_count)
 {
     return cm_mir_lower_instance_impl(context, hir, body_id, substitutions,
-        substitution_count, NULL, NULL);
+        substitution_count, NULL, NULL, CM_MIR_SEMANTIC_EVIDENCE_NONE);
 }
 
 static const CmHirContext *cm_mir_lower_admitted_hir(
@@ -1960,14 +1964,6 @@ static CmMirLowerResult cm_mir_lower_admission_failure(CmHirBodyId body_id)
 CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
     const CmSemanticAdmission *admission, CmHirBodyId body_id)
 {
-    return cm_mir_lower_admitted_instance(context, admission, body_id,
-        NULL, 0u);
-}
-
-CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
-    const CmSemanticAdmission *admission, CmHirBodyId body_id,
-    const CmHirTypeId *substitutions, uint32_t substitution_count)
-{
     const CmHirContext *hir;
     const CmSemanticResults *semantic_results;
     CmSemanticBodyView semantic_body;
@@ -1982,16 +1978,89 @@ CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
         return result;
     }
     hir = cm_mir_lower_admitted_hir(context, admission, body_id, &crate_id);
-    if (hir == NULL) return cm_mir_lower_admission_failure(body_id);
-    semantic_results = cm_semantic_admission_results(admission);
+    semantic_results = hir == NULL ? NULL
+        : cm_semantic_admission_results(admission);
     if (semantic_results == NULL
-        || substitution_count != 0u
         || cm_semantic_results_body(semantic_results, admission, body_id,
             &semantic_body) != CM_SEMANTIC_RESULTS_OK) {
         return cm_mir_lower_admission_failure(body_id);
     }
+    result = cm_mir_lower_instance_impl(context, hir, body_id, NULL, 0u,
+        admission, semantic_results, CM_MIR_SEMANTIC_EVIDENCE_BODY);
+    if (result.error_count == 0u
+        && context->admitted_crate == CM_HIR_CRATE_NONE) {
+        cm_mir_lower_latch_admission(context, hir, crate_id);
+    }
+    return result;
+}
+
+CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
+    const CmSemanticAdmission *admission, CmHirBodyId body_id,
+    const CmHirTypeId *substitutions, uint32_t substitution_count)
+{
+    const CmHirContext *hir;
+    const CmSemanticResults *semantic_results;
+    CmSemanticBodyView semantic_body;
+    CmHirInstanceSpec spec;
+    CmHirGenericArg *arguments;
+    CmHirCrateId crate_id;
+    CmMirLowerResult result;
+    uint32_t index;
+
+    if (context == NULL) {
+        memset(&result, 0, sizeof(result));
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
+            CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
+            "invalid admitted HIR-to-MIR lowering destination");
+        return result;
+    }
+    if ((substitution_count == 0u) != (substitutions == NULL)) {
+        memset(&result, 0, sizeof(result));
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
+            CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
+            "missing exact MIR instance substitutions");
+        return result;
+    }
+    hir = cm_mir_lower_admitted_hir(context, admission, body_id, &crate_id);
+    if (hir == NULL) return cm_mir_lower_admission_failure(body_id);
+    semantic_results = cm_semantic_admission_results(admission);
+    arguments = NULL;
+    if (substitution_count != 0u) {
+        arguments = (CmHirGenericArg *)cm_alloc_zeroed(substitution_count,
+            sizeof(CmHirGenericArg));
+        for (index = 0u; index < substitution_count; ++index) {
+            arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+            arguments[index].data.type = substitutions[index];
+        }
+    }
+    cm_hir_instance_spec_init(&spec);
+    spec.item_arguments = arguments;
+    spec.item_argument_count = substitution_count;
+    if (semantic_results == NULL) {
+        cm_free(arguments);
+        return cm_mir_lower_admission_failure(body_id);
+    }
+    {
+        const CmHirBody *body;
+
+        body = cm_hir_get_body(hir, body_id);
+        if (body == NULL) {
+            cm_free(arguments);
+            return cm_mir_lower_admission_failure(body_id);
+        }
+        spec.selected_callable = body->owner;
+        if (cm_semantic_results_instance_body(semantic_results, admission,
+                &spec, &semantic_body) != CM_SEMANTIC_RESULTS_OK
+            || semantic_body.body != body_id
+            || !cm_hir_def_id_equal(semantic_body.owner, body->owner)) {
+            cm_free(arguments);
+            return cm_mir_lower_admission_failure(body_id);
+        }
+    }
+    cm_free(arguments);
     result = cm_mir_lower_instance_impl(context, hir, body_id,
-        substitutions, substitution_count, admission, semantic_results);
+        substitutions, substitution_count, admission, semantic_results,
+        CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE);
     if (result.error_count == 0u
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
         cm_mir_lower_latch_admission(context, hir, crate_id);

@@ -1,6 +1,7 @@
 #include "cm/mir/model.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/instance.h"
 #include "cm/hir/semantic_results.h"
 
 #include <string.h>
@@ -110,6 +111,7 @@ static int cm_mir_legacy_body_shape_valid(const CmMirBody *body)
     const CmMirStatement *statement;
 
     if (body == NULL || !cm_mir_instance_is_empty(&body->instance)
+        || body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE
         || body->owned_storage != NULL
         || body->owner.crate_id == CM_HIR_CRATE_NONE
         || body->owner.index == CM_HIR_DEF_INDEX_NONE
@@ -432,8 +434,8 @@ static int cm_mir_instance_substitutions_valid(const CmHirContext *hir,
 
     if (item == NULL || instance == NULL
         || instance->substitution_count != item->generic_parameter_count
-        || (instance->substitution_count != 0u
-            && instance->substitutions == NULL)) {
+        || (instance->substitution_count == 0u)
+            != (instance->substitutions == NULL)) {
         return 0;
     }
     for (index = 0u; index < instance->substitution_count; ++index) {
@@ -685,6 +687,7 @@ typedef struct CmMirTreeMatch {
     const CmMirBody *body;
     const CmSemanticAdmission *admission;
     const CmSemanticResults *semantic_results;
+    const CmHirInstanceSpec *semantic_instance;
     unsigned int pointer_bits;
     uint32_t basic_block_index;
     uint32_t statement_index;
@@ -695,6 +698,94 @@ typedef struct CmMirTreeMatch {
         CM_MIR_EXPRESSION_RECURSION_LIMIT];
     size_t expected_projection_count;
 } CmMirTreeMatch;
+
+typedef struct CmMirSemanticInstanceQuery {
+    CmHirGenericArg *arguments;
+    CmHirInstanceSpec spec;
+} CmMirSemanticInstanceQuery;
+
+static int cm_mir_semantic_instance_query_init(
+    CmMirSemanticInstanceQuery *query, const CmMirBody *body)
+{
+    uint32_t index;
+
+    memset(query, 0, sizeof(*query));
+    if (body == NULL
+        || (body->instance.substitution_count == 0u)
+            != (body->instance.substitutions == NULL)) {
+        return 0;
+    }
+    if (body->instance.substitution_count != 0u) {
+        query->arguments = (CmHirGenericArg *)cm_alloc_zeroed(
+            body->instance.substitution_count, sizeof(CmHirGenericArg));
+    }
+    cm_hir_instance_spec_init(&query->spec);
+    query->spec.selected_callable = body->instance.definition;
+    query->spec.item_arguments = query->arguments;
+    query->spec.item_argument_count = body->instance.substitution_count;
+    for (index = 0u; index < body->instance.substitution_count; ++index) {
+        query->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+        query->arguments[index].data.type =
+            body->instance.substitutions[index];
+    }
+    return 1;
+}
+
+static void cm_mir_semantic_instance_query_destroy(
+    CmMirSemanticInstanceQuery *query)
+{
+    if (query == NULL) return;
+    cm_free(query->arguments);
+    memset(query, 0, sizeof(*query));
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_signature_query(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    const CmHirInstanceSpec *instance,
+    CmSemanticFunctionSignatureView *out_view)
+{
+    if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_signature(results, admission,
+            body->source_body, out_view);
+    }
+    return body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        ? cm_semantic_results_instance_signature(results, admission,
+            instance, out_view)
+        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_signature_parameter_query(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    const CmHirInstanceSpec *instance, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_signature_parameter(results, admission,
+            body->source_body, parameter, out_view);
+    }
+    return body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        ? cm_semantic_results_instance_signature_parameter(results,
+            admission, instance, parameter, out_view)
+        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_expression_query(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    const CmHirInstanceSpec *instance, CmHirExprId expression,
+    CmSemanticExpressionView *out_view)
+{
+    if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_expression(results, admission,
+            body->source_body, expression, out_view);
+    }
+    return body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        ? cm_semantic_results_instance_expression(results, admission,
+            instance, expression, out_view)
+        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
 
 static int cm_mir_semantic_view_equal(const CmSemanticTypeView *left,
     const CmSemanticTypeView *right)
@@ -826,6 +917,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
     CmMirOperand *out_operand)
 {
     const CmHirExpr *expression;
+    CmSemanticExpressionView authenticated_expression;
     CmHirTypeId instantiated;
 
     if (depth >= match->hir->expressions.len
@@ -837,6 +929,21 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         || expression->owner_body != match->body->source_body
         || !cm_mir_instantiate_u32_type(match->hir, match->item,
             &match->body->instance, expression->type, &instantiated)) {
+        return 0;
+    }
+    if (match->semantic_results != NULL
+        && (match->admission == NULL
+            || cm_mir_semantic_expression_query(match->semantic_results,
+                match->admission, match->body, match->semantic_instance,
+                expression_id, &authenticated_expression)
+                    != CM_SEMANTIC_RESULTS_OK
+            || !cm_mir_semantic_view_matches_hir(match,
+                &authenticated_expression.adjusted_type, instantiated))) {
+        return 0;
+    }
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        && expression->kind == CM_HIR_EXPR_CALL) {
         return 0;
     }
     memset(out_operand, 0, sizeof(*out_operand));
@@ -1402,7 +1509,8 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
     const CmHirItem *item, const CmMirBody *body,
     unsigned int pointer_bits, uint32_t parameter_count,
     const CmSemanticAdmission *admission,
-    const CmSemanticResults *semantic_results)
+    const CmSemanticResults *semantic_results,
+    const CmHirInstanceSpec *semantic_instance)
 {
     const CmHirBody *source_body;
     const CmHirExpr *root;
@@ -1425,6 +1533,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
     match.body = body;
     match.admission = admission;
     match.semantic_results = semantic_results;
+    match.semantic_instance = semantic_instance;
     match.pointer_bits = pointer_bits;
     match.next_temporary = source_body->local_count + 1u;
     match.visible_local_count = parameter_count;
@@ -1496,10 +1605,11 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
         && match.next_temporary == body->local_count;
 }
 
-static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
+static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
     const CmHirContext *hir, const CmMirBody *body, int stored,
     const CmSemanticAdmission *admission,
-    const CmSemanticResults *semantic_results)
+    const CmSemanticResults *semantic_results,
+    const CmHirInstanceSpec *semantic_instance)
 {
     const CmHirItem *item;
     const CmHirBody *source_body;
@@ -1510,6 +1620,11 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
     uint32_t index;
 
     if (body == NULL || (body->owned_storage != NULL) != stored
+        || (semantic_results == NULL
+            ? body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE
+            : (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
+                && body->semantic_evidence
+                    != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE))
         || body->basic_block_count == 0u || body->basic_blocks == NULL) {
         return 0;
     }
@@ -1523,9 +1638,9 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
     parameter_count = signature->parameter_count;
     memset(&semantic_signature, 0, sizeof(semantic_signature));
     if (semantic_results != NULL) {
-        if (admission == NULL || body->instance.substitution_count != 0u
-            || cm_semantic_results_signature(semantic_results, admission,
-                body->source_body, &semantic_signature)
+        if (admission == NULL
+            || cm_mir_semantic_signature_query(semantic_results, admission,
+                body, semantic_instance, &semantic_signature)
                     != CM_SEMANTIC_RESULTS_OK
             || !cm_hir_def_id_equal(semantic_signature.definition,
                 body->instance.definition)
@@ -1549,8 +1664,6 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
                 signature->return_type, &instantiated)) return 0;
     } else {
         if (!cm_mir_semantic_view_matches(semantic_results, admission,
-                &semantic_signature.return_type, source_body->expected_type)
-            || !cm_mir_semantic_view_matches(semantic_results, admission,
                 &semantic_signature.return_type, body->locals[0].type)) {
             return 0;
         }
@@ -1578,12 +1691,9 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
                     &body->instance, source_body->locals[index].type,
                     &instantiated)) return 0;
         } else {
-            if (cm_semantic_results_signature_parameter(semantic_results,
-                    admission, body->source_body, index,
-                    &semantic_parameter) != CM_SEMANTIC_RESULTS_OK
-                || !cm_mir_semantic_view_matches(semantic_results,
-                    admission, &semantic_parameter,
-                    source_body->locals[index].type)
+            if (cm_mir_semantic_signature_parameter_query(
+                    semantic_results, admission, body, semantic_instance,
+                    index, &semantic_parameter) != CM_SEMANTIC_RESULTS_OK
                 || !cm_mir_semantic_view_matches(semantic_results,
                     admission, &semantic_parameter,
                     body->locals[index + 1u].type)) return 0;
@@ -1757,7 +1867,31 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
         }
     }
     return cm_mir_root_shape_valid(context, hir, item, body,
-        context->pointer_bits, parameter_count, admission, semantic_results);
+        context->pointer_bits, parameter_count, admission, semantic_results,
+        semantic_instance);
+}
+
+static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
+    const CmHirContext *hir, const CmMirBody *body, int stored,
+    const CmSemanticAdmission *admission,
+    const CmSemanticResults *semantic_results)
+{
+    CmMirSemanticInstanceQuery query;
+    const CmHirInstanceSpec *instance;
+    int valid;
+
+    memset(&query, 0, sizeof(query));
+    instance = NULL;
+    if (semantic_results != NULL && body != NULL
+        && body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        if (!cm_mir_semantic_instance_query_init(&query, body)) return 0;
+        instance = &query.spec;
+    }
+    valid = cm_mir_exact_body_shape_valid_impl(context, hir, body, stored,
+        admission, semantic_results, instance);
+    cm_mir_semantic_instance_query_destroy(&query);
+    return valid;
 }
 
 static int cm_mir_storage_add(size_t *total, size_t count,
@@ -2001,6 +2135,7 @@ static CmMirStatus cm_mir_copy_body(const CmMirBody *body, CmMirBody *copy)
     memset(copy, 0, sizeof(*copy));
     copy->owner = body->owner;
     copy->source_body = body->source_body;
+    copy->semantic_evidence = body->semantic_evidence;
     copy->instance.definition = body->instance.definition;
     copy->instance.substitution_count = body->instance.substitution_count;
     copy->local_count = body->local_count;
@@ -2255,6 +2390,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
     const CmHirContext *hir;
     const CmSemanticResults *semantic_results;
     const CmHirBody *source_body;
+    CmMirSemanticInstanceQuery query;
     CmSemanticBodyView semantic_body;
     CmHirCrateId crate_id;
     CmMirStatus status;
@@ -2267,23 +2403,34 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
         || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
+    memset(&query, 0, sizeof(query));
     source_body = cm_hir_get_body(hir, body->source_body);
     semantic_results = cm_semantic_admission_results(admission);
     if (source_body == NULL || source_body->owner.crate_id != crate_id
         || body->owner.crate_id != crate_id
         || body->instance.definition.crate_id != crate_id
         || semantic_results == NULL
-        || cm_semantic_results_body(semantic_results, admission,
-            body->source_body, &semantic_body) != CM_SEMANTIC_RESULTS_OK
+        || (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
+            && body->semantic_evidence
+                != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE)
+        || !cm_mir_semantic_instance_query_init(&query, body)
+        || (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY
+            ? cm_semantic_results_body(semantic_results, admission,
+                body->source_body, &semantic_body)
+            : cm_semantic_results_instance_body(semantic_results,
+                admission, &query.spec, &semantic_body))
+                != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(semantic_body.owner,
-            body->instance.definition)
-        || body->instance.substitution_count != 0u) {
+            body->instance.definition)) {
+        cm_mir_semantic_instance_query_destroy(&query);
         return CM_MIR_INVALID_ADMISSION;
     }
     if (!cm_mir_exact_body_shape_valid(context, hir, body, 0,
             admission, semantic_results)) {
+        cm_mir_semantic_instance_query_destroy(&query);
         return CM_MIR_INVARIANT_VIOLATION;
     }
+    cm_mir_semantic_instance_query_destroy(&query);
     status = cm_mir_add_exact_copy(context, hir, body, out_id);
     if (status == CM_MIR_OK
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
@@ -2315,6 +2462,7 @@ CmMirStatus cm_mir_validate_admitted_monomorphized_body(
     const CmHirContext *hir;
     const CmSemanticResults *semantic_results;
     const CmMirBody *body;
+    CmMirSemanticInstanceQuery query;
     CmSemanticFunctionSignatureView signature;
     CmHirCrateId crate_id;
 
@@ -2324,19 +2472,32 @@ CmMirStatus cm_mir_validate_admitted_monomorphized_body(
         || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
+    memset(&query, 0, sizeof(query));
     semantic_results = cm_semantic_admission_results(admission);
     body = cm_mir_get_body(context, id);
     if (semantic_results == NULL || body == NULL
-        || body->instance.substitution_count != 0u
-        || cm_semantic_results_signature(semantic_results, admission,
-            body->source_body, &signature) != CM_SEMANTIC_RESULTS_OK
+        || (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
+            && body->semantic_evidence
+                != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE)
+        || !cm_mir_semantic_instance_query_init(&query, body)
+        || (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY
+            ? cm_semantic_results_signature(semantic_results, admission,
+                body->source_body, &signature)
+            : cm_semantic_results_instance_signature(semantic_results,
+                admission, &query.spec, &signature))
+                != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(signature.definition,
             body->instance.definition)) {
+        cm_mir_semantic_instance_query_destroy(&query);
         return CM_MIR_INVALID_ADMISSION;
     }
-    return cm_mir_exact_body_shape_valid(context, hir, body, 1,
-        admission, semantic_results)
-        ? CM_MIR_OK : CM_MIR_INVALID_ADMISSION;
+    if (!cm_mir_exact_body_shape_valid(context, hir, body, 1,
+            admission, semantic_results)) {
+        cm_mir_semantic_instance_query_destroy(&query);
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    cm_mir_semantic_instance_query_destroy(&query);
+    return CM_MIR_OK;
 }
 
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,
