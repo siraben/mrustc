@@ -1717,6 +1717,28 @@ static void test_definition_writeback_contract_and_rollback(void)
     assert(resolved == variable && resolved_type != NULL
         && resolved_type->kind == CM_TYPECK_TYPE_VARIABLE);
 
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_DEFERRED_INFERENCE;
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_DEFERRED_INFERENCE
+        && probe.invocation_count == 1u
+        && cm_typeck_type_count(typeck) == type_count);
+
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_PENDING_PROJECTION;
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_PENDING_PROJECTION
+        && probe.invocation_count == 1u
+        && cm_typeck_type_count(typeck) == type_count);
+
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
 }

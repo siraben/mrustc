@@ -154,6 +154,9 @@ static CmSemanticResultsStatus cm_results_typeck_region(
         || region->kind == CM_HIR_REGION_ERASED) {
         return cm_results_u8(buffer, (unsigned int)region->kind);
     }
+    if (region->kind == CM_HIR_REGION_INFER) {
+        return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
+    }
     return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
 }
 
@@ -165,8 +168,12 @@ static CmSemanticResultsStatus cm_results_typeck_const(
     const CmHirGenericParam *parameter;
     CmSemanticResultsStatus status;
 
-    if (constant == NULL || (constant->kind != CM_HIR_CONST_VALUE
-            && constant->kind != CM_HIR_CONST_PARAMETER)) {
+    if (constant == NULL) return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    if (constant->kind == CM_HIR_CONST_INFER) {
+        return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
+    }
+    if (constant->kind != CM_HIR_CONST_VALUE
+            && constant->kind != CM_HIR_CONST_PARAMETER) {
         return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
     }
     status = cm_results_u8(buffer, (unsigned int)constant->kind);
@@ -272,8 +279,9 @@ static CmSemanticResultsStatus cm_results_typeck_type(
     case CM_TYPECK_TYPE_ADT: tag = CM_HIR_TYPE_ADT_KIND; break;
     case CM_TYPECK_TYPE_PARAMETER: tag = CM_HIR_TYPE_PARAMETER_KIND; break;
     case CM_TYPECK_TYPE_VARIABLE:
+        return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
     case CM_TYPECK_TYPE_PROJECTION:
-        return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
+        return CM_SEMANTIC_RESULTS_PENDING_PROJECTION;
     default:
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
@@ -369,8 +377,9 @@ static CmSemanticResultsStatus cm_results_typeck_type(
         return status == CM_SEMANTIC_RESULTS_OK
             ? cm_results_u32(buffer, parameter->index) : status;
     case CM_TYPECK_TYPE_VARIABLE:
+        return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
     case CM_TYPECK_TYPE_PROJECTION:
-        return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
+        return CM_SEMANTIC_RESULTS_PENDING_PROJECTION;
     }
     return CM_SEMANTIC_RESULTS_INVALID_HIR;
 }
@@ -611,6 +620,12 @@ static CmSemanticBodyWritebackStatus cm_results_writeback_status(
     }
     if (status == CM_SEMANTIC_RESULTS_OVERFLOW) {
         return CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
+    }
+    if (status == CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE) {
+        return CM_SEMANTIC_BODY_WRITEBACK_DEFERRED_INFERENCE;
+    }
+    if (status == CM_SEMANTIC_RESULTS_PENDING_PROJECTION) {
+        return CM_SEMANTIC_BODY_WRITEBACK_PENDING_PROJECTION;
     }
     if (status == CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE) {
         return CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED;
@@ -1052,6 +1067,10 @@ const char *cm_semantic_results_status_name(CmSemanticResultsStatus status)
     case CM_SEMANTIC_RESULTS_FOREIGN: return "foreign";
     case CM_SEMANTIC_RESULTS_NOT_FOUND: return "not-found";
     case CM_SEMANTIC_RESULTS_INVALID_HIR: return "invalid-hir";
+    case CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE:
+        return "deferred-inference";
+    case CM_SEMANTIC_RESULTS_PENDING_PROJECTION:
+        return "pending-projection";
     case CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE: return "unsupported-type";
     case CM_SEMANTIC_RESULTS_OVERFLOW: return "overflow";
     }

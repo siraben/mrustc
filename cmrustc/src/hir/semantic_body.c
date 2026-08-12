@@ -1632,6 +1632,12 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             result.status = writeback_status
                     == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
                 ? CM_SEMANTIC_BODY_OVERFLOW
+                : writeback_status
+                        == CM_SEMANTIC_BODY_WRITEBACK_DEFERRED_INFERENCE
+                    ? CM_SEMANTIC_BODY_DEFERRED_INFERENCE
+                : writeback_status
+                        == CM_SEMANTIC_BODY_WRITEBACK_PENDING_PROJECTION
+                    ? CM_SEMANTIC_BODY_PENDING_PROJECTION
                 : writeback_status == CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED
                     ? CM_SEMANTIC_BODY_UNSUPPORTED
                     : CM_SEMANTIC_BODY_INVALID;

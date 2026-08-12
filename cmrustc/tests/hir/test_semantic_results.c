@@ -299,6 +299,90 @@ static void test_partial_checked_draft_does_not_seal(void)
     fixture_destroy(&fixture);
 }
 
+static void test_writeback_distinguishes_unsolved_terms(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult admission_result;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticResultsBodyStage stage;
+    CmTypeckContext *typeck;
+    const CmHirBody *body;
+    CmTypeckType projection;
+    CmTypeckTypeId terms[8];
+    CmTypeckTypeId variable;
+    CmTypeckTypeId projection_type;
+    size_t expression_index;
+
+    fixture_init(&fixture, "fn value() -> u32 { 1u32 }");
+    assert(fixture.hir.expressions.len <= 8u);
+    memset(&admission, 0, sizeof(admission));
+    admission_result = admit(&fixture, &admission);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+    body = cm_hir_get_body(&fixture.hir, 1u);
+    assert(body != NULL);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir, 1u)
+        == CM_HIR_OK);
+    memset(&session, 0, sizeof(session));
+    cm_semantic_session_options_init(&options);
+    options.local_crate = 1u;
+    options.exact_owner = body->owner;
+    options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+
+    cm_semantic_results_body_stage_init(&stage);
+    assert(cm_typeck_new_variable(typeck, CM_HIR_INFER_GENERAL,
+        (CmSpan){ fixture.source, 0u, 1u }, &variable) == CM_TYPECK_OK);
+    for (expression_index = 0u;
+            expression_index < fixture.hir.expressions.len;
+            ++expression_index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(&fixture.hir,
+            (CmHirExprId)(expression_index + 1u));
+        assert(expression != NULL);
+        terms[expression_index] = expression->owner_body == 1u
+            ? variable : CM_TYPECK_TYPE_NONE;
+    }
+    assert(cm_semantic_results_stage_checked_body(&stage, &session, 1u,
+        terms, fixture.hir.expressions.len)
+            == CM_SEMANTIC_BODY_WRITEBACK_DEFERRED_INFERENCE
+        && stage.state == NULL);
+
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = (CmSpan){ fixture.source, 0u, 1u };
+    projection.data.projection_type.self_type = variable;
+    projection.data.projection_type.trait_type.definition = body->owner;
+    projection.data.projection_type.associated_type.definition = body->owner;
+    assert(cm_typeck_add_type(typeck, &projection, &projection_type)
+        == CM_TYPECK_OK);
+    for (expression_index = 0u;
+            expression_index < fixture.hir.expressions.len;
+            ++expression_index) {
+        if (terms[expression_index] != CM_TYPECK_TYPE_NONE) {
+            terms[expression_index] = projection_type;
+        }
+    }
+    assert(cm_semantic_results_stage_checked_body(&stage, &session, 1u,
+        terms, fixture.hir.expressions.len)
+            == CM_SEMANTIC_BODY_WRITEBACK_PENDING_PROJECTION
+        && stage.state == NULL);
+
+    cm_semantic_results_body_stage_destroy(&stage);
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_successful_results();
@@ -306,6 +390,7 @@ int main(void)
     test_same_generation_foreign_admission();
     test_generic_parameter_type_is_structural();
     test_partial_checked_draft_does_not_seal();
+    test_writeback_distinguishes_unsolved_terms();
     puts("semantic results tests passed");
     return 0;
 }
