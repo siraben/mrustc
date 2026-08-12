@@ -1,0 +1,3 @@
+#![doc = "external"]
+
+struct External;

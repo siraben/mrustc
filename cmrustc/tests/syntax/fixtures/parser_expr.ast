@@ -1,0 +1,32 @@
+(crate
+  (attribute inner "#![no_core]")
+  (function inherited "compute"
+    (flags const=0 async=0 unsafe=0 body=1)
+    (parameter bind("input") path("Option"<type=path("i32")>))
+    (parameter bind("xs") array(path("i32"); "3"))
+    (return path("i32"))
+    (body block(let(bind(mut "total"): path("i32") = binary("+", literal("1"), binary("*", literal("2"), literal("3")))), let(bind("pair") = tuple(path("total"), index(path("xs"), literal("0")))), let(bind("choose") = closure(|bind("x"): path("i32")| block(tail=binary("+", path("x"), literal("1"))))), let(bind("numbers") = range(literal("1")..=literal("4"))), expr(if(let tuple-struct("Some" (bind("value"))) = path("input"), block(stmt(assign("=", path("total"), call(path("choose"), path("value"))))), else=block(stmt(assign("=", path("total"), cast(field(method(method(path("xs")."iter")."next", literal("0"))."field") as path("i32"))))))), expr(match(path("pair"), arm(tuple(or(literal("0"), literal("1")), _) => return(path("total"))), arm(tuple(bind(ref "left"), bind("right")) if binary("<", unary("*", path("left")), path("right")) => assign("+=", path("total"), path("right"))), arm(_ => block()))), expr(loop(block(stmt(break())))), expr(while(binary("<", path("total"), literal("10")), block(stmt(assign("=", path("total"), binary("+", path("total"), literal("1")))), tail=if(binary("==", path("total"), literal("8")), block(stmt(continue())))))), expr(for(bind("item") in path("xs"), block(stmt(assign("+=", path("total"), path("item")))))), tail=path("total")))
+  )
+  (function inherited "repeat"
+    (flags const=0 async=0 unsafe=0 body=1)
+    (parameter bind("value") path("i32"))
+    (return <none>)
+    (body block(let(bind("repeated") = array-repeat(path("value"); literal("4")))))
+  )
+  (function inherited "patterns"
+    (flags const=0 async=0 unsafe=0 body=1)
+    (parameter bind("value") path("Thing"))
+    (parameter bind("slice") array(path("i32"); "4"))
+    (return <none>)
+    (body block(let(struct("Thing" {"left": bind(ref "x"), "right", ..}) = path("value")), let(slice(bind("first"), .., bind("last")) = path("slice")), let(bind("result") = match(path("first"), arm(range(literal("0")..=literal("9")) => literal("true")), arm(_ => literal("false")))), let(bind("combine") = closure(move |bind(mut "x"), bind("y")| binary("+", path("x"), path("y"))))))
+  )
+  (function inherited "named_structs"
+    (flags const=0 async=0 unsafe=0 body=1)
+    (parameter bind("iter") path("Iter"))
+    (parameter bind("start") path("i32"))
+    (parameter bind("end") path("i32"))
+    (parameter bind("base") path("Range"))
+    (return <none>)
+    (body block(let(bind("pending") = struct("Pending" {"_data": path("marker"::"PhantomData")})), let(bind("from_iter") = struct("FromIter" {"iter"})), let(bind("range") = struct("Range" {"start", "end"})), let(bind("updated") = struct("Range" {"start": literal("0"), ..path("base")})), stmt(unsafe-block(stmt(call(path("consume"), path("updated")))))))
+  )
+)

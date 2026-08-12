@@ -1,0 +1,1 @@
+cr###"raw C string"###

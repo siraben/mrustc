@@ -1,0 +1,213 @@
+(crate
+  (attribute inner "#![no_core]")
+  (struct public "Pair"
+    (attribute outer "#[repr(C)]")
+    (generic type "T" "T")
+    (fields named
+      (field public "left" path("T"))
+      (field inherited "right" path("T"))
+    )
+  )
+  (struct public "Tuple"
+    (fields tuple
+      (field public _ path("u32"))
+      (field inherited _ path("u8"))
+    )
+  )
+  (struct inherited "Unit"
+    (fields unit
+    )
+  )
+  (struct inherited "Buffer"
+    (generic lifetime "'a" "'a")
+    (generic const "N" "const N: usize" constraint="usize" type=path("usize"))
+    (fields named
+      (field inherited "bytes" ref("'a" array(path("u8"); "N")))
+    )
+  )
+  (type inherited "Projection"
+    (generic type "T" "T")
+    (value path("Associated"<type=path("T"), binding "Item"=path("u8"), const="4">) initialized=1 mutable=0)
+  )
+  (enum inherited "Choice"
+    (generic type "T" "T")
+    (variant unit "None"
+    )
+    (variant tuple "One"
+      (field inherited _ path("T"))
+    )
+    (variant named "Record"
+      (field inherited "value" path("T"))
+    )
+    (variant unit "Number" = "3"
+    )
+  )
+  (type inherited "Nested"
+    (generic type "T" "T")
+    (value path("Option"<type=path("Result"<type=path("T"), type=path("u8")>)>) initialized=1 mutable=0)
+  )
+  (type inherited "Defaulted"
+    (generic type "T" "T = u8" default=path("u8"))
+    (value path("T") initialized=1 mutable=0)
+  )
+  (type inherited "BoundedDefault"
+    (generic type "T" "T: Into<Vec<u8>> = u8" constraint="Into<Vec<u8>>" default=path("u8")
+      (generic-bound required path("Into"<type=path("Vec"<type=path("u8")>)>))
+    )
+    (value path("T") initialized=1 mutable=0)
+  )
+  (type inherited "Callable"
+    (generic type "F" "F: FnMut(u8, Item) -> Result<u16, Error> + Send" constraint="FnMut(u8, Item) -> Result<u16, Error> + Send"
+      (generic-bound required path("FnMut"<type=callable-tuple(path("u8"), path("Item")), binding "Output"=path("Result"<type=path("u16"), type=path("Error")>)>))
+      (generic-bound required path("Send"))
+    )
+    (value path("F") initialized=1 mutable=0)
+  )
+  (type inherited "WhereCallable"
+    (generic type "F" "F")
+    (where "F: FnMut(u8) -> u16")
+    (where-predicate path("F")
+      (where-bound required path("FnMut"<type=callable-tuple(path("u8")), binding "Output"=path("u16")>))
+    )
+    (value path("F") initialized=1 mutable=0)
+  )
+  (type inherited "DeepDefault"
+    (generic type "T" "T = Option<Result<u8, u16>>" default=path("Option"<type=path("Result"<type=path("u8"), type=path("u16")>)>))
+    (value path("T") initialized=1 mutable=0)
+  )
+  (type inherited "IteratorItem"
+    (generic type "T" "T")
+    (value projection(self=path("T"), trait=path("Iterator"), associated="Item") initialized=1 mutable=0)
+  )
+  (type inherited "ExplicitProjection"
+    (generic lifetime "'a" "'a")
+    (generic type "T" "T")
+    (value projection(self=path("Option"<type=path("T")>), trait=path(::"core"::"convert"::"Trait"<lifetime="'a", type=path("Result"<type=path("T"), type=path("u8")>)>), associated="Assoc"<type=ref("'a" path("T")), const="4">) initialized=1 mutable=0)
+  )
+  (struct inherited "ConstDefault"
+    (generic const "N" "const N: usize = { Pair { left: 1, right: 2 }.left }" constraint="usize" type=path("usize") default-const="{ Pair { left: 1, right: 2 }.left }" default-const-expr=block(tail=field(struct("Pair" {"left": literal("1"), "right": literal("2")})."left")))
+    (fields unit
+    )
+  )
+  (const inherited "LIMIT"
+    (value path("usize") initialized=1 mutable=0)
+    (initializer literal("4"))
+  )
+  (static public "FLAG"
+    (value path("bool") initialized=1 mutable=1)
+    (initializer literal("false"))
+  )
+  (module inherited "nested"
+    (module-body inline=1
+      (function public "identity"
+        (generic type "T" "T")
+        (flags const=1 async=0 unsafe=0 body=1)
+        (parameter bind("value") path("T"))
+        (return path("T"))
+        (body block(tail=path("value")))
+      )
+      (function public "unchecked"
+        (flags const=1 async=0 unsafe=1 body=1)
+        (parameter bind("value") path("usize"))
+        (return path("usize"))
+        (body block(tail=path("value")))
+      )
+    )
+  )
+  (module inherited "external"
+    (module-body inline=0
+    )
+  )
+  (use inherited _
+    (tree "crate::nested::identity as call_identity")
+  )
+  (extern-crate inherited "core"
+    (alias "rust_core")
+  )
+  (extern-block inherited _
+    (abi "C")
+    (function inherited "foreign"
+      (flags const=0 async=0 unsafe=0 body=0)
+      (parameter bind("value") path("i32"))
+      (return path("i32"))
+    )
+    (static inherited "EXTERNAL"
+      (value path("u8") initialized=0 mutable=0)
+    )
+  )
+  (trait inherited "Show"
+    (generic type "T" "T")
+    (where "T: Copy,")
+    (where-predicate path("T")
+      (where-bound required path("Copy"))
+    )
+    (supertraits "Sized + nested::Marker + ~const ConstMarker")
+    (supertrait required path("Sized"))
+    (supertrait required path("nested"::"Marker"))
+    (supertrait conditionally-const path("ConstMarker"))
+    (type inherited "Output"
+      (value <none> initialized=0 mutable=0)
+    )
+    (const inherited "VALUE"
+      (value path("usize") initialized=0 mutable=0)
+    )
+    (function inherited "show"
+      (flags const=0 async=0 unsafe=0 body=0)
+      (self ref(bind("self")) <none>)
+      (parameter bind("value") path("T"))
+      (return path("Self"::"Output"))
+    )
+  )
+  (trait inherited "Iterator"
+    (type inherited "Item"
+      (value <none> initialized=0 mutable=0)
+    )
+  )
+  (trait inherited "PointeeSized"
+  )
+  (trait inherited "IntoIterator"
+    (type inherited "Item"
+      (value <none> initialized=0 mutable=0)
+    )
+    (type inherited "IntoIter"
+      (value <none> initialized=0 mutable=0)
+      (associated-type-bound required path("Iterator"<binding "Item"=path("Self"::"Item")>))
+    )
+  )
+  (trait inherited "Deref"
+    (supertraits "PointeeSized")
+    (supertrait required path("PointeeSized"))
+    (type inherited "Target"
+      (value <none> initialized=0 mutable=0)
+      (associated-type-bound relaxed path("Sized"))
+    )
+  )
+  (impl inherited _
+    (generic type "T" "T")
+    (where "T: Copy")
+    (where-predicate path("T")
+      (where-bound required path("Copy"))
+    )
+    (impl-header unsafe=1 const=0 negative=0 trait=path("Show"<type=path("T")>) self=path("Pair"<type=path("T")>))
+    (type inherited "Output"
+      (value path("T") initialized=1 mutable=0)
+    )
+    (const inherited "VALUE"
+      (value path("usize") initialized=1 mutable=0)
+      (initializer literal("1"))
+    )
+    (function inherited "show"
+      (flags const=0 async=0 unsafe=0 body=1)
+      (self ref(bind("self")) <none>)
+      (parameter bind("value") path("T"))
+      (return path("T"))
+      (body block(tail=path("value")))
+    )
+  )
+  (impl inherited _
+    (impl-header unsafe=0 const=0 negative=0 trait=<none> self=!)
+  )
+  (impl inherited _
+    (impl-header unsafe=0 const=0 negative=1 trait=path("PointeeSized") self=path("Pair"<type=path("u8")>))
+  )
+)

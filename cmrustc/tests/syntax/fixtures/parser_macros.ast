@@ -1,0 +1,30 @@
+(crate
+  (attribute inner "#![no_core]")
+  (macro inherited "make"
+    macro(form=macro-rules-definition, path="macro_rules", parameters="", delimiter=brace, semicolon=0, arguments="($name:ident) => { fn $name() {} };")
+  )
+  (macro public "assert_matches"
+    macro(form=declarative-definition, path=<no-path>, parameters="", delimiter=brace, semicolon=0, arguments="($expression:expr, $pattern:pat) => { () };")
+  )
+  (macro crate "cfg_value"
+    macro(form=declarative-definition, path=<no-path>, parameters="$($cfg:tt)*", delimiter=brace, semicolon=0, arguments="false")
+  )
+  (macro inherited _
+    macro(form=invocation, path="crate"::"make", parameters="", delimiter=paren, semicolon=1, arguments="generated")
+  )
+  (macro inherited _
+    macro(form=invocation, path="braced", parameters="", delimiter=brace, semicolon=0, arguments="outer([one, { two(three) }])")
+  )
+  (macro inherited _
+    macro(form=invocation, path="bracketed", parameters="", delimiter=bracket, semicolon=1, arguments="a, (b), { c }")
+  )
+  (const inherited "LINE"
+    (value path("u32") initialized=1 mutable=0)
+    (initializer macro(form=invocation, path="line", parameters="", delimiter=paren, semicolon=0, arguments=""))
+  )
+  (function inherited "demo"
+    (flags const=0 async=0 unsafe=0 body=1)
+    (return <none>)
+    (body block(let(bind("text") = macro(form=invocation, path="concat", parameters="", delimiter=paren, semicolon=0, arguments="\"a\", nested!([\"b\"])")), stmt(macro(form=invocation, path="assert", parameters="", delimiter=paren, semicolon=0, arguments="text")), stmt(macro(form=invocation, path="empty", parameters="", delimiter=paren, semicolon=0, arguments=""))))
+  )
+)
