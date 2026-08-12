@@ -722,6 +722,19 @@ static int cm_mir_semantic_view_matches_hir(
         && equal;
 }
 
+static int cm_mir_semantic_view_matches(const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmSemanticTypeView *view,
+    CmHirTypeId type)
+{
+    int equal;
+
+    equal = 0;
+    return results != NULL && admission != NULL
+        && cm_semantic_type_view_matches_monomorphic_hir(results, admission,
+            view, type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal;
+}
+
 static int cm_mir_place_equal(const CmHirContext *hir,
     const CmMirPlace *left, const CmMirPlace *right)
 {
@@ -1387,13 +1400,13 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
 static int cm_mir_root_shape_valid(const CmMirContext *context,
     const CmHirContext *hir,
     const CmHirItem *item, const CmMirBody *body,
-    unsigned int pointer_bits, const CmSemanticAdmission *admission,
+    unsigned int pointer_bits, uint32_t parameter_count,
+    const CmSemanticAdmission *admission,
     const CmSemanticResults *semantic_results)
 {
     const CmHirBody *source_body;
     const CmHirExpr *root;
     const CmMirBasicBlock *final_block;
-    const CmHirFunctionSignature *signature;
     CmMirTreeMatch match;
     CmMirOperand result;
     CmHirExprId root_id;
@@ -1405,7 +1418,6 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
         || body->basic_block_count == 0u) {
         return 0;
     }
-    signature = &item->data.function_item.signature;
     memset(&match, 0, sizeof(match));
     match.context = context;
     match.hir = hir;
@@ -1415,7 +1427,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
     match.semantic_results = semantic_results;
     match.pointer_bits = pointer_bits;
     match.next_temporary = source_body->local_count + 1u;
-    match.visible_local_count = signature->parameter_count;
+    match.visible_local_count = parameter_count;
     root_id = source_body->root_expression;
     root = cm_hir_get_expr(hir, root_id);
     if (root == NULL) return 0;
@@ -1425,7 +1437,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
                 source_body->expected_type)
             || root->data.block.tail_expression == CM_HIR_EXPR_NONE
             || root->data.block.statement_count
-                != source_body->local_count - signature->parameter_count
+                != source_body->local_count - parameter_count
             || (root->data.block.statement_count == 0u)
                 != (root->data.block.statements == NULL)) {
             return 0;
@@ -1438,10 +1450,10 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
             CmMirLocalId destination;
 
             statement = &root->data.block.statements[statement_index];
-            destination = signature->parameter_count + statement_index + 1u;
+            destination = parameter_count + statement_index + 1u;
             if (statement->kind != CM_HIR_STATEMENT_LET
                 || statement->data.let_statement.local_index
-                    != signature->parameter_count + statement_index
+                    != parameter_count + statement_index
                 || statement->data.let_statement.initializer
                     == CM_HIR_EXPR_NONE
                 || statement->data.let_statement.local_index
@@ -1465,7 +1477,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
         root_id = root->data.block.tail_expression;
         root = cm_hir_get_expr(hir, root_id);
         if (root == NULL) return 0;
-    } else if (source_body->local_count != signature->parameter_count) {
+    } else if (source_body->local_count != parameter_count) {
         return 0;
     }
     match.allowed_if_expression = root_id;
@@ -1492,6 +1504,8 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
     const CmHirItem *item;
     const CmHirBody *source_body;
     const CmHirFunctionSignature *signature;
+    CmSemanticFunctionSignatureView semantic_signature;
+    uint32_t parameter_count;
     CmHirTypeId instantiated;
     uint32_t index;
 
@@ -1506,32 +1520,76 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
     }
     signature = &item->data.function_item.signature;
     source_body = cm_hir_get_body(hir, body->source_body);
+    parameter_count = signature->parameter_count;
+    memset(&semantic_signature, 0, sizeof(semantic_signature));
+    if (semantic_results != NULL) {
+        if (admission == NULL || body->instance.substitution_count != 0u
+            || cm_semantic_results_signature(semantic_results, admission,
+                body->source_body, &semantic_signature)
+                    != CM_SEMANTIC_RESULTS_OK
+            || !cm_hir_def_id_equal(semantic_signature.definition,
+                body->instance.definition)
+            || semantic_signature.parameter_count == UINT32_MAX) {
+            return 0;
+        }
+        parameter_count = semantic_signature.parameter_count;
+    }
     if (signature->is_variadic
-        || signature->parameter_count == UINT32_MAX
+        || parameter_count == UINT32_MAX
         || source_body == NULL
-        || source_body->parameter_count != signature->parameter_count
-        || source_body->local_count < signature->parameter_count
+        || source_body->parameter_count != parameter_count
+        || source_body->local_count < parameter_count
         || source_body->local_count == UINT32_MAX
         || body->local_count < source_body->local_count + 1u
-        || body->locals == NULL
-        || !cm_mir_instantiate_u32_type(hir, item, &body->instance,
-            signature->return_type, &instantiated)
-        || !cm_mir_type_supported(hir, instantiated,
+        || body->locals == NULL) {
+        return 0;
+    }
+    if (semantic_results == NULL) {
+        if (!cm_mir_instantiate_u32_type(hir, item, &body->instance,
+                signature->return_type, &instantiated)) return 0;
+    } else {
+        if (!cm_mir_semantic_view_matches(semantic_results, admission,
+                &semantic_signature.return_type, source_body->expected_type)
+            || !cm_mir_semantic_view_matches(semantic_results, admission,
+                &semantic_signature.return_type, body->locals[0].type)) {
+            return 0;
+        }
+        instantiated = body->locals[0].type;
+    }
+    if (!cm_mir_type_supported(hir, instantiated,
             context->pointer_bits)
         || !cm_mir_type_target_valid(hir, instantiated,
             context->pointer_bits, 0u)
         || cm_mir_type_is_bool(hir, instantiated)
         || body->locals[0].kind != CM_MIR_LOCAL_RETURN
-        || body->locals[0].type != instantiated) {
+        || (semantic_results == NULL
+            && body->locals[0].type != instantiated)) {
         return 0;
     }
-    for (index = 0u; index < signature->parameter_count; ++index) {
-        if (source_body->locals[index].parameter_index != index
-            || source_body->locals[index].type
-                != signature->parameters[index].type
-            || !cm_mir_instantiate_u32_type(hir, item, &body->instance,
-                source_body->locals[index].type, &instantiated)
-            || !cm_mir_type_supported(hir, instantiated,
+    for (index = 0u; index < parameter_count; ++index) {
+        CmSemanticTypeView semantic_parameter;
+
+        memset(&semantic_parameter, 0, sizeof(semantic_parameter));
+        if (source_body->locals[index].parameter_index != index) return 0;
+        if (semantic_results == NULL) {
+            if (source_body->locals[index].type
+                    != signature->parameters[index].type
+                || !cm_mir_instantiate_u32_type(hir, item,
+                    &body->instance, source_body->locals[index].type,
+                    &instantiated)) return 0;
+        } else {
+            if (cm_semantic_results_signature_parameter(semantic_results,
+                    admission, body->source_body, index,
+                    &semantic_parameter) != CM_SEMANTIC_RESULTS_OK
+                || !cm_mir_semantic_view_matches(semantic_results,
+                    admission, &semantic_parameter,
+                    source_body->locals[index].type)
+                || !cm_mir_semantic_view_matches(semantic_results,
+                    admission, &semantic_parameter,
+                    body->locals[index + 1u].type)) return 0;
+            instantiated = body->locals[index + 1u].type;
+        }
+        if (!cm_mir_type_supported(hir, instantiated,
                 context->pointer_bits)
             || !cm_mir_type_target_valid(hir, instantiated,
                 context->pointer_bits, 0u)
@@ -1541,7 +1599,7 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
             return 0;
         }
     }
-    for (index = signature->parameter_count;
+    for (index = parameter_count;
          index < source_body->local_count; ++index) {
         if (source_body->locals[index].parameter_index
                 != CM_HIR_PARAMETER_INDEX_NONE
@@ -1624,9 +1682,10 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
                     &terminator->data.call.destination_place,
                     &destination_type)
                 || terminator->data.call.target >= body->basic_block_count
-                || terminator->data.call.argument_count
-                    != callee_item->data.function_item.signature
-                        .parameter_count
+                || (semantic_results == NULL
+                    && terminator->data.call.argument_count
+                        != callee_item->data.function_item.signature
+                            .parameter_count)
                 || (terminator->data.call.argument_count != 0u
                     && terminator->data.call.arguments == NULL)
                 || !cm_mir_type_equal(hir,
@@ -1698,7 +1757,7 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
         }
     }
     return cm_mir_root_shape_valid(context, hir, item, body,
-        context->pointer_bits, admission, semantic_results);
+        context->pointer_bits, parameter_count, admission, semantic_results);
 }
 
 static int cm_mir_storage_add(size_t *total, size_t count,
@@ -2139,23 +2198,13 @@ CmMirStatus cm_mir_add_body(CmMirContext *context, const CmMirBody *body,
     return CM_MIR_OK;
 }
 
-CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
+static CmMirStatus cm_mir_add_exact_copy(CmMirContext *context,
     const CmHirContext *hir, const CmMirBody *body, CmMirBodyId *out_id)
 {
     CmMirBody copy;
     CmMirStatus status;
     size_t index;
 
-    if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
-    if (!cm_mir_context_valid(context) || hir == NULL || body == NULL
-        || out_id == NULL || (context->hir_owner != NULL
-            && context->hir_owner != hir)) {
-        return CM_MIR_INVALID_ARGUMENT;
-    }
-    if (!cm_mir_exact_body_shape_valid(context, hir, body, 0,
-            NULL, NULL)) {
-        return CM_MIR_INVARIANT_VIOLATION;
-    }
     if (context->bodies.len >= (size_t)UINT32_MAX) {
         return CM_MIR_ID_EXHAUSTED;
     }
@@ -2183,6 +2232,22 @@ CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
     return CM_MIR_OK;
 }
 
+CmMirStatus cm_mir_add_monomorphized_body(CmMirContext *context,
+    const CmHirContext *hir, const CmMirBody *body, CmMirBodyId *out_id)
+{
+    if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
+    if (!cm_mir_context_valid(context) || hir == NULL || body == NULL
+        || out_id == NULL || (context->hir_owner != NULL
+            && context->hir_owner != hir)) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_exact_body_shape_valid(context, hir, body, 0,
+            NULL, NULL)) {
+        return CM_MIR_INVARIANT_VIOLATION;
+    }
+    return cm_mir_add_exact_copy(context, hir, body, out_id);
+}
+
 CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
     const CmSemanticAdmission *admission, const CmMirBody *body,
     CmMirBodyId *out_id)
@@ -2190,6 +2255,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
     const CmHirContext *hir;
     const CmSemanticResults *semantic_results;
     const CmHirBody *source_body;
+    CmSemanticBodyView semantic_body;
     CmHirCrateId crate_id;
     CmMirStatus status;
 
@@ -2207,6 +2273,10 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
         || body->owner.crate_id != crate_id
         || body->instance.definition.crate_id != crate_id
         || semantic_results == NULL
+        || cm_semantic_results_body(semantic_results, admission,
+            body->source_body, &semantic_body) != CM_SEMANTIC_RESULTS_OK
+        || !cm_hir_def_id_equal(semantic_body.owner,
+            body->instance.definition)
         || body->instance.substitution_count != 0u) {
         return CM_MIR_INVALID_ADMISSION;
     }
@@ -2214,7 +2284,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
             admission, semantic_results)) {
         return CM_MIR_INVARIANT_VIOLATION;
     }
-    status = cm_mir_add_monomorphized_body(context, hir, body, out_id);
+    status = cm_mir_add_exact_copy(context, hir, body, out_id);
     if (status == CM_MIR_OK
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
         cm_mir_context_latch_admission(context, hir, crate_id);

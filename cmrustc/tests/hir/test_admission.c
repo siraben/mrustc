@@ -1,5 +1,6 @@
 #include "cm/hir/admission.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/instance.h"
 #include "cm/hir/semantic_results.h"
 #include "cm/mir/lower.h"
 #include "cm/source.h"
@@ -128,6 +129,22 @@ static void lower_function(Fixture *f, const CmHirItem *function)
         function->data.function_item.body, &f->graph,
         f->graph_result.revision, &f->imports, &f->modules);
     assert(result.status == CM_HIR_BODY_LOWER_OK);
+}
+
+static CmHirExprId find_body_call(const CmHirContext *hir, CmHirBodyId body)
+{
+    size_t index;
+
+    for (index = 0u; index < hir->expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(hir, (CmHirExprId)(index + 1u));
+        if (expression != NULL && expression->owner_body == body
+            && expression->kind == CM_HIR_EXPR_CALL) {
+            return (CmHirExprId)(index + 1u);
+        }
+    }
+    return CM_HIR_EXPR_NONE;
 }
 
 static void test_success_and_stale(void)
@@ -503,10 +520,12 @@ static void test_reachable_admission_subset_and_mir(void)
     const CmHirItem *chosen;
     const CmHirItem *unsupported;
     const CmSemanticResults *results;
+    CmHirType type;
+    CmHirTypeId type_id;
 
     fixture_init(&f,
         "fn chosen(x: u32) -> u32 { x + 1u32 } "
-        "fn unsupported<T>(x: T) -> T { x }");
+        "fn unsupported(x: u32) -> u32 { x * 1u32 }");
     chosen = find_free_function(&f.hir, "chosen");
     unsupported = find_free_function(&f.hir, "unsupported");
     assert(chosen != NULL && unsupported != NULL);
@@ -542,6 +561,18 @@ static void test_reachable_admission_subset_and_mir(void)
         && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
             lower_result.body) == CM_MIR_OK);
     cm_mir_context_destroy(&mir);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_BOOL_KIND;
+    type.span = (CmSpan){ f.source, 0u, 1u };
+    assert(cm_hir_add_type(&f.hir, &type, &type_id) == CM_HIR_OK
+        && !cm_semantic_admission_is_current(&admission));
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission,
+        reachable.body, NULL, 0u);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_context_destroy(&mir);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&f);
 }
@@ -552,6 +583,10 @@ static void test_reachable_admission_requires_closed_unique_set(void)
     CmSemanticAdmission admission;
     CmSemanticAdmissionResult result;
     CmSemanticReachableBody reachable[2];
+    CmSemanticDirectCallView call_view;
+    CmSemanticFunctionSignatureView signature_view;
+    CmMirContext mir;
+    CmMirLowerResult lower_result;
     const CmHirItem *callee;
     const CmHirItem *caller;
     const CmSemanticResults *results;
@@ -580,7 +615,26 @@ static void test_reachable_admission_requires_closed_unique_set(void)
     results = cm_semantic_admission_results(&admission);
     assert(result.status == CM_SEMANTIC_ADMISSION_OK
         && results != NULL
-        && cm_semantic_results_body_count(results, &admission) == 2u);
+        && cm_semantic_results_body_count(results, &admission) == 2u
+        && cm_semantic_results_direct_call(results, &admission,
+            caller->data.function_item.body,
+            find_body_call(&f.hir, caller->data.function_item.body),
+            &call_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(call_view.callee, callee->definition)
+        && cm_semantic_results_signature(results, &admission,
+            callee->data.function_item.body,
+            &signature_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(signature_view.definition,
+            callee->definition));
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission,
+        callee->data.function_item.body, NULL, 0u);
+    assert(lower_result.error_count == 0u);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission,
+        caller->data.function_item.body, NULL, 0u);
+    assert(lower_result.error_count == 0u
+        && cm_mir_body_count(&mir) == 2u);
+    cm_mir_context_destroy(&mir);
     cm_semantic_admission_destroy(&admission);
 
     reachable[1] = reachable[0];
@@ -630,6 +684,132 @@ static void test_reachable_admission_rejects_untyped_and_generic(void)
     fixture_destroy(&f);
 }
 
+static void test_reachable_admission_scope_is_enforced(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticReachableBody reachable;
+    CmHirInstanceKey key;
+    CmHirInstanceSpec spec;
+    CmMirContext admitted_mir;
+    CmMirContext legacy_mir;
+    CmMirContext rejected_mir;
+    CmMirLowerResult lower_result;
+    CmMirBody candidate;
+    CmMirBodyId copied_id;
+    const CmHirItem *selected;
+    const CmHirItem *unselected;
+    const CmMirBody *stored;
+
+    fixture_init(&f,
+        "fn selected(x: u32) -> u32 { x + 1u32 } "
+        "fn unselected(x: u32) -> u32 { x }");
+    selected = find_free_function(&f.hir, "selected");
+    unselected = find_free_function(&f.hir, "unselected");
+    assert(selected != NULL && unselected != NULL);
+    lower_function(&f, selected);
+    lower_function(&f, unselected);
+    reachable.owner = selected->definition;
+    reachable.body = selected->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    assert(cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, &reachable, 1u).status == CM_SEMANTIC_ADMISSION_OK);
+
+    cm_mir_context_init(&admitted_mir);
+    lower_result = cm_mir_lower_admitted_body(&admitted_mir, &admission,
+        unselected->data.function_item.body);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&admitted_mir) == 0u);
+
+    cm_mir_context_init(&legacy_mir);
+    lower_result = cm_mir_lower_instance(&legacy_mir, &f.hir,
+        unselected->data.function_item.body, NULL, 0u);
+    assert(lower_result.error_count == 0u);
+    stored = cm_mir_get_body(&legacy_mir, lower_result.body);
+    assert(stored != NULL);
+    candidate = *stored;
+    candidate.owned_storage = NULL;
+    cm_mir_context_init(&rejected_mir);
+    copied_id = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&rejected_mir,
+        &admission, &candidate, &copied_id) == CM_MIR_INVALID_ADMISSION
+        && copied_id == CM_MIR_BODY_NONE
+        && cm_mir_body_count(&rejected_mir) == 0u);
+
+    memset(&key, 0, sizeof(key));
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = unselected->definition;
+    assert(cm_hir_instance_key_init(&key, &admission, &spec)
+        == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
+
+    cm_mir_context_destroy(&rejected_mir);
+    cm_mir_context_destroy(&legacy_mir);
+    cm_mir_context_destroy(&admitted_mir);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
+static void test_admitted_mir_header_uses_semantic_signature(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticReachableBody reachable;
+    CmMirContext mir;
+    CmMirContext copied;
+    CmMirLowerResult lower_result;
+    CmMirBody candidate;
+    CmMirBodyId copied_id;
+    const CmHirItem *selected;
+    const CmHirItem *bool_function;
+    const CmHirDefinition *definition;
+    CmHirItem *mutable_selected;
+    const CmMirBody *stored;
+
+    fixture_init(&f,
+        "fn selected(x: u32) -> u32 { x } "
+        "fn bool_type(x: bool) -> bool { x }");
+    selected = find_free_function(&f.hir, "selected");
+    bool_function = find_free_function(&f.hir, "bool_type");
+    assert(selected != NULL && bool_function != NULL);
+    lower_function(&f, selected);
+    reachable.owner = selected->definition;
+    reachable.body = selected->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    assert(cm_semantic_admit_typed_reachable_bodies(&admission, &f.hir,
+        1u, &reachable, 1u).status == CM_SEMANTIC_ADMISSION_OK);
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_instance(&mir, &admission,
+        reachable.body, NULL, 0u);
+    assert(lower_result.error_count == 0u);
+    stored = cm_mir_get_body(&mir, lower_result.body);
+    assert(stored != NULL);
+    candidate = *stored;
+    candidate.owned_storage = NULL;
+
+    definition = cm_hir_lookup_definition(&f.hir, selected->definition);
+    assert(definition != NULL && definition->kind == CM_HIR_DEFINITION_ITEM);
+    mutable_selected = (CmHirItem *)cm_vec_at(&f.hir.items,
+        (size_t)definition->entity.item_id - 1u);
+    assert(mutable_selected != NULL
+        && mutable_selected->data.function_item.signature.parameter_count
+            == 1u);
+    mutable_selected->data.function_item.signature.return_type =
+        bool_function->data.function_item.signature.return_type;
+    mutable_selected->data.function_item.signature.parameters[0].type =
+        bool_function->data.function_item.signature.parameters[0].type;
+
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        lower_result.body) == CM_MIR_OK);
+    cm_mir_context_init(&copied);
+    assert(cm_mir_add_admitted_monomorphized_body(&copied, &admission,
+        &candidate, &copied_id) == CM_MIR_OK && copied_id == 1u);
+    cm_mir_context_destroy(&copied);
+    cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
 static void test_invalid_api(void)
 {
     CmSemanticAdmission admission;
@@ -658,6 +838,8 @@ int main(void)
     test_reachable_admission_subset_and_mir();
     test_reachable_admission_requires_closed_unique_set();
     test_reachable_admission_rejects_untyped_and_generic();
+    test_reachable_admission_scope_is_enforced();
+    test_admitted_mir_header_uses_semantic_signature();
     test_invalid_api();
     puts("hir semantic admission tests passed");
     return 0;

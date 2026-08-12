@@ -1,6 +1,7 @@
 #include "cm/hir/instance.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/semantic_results.h"
 
 #include <string.h>
 
@@ -668,6 +669,9 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     CmInstanceBuffer output;
     CmHirInstanceKeyState *state;
     CmHirInstanceStatus status;
+    const CmHirItem *selected;
+    const CmSemanticResults *semantic_results;
+    CmSemanticBodyView semantic_body;
     size_t allocation_size;
 
     if (key == NULL || key->state != NULL || admission == NULL
@@ -679,6 +683,18 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     local_crate = cm_semantic_admission_crate(admission);
     if (hir == NULL || local_crate == CM_HIR_CRATE_NONE) {
         return CM_HIR_INSTANCE_STALE_ADMISSION;
+    }
+    selected = cm_instance_item(hir, spec->selected_callable);
+    semantic_results = cm_semantic_admission_results(admission);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || selected->data.function_item.body == CM_HIR_BODY_NONE
+        || semantic_results == NULL
+        || cm_semantic_results_body(semantic_results, admission,
+            selected->data.function_item.body, &semantic_body)
+                != CM_SEMANTIC_RESULTS_OK
+        || !cm_hir_def_id_equal(semantic_body.owner,
+            spec->selected_callable)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
     }
     memset(&sizing, 0, sizeof(sizing));
     sizing.sizing = 1;

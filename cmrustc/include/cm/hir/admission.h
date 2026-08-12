@@ -29,7 +29,7 @@ typedef struct CmSemanticAdmissionResult {
     CmHirStatus hir_status;
 } CmSemanticAdmissionResult;
 
-/* Process-local evidence for one completely admitted HIR generation. */
+/* Process-local evidence for one authenticated slice of an exact HIR generation. */
 typedef struct CmSemanticAdmission { void *state; } CmSemanticAdmission;
 
 typedef struct CmSemanticReachableBody {

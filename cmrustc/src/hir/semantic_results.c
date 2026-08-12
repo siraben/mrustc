@@ -1245,8 +1245,14 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
         if (!callee_record->present
             || !cm_hir_def_id_equal(callee_record->owner,
                 expression->direct_callable)
+            || expression->type_size == 0u
+            || expression->call_return_size == 0u
             || expression->call_parameter_count
                 != callee_record->signature_parameter_count
+            || !cm_results_type_bytes_equal(results,
+                expression->type_offset, expression->type_size,
+                expression->call_return_offset,
+                expression->call_return_size)
             || !cm_results_type_bytes_equal(results,
                 expression->call_return_offset,
                 expression->call_return_size,
@@ -1273,7 +1279,9 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
             }
             call_type = &results->call_parameters[call_index];
             signature_type = &results->signature_parameters[signature_index];
-            if (!cm_results_type_bytes_equal(results,
+            if (call_type->type_size == 0u
+                || signature_type->type_size == 0u
+                || !cm_results_type_bytes_equal(results,
                     call_type->type_offset, call_type->type_size,
                     signature_type->type_offset,
                     signature_type->type_size)) {

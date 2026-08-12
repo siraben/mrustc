@@ -1960,25 +1960,8 @@ static CmMirLowerResult cm_mir_lower_admission_failure(CmHirBodyId body_id)
 CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
     const CmSemanticAdmission *admission, CmHirBodyId body_id)
 {
-    const CmHirContext *hir;
-    CmHirCrateId crate_id;
-    CmMirLowerResult result;
-
-    if (context == NULL) {
-        memset(&result, 0, sizeof(result));
-        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
-            CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
-            "invalid admitted HIR-to-MIR lowering destination");
-        return result;
-    }
-    hir = cm_mir_lower_admitted_hir(context, admission, body_id, &crate_id);
-    if (hir == NULL) return cm_mir_lower_admission_failure(body_id);
-    result = cm_mir_lower_body(context, hir, body_id);
-    if (result.error_count == 0u
-        && context->admitted_crate == CM_HIR_CRATE_NONE) {
-        cm_mir_lower_latch_admission(context, hir, crate_id);
-    }
-    return result;
+    return cm_mir_lower_admitted_instance(context, admission, body_id,
+        NULL, 0u);
 }
 
 CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
