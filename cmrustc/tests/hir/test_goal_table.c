@@ -1,4 +1,5 @@
 #include "cm/hir/goal_table.h"
+#include "../../src/hir/trait_solver_internal.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -2348,6 +2349,229 @@ static void test_destroyed_index_and_environment_rejected(void)
     fixture_destroy(&fixture);
 }
 
+static void assert_projection_target_nonproven_clean(
+    CmProjectionTargetResult result)
+{
+    assert_cached_nonproven_clean(result.selection);
+    assert(result.target == CM_TYPECK_TYPE_NONE);
+}
+
+static void test_projection_target_selection(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmTraitGoalTableLimits limits;
+    CmProjectionTargetGoal goal;
+    CmProjectionTargetResult target;
+    CmHirDefId inner_trait;
+    CmHirDefId inner_associated;
+    CmHirDefId outer_trait;
+    CmHirDefId outer_associated;
+    CmHirDefId impl_definition;
+    CmHirDefId impl_associated;
+    CmHirTypeId values[2];
+    CmHirTypeId projection_hir;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId resolved;
+    const CmTypeckType *resolved_type;
+    size_t type_count;
+
+    memset(&limits, 0, sizeof(limits));
+
+    /* A projection-valued environment target is returned raw and remains
+     * authoritative over a conflicting impl fallback. */
+    fixture_init(&fixture, 0);
+    inner_trait = add_trait(&fixture, "TargetInner");
+    inner_associated = add_trait_associated(&fixture, inner_trait,
+        "TargetInnerAssoc");
+    outer_trait = add_trait(&fixture, "TargetOuter");
+    outer_associated = add_trait_associated(&fixture, outer_trait,
+        "TargetOuterAssoc");
+    values[0] = add_projection_type(&fixture, inner_trait,
+        inner_associated, fixture.bool_hir);
+    fixture.owner_trait = add_owner_with_equalities(&fixture, outer_trait,
+        outer_associated, &fixture.bool_hir, values, 1u, 0,
+        "TargetOwner");
+    impl_definition = add_bool_impl(&fixture, outer_trait);
+    (void)add_impl_associated(&fixture, impl_definition, outer_associated,
+        fixture.bool_hir);
+    projection_hir = add_projection_type(&fixture, outer_trait,
+        outer_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = fixture.owner_trait;
+    goal.projection_type = projection_type;
+    target = cm_trait_solver_select_projection_target(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal, NULL);
+    assert(target.selection.kind == CM_TRAIT_SOLVER_PROVEN
+        && target.selection.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && target.selection.param_env_fact_index
+            != CM_TRAIT_PROOF_FACT_NONE
+        && target.selection.param_env_equality_index == 0u
+        && cm_hir_def_id_is_none(target.selection.impl_definition)
+        && target.target != CM_TYPECK_TYPE_NONE);
+    assert(cm_typeck_resolve(&runtime.typeck, target.target, &resolved)
+        == CM_TYPECK_OK);
+    resolved_type = cm_typeck_get_type(&runtime.typeck, resolved);
+    assert(resolved_type != NULL
+        && resolved_type->kind == CM_TYPECK_TYPE_PROJECTION
+        && cm_hir_def_id_equal(resolved_type->data.projection_type
+                .trait_type.definition, inner_trait)
+        && cm_hir_def_id_equal(resolved_type->data.projection_type
+                .associated_type.definition, inner_associated));
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* Unique impl replay returns a live target and exact associated proof. */
+    fixture_init(&fixture, 0);
+    outer_trait = add_trait(&fixture, "ImplTarget");
+    outer_associated = add_trait_associated(&fixture, outer_trait,
+        "ImplTargetAssoc");
+    impl_definition = add_bool_impl(&fixture, outer_trait);
+    impl_associated = add_impl_associated(&fixture, impl_definition,
+        outer_associated, fixture.u8_hir);
+    projection_hir = add_projection_type(&fixture, outer_trait,
+        outer_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = fixture.owner_trait;
+    goal.projection_type = projection_type;
+    target = cm_trait_solver_select_projection_target(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal, NULL);
+    assert(target.selection.kind == CM_TRAIT_SOLVER_PROVEN
+        && target.selection.proof_origin == CM_TRAIT_PROOF_IMPL
+        && cm_hir_def_id_equal(target.selection.impl_definition,
+            impl_definition)
+        && cm_hir_def_id_equal(
+            target.selection.impl_associated_definition, impl_associated)
+        && target.target != CM_TYPECK_TYPE_NONE);
+    assert(cm_typeck_resolve(&runtime.typeck, target.target, &resolved)
+        == CM_TYPECK_OK);
+    resolved_type = cm_typeck_get_type(&runtime.typeck, resolved);
+    assert(resolved_type != NULL
+        && resolved_type->kind == CM_TYPECK_TYPE_INTEGER
+        && resolved_type->data.integer_type == CM_HIR_INT_U8);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* Conflicting applicable bounds never leak a target or probe terms. */
+    fixture_init(&fixture, 0);
+    outer_trait = add_trait(&fixture, "ConflictTarget");
+    outer_associated = add_trait_associated(&fixture, outer_trait,
+        "ConflictTargetAssoc");
+    values[0] = fixture.u8_hir;
+    values[1] = fixture.bool_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture, outer_trait,
+        outer_associated, (CmHirTypeId[]){fixture.bool_hir,
+            fixture.bool_hir}, values, 2u, 0, "ConflictTargetOwner");
+    projection_hir = add_projection_type(&fixture, outer_trait,
+        outer_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = fixture.owner_trait;
+    goal.projection_type = projection_type;
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    target = cm_trait_solver_select_projection_target(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal, NULL);
+    assert(target.selection.kind == CM_TRAIT_SOLVER_AMBIGUOUS);
+    assert_projection_target_nonproven_clean(target);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* A relevant HRTB equality blocks impl fallback transactionally. */
+    fixture_init(&fixture, 0);
+    outer_trait = add_trait(&fixture, "BlockedTarget");
+    outer_associated = add_trait_associated(&fixture, outer_trait,
+        "BlockedTargetAssoc");
+    values[0] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture, outer_trait,
+        outer_associated, &fixture.bool_hir, values, 1u, 1,
+        "BlockedTargetOwner");
+    impl_definition = add_bool_impl(&fixture, outer_trait);
+    (void)add_impl_associated(&fixture, impl_definition, outer_associated,
+        fixture.u8_hir);
+    projection_hir = add_projection_type(&fixture, outer_trait,
+        outer_associated, fixture.bool_hir);
+    runtime_init(&runtime, &fixture, limits);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = fixture.owner_trait;
+    goal.projection_type = projection_type;
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    target = cm_trait_solver_select_projection_target(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        &goal, NULL);
+    assert(target.selection.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && target.selection.blocking_match_count == 1u);
+    assert_projection_target_nonproven_clean(target);
+    assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+
+    /* Inference in projection Self defers without binding. A wrong owner is
+     * rejected through the same scrubbed, mutation-free boundary. */
+    fixture_init(&fixture, 0);
+    outer_trait = add_trait(&fixture, "InferenceTarget");
+    outer_associated = add_trait_associated(&fixture, outer_trait,
+        "InferenceTargetAssoc");
+    values[0] = fixture.u8_hir;
+    fixture.owner_trait = add_owner_with_equalities(&fixture, outer_trait,
+        outer_associated, &fixture.bool_hir, values, 1u, 0,
+        "InferenceTargetOwner");
+    runtime_init(&runtime, &fixture, limits);
+    {
+        CmTypeckType inference_projection;
+        CmTypeckTypeId inference_self;
+
+        assert(cm_typeck_new_variable(&runtime.typeck,
+            CM_HIR_INFER_GENERAL, test_span(21u, 22u), &inference_self)
+            == CM_TYPECK_OK);
+        memset(&inference_projection, 0, sizeof(inference_projection));
+        inference_projection.kind = CM_TYPECK_TYPE_PROJECTION;
+        inference_projection.span = test_span(21u, 24u);
+        inference_projection.data.projection_type.self_type =
+            inference_self;
+        inference_projection.data.projection_type.trait_type.definition =
+            outer_trait;
+        inference_projection.data.projection_type.associated_type.definition =
+            outer_associated;
+        assert(cm_typeck_add_type(&runtime.typeck, &inference_projection,
+            &projection_type) == CM_TYPECK_OK);
+        memset(&goal, 0, sizeof(goal));
+        goal.owner = fixture.owner_trait;
+        goal.projection_type = projection_type;
+        type_count = cm_typeck_type_count(&runtime.typeck);
+        target = cm_trait_solver_select_projection_target(&runtime.index,
+            &runtime.environment, &runtime.typeck, &runtime.substitution,
+            &goal, NULL);
+        assert(target.selection.kind == CM_TRAIT_SOLVER_DEFERRED_INFERENCE);
+        assert_projection_target_nonproven_clean(target);
+        assert_unbound(&runtime.typeck, inference_self);
+        assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+        goal.owner = outer_trait;
+        target = cm_trait_solver_select_projection_target(&runtime.index,
+            &runtime.environment, &runtime.typeck, &runtime.substitution,
+            &goal, NULL);
+        assert(target.selection.kind == CM_TRAIT_SOLVER_INVALID);
+        assert_projection_target_nonproven_clean(target);
+        assert_unbound(&runtime.typeck, inference_self);
+        assert(cm_typeck_type_count(&runtime.typeck) == type_count);
+    }
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_structural_keys_and_nonproven_rollback();
@@ -2369,6 +2593,7 @@ int main(void)
     test_projection_equality_defaults_and_foreign_metadata();
     test_projection_trait_argument_reallocation();
     test_projection_equality_recursion_and_blockers();
+    test_projection_target_selection();
     test_destroyed_typeck_rejected();
     test_destroyed_index_and_environment_rejected();
     puts("hir canonical goal table tests passed");

@@ -1,5 +1,7 @@
 #include "cm/hir/trait_solver.h"
 
+#include "trait_solver_internal.h"
+
 #include "cm/hir/projection.h"
 
 #include "cm/alloc.h"
@@ -52,6 +54,7 @@ typedef struct CmTraitMatchResult {
 
 typedef struct CmTraitProjectionMatchGoal {
     CmHirDefId associated_definition;
+    /* NONE requests target materialization without equality checking. */
     CmTypeckTypeId expected_type;
 } CmTraitProjectionMatchGoal;
 
@@ -1291,7 +1294,8 @@ static CmTraitMatchResult cm_trait_match_projection_target(
     CmTypeckInstantiation *instantiation, CmHirDefId goal_owner,
     const CmTraitProjectionMatchGoal *projection_goal,
     const CmTraitGoalEvaluator *evaluator, int expose_evidence,
-    CmHirDefId *out_associated_definition)
+    CmHirDefId *out_associated_definition,
+    CmTypeckTypeId *out_target)
 {
     CmHirProjectionImplTarget target;
     CmProjectionEqualityGoal nested_goal;
@@ -1342,7 +1346,11 @@ static CmTraitMatchResult cm_trait_match_projection_target(
         return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
             CM_TYPECK_INVALID_ID);
     }
-    if (resolved_target_type->kind == CM_TYPECK_TYPE_PROJECTION) {
+    if (projection_goal->expected_type == CM_TYPECK_TYPE_NONE) {
+        if (expose_evidence && out_target != NULL) {
+            *out_target = instantiated_target;
+        }
+    } else if (resolved_target_type->kind == CM_TYPECK_TYPE_PROJECTION) {
         if (evaluator == NULL || evaluator->evaluate_projection == NULL) {
             return cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
                 CM_TYPECK_OK);
@@ -1398,7 +1406,8 @@ static CmTraitMatchResult cm_trait_match_candidate(
     CmTypeckTypeId query_self, const CmTypeckNamedType *query_trait,
     CmHirDefId goal_owner, const CmTraitGoalEvaluator *evaluator,
     const CmTraitProjectionMatchGoal *projection_goal, int keep_bindings,
-    CmHirDefId *out_associated_definition)
+    CmHirDefId *out_associated_definition,
+    CmTypeckTypeId *out_target)
 {
     const CmHirItem *item;
     CmTypeckGenericArg *impl_arguments;
@@ -1407,6 +1416,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
     CmTypeckSnapshot snapshot;
     CmTypeckTypeId candidate_self;
     CmHirDefId associated_evidence;
+    CmTypeckTypeId target_evidence;
     CmTypeckStatus status;
     CmTraitMatchKind match;
     CmTraitSolverResultKind solver_kind;
@@ -1422,6 +1432,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
     memset(&candidate_trait, 0, sizeof(candidate_trait));
     candidate_self = CM_TYPECK_TYPE_NONE;
     associated_evidence = cm_hir_def_id_none();
+    target_evidence = CM_TYPECK_TYPE_NONE;
     match = CM_TRAIT_MATCH_YES;
     solver_kind = CM_TRAIT_SOLVER_PROVEN;
     status = CM_TYPECK_OK;
@@ -1593,7 +1604,8 @@ static CmTraitMatchResult cm_trait_match_candidate(
 
         projection = cm_trait_match_projection_target(state, item, typeck,
             candidate_self, &instantiation, goal_owner, projection_goal,
-            evaluator, keep_bindings, &associated_evidence);
+            evaluator, keep_bindings, &associated_evidence,
+            &target_evidence);
         match = projection.kind;
         solver_kind = projection.solver_kind;
         status = projection.typeck_status;
@@ -1607,6 +1619,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
         if (out_associated_definition != NULL) {
             *out_associated_definition = associated_evidence;
         }
+        if (out_target != NULL) *out_target = target_evidence;
     } else if (cm_typeck_rollback(typeck, &snapshot) != CM_TYPECK_OK) {
         cm_free(impl_arguments);
         return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
@@ -1736,7 +1749,8 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     const CmTraitImplIndex *index, CmTypeckContext *typeck,
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type,
     CmHirDefId goal_owner, const CmTraitGoalEvaluator *evaluator,
-    const CmTraitProjectionMatchGoal *projection_goal)
+    const CmTraitProjectionMatchGoal *projection_goal,
+    CmTypeckTypeId *out_target)
 {
     const CmTraitImplIndexState *state;
     CmTraitSelectionResult result;
@@ -1749,6 +1763,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     size_t unsupported_blockers;
     int saw_nonproof;
 
+    if (out_target != NULL) *out_target = CM_TYPECK_TYPE_NONE;
     result = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
     state = cm_trait_index_state_const(index);
     if (!cm_trait_index_is_current(state)) return result;
@@ -1787,7 +1802,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
             if (header_unknown == 0u) {
                 match = cm_trait_match_candidate(state, entry, typeck,
                     self_type, trait_type, goal_owner, evaluator,
-                    NULL, 0, NULL);
+                    NULL, 0, NULL, NULL);
                 if (match.kind == CM_TRAIT_MATCH_NO) continue;
                 if (match.kind == CM_TRAIT_MATCH_OVERFLOW) {
                     result.kind = CM_TRAIT_SOLVER_OVERFLOW;
@@ -1812,7 +1827,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
         }
         match = cm_trait_match_candidate(state, entry, typeck,
             self_type, trait_type, goal_owner, evaluator, NULL,
-            0, NULL);
+            0, NULL, NULL);
         if (match.kind == CM_TRAIT_MATCH_YES) {
             result.supported_match_count += 1u;
             if (winner == NULL) winner = entry;
@@ -1857,7 +1872,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
 
         replay = cm_trait_match_candidate(state, winner, typeck,
             self_type, trait_type, goal_owner, evaluator, projection_goal,
-            1, &result.impl_associated_definition);
+            1, &result.impl_associated_definition, out_target);
         if (replay.kind != CM_TRAIT_MATCH_YES) {
             if (replay.kind == CM_TRAIT_MATCH_OVERFLOW) {
                 result.kind = CM_TRAIT_SOLVER_OVERFLOW;
@@ -1890,7 +1905,7 @@ CmTraitSelectionResult cm_trait_solver_select(
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type)
 {
     return cm_trait_solver_select_inner(index, typeck, self_type,
-        trait_type, cm_hir_def_id_none(), NULL, NULL);
+        trait_type, cm_hir_def_id_none(), NULL, NULL, NULL);
 }
 
 static int cm_trait_typeck_region_equal(const CmHirRegion *left,
@@ -2137,6 +2152,79 @@ static CmTraitMatchResult cm_trait_match_environment_equality(
     return match;
 }
 
+static CmTraitMatchResult cm_trait_match_environment_equality_target(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmTypeckTypeId projection_self,
+    const CmTypeckNamedType *projection_trait, int keep_bindings,
+    int *out_lhs_applies, CmTypeckTypeId *out_target)
+{
+    CmParamEnvEqualityInstance candidate;
+    CmTypeckSnapshot snapshot;
+    CmTypeckStatus typeck_status;
+    CmParamEnvStatus env_status;
+    CmTraitMatchResult match;
+    CmTypeckStatus close_status;
+    int lhs_applies;
+
+    if (out_lhs_applies != NULL) *out_lhs_applies = 0;
+    if (out_target != NULL) *out_target = CM_TYPECK_TYPE_NONE;
+    lhs_applies = 0;
+    typeck_status = cm_typeck_snapshot(typeck, &snapshot);
+    if (typeck_status != CM_TYPECK_OK) {
+        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            typeck_status);
+    }
+    env_status = cm_param_env_instantiate_equality_target(environment,
+        fact_index, equality_index, typeck, substitution, &candidate,
+        &typeck_status);
+    if (env_status == CM_PARAM_ENV_READY) {
+        typeck_status = cm_typeck_unify(typeck, candidate.subject,
+            projection_self);
+        if (typeck_status == CM_TYPECK_OK) {
+            match = cm_trait_match_typeck_named(typeck,
+                &candidate.trait_type, projection_trait);
+        } else if (typeck_status == CM_TYPECK_TYPE_MISMATCH
+            || typeck_status == CM_TYPECK_KIND_CONFLICT
+            || typeck_status == CM_TYPECK_OCCURS_CHECK) {
+            match = cm_trait_match_result(CM_TRAIT_MATCH_NO,
+                typeck_status);
+        } else if (typeck_status == CM_TYPECK_OVERFLOW) {
+            match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
+                typeck_status);
+        } else {
+            match = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+                typeck_status);
+        }
+        if (match.kind == CM_TRAIT_MATCH_YES) lhs_applies = 1;
+    } else if (env_status == CM_PARAM_ENV_UNSUPPORTED) {
+        match = cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
+            typeck_status);
+    } else if (env_status == CM_PARAM_ENV_OVERFLOW) {
+        match = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
+            typeck_status);
+    } else {
+        match = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            typeck_status);
+    }
+    if (keep_bindings && match.kind == CM_TRAIT_MATCH_YES) {
+        close_status = cm_typeck_commit(typeck, &snapshot);
+        if (close_status == CM_TYPECK_OK && out_target != NULL) {
+            *out_target = candidate.value;
+        }
+    } else {
+        close_status = cm_typeck_rollback(typeck, &snapshot);
+    }
+    if (close_status != CM_TYPECK_OK) {
+        if (out_target != NULL) *out_target = CM_TYPECK_TYPE_NONE;
+        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            close_status);
+    }
+    if (out_lhs_applies != NULL) *out_lhs_applies = lhs_applies;
+    return match;
+}
+
 static int cm_trait_blocked_equality_head_may_apply(
     const CmHirContext *hir, const CmParamEnvFact *fact,
     CmTypeckContext *typeck, CmTypeckTypeId projection_self,
@@ -2210,6 +2298,62 @@ static CmTraitMatchResult cm_trait_environment_equalities_compatible(
         left_equality, typeck, substitution, &left, &status);
     if (env_status == CM_PARAM_ENV_READY) {
         env_status = cm_param_env_instantiate_equality(environment,
+            right_fact, right_equality, typeck, substitution, &right,
+            &status);
+    }
+    if (env_status == CM_PARAM_ENV_READY) {
+        status = cm_typeck_unify(typeck, left.value, right.value);
+        if (status == CM_TYPECK_OK) {
+            result = cm_trait_match_result(CM_TRAIT_MATCH_YES, status);
+        } else if (status == CM_TYPECK_TYPE_MISMATCH
+            || status == CM_TYPECK_KIND_CONFLICT
+            || status == CM_TYPECK_OCCURS_CHECK) {
+            result = cm_trait_match_result(CM_TRAIT_MATCH_NO, status);
+        } else if (status == CM_TYPECK_OVERFLOW) {
+            result = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
+                status);
+        } else {
+            result = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+                status);
+        }
+    } else if (env_status == CM_PARAM_ENV_OVERFLOW) {
+        result = cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW, status);
+    } else if (env_status == CM_PARAM_ENV_UNSUPPORTED) {
+        result = cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED, status);
+    } else {
+        result = cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            status);
+    }
+    close_status = cm_typeck_rollback(typeck, &snapshot);
+    if (close_status != CM_TYPECK_OK) {
+        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            close_status);
+    }
+    return result;
+}
+
+static CmTraitMatchResult cm_trait_environment_equality_targets_compatible(
+    const CmParamEnv *environment, size_t left_fact,
+    uint32_t left_equality, size_t right_fact, uint32_t right_equality,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution)
+{
+    CmParamEnvEqualityInstance left;
+    CmParamEnvEqualityInstance right;
+    CmTypeckSnapshot snapshot;
+    CmTypeckStatus status;
+    CmTypeckStatus close_status;
+    CmParamEnvStatus env_status;
+    CmTraitMatchResult result;
+
+    status = cm_typeck_snapshot(typeck, &snapshot);
+    if (status != CM_TYPECK_OK) {
+        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            status);
+    }
+    env_status = cm_param_env_instantiate_equality_target(environment,
+        left_fact, left_equality, typeck, substitution, &left, &status);
+    if (env_status == CM_PARAM_ENV_READY) {
+        env_status = cm_param_env_instantiate_equality_target(environment,
             right_fact, right_equality, typeck, substitution, &right,
             &status);
     }
@@ -2345,7 +2489,7 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
         return result;
     }
     return cm_trait_solver_select_inner(index, typeck, goal->self_type,
-        &goal->trait_type, goal->owner, evaluator, NULL);
+        &goal->trait_type, goal->owner, evaluator, NULL, NULL);
 }
 
 CmTraitSelectionResult cm_trait_solver_solve_implemented(
@@ -2355,6 +2499,310 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented(
 {
     return cm_trait_solver_solve_implemented_with_evaluator(index,
         environment, typeck, substitution, goal, NULL);
+}
+
+CmProjectionTargetResult cm_trait_solver_select_projection_target(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    const CmProjectionTargetGoal *goal,
+    const CmTraitGoalEvaluator *evaluator)
+{
+    const CmTraitImplIndexState *index_state;
+    const CmHirItem *trait_item;
+    const CmHirItem *associated_item;
+    const CmTypeckType *projection;
+    CmTraitProjectionMatchGoal projection_goal;
+    CmProjectionTargetResult target_result;
+    CmTraitSelectionResult result;
+    CmTraitSolverResultKind projection_validation;
+    CmTypeckNamedType projection_trait;
+    CmHirDefId projection_associated_definition;
+    CmTypeckTypeId resolved_projection;
+    CmTypeckTypeId projection_self;
+    CmTypeckStatus typeck_status;
+    CmHirDefId enclosing_owner;
+    size_t applicable_equality_count;
+    size_t reference_fact_index;
+    uint32_t reference_equality_index;
+    int conflicting_equalities;
+    size_t winner_fact_index;
+    uint32_t winner_equality_index;
+    size_t fact_index;
+
+    memset(&target_result, 0, sizeof(target_result));
+    target_result.selection = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
+    target_result.target = CM_TYPECK_TYPE_NONE;
+    result = target_result.selection;
+    index_state = cm_trait_index_state_const(index);
+    if (!cm_trait_index_is_current(index_state)
+        || !cm_param_env_is_current(environment)
+        || cm_param_env_hir(environment) != index_state->hir
+        || typeck == NULL
+        || cm_typeck_hir_context(typeck) != index_state->hir
+        || goal == NULL
+        || !cm_hir_def_id_equal(goal->owner,
+            cm_param_env_exact_owner(environment))) return target_result;
+    if (substitution == NULL || substitution->exact == NULL
+        || !cm_typeck_instantiation_is_valid(typeck, substitution->exact)
+        || !cm_hir_def_id_equal(substitution->exact->parameter_owner,
+            goal->owner)) return target_result;
+    enclosing_owner = cm_param_env_enclosing_owner(environment);
+    if (!cm_hir_def_id_is_none(enclosing_owner)) {
+        if (substitution->enclosing == NULL
+            || !cm_typeck_instantiation_is_valid(typeck,
+                substitution->enclosing)
+            || !cm_hir_def_id_equal(
+                substitution->enclosing->parameter_owner,
+                enclosing_owner)) return target_result;
+    } else if (substitution->enclosing != NULL) {
+        return target_result;
+    }
+    typeck_status = cm_typeck_resolve(typeck, goal->projection_type,
+        &resolved_projection);
+    if (typeck_status == CM_TYPECK_OVERFLOW) {
+        target_result.selection.kind = CM_TRAIT_SOLVER_OVERFLOW;
+        target_result.selection.typeck_status = typeck_status;
+        return target_result;
+    }
+    if (typeck_status != CM_TYPECK_OK) return target_result;
+    projection = cm_typeck_get_type(typeck, resolved_projection);
+    if (projection == NULL
+        || projection->kind != CM_TYPECK_TYPE_PROJECTION) {
+        return target_result;
+    }
+    projection_self = projection->data.projection_type.self_type;
+    projection_trait = projection->data.projection_type.trait_type;
+    projection_associated_definition =
+        projection->data.projection_type.associated_type.definition;
+    if (projection->data.projection_type.associated_type.argument_count != 0u
+        || projection->data.projection_type.associated_type.arguments
+            != NULL) {
+        target_result.selection.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
+        return target_result;
+    }
+    trait_item = cm_trait_find_definition_item(index_state->hir,
+        projection_trait.definition);
+    associated_item = cm_trait_find_definition_item(index_state->hir,
+        projection_associated_definition);
+    if (trait_item == NULL) {
+        if (cm_trait_definition_is_known_foreign(index_state,
+                projection_trait.definition, CM_HIR_ITEM_TRAIT)) {
+            target_result.selection.kind =
+                CM_TRAIT_SOLVER_DEFERRED_METADATA;
+        }
+        return target_result;
+    }
+    if (trait_item->kind != CM_HIR_ITEM_TRAIT) return target_result;
+    if (associated_item == NULL) {
+        if (trait_item->definition.crate_id != index_state->local_crate
+            || cm_trait_definition_is_known_foreign(index_state,
+                projection_associated_definition,
+                CM_HIR_ITEM_TYPE_ALIAS)) {
+            target_result.selection.kind =
+                CM_TRAIT_SOLVER_DEFERRED_METADATA;
+        }
+        return target_result;
+    }
+    if (associated_item->kind != CM_HIR_ITEM_TYPE_ALIAS
+        || !cm_hir_def_id_is_none(associated_item->data.type_alias_item
+                .trait_item_definition)
+        || !cm_hir_def_id_equal(associated_item->parent_definition,
+            trait_item->definition)) return target_result;
+    if (associated_item->data.type_alias_item.target != CM_HIR_TYPE_NONE
+        || associated_item->generic_parameter_count != 0u) {
+        target_result.selection.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
+        return target_result;
+    }
+    projection_validation = cm_trait_solver_validate_implemented_goal(
+        index_state->hir, typeck, projection_self, &projection_trait);
+    if (projection_validation != CM_TRAIT_SOLVER_PROVEN) {
+        target_result.selection.kind = projection_validation;
+        if (projection_validation == CM_TRAIT_SOLVER_OVERFLOW) {
+            target_result.selection.typeck_status = CM_TYPECK_OVERFLOW;
+        }
+        return target_result;
+    }
+
+    result = cm_trait_result(CM_TRAIT_SOLVER_NO_SOLUTION);
+    applicable_equality_count = 0u;
+    reference_fact_index = CM_TRAIT_PROOF_FACT_NONE;
+    reference_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
+    conflicting_equalities = 0;
+    winner_fact_index = CM_TRAIT_PROOF_FACT_NONE;
+    winner_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
+    for (fact_index = 0u;
+         fact_index < cm_param_env_fact_count(environment); ++fact_index) {
+        const CmParamEnvFact *fact;
+        uint32_t equality_index;
+
+        fact = cm_param_env_fact(environment, fact_index);
+        if (fact == NULL || fact->kind != CM_PARAM_ENV_FACT_IMPLEMENTED
+            || !cm_hir_def_id_equal(
+                fact->data.implemented.trait_type.definition,
+                projection_trait.definition)) continue;
+        for (equality_index = 0u;
+             equality_index < fact->data.implemented.equality_count;
+             ++equality_index) {
+            CmTraitMatchResult match;
+            int lhs_applies;
+            unsigned int equality_blockers;
+
+            if (fact->data.implemented.equalities == NULL
+                || fact->data.implemented.equality_blocker_flags == NULL) {
+                target_result.selection =
+                    cm_trait_result(CM_TRAIT_SOLVER_INVALID);
+                return target_result;
+            }
+            if (!cm_hir_def_id_equal(fact->data.implemented
+                    .equalities[equality_index].associated_type,
+                    projection_associated_definition)) continue;
+            equality_blockers = fact->head_blocker_flags
+                | fact->data.implemented
+                    .equality_blocker_flags[equality_index];
+            if ((equality_blockers & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u
+                && cm_trait_blocked_equality_head_may_apply(
+                    index_state->hir, fact, typeck, projection_self,
+                    &projection_trait)) {
+                target_result.selection =
+                    cm_trait_result(CM_TRAIT_SOLVER_OVERFLOW);
+                target_result.selection.typeck_status = CM_TYPECK_OVERFLOW;
+                return target_result;
+            }
+            if ((equality_blockers
+                    & ~(unsigned int)CM_PARAM_ENV_BLOCK_PROJECTION) != 0u
+                && cm_trait_blocked_equality_head_may_apply(
+                    index_state->hir, fact, typeck, projection_self,
+                    &projection_trait)) {
+                result.blocking_match_count += 1u;
+                continue;
+            } else if ((equality_blockers
+                    & ~(unsigned int)CM_PARAM_ENV_BLOCK_PROJECTION) != 0u) {
+                continue;
+            }
+            /* A projection is permitted only when isolated to the RHS. */
+            if ((fact->head_blocker_flags
+                    & CM_PARAM_ENV_BLOCK_PROJECTION) != 0u) {
+                if (cm_trait_blocked_equality_head_may_apply(
+                        index_state->hir, fact, typeck, projection_self,
+                        &projection_trait)) {
+                    result.blocking_match_count += 1u;
+                }
+                continue;
+            }
+            lhs_applies = 0;
+            match = cm_trait_match_environment_equality_target(environment,
+                fact_index, equality_index, typeck, substitution,
+                projection_self, &projection_trait, 0, &lhs_applies, NULL);
+            if (lhs_applies) {
+                if (reference_fact_index == CM_TRAIT_PROOF_FACT_NONE) {
+                    reference_fact_index = fact_index;
+                    reference_equality_index = equality_index;
+                } else {
+                    CmTraitMatchResult compatibility;
+
+                    compatibility =
+                        cm_trait_environment_equality_targets_compatible(
+                            environment, reference_fact_index,
+                            reference_equality_index, fact_index,
+                            equality_index, typeck, substitution);
+                    if (compatibility.kind == CM_TRAIT_MATCH_NO) {
+                        conflicting_equalities = 1;
+                    } else if (compatibility.kind
+                            == CM_TRAIT_MATCH_OVERFLOW) {
+                        target_result.selection =
+                            cm_trait_result(CM_TRAIT_SOLVER_OVERFLOW);
+                        target_result.selection.typeck_status =
+                            compatibility.typeck_status;
+                        return target_result;
+                    } else if (compatibility.kind
+                            != CM_TRAIT_MATCH_YES) {
+                        target_result.selection = cm_trait_result(
+                            compatibility.kind == CM_TRAIT_MATCH_UNSUPPORTED
+                                ? CM_TRAIT_SOLVER_UNSUPPORTED
+                                : CM_TRAIT_SOLVER_TYPECK_FAILURE);
+                        target_result.selection.typeck_status =
+                            compatibility.typeck_status;
+                        return target_result;
+                    }
+                }
+                applicable_equality_count += 1u;
+            }
+            if (match.kind == CM_TRAIT_MATCH_YES) {
+                result.supported_match_count += 1u;
+                if (winner_fact_index == CM_TRAIT_PROOF_FACT_NONE) {
+                    winner_fact_index = fact_index;
+                    winner_equality_index = equality_index;
+                }
+            } else if (match.kind == CM_TRAIT_MATCH_UNSUPPORTED) {
+                result.blocking_match_count += 1u;
+            } else if (match.kind == CM_TRAIT_MATCH_OVERFLOW) {
+                target_result.selection =
+                    cm_trait_result(CM_TRAIT_SOLVER_OVERFLOW);
+                target_result.selection.typeck_status = match.typeck_status;
+                return target_result;
+            } else if (match.kind == CM_TRAIT_MATCH_TYPECK_FAILURE) {
+                target_result.selection =
+                    cm_trait_result(CM_TRAIT_SOLVER_TYPECK_FAILURE);
+                target_result.selection.typeck_status = match.typeck_status;
+                return target_result;
+            }
+        }
+    }
+    if (result.blocking_match_count != 0u) {
+        result.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
+        target_result.selection = result;
+        return target_result;
+    }
+    if (conflicting_equalities) {
+        result.kind = CM_TRAIT_SOLVER_AMBIGUOUS;
+        target_result.selection = result;
+        return target_result;
+    }
+    if (winner_fact_index != CM_TRAIT_PROOF_FACT_NONE) {
+        CmTraitMatchResult replay;
+        int lhs_applies;
+
+        lhs_applies = 0;
+        replay = cm_trait_match_environment_equality_target(environment,
+            winner_fact_index, winner_equality_index, typeck,
+            substitution, projection_self, &projection_trait, 1,
+            &lhs_applies, &target_result.target);
+        if (replay.kind == CM_TRAIT_MATCH_YES && lhs_applies) {
+            result.kind = CM_TRAIT_SOLVER_PROVEN;
+            result.proof_origin = CM_TRAIT_PROOF_PARAM_ENV;
+            result.param_env_fact_index = winner_fact_index;
+            result.param_env_equality_index = winner_equality_index;
+            target_result.selection = result;
+            return target_result;
+        }
+        target_result.target = CM_TYPECK_TYPE_NONE;
+        target_result.selection = cm_trait_result(
+            replay.kind == CM_TRAIT_MATCH_OVERFLOW
+                ? CM_TRAIT_SOLVER_OVERFLOW
+                : CM_TRAIT_SOLVER_TYPECK_FAILURE);
+        target_result.selection.typeck_status = replay.typeck_status;
+        return target_result;
+    }
+    if (applicable_equality_count != 0u) {
+        target_result.selection = result;
+        return target_result;
+    }
+    if (trait_item->definition.crate_id != index_state->local_crate
+        || associated_item->definition.crate_id
+            != index_state->local_crate) {
+        target_result.selection =
+            cm_trait_result(CM_TRAIT_SOLVER_DEFERRED_METADATA);
+        return target_result;
+    }
+    projection_goal.associated_definition = associated_item->definition;
+    projection_goal.expected_type = CM_TYPECK_TYPE_NONE;
+    target_result.selection = cm_trait_solver_select_inner(index, typeck,
+        projection_self, &projection_trait, goal->owner, evaluator,
+        &projection_goal, &target_result.target);
+    if (target_result.selection.kind != CM_TRAIT_SOLVER_PROVEN) {
+        target_result.target = CM_TYPECK_TYPE_NONE;
+    }
+    return target_result;
 }
 
 CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
@@ -2638,7 +3086,7 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
     projection_goal.expected_type = goal->expected_type;
     return cm_trait_solver_select_inner(index, typeck,
         projection_self, &projection_trait, goal->owner, evaluator,
-        &projection_goal);
+        &projection_goal, NULL);
 }
 
 const char *cm_trait_solver_result_name(CmTraitSolverResultKind result)

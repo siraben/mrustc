@@ -269,7 +269,9 @@ $(HIR_PARAM_ENV_TEST_PROGRAM): tests/hir/test_param_env.c $(HIR_TRAIT_SOLVER_OBJ
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(HIR_TRAIT_SOLVER_OBJECTS) $(BASE_OBJECTS) $(LDLIBS)
 
-$(HIR_GOAL_TABLE_TEST_PROGRAM): tests/hir/test_goal_table.c $(HIR_GOAL_TABLE_OBJECTS) $(BASE_OBJECTS)
+$(BUILD_DIR)/obj/hir/trait_solver.o: src/hir/trait_solver_internal.h
+
+$(HIR_GOAL_TABLE_TEST_PROGRAM): tests/hir/test_goal_table.c src/hir/trait_solver_internal.h $(HIR_GOAL_TABLE_OBJECTS) $(BASE_OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(HIR_GOAL_TABLE_OBJECTS) $(BASE_OBJECTS) $(LDLIBS)
 
