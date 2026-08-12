@@ -1,4 +1,4 @@
-#include "cm/hir/semantic_body.h"
+#include "semantic_body_internal.h"
 
 #include "cm/hir/body.h"
 
@@ -310,7 +310,8 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmSemanticBodyResult result, CmTypeckContext *typeck,
     CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions,
     CmTypeckGenericArg *owner_arguments,
-    CmTypeckGenericArg *callee_arguments)
+    CmTypeckGenericArg *callee_arguments,
+    CmTypeckTypeId *expression_terms)
 {
     CmTypeckStatus rollback;
 
@@ -322,12 +323,13 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     cm_free(call_expressions);
     cm_free(owner_arguments);
     cm_free(callee_arguments);
+    cm_free(expression_terms);
     return result;
 }
 
 #define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
     cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
-        call_expressions, owner_arguments, callee_arguments)
+        call_expressions, owner_arguments, callee_arguments, expression_terms)
 
 static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
     uint32_t count, CmTypeckGenericArg **out_arguments)
@@ -346,9 +348,10 @@ static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
 
 static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     CmTypeckContext *typeck, const CmHirContext *hir,
-    const CmHirExpr *expression, const CmHirItem *callee,
-    const CmTypeckInstantiation *owner_instantiation,
+    CmHirExprId expression_id, const CmHirExpr *expression,
+    const CmHirItem *callee,
     const CmTypeckInstantiation *callee_instantiation,
+    const CmTypeckTypeId *expression_terms, size_t expression_term_count,
     CmTypeckStatus *out_typeck_status)
 {
     const CmHirFunctionSignature *signature;
@@ -358,7 +361,9 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
     CmTypeckStatus status;
     uint32_t index;
 
-    if (out_typeck_status == NULL) return CM_SEMANTIC_BODY_INVALID;
+    if (out_typeck_status == NULL || expression_terms == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
     *out_typeck_status = CM_TYPECK_OK;
     signature = callee == NULL ? NULL : &callee->data.function_item.signature;
     if (expression == NULL || signature == NULL
@@ -371,8 +376,12 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
         cm_semantic_scan_type(hir, expression->type, 0u),
         cm_semantic_scan_type(hir, signature->return_type, 0u));
     if (scan != CM_SEMANTIC_TYPE_OK) return cm_semantic_scan_status(scan);
-    status = cm_typeck_instantiate_hir_type(typeck, expression->type,
-        owner_instantiation, &actual_type);
+    actual_type = expression_id == CM_HIR_EXPR_NONE
+            || (size_t)expression_id > expression_term_count
+        ? CM_TYPECK_TYPE_NONE
+        : expression_terms[(size_t)expression_id - 1u];
+    status = actual_type == CM_TYPECK_TYPE_NONE
+        ? CM_TYPECK_INVALID_ID : CM_TYPECK_OK;
     if (status == CM_TYPECK_OK) {
         status = cm_typeck_instantiate_hir_type(typeck,
             signature->return_type, callee_instantiation, &declared_type);
@@ -400,8 +409,15 @@ static CmSemanticBodyStatus cm_semantic_body_check_call_signature(
         if (scan != CM_SEMANTIC_TYPE_OK) {
             return cm_semantic_scan_status(scan);
         }
-        status = cm_typeck_instantiate_hir_type(typeck, argument->type,
-            owner_instantiation, &actual_type);
+        actual_type = expression->data.call.arguments[index]
+                    == CM_HIR_EXPR_NONE
+                || (size_t)expression->data.call.arguments[index]
+                    > expression_term_count
+            ? CM_TYPECK_TYPE_NONE
+            : expression_terms[(size_t)expression->data.call.arguments[index]
+                - 1u];
+        status = actual_type == CM_TYPECK_TYPE_NONE
+            ? CM_TYPECK_INVALID_ID : CM_TYPECK_OK;
         if (status == CM_TYPECK_OK) {
             status = cm_typeck_instantiate_hir_type(typeck,
                 signature->parameters[index].type,
@@ -426,6 +442,8 @@ typedef struct CmSemanticBodyConstraints {
     const CmTypeckInstantiation *owner_instantiation;
     unsigned char *defined_locals;
     unsigned char *seen_parameters;
+    CmTypeckTypeId *expression_terms;
+    size_t expression_term_count;
     CmHirExprId failed_expression;
     CmTypeckStatus typeck_status;
 } CmSemanticBodyConstraints;
@@ -475,6 +493,71 @@ static CmSemanticBodyStatus cm_semantic_body_unify_types(
     return CM_SEMANTIC_BODY_OK;
 }
 
+static CmSemanticBodyStatus cm_semantic_body_expression_term(
+    CmSemanticBodyConstraints *constraints, CmHirExprId expression,
+    CmTypeckTypeId *out_type)
+{
+    if (constraints == NULL || out_type == NULL
+        || expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > constraints->expression_term_count
+        || cm_hir_get_expr(constraints->hir, expression) == NULL
+        || cm_hir_get_expr(constraints->hir, expression)->owner_body
+            != constraints->body_id
+        || constraints->expression_terms[(size_t)expression - 1u]
+            == CM_TYPECK_TYPE_NONE) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    *out_type = constraints->expression_terms[(size_t)expression - 1u];
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_unify_expression_type(
+    CmSemanticBodyConstraints *constraints, CmHirExprId expression,
+    CmHirTypeId hir_type, const CmTypeckInstantiation *instantiation)
+{
+    CmTypeckTypeId expression_type;
+    CmTypeckTypeId declared_type;
+    CmSemanticBodyStatus semantic_status;
+    CmTypeckStatus status;
+
+    semantic_status = cm_semantic_body_expression_term(constraints,
+        expression, &expression_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    semantic_status = cm_semantic_body_instantiate_type(constraints,
+        hir_type, instantiation, &declared_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    status = cm_typeck_unify(constraints->typeck, expression_type,
+        declared_type);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_unify_expressions(
+    CmSemanticBodyConstraints *constraints, CmHirExprId left,
+    CmHirExprId right)
+{
+    CmTypeckTypeId left_type;
+    CmTypeckTypeId right_type;
+    CmSemanticBodyStatus semantic_status;
+    CmTypeckStatus status;
+
+    semantic_status = cm_semantic_body_expression_term(constraints, left,
+        &left_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    semantic_status = cm_semantic_body_expression_term(constraints, right,
+        &right_type);
+    if (semantic_status != CM_SEMANTIC_BODY_OK) return semantic_status;
+    status = cm_typeck_unify(constraints->typeck, left_type, right_type);
+    if (status != CM_TYPECK_OK) {
+        constraints->typeck_status = status;
+        return cm_semantic_typeck_status(status);
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
 static int cm_semantic_body_integer_kind(const CmHirContext *hir,
     CmHirTypeId type_id, CmHirIntType kind)
 {
@@ -500,7 +583,7 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
 {
     const CmHirExpr *expression;
     CmSemanticBodyStatus status;
-    CmTypeckTypeId ignored_type;
+    CmTypeckTypeId *expression_term;
     uint32_t index;
 
     if (constraints == NULL || expression_id == CM_HIR_EXPR_NONE
@@ -513,9 +596,17 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
         return CM_SEMANTIC_BODY_INVALID;
     }
     constraints->failed_expression = expression_id;
-    status = cm_semantic_body_instantiate_type(constraints,
-        expression->type, constraints->owner_instantiation, &ignored_type);
-    if (status != CM_SEMANTIC_BODY_OK) return status;
+    if ((size_t)expression_id > constraints->expression_term_count) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    expression_term = &constraints->expression_terms[
+        (size_t)expression_id - 1u];
+    if (*expression_term == CM_TYPECK_TYPE_NONE) {
+        status = cm_semantic_body_instantiate_type(constraints,
+            expression->type, constraints->owner_instantiation,
+            expression_term);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+    }
 
     switch (expression->kind) {
     case CM_HIR_EXPR_INTEGER:
@@ -528,8 +619,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
                 >= constraints->body->local_count) {
             return CM_SEMANTIC_BODY_INVALID;
         }
-        return cm_semantic_body_unify_types(constraints, expression->type,
-            constraints->owner_instantiation,
+        return cm_semantic_body_unify_expression_type(constraints,
+            expression_id,
             constraints->body->locals[expression->data.local.local_index]
                 .type,
             constraints->owner_instantiation);
@@ -564,10 +655,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             if (status != CM_SEMANTIC_BODY_OK) return status;
             constraints->failed_expression =
                 statement->data.let_statement.initializer;
-            status = cm_semantic_body_unify_types(constraints,
-                cm_hir_get_expr(constraints->hir,
-                    statement->data.let_statement.initializer)->type,
-                constraints->owner_instantiation,
+            status = cm_semantic_body_unify_expression_type(constraints,
+                statement->data.let_statement.initializer,
                 constraints->body->locals[local_index].type,
                 constraints->owner_instantiation);
             if (status != CM_SEMANTIC_BODY_OK) return status;
@@ -579,11 +668,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             depth + 1u);
         if (status != CM_SEMANTIC_BODY_OK) return status;
         constraints->failed_expression = expression_id;
-        return cm_semantic_body_unify_types(constraints, expression->type,
-            constraints->owner_instantiation,
-            cm_hir_get_expr(constraints->hir,
-                expression->data.block.tail_expression)->type,
-            constraints->owner_instantiation);
+        return cm_semantic_body_unify_expressions(constraints,
+            expression_id, expression->data.block.tail_expression);
     }
     case CM_HIR_EXPR_CALL:
         if ((expression->data.call.argument_count == 0u)
@@ -647,14 +733,12 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             return CM_SEMANTIC_BODY_INVALID;
         }
         constraints->failed_expression = expression_id;
-        status = cm_semantic_body_unify_types(constraints, left->type,
-            constraints->owner_instantiation, right->type,
-            constraints->owner_instantiation);
+        status = cm_semantic_body_unify_expressions(constraints,
+            expression->data.binary.left, expression->data.binary.right);
         if (status != CM_SEMANTIC_BODY_OK) return status;
         if (arithmetic) {
-            status = cm_semantic_body_unify_types(constraints,
-                expression->type, constraints->owner_instantiation,
-                left->type, constraints->owner_instantiation);
+            status = cm_semantic_body_unify_expressions(constraints,
+                expression_id, expression->data.binary.left);
         }
         return status;
     }
@@ -704,7 +788,6 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
         for (index = 0u; index < expression->data.aggregate.field_count;
              ++index) {
             const CmHirAggregateFieldValue *field;
-            const CmHirExpr *value;
             uint32_t prior;
 
             field = &expression->data.aggregate.fields[index];
@@ -721,10 +804,9 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             status = cm_semantic_body_constrain_expression(constraints,
                 field->value, visible_local_count, depth + 1u);
             if (status != CM_SEMANTIC_BODY_OK) return status;
-            value = cm_hir_get_expr(constraints->hir, field->value);
             constraints->failed_expression = expression_id;
-            status = cm_semantic_body_unify_types(constraints, value->type,
-                constraints->owner_instantiation,
+            status = cm_semantic_body_unify_expression_type(constraints,
+                field->value,
                 aggregate->data.aggregate_item.fields[field->field_index]
                     .type,
                 &aggregate_instantiation);
@@ -778,8 +860,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             return CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
         }
         constraints->failed_expression = expression_id;
-        return cm_semantic_body_unify_types(constraints, expression->type,
-            constraints->owner_instantiation,
+        return cm_semantic_body_unify_expression_type(constraints,
+            expression_id,
             aggregate->data.aggregate_item
                 .fields[expression->data.field.field_index].type,
             &aggregate_instantiation);
@@ -831,13 +913,12 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             return CM_SEMANTIC_BODY_INVALID;
         }
         constraints->failed_expression = expression_id;
-        status = cm_semantic_body_unify_types(constraints,
-            then_expression->type, constraints->owner_instantiation,
-            else_expression->type, constraints->owner_instantiation);
+        status = cm_semantic_body_unify_expressions(constraints,
+            expression->data.if_expr.then_expression,
+            expression->data.if_expr.else_expression);
         if (status == CM_SEMANTIC_BODY_OK) {
-            status = cm_semantic_body_unify_types(constraints,
-                expression->type, constraints->owner_instantiation,
-                then_expression->type, constraints->owner_instantiation);
+            status = cm_semantic_body_unify_expressions(constraints,
+                expression_id, expression->data.if_expr.then_expression);
         }
         return status;
     }
@@ -850,6 +931,7 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     const CmHirBody *body, CmHirBodyId body_id,
     const CmHirItem *owner_item,
     const CmTypeckInstantiation *owner_instantiation,
+    CmTypeckTypeId *expression_terms, size_t expression_term_count,
     CmHirExprId *out_expression, CmTypeckStatus *out_typeck_status)
 {
     CmSemanticBodyConstraints constraints;
@@ -862,7 +944,9 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     size_t parameter_bitmap_size;
 
     if (typeck == NULL || hir == NULL || body == NULL || owner_item == NULL
-        || owner_instantiation == NULL || out_expression == NULL
+        || owner_instantiation == NULL || expression_terms == NULL
+        || expression_term_count != hir->expressions.len
+        || out_expression == NULL
         || out_typeck_status == NULL) return CM_SEMANTIC_BODY_INVALID;
     *out_expression = CM_HIR_EXPR_NONE;
     *out_typeck_status = CM_TYPECK_OK;
@@ -877,6 +961,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     constraints.body = body;
     constraints.body_id = body_id;
     constraints.owner_instantiation = owner_instantiation;
+    constraints.expression_terms = expression_terms;
+    constraints.expression_term_count = expression_term_count;
     constraints.failed_expression = body->root_expression;
     constraints.typeck_status = CM_TYPECK_OK;
     if (!cm_size_mul((size_t)(body->local_count == 0u
@@ -951,8 +1037,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     }
     if (status == CM_SEMANTIC_BODY_OK) {
         constraints.failed_expression = body->root_expression;
-        status = cm_semantic_body_unify_types(&constraints, root->type,
-            owner_instantiation, body->expected_type,
+        status = cm_semantic_body_unify_expression_type(&constraints,
+            body->root_expression, body->expected_type,
             owner_instantiation);
     }
 finish:
@@ -1057,7 +1143,8 @@ static CmSemanticBodyStatus cm_semantic_body_collect_calls(
 static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticSession *session, CmHirBodyId body_id,
     const CmHirTypeId *owner_type_substitutions,
-    uint32_t owner_type_substitution_count, int definition_mode)
+    uint32_t owner_type_substitution_count, int definition_mode,
+    CmSemanticBodyWritebackFn writeback, void *writeback_context)
 {
     CmSemanticBodyResult result;
     const CmHirContext *hir;
@@ -1077,6 +1164,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     size_t call_expression_count;
     size_t call_index;
     CmTypeckStatus typeck_status;
+    CmTypeckTypeId *expression_terms;
+    size_t expression_term_bytes;
     uint32_t owner_argument_index;
 
     (void)definition_mode;
@@ -1127,15 +1216,25 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
     owner_arguments = NULL;
     callee_arguments = NULL;
+    expression_terms = NULL;
     result.status = cm_semantic_body_collect_calls(hir, body_id,
         body->root_expression, &call_expressions, &call_expression_count);
     if (result.status != CM_SEMANTIC_BODY_OK) return result;
+    if (!cm_size_mul(hir->expressions.len, sizeof(*expression_terms),
+            &expression_term_bytes)) {
+        result.status = CM_SEMANTIC_BODY_OVERFLOW;
+        cm_free(call_expressions);
+        return result;
+    }
+    expression_terms = (CmTypeckTypeId *)cm_alloc_zeroed(1u,
+        expression_term_bytes);
     memset(&snapshot, 0, sizeof(snapshot));
     typeck_status = cm_typeck_snapshot(typeck, &snapshot);
     if (typeck_status != CM_TYPECK_OK) {
         result.status = cm_semantic_typeck_status(typeck_status);
         result.typeck_status = typeck_status;
         cm_free(call_expressions);
+        cm_free(expression_terms);
         return result;
     }
 
@@ -1252,8 +1351,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
 
     result.status = cm_semantic_body_constrain(typeck, hir, body, body_id,
-        owner_item, &owner_instantiation, &result.expression,
-        &result.typeck_status);
+        owner_item, &owner_instantiation, expression_terms,
+        hir->expressions.len, &result.expression, &result.typeck_status);
     if (result.status != CM_SEMANTIC_BODY_OK) {
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
@@ -1363,8 +1462,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 &snapshot, call_expressions);
         }
         result.status = cm_semantic_body_check_call_signature(typeck, hir,
-            expression, callee, &owner_instantiation,
-            &callee_instantiation, &typeck_status);
+            expression_id, expression, callee,
+            &callee_instantiation, expression_terms, hir->expressions.len,
+            &typeck_status);
         if (result.status != CM_SEMANTIC_BODY_OK) {
             result.typeck_status = typeck_status;
             return cm_semantic_body_fail_snapshot(result, typeck,
@@ -1514,6 +1614,22 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             }
         }
     }
+    if (writeback != NULL) {
+        CmSemanticBodyWritebackStatus writeback_status;
+
+        writeback_status = writeback(writeback_context, session, body_id,
+            expression_terms, hir->expressions.len);
+        if (writeback_status != CM_SEMANTIC_BODY_WRITEBACK_OK) {
+            result.status = writeback_status
+                    == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
+                ? CM_SEMANTIC_BODY_OVERFLOW
+                : writeback_status == CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED
+                    ? CM_SEMANTIC_BODY_UNSUPPORTED
+                    : CM_SEMANTIC_BODY_INVALID;
+            return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
+                call_expressions);
+        }
+    }
     typeck_status = cm_typeck_commit(typeck, &snapshot);
     if (typeck_status != CM_TYPECK_OK) {
         result.status = CM_SEMANTIC_BODY_TYPECK_FAILURE;
@@ -1522,11 +1638,13 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         cm_free(call_expressions);
         cm_free(owner_arguments);
         cm_free(callee_arguments);
+        cm_free(expression_terms);
         return result;
     }
     cm_free(call_expressions);
     cm_free(owner_arguments);
     cm_free(callee_arguments);
+    cm_free(expression_terms);
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_OK, body_id);
     result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
     return result;
@@ -1538,13 +1656,26 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     uint32_t owner_type_substitution_count)
 {
     return cm_semantic_body_check_calls_mode(session, body,
-        owner_type_substitutions, owner_type_substitution_count, 0);
+        owner_type_substitutions, owner_type_substitution_count, 0,
+        NULL, NULL);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_definition(
     CmSemanticSession *session, CmHirBodyId body)
 {
-    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1);
+    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
+        NULL, NULL);
+}
+
+CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
+    CmSemanticSession *session, CmHirBodyId body,
+    CmSemanticBodyWritebackFn writeback, void *writeback_context)
+{
+    if (writeback == NULL) {
+        return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
+    }
+    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
+        writeback, writeback_context);
 }
 
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status)

@@ -47,6 +47,24 @@ struct CmSemanticResults {
     int sealed;
 };
 
+typedef struct CmSemanticResultsBodyStageState {
+    const CmHirContext *hir;
+    const CmSemanticSession *producer_session;
+    const CmTypeckContext *producer_typeck;
+    CmTraitImplUniverse universe;
+    CmHirCrateId local_crate;
+    uint64_t storage_lifetime_id;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+    CmHirBodyId body;
+    CmHirDefId owner;
+    CmSemanticExpressionRecord *expressions;
+    size_t expression_count;
+    unsigned char *type_bytes;
+    size_t type_bytes_len;
+    uint32_t body_expression_count;
+} CmSemanticResultsBodyStageState;
+
 static CmSemanticResultsStatus cm_results_write(CmResultsBuffer *buffer,
     const void *bytes, size_t length)
 {
@@ -124,11 +142,12 @@ static CmSemanticResultsStatus cm_results_interned(
         ? cm_results_write(buffer, string->bytes, string->len) : status;
 }
 
-static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
-    const CmHirContext *hir, CmHirTypeId type_id, size_t depth);
+static CmSemanticResultsStatus cm_results_typeck_type(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth);
 
-static CmSemanticResultsStatus cm_results_region(CmResultsBuffer *buffer,
-    const CmHirRegion *region)
+static CmSemanticResultsStatus cm_results_typeck_region(
+    CmResultsBuffer *buffer, const CmHirRegion *region)
 {
     if (region == NULL) return CM_SEMANTIC_RESULTS_INVALID_HIR;
     if (region->kind == CM_HIR_REGION_STATIC
@@ -138,30 +157,43 @@ static CmSemanticResultsStatus cm_results_region(CmResultsBuffer *buffer,
     return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
 }
 
-static CmSemanticResultsStatus cm_results_const(CmResultsBuffer *buffer,
-    const CmHirContext *hir, const CmHirConstArg *constant, size_t depth)
+static CmSemanticResultsStatus cm_results_typeck_const(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, const CmTypeckConst *constant,
+    size_t depth)
 {
+    const CmHirGenericParam *parameter;
     CmSemanticResultsStatus status;
 
-    if (constant == NULL || constant->kind != CM_HIR_CONST_VALUE) {
+    if (constant == NULL || (constant->kind != CM_HIR_CONST_VALUE
+            && constant->kind != CM_HIR_CONST_PARAMETER)) {
         return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
     }
     status = cm_results_u8(buffer, (unsigned int)constant->kind);
     if (status == CM_SEMANTIC_RESULTS_OK) {
-        status = cm_results_type(buffer, hir, constant->type, depth + 1u);
+        status = cm_results_typeck_type(buffer, hir, typeck,
+            constant->type, depth + 1u);
     }
-    if (status == CM_SEMANTIC_RESULTS_OK) {
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (constant->kind == CM_HIR_CONST_VALUE) {
         status = cm_results_u64(buffer, constant->data.value.low_bits);
+        return status == CM_SEMANTIC_RESULTS_OK
+            ? cm_results_u64(buffer, constant->data.value.high_bits) : status;
     }
-    if (status == CM_SEMANTIC_RESULTS_OK) {
-        status = cm_results_u64(buffer, constant->data.value.high_bits);
+    parameter = cm_hir_get_generic_param(hir, constant->data.parameter);
+    if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_CONST
+        || cm_hir_def_id_is_none(parameter->owner)) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
-    return status;
+    status = cm_results_def(buffer, parameter->owner);
+    return status == CM_SEMANTIC_RESULTS_OK
+        ? cm_results_u32(buffer, parameter->index) : status;
 }
 
-static CmSemanticResultsStatus cm_results_argument(
+static CmSemanticResultsStatus cm_results_typeck_argument(
     CmResultsBuffer *buffer, const CmHirContext *hir,
-    const CmHirGenericArg *argument, size_t depth)
+    const CmTypeckContext *typeck, const CmTypeckGenericArg *argument,
+    size_t depth)
 {
     CmSemanticResultsStatus status;
 
@@ -170,18 +202,21 @@ static CmSemanticResultsStatus cm_results_argument(
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     switch (argument->kind) {
     case CM_HIR_GENERIC_ARG_LIFETIME:
-        return cm_results_region(buffer, &argument->data.lifetime);
+        return cm_results_typeck_region(buffer, &argument->data.lifetime);
     case CM_HIR_GENERIC_ARG_TYPE:
-        return cm_results_type(buffer, hir, argument->data.type, depth + 1u);
+        return cm_results_typeck_type(buffer, hir, typeck,
+            argument->data.type, depth + 1u);
     case CM_HIR_GENERIC_ARG_CONST:
-        return cm_results_const(buffer, hir, &argument->data.constant,
-            depth + 1u);
+        return cm_results_typeck_const(buffer, hir, typeck,
+            &argument->data.constant, depth + 1u);
     }
     return CM_SEMANTIC_RESULTS_INVALID_HIR;
 }
 
-static CmSemanticResultsStatus cm_results_named(CmResultsBuffer *buffer,
-    const CmHirContext *hir, const CmHirNamedType *named, size_t depth)
+static CmSemanticResultsStatus cm_results_typeck_named(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, const CmTypeckNamedType *named,
+    size_t depth)
 {
     CmSemanticResultsStatus status;
     uint32_t index;
@@ -197,91 +232,102 @@ static CmSemanticResultsStatus cm_results_named(CmResultsBuffer *buffer,
     }
     for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
             && index < named->argument_count; ++index) {
-        status = cm_results_argument(buffer, hir, &named->arguments[index],
-            depth + 1u);
+        status = cm_results_typeck_argument(buffer, hir, typeck,
+            &named->arguments[index], depth + 1u);
     }
     return status;
 }
 
-static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
-    const CmHirContext *hir, CmHirTypeId type_id, size_t depth)
+static CmSemanticResultsStatus cm_results_typeck_type(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth)
 {
-    const CmHirType *type;
+    const CmTypeckType *type;
     const CmHirGenericParam *parameter;
+    CmTypeckTypeId resolved;
     CmSemanticResultsStatus status;
+    unsigned int tag;
     uint32_t index;
 
     if (depth >= CM_RESULTS_TYPE_DEPTH) return CM_SEMANTIC_RESULTS_OVERFLOW;
-    type = cm_hir_get_type(hir, type_id);
+    if (cm_typeck_resolve(typeck, type_id, &resolved) != CM_TYPECK_OK) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    type = cm_typeck_get_type(typeck, resolved);
     if (type == NULL) return CM_SEMANTIC_RESULTS_INVALID_HIR;
     switch (type->kind) {
-    case CM_HIR_TYPE_ERROR_KIND:
-    case CM_HIR_TYPE_INFER_KIND:
-    case CM_HIR_TYPE_PROJECTION_KIND:
-    case CM_HIR_TYPE_FN_DEFINITION_KIND:
-    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
-    case CM_HIR_TYPE_DYN_TRAIT_KIND:
-    case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
-    case CM_HIR_TYPE_FOREIGN_KIND:
+    case CM_TYPECK_TYPE_NEVER: tag = CM_HIR_TYPE_NEVER_KIND; break;
+    case CM_TYPECK_TYPE_UNIT: tag = CM_HIR_TYPE_UNIT_KIND; break;
+    case CM_TYPECK_TYPE_BOOL: tag = CM_HIR_TYPE_BOOL_KIND; break;
+    case CM_TYPECK_TYPE_CHAR: tag = CM_HIR_TYPE_CHAR_KIND; break;
+    case CM_TYPECK_TYPE_STR: tag = CM_HIR_TYPE_STR_KIND; break;
+    case CM_TYPECK_TYPE_INTEGER: tag = CM_HIR_TYPE_INTEGER_KIND; break;
+    case CM_TYPECK_TYPE_FLOAT: tag = CM_HIR_TYPE_FLOAT_KIND; break;
+    case CM_TYPECK_TYPE_REFERENCE: tag = CM_HIR_TYPE_REFERENCE_KIND; break;
+    case CM_TYPECK_TYPE_RAW_POINTER: tag = CM_HIR_TYPE_RAW_POINTER_KIND; break;
+    case CM_TYPECK_TYPE_TUPLE: tag = CM_HIR_TYPE_TUPLE_KIND; break;
+    case CM_TYPECK_TYPE_ARRAY: tag = CM_HIR_TYPE_ARRAY_KIND; break;
+    case CM_TYPECK_TYPE_SLICE: tag = CM_HIR_TYPE_SLICE_KIND; break;
+    case CM_TYPECK_TYPE_FN_POINTER: tag = CM_HIR_TYPE_FN_POINTER_KIND; break;
+    case CM_TYPECK_TYPE_ADT: tag = CM_HIR_TYPE_ADT_KIND; break;
+    case CM_TYPECK_TYPE_PARAMETER: tag = CM_HIR_TYPE_PARAMETER_KIND; break;
+    case CM_TYPECK_TYPE_VARIABLE:
+    case CM_TYPECK_TYPE_PROJECTION:
         return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
     default:
-        break;
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
-    status = cm_results_u8(buffer, (unsigned int)type->kind);
+    status = cm_results_u8(buffer, tag);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     switch (type->kind) {
-    case CM_HIR_TYPE_NEVER_KIND:
-    case CM_HIR_TYPE_UNIT_KIND:
-    case CM_HIR_TYPE_BOOL_KIND:
-    case CM_HIR_TYPE_CHAR_KIND:
-    case CM_HIR_TYPE_STR_KIND:
+    case CM_TYPECK_TYPE_NEVER:
+    case CM_TYPECK_TYPE_UNIT:
+    case CM_TYPECK_TYPE_BOOL:
+    case CM_TYPECK_TYPE_CHAR:
+    case CM_TYPECK_TYPE_STR:
         return CM_SEMANTIC_RESULTS_OK;
-    case CM_HIR_TYPE_INTEGER_KIND:
-        return cm_results_u8(buffer,
-            (unsigned int)type->data.integer_type.kind);
-    case CM_HIR_TYPE_FLOAT_KIND:
-        return cm_results_u8(buffer,
-            (unsigned int)type->data.float_type.kind);
-    case CM_HIR_TYPE_REFERENCE_KIND:
-        status = cm_results_region(buffer,
+    case CM_TYPECK_TYPE_INTEGER:
+        return cm_results_u8(buffer, (unsigned int)type->data.integer_type);
+    case CM_TYPECK_TYPE_FLOAT:
+        return cm_results_u8(buffer, (unsigned int)type->data.float_type);
+    case CM_TYPECK_TYPE_REFERENCE:
+        status = cm_results_typeck_region(buffer,
             &type->data.reference_type.region);
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_u8(buffer,
                 (unsigned int)type->data.reference_type.mutability);
         }
         return status == CM_SEMANTIC_RESULTS_OK
-            ? cm_results_type(buffer, hir,
+            ? cm_results_typeck_type(buffer, hir, typeck,
                 type->data.reference_type.pointee, depth + 1u) : status;
-    case CM_HIR_TYPE_RAW_POINTER_KIND:
+    case CM_TYPECK_TYPE_RAW_POINTER:
         status = cm_results_u8(buffer,
             (unsigned int)type->data.raw_pointer_type.mutability);
         return status == CM_SEMANTIC_RESULTS_OK
-            ? cm_results_type(buffer, hir,
+            ? cm_results_typeck_type(buffer, hir, typeck,
                 type->data.raw_pointer_type.pointee, depth + 1u) : status;
-    case CM_HIR_TYPE_TUPLE_KIND:
+    case CM_TYPECK_TYPE_TUPLE:
         if ((type->data.tuple_type.element_count == 0u)
                 != (type->data.tuple_type.elements == NULL)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
-        status = cm_results_u32(buffer,
-            type->data.tuple_type.element_count);
+        status = cm_results_u32(buffer, type->data.tuple_type.element_count);
         for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
                 && index < type->data.tuple_type.element_count; ++index) {
-            status = cm_results_type(buffer, hir,
+            status = cm_results_typeck_type(buffer, hir, typeck,
                 type->data.tuple_type.elements[index], depth + 1u);
         }
         return status;
-    case CM_HIR_TYPE_ARRAY_KIND:
-        status = cm_results_type(buffer, hir,
+    case CM_TYPECK_TYPE_ARRAY:
+        status = cm_results_typeck_type(buffer, hir, typeck,
             type->data.array_type.element, depth + 1u);
         return status == CM_SEMANTIC_RESULTS_OK
-            ? cm_results_const(buffer, hir, &type->data.array_type.length,
-                depth + 1u) : status;
-    case CM_HIR_TYPE_SLICE_KIND:
-        return cm_results_type(buffer, hir,
+            ? cm_results_typeck_const(buffer, hir, typeck,
+                &type->data.array_type.length, depth + 1u) : status;
+    case CM_TYPECK_TYPE_SLICE:
+        return cm_results_typeck_type(buffer, hir, typeck,
             type->data.slice_type.element, depth + 1u);
-    case CM_HIR_TYPE_FN_POINTER_KIND:
+    case CM_TYPECK_TYPE_FN_POINTER:
         if ((type->data.fn_pointer_type.parameter_count == 0u)
                 != (type->data.fn_pointer_type.parameters == NULL)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
@@ -291,11 +337,11 @@ static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
         for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
                 && index < type->data.fn_pointer_type.parameter_count;
              ++index) {
-            status = cm_results_type(buffer, hir,
+            status = cm_results_typeck_type(buffer, hir, typeck,
                 type->data.fn_pointer_type.parameters[index], depth + 1u);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
-            status = cm_results_type(buffer, hir,
+            status = cm_results_typeck_type(buffer, hir, typeck,
                 type->data.fn_pointer_type.return_type, depth + 1u);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
@@ -309,17 +355,10 @@ static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
         return status == CM_SEMANTIC_RESULTS_OK
             ? cm_results_u8(buffer,
                 type->data.fn_pointer_type.is_variadic ? 1u : 0u) : status;
-    case CM_HIR_TYPE_ADT_KIND:
-        return cm_results_named(buffer, hir, &type->data.named_type,
-            depth + 1u);
-    case CM_HIR_TYPE_SELF_KIND:
-        if (cm_hir_def_id_is_none(type->data.self_type.owner)
-            || cm_hir_lookup_definition(hir,
-                type->data.self_type.owner) == NULL) {
-            return CM_SEMANTIC_RESULTS_INVALID_HIR;
-        }
-        return cm_results_def(buffer, type->data.self_type.owner);
-    case CM_HIR_TYPE_PARAMETER_KIND:
+    case CM_TYPECK_TYPE_ADT:
+        return cm_results_typeck_named(buffer, hir, typeck,
+            &type->data.named_type, depth + 1u);
+    case CM_TYPECK_TYPE_PARAMETER:
         parameter = cm_hir_get_generic_param(hir,
             type->data.parameter_type.parameter);
         if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
@@ -329,16 +368,19 @@ static CmSemanticResultsStatus cm_results_type(CmResultsBuffer *buffer,
         status = cm_results_def(buffer, parameter->owner);
         return status == CM_SEMANTIC_RESULTS_OK
             ? cm_results_u32(buffer, parameter->index) : status;
-    default:
+    case CM_TYPECK_TYPE_VARIABLE:
+    case CM_TYPECK_TYPE_PROJECTION:
         return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
     }
+    return CM_SEMANTIC_RESULTS_INVALID_HIR;
 }
 
 static CmSemanticResultsStatus cm_results_collect_expression(
     CmSemanticResults *results, const CmHirContext *hir,
     CmHirBodyId body_id, CmHirExprId expression_id, unsigned char *seen,
     CmResultsBuffer *types, uint32_t *body_expression_count, size_t depth,
-    int publish)
+    int publish, const CmTypeckContext *typeck,
+    const CmTypeckTypeId *expression_terms, size_t expression_term_count)
 {
     const CmHirExpr *expression;
     CmSemanticExpressionRecord *record;
@@ -370,12 +412,14 @@ static CmSemanticResultsStatus cm_results_collect_expression(
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.block.statements[index].data.let_statement
                     .initializer,
-                seen, types, body_expression_count, depth + 1u, publish);
+                seen, types, body_expression_count, depth + 1u, publish,
+                typeck, expression_terms, expression_term_count);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.block.tail_expression, seen, types,
-            body_expression_count, depth + 1u, publish);
+            body_expression_count, depth + 1u, publish, typeck,
+            expression_terms, expression_term_count);
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
     case CM_HIR_EXPR_CALL:
@@ -383,18 +427,21 @@ static CmSemanticResultsStatus cm_results_collect_expression(
              ++index) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.call.arguments[index], seen, types,
-                body_expression_count, depth + 1u, publish);
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         break;
     case CM_HIR_EXPR_BINARY:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.binary.left, seen, types,
-            body_expression_count, depth + 1u, publish);
+            body_expression_count, depth + 1u, publish, typeck,
+            expression_terms, expression_term_count);
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.binary.right, seen, types,
-                body_expression_count, depth + 1u, publish);
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
         }
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
@@ -403,29 +450,34 @@ static CmSemanticResultsStatus cm_results_collect_expression(
              ++index) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.aggregate.fields[index].value, seen, types,
-                body_expression_count, depth + 1u, publish);
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         break;
     case CM_HIR_EXPR_FIELD:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.field.base, seen, types,
-            body_expression_count, depth + 1u, publish);
+            body_expression_count, depth + 1u, publish, typeck,
+            expression_terms, expression_term_count);
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
     case CM_HIR_EXPR_IF:
         status = cm_results_collect_expression(results, hir, body_id,
             expression->data.if_expr.condition, seen, types,
-            body_expression_count, depth + 1u, publish);
+            body_expression_count, depth + 1u, publish, typeck,
+            expression_terms, expression_term_count);
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.if_expr.then_expression, seen, types,
-                body_expression_count, depth + 1u, publish);
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_expression(results, hir, body_id,
                 expression->data.if_expr.else_expression, seen, types,
-                body_expression_count, depth + 1u, publish);
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
         }
         if (status != CM_SEMANTIC_RESULTS_OK) return status;
         break;
@@ -438,7 +490,13 @@ static CmSemanticResultsStatus cm_results_collect_expression(
     record = &results->expressions[(size_t)expression_id - 1u];
     if (record->present) return CM_SEMANTIC_RESULTS_INVALID_HIR;
     if (publish) record->type_offset = types->len;
-    status = cm_results_type(types, hir, expression->type, 0u);
+    status = typeck == NULL || expression_terms == NULL
+            || expression_term_count != results->expression_count
+            || expression_terms[(size_t)expression_id - 1u]
+                == CM_TYPECK_TYPE_NONE
+        ? CM_SEMANTIC_RESULTS_INVALID_HIR
+        : cm_results_typeck_type(types, hir, typeck,
+            expression_terms[(size_t)expression_id - 1u], 0u);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     if (publish) {
         record->type_size = types->len - record->type_offset;
@@ -524,134 +582,245 @@ CmSemanticResultsStatus cm_semantic_results_begin(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
-CmSemanticResultsStatus cm_semantic_results_add_checked_body(
-    CmSemanticResults *results, CmSemanticSession *session,
-    const CmSemanticBodyResult *check)
+void cm_semantic_results_body_stage_init(CmSemanticResultsBodyStage *stage)
 {
+    if (stage != NULL) stage->state = NULL;
+}
+
+void cm_semantic_results_body_stage_destroy(
+    CmSemanticResultsBodyStage *stage)
+{
+    CmSemanticResultsBodyStageState *state;
+
+    if (stage == NULL) return;
+    state = (CmSemanticResultsBodyStageState *)stage->state;
+    if (state != NULL) {
+        cm_free(state->type_bytes);
+        cm_free(state->expressions);
+        memset(state, 0, sizeof(*state));
+        cm_free(state);
+    }
+    stage->state = NULL;
+}
+
+static CmSemanticBodyWritebackStatus cm_results_writeback_status(
+    CmSemanticResultsStatus status)
+{
+    if (status == CM_SEMANTIC_RESULTS_OK) {
+        return CM_SEMANTIC_BODY_WRITEBACK_OK;
+    }
+    if (status == CM_SEMANTIC_RESULTS_OVERFLOW) {
+        return CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
+    }
+    if (status == CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE) {
+        return CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED;
+    }
+    return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+}
+
+CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
+    void *context, CmSemanticSession *session, CmHirBodyId body_id,
+    const CmTypeckTypeId *expression_terms, size_t expression_term_count)
+{
+    CmSemanticResultsBodyStage *stage;
+    CmSemanticResultsBodyStageState *state;
     const CmHirContext *hir;
     const CmHirBody *body;
-    CmSemanticBodyRecord *record;
+    CmTypeckContext *typeck;
     CmResultsBuffer sizing;
     CmResultsBuffer output;
     unsigned char *seen;
-    unsigned char *body_type_bytes;
-    unsigned char *combined_type_bytes;
-    CmSemanticExpressionRecord *body_expressions;
     CmSemanticResults body_results;
     CmSemanticResultsStatus status;
-    size_t new_type_bytes_len;
     size_t expression_bytes;
     size_t expression_index;
     uint32_t expression_count;
-    CmHirBodyId body_id;
 
+    stage = (CmSemanticResultsBodyStage *)context;
+    if (stage == NULL || stage->state != NULL || session == NULL
+        || body_id == CM_HIR_BODY_NONE || expression_terms == NULL
+        || !cm_semantic_session_is_current(session)) {
+        return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    }
+    hir = cm_semantic_session_hir(session);
+    typeck = cm_semantic_session_typeck(session);
+    if (hir == NULL || typeck == NULL
+        || expression_term_count != hir->expressions.len) {
+        return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    }
+    body = cm_hir_get_body(hir, body_id);
+    if (body == NULL || body->state != CM_HIR_BODY_TYPED
+        || body->root_expression == CM_HIR_EXPR_NONE
+        || body->owner.crate_id != cm_semantic_session_local_crate(session)
+        || !cm_hir_def_id_equal(body->owner,
+            cm_semantic_session_exact_owner(session))) {
+        return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    }
+    if (!cm_size_mul(expression_term_count,
+            sizeof(CmSemanticExpressionRecord), &expression_bytes)) {
+        return CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
+    }
+    state = (CmSemanticResultsBodyStageState *)cm_alloc_zeroed(1u,
+        sizeof(*state));
+    state->expression_count = expression_term_count;
+    state->expressions = expression_bytes == 0u ? NULL
+        : (CmSemanticExpressionRecord *)cm_alloc_zeroed(1u,
+            expression_bytes);
+    seen = expression_term_count == 0u ? NULL
+        : (unsigned char *)cm_alloc_zeroed(expression_term_count, 1u);
+    memset(&body_results, 0, sizeof(body_results));
+    body_results.expression_count = expression_term_count;
+    body_results.expressions = state->expressions;
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    expression_count = 0u;
+    status = cm_results_collect_expression(&body_results, hir, body_id,
+        body->root_expression, seen, &sizing, &expression_count, 0u, 0,
+        typeck, expression_terms, expression_term_count);
+    if (status != CM_SEMANTIC_RESULTS_OK) {
+        cm_free(seen);
+        cm_free(state->expressions);
+        cm_free(state);
+        return cm_results_writeback_status(status);
+    }
+    for (expression_index = 0u; expression_index < expression_term_count;
+            ++expression_index) {
+        const CmHirExpr *expression;
+        int owned;
+
+        expression = cm_hir_get_expr(hir,
+            (CmHirExprId)(expression_index + 1u));
+        owned = expression != NULL && expression->owner_body == body_id;
+        if (expression == NULL
+            || (owned && (seen[expression_index] != 2u
+                || expression_terms[expression_index]
+                    == CM_TYPECK_TYPE_NONE))
+            || (!owned && expression_terms[expression_index]
+                != CM_TYPECK_TYPE_NONE)) {
+            cm_free(seen);
+            cm_free(state->expressions);
+            cm_free(state);
+            return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+        }
+    }
+    state->type_bytes = sizing.len == 0u ? NULL
+        : (unsigned char *)cm_alloc(sizing.len);
+    if (seen != NULL) memset(seen, 0, expression_term_count);
+    memset(&output, 0, sizeof(output));
+    output.data = state->type_bytes;
+    output.cap = sizing.len;
+    expression_count = 0u;
+    status = cm_results_collect_expression(&body_results, hir, body_id,
+        body->root_expression, seen, &output, &expression_count, 0u, 1,
+        typeck, expression_terms, expression_term_count);
+    cm_free(seen);
+    if (status != CM_SEMANTIC_RESULTS_OK || output.len != sizing.len) {
+        cm_free(state->type_bytes);
+        cm_free(state->expressions);
+        cm_free(state);
+        return cm_results_writeback_status(status == CM_SEMANTIC_RESULTS_OK
+            ? CM_SEMANTIC_RESULTS_INVALID_HIR : status);
+    }
+    state->hir = hir;
+    state->producer_session = session;
+    state->producer_typeck = typeck;
+    state->universe = cm_semantic_session_universe(session);
+    state->local_crate = cm_semantic_session_local_crate(session);
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->body = body_id;
+    state->owner = body->owner;
+    state->type_bytes_len = sizing.len;
+    state->body_expression_count = expression_count;
+    stage->state = state;
+    return CM_SEMANTIC_BODY_WRITEBACK_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
+    CmSemanticResults *results, CmSemanticSession *session,
+    const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage)
+{
+    CmSemanticResultsBodyStageState *state;
+    const CmHirContext *hir;
+    const CmHirBody *body;
+    CmSemanticBodyRecord *record;
+    unsigned char *combined_type_bytes;
+    size_t new_type_bytes_len;
+    size_t expression_index;
+
+    state = stage == NULL ? NULL
+        : (CmSemanticResultsBodyStageState *)stage->state;
     if (results == NULL || session == NULL || results->sealed
         || check == NULL || check->status != CM_SEMANTIC_BODY_OK
-        || check->body == CM_HIR_BODY_NONE
-        || !cm_semantic_session_is_current(session)) {
+        || state == NULL || !cm_semantic_session_is_current(session)) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    body_id = check->body;
     hir = cm_semantic_session_hir(session);
-    if (hir == NULL || hir != results->hir
+    if (hir == NULL || session != state->producer_session
+        || cm_semantic_session_typeck(session) != state->producer_typeck
+        || cm_semantic_session_universe(session) != state->universe
+        || hir != results->hir || hir != state->hir
+        || state->body != check->body
+        || state->expression_count != results->expression_count
+        || state->local_crate != results->local_crate
         || cm_semantic_session_local_crate(session) != results->local_crate
+        || state->storage_lifetime_id != results->storage_lifetime_id
+        || state->semantic_generation != results->semantic_generation
+        || state->rewind_generation != results->rewind_generation
         || hir->storage.lifetime_id != results->storage_lifetime_id
         || hir->semantic_generation != results->semantic_generation
         || hir->rewind_generation != results->rewind_generation
-        || (size_t)body_id > results->body_count) {
+        || state->body == CM_HIR_BODY_NONE
+        || (size_t)state->body > results->body_count) {
         return CM_SEMANTIC_RESULTS_STALE;
     }
-    body = cm_hir_get_body(hir, body_id);
-    record = &results->bodies[(size_t)body_id - 1u];
+    body = cm_hir_get_body(hir, state->body);
+    record = &results->bodies[(size_t)state->body - 1u];
     if (body == NULL || body->state != CM_HIR_BODY_TYPED
-        || body->root_expression == CM_HIR_EXPR_NONE
-        || body->owner.crate_id != results->local_crate
+        || !cm_hir_def_id_equal(body->owner, state->owner)
         || !cm_hir_def_id_equal(body->owner,
             cm_semantic_session_exact_owner(session))
         || record->present) {
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
-    if (!cm_size_mul(results->expression_count,
-            sizeof(*body_expressions), &expression_bytes)) {
-        return CM_SEMANTIC_RESULTS_OVERFLOW;
-    }
-    seen = results->expression_count == 0u ? NULL
-        : (unsigned char *)cm_alloc_zeroed(results->expression_count, 1u);
-    memset(&sizing, 0, sizeof(sizing));
-    sizing.sizing = 1;
-    expression_count = 0u;
-    status = cm_results_collect_expression(results, hir, body_id,
-        body->root_expression, seen, &sizing, &expression_count, 0u, 0);
-    if (status != CM_SEMANTIC_RESULTS_OK) {
-        cm_free(seen);
-        return status;
-    }
-    if (!cm_size_add(results->type_bytes_len, sizing.len,
-            &new_type_bytes_len)) {
-        cm_free(seen);
-        return CM_SEMANTIC_RESULTS_OVERFLOW;
-    }
-    body_type_bytes = sizing.len == 0u ? NULL
-        : (unsigned char *)cm_alloc(sizing.len);
-    body_expressions = expression_bytes == 0u ? NULL
-        : (CmSemanticExpressionRecord *)cm_alloc_zeroed(1u,
-            expression_bytes);
-    memset(&body_results, 0, sizeof(body_results));
-    body_results.expression_count = results->expression_count;
-    body_results.expressions = body_expressions;
-    if (seen != NULL) memset(seen, 0, results->expression_count);
-    memset(&output, 0, sizeof(output));
-    output.data = body_type_bytes;
-    output.cap = sizing.len;
-    expression_count = 0u;
-    status = cm_results_collect_expression(&body_results, hir, body_id,
-        body->root_expression, seen, &output, &expression_count, 0u, 1);
-    cm_free(seen);
-    if (status != CM_SEMANTIC_RESULTS_OK
-        || output.len != sizing.len) {
-        cm_free(body_expressions);
-        cm_free(body_type_bytes);
-        return status == CM_SEMANTIC_RESULTS_OK
-            ? CM_SEMANTIC_RESULTS_INVALID_HIR : status;
-    }
     for (expression_index = 0u;
             expression_index < results->expression_count;
             ++expression_index) {
-        if (body_expressions[expression_index].present
+        if (state->expressions[expression_index].present
             && results->expressions[expression_index].present) {
-            cm_free(body_expressions);
-            cm_free(body_type_bytes);
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
     }
+    if (!cm_size_add(results->type_bytes_len, state->type_bytes_len,
+            &new_type_bytes_len)) return CM_SEMANTIC_RESULTS_OVERFLOW;
     combined_type_bytes = new_type_bytes_len == 0u ? NULL
         : (unsigned char *)cm_alloc(new_type_bytes_len);
     if (results->type_bytes_len != 0u) {
         memcpy(combined_type_bytes, results->type_bytes,
             results->type_bytes_len);
     }
-    if (sizing.len != 0u) {
+    if (state->type_bytes_len != 0u) {
         memcpy(combined_type_bytes + results->type_bytes_len,
-            body_type_bytes, sizing.len);
+            state->type_bytes, state->type_bytes_len);
     }
     for (expression_index = 0u;
             expression_index < results->expression_count;
             ++expression_index) {
-        if (!body_expressions[expression_index].present) continue;
-        body_expressions[expression_index].type_offset +=
+        if (!state->expressions[expression_index].present) continue;
+        state->expressions[expression_index].type_offset +=
             results->type_bytes_len;
         results->expressions[expression_index] =
-            body_expressions[expression_index];
+            state->expressions[expression_index];
     }
     cm_free(results->type_bytes);
     results->type_bytes = combined_type_bytes;
     results->type_bytes_len = new_type_bytes_len;
     record->present = 1;
     record->owner = body->owner;
-    record->expression_count = expression_count;
+    record->expression_count = state->body_expression_count;
     results->admitted_body_count += 1u;
-    cm_free(body_expressions);
-    cm_free(body_type_bytes);
+    cm_semantic_results_body_stage_destroy(stage);
     return CM_SEMANTIC_RESULTS_OK;
 }
 

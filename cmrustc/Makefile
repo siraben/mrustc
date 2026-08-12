@@ -178,6 +178,7 @@ $(BUILD_DIR)/obj/hir/library.o: src/hir/library_internal.h
 $(BUILD_DIR)/obj/hir/metadata.o: src/hir/library_internal.h src/hir/metadata_codec.h
 $(BUILD_DIR)/obj/hir/metadata_codec.o: src/hir/metadata_codec.h
 $(BUILD_DIR)/obj/hir/admission.o: src/hir/semantic_results_internal.h
+$(BUILD_DIR)/obj/hir/semantic_body.o: src/hir/semantic_body_internal.h
 $(BUILD_DIR)/obj/hir/semantic_results.o: src/hir/semantic_results_internal.h
 
 $(TEST_PROGRAM): tests/test_source_diag.c $(LIBRARY_OBJECTS)

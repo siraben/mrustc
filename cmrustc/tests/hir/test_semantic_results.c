@@ -256,6 +256,7 @@ static void test_partial_checked_draft_does_not_seal(void)
     CmSemanticSessionOptions options;
     CmSemanticBodyResult body_result;
     CmSemanticResults *draft;
+    CmSemanticResultsBodyStage stage;
     const CmHirBody *body;
 
     fixture_init(&fixture,
@@ -276,18 +277,21 @@ static void test_partial_checked_draft_does_not_seal(void)
     options.finalization = &finalization;
     assert(cm_semantic_session_init(&session, &fixture.hir, &options)
         == CM_TRAIT_SOLVER_PROVEN);
-    body_result = cm_semantic_body_check_definition(&session, 1u);
+    cm_semantic_results_body_stage_init(&stage);
+    body_result = cm_semantic_body_check_definition_with_writeback(&session,
+        1u, cm_semantic_results_stage_checked_body, &stage);
     assert(body_result.status == CM_SEMANTIC_BODY_OK);
     draft = NULL;
     assert(cm_semantic_results_begin(&fixture.hir, 1u, &draft)
             == CM_SEMANTIC_RESULTS_OK
         && draft != NULL
-        && cm_semantic_results_add_checked_body(draft, &session,
-            &body_result) == CM_SEMANTIC_RESULTS_OK
-        && cm_semantic_results_add_checked_body(draft, &session,
-            &body_result) == CM_SEMANTIC_RESULTS_INVALID_HIR
+        && cm_semantic_results_commit_checked_body(draft, &session,
+            &body_result, &stage) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_commit_checked_body(draft, &session,
+            &body_result, &stage) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_seal(draft)
             == CM_SEMANTIC_RESULTS_INVALID_HIR);
+    cm_semantic_results_body_stage_destroy(&stage);
     cm_semantic_results_destroy(draft);
     cm_semantic_session_destroy(&session);
     cm_hir_crate_finalization_destroy(&finalization);

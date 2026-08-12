@@ -80,6 +80,7 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     CmHirStatus hir_status;
     CmSemanticResultsStatus results_status;
     CmSemanticResults *semantic_results;
+    CmSemanticResultsBodyStage body_stage;
     CmSemanticAdmissionState *state;
     int mark_active;
 
@@ -110,6 +111,7 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     memset(&finalization, 0, sizeof(finalization));
     memset(&session, 0, sizeof(session));
     semantic_results = NULL;
+    cm_semantic_results_body_stage_init(&body_stage);
     state = NULL;
 
     result.local_bodies = cm_hir_lower_local_bodies(hir, local_crate,
@@ -171,14 +173,16 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
             result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
             goto rollback;
         }
-        result.body_result = cm_semantic_body_check_definition(&session,
-            result.body);
+        result.body_result =
+            cm_semantic_body_check_definition_with_writeback(&session,
+                result.body, cm_semantic_results_stage_checked_body,
+                &body_stage);
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
             goto rollback;
         }
-        results_status = cm_semantic_results_add_checked_body(
-            semantic_results, &session, &result.body_result);
+        results_status = cm_semantic_results_commit_checked_body(
+            semantic_results, &session, &result.body_result, &body_stage);
         cm_semantic_session_destroy(&session);
         if (results_status != CM_SEMANTIC_RESULTS_OK) {
             result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
@@ -221,6 +225,7 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     return result;
 
 rollback:
+    cm_semantic_results_body_stage_destroy(&body_stage);
     cm_semantic_session_destroy(&session);
     cm_hir_crate_finalization_destroy(&finalization);
     if (mark_active) {

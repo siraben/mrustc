@@ -18,11 +18,12 @@ typedef enum CmSemanticResultsStatus {
 } CmSemanticResultsStatus;
 
 /*
- * Canonical authenticated definition-mode structural bytes, independent of
- * generation-local CmHirTypeId. Rigid Self and generic parameters retain
- * their definition identity; these are not concrete instance substitutions.
- * Bytes may be compared across current results produced for the same HIR
- * context; storage is borrowed from the producing results.
+ * Canonical authenticated solved structural bytes, independent of
+ * generation-local CmHirTypeId and session-local CmTypeckTypeId. Generic
+ * parameters retain their definition identity; concrete impl Self is
+ * substituted before publication. Bytes may be compared across current
+ * results produced for the same HIR context; storage is borrowed from the
+ * producing results.
  */
 typedef struct CmSemanticTypeView {
     const unsigned char *bytes;

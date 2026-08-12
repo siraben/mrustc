@@ -1,6 +1,8 @@
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/body.h"
 
+#include "../../src/hir/semantic_body_internal.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -34,6 +36,79 @@ typedef struct TestFixture {
     CmHirExprId present_call;
     CmHirExprId missing_call;
 } TestFixture;
+
+typedef struct WritebackProbe {
+    const CmHirContext *hir;
+    CmHirBodyId expected_body;
+    CmSemanticBodyWritebackStatus result;
+    size_t invocation_count;
+    size_t owned_term_count;
+    CmTypeckTypeId first_owned_term;
+    CmTypeckTypeId binding_variable;
+    CmTypeckTypeId added_term;
+    int mutate_typeck;
+} WritebackProbe;
+
+static CmSemanticBodyWritebackStatus probe_writeback(void *context,
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmTypeckTypeId *expression_terms, size_t expression_term_count)
+{
+    WritebackProbe *probe;
+    const CmTypeckContext *typeck;
+    size_t index;
+
+    probe = (WritebackProbe *)context;
+    assert(probe != NULL && session != NULL
+        && cm_semantic_session_is_current(session)
+        && cm_semantic_session_hir(session) == probe->hir
+        && body == probe->expected_body
+        && expression_terms != NULL
+        && expression_term_count == probe->hir->expressions.len);
+    typeck = cm_semantic_session_typeck(session);
+    assert(typeck != NULL);
+    probe->invocation_count += 1u;
+    probe->owned_term_count = 0u;
+    probe->first_owned_term = CM_TYPECK_TYPE_NONE;
+    for (index = 0u; index < expression_term_count; ++index) {
+        const CmHirExpr *expression;
+        CmTypeckTypeId resolved;
+
+        expression = cm_hir_get_expr(probe->hir,
+            (CmHirExprId)(index + 1u));
+        assert(expression != NULL);
+        if (expression->owner_body != body) {
+            assert(expression_terms[index] == CM_TYPECK_TYPE_NONE);
+            continue;
+        }
+        assert(expression_terms[index] != CM_TYPECK_TYPE_NONE
+            && cm_typeck_resolve(typeck, expression_terms[index], &resolved)
+                == CM_TYPECK_OK
+            && cm_typeck_get_type(typeck, resolved) != NULL);
+        if (probe->first_owned_term == CM_TYPECK_TYPE_NONE) {
+            probe->first_owned_term = expression_terms[index];
+        }
+        probe->owned_term_count += 1u;
+    }
+    assert(probe->owned_term_count != 0u
+        && probe->first_owned_term != CM_TYPECK_TYPE_NONE);
+    if (probe->mutate_typeck) {
+        CmTypeckContext *mutable_typeck;
+        CmTypeckType added;
+
+        mutable_typeck = cm_semantic_session_typeck(session);
+        memset(&added, 0, sizeof(added));
+        added.kind = CM_TYPECK_TYPE_UNIT;
+        added.span.source = 1u;
+        added.span.start = 2u;
+        added.span.end = 5u;
+        assert(probe->binding_variable != CM_TYPECK_TYPE_NONE
+            && cm_typeck_unify(mutable_typeck, probe->binding_variable,
+                probe->first_owned_term) == CM_TYPECK_OK
+            && cm_typeck_add_type(mutable_typeck, &added,
+                &probe->added_term) == CM_TYPECK_OK);
+    }
+    return probe->result;
+}
 
 static CmSpan test_span(uint32_t start, uint32_t end)
 {
@@ -1571,6 +1646,81 @@ static void test_malformed_foreign_and_stale(void)
     fixture_destroy(&fixture);
 }
 
+static void test_definition_writeback_contract_and_rollback(void)
+{
+    TestFixture fixture;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
+    CmHirExpr *root;
+    CmHirTypeId saved_type;
+    CmTypeckTypeId variable;
+    CmTypeckTypeId resolved;
+    const CmTypeckType *resolved_type;
+    WritebackProbe probe;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.present_caller);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+
+    root = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)fixture.present_call - 1u);
+    assert(root != NULL);
+    saved_type = root->type;
+    root->type = fixture.u8_type;
+    type_count = cm_typeck_type_count(typeck);
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && probe.invocation_count == 0u
+        && cm_typeck_type_count(typeck) == type_count);
+    root->type = saved_type;
+
+    result = cm_semantic_body_check_definition(&session,
+        fixture.present_body);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 0u);
+
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u
+        && probe.owned_term_count == 2u);
+
+    assert(cm_typeck_new_variable(typeck, CM_HIR_INFER_GENERAL,
+        test_span(1u, 2u), &variable) == CM_TYPECK_OK);
+    type_count = cm_typeck_type_count(typeck);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = fixture.present_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    probe.binding_variable = variable;
+    probe.mutate_typeck = 1;
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        fixture.present_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.invocation_count == 1u
+        && probe.added_term != CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(typeck) == type_count
+        && cm_typeck_resolve(typeck, variable, &resolved) == CM_TYPECK_OK);
+    resolved_type = cm_typeck_get_type(typeck, resolved);
+    assert(resolved == variable && resolved_type != NULL
+        && resolved_type->kind == CM_TYPECK_TYPE_VARIABLE);
+
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_invalid_api_and_status_names(void)
 {
     TestFixture fixture;
@@ -1615,6 +1765,7 @@ int main(void)
     test_two_parameter_nested_substitution_and_rollback();
     test_whole_body_constraints_and_rollback();
     test_malformed_foreign_and_stale();
+    test_definition_writeback_contract_and_rollback();
     test_invalid_api_and_status_names();
     puts("hir semantic body tests passed");
     return 0;
