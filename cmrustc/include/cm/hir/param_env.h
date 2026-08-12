@@ -66,13 +66,21 @@ typedef struct CmParamEnvFact {
     CmHirDefId parameter_owner;
     CmHirDefId self_owner;
     CmSpan span;
+    /* Aggregate retained for diagnostics and pending-goal summaries. */
     unsigned int blocker_flags;
+    /* Applicability blockers from the implemented subject/trait head only. */
+    unsigned int head_blocker_flags;
     union {
         struct {
             /* NONE denotes the enclosing trait/impl Self. */
             CmHirTypeId subject;
             CmHirNamedType trait_type;
             CmHirAssociatedTypeEquality *equalities;
+            /*
+             * Environment-owned flags for each head-plus-RHS equality,
+             * parallel to equalities.
+             */
+            unsigned int *equality_blocker_flags;
             uint32_t equality_count;
             CmHirPredicateScopeId scope;
             CmHirLifetimeBinder binder;
@@ -139,6 +147,18 @@ CmParamEnvStatus cm_param_env_instantiate_implemented(
  * definition identities remain stable while the environment is current.
  */
 CmParamEnvStatus cm_param_env_instantiate_equality(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmParamEnvEqualityInstance *out_equality,
+    CmTypeckStatus *out_typeck_status);
+
+/*
+ * As above, but permits a projection blocker isolated to the equality RHS so
+ * a recursive normalizer can consume the instantiated target. Every head or
+ * non-projection RHS blocker still rejects transactionally.
+ */
+CmParamEnvStatus cm_param_env_instantiate_equality_target(
     const CmParamEnv *environment, size_t fact_index,
     uint32_t equality_index, CmTypeckContext *typeck,
     const CmParamEnvSubstitution *substitution,

@@ -97,6 +97,64 @@ static CmHirDefId add_associated_declaration(TestFixture *fixture,
     return definition;
 }
 
+static CmHirTypeId add_projection_type(TestFixture *fixture,
+    CmHirDefId trait_definition, CmHirDefId associated_definition,
+    CmHirTypeId self_type)
+{
+    CmHirType type;
+    CmHirTypeId type_id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PROJECTION_KIND;
+    type.span = test_span(4u, 8u);
+    type.data.projection_type.self_type = self_type;
+    type.data.projection_type.trait_type.definition = trait_definition;
+    type.data.projection_type.associated_type.definition =
+        associated_definition;
+    assert(cm_hir_add_type(&fixture->hir, &type, &type_id) == CM_HIR_OK);
+    return type_id;
+}
+
+static CmHirDefId add_granularity_owner(TestFixture *fixture,
+    const char *name, CmHirTypeId subject, CmHirTypeId equality_value,
+    int higher_ranked)
+{
+    CmHirDefId definition;
+    CmHirAssociatedTypeEquality equality;
+    CmHirTraitPredicate predicate;
+    CmInternId lifetime;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_TRAIT, test_span(1u, 20u),
+        &definition) == CM_HIR_OK);
+    memset(&equality, 0, sizeof(equality));
+    equality.associated_type = fixture->bound_associated_type;
+    equality.value = equality_value;
+    equality.span = test_span(6u, 9u);
+    memset(&predicate, 0, sizeof(predicate));
+    predicate.subject = subject;
+    predicate.trait_type.definition = fixture->bound_trait;
+    predicate.equalities = &equality;
+    predicate.equality_count = 1u;
+    predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
+    predicate.span = test_span(4u, 10u);
+    lifetime = cm_hir_intern(&fixture->hir, "a");
+    if (higher_ranked) {
+        predicate.binder.lifetimes = &lifetime;
+        predicate.binder.lifetime_count = 1u;
+        predicate.binder.span = predicate.span;
+    }
+    init_item(&item, CM_HIR_ITEM_TRAIT, definition, fixture->root, name,
+        &fixture->hir);
+    item.predicates = &predicate;
+    item.predicate_count = 1u;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirTypeId add_parameter_type(TestFixture *fixture,
     CmHirGenericParamId parameter)
 {
@@ -265,6 +323,55 @@ static CmHirDefId add_mixed_associated_type(TestFixture *fixture)
     return definition;
 }
 
+static CmHirDefId add_split_owner_equality(TestFixture *fixture)
+{
+    CmHirDefId definition;
+    CmHirGenericParam parameter;
+    CmHirAssociatedTypeEquality equality;
+    CmHirTraitPredicate predicate;
+    CmHirTypeId exact_type;
+    CmHirTypeId enclosing_type;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_TYPE_ALIAS, test_span(1u, 20u),
+        &definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = definition;
+    parameter.name = cm_hir_intern(&fixture->hir, "R");
+    parameter.span = test_span(2u, 3u);
+    assert(cm_hir_add_generic_param(&fixture->hir, &parameter,
+        &fixture->associated_parameter) == CM_HIR_OK);
+    exact_type = add_parameter_type(fixture,
+        fixture->associated_parameter);
+    enclosing_type = add_parameter_type(fixture,
+        fixture->outer_parameter);
+    memset(&equality, 0, sizeof(equality));
+    equality.associated_type = fixture->bound_associated_type;
+    equality.value = enclosing_type;
+    equality.span = test_span(6u, 9u);
+    memset(&predicate, 0, sizeof(predicate));
+    predicate.subject = exact_type;
+    predicate.trait_type.definition = fixture->bound_trait;
+    predicate.equalities = &equality;
+    predicate.equality_count = 1u;
+    predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
+    predicate.span = test_span(4u, 10u);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, fixture->root,
+        "SplitOwner", &fixture->hir);
+    item.parent_definition = fixture->outer_trait;
+    item.generic_parameter_start = fixture->associated_parameter;
+    item.generic_parameter_count = 1u;
+    item.predicates = &predicate;
+    item.predicate_count = 1u;
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    item.data.type_alias_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static void fixture_init(TestFixture *fixture)
 {
     memset(fixture, 0, sizeof(*fixture));
@@ -302,12 +409,21 @@ static void test_environment_facts_and_solver(void)
     CmTypeckContext typeck;
     CmTypeckGenericArg generic_argument;
     CmTypeckInstantiation exact;
+    CmTypeckInstantiation enclosing;
+    CmTypeckGenericArg exact_argument;
+    CmTypeckGenericArg enclosing_argument;
     CmParamEnvSubstitution substitution;
     CmImplementedTraitGoal goal;
     CmTraitSelectionResult result;
+    CmTraitSelectionResult selection;
+    CmParamEnvEqualityInstance equality;
+    CmTypeckNamedType instantiated_trait;
     CmTypeckTypeId u8_type;
     CmTypeckTypeId bool_type;
     CmTypeckTypeId reference_type;
+    CmTypeckTypeId instantiated_subject;
+    CmTypeckStatus typeck_status;
+    CmHirDefId owner;
     CmTypeckType reference;
     const CmParamEnvFact *fact;
     size_t fact_index;
@@ -318,6 +434,7 @@ static void test_environment_facts_and_solver(void)
     int saw_equality_pending;
     int saw_outlives_pending;
     size_t equality_fact_index;
+    size_t type_count;
 
     fixture_init(&fixture);
     memset(&environment, 0, sizeof(environment));
@@ -469,6 +586,290 @@ static void test_environment_facts_and_solver(void)
     assert(result.kind == CM_TRAIT_SOLVER_INVALID);
     cm_typeck_context_destroy(&typeck);
     cm_trait_impl_index_destroy(&index);
+    cm_param_env_destroy(&environment);
+    cm_hir_context_destroy(&fixture.hir);
+
+    /* Head and RHS must be classified together for owner dependencies.  An
+     * exact-owner head remains usable, but its equality cannot combine an
+     * enclosing-owner RHS in one instantiation. */
+    fixture_init(&fixture);
+    owner = add_split_owner_equality(&fixture);
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir, owner)
+        == CM_PARAM_ENV_READY);
+    fact = cm_param_env_fact(&environment, 0u);
+    assert(fact != NULL
+        && fact->parameter_owner.crate_id == owner.crate_id
+        && fact->parameter_owner.index == owner.index
+        && fact->head_blocker_flags == CM_PARAM_ENV_BLOCK_NONE
+        && fact->data.implemented.equality_blocker_flags != NULL
+        && fact->data.implemented.equality_blocker_flags[0]
+            == CM_PARAM_ENV_BLOCK_MIXED_OWNER
+        && fact->blocker_flags == CM_PARAM_ENV_BLOCK_MIXED_OWNER);
+    assert(cm_param_env_pending_count(&environment) == 2u
+        && cm_param_env_pending(&environment, 0u)->kind
+            == CM_PARAM_ENV_PENDING_MIXED_OWNER_SUBSTITUTION
+        && cm_param_env_pending(&environment, 1u)->kind
+            == CM_PARAM_ENV_PENDING_PROJECTION_EQUALITY);
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &bool_type)
+        == CM_TYPECK_OK);
+    memset(&exact_argument, 0, sizeof(exact_argument));
+    exact_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    exact_argument.data.type = bool_type;
+    enclosing_argument = exact_argument;
+    memset(&exact, 0, sizeof(exact));
+    exact.parameter_owner = owner;
+    exact.arguments = &exact_argument;
+    exact.argument_count = 1u;
+    exact.self_owner = fixture.outer_trait;
+    exact.self_type = bool_type;
+    memset(&enclosing, 0, sizeof(enclosing));
+    enclosing.parameter_owner = fixture.outer_trait;
+    enclosing.arguments = &enclosing_argument;
+    enclosing.argument_count = 1u;
+    enclosing.self_owner = fixture.outer_trait;
+    enclosing.self_type = bool_type;
+    substitution.exact = &exact;
+    substitution.enclosing = &enclosing;
+    assert(cm_param_env_instantiate_implemented(&environment, 0u, &typeck,
+        &substitution, &instantiated_subject, &instantiated_trait,
+        &typeck_status) == CM_PARAM_ENV_READY
+        && typeck_status == CM_TYPECK_OK
+        && instantiated_subject == bool_type);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = owner;
+    goal.self_type = bool_type;
+    goal.trait_type = trait_query(fixture.bound_trait);
+    selection = cm_trait_solver_solve_implemented(&index, &environment,
+        &typeck, &substitution, &goal);
+    assert(selection.kind == CM_TRAIT_SOLVER_PROVEN
+        && selection.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && selection.param_env_fact_index == 0u);
+    type_count = cm_typeck_type_count(&typeck);
+    memset(&equality, 0, sizeof(equality));
+    assert(cm_param_env_instantiate_equality_target(&environment, 0u, 0u,
+        &typeck, &substitution, &equality, &typeck_status)
+        == CM_PARAM_ENV_UNSUPPORTED
+        && equality.subject == CM_TYPECK_TYPE_NONE
+        && equality.value == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&typeck) == type_count);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    cm_param_env_destroy(&environment);
+    cm_hir_context_destroy(&fixture.hir);
+}
+
+static void test_blocker_granularity(void)
+{
+    TestFixture fixture;
+    CmParamEnv environment;
+    CmTraitImplIndex index;
+    CmTypeckContext typeck;
+    CmTypeckInstantiation exact;
+    CmParamEnvSubstitution substitution;
+    CmImplementedTraitGoal goal;
+    CmTraitSelectionResult selection;
+    CmParamEnvEqualityInstance equality;
+    CmTypeckNamedType instantiated_trait;
+    const CmTypeckType *target_type;
+    const CmParamEnvFact *fact;
+    CmTypeckTypeId projection_hir;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId instantiated_subject;
+    CmTypeckStatus typeck_status;
+    CmHirDefId owner;
+    size_t type_count;
+
+    /* A projection isolated to the equality RHS must not poison the usable
+     * implemented head. Strict equality consumers still reject it, while a
+     * recursive normalizer may request the instantiated projection target. */
+    fixture_init(&fixture);
+    projection_hir = add_projection_type(&fixture, fixture.bound_trait,
+        fixture.bound_associated_type, fixture.bool_hir);
+    owner = add_granularity_owner(&fixture, "RhsProjection",
+        fixture.bool_hir, projection_hir, 0);
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir, owner)
+        == CM_PARAM_ENV_READY);
+    fact = cm_param_env_fact(&environment, 0u);
+    assert(fact != NULL
+        && fact->blocker_flags == CM_PARAM_ENV_BLOCK_PROJECTION
+        && fact->head_blocker_flags == CM_PARAM_ENV_BLOCK_NONE
+        && fact->data.implemented.equality_blocker_flags != NULL
+        && fact->data.implemented.equality_blocker_flags[0]
+            == CM_PARAM_ENV_BLOCK_PROJECTION
+        && fact->data.implemented.equality_count == 1u);
+    assert(cm_param_env_pending_count(&environment) == 2u
+        && cm_param_env_pending(&environment, 0u)->fact_index == 0u
+        && cm_param_env_pending(&environment, 0u)->kind
+            == CM_PARAM_ENV_PENDING_PROJECTION_NORMALIZATION
+        && cm_param_env_pending(&environment, 1u)->fact_index == 0u
+        && cm_param_env_pending(&environment, 1u)->kind
+            == CM_PARAM_ENV_PENDING_PROJECTION_EQUALITY);
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
+        == CM_TYPECK_OK);
+    memset(&exact, 0, sizeof(exact));
+    exact.parameter_owner = owner;
+    exact.self_owner = owner;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    assert(cm_param_env_instantiate_implemented(&environment, 0u, &typeck,
+        &substitution, &instantiated_subject, &instantiated_trait,
+        &typeck_status) == CM_PARAM_ENV_READY
+        && typeck_status == CM_TYPECK_OK
+        && instantiated_subject != CM_TYPECK_TYPE_NONE
+        && cm_hir_def_id_equal(instantiated_trait.definition,
+            fixture.bound_trait));
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = owner;
+    goal.self_type = bool_type;
+    goal.trait_type = trait_query(fixture.bound_trait);
+    selection = cm_trait_solver_solve_implemented(&index, &environment,
+        &typeck, &substitution, &goal);
+    assert(selection.kind == CM_TRAIT_SOLVER_PROVEN
+        && selection.proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && selection.param_env_fact_index == 0u
+        && selection.param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && cm_hir_def_id_is_none(selection.impl_definition));
+    type_count = cm_typeck_type_count(&typeck);
+    memset(&equality, 0, sizeof(equality));
+    assert(cm_param_env_instantiate_equality(&environment, 0u, 0u,
+        &typeck, &substitution, &equality, &typeck_status)
+        == CM_PARAM_ENV_UNSUPPORTED
+        && equality.subject == CM_TYPECK_TYPE_NONE
+        && equality.value == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&typeck) == type_count);
+    assert(cm_param_env_instantiate_equality_target(&environment, 0u, 0u,
+        &typeck, &substitution, &equality, &typeck_status)
+        == CM_PARAM_ENV_READY
+        && typeck_status == CM_TYPECK_OK
+        && equality.fact_index == 0u
+        && equality.equality_index == 0u
+        && equality.subject != CM_TYPECK_TYPE_NONE
+        && equality.value != CM_TYPECK_TYPE_NONE
+        && cm_hir_def_id_equal(equality.associated_type,
+            fixture.bound_associated_type));
+    target_type = cm_typeck_get_type(&typeck, equality.value);
+    assert(target_type != NULL
+        && target_type->kind == CM_TYPECK_TYPE_PROJECTION);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    cm_param_env_destroy(&environment);
+    cm_hir_context_destroy(&fixture.hir);
+
+    /* Higher-ranked scope is a global blocker for both the head and RHS;
+     * projection-target mode must not bypass it. */
+    fixture_init(&fixture);
+    projection_hir = add_projection_type(&fixture, fixture.bound_trait,
+        fixture.bound_associated_type, fixture.bool_hir);
+    owner = add_granularity_owner(&fixture, "HigherRankedProjection",
+        fixture.bool_hir, projection_hir, 1);
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir, owner)
+        == CM_PARAM_ENV_READY);
+    fact = cm_param_env_fact(&environment, 0u);
+    assert(fact != NULL
+        && fact->head_blocker_flags == CM_PARAM_ENV_BLOCK_HIGHER_RANKED
+        && fact->data.implemented.equality_blocker_flags != NULL
+        && fact->data.implemented.equality_blocker_flags[0]
+            == (CM_PARAM_ENV_BLOCK_HIGHER_RANKED
+                | CM_PARAM_ENV_BLOCK_PROJECTION)
+        && fact->blocker_flags
+            == (CM_PARAM_ENV_BLOCK_HIGHER_RANKED
+                | CM_PARAM_ENV_BLOCK_PROJECTION));
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
+        == CM_TYPECK_OK);
+    memset(&exact, 0, sizeof(exact));
+    exact.parameter_owner = owner;
+    exact.self_owner = owner;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    type_count = cm_typeck_type_count(&typeck);
+    assert(cm_param_env_instantiate_implemented(&environment, 0u, &typeck,
+        &substitution, &instantiated_subject, &instantiated_trait,
+        &typeck_status) == CM_PARAM_ENV_UNSUPPORTED);
+    assert(cm_param_env_instantiate_equality_target(&environment, 0u, 0u,
+        &typeck, &substitution, &equality, &typeck_status)
+        == CM_PARAM_ENV_UNSUPPORTED
+        && equality.subject == CM_TYPECK_TYPE_NONE
+        && equality.value == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&typeck) == type_count);
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = owner;
+    goal.self_type = bool_type;
+    goal.trait_type = trait_query(fixture.bound_trait);
+    selection = cm_trait_solver_solve_implemented(&index, &environment,
+        &typeck, &substitution, &goal);
+    assert(selection.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && selection.proof_origin == CM_TRAIT_PROOF_NONE
+        && selection.param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+        && selection.param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && cm_typeck_type_count(&typeck) == type_count);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    cm_param_env_destroy(&environment);
+    cm_hir_context_destroy(&fixture.hir);
+
+    /* A projection in the implemented subject is a head blocker even when
+     * the equality RHS itself is concrete. */
+    fixture_init(&fixture);
+    projection_hir = add_projection_type(&fixture, fixture.bound_trait,
+        fixture.bound_associated_type, fixture.bool_hir);
+    owner = add_granularity_owner(&fixture, "HeadProjection",
+        projection_hir, fixture.u8_hir, 0);
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir, owner)
+        == CM_PARAM_ENV_READY);
+    fact = cm_param_env_fact(&environment, 0u);
+    assert(fact != NULL
+        && fact->blocker_flags == CM_PARAM_ENV_BLOCK_PROJECTION
+        && fact->head_blocker_flags == CM_PARAM_ENV_BLOCK_PROJECTION
+        && fact->data.implemented.equality_blocker_flags != NULL
+        && fact->data.implemented.equality_blocker_flags[0]
+            == CM_PARAM_ENV_BLOCK_PROJECTION);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    memset(&exact, 0, sizeof(exact));
+    exact.parameter_owner = owner;
+    exact.self_owner = owner;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    type_count = cm_typeck_type_count(&typeck);
+    assert(cm_param_env_instantiate_implemented(&environment, 0u, &typeck,
+        &substitution, &instantiated_subject, &instantiated_trait,
+        &typeck_status) == CM_PARAM_ENV_UNSUPPORTED);
+    assert(cm_param_env_instantiate_equality_target(&environment, 0u, 0u,
+        &typeck, &substitution, &equality, &typeck_status)
+        == CM_PARAM_ENV_UNSUPPORTED
+        && equality.subject == CM_TYPECK_TYPE_NONE
+        && equality.value == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&typeck) == type_count);
+    (void)projection_type;
+    cm_typeck_context_destroy(&typeck);
     cm_param_env_destroy(&environment);
     cm_hir_context_destroy(&fixture.hir);
 }
@@ -716,6 +1117,7 @@ static void test_semantic_generation_stales_environment(void)
 int main(void)
 {
     test_environment_facts_and_solver();
+    test_blocker_granularity();
     test_mixed_owner_and_staleness();
     test_dependency_overflow_is_not_projection();
     test_rewind_generation_stales_environment();

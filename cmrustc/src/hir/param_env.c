@@ -277,45 +277,17 @@ static void cm_param_env_add_pending(CmParamEnvState *state,
     (void)cm_vec_push(&state->pending, &pending);
 }
 
-static unsigned int cm_param_env_fact_dependencies(CmParamEnvState *state,
-    const CmHirTraitPredicate *predicate, CmHirDefId source_owner,
-    size_t fact_index, unsigned int *out_dependencies)
+static unsigned int cm_param_env_dependency_blockers(
+    unsigned int dependencies)
 {
-    CmParamDependencyScan scan;
-    unsigned int dependencies;
     unsigned int blockers;
-    uint32_t equality_index;
 
-    scan.hir = state->hir;
-    scan.exact_owner = state->exact_owner;
-    scan.enclosing_owner = state->enclosing_owner;
-    dependencies = cm_param_dependency_type(&scan, predicate->subject, 0u)
-        | cm_param_dependency_named(&scan, &predicate->trait_type, 0u);
-    for (equality_index = 0u;
-         equality_index < predicate->equality_count; ++equality_index) {
-        dependencies |= cm_param_dependency_type(&scan,
-            predicate->equalities[equality_index].value, 0u);
-    }
     blockers = CM_PARAM_ENV_BLOCK_NONE;
-    *out_dependencies = dependencies;
-    if (predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
-        || predicate->binder.lifetime_count != 0u
-        || (dependencies & CM_PARAM_DEP_LATE_BOUND) != 0u) {
+    if ((dependencies & CM_PARAM_DEP_LATE_BOUND) != 0u) {
         blockers |= CM_PARAM_ENV_BLOCK_HIGHER_RANKED;
-        cm_param_env_add_pending(state, CM_PARAM_ENV_PENDING_HIGHER_RANKED,
-            source_owner, fact_index, predicate->span);
-    }
-    if (predicate->modifier != CM_HIR_PREDICATE_REQUIRED) {
-        blockers |= CM_PARAM_ENV_BLOCK_MODIFIER;
-        cm_param_env_add_pending(state,
-            CM_PARAM_ENV_PENDING_UNSUPPORTED_MODIFIER,
-            source_owner, fact_index, predicate->span);
     }
     if ((dependencies & CM_PARAM_DEP_PROJECTION) != 0u) {
         blockers |= CM_PARAM_ENV_BLOCK_PROJECTION;
-        cm_param_env_add_pending(state,
-            CM_PARAM_ENV_PENDING_PROJECTION_NORMALIZATION,
-            source_owner, fact_index, predicate->span);
     }
     if ((dependencies & CM_PARAM_DEP_OVERFLOW) != 0u) {
         blockers |= CM_PARAM_ENV_BLOCK_OVERFLOW;
@@ -323,13 +295,89 @@ static unsigned int cm_param_env_fact_dependencies(CmParamEnvState *state,
     if ((dependencies & CM_PARAM_DEP_EXACT) != 0u
         && (dependencies & CM_PARAM_DEP_ENCLOSING) != 0u) {
         blockers |= CM_PARAM_ENV_BLOCK_MIXED_OWNER;
-        cm_param_env_add_pending(state,
-            CM_PARAM_ENV_PENDING_MIXED_OWNER_SUBSTITUTION,
-            source_owner, fact_index, predicate->span);
     }
     if ((dependencies & (CM_PARAM_DEP_FOREIGN
             | CM_PARAM_DEP_SELF_FOREIGN)) != 0u) {
         blockers |= CM_PARAM_ENV_BLOCK_FOREIGN_OWNER;
+    }
+    return blockers;
+}
+
+static unsigned int cm_param_env_fact_dependencies(CmParamEnvState *state,
+    const CmHirTraitPredicate *predicate, CmHirDefId source_owner,
+    size_t fact_index, unsigned int *out_dependencies,
+    unsigned int *out_head_blockers,
+    unsigned int **out_equality_blockers)
+{
+    CmParamDependencyScan scan;
+    unsigned int dependencies;
+    unsigned int blockers;
+    unsigned int head_dependencies;
+    unsigned int global_blockers;
+    unsigned int *equality_blockers;
+    uint32_t equality_index;
+
+    scan.hir = state->hir;
+    scan.exact_owner = state->exact_owner;
+    scan.enclosing_owner = state->enclosing_owner;
+
+    head_dependencies = cm_param_dependency_type(&scan,
+        predicate->subject, 0u)
+        | cm_param_dependency_named(&scan, &predicate->trait_type, 0u);
+    dependencies = head_dependencies;
+    equality_blockers = NULL;
+    if (predicate->equality_count != 0u) {
+        equality_blockers = (unsigned int *)cm_alloc_zeroed(
+            predicate->equality_count, sizeof(unsigned int));
+    }
+    global_blockers = CM_PARAM_ENV_BLOCK_NONE;
+    if (predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+        || predicate->binder.lifetime_count != 0u) {
+        global_blockers |= CM_PARAM_ENV_BLOCK_HIGHER_RANKED;
+    }
+    if (predicate->modifier != CM_HIR_PREDICATE_REQUIRED) {
+        global_blockers |= CM_PARAM_ENV_BLOCK_MODIFIER;
+    }
+    for (equality_index = 0u;
+         equality_index < predicate->equality_count; ++equality_index) {
+        unsigned int equality_dependencies;
+
+        equality_dependencies = cm_param_dependency_type(&scan,
+            predicate->equalities[equality_index].value, 0u);
+        dependencies |= equality_dependencies;
+        equality_blockers[equality_index] = global_blockers
+            | cm_param_env_dependency_blockers(head_dependencies
+                | equality_dependencies);
+    }
+    *out_head_blockers = global_blockers
+        | cm_param_env_dependency_blockers(head_dependencies);
+    *out_equality_blockers = equality_blockers;
+    blockers = *out_head_blockers;
+    for (equality_index = 0u;
+         equality_index < predicate->equality_count; ++equality_index) {
+        blockers |= equality_blockers[equality_index];
+    }
+    *out_dependencies = dependencies;
+    if ((blockers & CM_PARAM_ENV_BLOCK_HIGHER_RANKED) != 0u) {
+        cm_param_env_add_pending(state, CM_PARAM_ENV_PENDING_HIGHER_RANKED,
+            source_owner, fact_index, predicate->span);
+    }
+    if ((blockers & CM_PARAM_ENV_BLOCK_MODIFIER) != 0u) {
+        cm_param_env_add_pending(state,
+            CM_PARAM_ENV_PENDING_UNSUPPORTED_MODIFIER,
+            source_owner, fact_index, predicate->span);
+    }
+    if ((blockers & CM_PARAM_ENV_BLOCK_PROJECTION) != 0u) {
+        cm_param_env_add_pending(state,
+            CM_PARAM_ENV_PENDING_PROJECTION_NORMALIZATION,
+            source_owner, fact_index, predicate->span);
+    }
+    if ((blockers & CM_PARAM_ENV_BLOCK_MIXED_OWNER) != 0u) {
+        cm_param_env_add_pending(state,
+            CM_PARAM_ENV_PENDING_MIXED_OWNER_SUBSTITUTION,
+            source_owner, fact_index, predicate->span);
+    }
+    if ((blockers & CM_PARAM_ENV_BLOCK_FOREIGN_OWNER) != 0u) {
         cm_param_env_add_pending(state,
             CM_PARAM_ENV_PENDING_FOREIGN_OWNER_SUBSTITUTION,
             source_owner, fact_index, predicate->span);
@@ -372,7 +420,9 @@ static void cm_param_env_add_predicates(CmParamEnvState *state,
         fact.data.implemented.modifier = predicate->modifier;
         fact_index = state->facts.len;
         fact.blocker_flags = cm_param_env_fact_dependencies(state,
-            predicate, item->definition, fact_index, &dependencies);
+            predicate, item->definition, fact_index, &dependencies,
+            &fact.head_blocker_flags,
+            &fact.data.implemented.equality_blocker_flags);
         if ((dependencies & CM_PARAM_DEP_EXACT) == 0u
             && (dependencies & CM_PARAM_DEP_ENCLOSING) != 0u) {
             fact.parameter_owner = state->enclosing_owner;
@@ -433,7 +483,8 @@ static void cm_param_env_add_trait_facts(CmParamEnvState *state,
          ++index) {
         const CmHirSupertrait *supertrait;
         CmParamDependencyScan scan;
-        unsigned int dependencies;
+        unsigned int global_blockers;
+        unsigned int head_dependencies;
         uint32_t equality_index;
         size_t fact_index;
 
@@ -456,45 +507,59 @@ static void cm_param_env_add_trait_facts(CmParamEnvState *state,
         scan.hir = state->hir;
         scan.exact_owner = state->exact_owner;
         scan.enclosing_owner = state->enclosing_owner;
-        dependencies = cm_param_dependency_named(&scan,
+        head_dependencies = cm_param_dependency_named(&scan,
             &supertrait->trait_type, 0u);
+        global_blockers = supertrait->modifier
+                == CM_HIR_SUPERTRAIT_REQUIRED
+            ? CM_PARAM_ENV_BLOCK_NONE : CM_PARAM_ENV_BLOCK_MODIFIER;
+        fact.head_blocker_flags = global_blockers
+            | cm_param_env_dependency_blockers(head_dependencies);
+        if (supertrait->equality_count != 0u) {
+            fact.data.implemented.equality_blocker_flags =
+                (unsigned int *)cm_alloc_zeroed(
+                    supertrait->equality_count, sizeof(unsigned int));
+        }
         for (equality_index = 0u;
              equality_index < supertrait->equality_count;
              ++equality_index) {
-            dependencies |= cm_param_dependency_type(&scan,
+            unsigned int equality_dependencies;
+
+            equality_dependencies = cm_param_dependency_type(&scan,
                 supertrait->equalities[equality_index].value, 0u);
+            fact.data.implemented.equality_blocker_flags[equality_index] =
+                global_blockers
+                | cm_param_env_dependency_blockers(head_dependencies
+                    | equality_dependencies);
         }
         if (supertrait->modifier != CM_HIR_SUPERTRAIT_REQUIRED) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_MODIFIER;
             cm_param_env_add_pending(state,
                 CM_PARAM_ENV_PENDING_UNSUPPORTED_MODIFIER,
                 trait_item->definition, fact_index, supertrait->span);
         }
-        if ((dependencies & CM_PARAM_DEP_LATE_BOUND) != 0u) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_HIGHER_RANKED;
+        fact.blocker_flags = fact.head_blocker_flags;
+        for (equality_index = 0u;
+             equality_index < supertrait->equality_count;
+             ++equality_index) {
+            fact.blocker_flags |= fact.data.implemented
+                .equality_blocker_flags[equality_index];
+        }
+        if ((fact.blocker_flags
+                & CM_PARAM_ENV_BLOCK_HIGHER_RANKED) != 0u) {
             cm_param_env_add_pending(state,
                 CM_PARAM_ENV_PENDING_HIGHER_RANKED,
                 trait_item->definition, fact_index, supertrait->span);
         }
-        if ((dependencies & CM_PARAM_DEP_PROJECTION) != 0u) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_PROJECTION;
+        if ((fact.blocker_flags & CM_PARAM_ENV_BLOCK_PROJECTION) != 0u) {
             cm_param_env_add_pending(state,
                 CM_PARAM_ENV_PENDING_PROJECTION_NORMALIZATION,
                 trait_item->definition, fact_index, supertrait->span);
         }
-        if ((dependencies & CM_PARAM_DEP_OVERFLOW) != 0u) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_OVERFLOW;
-        }
-        if ((dependencies & CM_PARAM_DEP_EXACT) != 0u
-            && (dependencies & CM_PARAM_DEP_ENCLOSING) != 0u) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_MIXED_OWNER;
+        if ((fact.blocker_flags & CM_PARAM_ENV_BLOCK_MIXED_OWNER) != 0u) {
             cm_param_env_add_pending(state,
                 CM_PARAM_ENV_PENDING_MIXED_OWNER_SUBSTITUTION,
                 trait_item->definition, fact_index, supertrait->span);
         }
-        if ((dependencies & (CM_PARAM_DEP_FOREIGN
-                | CM_PARAM_DEP_SELF_FOREIGN)) != 0u) {
-            fact.blocker_flags |= CM_PARAM_ENV_BLOCK_FOREIGN_OWNER;
+        if ((fact.blocker_flags & CM_PARAM_ENV_BLOCK_FOREIGN_OWNER) != 0u) {
             cm_param_env_add_pending(state,
                 CM_PARAM_ENV_PENDING_FOREIGN_OWNER_SUBSTITUTION,
                 trait_item->definition, fact_index, supertrait->span);
@@ -597,9 +662,19 @@ CmParamEnvStatus cm_param_env_init(CmParamEnv *environment,
 void cm_param_env_destroy(CmParamEnv *environment)
 {
     CmParamEnvState *state;
+    size_t fact_index;
 
     state = cm_param_env_state(environment);
     if (state == NULL) return;
+    for (fact_index = 0u; fact_index < state->facts.len; ++fact_index) {
+        CmParamEnvFact *fact;
+
+        fact = (CmParamEnvFact *)cm_vec_at(&state->facts, fact_index);
+        if (fact != NULL && fact->kind == CM_PARAM_ENV_FACT_IMPLEMENTED) {
+            cm_free(fact->data.implemented.equality_blocker_flags);
+            fact->data.implemented.equality_blocker_flags = NULL;
+        }
+    }
     cm_vec_destroy(&state->pending);
     cm_vec_destroy(&state->facts);
     cm_free(state);
@@ -709,12 +784,13 @@ CmParamEnvStatus cm_param_env_instantiate_implemented(
     if (fact == NULL || fact->kind != CM_PARAM_ENV_FACT_IMPLEMENTED
         || typeck == NULL || cm_typeck_hir_context(typeck) != state->hir
         || out_subject == NULL || out_trait == NULL
-        || fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
-        if (fact != NULL && (fact->blocker_flags
+        || fact->head_blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
+        if (fact != NULL && (fact->head_blocker_flags
                 & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u) {
             return CM_PARAM_ENV_OVERFLOW;
         }
-        return fact != NULL && fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+        return fact != NULL
+                && fact->head_blocker_flags != CM_PARAM_ENV_BLOCK_NONE
             ? CM_PARAM_ENV_UNSUPPORTED : CM_PARAM_ENV_INVALID;
     }
     instantiation = cm_param_env_choose_instantiation(state, fact,
@@ -766,12 +842,12 @@ CmParamEnvStatus cm_param_env_instantiate_implemented(
     return CM_PARAM_ENV_TYPECK_FAILURE;
 }
 
-CmParamEnvStatus cm_param_env_instantiate_equality(
+static CmParamEnvStatus cm_param_env_instantiate_equality_mode(
     const CmParamEnv *environment, size_t fact_index,
     uint32_t equality_index, CmTypeckContext *typeck,
     const CmParamEnvSubstitution *substitution,
     CmParamEnvEqualityInstance *out_equality,
-    CmTypeckStatus *out_typeck_status)
+    CmTypeckStatus *out_typeck_status, int allow_rhs_projection)
 {
     const CmTypeckInstantiation *instantiation;
     const CmParamEnvState *state;
@@ -782,6 +858,7 @@ CmParamEnvStatus cm_param_env_instantiate_equality(
     CmParamEnvEqualityInstance result;
     CmTypeckSnapshot snapshot;
     CmTypeckStatus status;
+    unsigned int equality_blockers;
 
     if (out_equality != NULL) memset(out_equality, 0, sizeof(*out_equality));
     if (out_typeck_status != NULL) {
@@ -790,17 +867,32 @@ CmParamEnvStatus cm_param_env_instantiate_equality(
     state = cm_param_env_state_const(environment);
     fact = cm_param_env_fact(environment, fact_index);
     if (!cm_param_env_state_current(state)) return CM_PARAM_ENV_STALE;
+    equality_blockers = CM_PARAM_ENV_BLOCK_NONE;
+    if (fact != NULL && fact->kind == CM_PARAM_ENV_FACT_IMPLEMENTED
+        && equality_index < fact->data.implemented.equality_count
+        && fact->data.implemented.equality_blocker_flags != NULL) {
+        equality_blockers = fact->data.implemented
+            .equality_blocker_flags[equality_index];
+    }
     if (fact == NULL || fact->kind != CM_PARAM_ENV_FACT_IMPLEMENTED
         || typeck == NULL || cm_typeck_hir_context(typeck) != state->hir
         || out_equality == NULL
         || equality_index >= fact->data.implemented.equality_count
         || fact->data.implemented.equalities == NULL
-        || fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
-        if (fact != NULL && (fact->blocker_flags
+        || fact->data.implemented.equality_blocker_flags == NULL
+        || fact->head_blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+        || (allow_rhs_projection
+            ? (equality_blockers
+                & ~(unsigned int)CM_PARAM_ENV_BLOCK_PROJECTION) != 0u
+            : equality_blockers != CM_PARAM_ENV_BLOCK_NONE)) {
+        if (fact != NULL && ((fact->head_blocker_flags
+                | equality_blockers)
                 & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u) {
             return CM_PARAM_ENV_OVERFLOW;
         }
-        return fact != NULL && fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+        return fact != NULL
+                && (fact->head_blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+                    || equality_blockers != CM_PARAM_ENV_BLOCK_NONE)
             ? CM_PARAM_ENV_UNSUPPORTED : CM_PARAM_ENV_INVALID;
     }
     instantiation = cm_param_env_choose_instantiation(state, fact,
@@ -870,6 +962,30 @@ CmParamEnvStatus cm_param_env_instantiate_equality(
         return CM_PARAM_ENV_UNSUPPORTED;
     }
     return CM_PARAM_ENV_TYPECK_FAILURE;
+}
+
+CmParamEnvStatus cm_param_env_instantiate_equality(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmParamEnvEqualityInstance *out_equality,
+    CmTypeckStatus *out_typeck_status)
+{
+    return cm_param_env_instantiate_equality_mode(environment, fact_index,
+        equality_index, typeck, substitution, out_equality,
+        out_typeck_status, 0);
+}
+
+CmParamEnvStatus cm_param_env_instantiate_equality_target(
+    const CmParamEnv *environment, size_t fact_index,
+    uint32_t equality_index, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    CmParamEnvEqualityInstance *out_equality,
+    CmTypeckStatus *out_typeck_status)
+{
+    return cm_param_env_instantiate_equality_mode(environment, fact_index,
+        equality_index, typeck, substitution, out_equality,
+        out_typeck_status, 1);
 }
 
 const char *cm_param_env_status_name(CmParamEnvStatus status)

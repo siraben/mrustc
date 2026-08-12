@@ -2298,11 +2298,12 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
             || !cm_hir_def_id_equal(
                 fact->data.implemented.trait_type.definition,
                 goal->trait_type.definition)) continue;
-        if ((fact->blocker_flags & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u) {
+        if ((fact->head_blocker_flags
+                & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u) {
             result.kind = CM_TRAIT_SOLVER_OVERFLOW;
             return result;
         }
-        if (fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
+        if (fact->head_blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
             result.blocking_match_count += 1u;
             continue;
         }
@@ -2511,15 +2512,20 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
              ++equality_index) {
             CmTraitMatchResult match;
             int lhs_applies;
+            unsigned int equality_blockers;
 
-            if (fact->data.implemented.equalities == NULL) {
+            if (fact->data.implemented.equalities == NULL
+                || fact->data.implemented.equality_blocker_flags == NULL) {
                 result.kind = CM_TRAIT_SOLVER_INVALID;
                 return result;
             }
             if (!cm_hir_def_id_equal(fact->data.implemented
                     .equalities[equality_index].associated_type,
                     projection_associated_definition)) continue;
-            if ((fact->blocker_flags
+            equality_blockers = fact->head_blocker_flags
+                | fact->data.implemented
+                    .equality_blocker_flags[equality_index];
+            if ((equality_blockers
                     & CM_PARAM_ENV_BLOCK_OVERFLOW) != 0u
                 && cm_trait_blocked_equality_head_may_apply(
                     index_state->hir, fact, typeck, projection_self,
@@ -2528,13 +2534,13 @@ CmTraitSelectionResult cm_trait_solver_solve_projection_equality(
                 result.typeck_status = CM_TYPECK_OVERFLOW;
                 return result;
             }
-            if (fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE
+            if (equality_blockers != CM_PARAM_ENV_BLOCK_NONE
                 && cm_trait_blocked_equality_head_may_apply(
                     index_state->hir, fact, typeck, projection_self,
                     &projection_trait)) {
                 result.blocking_match_count += 1u;
                 continue;
-            } else if (fact->blocker_flags != CM_PARAM_ENV_BLOCK_NONE) {
+            } else if (equality_blockers != CM_PARAM_ENV_BLOCK_NONE) {
                 continue;
             }
             lhs_applies = 0;
