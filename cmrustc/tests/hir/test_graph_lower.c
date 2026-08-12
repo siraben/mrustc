@@ -7985,6 +7985,7 @@ static void test_adt_generic_type_defaults(void)
 {
     static const unsigned char source[] =
         "pub enum ControlFlow<B, C = ()> { Continue(C), Break(B) }\n"
+        "trait UsesControlFlow { fn f() -> ControlFlow<bool>; }\n"
         "struct Pair<T = u8, U = T>(T, U);\n"
         "struct Uses {\n"
         "enum_default: ControlFlow<u16>,\n"
@@ -8015,6 +8016,10 @@ static void test_adt_generic_type_defaults(void)
     const CmHirType *pair_second_default;
     const CmHirType *applications[5];
     const CmHirType *arguments[10];
+    const CmHirItem *uses_control_flow;
+    const CmHirItem *uses_control_flow_method;
+    const CmHirType *uses_control_flow_return;
+    const CmHirType *uses_control_flow_default;
     uint32_t field_index;
     uint32_t argument_index;
 
@@ -8041,6 +8046,15 @@ static void test_adt_generic_type_defaults(void)
     control_flow = find_hir_item_anywhere(&hir, "ControlFlow");
     pair = find_hir_item_anywhere(&hir, "Pair");
     uses = find_hir_item_anywhere(&hir, "Uses");
+    uses_control_flow = find_hir_item_anywhere(&hir, "UsesControlFlow");
+    uses_control_flow_method = uses_control_flow == NULL ? NULL
+        : find_hir_associated_item(&hir, uses_control_flow->definition,
+            CM_HIR_ITEM_FUNCTION, "f");
+    uses_control_flow_return = uses_control_flow_method == NULL ? NULL
+        : cm_hir_get_type(&hir,
+            uses_control_flow_method->data.function_item.signature.return_type);
+    uses_control_flow_default = hir_named_type_argument(&hir,
+        uses_control_flow_return, 1u);
     break_parameter = control_flow == NULL ? NULL
         : cm_hir_get_generic_param(&hir,
             control_flow->generic_parameter_start);
@@ -8087,7 +8101,7 @@ static void test_adt_generic_type_defaults(void)
         }
     }
     check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 3u && control_flow != NULL
+        && result.lowered_item_count == 5u && control_flow != NULL
         && control_flow->kind == CM_HIR_ITEM_ENUM
         && control_flow->generic_parameter_count == 2u
         && break_parameter != NULL && !break_parameter->has_default
@@ -8145,6 +8159,16 @@ static void test_adt_generic_type_defaults(void)
         && arguments[9]->kind == CM_HIR_TYPE_INTEGER_KIND
         && arguments[9]->data.integer_type.kind == CM_HIR_INT_U16,
         "ADT defaults lost declaration identity or application substitution");
+    check(uses_control_flow != NULL && uses_control_flow_method != NULL
+        && uses_control_flow_return != NULL
+        && uses_control_flow_return->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(
+            uses_control_flow_return->data.named_type.definition,
+            control_flow->definition)
+        && uses_control_flow_return->data.named_type.argument_count == 2u
+        && uses_control_flow_default != NULL
+        && uses_control_flow_default->kind == CM_HIR_TYPE_UNIT_KIND,
+        "trait method did not apply the earlier ADT type default");
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);

@@ -4226,14 +4226,6 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             type.kind = CM_HIR_TYPE_UNIT_KIND;
             return cm_lower_add_type(state, &type, ast_type_id);
         }
-        if (ast_type->element_count == 1u
-            && ast_type->tuple_provenance
-                != CM_AST_TUPLE_CALLABLE_INPUTS) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "the AST does not distinguish (T) from (T,) tuple syntax");
-            return CM_HIR_TYPE_NONE;
-        }
         elements = (CmHirTypeId *)cm_alloc_zeroed(
             (size_t)ast_type->element_count, sizeof(CmHirTypeId));
         for (index = 0u; index < ast_type->element_count && !state->failed;
@@ -14331,13 +14323,19 @@ CmHirLowerResult cm_hir_lower_crate(CmHirContext *context, const CmAst *ast,
     if (!cm_lower_prebind_projection_declarations(&state)) {
         goto finish;
     }
-    if (!cm_lower_predeclare_all_generic_defaults(&state, 1)) {
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_ADT_TYPES)) {
+        goto finish;
+    }
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_TRAIT)) {
         goto finish;
     }
     if (!cm_lower_bind_projection_declarations(&state)) {
         goto finish;
     }
-    if (!cm_lower_predeclare_all_generic_defaults(&state, 0)) {
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_REMAINING)) {
         goto finish;
     }
     (void)cm_lower_bind_remaining_items(&state);
@@ -14457,13 +14455,19 @@ CmHirLowerResult cm_hir_lower_expanded_crate(CmHirContext *context,
     if (!cm_lower_prebind_projection_declarations(&state)) {
         goto finish;
     }
-    if (!cm_lower_predeclare_all_generic_defaults(&state, 1)) {
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_ADT_TYPES)) {
+        goto finish;
+    }
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_TRAIT)) {
         goto finish;
     }
     if (!cm_lower_bind_projection_declarations(&state)) {
         goto finish;
     }
-    if (!cm_lower_predeclare_all_generic_defaults(&state, 0)) {
+    if (!cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_REMAINING)) {
         goto finish;
     }
     (void)cm_lower_bind_remaining_items(&state);
@@ -14615,13 +14619,19 @@ CmHirLowerResult cm_hir_lower_module_graph(CmHirContext *context,
         (void)cm_lower_prebind_projection_declarations(&state);
     }
     if (!state.failed) {
-        (void)cm_lower_predeclare_all_generic_defaults(&state, 1);
+        (void)cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_ADT_TYPES);
+    }
+    if (!state.failed) {
+        (void)cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_TRAIT);
     }
     if (!state.failed) {
         (void)cm_lower_bind_projection_declarations(&state);
     }
     if (!state.failed) {
-        (void)cm_lower_predeclare_all_generic_defaults(&state, 0);
+        (void)cm_lower_predeclare_all_generic_defaults(&state,
+            CM_LOWER_DEFAULTS_REMAINING);
     }
     if (!state.failed) {
         (void)cm_lower_bind_remaining_items(&state);

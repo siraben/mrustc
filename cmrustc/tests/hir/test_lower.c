@@ -1017,11 +1017,6 @@ static void test_unsupported_constructs_are_errors(void)
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM);
     cm_hir_context_destroy(&context);
 
-    result = lower_source(
-        "fn bad(pair: (u8)) { }", &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    cm_hir_context_destroy(&context);
 }
 
 static void test_const_generic_path_default(void)
@@ -1299,6 +1294,56 @@ static CmHirLowerResult lower_cfg_view(CmHirContext *context,
     options.crate_name = "expanded_test";
     options.source = 11u;
     return cm_hir_lower_expanded_crate(context, ast, expanded, &options);
+}
+
+static void check_adt_default_visible_to_trait_method(
+    const CmHirContext *context, const CmHirLowerResult *result)
+{
+    const CmHirItem *control_flow;
+    const CmHirItem *trait_item;
+    const CmHirItem *method;
+    const CmHirType *return_type;
+    const CmHirType *default_type;
+
+    control_flow = find_item(context, "ControlFlow");
+    trait_item = find_item(context, "UsesControlFlow");
+    method = trait_item == NULL ? NULL
+        : find_child(context, trait_item->definition, "f");
+    return_type = method == NULL ? NULL : cm_hir_get_type(context,
+        method->data.function_item.signature.return_type);
+    default_type = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_ADT_KIND
+            || return_type->data.named_type.argument_count != 2u
+        ? NULL : cm_hir_get_type(context,
+            return_type->data.named_type.arguments[1].data.type);
+    assert(result->error_count == 0u && control_flow != NULL
+        && trait_item != NULL && method != NULL && return_type != NULL
+        && cm_hir_def_id_equal(return_type->data.named_type.definition,
+            control_flow->definition)
+        && default_type != NULL
+        && default_type->kind == CM_HIR_TYPE_UNIT_KIND);
+}
+
+static void test_adt_default_declaration_order_entry_points(void)
+{
+    static const char source[] =
+        "enum ControlFlow<B, C = ()> { Continue(C), Break(B) }"
+        "trait UsesControlFlow { fn f() -> ControlFlow<bool>; }";
+    CmAst ast;
+    CmExpandedAst expanded;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    check_adt_default_visible_to_trait_method(&context, &result);
+    cm_hir_context_destroy(&context);
+
+    make_cfg_view(source, &ast, &expanded);
+    result = lower_cfg_view(&context, &ast, &expanded);
+    check_adt_default_visible_to_trait_method(&context, &result);
+    cm_hir_context_destroy(&context);
+    cm_expanded_ast_destroy(&expanded);
+    cm_ast_destroy(&ast);
 }
 
 static void check_discard_parameter_shape(const CmHirContext *context,
@@ -3683,10 +3728,6 @@ static void test_callable_tuple_provenance(void)
     static const char callable[] =
         "trait FnOnce<Args> { type Output; }"
         "trait Callable { fn call<F: FnOnce(u8) -> u16>(); }";
-    static const char *const ambiguous[] = {
-        "trait T { fn f(value: (u8)); }",
-        "trait T { fn f(value: (u8,)); }"
-    };
     CmAst ast;
     CmParseResult parse_result;
     const CmAstItemId *root_id;
@@ -3701,7 +3742,6 @@ static void test_callable_tuple_provenance(void)
     CmHirLowerOptions options;
     CmHirContext context;
     CmHirLowerResult result;
-    size_t index;
 
     cm_ast_init(&ast);
     parse_result = cm_parse_crate(&ast, callable, sizeof(callable) - 1u,
@@ -3745,10 +3785,7 @@ static void test_callable_tuple_provenance(void)
     tuple_type->tuple_provenance = CM_AST_TUPLE_SOURCE;
     cm_hir_context_init(&context);
     result = cm_hir_lower_crate(&context, &ast, &options);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "does not distinguish (T) from (T,) tuple syntax") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     tuple_type->tuple_provenance = (CmAstTupleProvenance)99;
@@ -3785,17 +3822,44 @@ static void test_callable_tuple_provenance(void)
     cm_hir_context_destroy(&context);
     element_type->tuple_provenance = CM_AST_TUPLE_SOURCE;
     cm_ast_destroy(&ast);
+}
 
-    for (index = 0u; index < sizeof(ambiguous) / sizeof(ambiguous[0]);
-         ++index) {
-        result = lower_source(ambiguous[index], &context, NULL);
-        assert(result.error_count == 1u
-            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-            && strstr(result.first_error.message,
-                "does not distinguish (T) from (T,) tuple syntax")
-                != NULL);
-        cm_hir_context_destroy(&context);
-    }
+static void test_parenthesized_and_singleton_tuple_types(void)
+{
+    static const char source[] =
+        "trait Shapes { fn f(grouped: (u8), singleton: (u16,)); }";
+    const CmHirItem *owner;
+    const CmHirItem *method;
+    const CmHirType *grouped;
+    const CmHirType *singleton;
+    const CmHirType *element;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    owner = find_item(&context, "Shapes");
+    method = owner == NULL ? NULL
+        : find_child(&context, owner->definition, "f");
+    grouped = method == NULL
+            || method->data.function_item.signature.parameter_count != 2u
+        ? NULL : cm_hir_get_type(&context,
+            method->data.function_item.signature.parameters[0].type);
+    singleton = grouped == NULL ? NULL : cm_hir_get_type(&context,
+        method->data.function_item.signature.parameters[1].type);
+    element = singleton == NULL
+            || singleton->kind != CM_HIR_TYPE_TUPLE_KIND
+            || singleton->data.tuple_type.element_count != 1u
+            || singleton->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            singleton->data.tuple_type.elements[0]);
+    assert(result.error_count == 0u
+        && grouped != NULL && grouped->kind == CM_HIR_TYPE_INTEGER_KIND
+        && grouped->data.integer_type.kind == CM_HIR_INT_U8
+        && singleton != NULL
+        && singleton->kind == CM_HIR_TYPE_TUPLE_KIND
+        && element != NULL && element->kind == CM_HIR_TYPE_INTEGER_KIND
+        && element->data.integer_type.kind == CM_HIR_INT_U16);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_trait_method_predicate_storage_mismatch(void)
@@ -6035,6 +6099,7 @@ int main(void)
     test_resolver_failure_is_distinct();
     test_unsupported_constructs_are_errors();
     test_const_generic_path_default();
+    test_adt_default_declaration_order_entry_points();
     test_const_generic_trait_method_declaration();
     test_generic_parameter_shadows_type_path_prefix();
     test_defaulted_alias_entry_points();
@@ -6052,6 +6117,7 @@ int main(void)
     test_trait_method_const_predicates();
     test_trait_method_predicate_boundaries();
     test_callable_tuple_provenance();
+    test_parenthesized_and_singleton_tuple_types();
     test_trait_method_predicate_storage_mismatch();
     test_post_value_where_predicate_storage_mismatch();
     test_associated_type_constraint_fails_closed();
