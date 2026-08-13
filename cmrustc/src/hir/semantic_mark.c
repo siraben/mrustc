@@ -42,8 +42,8 @@ static int cm_semantic_mark_selected_call(CmSemanticMarkScratch *scratch,
     } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
         if (expression->data.method_call.receiver == CM_HIR_EXPR_NONE
             || expression->data.method_call.argument_count > 1u
-            || (expression->data.method_call.argument_count != 0u
-                && expression->data.method_call.arguments == NULL)
+            || (expression->data.method_call.argument_count == 0u)
+                != (expression->data.method_call.arguments == NULL)
             || expression->data.method_call.syntax
                 != CM_HIR_CALLABLE_DOT_METHOD) return 0;
         argument_storage[0] = expression->data.method_call.receiver;

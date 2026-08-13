@@ -1,5 +1,7 @@
 #include "cm/hir/admission.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/semantic_mark.h"
+#include "cm/hir/semantic_regions.h"
 #include "cm/hir/semantic_results.h"
 #include "cm/alloc.h"
 #include "cm/source.h"
@@ -1624,8 +1626,11 @@ static void test_durable_dot_method_recipe(void)
     const CmHirItem *wrapper;
     const CmHirBody *body;
     const CmHirExpr *source_call;
+    CmHirExpr *mutable_call;
     CmHirExprId call_expression;
     CmHirExprId argument;
+    CmSemanticMarkResult mark_result;
+    CmSemanticRegionsResult regions_result;
     size_t index;
     int equal;
 
@@ -1736,6 +1741,42 @@ static void test_durable_dot_method_recipe(void)
         wrapper->data.function_item.body, call_expression,
         cm_hir_get_expr(&fixture.hir,
             source_call->data.method_call.receiver)->type, &selection);
+
+    /* MARKED and REGIONS authenticate the live source slice independently of
+     * HIR construction.  A zero count paired with retained storage must not
+     * be accepted merely because no element would be dereferenced. */
+    mutable_call = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)call_expression - 1u);
+    assert(mutable_call != NULL
+        && mutable_call->data.method_call.argument_count == 1u
+        && mutable_call->data.method_call.arguments != NULL);
+    mutable_call->data.method_call.argument_count = 0u;
+    mark_result = cm_hir_semantic_mark_admitted_bodies(&fixture.hir,
+        &reachable.body, 1u, &admission);
+    assert(mark_result.status == CM_SEMANTIC_MARK_INVALID_HIR
+        && mark_result.expression == call_expression
+        && cm_semantic_admission_is_current(&admission));
+    mutable_call->data.method_call.argument_count = 1u;
+    mark_result = cm_hir_semantic_mark_admitted_bodies(&fixture.hir,
+        &reachable.body, 1u, &admission);
+    assert(mark_result.status == CM_SEMANTIC_MARK_OK
+        && !cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission,
+        &fixture.hir, 1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK);
+    mutable_call->data.method_call.argument_count = 0u;
+    regions_result = cm_hir_semantic_check_admitted_regions(&fixture.hir,
+        &reachable.body, 1u, &admission);
+    assert(regions_result.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions_result.expression == call_expression
+        && cm_semantic_admission_is_current(&admission));
+    mutable_call->data.method_call.argument_count = 1u;
+    regions_result = cm_hir_semantic_check_admitted_regions(&fixture.hir,
+        &reachable.body, 1u, &admission);
+    assert(regions_result.status == CM_SEMANTIC_REGIONS_OK);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
