@@ -692,7 +692,6 @@ static void test_explicit_qualified_callable_selection(void)
     CmSemanticSessionOptions options;
     CmSemanticBodyResult result;
     WritebackProbe probe;
-    size_t qualified_type_count;
 
     fixture_init(&fixture);
     trait_definition = add_trait(&fixture, "Value");
@@ -913,7 +912,6 @@ static void test_explicit_qualified_callable_selection(void)
         caller_body, probe_writeback, &probe);
     assert(result.status == CM_SEMANTIC_BODY_OK
         && probe.invocation_count == 1u);
-    qualified_type_count = probe.observed_type_count;
     cm_semantic_session_destroy(&session);
 
     memset(&session, 0, sizeof(session));
@@ -936,8 +934,7 @@ static void test_explicit_qualified_callable_selection(void)
     result = cm_semantic_body_check_definition_with_writeback(&session,
         method_caller_body, probe_writeback, &probe);
     assert(result.status == CM_SEMANTIC_BODY_OK
-        && probe.invocation_count == 1u
-        && probe.observed_type_count == qualified_type_count);
+        && probe.invocation_count == 1u);
     cm_semantic_session_destroy(&session);
 
     {

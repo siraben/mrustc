@@ -1291,6 +1291,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             CmTraitSelectionResult selection;
             CmTypeckSnapshot probe_snapshot;
             CmTypeckStatus probe_status;
+            size_t probe_type_count;
             const CmHirItem *impl_item;
             const CmHirItem *selected_callable;
 
@@ -1301,6 +1302,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 constraints->typeck_status = probe_status;
                 return CM_SEMANTIC_BODY_TYPECK_FAILURE;
             }
+            probe_type_count = cm_typeck_type_count(constraints->typeck);
             memset(&goal, 0, sizeof(goal));
             goal.kind = CM_TRAIT_GOAL_IMPLEMENTED;
             goal.data.implemented.owner = constraints->body->owner;
@@ -1312,7 +1314,9 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 environment_substitution, &goal);
             probe_status = cm_typeck_rollback(constraints->typeck,
                 &probe_snapshot);
-            if (probe_status != CM_TYPECK_OK) {
+            if (probe_status != CM_TYPECK_OK
+                || cm_typeck_type_count(constraints->typeck)
+                    != probe_type_count) {
                 constraints->typeck_status = probe_status;
                 return CM_SEMANTIC_BODY_TYPECK_FAILURE;
             }
