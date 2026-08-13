@@ -3005,6 +3005,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
     }
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
         /*
          * The HIR model can represent these nodes, but body admission must
          * not accept them until it also publishes the exact adjustment and
@@ -3235,6 +3237,8 @@ static CmSemanticBodyStatus cm_semantic_body_walk(
         break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
         return CM_SEMANTIC_BODY_INVALID;
     default: return CM_SEMANTIC_BODY_INVALID;
     }

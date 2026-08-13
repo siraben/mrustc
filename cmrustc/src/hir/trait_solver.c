@@ -19,6 +19,7 @@ typedef struct CmTraitImplIndexState {
     uint64_t hir_semantic_generation;
     uint64_t hir_rewind_generation;
     size_t hir_item_count;
+    size_t hir_closure_count;
     size_t hir_type_count;
     size_t hir_generic_parameter_count;
     size_t hir_definition_count;
@@ -40,6 +41,7 @@ typedef struct CmTraitImplSelectionWitnessState {
     uint64_t hir_semantic_generation;
     uint64_t hir_rewind_generation;
     size_t hir_item_count;
+    size_t hir_closure_count;
     size_t hir_type_count;
     size_t hir_generic_parameter_count;
     size_t hir_definition_count;
@@ -165,6 +167,7 @@ int cm_trait_impl_selection_witness_is_current(
             != state->hir_semantic_generation
         || state->hir->rewind_generation != state->hir_rewind_generation
         || state->hir->items.len != state->hir_item_count
+        || state->hir->closures.len != state->hir_closure_count
         || state->hir->types.len != state->hir_type_count
         || state->hir->generic_parameters.len
             != state->hir_generic_parameter_count
@@ -217,6 +220,7 @@ static int cm_trait_index_is_current(const CmTraitImplIndexState *state)
             == state->hir_semantic_generation
         && state->hir->rewind_generation == state->hir_rewind_generation
         && state->hir->items.len == state->hir_item_count
+        && state->hir->closures.len == state->hir_closure_count
         && state->hir->types.len == state->hir_type_count
         && state->hir->generic_parameters.len
             == state->hir_generic_parameter_count
@@ -718,6 +722,7 @@ static CmTraitSolverResultKind cm_trait_impl_index_init_internal(
     state->hir_semantic_generation = hir->semantic_generation;
     state->hir_rewind_generation = hir->rewind_generation;
     state->hir_item_count = hir->items.len;
+    state->hir_closure_count = hir->closures.len;
     state->hir_type_count = hir->types.len;
     state->hir_generic_parameter_count = hir->generic_parameters.len;
     state->hir_definition_count = hir->definitions.len;
@@ -1790,6 +1795,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
                 state->hir_semantic_generation;
             witness->hir_rewind_generation = state->hir_rewind_generation;
             witness->hir_item_count = state->hir_item_count;
+            witness->hir_closure_count = state->hir_closure_count;
             witness->hir_type_count = state->hir_type_count;
             witness->hir_generic_parameter_count =
                 state->hir_generic_parameter_count;

@@ -82,6 +82,7 @@ typedef struct CmTraitGoalTableState {
     size_t hir_module_count;
     size_t hir_item_count;
     size_t hir_body_count;
+    size_t hir_closure_count;
     size_t hir_expression_count;
     size_t hir_type_count;
     size_t hir_generic_parameter_count;
@@ -153,6 +154,7 @@ static int cm_goal_table_state_is_current(
         && hir->modules.len == state->hir_module_count
         && hir->items.len == state->hir_item_count
         && hir->bodies.len == state->hir_body_count
+        && hir->closures.len == state->hir_closure_count
         && hir->expressions.len == state->hir_expression_count
         && hir->types.len == state->hir_type_count
         && hir->generic_parameters.len
@@ -1241,6 +1243,7 @@ CmTraitSolverResultKind cm_trait_goal_table_init(CmTraitGoalTable *table,
     state->hir_module_count = hir->modules.len;
     state->hir_item_count = hir->items.len;
     state->hir_body_count = hir->bodies.len;
+    state->hir_closure_count = hir->closures.len;
     state->hir_expression_count = hir->expressions.len;
     state->hir_type_count = hir->types.len;
     state->hir_generic_parameter_count = hir->generic_parameters.len;

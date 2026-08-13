@@ -293,6 +293,8 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
         break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
         scratch->result.status =
             CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION;
         scratch->result.expression = expression_id;

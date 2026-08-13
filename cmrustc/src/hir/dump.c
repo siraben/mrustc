@@ -372,8 +372,8 @@ static void cm_hir_dump_type(FILE *stream, const CmHirContext *context,
         cm_hir_dump_named(stream, context, &type->data.named_type);
         break;
     case CM_HIR_TYPE_CLOSURE_KIND:
-        fputs("closure ", stream);
-        cm_hir_dump_named(stream, context, &type->data.named_type);
+        fprintf(stream, "closure#%u",
+            (unsigned int)type->data.closure_type.closure);
         break;
     case CM_HIR_TYPE_FOREIGN_KIND:
         fputs("foreign ", stream);
@@ -447,7 +447,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v29\n", stream);
+    fputs("hir-v30\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -687,6 +687,54 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         cm_hir_dump_span(stream, type->span);
         fputc('\n', stream);
     }
+    for (index = 0u; index < context->closures.len; ++index) {
+        const CmHirClosure *closure;
+        uint32_t parameter_index;
+
+        closure = (const CmHirClosure *)cm_vec_at_const(
+            &context->closures, index);
+        fprintf(stream,
+            "closure#%u state=%s owner=body#%u source-expr=%u "
+            "return=ty#%u body=",
+            (unsigned int)(index + 1u),
+            closure->state == CM_HIR_CLOSURE_SIGNATURE_RESERVED
+                ? "signature-reserved" : "body-bound",
+            (unsigned int)closure->owner_body,
+            (unsigned int)closure->source_expression_id,
+            (unsigned int)closure->return_type);
+        if (closure->body_expression == CM_HIR_EXPR_NONE) {
+            fputs("none", stream);
+        } else {
+            fprintf(stream, "expr#%u",
+                (unsigned int)closure->body_expression);
+        }
+        fprintf(stream, " visible-locals=%u move=%d parameters=[",
+            (unsigned int)closure->visible_local_count, closure->is_move);
+        for (parameter_index = 0u;
+             parameter_index < closure->parameter_count;
+             ++parameter_index) {
+            const CmHirClosureParam *parameter;
+
+            parameter = &closure->parameters[parameter_index];
+            if (parameter_index != 0u) fputc(',', stream);
+            fprintf(stream, "parameter(index=%u,kind=%s,name=",
+                (unsigned int)parameter_index,
+                parameter->binding_kind == CM_HIR_BINDING_NAMED
+                    ? "named" : "discard");
+            if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
+                fputs("_", stream);
+            } else {
+                cm_hir_dump_string(stream, context, parameter->name);
+            }
+            fprintf(stream, ",type=ty#%u,span=",
+                (unsigned int)parameter->type);
+            cm_hir_dump_span(stream, parameter->span);
+            fputc(')', stream);
+        }
+        fputs("] span=", stream);
+        cm_hir_dump_span(stream, closure->span);
+        fputc('\n', stream);
+    }
     for (index = 0u; index < context->expressions.len; ++index) {
         const CmHirExpr *expression;
         const char *kind_name;
@@ -711,6 +759,10 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
             kind_name = "borrow-shared";
             break;
         case CM_HIR_EXPR_DEREFERENCE: kind_name = "dereference"; break;
+        case CM_HIR_EXPR_CLOSURE_PARAMETER:
+            kind_name = "closure-parameter";
+            break;
+        case CM_HIR_EXPR_CLOSURE: kind_name = "closure"; break;
         default: kind_name = "unknown"; break;
         }
         fprintf(stream, "expr#%u %s type=ty#%u ",
@@ -750,6 +802,16 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         case CM_HIR_EXPR_LOCAL:
             fprintf(stream, "local=%u",
                 (unsigned int)expression->data.local.local_index);
+            break;
+        case CM_HIR_EXPR_CLOSURE_PARAMETER:
+            fprintf(stream, "closure=closure#%u parameter=%u",
+                (unsigned int)expression->data.closure_parameter.closure,
+                (unsigned int)expression->data.closure_parameter
+                    .parameter_index);
+            break;
+        case CM_HIR_EXPR_CLOSURE:
+            fprintf(stream, "closure=closure#%u",
+                (unsigned int)expression->data.closure.closure);
             break;
         case CM_HIR_EXPR_CALL:
             fputs("callee=", stream);

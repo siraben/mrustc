@@ -12,6 +12,7 @@ typedef uint32_t CmHirCrateId;
 typedef uint32_t CmHirModuleId;
 typedef uint32_t CmHirItemId;
 typedef uint32_t CmHirBodyId;
+typedef uint32_t CmHirClosureId;
 typedef uint32_t CmHirExprId;
 typedef uint32_t CmHirTypeId;
 typedef uint32_t CmHirGenericParamId;
@@ -20,6 +21,7 @@ typedef uint32_t CmHirGenericParamId;
 #define CM_HIR_MODULE_NONE ((CmHirModuleId)0u)
 #define CM_HIR_ITEM_NONE ((CmHirItemId)0u)
 #define CM_HIR_BODY_NONE ((CmHirBodyId)0u)
+#define CM_HIR_CLOSURE_NONE ((CmHirClosureId)0u)
 #define CM_HIR_EXPR_NONE ((CmHirExprId)0u)
 #define CM_HIR_TYPE_NONE ((CmHirTypeId)0u)
 #define CM_HIR_GENERIC_PARAM_NONE ((CmHirGenericParamId)0u)

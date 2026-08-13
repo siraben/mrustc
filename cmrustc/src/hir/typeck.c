@@ -2474,6 +2474,7 @@ static int cm_typeck_caller_mark_valid(const CmHirContext *hir,
         && mark->context == hir && mark->crates <= hir->crates.len
         && mark->modules <= hir->modules.len && mark->items <= hir->items.len
         && mark->bodies <= hir->bodies.len
+        && mark->closures <= hir->closures.len
         && mark->expressions <= hir->expressions.len
         && mark->types <= hir->types.len
         && mark->generic_parameters <= hir->generic_parameters.len

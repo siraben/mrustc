@@ -14,6 +14,7 @@ typedef struct CmHirCrateFinalizationState {
     size_t module_count;
     size_t item_count;
     size_t body_count;
+    size_t closure_count;
     size_t expression_count;
     size_t type_count;
     size_t generic_parameter_count;
@@ -42,6 +43,7 @@ static int cm_finalization_current(
         && hir->modules.len == state->module_count
         && hir->items.len == state->item_count
         && hir->bodies.len == state->body_count
+        && hir->closures.len == state->closure_count
         && hir->expressions.len == state->expression_count
         && hir->types.len == state->type_count
         && hir->generic_parameters.len
@@ -260,6 +262,53 @@ static int cm_finalization_local_crate_valid(const CmHirContext *hir,
         }
         if (expected != body_id) return 0;
     }
+    for (index = 0u; index < hir->closures.len; ++index) {
+        const CmHirClosure *closure;
+        const CmHirBody *body;
+        const CmHirExpr *closure_root;
+        const CmHirType *return_type;
+        uint32_t parameter_index;
+
+        closure = cm_hir_get_closure(hir, (CmHirClosureId)(index + 1u));
+        body = closure == NULL ? NULL
+            : cm_hir_get_body(hir, closure->owner_body);
+        closure_root = closure == NULL ? NULL
+            : cm_hir_get_expr(hir, closure->body_expression);
+        return_type = closure == NULL ? NULL
+            : cm_hir_get_type(hir, closure->return_type);
+        if (closure == NULL || body == NULL
+            || body->owner.crate_id != local_crate) continue;
+        if (closure->state != CM_HIR_CLOSURE_BODY_BOUND
+            || closure->source_expression_id == 0u
+            || closure_root == NULL
+            || closure_root->owner_body != closure->owner_body
+            || closure_root->type != closure->return_type
+            || return_type == NULL
+            || closure->visible_local_count > body->local_count
+            || closure->span.source != body->source
+            || closure->span.start < body->span.start
+            || closure->span.end > body->span.end
+            || closure_root->span.source != closure->span.source
+            || closure_root->span.start < closure->span.start
+            || closure_root->span.end > closure->span.end
+            || (closure->parameter_count == 0u)
+                != (closure->parameters == NULL)
+            || (closure->is_move != 0 && closure->is_move != 1)) return 0;
+        for (parameter_index = 0u;
+             parameter_index < closure->parameter_count;
+             ++parameter_index) {
+            const CmHirClosureParam *parameter;
+
+            parameter = &closure->parameters[parameter_index];
+            if (cm_hir_get_type(hir, parameter->type) == NULL
+                || parameter->span.source != closure->span.source
+                || parameter->span.start < closure->span.start
+                || parameter->span.end > closure->span.end
+                || (parameter->binding_kind != CM_HIR_BINDING_NAMED
+                    && parameter->binding_kind
+                        != CM_HIR_BINDING_DISCARD)) return 0;
+        }
+    }
     for (index = 0u; index < hir->generic_parameters.len; ++index) {
         const CmHirGenericParam *parameter;
         const CmHirDefinition *owner;
@@ -305,6 +354,7 @@ CmHirStatus cm_hir_crate_finalization_init(
     state->module_count = hir->modules.len;
     state->item_count = hir->items.len;
     state->body_count = hir->bodies.len;
+    state->closure_count = hir->closures.len;
     state->expression_count = hir->expressions.len;
     state->type_count = hir->types.len;
     state->generic_parameter_count = hir->generic_parameters.len;

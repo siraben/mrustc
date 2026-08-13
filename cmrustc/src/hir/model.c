@@ -134,6 +134,7 @@ void cm_hir_context_init(CmHirContext *context)
     cm_vec_init(&context->modules, sizeof(CmHirModule));
     cm_vec_init(&context->items, sizeof(CmHirItem));
     cm_vec_init(&context->bodies, sizeof(CmHirBody));
+    cm_vec_init(&context->closures, sizeof(CmHirClosure));
     cm_vec_init(&context->expressions, sizeof(CmHirExpr));
     cm_vec_init(&context->types, sizeof(CmHirType));
     cm_vec_init(&context->generic_parameters, sizeof(CmHirGenericParam));
@@ -162,6 +163,7 @@ void cm_hir_context_destroy(CmHirContext *context)
     cm_vec_destroy(&context->generic_parameters);
     cm_vec_destroy(&context->types);
     cm_vec_destroy(&context->expressions);
+    cm_vec_destroy(&context->closures);
     cm_vec_destroy(&context->bodies);
     cm_vec_destroy(&context->items);
     cm_vec_destroy(&context->modules);
@@ -182,6 +184,7 @@ CmHirStatus cm_hir_context_mark(CmHirContext *context,
     out_mark->modules = context->modules.len;
     out_mark->items = context->items.len;
     out_mark->bodies = context->bodies.len;
+    out_mark->closures = context->closures.len;
     out_mark->expressions = context->expressions.len;
     out_mark->types = context->types.len;
     out_mark->generic_parameters = context->generic_parameters.len;
@@ -202,6 +205,7 @@ static int cm_hir_context_mark_is_valid(const CmHirContext *context,
         && mark->modules <= context->modules.len
         && mark->items <= context->items.len
         && mark->bodies <= context->bodies.len
+        && mark->closures <= context->closures.len
         && mark->expressions <= context->expressions.len
         && mark->types <= context->types.len
         && mark->generic_parameters <= context->generic_parameters.len
@@ -235,6 +239,7 @@ CmHirStatus cm_hir_context_rewind(CmHirContext *context,
     cm_vec_resize(&context->generic_parameters, mark->generic_parameters);
     cm_vec_resize(&context->types, mark->types);
     cm_vec_resize(&context->expressions, mark->expressions);
+    cm_vec_resize(&context->closures, mark->closures);
     cm_vec_resize(&context->bodies, mark->bodies);
     cm_vec_resize(&context->items, mark->items);
     cm_vec_resize(&context->modules, mark->modules);
@@ -331,6 +336,15 @@ const CmHirBody *cm_hir_get_body(const CmHirContext *context,
         return NULL;
     }
     return (const CmHirBody *)cm_hir_get_id(&context->bodies, id);
+}
+
+const CmHirClosure *cm_hir_get_closure(const CmHirContext *context,
+    CmHirClosureId id)
+{
+    if (context == NULL) {
+        return NULL;
+    }
+    return (const CmHirClosure *)cm_hir_get_id(&context->closures, id);
 }
 
 const CmHirExpr *cm_hir_get_expr(const CmHirContext *context,
@@ -1352,11 +1366,14 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
                 type->data.fn_pointer_type.parameters[index]);
         }
         break;
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        valid = cm_hir_get_closure(context,
+            type->data.closure_type.closure) != NULL;
+        break;
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         valid = cm_hir_named_type_valid(context, &type->data.named_type);
         break;
@@ -1428,7 +1445,6 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         copy.data.named_type = cm_hir_copy_named_type(context,
             &type->data.named_type);
@@ -1629,10 +1645,12 @@ static int cm_hir_type_late_bound_free(const CmHirContext *context,
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_hir_named_late_bound_free(context,
             &type->data.named_type, depth);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return cm_hir_get_closure(context,
+            type->data.closure_type.closure) != NULL;
     case CM_HIR_TYPE_PROJECTION_KIND:
         return cm_hir_type_late_bound_free(context,
                 type->data.projection_type.self_type, depth + 1u)
@@ -1858,10 +1876,12 @@ static int cm_hir_type_self_owner_valid(const CmHirContext *context,
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_hir_named_self_owner_valid(context, &type->data.named_type,
             expected_owner, depth);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return cm_hir_get_closure(context,
+            type->data.closure_type.closure) != NULL;
     case CM_HIR_TYPE_PROJECTION_KIND:
         return cm_hir_type_self_owner_valid(context,
                 type->data.projection_type.self_type, expected_owner,
@@ -2322,11 +2342,12 @@ static int cm_hir_predicate_type_in_scope(const CmHirContext *context,
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_hir_predicate_named_in_scope(context,
             &type->data.named_type, owner_definition, parent_definition,
             binder, depth);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return 0;
     case CM_HIR_TYPE_PARAMETER_KIND:
         return cm_hir_predicate_parameter_in_scope(context,
             type->data.parameter_type.parameter, owner_definition,
@@ -4208,6 +4229,12 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
     size_t depth);
 static int cm_hir_body_type_equal(const CmHirContext *context,
     CmHirTypeId left_id, CmHirTypeId right_id);
+static int cm_hir_expression_body_span_valid(const CmHirBody *body,
+    CmSpan span);
+static int cm_hir_expression_scope_valid(const CmHirContext *context,
+    CmHirExprId expression_id, CmHirBodyId body_id,
+    uint32_t visible_local_count, CmHirClosureId active_closure,
+    size_t depth);
 
 static int cm_hir_default_parameter_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
@@ -4324,12 +4351,13 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
             depth + 1u);
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
         return cm_hir_default_named_in_scope(context, owner,
             parameter_index, &type->data.named_type, depth);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return 0;
     case CM_HIR_TYPE_PARAMETER_KIND:
         return cm_hir_default_parameter_in_scope(context, owner,
             parameter_index, type->data.parameter_type.parameter);
@@ -4610,6 +4638,88 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     return status;
 }
 
+CmHirStatus cm_hir_reserve_closure(CmHirContext *context,
+    CmHirBodyId owner_body, uint32_t source_expression_id,
+    const CmHirClosureParam *parameters, uint32_t parameter_count,
+    CmHirTypeId return_type, uint32_t visible_local_count, int is_move,
+    CmSpan span, CmHirClosureId *out_id)
+{
+    const CmHirBody *body;
+    CmHirClosure copy;
+    uint32_t index;
+    size_t old_index;
+
+    if (context == NULL || out_id == NULL || owner_body == CM_HIR_BODY_NONE
+        || source_expression_id == 0u
+        || (parameter_count == 0u) != (parameters == NULL)
+        || (is_move != 0 && is_move != 1)
+        || !cm_hir_span_is_ordered(span)) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    *out_id = CM_HIR_CLOSURE_NONE;
+    body = cm_hir_get_body(context, owner_body);
+    if (body == NULL || !cm_hir_type_id_valid(context, return_type)) {
+        return CM_HIR_INVALID_ID;
+    }
+    if (body->state != CM_HIR_BODY_UNLOWERED
+        || visible_local_count > body->local_count
+        || !cm_hir_expression_body_span_valid(body, span)) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    for (index = 0u; index < parameter_count; ++index) {
+        const CmHirClosureParam *parameter;
+        uint32_t previous;
+        int binding_valid;
+
+        parameter = &parameters[index];
+        binding_valid = parameter->binding_kind == CM_HIR_BINDING_NAMED
+            ? cm_hir_intern_id_nonempty(context, parameter->name)
+                && !cm_hir_intern_matches(context, parameter->name, "_")
+            : parameter->binding_kind == CM_HIR_BINDING_DISCARD
+                && parameter->name == CM_INTERN_ID_NONE;
+        if (!binding_valid
+            || !cm_hir_type_id_valid(context, parameter->type)
+            || !cm_hir_span_is_ordered(parameter->span)) {
+            return CM_HIR_INVALID_ID;
+        }
+        if (parameter->span.source != span.source
+            || parameter->span.start < span.start
+            || parameter->span.end > span.end) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
+        for (previous = 0u; previous < index; ++previous) {
+            if (parameters[previous].binding_kind == CM_HIR_BINDING_NAMED
+                && parameters[previous].name == parameter->name) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+        }
+    }
+    for (old_index = 0u; old_index < context->closures.len; ++old_index) {
+        const CmHirClosure *old_closure;
+
+        old_closure = (const CmHirClosure *)cm_vec_at_const(
+            &context->closures, old_index);
+        if (old_closure->owner_body == owner_body
+            && old_closure->source_expression_id == source_expression_id) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+    }
+    memset(&copy, 0, sizeof(copy));
+    copy.state = CM_HIR_CLOSURE_SIGNATURE_RESERVED;
+    copy.owner_body = owner_body;
+    copy.source_expression_id = source_expression_id;
+    copy.parameters = (CmHirClosureParam *)cm_hir_copy_array(context,
+        parameters, parameter_count, sizeof(CmHirClosureParam));
+    copy.parameter_count = parameter_count;
+    copy.return_type = return_type;
+    copy.body_expression = CM_HIR_EXPR_NONE;
+    copy.visible_local_count = visible_local_count;
+    copy.is_move = is_move;
+    copy.span = span;
+    return cm_hir_push(context, &context->closures, &copy, out_id);
+}
+
 static int cm_hir_expression_body_span_valid(const CmHirBody *body,
     CmSpan span)
 {
@@ -4658,6 +4768,9 @@ static int cm_hir_body_type_equal(const CmHirContext *context,
             && right->data.named_type.arguments == NULL
             && cm_hir_def_id_equal(left->data.named_type.definition,
                 right->data.named_type.definition);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return left->data.closure_type.closure
+            == right->data.closure_type.closure;
     default:
         return 0;
     }
@@ -4675,6 +4788,10 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
     if (expression == NULL || expression->owner_body != body_id) return 0;
     switch (expression->kind) {
     case CM_HIR_EXPR_INTEGER:
+        return 1;
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
+        /* Strict lexical authentication occurs when a closure/body is bound. */
         return 1;
     case CM_HIR_EXPR_LOCAL:
         return expression->data.local.local_index < visible_local_count;
@@ -4776,6 +4893,167 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
     }
     }
     return 0;
+}
+
+static int cm_hir_expression_scope_valid(const CmHirContext *context,
+    CmHirExprId expression_id, CmHirBodyId body_id,
+    uint32_t visible_local_count, CmHirClosureId active_closure,
+    size_t depth)
+{
+    const CmHirExpr *expression;
+    uint32_t index;
+
+    if (depth >= context->expressions.len) return 0;
+    expression = cm_hir_get_expr(context, expression_id);
+    if (expression == NULL || expression->owner_body != body_id) return 0;
+    switch (expression->kind) {
+    case CM_HIR_EXPR_INTEGER:
+        return 1;
+    case CM_HIR_EXPR_LOCAL:
+        return expression->data.local.local_index < visible_local_count;
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+        return active_closure != CM_HIR_CLOSURE_NONE
+            && expression->data.closure_parameter.closure == active_closure;
+    case CM_HIR_EXPR_CLOSURE:
+    {
+        const CmHirClosure *closure;
+
+        closure = cm_hir_get_closure(context,
+            expression->data.closure.closure);
+        return closure != NULL && closure->state == CM_HIR_CLOSURE_BODY_BOUND
+            && closure->owner_body == body_id
+            && cm_hir_expression_scope_valid(context,
+                closure->body_expression, body_id,
+                closure->visible_local_count,
+                expression->data.closure.closure, depth + 1u);
+    }
+    case CM_HIR_EXPR_CALL:
+        for (index = 0u; index < expression->data.call.argument_count;
+             ++index) {
+            if (!cm_hir_expression_scope_valid(context,
+                    expression->data.call.arguments[index], body_id,
+                    visible_local_count, active_closure, depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    case CM_HIR_EXPR_METHOD_CALL:
+        if (!cm_hir_expression_scope_valid(context,
+                expression->data.method_call.receiver, body_id,
+                visible_local_count, active_closure, depth + 1u)) return 0;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            if (!cm_hir_expression_scope_valid(context,
+                    expression->data.method_call.arguments[index], body_id,
+                    visible_local_count, active_closure, depth + 1u)) return 0;
+        }
+        return 1;
+    case CM_HIR_EXPR_QUALIFIED_CALL:
+        for (index = 0u;
+             index < expression->data.qualified_call.argument_count;
+             ++index) {
+            if (!cm_hir_expression_scope_valid(context,
+                    expression->data.qualified_call.arguments[index],
+                    body_id, visible_local_count, active_closure,
+                    depth + 1u)) return 0;
+        }
+        return 1;
+    case CM_HIR_EXPR_BINARY:
+        return cm_hir_expression_scope_valid(context,
+                expression->data.binary.left, body_id, visible_local_count,
+                active_closure, depth + 1u)
+            && cm_hir_expression_scope_valid(context,
+                expression->data.binary.right, body_id, visible_local_count,
+                active_closure, depth + 1u);
+    case CM_HIR_EXPR_AGGREGATE:
+        for (index = 0u; index < expression->data.aggregate.field_count;
+             ++index) {
+            if (!cm_hir_expression_scope_valid(context,
+                    expression->data.aggregate.fields[index].value,
+                    body_id, visible_local_count, active_closure,
+                    depth + 1u)) return 0;
+        }
+        return 1;
+    case CM_HIR_EXPR_FIELD:
+        return cm_hir_expression_scope_valid(context,
+            expression->data.field.base, body_id, visible_local_count,
+            active_closure, depth + 1u);
+    case CM_HIR_EXPR_BORROW_SHARED:
+        return cm_hir_expression_scope_valid(context,
+            expression->data.borrow_shared.operand, body_id,
+            visible_local_count, active_closure, depth + 1u);
+    case CM_HIR_EXPR_DEREFERENCE:
+        return cm_hir_expression_scope_valid(context,
+            expression->data.dereference.operand, body_id,
+            visible_local_count, active_closure, depth + 1u);
+    case CM_HIR_EXPR_IF:
+        return cm_hir_expression_scope_valid(context,
+                expression->data.if_expr.condition, body_id,
+                visible_local_count, active_closure, depth + 1u)
+            && cm_hir_expression_scope_valid(context,
+                expression->data.if_expr.then_expression, body_id,
+                visible_local_count, active_closure, depth + 1u)
+            && cm_hir_expression_scope_valid(context,
+                expression->data.if_expr.else_expression, body_id,
+                visible_local_count, active_closure, depth + 1u);
+    case CM_HIR_EXPR_BLOCK:
+    {
+        uint32_t nested_visible;
+
+        nested_visible = visible_local_count;
+        for (index = 0u; index < expression->data.block.statement_count;
+             ++index) {
+            const CmHirStatement *statement;
+
+            statement = &expression->data.block.statements[index];
+            if (statement->kind != CM_HIR_STATEMENT_LET
+                || statement->data.let_statement.local_index
+                    != nested_visible
+                || !cm_hir_expression_scope_valid(context,
+                    statement->data.let_statement.initializer, body_id,
+                    nested_visible, active_closure, depth + 1u)
+                || nested_visible == UINT32_MAX) return 0;
+            ++nested_visible;
+        }
+        return cm_hir_expression_scope_valid(context,
+            expression->data.block.tail_expression, body_id,
+            nested_visible, active_closure, depth + 1u);
+    }
+    }
+    return 0;
+}
+
+CmHirStatus cm_hir_bind_closure_body(CmHirContext *context,
+    CmHirClosureId closure_id, CmHirExprId body_expression)
+{
+    CmHirClosure *closure;
+    const CmHirExpr *root;
+
+    if (context == NULL || closure_id == CM_HIR_CLOSURE_NONE
+        || body_expression == CM_HIR_EXPR_NONE) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    closure = (CmHirClosure *)cm_hir_get_id_mut(&context->closures,
+        closure_id);
+    root = cm_hir_get_expr(context, body_expression);
+    if (closure == NULL || root == NULL) return CM_HIR_INVALID_ID;
+    if (closure->state != CM_HIR_CLOSURE_SIGNATURE_RESERVED
+        || closure->body_expression != CM_HIR_EXPR_NONE
+        || root->owner_body != closure->owner_body
+        || !cm_hir_body_type_equal(context, root->type,
+            closure->return_type)
+        || root->span.source != closure->span.source
+        || root->span.start < closure->span.start
+        || root->span.end > closure->span.end
+        || !cm_hir_expression_scope_valid(context, body_expression,
+            closure->owner_body, closure->visible_local_count,
+            closure_id, 0u)) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    closure->body_expression = body_expression;
+    closure->state = CM_HIR_CLOSURE_BODY_BOUND;
+    cm_hir_context_record_semantic_mutation(context);
+    return CM_HIR_OK;
 }
 
 static int cm_hir_call_region_matches(const CmHirRegion *declared,
@@ -5429,6 +5707,15 @@ static void cm_hir_claim_expression_tree(CmHirContext *context,
             expression->data.if_expr.then_expression, body_id);
         cm_hir_claim_expression_tree(context,
             expression->data.if_expr.else_expression, body_id);
+    } else if (expression->kind == CM_HIR_EXPR_CLOSURE) {
+        const CmHirClosure *closure;
+
+        closure = cm_hir_get_closure(context,
+            expression->data.closure.closure);
+        if (closure != NULL && closure->state == CM_HIR_CLOSURE_BODY_BOUND) {
+            cm_hir_claim_expression_tree(context, closure->body_expression,
+                body_id);
+        }
     }
     expression->owner_body = body_id;
 }
@@ -5453,7 +5740,7 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
         || expression->usage != CM_HIR_USAGE_UNKNOWN
         || expression->static_borrow_state != CM_HIR_STATIC_BORROW_UNKNOWN
         || (unsigned int)expression->kind >
-            (unsigned int)CM_HIR_EXPR_DEREFERENCE) {
+            (unsigned int)CM_HIR_EXPR_CLOSURE) {
         return CM_HIR_INVALID_ARGUMENT;
     }
     body = expression->owner_body == CM_HIR_BODY_NONE ? NULL
@@ -5556,6 +5843,49 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
             return CM_HIR_INVARIANT_VIOLATION;
         }
         break;
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    {
+        const CmHirClosure *closure;
+        const CmHirClosureParam *parameter;
+
+        closure = cm_hir_get_closure(context,
+            expression->data.closure_parameter.closure);
+        parameter = closure != NULL
+                && expression->data.closure_parameter.parameter_index
+                    < closure->parameter_count
+            ? &closure->parameters[
+                expression->data.closure_parameter.parameter_index]
+            : NULL;
+        if (body == NULL || closure == NULL || parameter == NULL
+            || closure->owner_body != expression->owner_body
+            || parameter->binding_kind != CM_HIR_BINDING_NAMED
+            || !cm_hir_body_type_equal(context, parameter->type,
+                expression->type)
+            || expression->span.source != parameter->span.source
+            || expression->span.start < parameter->span.start
+            || expression->span.end > closure->span.end) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        break;
+    }
+    case CM_HIR_EXPR_CLOSURE:
+    {
+        const CmHirClosure *closure;
+
+        closure = cm_hir_get_closure(context, expression->data.closure.closure);
+        if (body == NULL || closure == NULL
+            || closure->state != CM_HIR_CLOSURE_BODY_BOUND
+            || closure->owner_body != expression->owner_body
+            || type->kind != CM_HIR_TYPE_CLOSURE_KIND
+            || type->data.closure_type.closure
+                != expression->data.closure.closure
+            || expression->span.source != closure->span.source
+            || expression->span.start != closure->span.start
+            || expression->span.end != closure->span.end) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        break;
+    }
     case CM_HIR_EXPR_CALL:
         if (body == NULL || !cm_hir_call_expression_valid(context,
                 expression)) {
@@ -5952,6 +6282,7 @@ CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
 {
     CmHirBody *body;
     const CmHirExpr *root;
+    uint32_t initial_visible_local_count;
 
     if (context == NULL || body_id == CM_HIR_BODY_NONE
         || root_expression == CM_HIR_EXPR_NONE) {
@@ -5960,6 +6291,12 @@ CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
     body = (CmHirBody *)cm_vec_at(&context->bodies, (size_t)body_id - 1u);
     root = cm_hir_get_expr(context, root_expression);
     if (body == NULL || root == NULL) return CM_HIR_INVALID_ID;
+    initial_visible_local_count = 0u;
+    while (initial_visible_local_count < body->local_count
+        && body->locals[initial_visible_local_count].parameter_index
+            != CM_HIR_PARAMETER_INDEX_NONE) {
+        ++initial_visible_local_count;
+    }
     if (body->state != CM_HIR_BODY_UNLOWERED
         || body->root_expression != CM_HIR_EXPR_NONE
         || body->source == 0u || body->source_expression_id == 0u
@@ -5970,7 +6307,10 @@ CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
             && root->owner_body != body_id)
         || root->span.source != body->source
         || root->span.start < body->span.start
-        || root->span.end > body->span.end) {
+        || root->span.end > body->span.end
+        || !cm_hir_expression_scope_valid(context, root_expression,
+            body_id, initial_visible_local_count,
+            CM_HIR_CLOSURE_NONE, 0u)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     cm_hir_claim_expression_tree(context, root_expression, body_id);

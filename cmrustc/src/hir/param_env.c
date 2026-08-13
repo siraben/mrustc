@@ -33,6 +33,7 @@ typedef struct CmParamEnvState {
     size_t module_count;
     size_t item_count;
     size_t body_count;
+    size_t closure_count;
     size_t expression_count;
     size_t type_count;
     size_t generic_parameter_count;
@@ -71,6 +72,7 @@ static int cm_param_env_state_current(const CmParamEnvState *state)
         && hir->modules.len == state->module_count
         && hir->items.len == state->item_count
         && hir->bodies.len == state->body_count
+        && hir->closures.len == state->closure_count
         && hir->expressions.len == state->expression_count
         && hir->types.len == state->type_count
         && hir->generic_parameters.len == state->generic_parameter_count
@@ -223,10 +225,11 @@ static unsigned int cm_param_dependency_type(
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_param_dependency_named(scan, &type->data.named_type,
             depth + 1u);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return CM_PARAM_DEP_FOREIGN;
     case CM_HIR_TYPE_SELF_KIND:
         return cm_param_dependency_owner(scan,
             type->data.self_type.owner, 1);
@@ -636,6 +639,7 @@ CmParamEnvStatus cm_param_env_init(CmParamEnv *environment,
     state->module_count = hir->modules.len;
     state->item_count = hir->items.len;
     state->body_count = hir->bodies.len;
+    state->closure_count = hir->closures.len;
     state->expression_count = hir->expressions.len;
     state->type_count = hir->types.len;
     state->generic_parameter_count = hir->generic_parameters.len;

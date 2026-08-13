@@ -6975,9 +6975,10 @@ static void cm_lower_trait_default_free_type_temporary(CmHirType *type)
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         cm_free(type->data.named_type.arguments);
+        break;
+    case CM_HIR_TYPE_CLOSURE_KIND:
         break;
     case CM_HIR_TYPE_PROJECTION_KIND:
         cm_free(type->data.projection_type.trait_type.arguments);

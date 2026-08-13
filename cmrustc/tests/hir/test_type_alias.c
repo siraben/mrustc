@@ -361,9 +361,11 @@ static int type_root_is_alias_free(const CmHirContext *hir,
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return named_type_is_alias_free(hir, &type->data.named_type, depth);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return cm_hir_get_closure(hir,
+            type->data.closure_type.closure) != NULL;
     case CM_HIR_TYPE_PROJECTION_KIND:
         return type_root_is_alias_free(hir,
                 type->data.projection_type.self_type, depth + 1u)

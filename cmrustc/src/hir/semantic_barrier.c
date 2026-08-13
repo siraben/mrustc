@@ -39,6 +39,7 @@ struct CmSemanticBarrierState {
     size_t module_count;
     size_t item_count;
     size_t body_count;
+    size_t closure_count;
     size_t expression_count;
     size_t type_count;
     size_t generic_parameter_count;
@@ -49,6 +50,7 @@ struct CmSemanticBarrierState {
     void *typed_items;
     void *typed_modules;
     void *typed_bodies;
+    void *typed_closures;
     void *typed_expressions;
     void *typed_types;
     void *typed_generic_parameters;
@@ -312,6 +314,16 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
                 body->locals, (size_t)body->local_count,
                 sizeof(*body->locals))) return 0;
     }
+    for (index = 0u; index < hir->closures.len; ++index) {
+        const CmHirClosure *closure;
+
+        closure = (const CmHirClosure *)cm_vec_at_const(
+            &hir->closures, index);
+        if (closure == NULL
+            || !cm_semantic_barrier_hash_array(&hash,
+                closure->parameters, (size_t)closure->parameter_count,
+                sizeof(*closure->parameters))) return 0;
+    }
     for (index = 0u; index < hir->types.len; ++index) {
         const CmHirType *type;
 
@@ -333,10 +345,13 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
             || type->kind == CM_HIR_TYPE_ADT_KIND
             || type->kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
             || type->kind == CM_HIR_TYPE_OPAQUE_KIND
-            || type->kind == CM_HIR_TYPE_CLOSURE_KIND
             || type->kind == CM_HIR_TYPE_FOREIGN_KIND) {
             if (!cm_semantic_barrier_hash_named(&hash,
                     &type->data.named_type)) return 0;
+        } else if (type->kind == CM_HIR_TYPE_CLOSURE_KIND) {
+            hash = cm_semantic_barrier_hash_bytes(hash,
+                &type->data.closure_type.closure,
+                sizeof(type->data.closure_type.closure));
         } else if (type->kind == CM_HIR_TYPE_PROJECTION_KIND) {
             if (!cm_semantic_barrier_hash_named(&hash,
                     &type->data.projection_type.trait_type)
@@ -420,6 +435,7 @@ static void cm_semantic_barrier_release_typed_snapshot(
     cm_free(state->typed_items);
     cm_free(state->typed_modules);
     cm_free(state->typed_bodies);
+    cm_free(state->typed_closures);
     cm_free(state->typed_expressions);
     cm_free(state->typed_types);
     cm_free(state->typed_generic_parameters);
@@ -427,6 +443,7 @@ static void cm_semantic_barrier_release_typed_snapshot(
     state->typed_items = NULL;
     state->typed_modules = NULL;
     state->typed_bodies = NULL;
+    state->typed_closures = NULL;
     state->typed_expressions = NULL;
     state->typed_types = NULL;
     state->typed_generic_parameters = NULL;
@@ -451,6 +468,8 @@ static int cm_semantic_barrier_capture_typed_snapshot(
             &state->typed_modules)
         || !cm_semantic_barrier_snapshot_vec(&state->hir->bodies,
             &state->typed_bodies)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->closures,
+            &state->typed_closures)
         || !cm_semantic_barrier_snapshot_vec(&state->hir->expressions,
             &state->typed_expressions)
         || !cm_semantic_barrier_snapshot_vec(&state->hir->types,
@@ -493,6 +512,8 @@ static int cm_semantic_barrier_typed_snapshot_matches(
             state->typed_modules)
         || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->bodies,
             state->typed_bodies)
+        || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->closures,
+            state->typed_closures)
         || !cm_semantic_barrier_snapshot_vec_matches(
             &state->hir->expressions, state->typed_expressions)
         || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->types,
@@ -764,6 +785,7 @@ static void cm_semantic_barrier_capture_generation(
     state->module_count = hir->modules.len;
     state->item_count = hir->items.len;
     state->body_count = hir->bodies.len;
+    state->closure_count = hir->closures.len;
     state->expression_count = hir->expressions.len;
     state->type_count = hir->types.len;
     state->generic_parameter_count = hir->generic_parameters.len;
@@ -791,6 +813,7 @@ static int cm_semantic_barrier_state_current(
         && hir->modules.len == state->module_count
         && hir->items.len == state->item_count
         && hir->bodies.len == state->body_count
+        && hir->closures.len == state->closure_count
         && hir->expressions.len == state->expression_count
         && hir->types.len == state->type_count
         && hir->generic_parameters.len

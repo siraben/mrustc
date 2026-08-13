@@ -278,7 +278,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v29` and
+remains omitted rather than guessed. Canonical dumps are `hir-v30` and
 `mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -296,11 +296,18 @@ Manifest body owners and enclosing trait/impl items with predicates or
 outlives constraints reject instead of silently escaping that proof;
 the latter two still lack manifest atom identities.
 
-Canonical `hir-v29` records an explicit origin for every current function,
-const, and static body. The origin kind is `ITEM_SOURCE`, and its definition,
-enclosing definition, item backlink, and legacy owner must agree exactly.
-Construction, finalization, deterministic dumps, and typed barrier snapshots
-authenticate those fields. Exact canonical callable instances additionally
+Canonical `hir-v30` adds stable, context-owned source-closure identities,
+closure-owned lexical parameters, exact visible-local prefixes, nominal types
+keyed by closure identity, and source-closure/parameter expression nodes.
+Signatures are reserved before those dependent nodes and bodies bind once;
+rewind, finalization, deterministic dumps, typed barrier fingerprints, and
+observer currentness authenticate the arena. This is representation only:
+capture absence/class and Copy evidence are uncomputed, while invocation,
+lifetime inference, expansion, MIR, and C emission reject these nodes.
+
+Every current function, const, and static body still has an `ITEM_SOURCE`
+origin whose definition, enclosing definition, item backlink, and legacy owner
+agree exactly. Exact canonical callable instances additionally
 encode separate dispatch and executable-body definitions. Semantic results,
 admission, MIR, reachability, and C emission preserve both, and `mir-v9` dumps
 render `dispatch/body`. Qualified receiver-free calls can now execute a
@@ -742,7 +749,7 @@ discarded. The graph-owned effective view evaluates cfg/cfg_attr before
 publication and preserves the parent enum plus original AST variant index.
 Enum-self, explicit variant, alias, glob, and checked-path imports use that
 identity; named-field variants are type-only, while unit and tuple variants
-also publish value constructors. Canonical HIR `hir-v29` pre-reserves a
+also publish value constructors. Canonical HIR `hir-v30` pre-reserves a
 distinct definition for every source variant, retains it on the variant
 payload, binds it to the final enum item/index, and revalidates structural
 imports when the enum becomes bound. The parent enum definition is never

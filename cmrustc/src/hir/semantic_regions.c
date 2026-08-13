@@ -1566,6 +1566,8 @@ static int cm_semantic_regions_visit_expression(
         break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
         return cm_semantic_regions_fail(scratch,
             CM_SEMANTIC_REGIONS_UNSUPPORTED_EXPRESSION, expression->type);
     default:

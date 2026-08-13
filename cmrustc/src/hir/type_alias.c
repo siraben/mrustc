@@ -1002,10 +1002,12 @@ static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
     }
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
-    case CM_HIR_TYPE_CLOSURE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_alias_normalize_nominal(state, source_id, &source,
             out_type);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        *out_type = source_id;
+        return 1;
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
         return cm_alias_expand(state, source_id, &source, out_type);
     case CM_HIR_TYPE_PARAMETER_KIND:

@@ -1308,7 +1308,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -2099,7 +2099,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -2343,7 +2343,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
+    assert(strncmp(dump, "hir-v30\n", strlen("hir-v30\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -3030,7 +3030,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -3512,7 +3512,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -4029,7 +4029,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -5176,7 +5176,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -5642,6 +5642,183 @@ static void test_context_transaction_marks(void)
     assert(cm_hir_context_mark(NULL, &mark) == CM_HIR_INVALID_ARGUMENT
         && cm_hir_context_mark(&context, NULL) == CM_HIR_INVALID_ARGUMENT);
     cm_hir_context_destroy(&other);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_closure_hir_model(void)
+{
+    CmHirContext context;
+    CmHirContextMark mark;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirDefId body_definition;
+    CmHirType type;
+    CmHirTypeId u32_type;
+    CmHirTypeId closure_type;
+    CmHirTypeId second_closure_type;
+    CmHirLocal locals[2];
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirClosureParam parameters[2];
+    CmHirClosureId closure_id;
+    CmHirClosureId second_closure_id;
+    CmHirClosureId rejected_closure_id;
+    CmHirExpr expression;
+    CmHirExprId parameter_expression;
+    CmHirExprId later_local_expression;
+    CmHirExprId closure_expression;
+    CmHirExprId rejected_expression;
+    const CmHirClosure *stored;
+    uint64_t generation;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "closure_hir_model"), CM_HIR_EDITION_2024,
+        test_span(0u, 300u), &crate_id, &root_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = test_span(1u, 2u);
+    type.data.integer_type.kind = CM_HIR_INT_U32;
+    assert(cm_hir_add_type(&context, &type, &u32_type) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(10u, 250u), &body_definition) == CM_HIR_OK);
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = cm_hir_intern(&context, "before");
+    locals[0].type = u32_type;
+    locals[0].span = test_span(20u, 25u);
+    locals[0].parameter_index = 0u;
+    locals[1].name = cm_hir_intern(&context, "after");
+    locals[1].type = u32_type;
+    locals[1].span = test_span(200u, 205u);
+    locals[1].parameter_index = 1u;
+    memset(&body, 0, sizeof(body));
+    body.owner = body_definition;
+    body.origin = cm_hir_body_origin_item_source(body_definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = u32_type;
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 2u;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.span = test_span(10u, 250u);
+    assert(cm_hir_add_body(&context, &body, &body_id) == CM_HIR_OK);
+    assert(root_id != CM_HIR_MODULE_NONE);
+
+    memset(&mark, 0, sizeof(mark));
+    assert(cm_hir_context_mark(&context, &mark) == CM_HIR_OK);
+    memset(parameters, 0, sizeof(parameters));
+    parameters[0].name = cm_hir_intern(&context, "value");
+    parameters[0].type = u32_type;
+    parameters[0].span = test_span(52u, 57u);
+    parameters[0].binding_kind = CM_HIR_BINDING_NAMED;
+    parameters[1].name = CM_INTERN_ID_NONE;
+    parameters[1].type = u32_type;
+    parameters[1].span = test_span(59u, 60u);
+    parameters[1].binding_kind = CM_HIR_BINDING_DISCARD;
+    assert(cm_hir_reserve_closure(&context, body_id, 7u, parameters, 2u,
+        u32_type, 1u, 1, test_span(50u, 100u), &closure_id) == CM_HIR_OK);
+    stored = cm_hir_get_closure(&context, closure_id);
+    parameters[0].name = CM_INTERN_ID_NONE;
+    parameters[0].type = CM_HIR_TYPE_NONE;
+    assert(stored != NULL && stored->state
+            == CM_HIR_CLOSURE_SIGNATURE_RESERVED
+        && stored->parameters != parameters
+        && stored->parameters[0].name != CM_INTERN_ID_NONE
+        && stored->parameters[0].type == u32_type
+        && stored->visible_local_count == 1u && stored->is_move);
+    parameters[0] = stored->parameters[0];
+    assert(cm_hir_reserve_closure(&context, body_id, 7u, parameters, 2u,
+        u32_type, 1u, 1, test_span(50u, 100u), &rejected_closure_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    assert(rejected_closure_id == CM_HIR_CLOSURE_NONE);
+    parameters[1] = parameters[0];
+    parameters[1].span = test_span(59u, 60u);
+    assert(cm_hir_reserve_closure(&context, body_id, 8u, parameters, 2u,
+        u32_type, 1u, 0, test_span(50u, 100u), &rejected_closure_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    parameters[1] = stored->parameters[1];
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_CLOSURE_KIND;
+    type.span = test_span(50u, 100u);
+    type.data.closure_type.closure = closure_id;
+    assert(cm_hir_add_type(&context, &type, &closure_type) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE;
+    expression.owner_body = body_id;
+    expression.type = closure_type;
+    expression.span = test_span(50u, 100u);
+    expression.data.closure.closure = closure_id;
+    assert(cm_hir_add_expr(&context, &expression, &rejected_expression)
+        == CM_HIR_INVARIANT_VIOLATION);
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE_PARAMETER;
+    expression.owner_body = body_id;
+    expression.type = u32_type;
+    expression.span = test_span(70u, 75u);
+    expression.data.closure_parameter.closure = closure_id;
+    expression.data.closure_parameter.parameter_index = 0u;
+    assert(cm_hir_add_expr(&context, &expression, &parameter_expression)
+        == CM_HIR_OK);
+    expression.data.closure_parameter.parameter_index = 1u;
+    assert(cm_hir_add_expr(&context, &expression, &rejected_expression)
+        == CM_HIR_INVARIANT_VIOLATION);
+    generation = context.semantic_generation;
+    assert(cm_hir_bind_closure_body(&context, closure_id,
+        parameter_expression) == CM_HIR_OK);
+    assert(context.semantic_generation == generation + UINT64_C(1));
+    stored = cm_hir_get_closure(&context, closure_id);
+    assert(stored != NULL && stored->state == CM_HIR_CLOSURE_BODY_BOUND
+        && stored->body_expression == parameter_expression);
+    assert(cm_hir_bind_closure_body(&context, closure_id,
+        parameter_expression) == CM_HIR_INVARIANT_VIOLATION);
+    assert(cm_hir_set_body_root_expression(&context, body_id,
+        parameter_expression) == CM_HIR_INVARIANT_VIOLATION);
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE;
+    expression.owner_body = body_id;
+    expression.type = closure_type;
+    expression.span = test_span(50u, 100u);
+    expression.data.closure.closure = closure_id;
+    assert(cm_hir_add_expr(&context, &expression, &closure_expression)
+        == CM_HIR_OK);
+    assert(cm_hir_get_expr(&context, closure_expression) != NULL);
+
+    parameters[0] = stored->parameters[0];
+    parameters[0].span = test_span(112u, 117u);
+    assert(cm_hir_reserve_closure(&context, body_id, 9u, parameters, 1u,
+        u32_type, 1u, 0, test_span(110u, 180u), &second_closure_id)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_CLOSURE_KIND;
+    type.span = test_span(110u, 180u);
+    type.data.closure_type.closure = second_closure_id;
+    assert(cm_hir_add_type(&context, &type, &second_closure_type)
+        == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_id;
+    expression.type = u32_type;
+    expression.span = test_span(130u, 135u);
+    expression.data.local.local_index = 1u;
+    assert(cm_hir_add_expr(&context, &expression, &later_local_expression)
+        == CM_HIR_OK);
+    assert(cm_hir_bind_closure_body(&context, second_closure_id,
+        later_local_expression) == CM_HIR_INVARIANT_VIOLATION);
+    assert(cm_hir_bind_closure_body(&context, second_closure_id,
+        parameter_expression) == CM_HIR_INVARIANT_VIOLATION);
+    assert(second_closure_type != CM_HIR_TYPE_NONE);
+
+    assert(context.closures.len == 2u && context.expressions.len != 0u
+        && context.types.len >= 3u);
+    assert(cm_hir_context_rewind(&context, &mark) == CM_HIR_OK);
+    assert(context.closures.len == 0u
+        && cm_hir_get_closure(&context, closure_id) == NULL
+        && cm_hir_get_type(&context, closure_type) == NULL
+        && cm_hir_get_expr(&context, parameter_expression) == NULL);
     cm_hir_context_destroy(&context);
 }
 
@@ -6139,7 +6316,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
+    assert(strncmp(dump, "hir-v30\n", strlen("hir-v30\n")) == 0
         && strstr(dump, "trait-header item#2 safety=unsafe auto=1")
             != NULL
         && strstr(dump, "impl-header item#3 safety=safe negative=1")
@@ -6530,7 +6707,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -7079,7 +7256,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
+    assert(strncmp(first_dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,
@@ -7125,6 +7302,7 @@ int main(void)
     test_method_call_expression_model();
     test_aggregate_expression_model();
     test_context_transaction_marks();
+    test_closure_hir_model();
     test_context_generation_exhaustion_boundary();
     test_adt_generic_default_model();
     test_const_generic_default_type_invariants();

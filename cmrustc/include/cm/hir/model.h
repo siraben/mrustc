@@ -320,6 +320,10 @@ typedef struct CmHirType {
             CmHirSafety safety;
             int is_variadic;
         } fn_pointer_type;
+        struct {
+            /* Stable source-closure identity, never a generated item DefId. */
+            CmHirClosureId closure;
+        } closure_type;
         CmHirNamedType named_type;
         struct {
             CmHirDefId owner;
@@ -674,6 +678,38 @@ typedef struct CmHirLocal {
 
 #define CM_HIR_PARAMETER_INDEX_NONE ((uint32_t)UINT32_MAX)
 
+typedef enum CmHirClosureState {
+    /* Signature is complete; body_expression has not been bound yet. */
+    CM_HIR_CLOSURE_SIGNATURE_RESERVED = 0,
+    CM_HIR_CLOSURE_BODY_BOUND
+} CmHirClosureState;
+
+/* Closure parameters are lexical bindings, not flat item-body locals. */
+typedef struct CmHirClosureParam {
+    CmInternId name;
+    CmHirTypeId type;
+    CmSpan span;
+    CmHirBindingKind binding_kind;
+} CmHirClosureParam;
+
+/*
+ * Durable source-closure identity. Capture absence is deliberately not
+ * represented here: MARKED must later publish authenticated capture evidence.
+ */
+typedef struct CmHirClosure {
+    CmHirClosureState state;
+    CmHirBodyId owner_body;
+    uint32_t source_expression_id;
+    CmHirClosureParam *parameters;
+    uint32_t parameter_count;
+    CmHirTypeId return_type;
+    CmHirExprId body_expression;
+    /* Exact outer-local prefix visible at the closure's source position. */
+    uint32_t visible_local_count;
+    int is_move;
+    CmSpan span;
+} CmHirClosure;
+
 typedef enum CmHirExprKind {
     CM_HIR_EXPR_INTEGER = 0,
     CM_HIR_EXPR_BLOCK,
@@ -696,7 +732,11 @@ typedef enum CmHirExprKind {
     /* Explicit shared borrow of one body-owned place expression. */
     CM_HIR_EXPR_BORROW_SHARED,
     /* Explicit built-in dereference of one immutable erased reference. */
-    CM_HIR_EXPR_DEREFERENCE
+    CM_HIR_EXPR_DEREFERENCE,
+    /* A read of one parameter owned by an enclosing source closure. */
+    CM_HIR_EXPR_CLOSURE_PARAMETER,
+    /* Construction of one source closure; not executable before expansion. */
+    CM_HIR_EXPR_CLOSURE
 } CmHirExprKind;
 
 typedef enum CmHirCallableSyntax {
@@ -779,6 +819,13 @@ typedef struct CmHirExpr {
         struct {
             uint32_t local_index;
         } local;
+        struct {
+            CmHirClosureId closure;
+            uint32_t parameter_index;
+        } closure_parameter;
+        struct {
+            CmHirClosureId closure;
+        } closure;
         struct {
             CmHirDefId callee;
             /* Substitutions and arguments occupy one contiguous slice. */
@@ -901,6 +948,7 @@ typedef struct CmHirContext {
     CmVec modules;
     CmVec items;
     CmVec bodies;
+    CmVec closures;
     CmVec expressions;
     CmVec types;
     CmVec generic_parameters;
@@ -926,6 +974,7 @@ typedef struct CmHirContextMark {
     size_t modules;
     size_t items;
     size_t bodies;
+    size_t closures;
     size_t expressions;
     size_t types;
     size_t generic_parameters;
@@ -1018,6 +1067,17 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
 CmHirBodyOrigin cm_hir_body_origin_item_source(CmHirDefId definition);
 CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     CmHirBodyId *out_id);
+/*
+ * Reserve a stable identity and complete signature before constructing its
+ * nominal type and parameter reads. The nested body is bound exactly once.
+ */
+CmHirStatus cm_hir_reserve_closure(CmHirContext *context,
+    CmHirBodyId owner_body, uint32_t source_expression_id,
+    const CmHirClosureParam *parameters, uint32_t parameter_count,
+    CmHirTypeId return_type, uint32_t visible_local_count, int is_move,
+    CmSpan span, CmHirClosureId *out_id);
+CmHirStatus cm_hir_bind_closure_body(CmHirContext *context,
+    CmHirClosureId closure, CmHirExprId body_expression);
 CmHirStatus cm_hir_add_expr(CmHirContext *context, const CmHirExpr *expression,
     CmHirExprId *out_id);
 /*
@@ -1057,6 +1117,8 @@ const CmHirItem *cm_hir_get_item(const CmHirContext *context,
     CmHirItemId id);
 const CmHirBody *cm_hir_get_body(const CmHirContext *context,
     CmHirBodyId id);
+const CmHirClosure *cm_hir_get_closure(const CmHirContext *context,
+    CmHirClosureId id);
 const CmHirExpr *cm_hir_get_expr(const CmHirContext *context,
     CmHirExprId id);
 const CmHirType *cm_hir_get_type(const CmHirContext *context,

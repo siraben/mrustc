@@ -1196,6 +1196,8 @@ static CmSemanticResultsStatus cm_results_collect_expression(
         break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    case CM_HIR_EXPR_CLOSURE:
         /* Not publishable until semantic admission owns their recipes. */
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     default:

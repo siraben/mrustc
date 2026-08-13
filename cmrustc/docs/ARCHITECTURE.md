@@ -313,7 +313,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v29`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v30`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
@@ -337,12 +337,22 @@ and type-position expression bodies are deliberately not REGIONS roots yet;
 manifest body owners and enclosing trait/impl items with any predicate or
 outlives constraint are therefore rejected fail-closed.
 
-Every represented body also carries an explicit authenticated origin. In the
-first additive `hir-v29` checkpoint, the only admitted origin is
-`ITEM_SOURCE`: its executable definition, enclosing definition, item backlink,
-and transitional lexical owner must all be the same function, const, or static
-definition. This preserves one body per item and current execution behavior
-while removing `owner` as an implicit source of body identity. Type-position
+Canonical `hir-v30` adds stable source-closure identity without claiming
+closure semantics. The context owns a one-based closure arena; reservation
+deep-copies the complete lexical parameter signature before its nominal
+closure type or parameter-read expressions can be built, and body binding is
+single-assignment. Closure code remains a nested expression tree owned by its
+enclosing item body, with an exact visible-local prefix and closure-owned
+parameters rather than synthetic body locals. Finalization, dumps, typed
+snapshot/fingerprint checks, rewinds, and semantic-observer counts cover the
+arena. Capture absence/class, Copy proofs, invocation, lifetime inference,
+expansion, MIR, and codegen are not represented as evidence yet, so every
+semantic/executable consumer rejects source-closure nodes fail-closed.
+
+Every represented item body still carries an authenticated `ITEM_SOURCE`
+origin: its executable definition, enclosing definition, item backlink, and
+transitional lexical owner are the same function, const, or static definition.
+This preserves one body per item and current execution behavior. Type-position
 and generated origins remain later atomic migrations.
 
 Exact callable instances now keep two authenticated definitions. The selected
@@ -1338,7 +1348,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v29`.
+wrong-kind targets hard-error. The canonical format is `hir-v30`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are
