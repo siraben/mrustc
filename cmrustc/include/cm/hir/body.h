@@ -7,7 +7,8 @@
 typedef enum CmHirBodyFunctionOwnerKind {
     CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED = 0,
     CM_HIR_BODY_FUNCTION_OWNER_FREE,
-    CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD
+    CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD,
+    CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD
 } CmHirBodyFunctionOwnerKind;
 
 typedef enum CmHirBodyLowerStatus {
@@ -134,8 +135,9 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     const CmHirModuleMap *modules);
 
 /*
- * Transactionally publish every supported local free-function or concrete
- * trait-impl method body in stable HIR item order. The complete local
+ * Transactionally publish every supported local free-function, concrete
+ * trait-impl method, or constrained type-generic trait-impl method body in
+ * stable HIR item order. The complete local
  * body/item relation is validated before mutation. Unsupported associated
  * function bodies and const/static initializers are explicit unsupported
  * owner kinds and are never silently skipped.

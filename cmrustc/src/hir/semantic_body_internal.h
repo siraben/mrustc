@@ -32,9 +32,17 @@ typedef struct CmSemanticCheckedCallableFacts {
     CmHirDefId enclosing_impl;
     CmHirDefId implemented_trait;
     CmHirDefId self_owner;
+    const CmTypeckGenericArg *item_argument_inputs;
+    const CmTypeckGenericArg *item_arguments;
     uint32_t item_argument_count;
+    const CmTypeckGenericArg *method_argument_inputs;
+    const CmTypeckGenericArg *method_arguments;
     uint32_t method_argument_count;
+    const CmTypeckGenericArg *enclosing_impl_argument_inputs;
+    const CmTypeckGenericArg *enclosing_impl_arguments;
     uint32_t enclosing_impl_argument_count;
+    const CmTypeckGenericArg *implemented_trait_argument_inputs;
+    const CmTypeckGenericArg *implemented_trait_arguments;
     uint32_t implemented_trait_argument_count;
     CmHirExprId receiver_expression;
     uint32_t receiver_argument;

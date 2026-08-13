@@ -51,7 +51,8 @@ typedef struct CmSemanticReachableInstanceCall {
 
 /*
  * Transactionally lower and admit every supported local free-function or
- * concrete trait-impl method body.
+ * trait-impl method body definition. Generic definitions retain symbolic
+ * owner parameters here; executable instances require exact admission below.
  */
 CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     CmSemanticAdmission *admission, CmHirContext *hir,

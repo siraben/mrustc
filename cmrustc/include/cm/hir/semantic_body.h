@@ -54,9 +54,9 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     uint32_t owner_type_substitution_count);
 
 /*
- * Check a body with rigid definition-mode parameters. Concrete trait-impl
- * methods authenticate the session's enclosing impl and expose its imported
- * Self type through exact-method and enclosing-impl instantiations.
+ * Check a body with rigid definition-mode parameters. Supported trait-impl
+ * methods authenticate the session's enclosing impl and expose its `Self`
+ * type through separate exact-method and enclosing-impl instantiations.
  */
 CmSemanticBodyResult cm_semantic_body_check_definition(
     CmSemanticSession *session, CmHirBodyId body);

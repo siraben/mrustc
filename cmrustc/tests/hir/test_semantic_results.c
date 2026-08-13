@@ -123,6 +123,56 @@ static CmHirDefId find_named_item(const Fixture *fixture,
     return cm_hir_def_id_none();
 }
 
+static CmHirTypeId find_integer_type(const Fixture *fixture,
+    CmHirIntType kind)
+{
+    size_t index;
+
+    for (index = 0u; index < fixture->hir.types.len; ++index) {
+        const CmHirType *type;
+
+        type = cm_hir_get_type(&fixture->hir, (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == kind) {
+            return (CmHirTypeId)(index + 1u);
+        }
+    }
+    return CM_HIR_TYPE_NONE;
+}
+
+static const CmHirItem *find_function_item(const Fixture *fixture,
+    const char *name)
+{
+    CmHirDefId definition;
+    const CmHirDefinition *record;
+
+    definition = find_named_item(fixture, name, cm_hir_def_id_none());
+    record = cm_hir_lookup_definition(&fixture->hir, definition);
+    return record == NULL || record->kind != CM_HIR_DEFINITION_ITEM
+        ? NULL : cm_hir_get_item(&fixture->hir, record->entity.item_id);
+}
+
+static CmHirExprId find_owned_callable(const Fixture *fixture,
+    CmHirBodyId body, CmHirExprKind kind)
+{
+    CmHirExprId found;
+    size_t index;
+
+    found = CM_HIR_EXPR_NONE;
+    for (index = 0u; index < fixture->hir.expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(&fixture->hir,
+            (CmHirExprId)(index + 1u));
+        if (expression != NULL && expression->owner_body == body
+            && expression->kind == kind) {
+            assert(found == CM_HIR_EXPR_NONE);
+            found = (CmHirExprId)(index + 1u);
+        }
+    }
+    return found;
+}
+
 static CmHirTypeId add_projection_type(Fixture *fixture,
     CmHirDefId trait_definition, CmHirDefId associated_definition,
     CmHirTypeId self_type)
@@ -139,6 +189,51 @@ static CmHirTypeId add_projection_type(Fixture *fixture,
         associated_definition;
     assert(cm_hir_add_type(&fixture->hir, &projection, &type) == CM_HIR_OK);
     return type;
+}
+
+static void assert_no_callable_generic_arguments(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirBodyId body, CmHirExprId expression)
+{
+    CmSemanticGenericArgumentView argument;
+    size_t domain;
+
+    for (domain = 0u; domain < 4u; ++domain) {
+        assert(cm_semantic_results_callable_generic_argument(results,
+            admission, body, expression,
+            (CmSemanticCallableGenericArgumentDomain)domain, 0u, &argument)
+                == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    }
+    assert(cm_semantic_results_callable_generic_argument(results, admission,
+        body, expression, (CmSemanticCallableGenericArgumentDomain)4, 0u,
+        &argument) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ITEM, 0u, NULL)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
+}
+
+static void assert_no_instance_callable_generic_arguments(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *caller, CmHirExprId expression)
+{
+    CmSemanticGenericArgumentView argument;
+    size_t domain;
+
+    for (domain = 0u; domain < 4u; ++domain) {
+        assert(cm_semantic_results_instance_callable_generic_argument(results,
+            admission, caller, expression,
+            (CmSemanticCallableGenericArgumentDomain)domain, 0u, &argument)
+                == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    }
+    assert(cm_semantic_results_instance_callable_generic_argument(results,
+        admission, caller, expression,
+        (CmSemanticCallableGenericArgumentDomain)4, 0u, &argument)
+            == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
+        && cm_semantic_results_instance_callable_generic_argument(results,
+            admission, caller, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ITEM, 0u, NULL)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
 }
 
 static void fixture_init(Fixture *fixture, const char *source)
@@ -1102,6 +1197,8 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
         && cm_semantic_results_instance_callable_selection_for_callee(
             results, &admission, &caller, expression, &wrong_callee,
             &selection) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    assert_no_instance_callable_generic_arguments(results, &admission,
+        &caller, expression);
     for (parameter_index = 0u;
          parameter_index < expected->argument_count; ++parameter_index) {
         assert(cm_semantic_results_instance_callable_parameter_for_callee(
@@ -1209,6 +1306,8 @@ static void test_durable_qualified_callable_recipe(void)
         && cm_semantic_results_callable_parameter(results, &admission,
             wrapper->data.function_item.body, call_expression, 1u,
             &parameter_type) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    assert_no_callable_generic_arguments(results, &admission,
+        wrapper->data.function_item.body, call_expression);
     assert_exact_callable_instance_recipe(&fixture, wrapper_definition,
         wrapper->data.function_item.body, call_expression,
         source_call->data.qualified_call.requested_self_type, &selection);
@@ -1341,10 +1440,208 @@ static void test_durable_dot_method_recipe(void)
         && cm_semantic_results_callable_argument(results, &admission,
             wrapper->data.function_item.body, call_expression, 2u,
             &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    assert_no_callable_generic_arguments(results, &admission,
+        wrapper->data.function_item.body, call_expression);
     assert_exact_callable_instance_recipe(&fixture, wrapper_definition,
         wrapper->data.function_item.body, call_expression,
         cm_hir_get_expr(&fixture.hir,
             source_call->data.method_call.receiver)->type, &selection);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
+static CmSemanticGenericArgumentView assert_generic_impl_callable_recipe(
+    const Fixture *fixture, const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmHirItem *owner,
+    CmHirExprKind expression_kind, CmHirTypeId expected_argument_type,
+    CmHirCallableSyntax expected_syntax)
+{
+    CmSemanticCallableSelectionView selection;
+    CmSemanticGenericArgumentView argument;
+    CmSemanticGenericArgumentView missing;
+    CmHirExprId expression;
+    int equal;
+    int matches;
+
+    assert(fixture != NULL && results != NULL && admission != NULL
+        && owner != NULL && owner->kind == CM_HIR_ITEM_FUNCTION);
+    expression = find_owned_callable(fixture,
+        owner->data.function_item.body, expression_kind);
+    assert(expression != CM_HIR_EXPR_NONE
+        && cm_semantic_results_callable_selection(results, admission,
+            owner->data.function_item.body, expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && selection.syntax == expected_syntax
+        && selection.item_argument_count == 0u
+        && selection.method_argument_count == 0u
+        && selection.enclosing_impl_argument_count == 1u
+        && selection.implemented_trait_argument_count == 0u
+        && cm_hir_def_id_equal(selection.enclosing_impl,
+            selection.selected_impl)
+        && cm_hir_def_id_equal(selection.implemented_trait,
+            selection.requested_trait)
+        && cm_hir_def_id_equal(selection.self_owner,
+            selection.selected_impl)
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            owner->data.function_item.body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL, 0u,
+            &argument) == CM_SEMANTIC_RESULTS_OK
+        && argument.kind == CM_HIR_GENERIC_ARG_TYPE
+        && argument.input.bytes != NULL && argument.input.size != 0u
+        && argument.normalized.bytes != NULL
+        && argument.normalized.size != 0u
+        && cm_semantic_type_view_equal(&argument.input,
+            &argument.normalized, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_type_view_matches_monomorphic_hir(results, admission,
+            &argument.input, expected_argument_type, &matches)
+            == CM_SEMANTIC_RESULTS_OK && matches
+        && cm_semantic_type_view_matches_monomorphic_hir(results, admission,
+            &argument.normalized, expected_argument_type, &matches)
+            == CM_SEMANTIC_RESULTS_OK && matches
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            owner->data.function_item.body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL, 1u,
+            &missing) == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            owner->data.function_item.body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ITEM, 0u, &missing)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            owner->data.function_item.body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_METHOD, 0u, &missing)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_callable_generic_argument(results, admission,
+            owner->data.function_item.body, expression,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_IMPLEMENTED_TRAIT, 0u,
+            &missing) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    return argument;
+}
+
+static void test_durable_generic_impl_callable_recipes(void)
+{
+    Fixture fixture;
+    CmHirLocalBodiesResult lower_result;
+    CmSemanticReachableBody reachable[2];
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    const CmSemanticResults *results;
+    const CmHirItem *qualified;
+    const CmHirItem *method;
+    CmHirItem *impl_item;
+    CmHirItem *impl_method;
+    CmHirBody *impl_body;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirType parameter_type_value;
+    CmHirTypeId parameter_type;
+    CmHirDefId trait_definition;
+    CmSemanticGenericArgumentView u32_argument;
+    CmSemanticGenericArgumentView u8_argument;
+    CmHirTypeId u32_type;
+    CmHirTypeId u8_type;
+    size_t index;
+    int equal;
+
+    fixture_init(&fixture,
+        "trait Echo { fn echo(self, value: Self) -> Self; } "
+        "impl Echo for u32 { "
+        "fn echo(self, value: u32) -> u32 { value } } "
+        "fn qualified(receiver: u32, value: u32) -> u32 { "
+        "<u32 as Echo>::echo(receiver, value) } "
+        "fn method(receiver: u8, value: u8) -> u8 { "
+        "receiver.echo(value) }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    trait_definition = find_named_item(&fixture, "Echo",
+        cm_hir_def_id_none());
+    impl_item = NULL;
+    for (index = 0u; index < fixture.hir.items.len; ++index) {
+        CmHirItem *candidate;
+
+        candidate = (CmHirItem *)cm_vec_at(&fixture.hir.items, index);
+        if (candidate != NULL && candidate->kind == CM_HIR_ITEM_IMPL
+            && candidate->data.impl_item.has_trait
+            && cm_hir_def_id_equal(
+                candidate->data.impl_item.trait_type.definition,
+                trait_definition)) {
+            assert(impl_item == NULL);
+            impl_item = candidate;
+        }
+    }
+    impl_method = impl_item == NULL ? NULL : (CmHirItem *)cm_hir_get_item(
+        &fixture.hir, cm_hir_lookup_definition(&fixture.hir,
+            find_named_item(&fixture, "echo", impl_item->definition))
+                ->entity.item_id);
+    qualified = find_function_item(&fixture, "qualified");
+    method = find_function_item(&fixture, "method");
+    u32_type = find_integer_type(&fixture, CM_HIR_INT_U32);
+    u8_type = find_integer_type(&fixture, CM_HIR_INT_U8);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK
+        && impl_item != NULL && impl_method != NULL
+        && qualified != NULL && method != NULL
+        && u32_type != CM_HIR_TYPE_NONE && u8_type != CM_HIR_TYPE_NONE);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = impl_item->definition;
+    parameter.name = cm_hir_intern(&fixture.hir, "T");
+    parameter.span = impl_item->span;
+    assert(cm_hir_add_generic_param(&fixture.hir, &parameter,
+        &parameter_id) == CM_HIR_OK);
+    memset(&parameter_type_value, 0, sizeof(parameter_type_value));
+    parameter_type_value.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    parameter_type_value.span = impl_item->span;
+    parameter_type_value.data.parameter_type.parameter = parameter_id;
+    assert(cm_hir_add_type(&fixture.hir, &parameter_type_value,
+        &parameter_type) == CM_HIR_OK);
+    impl_item->generic_parameter_start = parameter_id;
+    impl_item->generic_parameter_count = 1u;
+    impl_item->data.impl_item.self_type = parameter_type;
+    for (index = 0u;
+         index < impl_method->data.function_item.signature.parameter_count;
+         ++index) {
+        impl_method->data.function_item.signature.parameters[index].type =
+            parameter_type;
+    }
+    impl_method->data.function_item.signature.return_type = parameter_type;
+    impl_body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        impl_method->data.function_item.body);
+    assert(impl_body != NULL && impl_body->local_count == 2u);
+    impl_body->expected_type = parameter_type;
+    for (index = 0u; index < impl_body->local_count; ++index) {
+        impl_body->locals[index].type = parameter_type;
+    }
+    for (index = 0u; index < fixture.hir.expressions.len; ++index) {
+        CmHirExpr *expression;
+
+        expression = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+            index);
+        if (expression != NULL
+            && expression->owner_body == impl_method->data.function_item.body) {
+            expression->type = parameter_type;
+        }
+    }
+    reachable[0].owner = method->definition;
+    reachable[0].body = method->data.function_item.body;
+    reachable[1].owner = qualified->definition;
+    reachable[1].body = qualified->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission,
+        &fixture.hir, 1u, reachable, 2u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL);
+    u32_argument = assert_generic_impl_callable_recipe(&fixture, results,
+        &admission, qualified, CM_HIR_EXPR_QUALIFIED_CALL, u32_type,
+        CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD);
+    u8_argument = assert_generic_impl_callable_recipe(&fixture, results,
+        &admission, method, CM_HIR_EXPR_METHOD_CALL, u8_type,
+        CM_HIR_CALLABLE_DOT_METHOD);
+    assert(u32_argument.kind == CM_HIR_GENERIC_ARG_TYPE
+        && u8_argument.kind == CM_HIR_GENERIC_ARG_TYPE
+        && cm_semantic_type_view_equal(&u32_argument.normalized,
+            &u8_argument.normalized, &equal) == CM_SEMANTIC_RESULTS_OK
+        && !equal);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
@@ -1565,6 +1862,7 @@ int main(void)
     test_durable_projection_trace_definition();
     test_durable_qualified_callable_recipe();
     test_durable_dot_method_recipe();
+    test_durable_generic_impl_callable_recipes();
     test_projection_failure_discards_partial_stage();
     puts("semantic results tests passed");
     return 0;

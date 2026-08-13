@@ -17,8 +17,76 @@ static const CmHirItem *cm_hir_body_owner_item(
         ? item : NULL;
 }
 
-static int cm_hir_body_owner_type_concrete(const CmHirContext *context,
-    CmHirTypeId type_id, size_t depth);
+static int cm_hir_body_owner_type_supported(const CmHirContext *context,
+    const CmHirItem *impl_item, CmHirTypeId type_id, size_t depth);
+
+typedef enum CmHirBodyOwnerNamedTargetKind {
+    CM_HIR_BODY_OWNER_NAMED_ADT = 0,
+    CM_HIR_BODY_OWNER_NAMED_TRAIT
+} CmHirBodyOwnerNamedTargetKind;
+
+static int cm_hir_body_owner_type_parameters_supported(
+    const CmHirContext *context, const CmHirItem *item)
+{
+    uint32_t index;
+
+    if (context == NULL || item == NULL) return 0;
+    if (item->generic_parameter_count == 0u) {
+        return item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE;
+    }
+    if (item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count - 1u > UINT32_MAX
+            - item->generic_parameter_start) {
+        return 0;
+    }
+    for (index = 0u; index < item->generic_parameter_count; ++index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(context,
+            item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+            || parameter->index != index || parameter->is_relaxed_sized
+            || parameter->has_default
+            || !cm_hir_def_id_equal(parameter->owner,
+                item->definition)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_hir_body_owner_constraints_empty(const CmHirItem *item)
+{
+    return item != NULL
+        && item->predicate_scope_count == 0u
+        && item->predicate_scopes == NULL
+        && item->predicate_count == 0u
+        && item->predicates == NULL
+        && item->outlives_predicate_count == 0u
+        && item->outlives_predicates == NULL;
+}
+
+static int cm_hir_body_owner_impl_type_parameter(
+    const CmHirContext *context, const CmHirItem *impl_item,
+    CmHirGenericParamId parameter_id)
+{
+    const CmHirGenericParam *parameter;
+    uint32_t index;
+
+    if (context == NULL || impl_item == NULL
+        || impl_item->generic_parameter_count == 0u
+        || impl_item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || parameter_id < impl_item->generic_parameter_start) {
+        return 0;
+    }
+    index = parameter_id - impl_item->generic_parameter_start;
+    if (index >= impl_item->generic_parameter_count) return 0;
+    parameter = cm_hir_get_generic_param(context, parameter_id);
+    return parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+        && !parameter->is_relaxed_sized && !parameter->has_default
+        && parameter->index == index
+        && cm_hir_def_id_equal(parameter->owner, impl_item->definition);
+}
 
 static int cm_hir_body_owner_region_concrete(const CmHirRegion *region)
 {
@@ -28,16 +96,18 @@ static int cm_hir_body_owner_region_concrete(const CmHirRegion *region)
 }
 
 static int cm_hir_body_owner_const_concrete(const CmHirContext *context,
-    const CmHirConstArg *constant, size_t depth)
+    const CmHirItem *impl_item, const CmHirConstArg *constant, size_t depth)
 {
     return constant != NULL && constant->kind == CM_HIR_CONST_VALUE
-        && cm_hir_body_owner_type_concrete(context, constant->type,
-            depth + 1u);
+        && cm_hir_body_owner_type_supported(context, impl_item,
+            constant->type, depth + 1u);
 }
 
-static int cm_hir_body_owner_named_concrete(const CmHirContext *context,
-    const CmHirNamedType *named, size_t depth)
+static int cm_hir_body_owner_named_supported(const CmHirContext *context,
+    const CmHirItem *impl_item, const CmHirNamedType *named,
+    CmHirBodyOwnerNamedTargetKind target_kind, size_t depth)
 {
+    const CmHirItem *target;
     uint32_t index;
 
     if (named == NULL || cm_hir_def_id_is_none(named->definition)
@@ -45,18 +115,47 @@ static int cm_hir_body_owner_named_concrete(const CmHirContext *context,
         || (named->argument_count == 0u) != (named->arguments == NULL)) {
         return 0;
     }
+    target = cm_hir_body_owner_item(context, named->definition);
+    if (target == NULL
+        || (target_kind == CM_HIR_BODY_OWNER_NAMED_ADT
+            ? target->kind != CM_HIR_ITEM_STRUCT
+                && target->kind != CM_HIR_ITEM_UNION
+                && target->kind != CM_HIR_ITEM_ENUM
+            : target->kind != CM_HIR_ITEM_TRAIT)
+        || target->generic_parameter_count != named->argument_count
+        || (target->generic_parameter_count == 0u
+            ? target->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+            : target->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+                || target->generic_parameter_count - 1u > UINT32_MAX
+                    - target->generic_parameter_start)) {
+        return 0;
+    }
     for (index = 0u; index < named->argument_count; ++index) {
         const CmHirGenericArg *argument;
+        const CmHirGenericParam *parameter;
 
         argument = &named->arguments[index];
+        parameter = cm_hir_get_generic_param(context,
+            target->generic_parameter_start + index);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, target->definition)
+            || (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME
+                    ? parameter->kind != CM_HIR_GENERIC_LIFETIME
+                : argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                    ? parameter->kind != CM_HIR_GENERIC_TYPE
+                : argument->kind == CM_HIR_GENERIC_ARG_CONST
+                    ? parameter->kind != CM_HIR_GENERIC_CONST
+                    : 1)) {
+            return 0;
+        }
         if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
-            if (!cm_hir_body_owner_type_concrete(context,
+            if (!cm_hir_body_owner_type_supported(context, impl_item,
                     argument->data.type, depth + 1u)) return 0;
         } else if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
             if (!cm_hir_body_owner_region_concrete(
                     &argument->data.lifetime)) return 0;
         } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
-            if (!cm_hir_body_owner_const_concrete(context,
+            if (!cm_hir_body_owner_const_concrete(context, impl_item,
                     &argument->data.constant, depth + 1u)) return 0;
         } else {
             return 0;
@@ -65,8 +164,8 @@ static int cm_hir_body_owner_named_concrete(const CmHirContext *context,
     return 1;
 }
 
-static int cm_hir_body_owner_type_concrete(const CmHirContext *context,
-    CmHirTypeId type_id, size_t depth)
+static int cm_hir_body_owner_type_supported(const CmHirContext *context,
+    const CmHirItem *impl_item, CmHirTypeId type_id, size_t depth)
 {
     const CmHirType *type;
     uint32_t index;
@@ -86,52 +185,55 @@ static int cm_hir_body_owner_type_concrete(const CmHirContext *context,
     case CM_HIR_TYPE_REFERENCE_KIND:
         return cm_hir_body_owner_region_concrete(
                 &type->data.reference_type.region)
-            && cm_hir_body_owner_type_concrete(context,
+            && cm_hir_body_owner_type_supported(context, impl_item,
                 type->data.reference_type.pointee, depth + 1u);
     case CM_HIR_TYPE_RAW_POINTER_KIND:
-        return cm_hir_body_owner_type_concrete(context,
+        return cm_hir_body_owner_type_supported(context, impl_item,
             type->data.raw_pointer_type.pointee, depth + 1u);
     case CM_HIR_TYPE_TUPLE_KIND:
         if ((type->data.tuple_type.element_count == 0u)
                 != (type->data.tuple_type.elements == NULL)) return 0;
         for (index = 0u; index < type->data.tuple_type.element_count;
              ++index) {
-            if (!cm_hir_body_owner_type_concrete(context,
+            if (!cm_hir_body_owner_type_supported(context, impl_item,
                     type->data.tuple_type.elements[index],
                     depth + 1u)) return 0;
         }
         return 1;
     case CM_HIR_TYPE_ARRAY_KIND:
-        return cm_hir_body_owner_type_concrete(context,
+        return cm_hir_body_owner_type_supported(context, impl_item,
                 type->data.array_type.element, depth + 1u)
-            && cm_hir_body_owner_const_concrete(context,
+            && cm_hir_body_owner_const_concrete(context, impl_item,
                 &type->data.array_type.length, depth + 1u);
     case CM_HIR_TYPE_SLICE_KIND:
-        return cm_hir_body_owner_type_concrete(context,
+        return cm_hir_body_owner_type_supported(context, impl_item,
             type->data.slice_type.element, depth + 1u);
     case CM_HIR_TYPE_FN_POINTER_KIND:
         if ((type->data.fn_pointer_type.parameter_count == 0u)
                 != (type->data.fn_pointer_type.parameters == NULL)
-            || !cm_hir_body_owner_type_concrete(context,
+            || !cm_hir_body_owner_type_supported(context, impl_item,
                 type->data.fn_pointer_type.return_type, depth + 1u)) {
             return 0;
         }
         for (index = 0u;
              index < type->data.fn_pointer_type.parameter_count; ++index) {
-            if (!cm_hir_body_owner_type_concrete(context,
+            if (!cm_hir_body_owner_type_supported(context, impl_item,
                     type->data.fn_pointer_type.parameters[index],
                     depth + 1u)) return 0;
         }
         return 1;
     case CM_HIR_TYPE_ADT_KIND:
-        return cm_hir_body_owner_named_concrete(context,
-            &type->data.named_type, depth + 1u);
+        return cm_hir_body_owner_named_supported(context, impl_item,
+            &type->data.named_type, CM_HIR_BODY_OWNER_NAMED_ADT,
+            depth + 1u);
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return cm_hir_body_owner_impl_type_parameter(context, impl_item,
+            type->data.parameter_type.parameter);
     case CM_HIR_TYPE_ERROR_KIND:
     case CM_HIR_TYPE_INFER_KIND:
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_SELF_KIND:
-    case CM_HIR_TYPE_PARAMETER_KIND:
     case CM_HIR_TYPE_PROJECTION_KIND:
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
@@ -160,25 +262,34 @@ CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
     }
     parent = cm_hir_body_owner_item(context, item->parent_definition);
     if (parent == NULL || parent->kind != CM_HIR_ITEM_IMPL
-        || parent->generic_parameter_count != 0u
+        || !cm_hir_body_owner_type_parameters_supported(context, parent)
+        || !cm_hir_body_owner_constraints_empty(parent)
         || !parent->data.impl_item.has_trait
         || parent->data.impl_item.is_negative
+        || !cm_hir_body_owner_type_parameters_supported(context, item)
         || item->generic_parameter_count != 0u
+        || !cm_hir_body_owner_constraints_empty(item)
         || cm_hir_def_id_is_none(
             item->data.function_item.trait_item_definition)
-        || !cm_hir_body_owner_type_concrete(context,
+        || !cm_hir_body_owner_type_supported(context, parent,
             parent->data.impl_item.self_type, 0u)
-        || !cm_hir_body_owner_named_concrete(context,
-            &parent->data.impl_item.trait_type, 0u)) {
+        || !cm_hir_body_owner_named_supported(context, parent,
+            &parent->data.impl_item.trait_type,
+            CM_HIR_BODY_OWNER_NAMED_TRAIT, 0u)) {
         return CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED;
     }
     trait_method = cm_hir_body_owner_item(context,
         item->data.function_item.trait_item_definition);
     if (trait_method == NULL || trait_method->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_body_owner_type_parameters_supported(context,
+            trait_method)
         || trait_method->generic_parameter_count != 0u
+        || !cm_hir_body_owner_constraints_empty(trait_method)
         || !cm_hir_def_id_equal(trait_method->parent_definition,
             parent->data.impl_item.trait_type.definition)) {
         return CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED;
     }
-    return CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD;
+    return parent->generic_parameter_count == 0u
+        ? CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD
+        : CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD;
 }

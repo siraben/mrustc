@@ -1638,6 +1638,34 @@ adjustments follow that authority boundary. Operators, indexing, and
 callable-trait syntax then reuse the same selection and adjustment machinery
 instead of introducing parallel lookup paths.
 
+The scratch producer side of that checkpoint now accepts a type-only blanket
+`impl<T>` for both qualified and dot calls. Selection asks the solver for a
+caller-owned root witness, immediately copies its declaration-ordered impl
+arguments, authenticates the witness owner, and instantiates the selected
+signature under distinct empty-method and nonempty-impl frames plus a separate
+impl-owned `Self` binding. The first exact fixture is `Echo for T`: both
+`<u32 as Echo>::echo(receiver, value)` and `receiver.echo(value)` retain
+enclosing-impl arguments `[u32]`; item, method, and implemented-trait domains
+remain empty; every selected parameter and return term normalizes to `u32`.
+Each of the four argument domains retains separate input/output arrays and
+normalizes type payloads independently with its reserved projection-decision
+kind. Const argument declared types are normalized while the const value and
+kind remain fixed; lifetime values and any other changed non-type payload fail
+closed. Helper-local cleanup now owns all eight arrays until the callable count
+commits. Semantic-results storage durably owns those four input/normalized
+domains for both definition and exact-instance records, rebases their ranges
+transactionally, authenticates declaration arity and argument kinds, and
+exposes domain-specific borrowed views. Qualified `u32` and dot-method `u8`
+records round-trip independently, and sanitizer coverage guards the publication
+counter reset that previously corrupted cleanup. Type-generic impl method
+definitions also check under a rigid enclosing-impl frame plus a separate
+impl-owned `Self` binding. The supported-owner classifier authenticates every
+nested ADT and implemented-trait target against a bound declaration, exact
+generic arity, declaration-ordered parameter owner/index/kind, and recursive
+argument payload before admitting that frame. Exact callee construction and
+admission, plus all reachability/MIR/codegen consumers, remain the active gate
+before this selection slice can be exposed as executable compiler output.
+
 ## M6: Build orchestration
 
 | ID | State | Task | Acceptance |

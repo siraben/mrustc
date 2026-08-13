@@ -153,6 +153,26 @@ typedef struct CmSemanticCallableSelectionView {
     CmSemanticTypeView return_type;
 } CmSemanticCallableSelectionView;
 
+/* The four distinct binder-owner domains retained by a selected callable. */
+typedef enum CmSemanticCallableGenericArgumentDomain {
+    CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ITEM = 0,
+    CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_METHOD,
+    CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL,
+    CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_IMPLEMENTED_TRAIT
+} CmSemanticCallableGenericArgumentDomain;
+
+/*
+ * One durable generic argument before and after projection normalization.
+ * The byte views use the same canonical payload encoding as semantic types for
+ * type arguments; lifetime and const arguments retain their own canonical
+ * payload encoding. Storage is borrowed from the producing results object.
+ */
+typedef struct CmSemanticGenericArgumentView {
+    CmHirGenericArgKind kind;
+    CmSemanticTypeView input;
+    CmSemanticTypeView normalized;
+} CmSemanticGenericArgumentView;
+
 typedef enum CmSemanticProjectionDecisionKind {
     CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE = 0,
     CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE,
@@ -261,6 +281,13 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_parameter(
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     uint32_t parameter, CmSemanticTypeView *out_view);
 CmSemanticResultsStatus
+cm_semantic_results_instance_callable_generic_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    CmSemanticCallableGenericArgumentDomain domain, uint32_t argument,
+    CmSemanticGenericArgumentView *out_view);
+CmSemanticResultsStatus
 cm_semantic_results_instance_callable_parameter_for_callee(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
@@ -350,6 +377,12 @@ CmSemanticResultsStatus cm_semantic_results_callable_parameter(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_callable_generic_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression,
+    CmSemanticCallableGenericArgumentDomain domain, uint32_t argument,
+    CmSemanticGenericArgumentView *out_view);
 CmSemanticResultsStatus cm_semantic_results_projection_trace(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission, CmHirBodyId body,

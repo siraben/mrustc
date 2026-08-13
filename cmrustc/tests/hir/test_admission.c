@@ -279,14 +279,13 @@ static void test_concrete_impl_method_is_admitted(void)
     fixture_destroy(&f);
 }
 
-static void test_generic_impl_method_is_rejected_atomically(void)
+static void test_generic_impl_method_definition_is_admitted(void)
 {
     Fixture f;
     CmSemanticAdmission admission;
     CmSemanticAdmissionResult result;
     const CmHirItem *method;
-    size_t expressions;
-    size_t types;
+    const CmHirBody *body;
 
     fixture_init(&f,
         "trait Value { fn value() -> u32; } "
@@ -296,22 +295,17 @@ static void test_generic_impl_method_is_rejected_atomically(void)
     method = find_impl_method(&f.hir, "value");
     assert(method != NULL
         && cm_hir_body_function_owner_kind(&f.hir, method)
-            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
-    expressions = f.hir.expressions.len;
-    types = f.hir.types.len;
+            == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD);
     memset(&admission, 0, sizeof(admission));
     result = admit(&f, &admission);
-    assert(result.status == CM_SEMANTIC_ADMISSION_LOCAL_BODIES_FAILURE
-        && result.local_bodies.status
-            == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
-        && cm_hir_def_id_equal(result.owner, method->definition)
-        && result.body == method->data.function_item.body
-        && admission.state == NULL
-        && f.hir.expressions.len == expressions
-        && f.hir.types.len == types
-        && cm_hir_get_body(&f.hir,
-            method->data.function_item.body)->state
-                == CM_HIR_BODY_UNLOWERED);
+    body = cm_hir_get_body(&f.hir, method->data.function_item.body);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && result.local_bodies.status == CM_HIR_LOCAL_BODIES_OK
+        && result.item_result.status == CM_SEMANTIC_ITEM_OK
+        && result.body_result.status == CM_SEMANTIC_BODY_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
     fixture_destroy(&f);
 }
 
@@ -1568,7 +1562,7 @@ int main(void)
     test_body_failure_rolls_back();
     test_semantic_failure_rolls_back();
     test_concrete_impl_method_is_admitted();
-    test_generic_impl_method_is_rejected_atomically();
+    test_generic_impl_method_definition_is_admitted();
     test_impl_method_body_failure_is_atomic();
     test_mir_admission_gates();
     test_reachable_admission_subset_and_mir();

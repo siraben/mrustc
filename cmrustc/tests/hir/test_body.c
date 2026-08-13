@@ -57,6 +57,40 @@ static const CmHirItem *find_function(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_impl_function(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmHirItem *parent;
+        const CmHirDefinition *parent_definition;
+        const CmInternedString *item_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        parent_definition = item == NULL
+            || item->kind != CM_HIR_ITEM_FUNCTION
+            || cm_hir_def_id_is_none(item->parent_definition)
+            ? NULL : cm_hir_lookup_definition(hir,
+                item->parent_definition);
+        parent = parent_definition == NULL
+                || parent_definition->kind != CM_HIR_DEFINITION_ITEM
+                || parent_definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir,
+                parent_definition->entity.item_id);
+        if (parent == NULL || parent->kind != CM_HIR_ITEM_IMPL) continue;
+        item_name = cm_interner_get(&hir->strings, item->name);
+        if (item_name != NULL && item_name->len == length
+            && memcmp(item_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static const CmHirItem *find_struct(const CmHirContext *hir,
     const char *name)
 {
@@ -378,6 +412,248 @@ static void test_all_local_bodies_transaction(void)
         && cm_hir_get_body(&fixture.hir,
             find_function(&fixture.hir, "second")->data.function_item.body)
                 ->state == CM_HIR_BODY_TYPED);
+    fixture_destroy(&fixture);
+}
+
+static void test_generic_impl_method_body_owner(void)
+{
+    static const char accepted_source[] =
+        "trait Echo { type Value; "
+        "fn echo(value: Self::Value) -> Self::Value; } "
+        "struct Wrap<T> { value: T } "
+        "impl<T> Echo for Wrap<T> { "
+        "type Value = T; "
+        "fn echo(value: T) -> T { value } } "
+        "fn main() -> u32 { 0u32 }";
+    TestFixture fixture;
+    CmHirLocalBodiesResult result;
+    const CmHirItem *method;
+    const CmHirItem *impl_item;
+    const CmHirItem *trait_item;
+    const CmHirItem *wrap_item;
+    const CmHirDefinition *impl_definition;
+    const CmHirGenericParam *parameter;
+    const CmHirGenericParam *wrap_parameter;
+    const CmHirBody *body;
+    const CmHirType *impl_self_type;
+    const CmHirType *return_type;
+    const CmHirType *local_type;
+    const CmHirType *tail_type;
+    const CmHirExpr *root;
+    const CmHirExpr *tail;
+    CmHirItem *mutable_method;
+    CmHirItem *mutable_impl;
+    CmHirItem *mutable_wrap;
+    CmHirGenericParam *mutable_parameter;
+    CmHirGenericParam *mutable_wrap_parameter;
+    CmHirNamedType *mutable_self_named;
+    CmHirGenericArg saved_self_argument;
+    CmHirDefId saved_definition;
+    uint32_t saved_parameter_count;
+    CmHirDefId saved_parameter_owner;
+    CmHirGenericParamKind saved_parameter_kind;
+    uint32_t saved_parameter_index;
+    CmHirPredicateScope predicate_scope;
+    CmHirTraitPredicate predicate;
+    CmHirOutlivesPredicate outlives;
+
+    fixture_init(&fixture, accepted_source);
+    method = find_impl_function(&fixture.hir, "echo");
+    impl_definition = method == NULL ? NULL
+        : cm_hir_lookup_definition(&fixture.hir,
+            method->parent_definition);
+    impl_item = impl_definition == NULL
+            || impl_definition->kind != CM_HIR_DEFINITION_ITEM
+            || impl_definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(&fixture.hir,
+            impl_definition->entity.item_id);
+    trait_item = find_trait(&fixture.hir, "Echo");
+    wrap_item = find_struct(&fixture.hir, "Wrap");
+    parameter = impl_item == NULL ? NULL
+        : cm_hir_get_generic_param(&fixture.hir,
+            impl_item->generic_parameter_start);
+    wrap_parameter = wrap_item == NULL ? NULL
+        : cm_hir_get_generic_param(&fixture.hir,
+            wrap_item->generic_parameter_start);
+    impl_self_type = impl_item == NULL ? NULL
+        : cm_hir_get_type(&fixture.hir,
+            impl_item->data.impl_item.self_type);
+    body = method == NULL ? NULL : cm_hir_get_body(&fixture.hir,
+        method->data.function_item.body);
+    return_type = method == NULL ? NULL : cm_hir_get_type(&fixture.hir,
+        method->data.function_item.signature.return_type);
+    local_type = body == NULL || body->local_count != 1u ? NULL
+        : cm_hir_get_type(&fixture.hir, body->locals[0].type);
+    assert(method != NULL && impl_item != NULL && trait_item != NULL
+        && wrap_item != NULL && wrap_parameter != NULL
+        && impl_self_type != NULL
+        && impl_self_type->kind == CM_HIR_TYPE_ADT_KIND
+        && impl_item->generic_parameter_count == 1u
+        && method->generic_parameter_count == 0u
+        && parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+        && parameter->index == 0u
+        && cm_hir_def_id_equal(parameter->owner, impl_item->definition)
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && return_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && local_type != NULL
+        && local_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && local_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && cm_hir_body_function_owner_kind(&fixture.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD);
+
+    mutable_method = (CmHirItem *)method;
+    mutable_impl = (CmHirItem *)impl_item;
+    mutable_wrap = (CmHirItem *)wrap_item;
+    mutable_parameter = (CmHirGenericParam *)parameter;
+    mutable_wrap_parameter = (CmHirGenericParam *)wrap_parameter;
+    mutable_self_named = &((CmHirType *)impl_self_type)->data.named_type;
+
+    saved_definition = mutable_self_named->definition;
+    mutable_self_named->definition = method->definition;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_self_named->definition = trait_item->definition;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_self_named->definition = saved_definition;
+
+    saved_definition = mutable_impl->data.impl_item.trait_type.definition;
+    mutable_impl->data.impl_item.trait_type.definition =
+        wrap_item->definition;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_impl->data.impl_item.trait_type.definition = saved_definition;
+
+    saved_parameter_count = mutable_wrap->generic_parameter_count;
+    mutable_wrap->generic_parameter_count = 0u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_wrap->generic_parameter_count = saved_parameter_count;
+
+    assert(mutable_self_named->argument_count == 1u);
+    saved_self_argument = mutable_self_named->arguments[0];
+    mutable_self_named->arguments[0].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    mutable_self_named->arguments[0].data.lifetime.kind =
+        CM_HIR_REGION_STATIC;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_self_named->arguments[0] = saved_self_argument;
+
+    saved_parameter_owner = mutable_wrap_parameter->owner;
+    mutable_wrap_parameter->owner = mutable_impl->definition;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_wrap_parameter->owner = saved_parameter_owner;
+    saved_parameter_index = mutable_wrap_parameter->index;
+    mutable_wrap_parameter->index = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_wrap_parameter->index = saved_parameter_index;
+    saved_parameter_kind = mutable_wrap_parameter->kind;
+    mutable_wrap_parameter->kind = CM_HIR_GENERIC_CONST;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_wrap_parameter->kind = saved_parameter_kind;
+
+    mutable_parameter->kind = CM_HIR_GENERIC_LIFETIME;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_parameter->kind = CM_HIR_GENERIC_CONST;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_parameter->kind = CM_HIR_GENERIC_TYPE;
+    mutable_parameter->has_default = 1;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_parameter->has_default = 0;
+    mutable_parameter->is_relaxed_sized = 1;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_parameter->is_relaxed_sized = 0;
+
+    mutable_method->generic_parameter_start =
+        mutable_impl->generic_parameter_start;
+    mutable_method->generic_parameter_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_method->generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    mutable_method->generic_parameter_count = 0u;
+
+    memset(&predicate_scope, 0, sizeof(predicate_scope));
+    mutable_impl->predicate_scopes = &predicate_scope;
+    mutable_impl->predicate_scope_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_impl->predicate_scopes = NULL;
+    mutable_impl->predicate_scope_count = 0u;
+    mutable_method->predicate_scopes = &predicate_scope;
+    mutable_method->predicate_scope_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_method->predicate_scopes = NULL;
+    mutable_method->predicate_scope_count = 0u;
+
+    memset(&predicate, 0, sizeof(predicate));
+    mutable_impl->predicates = &predicate;
+    mutable_impl->predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_impl->predicates = NULL;
+    mutable_impl->predicate_count = 0u;
+    mutable_method->predicates = &predicate;
+    mutable_method->predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_method->predicates = NULL;
+    mutable_method->predicate_count = 0u;
+
+    memset(&outlives, 0, sizeof(outlives));
+    mutable_impl->outlives_predicates = &outlives;
+    mutable_impl->outlives_predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    mutable_impl->outlives_predicates = NULL;
+    mutable_impl->outlives_predicate_count = 0u;
+
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD);
+    result = lower_fixture_local_bodies(&fixture);
+    body = cm_hir_get_body(&fixture.hir,
+        method->data.function_item.body);
+    root = body == NULL ? NULL : cm_hir_get_expr(&fixture.hir,
+        body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir, root->data.block.tail_expression);
+    return_type = method == NULL ? NULL : cm_hir_get_type(&fixture.hir,
+        method->data.function_item.signature.return_type);
+    local_type = body == NULL || body->local_count != 1u ? NULL
+        : cm_hir_get_type(&fixture.hir, body->locals[0].type);
+    tail_type = tail == NULL ? NULL
+        : cm_hir_get_type(&fixture.hir, tail->type);
+    assert(result.status == CM_HIR_LOCAL_BODIES_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && body->expected_type
+            == method->data.function_item.signature.return_type
+        && tail != NULL && tail->kind == CM_HIR_EXPR_LOCAL
+        && tail->type == body->expected_type
+        && tail->data.local.local_index == 0u
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && return_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && local_type != NULL
+        && local_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && local_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && tail_type != NULL
+        && tail_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && tail_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && cm_hir_body_function_owner_kind(&fixture.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD);
     fixture_destroy(&fixture);
 }
 
@@ -3791,6 +4067,7 @@ static void test_owned_local_and_instantiated_call_model(void)
 int main(void)
 {
     test_all_local_bodies_transaction();
+    test_generic_impl_method_body_owner();
     test_exact_i32_body();
     test_source_backed_named_aggregate_body();
     test_nested_and_empty_named_aggregate_bodies();
