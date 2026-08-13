@@ -313,7 +313,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v27`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v28`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond advance the current canonical schema to `mir-v7`.
 
@@ -1287,7 +1287,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v27`.
+wrong-kind targets hard-error. The canonical format is `hir-v28`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

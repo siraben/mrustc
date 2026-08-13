@@ -298,9 +298,8 @@ static void test_marked_preflight_is_atomic(void)
     tail->kind = CM_HIR_EXPR_BORROW_SHARED;
     tail->data.borrow_shared.operand = initializer;
     result = advance_marked(&barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
-        && result.phase == CM_SEMANTIC_BARRIER_TYPED
-        && result.atom_index == 1u && result.expression != CM_HIR_EXPR_NONE);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED);
     *tail = saved_tail;
     assert(fixture.hir.semantic_generation == generation
         && fixture.hir.rewind_generation == rewind_generation
@@ -310,8 +309,7 @@ static void test_marked_preflight_is_atomic(void)
 
     root->data.block.tail_expression = initializer;
     result = advance_marked(&barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
-        && result.atom_index == 1u);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR);
     root->data.block.tail_expression = saved_root_tail;
     assert(fixture.hir.semantic_generation == generation
         && cm_semantic_barrier_capability_id(&barrier) == capability);
@@ -319,29 +317,44 @@ static void test_marked_preflight_is_atomic(void)
 
     root->data.block.tail_expression = body->root_expression;
     result = advance_marked(&barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
-        && result.atom_index == 1u);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR);
     root->data.block.tail_expression = saved_root_tail;
     assert(fixture.hir.semantic_generation == generation
         && cm_semantic_barrier_capability_id(&barrier) == capability);
 
     tail->owner_body = 1u;
     result = advance_marked(&barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
-        && result.atom_index == 1u);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR);
     tail->owner_body = 2u;
     assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
 
     tail->usage = CM_HIR_USAGE_BORROW;
     result = advance_marked(&barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
-        && result.atom_index == 1u);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR);
     tail->usage = CM_HIR_USAGE_UNKNOWN;
     assert(fixture.hir.semantic_generation == generation
         && fixture.hir.rewind_generation == rewind_generation
         && cm_semantic_barrier_capability_id(&barrier) == capability
         && cm_semantic_barrier_phase(&barrier) == CM_SEMANTIC_BARRIER_TYPED);
     assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+
+    assert(tail->kind == CM_HIR_EXPR_LOCAL
+        && tail->data.local.local_index < body->local_count);
+    tail->data.local.local_index = body->local_count;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && fixture.hir.semantic_generation == generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    tail->data.local.local_index = body->local_count - 1u;
+
+    root->data.block.statement_count = UINT32_MAX;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && fixture.hir.semantic_generation == generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    root->data.block.statement_count = 1u;
 
     result = advance_marked(&barrier);
     assert(result.status == CM_SEMANTIC_BARRIER_OK

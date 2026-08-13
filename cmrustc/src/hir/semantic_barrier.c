@@ -42,6 +42,15 @@ typedef struct CmSemanticBarrierState {
     size_t prebound_associated_type_count;
     CmSemanticAtomView *atoms;
     size_t atom_count;
+    void *typed_items;
+    void *typed_modules;
+    void *typed_bodies;
+    void *typed_expressions;
+    void *typed_types;
+    void *typed_generic_parameters;
+    void *typed_definitions;
+    uint64_t typed_payload_fingerprint;
+    int has_typed_snapshot;
 } CmSemanticBarrierState;
 
 static uint64_t cm_semantic_barrier_capability_counter;
@@ -56,12 +65,283 @@ static int cm_semantic_barrier_state_current(
     const CmSemanticBarrierState *state);
 static int cm_semantic_barrier_atom_still_matches(
     const CmSemanticBarrierState *state, size_t index);
+static int cm_semantic_barrier_capture_typed_snapshot(
+    CmSemanticBarrierState *state);
+static int cm_semantic_barrier_typed_snapshot_matches(
+    const CmSemanticBarrierState *state);
+static void cm_semantic_barrier_release_typed_snapshot(
+    CmSemanticBarrierState *state);
 
 static uint64_t cm_semantic_barrier_new_capability_id(void)
 {
     if (cm_semantic_barrier_capability_counter == UINT64_MAX) abort();
     cm_semantic_barrier_capability_counter += UINT64_C(1);
     return cm_semantic_barrier_capability_counter;
+}
+
+static uint64_t cm_semantic_barrier_hash_bytes(uint64_t hash,
+    const void *bytes, size_t byte_count)
+{
+    const unsigned char *cursor;
+    size_t index;
+
+    cursor = (const unsigned char *)bytes;
+    for (index = 0u; index < byte_count; ++index) {
+        hash ^= (uint64_t)cursor[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static int cm_semantic_barrier_hash_array(uint64_t *hash,
+    const void *values, size_t count, size_t element_size)
+{
+    size_t byte_count;
+
+    if ((count != 0u && values == NULL)
+        || !cm_size_mul(count, element_size, &byte_count)) return 0;
+    *hash = cm_semantic_barrier_hash_bytes(*hash, values, byte_count);
+    return 1;
+}
+
+static int cm_semantic_barrier_hash_named(uint64_t *hash,
+    const CmHirNamedType *named)
+{
+    return named != NULL && cm_semantic_barrier_hash_array(hash,
+        named->arguments, (size_t)named->argument_count,
+        sizeof(*named->arguments));
+}
+
+static int cm_semantic_barrier_typed_payload_fingerprint(
+    const CmHirContext *hir, uint64_t *out_fingerprint)
+{
+    uint64_t hash;
+    size_t index;
+
+    if (hir == NULL || out_fingerprint == NULL) return 0;
+    hash = UINT64_C(1469598103934665603);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item == NULL) return 0;
+        if (item->kind == CM_HIR_ITEM_FUNCTION) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.function_item.signature.parameters,
+                    (size_t)item->data.function_item.signature
+                        .parameter_count,
+                    sizeof(*item->data.function_item.signature.parameters))) {
+                return 0;
+            }
+        } else if (item->kind == CM_HIR_ITEM_STRUCT
+            || item->kind == CM_HIR_ITEM_UNION) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.aggregate_item.fields,
+                    (size_t)item->data.aggregate_item.field_count,
+                    sizeof(*item->data.aggregate_item.fields))) return 0;
+        }
+    }
+    for (index = 0u; index < hir->bodies.len; ++index) {
+        const CmHirBody *body;
+
+        body = (const CmHirBody *)cm_vec_at_const(&hir->bodies, index);
+        if (body == NULL || !cm_semantic_barrier_hash_array(&hash,
+                body->locals, (size_t)body->local_count,
+                sizeof(*body->locals))) return 0;
+    }
+    for (index = 0u; index < hir->types.len; ++index) {
+        const CmHirType *type;
+
+        type = (const CmHirType *)cm_vec_at_const(&hir->types, index);
+        if (type == NULL) return 0;
+        if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    type->data.tuple_type.elements,
+                    (size_t)type->data.tuple_type.element_count,
+                    sizeof(*type->data.tuple_type.elements))) return 0;
+        } else if (type->kind == CM_HIR_TYPE_FN_POINTER_KIND) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    type->data.fn_pointer_type.parameters,
+                    (size_t)type->data.fn_pointer_type.parameter_count,
+                    sizeof(*type->data.fn_pointer_type.parameters))) {
+                return 0;
+            }
+        } else if (type->kind == CM_HIR_TYPE_FN_DEFINITION_KIND
+            || type->kind == CM_HIR_TYPE_ADT_KIND
+            || type->kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
+            || type->kind == CM_HIR_TYPE_OPAQUE_KIND
+            || type->kind == CM_HIR_TYPE_CLOSURE_KIND
+            || type->kind == CM_HIR_TYPE_FOREIGN_KIND) {
+            if (!cm_semantic_barrier_hash_named(&hash,
+                    &type->data.named_type)) return 0;
+        } else if (type->kind == CM_HIR_TYPE_PROJECTION_KIND) {
+            if (!cm_semantic_barrier_hash_named(&hash,
+                    &type->data.projection_type.trait_type)
+                || !cm_semantic_barrier_hash_named(&hash,
+                    &type->data.projection_type.associated_type)) return 0;
+        } else if (type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND) {
+            if (!cm_semantic_barrier_hash_named(&hash,
+                    &type->data.dyn_trait_type.principal_trait)) return 0;
+        }
+    }
+    for (index = 0u; index < hir->expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = (const CmHirExpr *)cm_vec_at_const(
+            &hir->expressions, index);
+        if (expression == NULL) return 0;
+        if (expression->kind == CM_HIR_EXPR_BLOCK) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    expression->data.block.statements,
+                    (size_t)expression->data.block.statement_count,
+                    sizeof(*expression->data.block.statements))) return 0;
+        } else if (expression->kind == CM_HIR_EXPR_CALL) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    expression->data.call.type_substitutions,
+                    (size_t)expression->data.call.type_substitution_count,
+                    sizeof(*expression->data.call.type_substitutions))
+                || !cm_semantic_barrier_hash_array(&hash,
+                    expression->data.call.arguments,
+                    (size_t)expression->data.call.argument_count,
+                    sizeof(*expression->data.call.arguments))) return 0;
+        } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    expression->data.method_call.arguments,
+                    (size_t)expression->data.method_call.argument_count,
+                    sizeof(*expression->data.method_call.arguments))
+                || !cm_semantic_barrier_hash_array(&hash,
+                    expression->data.method_call.in_scope_traits,
+                    (size_t)expression->data.method_call
+                        .in_scope_trait_count,
+                    sizeof(*expression->data.method_call.in_scope_traits))) {
+                return 0;
+            }
+        } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    expression->data.qualified_call.arguments,
+                    (size_t)expression->data.qualified_call.argument_count,
+                    sizeof(*expression->data.qualified_call.arguments))) {
+                return 0;
+            }
+        } else if (expression->kind == CM_HIR_EXPR_AGGREGATE) {
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    expression->data.aggregate.fields,
+                    (size_t)expression->data.aggregate.field_count,
+                    sizeof(*expression->data.aggregate.fields))) return 0;
+        }
+    }
+    *out_fingerprint = hash;
+    return 1;
+}
+
+static int cm_semantic_barrier_snapshot_vec(const CmVec *values,
+    void **out_snapshot)
+{
+    size_t byte_count;
+
+    *out_snapshot = NULL;
+    if (values == NULL
+        || !cm_size_mul(values->len, values->elem_size, &byte_count)) {
+        return 0;
+    }
+    if (byte_count == 0u) return 1;
+    *out_snapshot = cm_alloc(byte_count);
+    memcpy(*out_snapshot, values->data, byte_count);
+    return 1;
+}
+
+static void cm_semantic_barrier_release_typed_snapshot(
+    CmSemanticBarrierState *state)
+{
+    if (state == NULL) return;
+    cm_free(state->typed_items);
+    cm_free(state->typed_modules);
+    cm_free(state->typed_bodies);
+    cm_free(state->typed_expressions);
+    cm_free(state->typed_types);
+    cm_free(state->typed_generic_parameters);
+    cm_free(state->typed_definitions);
+    state->typed_items = NULL;
+    state->typed_modules = NULL;
+    state->typed_bodies = NULL;
+    state->typed_expressions = NULL;
+    state->typed_types = NULL;
+    state->typed_generic_parameters = NULL;
+    state->typed_definitions = NULL;
+    state->typed_payload_fingerprint = UINT64_C(0);
+    state->has_typed_snapshot = 0;
+}
+
+static int cm_semantic_barrier_capture_typed_snapshot(
+    CmSemanticBarrierState *state)
+{
+    uint64_t fingerprint;
+
+    if (state == NULL || state->hir == NULL || state->has_typed_snapshot) {
+        return 0;
+    }
+    if (!cm_semantic_barrier_typed_payload_fingerprint(state->hir,
+            &fingerprint)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->items,
+            &state->typed_items)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->modules,
+            &state->typed_modules)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->bodies,
+            &state->typed_bodies)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->expressions,
+            &state->typed_expressions)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->types,
+            &state->typed_types)
+        || !cm_semantic_barrier_snapshot_vec(
+            &state->hir->generic_parameters,
+            &state->typed_generic_parameters)
+        || !cm_semantic_barrier_snapshot_vec(&state->hir->definitions,
+            &state->typed_definitions)) {
+        cm_semantic_barrier_release_typed_snapshot(state);
+        return 0;
+    }
+    state->typed_payload_fingerprint = fingerprint;
+    state->has_typed_snapshot = 1;
+    return 1;
+}
+
+static int cm_semantic_barrier_snapshot_vec_matches(const CmVec *values,
+    const void *snapshot)
+{
+    size_t byte_count;
+
+    return values != NULL
+        && cm_size_mul(values->len, values->elem_size, &byte_count)
+        && (byte_count == 0u
+            ? snapshot == NULL
+            : snapshot != NULL
+                && memcmp(values->data, snapshot, byte_count) == 0);
+}
+
+static int cm_semantic_barrier_typed_snapshot_matches(
+    const CmSemanticBarrierState *state)
+{
+    uint64_t fingerprint;
+
+    if (state == NULL || state->hir == NULL || !state->has_typed_snapshot
+        || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->items,
+            state->typed_items)
+        || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->modules,
+            state->typed_modules)
+        || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->bodies,
+            state->typed_bodies)
+        || !cm_semantic_barrier_snapshot_vec_matches(
+            &state->hir->expressions, state->typed_expressions)
+        || !cm_semantic_barrier_snapshot_vec_matches(&state->hir->types,
+            state->typed_types)
+        || !cm_semantic_barrier_snapshot_vec_matches(
+            &state->hir->generic_parameters,
+            state->typed_generic_parameters)
+        || !cm_semantic_barrier_snapshot_vec_matches(
+            &state->hir->definitions, state->typed_definitions)) return 0;
+    return cm_semantic_barrier_typed_payload_fingerprint(state->hir,
+            &fingerprint)
+        && fingerprint == state->typed_payload_fingerprint;
 }
 
 static CmSemanticBarrierResult cm_semantic_barrier_result(
@@ -114,6 +394,10 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
         result.status = CM_SEMANTIC_BARRIER_PHASE_ORDER;
         return result;
     }
+    if (!cm_semantic_barrier_typed_snapshot_matches(state)) {
+        result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
+        return result;
+    }
     for (index = 0u; index < state->atom_count; ++index) {
         if (!cm_semantic_barrier_atom_still_matches(state, index)) {
             result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
@@ -144,6 +428,12 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
             result.atom_index = mark_result.body_index;
             result.atom = state->atoms[mark_result.body_index];
         }
+        return result;
+    }
+    cm_semantic_barrier_release_typed_snapshot(state);
+    if (!cm_semantic_barrier_capture_typed_snapshot(state)) {
+        result.status = CM_SEMANTIC_BARRIER_HIR_FAILURE;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
         return result;
     }
     cm_semantic_barrier_capture_generation(state);
@@ -624,11 +914,20 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_typed(
     }
     mark_active = 0;
     cm_semantic_barrier_capture_generation(state);
+    if (!cm_semantic_barrier_capture_typed_snapshot(state)) {
+        result.status = CM_SEMANTIC_BARRIER_HIR_FAILURE;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
+        goto committed_failure;
+    }
     state->capability_id = next_capability_id;
     state->phase = CM_SEMANTIC_BARRIER_TYPED;
     cm_free(journal);
     result.status = CM_SEMANTIC_BARRIER_OK;
     result.phase = CM_SEMANTIC_BARRIER_TYPED;
+    return result;
+
+committed_failure:
+    cm_free(journal);
     return result;
 
 rollback:
@@ -660,6 +959,7 @@ void cm_semantic_barrier_destroy(CmSemanticBarrier *barrier)
     if (barrier == NULL) return;
     state = (CmSemanticBarrierState *)barrier->state;
     if (state != NULL) {
+        cm_semantic_barrier_release_typed_snapshot(state);
         cm_free(state->atoms);
         memset(state, 0, sizeof(*state));
         cm_free(state);

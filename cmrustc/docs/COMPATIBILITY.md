@@ -278,7 +278,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v27` and
+remains omitted rather than guessed. Canonical dumps are `hir-v28` and
 `mir-v7`.
 
 The first exact control-flow slice accepts `if left == right { then_u32 }
@@ -709,7 +709,7 @@ discarded. The graph-owned effective view evaluates cfg/cfg_attr before
 publication and preserves the parent enum plus original AST variant index.
 Enum-self, explicit variant, alias, glob, and checked-path imports use that
 identity; named-field variants are type-only, while unit and tuple variants
-also publish value constructors. Canonical HIR `hir-v27` pre-reserves a
+also publish value constructors. Canonical HIR `hir-v28` pre-reserves a
 distinct definition for every source variant, retains it on the variant
 payload, binds it to the final enum item/index, and revalidates structural
 imports when the enum becomes bound. The parent enum definition is never
