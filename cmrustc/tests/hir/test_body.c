@@ -57,6 +57,28 @@ static const CmHirItem *find_function(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_value(const CmHirContext *hir,
+    CmHirItemKind kind, const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *item_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item == NULL || item->kind != kind) continue;
+        item_name = cm_interner_get(&hir->strings, item->name);
+        if (item_name != NULL && item_name->len == length
+            && memcmp(item_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static const CmHirItem *find_impl_function(const CmHirContext *hir,
     const char *name)
 {
@@ -413,6 +435,168 @@ static void test_all_local_bodies_transaction(void)
             find_function(&fixture.hir, "second")->data.function_item.body)
                 ->state == CM_HIR_BODY_TYPED);
     fixture_destroy(&fixture);
+}
+
+static void test_free_value_body_owners(void)
+{
+    TestFixture fixture;
+    CmHirLocalBodiesResult result;
+    const CmHirItem *constant;
+    const CmHirItem *braced;
+    const CmHirItem *static_item;
+    const CmHirBody *body;
+    const CmHirExpr *root;
+    const CmHirExpr *tail;
+
+    fixture_init(&fixture,
+        "fn ordinary(value: u32) -> u32 { value } "
+        "const DIRECT: u32 = ordinary(4u32); "
+        "const BRACED: u32 = { 2u32 }; "
+        "static SLOT: i32 = 3i32; "
+        "fn main() -> u32 { 0u32 }");
+    constant = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "DIRECT");
+    braced = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "BRACED");
+    static_item = find_value(&fixture.hir, CM_HIR_ITEM_STATIC, "SLOT");
+    assert(constant != NULL && braced != NULL && static_item != NULL
+        && cm_hir_body_value_owner_kind(&fixture.hir, constant)
+            == CM_HIR_BODY_VALUE_OWNER_FREE_CONST
+        && cm_hir_body_value_owner_kind(&fixture.hir, braced)
+            == CM_HIR_BODY_VALUE_OWNER_FREE_CONST
+        && cm_hir_body_value_owner_kind(&fixture.hir, static_item)
+            == CM_HIR_BODY_VALUE_OWNER_FREE_STATIC);
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_OK);
+
+    body = cm_hir_get_body(&fixture.hir,
+        constant->data.value_item.body);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED
+        && body->local_count == 0u && body->parameter_count == 0u
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && root->data.block.statement_count == 0u
+        && tail != NULL && tail->kind == CM_HIR_EXPR_CALL);
+
+    body = cm_hir_get_body(&fixture.hir, braced->data.value_item.body);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && root->data.block.statement_count == 0u
+        && tail != NULL && tail->kind == CM_HIR_EXPR_INTEGER
+        && tail->data.integer.low_bits == UINT64_C(2));
+
+    body = cm_hir_get_body(&fixture.hir,
+        static_item->data.value_item.body);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && tail != NULL && tail->kind == CM_HIR_EXPR_INTEGER
+        && tail->data.integer.low_bits == UINT64_C(3));
+    fixture_destroy(&fixture);
+}
+
+static void test_value_body_atomic_rollback_and_owner_rejection(void)
+{
+    TestFixture fixture;
+    CmHirLocalBodiesResult result;
+    const CmHirItem *constant;
+    const CmHirItem *static_item;
+    const CmHirItem *trait_default;
+    CmHirItem *mutable_constant;
+    TestHirSnapshot snapshot;
+
+    fixture_init(&fixture,
+        "fn main() -> i32 { 1i32 } "
+        "const BAD: i32 = 2u32; static SLOT: i32 = 3i32;");
+    constant = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "BAD");
+    static_item = find_value(&fixture.hir, CM_HIR_ITEM_STATIC, "SLOT");
+    assert(constant != NULL && static_item != NULL);
+    hir_snapshot_take(&fixture.hir, &snapshot);
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_BODY_FAILURE
+        && result.body == constant->data.value_item.body
+        && result.body_result.status == CM_HIR_BODY_LOWER_INVALID_LITERAL
+        && cm_hir_get_body(&fixture.hir, fixture.body)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir,
+            constant->data.value_item.body)->state
+                == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir,
+            static_item->data.value_item.body)->state
+                == CM_HIR_BODY_UNLOWERED);
+    hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+    hir_snapshot_destroy(&snapshot);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture,
+        "trait HasValue { const VALUE: u32 = 1u32; } "
+        "fn main() -> u32 { 0u32 }");
+    trait_default = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "VALUE");
+    assert(trait_default != NULL
+        && cm_hir_body_value_owner_kind(&fixture.hir, trait_default)
+            == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED);
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
+        && result.body == trait_default->data.value_item.body);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture,
+        "const VALUE: u32 = 1u32; fn main() -> u32 { 0u32 }");
+    constant = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "VALUE");
+    assert(constant != NULL);
+    mutable_constant = (CmHirItem *)constant;
+    mutable_constant->generic_parameter_start = 1u;
+    mutable_constant->generic_parameter_count = 1u;
+    assert(cm_hir_body_value_owner_kind(&fixture.hir, constant)
+        == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED);
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
+        && result.body == constant->data.value_item.body);
+    fixture_destroy(&fixture);
+}
+
+static void test_value_block_rejections_are_transactional(void)
+{
+    static const char *sources[] = {
+        "const BAD: u32 = { let value = 1u32; value }; "
+            "fn main() -> u32 { 0u32 }",
+        "const BAD: u32 = unsafe { 1u32 }; "
+            "fn main() -> u32 { 0u32 }",
+        "const BAD: u32 = const { 1u32 }; "
+            "fn main() -> u32 { 0u32 }"
+    };
+    size_t index;
+
+    for (index = 0u; index < sizeof(sources) / sizeof(sources[0]); ++index) {
+        TestFixture fixture;
+        CmHirLocalBodiesResult result;
+        const CmHirItem *constant;
+        TestHirSnapshot snapshot;
+
+        fixture_init(&fixture, sources[index]);
+        constant = find_value(&fixture.hir, CM_HIR_ITEM_CONST, "BAD");
+        assert(constant != NULL);
+        hir_snapshot_take(&fixture.hir, &snapshot);
+        result = lower_fixture_local_bodies(&fixture);
+        assert(result.status == CM_HIR_LOCAL_BODIES_BODY_FAILURE
+            && result.body == constant->data.value_item.body
+            && result.body_result.status
+                == CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+        hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+        hir_snapshot_destroy(&snapshot);
+        fixture_destroy(&fixture);
+    }
 }
 
 static void test_generic_impl_method_body_owner(void)
@@ -4067,6 +4251,9 @@ static void test_owned_local_and_instantiated_call_model(void)
 int main(void)
 {
     test_all_local_bodies_transaction();
+    test_free_value_body_owners();
+    test_value_body_atomic_rollback_and_owner_rejection();
+    test_value_block_rejections_are_transactional();
     test_generic_impl_method_body_owner();
     test_exact_i32_body();
     test_source_backed_named_aggregate_body();

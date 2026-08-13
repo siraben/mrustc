@@ -293,3 +293,34 @@ CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
         ? CM_HIR_BODY_FUNCTION_OWNER_CONCRETE_TRAIT_IMPL_METHOD
         : CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD;
 }
+
+CmHirBodyValueOwnerKind cm_hir_body_value_owner_kind(
+    const CmHirContext *context, const CmHirItem *item)
+{
+    const CmHirBody *body;
+
+    if (context == NULL || item == NULL
+        || (item->kind != CM_HIR_ITEM_CONST
+            && item->kind != CM_HIR_ITEM_STATIC)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || !cm_hir_def_id_is_none(
+            item->data.value_item.trait_item_definition)
+        || item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count != 0u
+        || !cm_hir_body_owner_constraints_empty(item)
+        || item->data.value_item.body == CM_HIR_BODY_NONE
+        || item->data.value_item.type == CM_HIR_TYPE_NONE
+        || item->data.value_item.mutability != CM_HIR_IMMUTABLE) {
+        return CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED;
+    }
+    body = cm_hir_get_body(context, item->data.value_item.body);
+    if (body == NULL || !cm_hir_def_id_equal(body->owner, item->definition)
+        || body->expected_type != item->data.value_item.type
+        || body->local_count != 0u || body->locals != NULL
+        || body->parameter_count != 0u) {
+        return CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED;
+    }
+    return item->kind == CM_HIR_ITEM_CONST
+        ? CM_HIR_BODY_VALUE_OWNER_FREE_CONST
+        : CM_HIR_BODY_VALUE_OWNER_FREE_STATIC;
+}

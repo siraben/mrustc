@@ -11,6 +11,12 @@ typedef enum CmHirBodyFunctionOwnerKind {
     CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD
 } CmHirBodyFunctionOwnerKind;
 
+typedef enum CmHirBodyValueOwnerKind {
+    CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED = 0,
+    CM_HIR_BODY_VALUE_OWNER_FREE_CONST,
+    CM_HIR_BODY_VALUE_OWNER_FREE_STATIC
+} CmHirBodyValueOwnerKind;
+
 typedef enum CmHirBodyLowerStatus {
     CM_HIR_BODY_LOWER_OK = 0,
     CM_HIR_BODY_LOWER_INVALID_ARGUMENT,
@@ -80,8 +86,12 @@ CmHirStatus cm_hir_body_add_if_expression(CmHirContext *context,
     CmHirExprId *out_expression);
 
 /*
- * Type one source-qualified body in the deliberately narrow executable HIR
- * slice. Accepted tails are decimal i32/u32/usize literals with either the
+ * Type one source-qualified function block or free const/static initializer
+ * in the deliberately narrow executable HIR slice. Non-block value
+ * initializers are wrapped in the same canonical zero-statement HIR block
+ * used by MIR; a statement-free braced initializer uses that source block as
+ * the canonical root.
+ * Accepted tails are decimal i32/u32/usize literals with either the
  * exact matching suffix or no suffix when this expected type is already fixed
  * by the surrounding return, explicit let, field, operand, branch, or call
  * position. The first source-inference slice also admits immutable simple
@@ -136,11 +146,11 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
 
 /*
  * Transactionally publish every supported local free-function, concrete
- * trait-impl method, or constrained type-generic trait-impl method body in
- * stable HIR item order. The complete local
+ * trait-impl method, constrained type-generic trait-impl method, free const,
+ * or immutable free static body in stable HIR item order. The complete local
  * body/item relation is validated before mutation. Unsupported associated
- * function bodies and const/static initializers are explicit unsupported
- * owner kinds and are never silently skipped.
+ * associated/generic const/static bodies are explicit unsupported owner kinds
+ * and are never silently skipped.
  */
 CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
     CmHirCrateId local_crate, const CmModuleGraph *graph,
@@ -148,6 +158,8 @@ CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
     const CmHirModuleMap *modules);
 
 CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
+    const CmHirContext *context, const CmHirItem *item);
+CmHirBodyValueOwnerKind cm_hir_body_value_owner_kind(
     const CmHirContext *context, const CmHirItem *item);
 
 const char *cm_hir_body_lower_status_name(CmHirBodyLowerStatus status);

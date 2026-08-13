@@ -470,18 +470,20 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_typed(
             result.atom = state->atoms[index];
             return result;
         }
-        if (state->atoms[index].kind != CM_SEMANTIC_ATOM_FUNCTION) {
-            result.status = CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM;
-            result.atom_index = index;
-            result.atom = state->atoms[index];
-            return result;
-        }
         definition = cm_hir_lookup_definition(state->hir,
             state->atoms[index].owner);
         item = definition == NULL ? NULL : cm_hir_get_item(state->hir,
             definition->entity.item_id);
-        if (cm_hir_body_function_owner_kind(state->hir, item)
-                == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED) {
+        if ((state->atoms[index].kind == CM_SEMANTIC_ATOM_FUNCTION
+                && cm_hir_body_function_owner_kind(state->hir, item)
+                    == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED)
+            || ((state->atoms[index].kind == CM_SEMANTIC_ATOM_CONST
+                    || state->atoms[index].kind
+                        == CM_SEMANTIC_ATOM_STATIC)
+                && cm_hir_body_value_owner_kind(state->hir, item)
+                    == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED)
+            || state->atoms[index].kind == CM_SEMANTIC_ATOM_TYPE_POSITION
+            || state->atoms[index].kind == CM_SEMANTIC_ATOM_NONE) {
             result.status = CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM;
             result.atom_index = index;
             result.atom = state->atoms[index];

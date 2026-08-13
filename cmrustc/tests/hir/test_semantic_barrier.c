@@ -168,12 +168,15 @@ static void test_typed_success_and_phase_order(void)
     fixture_destroy(&fixture);
 }
 
-static void test_const_and_static_block_typed(void)
+static void test_const_and_static_typed(void)
 {
     Fixture fixture;
     CmSemanticBarrier barrier;
     CmSemanticBarrierResult result;
     CmSemanticAtomView atom;
+    const CmHirBody *body;
+    const CmHirExpr *root;
+    const CmHirExpr *tail;
 
     fixture_init(&fixture,
         "fn ready() -> i32 { 1 } const VALUE: i32 = 2; "
@@ -189,14 +192,69 @@ static void test_const_and_static_block_typed(void)
             == CM_SEMANTIC_BARRIER_OK
         && atom.kind == CM_SEMANTIC_ATOM_STATIC);
     result = advance_typed(&fixture, &barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_TYPED);
+    body = cm_hir_get_body(&fixture.hir, 2u);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED
+        && body->local_count == 0u && body->parameter_count == 0u
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && root->data.block.statement_count == 0u
+        && tail != NULL && tail->kind == CM_HIR_EXPR_INTEGER
+        && tail->type == body->expected_type
+        && tail->data.integer.low_bits == UINT64_C(2));
+    body = cm_hir_get_body(&fixture.hir, 3u);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && tail != NULL && tail->kind == CM_HIR_EXPR_INTEGER
+        && tail->data.integer.low_bits == UINT64_C(3));
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
+static void test_const_initializer_failure_rolls_back_all_bodies(void)
+{
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    size_t expressions;
+    uint64_t capability;
+
+    fixture_init(&fixture,
+        "fn ready() -> i32 { 1 } const BAD: i32 = 2u32; "
+        "static SLOT: i32 = 3;");
+    expressions = fixture.hir.expressions.len;
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    capability = cm_semantic_barrier_capability_id(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_BODY_FAILURE
         && result.phase == CM_SEMANTIC_BARRIER_STRUCTURAL
         && result.atom_index == 1u
         && result.atom.kind == CM_SEMANTIC_ATOM_CONST
-        && cm_semantic_barrier_phase(&barrier)
-            == CM_SEMANTIC_BARRIER_STRUCTURAL
+        && result.local_bodies.body_result.status
+            == CM_HIR_BODY_LOWER_INVALID_LITERAL
+        && fixture.hir.expressions.len == expressions
         && cm_hir_get_body(&fixture.hir, 1u)->state
-            == CM_HIR_BODY_UNLOWERED);
+            == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir, 2u)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir, 3u)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_semantic_barrier_is_current(&barrier)
+        && cm_semantic_barrier_capability_id(&barrier) != capability);
     cm_semantic_barrier_destroy(&barrier);
     fixture_destroy(&fixture);
 }
@@ -503,7 +561,8 @@ int main(void)
 {
     test_manifest_is_complete_stable_and_immutable();
     test_typed_success_and_phase_order();
-    test_const_and_static_block_typed();
+    test_const_and_static_typed();
+    test_const_initializer_failure_rolls_back_all_bodies();
     test_typed_failure_rolls_back_and_remains_structural();
     test_append_rewind_and_capability_aba();
     test_source_snapshots_stale_barrier();

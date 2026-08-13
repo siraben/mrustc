@@ -3376,6 +3376,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     const CmAst *ast;
     const CmAstExpr *block_ast;
     const CmAstExpr *tail_ast;
+    CmAstExprId tail_ast_id;
     CmHirBodyLowerResult result;
     CmHirBodyLowerStatus literal_status;
     CmHirExpr block;
@@ -3413,6 +3414,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     size_t inferred_type_add_count;
     int transaction_marked;
     int add_bool_type;
+    int value_body;
 
     memset(&result, 0, sizeof(result));
     if (context == NULL || graph == NULL || imports == NULL || modules == NULL
@@ -3438,14 +3440,22 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         || owner_definition->state != CM_HIR_DEFINITION_BOUND
         ? NULL : cm_hir_get_item(context,
             owner_definition->entity.item_id);
-    if (owner_item == NULL || owner_item->kind != CM_HIR_ITEM_FUNCTION
-        || !cm_hir_def_id_equal(owner_item->definition, body->owner)
-        || owner_item->data.function_item.body != body_id) {
+    if (owner_item == NULL
+        || !cm_hir_def_id_equal(owner_item->definition, body->owner)) {
         return cm_hir_body_result(CM_HIR_BODY_LOWER_INVALID_BODY,
             body_id, body->span);
     }
-    if (cm_hir_body_function_owner_kind(context, owner_item)
-            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED) {
+    value_body = owner_item->kind == CM_HIR_ITEM_CONST
+        || owner_item->kind == CM_HIR_ITEM_STATIC;
+    if ((!value_body
+            && (owner_item->kind != CM_HIR_ITEM_FUNCTION
+                || owner_item->data.function_item.body != body_id
+                || cm_hir_body_function_owner_kind(context, owner_item)
+                    == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED))
+        || (value_body
+            && (owner_item->data.value_item.body != body_id
+                || cm_hir_body_value_owner_kind(context, owner_item)
+                    == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED))) {
         return cm_hir_body_result(CM_HIR_BODY_LOWER_UNSUPPORTED_BODY,
             body_id, body->span);
     }
@@ -3476,11 +3486,30 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     }
     result = cm_hir_body_result(CM_HIR_BODY_LOWER_UNSUPPORTED_BODY,
         body_id, cm_hir_body_ast_span(source, block_ast->span));
-    if (block_ast->kind != CM_AST_EXPR_BLOCK
-        || block_ast->data.block.tail == CM_AST_EXPR_NONE) {
-        return result;
+    if (value_body) {
+        statement_count = 0u;
+        tail_ast_id = (CmAstExprId)body->source_expression_id;
+        if (block_ast->kind == CM_AST_EXPR_BLOCK) {
+            if (block_ast->data.block.is_unsafe
+                || block_ast->data.block.is_const
+                || (block_ast->attribute_count == 0u
+                    && block_ast->attributes != NULL)
+                || block_ast->attribute_count != 0u
+                || block_ast->data.block.statement_count != 0u
+                || block_ast->data.block.statements != NULL
+                || block_ast->data.block.tail == CM_AST_EXPR_NONE) {
+                return result;
+            }
+            tail_ast_id = block_ast->data.block.tail;
+        }
+    } else {
+        if (block_ast->kind != CM_AST_EXPR_BLOCK
+            || block_ast->data.block.tail == CM_AST_EXPR_NONE) {
+            return result;
+        }
+        statement_count = block_ast->data.block.statement_count;
+        tail_ast_id = block_ast->data.block.tail;
     }
-    statement_count = block_ast->data.block.statement_count;
     let_plans = NULL;
     hir_statements = NULL;
     transaction_marked = 0;
@@ -3492,7 +3521,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         result.status = CM_HIR_BODY_LOWER_INVALID_BODY;
         return result;
     }
-    tail_ast = cm_ast_get_expr(ast, block_ast->data.block.tail);
+    tail_ast = cm_ast_get_expr(ast, tail_ast_id);
     if (tail_ast == NULL || tail_ast->span.start > tail_ast->span.end
         || tail_ast->span.start < block_ast->span.start
         || tail_ast->span.end > block_ast->span.end) {
@@ -3518,7 +3547,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     build_state.source = source;
     build_state.base_local_count = body->local_count;
     build_state.allowed_if_expression = tail_ast->kind == CM_AST_EXPR_IF
-        ? block_ast->data.block.tail : CM_AST_EXPR_NONE;
+        ? tail_ast_id : CM_AST_EXPR_NONE;
     max_resolve_path_segments = cm_hir_body_max_resolve_path_segments(ast);
     if (!cm_size_mul(max_resolve_path_segments,
             sizeof(CmResolvePathSegmentView), &path_storage_bytes)) {
@@ -3543,7 +3572,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         }
     } else {
         literal_status = cm_hir_body_preflight_typed_expression(&build_state,
-            body->expected_type, block_ast->data.block.tail,
+            body->expected_type, tail_ast_id,
             block_ast->span, 0u, &expression_counts);
     }
     if (literal_status != CM_HIR_BODY_LOWER_OK) {
@@ -3781,10 +3810,10 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         }
         build_state.visible_let_count = statement_count;
         hir_status = cm_hir_body_build_typed_expression(&build_state,
-            body->expected_type, block_ast->data.block.tail, &tail_id);
+            body->expected_type, tail_ast_id, &tail_id);
     } else {
         hir_status = cm_hir_body_build_typed_expression(&build_state,
-            body->expected_type, block_ast->data.block.tail, &tail_id);
+            body->expected_type, tail_ast_id, &tail_id);
     }
     if (hir_status == CM_HIR_OK
         && (build_state.call_storage_cursor
@@ -4029,8 +4058,13 @@ CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
         result.item = item_id;
         result.owner = item->definition;
         result.body = body_id;
-        if (cm_hir_body_function_owner_kind(context, item)
-                == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED) {
+        if ((item->kind == CM_HIR_ITEM_FUNCTION
+                && cm_hir_body_function_owner_kind(context, item)
+                    == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED)
+            || ((item->kind == CM_HIR_ITEM_CONST
+                    || item->kind == CM_HIR_ITEM_STATIC)
+                && cm_hir_body_value_owner_kind(context, item)
+                    == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED)) {
             result.status = CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER;
             goto finish;
         }
@@ -4086,8 +4120,10 @@ CmHirLocalBodiesResult cm_hir_lower_local_bodies(CmHirContext *context,
         item_id = (CmHirItemId)(item_index + 1u);
         item = cm_hir_get_item(context, item_id);
         if (item == NULL || item->definition.crate_id != local_crate
-            || item->kind != CM_HIR_ITEM_FUNCTION) continue;
-        body_id = item->data.function_item.body;
+            || (item->kind != CM_HIR_ITEM_FUNCTION
+                && item->kind != CM_HIR_ITEM_CONST
+                && item->kind != CM_HIR_ITEM_STATIC)) continue;
+        body_id = cm_hir_local_item_body(item);
         if (body_id == CM_HIR_BODY_NONE) continue;
         body = cm_hir_get_body(context, body_id);
         if (body != NULL && body->state == CM_HIR_BODY_TYPED) continue;

@@ -1783,11 +1783,21 @@ real atomic `STRUCTURAL -> TYPED` pass through local-body lowering: failure
 rolls the entire HIR transaction back and recaptures the new generation so the
 same manifest remains inspectable and retryable at STRUCTURAL. Successful
 transitions and mutating rollbacks mint a fresh exact-generation capability.
-Const/static bodies and trait-default bodies are present in the manifest but
-explicitly block TYPED until their real checkers exist. No API can yet mint
+Free monomorphic const and immutable static initializers now participate in
+the same atomic TYPED transition as functions and publish canonical
+HIR block roots (wrapping non-block initializers only). Ordinary call typing
+matches original mrustc here; const-operation legality remains a later
+marking/evaluation obligation. Associated/generic value bodies and
+trait-default bodies remain present but explicitly block TYPED. No API can yet mint
 MARKED, REGIONS, REWRITTEN, or VALIDATED, and normalized array lengths/discriminants
 are not misrepresented as type-position body atoms while HIR lacks stable
 source body identities for them.
+
+The dependency-macro provenance follow-on must also pin producer and consumer
+module-graph lifetime IDs through dependency definitions/imports and
+`CmResolveDependencyItemRef`. Revision/certificate identity alone still admits
+an old consumer reference after destroy/reinitialize/rebuild at the same graph
+address.
 
 Committed MIR now also latches the exact semantic-admission capability which
 authorized its first body. A newly constructed admission for the same HIR
