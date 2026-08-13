@@ -1169,6 +1169,268 @@ static void test_transactional_hir_instantiation(void)
     fixture_destroy(&fixture);
 }
 
+static void test_scoped_multi_owner_instantiation(void)
+{
+    TestFixture fixture;
+    CmTypeckContext foreign_typeck;
+    CmTypeckSnapshot snapshot;
+    CmTypeckType scratch_type;
+    CmHirItem method_item;
+    CmHirItemId method_item_id;
+    CmHirGenericParam const_parameter;
+    CmHirGenericParamId const_parameter_id;
+    CmHirType type;
+    CmHirTypeId owner_types[2];
+    CmHirTypeId self_type;
+    CmHirTypeId tuple_type;
+    CmHirTypeId elements[3];
+    CmTypeckGenericArg arguments[3];
+    CmTypeckInstantiationFrame frames[2];
+    CmTypeckScopedInstantiation instantiation;
+    CmTypeckTypeId instantiated;
+    CmTypeckTypeId stale_type;
+    CmTypeckTypeId reused_type;
+    const CmTypeckType *scratch;
+    size_t count;
+
+    fixture_init(&fixture);
+    memset(&method_item, 0, sizeof(method_item));
+    method_item.kind = CM_HIR_ITEM_STRUCT;
+    method_item.definition = fixture.definitions[2];
+    method_item.owner_module = fixture.root_module;
+    method_item.parent_definition = cm_hir_def_id_none();
+    method_item.name = cm_hir_intern(&fixture.hir, "MethodOwner");
+    method_item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    method_item.visibility.restriction = cm_hir_def_id_none();
+    method_item.span = test_span(3u, 4u);
+    method_item.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    method_item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+    assert(cm_hir_add_item(&fixture.hir, &method_item, &method_item_id)
+        == CM_HIR_OK);
+    (void)method_item_id;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = test_span(55u, 56u);
+    type.data.parameter_type.parameter = fixture.parameters[0];
+    assert(cm_hir_add_type(&fixture.hir, &type, &owner_types[0])
+        == CM_HIR_OK);
+    type.data.parameter_type.parameter = fixture.parameters[1];
+    assert(cm_hir_add_type(&fixture.hir, &type, &owner_types[1])
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_SELF_KIND;
+    type.span = test_span(55u, 56u);
+    type.data.self_type.owner = fixture.definitions[5];
+    assert(cm_hir_add_type(&fixture.hir, &type, &self_type) == CM_HIR_OK);
+    elements[0] = owner_types[0];
+    elements[1] = owner_types[1];
+    elements[2] = self_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(55u, 56u);
+    type.data.tuple_type.elements = elements;
+    type.data.tuple_type.element_count = 3u;
+    assert(cm_hir_add_type(&fixture.hir, &type, &tuple_type) == CM_HIR_OK);
+
+    memset(arguments, 0, sizeof(arguments));
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = fixture.u32_type;
+    arguments[1].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[1].data.type = fixture.bool_type;
+    memset(frames, 0, sizeof(frames));
+    frames[0].parameter_owner = fixture.definitions[0];
+    frames[0].arguments = &arguments[0];
+    frames[0].argument_count = 1u;
+    frames[1].parameter_owner = fixture.definitions[1];
+    frames[1].arguments = &arguments[1];
+    frames[1].argument_count = 1u;
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    instantiation.frames = frames;
+    instantiation.frame_count = 2u;
+    instantiation.self_owner = fixture.definitions[5];
+    instantiation.self_type = fixture.i32_type;
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            tuple_type, &instantiation, &instantiated) == CM_TYPECK_OK);
+    scratch = cm_typeck_get_type(&fixture.typeck, instantiated);
+    assert(scratch != NULL && scratch->kind == CM_TYPECK_TYPE_TUPLE
+        && scratch->data.tuple_type.element_count == 3u
+        && scratch->data.tuple_type.elements[0] == fixture.u32_type
+        && scratch->data.tuple_type.elements[1] == fixture.bool_type
+        && scratch->data.tuple_type.elements[2] == fixture.i32_type);
+
+    frames[0].parameter_owner = fixture.definitions[1];
+    frames[0].arguments = &arguments[1];
+    frames[1].parameter_owner = fixture.definitions[0];
+    frames[1].arguments = &arguments[0];
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            tuple_type, &instantiation, &instantiated) == CM_TYPECK_OK);
+    scratch = cm_typeck_get_type(&fixture.typeck, instantiated);
+    assert(scratch != NULL && scratch->kind == CM_TYPECK_TYPE_TUPLE
+        && scratch->data.tuple_type.elements[0] == fixture.u32_type
+        && scratch->data.tuple_type.elements[1] == fixture.bool_type
+        && scratch->data.tuple_type.elements[2] == fixture.i32_type);
+
+    count = cm_typeck_type_count(&fixture.typeck);
+    frames[1] = frames[0];
+    assert(!cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            tuple_type, &instantiation, &instantiated)
+            == CM_TYPECK_INVALID_ARGUMENT
+        && instantiated == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&fixture.typeck) == count);
+
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            owner_types[0], &instantiation, &instantiated) == CM_TYPECK_OK);
+    scratch = cm_typeck_get_type(&fixture.typeck, instantiated);
+    assert(scratch != NULL && scratch->kind == CM_TYPECK_TYPE_PARAMETER
+        && scratch->data.parameter_type.parameter == fixture.parameters[0]);
+    assert(cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+        self_type, &instantiation, &instantiated)
+        == CM_TYPECK_UNSUPPORTED_HIR_TYPE);
+
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    memset(frames, 0, sizeof(frames));
+    frames[0].parameter_owner = fixture.definitions[2];
+    instantiation.frames = frames;
+    instantiation.frame_count = 1u;
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+        &instantiation));
+    frames[0].parameter_owner = fixture.definitions[1];
+    assert(!cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+        &instantiation));
+    frames[0].arguments = &arguments[0];
+    arguments[0].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    arguments[0].data.lifetime.kind = CM_HIR_REGION_STATIC;
+    frames[0].argument_count = 1u;
+    assert(!cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+        &instantiation));
+
+    elements[0] = owner_types[0];
+    elements[1] = self_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(55u, 56u);
+    type.data.tuple_type.elements = elements;
+    type.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(&fixture.hir, &type, &tuple_type) == CM_HIR_OK);
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = fixture.u32_type;
+    memset(frames, 0, sizeof(frames));
+    frames[0].parameter_owner = fixture.definitions[2];
+    frames[1].parameter_owner = fixture.definitions[0];
+    frames[1].arguments = &arguments[0];
+    frames[1].argument_count = 1u;
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    instantiation.frames = frames;
+    instantiation.frame_count = 2u;
+    instantiation.self_owner = fixture.definitions[5];
+    instantiation.self_type = fixture.i32_type;
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            tuple_type, &instantiation, &instantiated) == CM_TYPECK_OK);
+    scratch = cm_typeck_get_type(&fixture.typeck, instantiated);
+    assert(scratch != NULL && scratch->kind == CM_TYPECK_TYPE_TUPLE
+        && scratch->data.tuple_type.element_count == 2u
+        && scratch->data.tuple_type.elements[0] == fixture.u32_type
+        && scratch->data.tuple_type.elements[1] == fixture.i32_type);
+
+    frames[0].arguments = &arguments[0];
+    frames[0].argument_count = 1u;
+    assert(!cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+        &instantiation));
+
+    memset(&const_parameter, 0, sizeof(const_parameter));
+    const_parameter.kind = CM_HIR_GENERIC_CONST;
+    const_parameter.owner = fixture.definitions[0];
+    const_parameter.index = 1u;
+    const_parameter.name = cm_hir_intern(&fixture.hir, "N");
+    const_parameter.span = test_span(56u, 57u);
+    const_parameter.declared_type = owner_types[1];
+    assert(cm_hir_add_generic_param(&fixture.hir, &const_parameter,
+        &const_parameter_id) == CM_HIR_OK);
+    (void)const_parameter_id;
+    memset(arguments, 0, sizeof(arguments));
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = fixture.u32_type;
+    arguments[1].kind = CM_HIR_GENERIC_ARG_CONST;
+    arguments[1].data.constant.kind = CM_HIR_CONST_VALUE;
+    arguments[1].data.constant.type = fixture.bool_type;
+    arguments[1].data.constant.data.value.low_bits = UINT64_C(3);
+    arguments[2].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[2].data.type = fixture.bool_type;
+    memset(frames, 0, sizeof(frames));
+    frames[0].parameter_owner = fixture.definitions[0];
+    frames[0].arguments = &arguments[0];
+    frames[0].argument_count = 2u;
+    frames[1].parameter_owner = fixture.definitions[1];
+    frames[1].arguments = &arguments[2];
+    frames[1].argument_count = 1u;
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    instantiation.frames = frames;
+    instantiation.frame_count = 2u;
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            fixture.hir_u32, &instantiation, &instantiated)
+            == CM_TYPECK_OK);
+    count = cm_typeck_type_count(&fixture.typeck);
+    arguments[1].data.constant.type = fixture.u32_type;
+    assert(cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            fixture.hir_u32, &instantiation, &instantiated)
+            == CM_TYPECK_TYPE_MISMATCH
+        && instantiated == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&fixture.typeck) == count);
+
+    assert(cm_typeck_snapshot(&fixture.typeck, &snapshot) == CM_TYPECK_OK);
+    memset(&scratch_type, 0, sizeof(scratch_type));
+    scratch_type.kind = CM_TYPECK_TYPE_TUPLE;
+    scratch_type.span = test_span(58u, 59u);
+    scratch_type.data.tuple_type.elements = &fixture.u32_type;
+    scratch_type.data.tuple_type.element_count = 1u;
+    assert(cm_typeck_add_type(&fixture.typeck, &scratch_type, &stale_type)
+        == CM_TYPECK_OK);
+    memset(arguments, 0, sizeof(arguments));
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = stale_type;
+    memset(frames, 0, sizeof(frames));
+    frames[0].parameter_owner = fixture.definitions[1];
+    frames[0].arguments = &arguments[0];
+    frames[0].argument_count = 1u;
+    cm_typeck_scoped_instantiation_init(&fixture.typeck, &instantiation);
+    instantiation.frames = frames;
+    instantiation.frame_count = 1u;
+    assert(cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+        &instantiation));
+    assert(cm_typeck_rollback(&fixture.typeck, &snapshot) == CM_TYPECK_OK);
+    scratch_type.data.tuple_type.elements = &fixture.bool_type;
+    assert(cm_typeck_add_type(&fixture.typeck, &scratch_type, &reused_type)
+        == CM_TYPECK_OK && reused_type == stale_type);
+    assert(!cm_typeck_scoped_instantiation_is_valid(&fixture.typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&fixture.typeck,
+            owner_types[1], &instantiation, &instantiated)
+            == CM_TYPECK_INVALID_ARGUMENT
+        && instantiated == CM_TYPECK_TYPE_NONE);
+
+    cm_typeck_context_init(&foreign_typeck, &fixture.hir);
+    assert(!cm_typeck_scoped_instantiation_is_valid(&foreign_typeck,
+            &instantiation)
+        && cm_typeck_instantiate_hir_type_scoped(&foreign_typeck,
+            fixture.hir_u32, &instantiation, &instantiated)
+            == CM_TYPECK_INVALID_ARGUMENT);
+    cm_typeck_context_destroy(&foreign_typeck);
+    fixture_destroy(&fixture);
+}
+
 static void test_instantiation_rejection_is_atomic(void)
 {
     TestFixture fixture;
@@ -1203,6 +1465,18 @@ static void test_instantiation_rejection_is_atomic(void)
     instantiation.arguments = &argument;
     instantiation.argument_count = 1u;
     count = cm_typeck_type_count(&fixture.typeck);
+
+    out = fixture.bool_type;
+    assert(cm_typeck_instantiate_hir_type(&fixture.typeck, parameter_type,
+        NULL, &out) == CM_TYPECK_INVALID_ARGUMENT
+        && out == CM_TYPECK_TYPE_NONE);
+    memset(&named, 0, sizeof(named));
+    named.definition = fixture.definitions[2];
+    memset(&out_named, 0xff, sizeof(out_named));
+    assert(cm_typeck_instantiate_hir_named(&fixture.typeck, &named,
+        NULL, &out_named) == CM_TYPECK_INVALID_ARGUMENT
+        && cm_hir_def_id_is_none(out_named.definition)
+        && out_named.arguments == NULL && out_named.argument_count == 0u);
 
     instantiation.argument_count = 0u;
     assert(cm_typeck_instantiate_hir_type(&fixture.typeck, parameter_type,
@@ -1408,6 +1682,7 @@ int main(void)
     test_freeze_transactions();
     test_import_rejection_and_complex_reuse();
     test_transactional_hir_instantiation();
+    test_scoped_multi_owner_instantiation();
     test_instantiation_rejection_is_atomic();
     test_instantiation_memoizes_shared_hir_dag();
     test_status_names_and_invalid_inputs();

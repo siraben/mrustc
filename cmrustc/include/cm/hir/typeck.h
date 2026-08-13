@@ -87,6 +87,29 @@ typedef struct CmTypeckInstantiation {
     CmTypeckTypeId self_type;
 } CmTypeckInstantiation;
 
+/* One declaration-ordered parameter-owner domain in a scoped substitution. */
+typedef struct CmTypeckInstantiationFrame {
+    CmHirDefId parameter_owner;
+    const CmTypeckGenericArg *arguments;
+    uint32_t argument_count;
+} CmTypeckInstantiationFrame;
+
+/*
+ * Authenticated substitution across distinct parameter owners. Frames may be
+ * empty but their owners must be unique; `Self` remains a separate binding.
+ * All slices are borrowed for the duration of one synchronous operation.
+ */
+typedef struct CmTypeckScopedInstantiation {
+    const void *typeck_state;
+    uint64_t typeck_lifetime_id;
+    /* Entry-time ABA guard for scratch TypeIds invalidated by rollback. */
+    uint64_t typeck_rollback_generation;
+    const CmTypeckInstantiationFrame *frames;
+    uint32_t frame_count;
+    CmHirDefId self_owner;
+    CmTypeckTypeId self_type;
+} CmTypeckScopedInstantiation;
+
 /*
  * Session-owned structural term. Variable terms are created only through
  * cm_typeck_new_variable. cm_typeck_add_type deeply copies every array.
@@ -173,6 +196,8 @@ void cm_typeck_context_destroy(CmTypeckContext *context);
 /* Initialize an empty instantiation capability for this exact session. */
 void cm_typeck_instantiation_init(const CmTypeckContext *context,
     CmTypeckInstantiation *instantiation);
+void cm_typeck_scoped_instantiation_init(const CmTypeckContext *context,
+    CmTypeckScopedInstantiation *instantiation);
 
 CmTypeckStatus cm_typeck_snapshot(CmTypeckContext *context,
     CmTypeckSnapshot *out_snapshot);
@@ -195,6 +220,14 @@ CmTypeckStatus cm_typeck_instantiate_hir_type(CmTypeckContext *context,
 CmTypeckStatus cm_typeck_instantiate_hir_named(CmTypeckContext *context,
     const CmHirNamedType *named,
     const CmTypeckInstantiation *instantiation,
+    CmTypeckNamedType *out_named);
+CmTypeckStatus cm_typeck_instantiate_hir_type_scoped(
+    CmTypeckContext *context, CmHirTypeId hir_type,
+    const CmTypeckScopedInstantiation *instantiation,
+    CmTypeckTypeId *out_type);
+CmTypeckStatus cm_typeck_instantiate_hir_named_scoped(
+    CmTypeckContext *context, const CmHirNamedType *named,
+    const CmTypeckScopedInstantiation *instantiation,
     CmTypeckNamedType *out_named);
 CmTypeckStatus cm_typeck_add_type(CmTypeckContext *context,
     const CmTypeckType *type, CmTypeckTypeId *out_type);
@@ -237,6 +270,9 @@ int cm_typeck_adt_is_valid(const CmTypeckContext *context,
 /* Authenticate every owner, argument kind, term, and optional Self binding. */
 int cm_typeck_instantiation_is_valid(const CmTypeckContext *context,
     const CmTypeckInstantiation *instantiation);
+int cm_typeck_scoped_instantiation_is_valid(
+    const CmTypeckContext *context,
+    const CmTypeckScopedInstantiation *instantiation);
 
 /*
  * Freeze one fully solved term into `hir`. The caller must hold an active HIR

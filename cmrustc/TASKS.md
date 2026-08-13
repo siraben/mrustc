@@ -1612,12 +1612,29 @@ Recursive predicate/projection evaluators stay witness-free so nested proofs
 cannot replace the root winner. The borrowed instantiation view must be copied
 before the witness is cleared, destroyed, or reused.
 
-The next checkpoint is scoped multi-owner instantiation followed by immediate
-copying of this impl witness into durable payloads for all four callable
-argument domains: item, method, enclosing impl, and implemented trait. Those
-domains must stay distinct and derive the canonical callee from the same
-normalized values before generic qualified-call and dot-method gates open.
-General adjustments follow that authority boundary. Operators, indexing, and
+Typeck now also supports one synchronous scoped instantiation containing any
+bounded set of unique exact parameter-owner frames plus a separate `Self`
+binding. Lifetime, type, and const parameters dispatch only through their exact
+owner; missing owners remain rigid, declaration arity/kinds are authenticated
+for both bound items and reserved construction fixtures, and cross-owner const
+declared types see the complete scope. Frame order has no semantic effect:
+const validation visits owners in canonical DefId order, and lookup is by exact
+owner. Every operation remains snapshot-atomic. Explicit empty method-owner
+frames alongside a nonempty impl-owner frame, duplicate owners, bound-item
+arity mismatch, frame permutation, cross-owner const validation, foreign
+sessions, and rollback are covered. Scoped capabilities also retain a rollback
+generation so a borrowed scratch TypeId cannot become valid again after its
+numeric ID is reused. Legacy single-owner entry points remain wrappers and
+preserve their established caller lifetime behavior.
+
+The next checkpoint immediately copies the root impl witness into durable
+payloads for all four callable argument domains: item, method, enclosing impl,
+and implemented trait. Those domains must stay distinct and derive the
+canonical callee from the same normalized values before generic qualified-call
+and dot-method gates open. All initialized witnesses must be destroyed on every
+path, and helper-local partial callable facts must be cleaned before returning
+because outer cleanup cannot see a slot until its count is committed. General
+adjustments follow that authority boundary. Operators, indexing, and
 callable-trait syntax then reuse the same selection and adjustment machinery
 instead of introducing parallel lookup paths.
 

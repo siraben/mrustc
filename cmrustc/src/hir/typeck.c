@@ -51,6 +51,7 @@ typedef struct CmTypeckState {
     CmVec snapshots;
     uint64_t lifetime_id;
     uint64_t state_revision;
+    uint64_t rollback_generation;
     uint64_t next_snapshot_id;
     uint64_t hir_storage_lifetime_id;
     uint64_t hir_semantic_generation;
@@ -399,6 +400,7 @@ void cm_typeck_context_init(CmTypeckContext *context,
     cm_vec_init(&state->imports, sizeof(CmTypeckImportEntry));
     cm_vec_init(&state->snapshots, sizeof(CmTypeckSnapshotRecord));
     state->lifetime_id = cm_typeck_new_lifetime_id();
+    state->rollback_generation = UINT64_C(1);
     cm_typeck_record_state_mutation(state);
     state->next_snapshot_id = UINT64_C(1);
     state->hir_storage_lifetime_id = hir->storage.lifetime_id;
@@ -446,6 +448,20 @@ void cm_typeck_instantiation_init(const CmTypeckContext *context,
     if (!cm_typeck_state_is_current(state)) return;
     instantiation->typeck_state = state;
     instantiation->typeck_lifetime_id = state->lifetime_id;
+}
+
+void cm_typeck_scoped_instantiation_init(const CmTypeckContext *context,
+    CmTypeckScopedInstantiation *instantiation)
+{
+    const CmTypeckState *state;
+
+    if (instantiation == NULL) return;
+    memset(instantiation, 0, sizeof(*instantiation));
+    state = cm_typeck_state_const(context);
+    if (!cm_typeck_state_is_current(state)) return;
+    instantiation->typeck_state = state;
+    instantiation->typeck_lifetime_id = state->lifetime_id;
+    instantiation->typeck_rollback_generation = state->rollback_generation;
 }
 
 CmTypeckStatus cm_typeck_snapshot(CmTypeckContext *context,
@@ -531,6 +547,8 @@ CmTypeckStatus cm_typeck_rollback(CmTypeckContext *context,
     cm_vec_resize(&state->snapshots, state->snapshots.len - 1u);
     snapshot->active = 0;
     snapshot->owner = NULL;
+    if (state->rollback_generation == UINT64_MAX) abort();
+    state->rollback_generation += UINT64_C(1);
     cm_typeck_record_state_mutation(state);
     return CM_TYPECK_OK;
 }
@@ -1054,7 +1072,7 @@ CmTypeckStatus cm_typeck_import_hir_type(CmTypeckContext *context,
 
 typedef struct CmTypeckInstantiationState {
     CmTypeckState *types;
-    const CmTypeckInstantiation *instantiation;
+    const CmTypeckScopedInstantiation *instantiation;
     CmVec memo;
     size_t depth;
 } CmTypeckInstantiationState;
@@ -1098,44 +1116,96 @@ static int cm_typeck_instantiation_arg_matches(
     return 0;
 }
 
-static int cm_typeck_instantiation_valid_inner(const CmTypeckState *state,
-    const CmTypeckInstantiation *instantiation)
+static int cm_typeck_instantiation_frame_valid(const CmTypeckState *state,
+    const CmTypeckInstantiationFrame *frame)
 {
     const CmHirDefinition *definition;
-    size_t parameter_index;
-    size_t owned_count;
+    const CmHirItem *item;
     uint32_t index;
 
-    if (instantiation == NULL
-        || instantiation->typeck_state != state
-        || instantiation->typeck_lifetime_id != state->lifetime_id
-        || cm_hir_def_id_is_none(instantiation->parameter_owner)
-        || (instantiation->argument_count == 0u)
-            != (instantiation->arguments == NULL)
-        || !cm_typeck_generic_args_valid(state, instantiation->arguments,
-            instantiation->argument_count)) return 0;
+    if (frame == NULL || cm_hir_def_id_is_none(frame->parameter_owner)
+        || (frame->argument_count == 0u) != (frame->arguments == NULL)
+        || !cm_typeck_generic_args_valid(state, frame->arguments,
+            frame->argument_count)) return 0;
     definition = cm_hir_lookup_definition(state->hir,
-        instantiation->parameter_owner);
+        frame->parameter_owner);
     if (definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM) {
         return 0;
     }
-    owned_count = 0u;
-    for (parameter_index = 0u;
-         parameter_index < state->hir->generic_parameters.len;
-         ++parameter_index) {
+    item = definition->state == CM_HIR_DEFINITION_BOUND
+        ? cm_hir_get_item(state->hir, definition->entity.item_id) : NULL;
+    if (item != NULL) {
+        if (!cm_hir_def_id_equal(item->definition,
+                frame->parameter_owner)
+            || item->generic_parameter_count != frame->argument_count
+            || (item->generic_parameter_count == 0u)
+                != (item->generic_parameter_start
+                    == CM_HIR_GENERIC_PARAM_NONE)) return 0;
+    } else if (definition->state != CM_HIR_DEFINITION_RESERVED) {
+        return 0;
+    }
+    for (index = 0u; index < frame->argument_count; ++index) {
         const CmHirGenericParam *parameter;
 
-        parameter = (const CmHirGenericParam *)cm_vec_at_const(
-            &state->hir->generic_parameters, parameter_index);
-        if (parameter != NULL && cm_hir_def_id_equal(parameter->owner,
-                instantiation->parameter_owner)) owned_count += 1u;
-    }
-    if (owned_count != (size_t)instantiation->argument_count) return 0;
-    for (index = 0u; index < instantiation->argument_count; ++index) {
+        parameter = item == NULL
+            ? cm_typeck_instantiation_parameter(state,
+                frame->parameter_owner, index)
+            : cm_hir_get_generic_param(state->hir,
+                item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                frame->parameter_owner)) return 0;
         if (!cm_typeck_instantiation_arg_matches(
-                cm_typeck_instantiation_parameter(state,
-                    instantiation->parameter_owner, index),
-                &instantiation->arguments[index])) return 0;
+                parameter, &frame->arguments[index])) return 0;
+    }
+    if (item == NULL) {
+        size_t parameter_index;
+        size_t owned_count;
+
+        owned_count = 0u;
+        for (parameter_index = 0u;
+             parameter_index < state->hir->generic_parameters.len;
+             ++parameter_index) {
+            const CmHirGenericParam *parameter;
+
+            parameter = (const CmHirGenericParam *)cm_vec_at_const(
+                &state->hir->generic_parameters, parameter_index);
+            if (parameter != NULL && cm_hir_def_id_equal(parameter->owner,
+                    frame->parameter_owner)) owned_count += 1u;
+        }
+        if (owned_count != (size_t)frame->argument_count) return 0;
+    }
+    return 1;
+}
+
+static int cm_typeck_scoped_instantiation_valid_inner(
+    const CmTypeckState *state,
+    const CmTypeckScopedInstantiation *instantiation)
+{
+    const CmHirDefinition *definition;
+    uint32_t frame_index;
+
+    if (instantiation == NULL || instantiation->typeck_state != state
+        || instantiation->typeck_lifetime_id != state->lifetime_id
+        || instantiation->typeck_rollback_generation
+            != state->rollback_generation
+        || (instantiation->frame_count == 0u)
+            != (instantiation->frames == NULL)
+        || (size_t)instantiation->frame_count
+            > state->hir->definitions.len) return 0;
+    for (frame_index = 0u; frame_index < instantiation->frame_count;
+         ++frame_index) {
+        uint32_t prior_index;
+
+        if (!cm_typeck_instantiation_frame_valid(state,
+                &instantiation->frames[frame_index])) return 0;
+        for (prior_index = 0u; prior_index < frame_index; ++prior_index) {
+            if (cm_hir_def_id_equal(
+                    instantiation->frames[prior_index].parameter_owner,
+                    instantiation->frames[frame_index].parameter_owner)) {
+                return 0;
+            }
+        }
     }
     if (instantiation->self_type == CM_TYPECK_TYPE_NONE) {
         return cm_hir_def_id_is_none(instantiation->self_owner);
@@ -1145,6 +1215,29 @@ static int cm_typeck_instantiation_valid_inner(const CmTypeckState *state,
     return !cm_hir_def_id_is_none(instantiation->self_owner)
         && definition != NULL && definition->kind == CM_HIR_DEFINITION_ITEM
         && cm_typeck_type_id_valid(state, instantiation->self_type);
+}
+
+static int cm_typeck_instantiation_valid_inner(const CmTypeckState *state,
+    const CmTypeckInstantiation *instantiation)
+{
+    CmTypeckInstantiationFrame frame;
+    CmTypeckScopedInstantiation scoped;
+
+    if (instantiation == NULL
+        || cm_hir_def_id_is_none(instantiation->parameter_owner)) return 0;
+    memset(&frame, 0, sizeof(frame));
+    frame.parameter_owner = instantiation->parameter_owner;
+    frame.arguments = instantiation->arguments;
+    frame.argument_count = instantiation->argument_count;
+    memset(&scoped, 0, sizeof(scoped));
+    scoped.typeck_state = instantiation->typeck_state;
+    scoped.typeck_lifetime_id = instantiation->typeck_lifetime_id;
+    scoped.typeck_rollback_generation = state->rollback_generation;
+    scoped.frames = &frame;
+    scoped.frame_count = 1u;
+    scoped.self_owner = instantiation->self_owner;
+    scoped.self_type = instantiation->self_type;
+    return cm_typeck_scoped_instantiation_valid_inner(state, &scoped);
 }
 
 int cm_typeck_instantiation_is_valid(const CmTypeckContext *context,
@@ -1157,6 +1250,35 @@ int cm_typeck_instantiation_is_valid(const CmTypeckContext *context,
         && cm_typeck_instantiation_valid_inner(state, instantiation);
 }
 
+int cm_typeck_scoped_instantiation_is_valid(
+    const CmTypeckContext *context,
+    const CmTypeckScopedInstantiation *instantiation)
+{
+    const CmTypeckState *state;
+
+    state = cm_typeck_state_const(context);
+    return cm_typeck_state_is_current(state)
+        && cm_typeck_scoped_instantiation_valid_inner(state,
+            instantiation);
+}
+
+static const CmTypeckInstantiationFrame *cm_typeck_instantiation_frame(
+    const CmTypeckInstantiationState *instantiate, CmHirDefId owner)
+{
+    uint32_t index;
+
+    for (index = 0u; index < instantiate->instantiation->frame_count;
+         ++index) {
+        const CmTypeckInstantiationFrame *frame;
+
+        frame = &instantiate->instantiation->frames[index];
+        if (cm_hir_def_id_equal(frame->parameter_owner, owner)) {
+            return frame;
+        }
+    }
+    return NULL;
+}
+
 static CmTypeckStatus cm_typeck_instantiate_type_inner(
     CmTypeckInstantiationState *instantiate, CmHirTypeId hir_type,
     CmTypeckTypeId *out_type);
@@ -1165,6 +1287,7 @@ static CmTypeckStatus cm_typeck_instantiate_region(
     CmTypeckInstantiationState *instantiate, const CmHirRegion *source,
     CmHirRegion *out)
 {
+    const CmTypeckInstantiationFrame *frame;
     const CmHirGenericParam *parameter;
 
     if (!cm_typeck_region_valid(instantiate->types, source)) {
@@ -1177,13 +1300,12 @@ static CmTypeckStatus cm_typeck_instantiate_region(
     if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_LIFETIME) {
         return CM_TYPECK_UNSUPPORTED_HIR_TYPE;
     }
-    if (cm_hir_def_id_equal(parameter->owner,
-            instantiate->instantiation->parameter_owner)) {
-        if (parameter->index
-            >= instantiate->instantiation->argument_count) {
+    frame = cm_typeck_instantiation_frame(instantiate, parameter->owner);
+    if (frame != NULL) {
+        if (parameter->index >= frame->argument_count) {
             return CM_TYPECK_INVALID_ARGUMENT;
         }
-        *out = instantiate->instantiation->arguments[parameter->index]
+        *out = frame->arguments[parameter->index]
             .data.lifetime;
     }
     return CM_TYPECK_OK;
@@ -1193,6 +1315,7 @@ static CmTypeckStatus cm_typeck_instantiate_const(
     CmTypeckInstantiationState *instantiate, const CmHirConstArg *source,
     CmTypeckConst *out)
 {
+    const CmTypeckInstantiationFrame *frame;
     const CmHirGenericParam *parameter;
     CmTypeckStatus status;
 
@@ -1207,13 +1330,13 @@ static CmTypeckStatus cm_typeck_instantiate_const(
         if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_CONST) {
             return CM_TYPECK_UNSUPPORTED_CONSTANT;
         }
-        if (cm_hir_def_id_equal(parameter->owner,
-                instantiate->instantiation->parameter_owner)) {
-            if (parameter->index
-                >= instantiate->instantiation->argument_count) {
+        frame = cm_typeck_instantiation_frame(instantiate,
+            parameter->owner);
+        if (frame != NULL) {
+            if (parameter->index >= frame->argument_count) {
                 return CM_TYPECK_INVALID_ARGUMENT;
             }
-            *out = instantiate->instantiation->arguments[parameter->index]
+            *out = frame->arguments[parameter->index]
                 .data.constant;
             return CM_TYPECK_OK;
         }
@@ -1300,6 +1423,7 @@ static CmTypeckStatus cm_typeck_instantiate_type_inner_impl(
     CmTypeckInstantiationState *instantiate, CmHirTypeId hir_type,
     CmTypeckTypeId *out_type)
 {
+    const CmTypeckInstantiationFrame *frame;
     const CmHirType *source;
     const CmHirGenericParam *parameter;
     CmTypeckType type;
@@ -1427,14 +1551,13 @@ static CmTypeckStatus cm_typeck_instantiate_type_inner_impl(
         if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE) {
             return CM_TYPECK_UNSUPPORTED_HIR_TYPE;
         }
-        if (cm_hir_def_id_equal(parameter->owner,
-                instantiate->instantiation->parameter_owner)) {
-            if (parameter->index
-                >= instantiate->instantiation->argument_count) {
+        frame = cm_typeck_instantiation_frame(instantiate,
+            parameter->owner);
+        if (frame != NULL) {
+            if (parameter->index >= frame->argument_count) {
                 return CM_TYPECK_INVALID_ARGUMENT;
             }
-            *out_type = instantiate->instantiation
-                ->arguments[parameter->index].data.type;
+            *out_type = frame->arguments[parameter->index].data.type;
             return CM_TYPECK_OK;
         }
         type.kind = CM_TYPECK_TYPE_PARAMETER;
@@ -1514,31 +1637,68 @@ static CmTypeckStatus cm_typeck_instantiate_type_inner(
 static CmTypeckStatus cm_typeck_validate_instantiation_const_types(
     CmTypeckContext *context, CmTypeckInstantiationState *instantiate)
 {
-    uint32_t index;
+    CmHirDefId previous_owner;
+    uint32_t frame_ordinal;
 
-    for (index = 0u;
-         index < instantiate->instantiation->argument_count; ++index) {
-        const CmHirGenericParam *parameter;
-        CmTypeckTypeId declared_type;
-        CmTypeckStatus status;
+    previous_owner = cm_hir_def_id_none();
+    for (frame_ordinal = 0u;
+         frame_ordinal < instantiate->instantiation->frame_count;
+         ++frame_ordinal) {
+        const CmTypeckInstantiationFrame *frame;
+        uint32_t frame_index;
+        uint32_t index;
 
-        parameter = cm_typeck_instantiation_parameter(instantiate->types,
-            instantiate->instantiation->parameter_owner, index);
-        if (parameter == NULL) return CM_TYPECK_INVALID_ARGUMENT;
-        if (parameter->kind != CM_HIR_GENERIC_CONST) continue;
-        status = cm_typeck_instantiate_type_inner(instantiate,
-            parameter->declared_type, &declared_type);
-        if (status != CM_TYPECK_OK) return status;
-        status = cm_typeck_unify(context, declared_type,
-            instantiate->instantiation->arguments[index]
-                .data.constant.type);
-        if (status != CM_TYPECK_OK) return status;
+        frame = NULL;
+        for (frame_index = 0u;
+             frame_index < instantiate->instantiation->frame_count;
+             ++frame_index) {
+            const CmTypeckInstantiationFrame *candidate;
+            int after_previous;
+
+            candidate = &instantiate->instantiation->frames[frame_index];
+            after_previous = cm_hir_def_id_is_none(previous_owner)
+                || candidate->parameter_owner.crate_id
+                    > previous_owner.crate_id
+                || (candidate->parameter_owner.crate_id
+                        == previous_owner.crate_id
+                    && candidate->parameter_owner.index
+                        > previous_owner.index);
+            if (!after_previous) continue;
+            if (frame == NULL
+                || candidate->parameter_owner.crate_id
+                    < frame->parameter_owner.crate_id
+                || (candidate->parameter_owner.crate_id
+                        == frame->parameter_owner.crate_id
+                    && candidate->parameter_owner.index
+                        < frame->parameter_owner.index)) {
+                frame = candidate;
+            }
+        }
+        if (frame == NULL) return CM_TYPECK_INVALID_ARGUMENT;
+        previous_owner = frame->parameter_owner;
+        for (index = 0u; index < frame->argument_count; ++index) {
+            const CmHirGenericParam *parameter;
+            CmTypeckTypeId declared_type;
+            CmTypeckStatus status;
+
+            parameter = cm_typeck_instantiation_parameter(
+                instantiate->types, frame->parameter_owner, index);
+            if (parameter == NULL) return CM_TYPECK_INVALID_ARGUMENT;
+            if (parameter->kind != CM_HIR_GENERIC_CONST) continue;
+            status = cm_typeck_instantiate_type_inner(instantiate,
+                parameter->declared_type, &declared_type);
+            if (status != CM_TYPECK_OK) return status;
+            status = cm_typeck_unify(context, declared_type,
+                frame->arguments[index].data.constant.type);
+            if (status != CM_TYPECK_OK) return status;
+        }
     }
     return CM_TYPECK_OK;
 }
 
-CmTypeckStatus cm_typeck_instantiate_hir_type(CmTypeckContext *context,
-    CmHirTypeId hir_type, const CmTypeckInstantiation *instantiation,
+CmTypeckStatus cm_typeck_instantiate_hir_type_scoped(
+    CmTypeckContext *context, CmHirTypeId hir_type,
+    const CmTypeckScopedInstantiation *instantiation,
     CmTypeckTypeId *out_type)
 {
     CmTypeckState *state;
@@ -1549,7 +1709,8 @@ CmTypeckStatus cm_typeck_instantiate_hir_type(CmTypeckContext *context,
     state = cm_typeck_state(context);
     if (out_type != NULL) *out_type = CM_TYPECK_TYPE_NONE;
     if (!cm_typeck_state_is_current(state) || out_type == NULL
-        || !cm_typeck_instantiation_valid_inner(state, instantiation)) {
+        || !cm_typeck_scoped_instantiation_valid_inner(state,
+            instantiation)) {
         return CM_TYPECK_INVALID_ARGUMENT;
     }
     status = cm_typeck_snapshot(context, &snapshot);
@@ -1574,9 +1735,9 @@ CmTypeckStatus cm_typeck_instantiate_hir_type(CmTypeckContext *context,
     return status;
 }
 
-CmTypeckStatus cm_typeck_instantiate_hir_named(CmTypeckContext *context,
-    const CmHirNamedType *named,
-    const CmTypeckInstantiation *instantiation,
+CmTypeckStatus cm_typeck_instantiate_hir_named_scoped(
+    CmTypeckContext *context, const CmHirNamedType *named,
+    const CmTypeckScopedInstantiation *instantiation,
     CmTypeckNamedType *out_named)
 {
     CmTypeckState *state;
@@ -1591,7 +1752,8 @@ CmTypeckStatus cm_typeck_instantiate_hir_named(CmTypeckContext *context,
         out_named->definition = cm_hir_def_id_none();
     }
     if (!cm_typeck_state_is_current(state) || out_named == NULL
-        || !cm_typeck_instantiation_valid_inner(state, instantiation)) {
+        || !cm_typeck_scoped_instantiation_valid_inner(state,
+            instantiation)) {
         return CM_TYPECK_INVALID_ARGUMENT;
     }
     status = cm_typeck_snapshot(context, &snapshot);
@@ -1622,6 +1784,66 @@ CmTypeckStatus cm_typeck_instantiate_hir_named(CmTypeckContext *context,
         out_named->definition = cm_hir_def_id_none();
     }
     return status;
+}
+
+static void cm_typeck_scoped_from_instantiation(
+    const CmTypeckState *state,
+    const CmTypeckInstantiation *instantiation,
+    CmTypeckInstantiationFrame *frame,
+    CmTypeckScopedInstantiation *scoped)
+{
+    memset(frame, 0, sizeof(*frame));
+    memset(scoped, 0, sizeof(*scoped));
+    if (instantiation == NULL) return;
+    frame->parameter_owner = instantiation->parameter_owner;
+    frame->arguments = instantiation->arguments;
+    frame->argument_count = instantiation->argument_count;
+    scoped->typeck_state = instantiation->typeck_state;
+    scoped->typeck_lifetime_id = instantiation->typeck_lifetime_id;
+    scoped->typeck_rollback_generation = state == NULL
+        ? 0u : state->rollback_generation;
+    scoped->frames = frame;
+    scoped->frame_count = 1u;
+    scoped->self_owner = instantiation->self_owner;
+    scoped->self_type = instantiation->self_type;
+}
+
+CmTypeckStatus cm_typeck_instantiate_hir_type(CmTypeckContext *context,
+    CmHirTypeId hir_type, const CmTypeckInstantiation *instantiation,
+    CmTypeckTypeId *out_type)
+{
+    CmTypeckInstantiationFrame frame;
+    CmTypeckScopedInstantiation scoped;
+    const CmTypeckState *state;
+
+    if (out_type != NULL) *out_type = CM_TYPECK_TYPE_NONE;
+    if (instantiation == NULL) return CM_TYPECK_INVALID_ARGUMENT;
+    state = cm_typeck_state_const(context);
+    cm_typeck_scoped_from_instantiation(state, instantiation, &frame,
+        &scoped);
+    return cm_typeck_instantiate_hir_type_scoped(context, hir_type,
+        &scoped, out_type);
+}
+
+CmTypeckStatus cm_typeck_instantiate_hir_named(CmTypeckContext *context,
+    const CmHirNamedType *named,
+    const CmTypeckInstantiation *instantiation,
+    CmTypeckNamedType *out_named)
+{
+    CmTypeckInstantiationFrame frame;
+    CmTypeckScopedInstantiation scoped;
+    const CmTypeckState *state;
+
+    if (out_named != NULL) {
+        memset(out_named, 0, sizeof(*out_named));
+        out_named->definition = cm_hir_def_id_none();
+    }
+    if (instantiation == NULL) return CM_TYPECK_INVALID_ARGUMENT;
+    state = cm_typeck_state_const(context);
+    cm_typeck_scoped_from_instantiation(state, instantiation, &frame,
+        &scoped);
+    return cm_typeck_instantiate_hir_named_scoped(context, named,
+        &scoped, out_named);
 }
 
 static void cm_typeck_write_variable(CmTypeckState *state, uint32_t id,
