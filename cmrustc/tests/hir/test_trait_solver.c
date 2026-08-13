@@ -358,6 +358,62 @@ static CmHirDefId add_type_only_generic_impl(TestFixture *fixture,
     return definition;
 }
 
+static CmHirDefId add_ordered_generic_impl(TestFixture *fixture,
+    CmHirDefId trait_definition)
+{
+    CmHirDefId definition;
+    CmHirGenericParam parameters[2];
+    CmHirGenericParamId parameter_ids[2];
+    CmHirType parameter_type;
+    CmHirTypeId parameter_types[2];
+    CmHirTypeId self_type;
+    CmHirGenericArg trait_arguments[2];
+    CmHirItem item;
+    CmHirItemId item_id;
+    uint32_t index;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_IMPL, test_span(1u, 2u),
+        &definition) == CM_HIR_OK);
+    memset(parameters, 0, sizeof(parameters));
+    memset(parameter_ids, 0, sizeof(parameter_ids));
+    memset(parameter_types, 0, sizeof(parameter_types));
+    for (index = 0u; index < 2u; ++index) {
+        parameters[index].kind = CM_HIR_GENERIC_TYPE;
+        parameters[index].owner = definition;
+        parameters[index].index = index;
+        parameters[index].name = cm_hir_intern(&fixture->hir,
+            index == 0u ? "T" : "U");
+        parameters[index].span = test_span(1u, 2u);
+        assert(cm_hir_add_generic_param(&fixture->hir, &parameters[index],
+            &parameter_ids[index]) == CM_HIR_OK);
+        memset(&parameter_type, 0, sizeof(parameter_type));
+        parameter_type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+        parameter_type.span = test_span(1u, 2u);
+        parameter_type.data.parameter_type.parameter = parameter_ids[index];
+        assert(cm_hir_add_type(&fixture->hir, &parameter_type,
+            &parameter_types[index]) == CM_HIR_OK);
+    }
+    self_type = add_hir_tuple(&fixture->hir, parameter_types, 2u);
+    memset(trait_arguments, 0, sizeof(trait_arguments));
+    trait_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_arguments[0].data.type = parameter_types[1];
+    trait_arguments[1].kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_arguments[1].data.type = parameter_types[0];
+    init_item(&item, CM_HIR_ITEM_IMPL, definition, fixture->root,
+        CM_INTERN_ID_NONE);
+    item.generic_parameter_start = parameter_ids[0];
+    item.generic_parameter_count = 2u;
+    item.data.impl_item.self_type = self_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.trait_type.arguments = trait_arguments;
+    item.data.impl_item.trait_type.argument_count = 2u;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_monomorphic_tuple_impl(TestFixture *fixture,
     CmHirDefId trait_definition)
 {
@@ -755,6 +811,191 @@ static void test_type_only_generic_selection(void)
     cm_typeck_context_destroy(&reversed_typeck);
     cm_trait_impl_index_destroy(&reversed_index);
     fixture_destroy(&reversed_fixture);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&impl_index);
+    fixture_destroy(&fixture);
+}
+
+static void test_impl_selection_witness(void)
+{
+    TestFixture fixture;
+    CmTraitImplIndex impl_index;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckContext typeck;
+    CmTypeckSnapshot snapshot;
+    CmTypeckInstantiation instantiation;
+    CmTypeckTypeId u8_type;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId tuple_elements[2];
+    CmTypeckTypeId tuple_type;
+    CmTypeckTypeId unary_tuple_type;
+    CmTypeckTypeId resolved;
+    CmTypeckGenericArg arguments[2];
+    CmTypeckNamedType query;
+    CmTraitSelectionResult result;
+    CmHirDefId ordered_trait;
+    CmHirDefId ordered_impl;
+
+    fixture_init(&fixture);
+    ordered_trait = add_type_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "Ordered", 2u);
+    ordered_impl = add_ordered_generic_impl(&fixture, ordered_trait);
+    memset(&impl_index, 0, sizeof(impl_index));
+    assert(cm_trait_impl_index_init(&impl_index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    cm_trait_impl_selection_witness_init(&witness);
+    assert(!cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &u8_type)
+            == CM_TYPECK_OK
+        && cm_typeck_import_hir_type(&typeck, fixture.bool_hir, &bool_type)
+            == CM_TYPECK_OK);
+    tuple_elements[0] = u8_type;
+    tuple_elements[1] = bool_type;
+    tuple_type = add_typeck_tuple(&typeck, tuple_elements, 2u);
+    memset(arguments, 0, sizeof(arguments));
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = bool_type;
+    arguments[1].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[1].data.type = u8_type;
+    query = trait_query(ordered_trait);
+    query.arguments = arguments;
+    query.argument_count = 2u;
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        tuple_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && cm_hir_def_id_equal(result.impl_definition, ordered_impl)
+        && cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation)
+        && cm_hir_def_id_equal(instantiation.parameter_owner, ordered_impl)
+        && instantiation.argument_count == 2u
+        && instantiation.arguments != NULL
+        && instantiation.arguments[0].kind == CM_HIR_GENERIC_ARG_TYPE
+        && instantiation.arguments[1].kind == CM_HIR_GENERIC_ARG_TYPE
+        && cm_typeck_resolve(&typeck,
+            instantiation.arguments[0].data.type, &resolved) == CM_TYPECK_OK
+        && resolved == u8_type
+        && cm_typeck_resolve(&typeck,
+            instantiation.arguments[1].data.type, &resolved) == CM_TYPECK_OK
+        && resolved == bool_type);
+
+    assert(cm_typeck_snapshot(&typeck, &snapshot) == CM_TYPECK_OK
+        && cm_typeck_rollback(&typeck, &snapshot) == CM_TYPECK_OK
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        tuple_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_trait_impl_selection_witness_is_current(&witness, &typeck));
+
+    query = trait_query(fixture.empty_trait);
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        bool_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck));
+
+    query = trait_query(fixture.exact_trait);
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        u8_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_hir_def_id_equal(result.impl_definition, fixture.exact_impl)
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation)
+        && cm_hir_def_id_equal(instantiation.parameter_owner,
+            fixture.exact_impl)
+        && instantiation.argument_count == 0u
+        && instantiation.arguments == NULL);
+
+    unary_tuple_type = add_typeck_tuple(&typeck, tuple_elements, 1u);
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = u8_type;
+    query = trait_query(fixture.overlap_generic_trait);
+    query.arguments = arguments;
+    query.argument_count = 1u;
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        unary_tuple_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.supported_match_count == 2u
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+
+    cm_typeck_context_destroy(&typeck);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(!cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+    cm_trait_impl_selection_witness_destroy(&witness);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&impl_index);
+    fixture_destroy(&fixture);
+}
+
+static void test_impl_selection_witness_hir_staleness(void)
+{
+    TestFixture fixture;
+    CmTraitImplIndex impl_index;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckContext typeck;
+    CmTypeckInstantiation instantiation;
+    CmTypeckTypeId u8_type;
+    CmTypeckNamedType query;
+    CmTraitSelectionResult result;
+
+    fixture_init(&fixture);
+    memset(&impl_index, 0, sizeof(impl_index));
+    assert(cm_trait_impl_index_init(&impl_index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    cm_trait_impl_selection_witness_init(&witness);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &u8_type)
+        == CM_TYPECK_OK);
+    query = trait_query(fixture.generic_trait);
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        u8_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation)
+        && instantiation.argument_count == 1u);
+    (void)add_blanket_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        fixture.generic_trait);
+    assert(!cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+    cm_trait_impl_selection_witness_destroy(&witness);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&impl_index);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture);
+    memset(&impl_index, 0, sizeof(impl_index));
+    assert(cm_trait_impl_index_init(&impl_index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    cm_trait_impl_selection_witness_init(&witness);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &u8_type)
+        == CM_TYPECK_OK);
+    query = trait_query(fixture.exact_trait);
+    result = cm_trait_solver_select_with_witness(&impl_index, &typeck,
+        u8_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation)
+        && instantiation.argument_count == 0u);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        fixture.exact_trait, fixture.u8_hir, 0);
+    assert(!cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &instantiation));
+    cm_trait_impl_selection_witness_destroy(&witness);
     cm_typeck_context_destroy(&typeck);
     cm_trait_impl_index_destroy(&impl_index);
     fixture_destroy(&fixture);
@@ -1331,6 +1572,8 @@ int main(void)
 {
     test_index_and_selection();
     test_type_only_generic_selection();
+    test_impl_selection_witness();
+    test_impl_selection_witness_hir_staleness();
     test_projection_overflow_and_invalid_query();
     test_const_scanning();
     test_stale_index_fingerprints();

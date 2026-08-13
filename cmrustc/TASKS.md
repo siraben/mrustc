@@ -1598,11 +1598,28 @@ trace-free. Duplicate, relabeled, orphaned, incomplete, and overlapping traces
 fail final checked-body validation. Generic-argument trace kinds are reserved
 but rejected until their corresponding durable argument arrays exist.
 
-The next checkpoint is the solver-owned winning impl-substitution witness,
-followed by scoped multi-owner instantiation and durable payloads for all four
-callable argument domains. Those must precede general adjustments. Operators,
-indexing, and callable-trait syntax then reuse the same selection and
-adjustment machinery instead of introducing parallel lookup paths.
+Unique impl selection now optionally publishes a separate caller-owned winning
+impl-substitution witness without adding ownership to the by-value selection
+result or goal-table cache. The witness retains the exact selected impl and its
+generic arguments in declaration order, including authenticated present
+evidence for zero-generic impls. Exposure reconstructs a validated typeck
+instantiation and is tied to the exact typeck lifetime/revision plus the HIR
+storage lifetime, semantic/rewind generations, and index-relevant collection
+counts. Rollback, later binding changes, HIR/index mutation, destroy/recreate,
+parameter-environment proofs, every non-proof, completed non-proof cache hits,
+and outer goal-table commit failure therefore leave no current impl evidence.
+Recursive predicate/projection evaluators stay witness-free so nested proofs
+cannot replace the root winner. The borrowed instantiation view must be copied
+before the witness is cleared, destroyed, or reused.
+
+The next checkpoint is scoped multi-owner instantiation followed by immediate
+copying of this impl witness into durable payloads for all four callable
+argument domains: item, method, enclosing impl, and implemented trait. Those
+domains must stay distinct and derive the canonical callee from the same
+normalized values before generic qualified-call and dot-method gates open.
+General adjustments follow that authority boundary. Operators, indexing, and
+callable-trait syntax then reuse the same selection and adjustment machinery
+instead of introducing parallel lookup paths.
 
 ## M6: Build orchestration
 

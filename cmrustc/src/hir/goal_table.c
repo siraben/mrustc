@@ -1,5 +1,7 @@
 #include "cm/hir/goal_table.h"
 
+#include "trait_solver_internal.h"
+
 #include "cm/alloc.h"
 #include "cm/vec.h"
 
@@ -1338,10 +1340,11 @@ static CmTraitSelectionResult cm_goal_evaluate_projection(void *context,
         recursive->substitution, &goal);
 }
 
-CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
+CmTraitSelectionResult cm_trait_goal_table_solve_with_impl_witness(
+    CmTraitGoalTable *table,
     CmTypeckContext *typeck,
     const CmParamEnvSubstitution *substitution,
-    const CmTraitGoal *goal)
+    const CmTraitGoal *goal, CmTraitImplSelectionWitness *witness)
 {
     CmTraitGoalTableState *state;
     CmGoalCanonicalStatus canonical_status;
@@ -1356,6 +1359,12 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
     int may_cache;
 
     result = cm_goal_result(CM_TRAIT_SOLVER_INVALID);
+    if (witness != NULL) {
+        cm_trait_impl_selection_witness_clear(witness);
+        if (goal == NULL || goal->kind != CM_TRAIT_GOAL_IMPLEMENTED) {
+            return result;
+        }
+    }
     state = cm_goal_table_state(table);
     if (!cm_goal_table_state_is_current(state)) return result;
     cm_vec_init(&key, sizeof(uint64_t));
@@ -1407,9 +1416,10 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
         evaluator.context = &recursive;
         evaluator.evaluate = cm_goal_evaluate_implemented;
         evaluator.evaluate_projection = cm_goal_evaluate_projection;
-        result = cm_trait_solver_solve_implemented_with_evaluator(
+        result =
+            cm_trait_solver_solve_implemented_with_evaluator_and_witness(
             state->index, state->environment, typeck, substitution,
-            &goal->data.implemented, &evaluator);
+            &goal->data.implemented, &evaluator, witness);
     } else if (goal->kind == CM_TRAIT_GOAL_PROJECTION_EQUALITY) {
         recursive.table = table;
         recursive.substitution = substitution;
@@ -1428,11 +1438,15 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
         entry = cm_goal_entry(state, entry_index);
         if (entry != NULL) cm_goal_vacate_entry(entry);
         if (typeck_status != CM_TYPECK_OK) {
+            if (witness != NULL) {
+                cm_trait_impl_selection_witness_clear(witness);
+            }
             result = cm_goal_result(CM_TRAIT_SOLVER_TYPECK_FAILURE);
             result.typeck_status = typeck_status;
         }
         return result;
     }
+    if (witness != NULL) cm_trait_impl_selection_witness_clear(witness);
     typeck_status = cm_typeck_rollback(typeck, &snapshot);
     if (typeck_status != CM_TYPECK_OK) {
         entry = cm_goal_entry(state, entry_index);
@@ -1457,4 +1471,13 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
         cm_goal_vacate_entry(entry);
     }
     return result;
+}
+
+CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
+    CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    const CmTraitGoal *goal)
+{
+    return cm_trait_goal_table_solve_with_impl_witness(table, typeck,
+        substitution, goal, NULL);
 }

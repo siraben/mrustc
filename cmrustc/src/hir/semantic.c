@@ -320,6 +320,25 @@ CmTraitSelectionResult cm_semantic_session_solve_goal(
         substitution, goal);
 }
 
+CmTraitSelectionResult cm_semantic_session_solve_goal_with_impl_witness(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal,
+    CmTraitImplSelectionWitness *witness)
+{
+    CmSemanticSessionState *state;
+
+    if (witness != NULL) cm_trait_impl_selection_witness_clear(witness);
+    state = cm_semantic_state(session);
+    if (!cm_semantic_state_is_current(state)
+        || term_owner != &state->typeck || substitution == NULL
+        || goal == NULL || goal->kind != CM_TRAIT_GOAL_IMPLEMENTED
+        || witness == NULL) {
+        return cm_semantic_result(CM_TRAIT_SOLVER_INVALID);
+    }
+    return cm_trait_goal_table_solve_with_impl_witness(&state->table,
+        &state->typeck, substitution, goal, witness);
+}
+
 CmTraitSelectionResult cm_semantic_session_solve_implemented(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal)

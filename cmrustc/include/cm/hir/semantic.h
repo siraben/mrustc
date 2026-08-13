@@ -64,6 +64,12 @@ CmTraitSelectionResult cm_semantic_session_solve_goal(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal);
 
+/* Implemented-goal root solve retaining the selected impl substitutions. */
+CmTraitSelectionResult cm_semantic_session_solve_goal_with_impl_witness(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, const CmTraitGoal *goal,
+    CmTraitImplSelectionWitness *witness);
+
 /* Compatibility entry point restricted to implemented-trait goals. */
 CmTraitSelectionResult cm_semantic_session_solve_implemented(
     CmSemanticSession *session, const CmTypeckContext *term_owner,

@@ -32,4 +32,12 @@ CmTraitSolverResultKind cm_trait_solver_validate_session(
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     CmHirDefId owner);
 
+CmTraitSelectionResult
+cm_trait_solver_solve_implemented_with_evaluator_and_witness(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    const CmImplementedTraitGoal *goal,
+    const CmTraitGoalEvaluator *evaluator,
+    CmTraitImplSelectionWitness *witness);
+
 #endif

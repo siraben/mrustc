@@ -28,6 +28,25 @@ typedef struct CmTraitImplIndexState {
     CmTraitImplUniverse universe;
 } CmTraitImplIndexState;
 
+typedef struct CmTraitImplSelectionWitnessState {
+    CmHirDefId impl_definition;
+    CmTypeckGenericArg *arguments;
+    uint32_t argument_count;
+    const CmTypeckContext *term_owner;
+    uint64_t term_lifetime;
+    uint64_t term_revision;
+    const CmHirContext *hir;
+    uint64_t hir_storage_lifetime_id;
+    uint64_t hir_semantic_generation;
+    uint64_t hir_rewind_generation;
+    size_t hir_item_count;
+    size_t hir_type_count;
+    size_t hir_generic_parameter_count;
+    size_t hir_definition_count;
+    size_t hir_crate_count;
+    size_t hir_module_count;
+} CmTraitImplSelectionWitnessState;
+
 typedef enum CmTraitTypeScan {
     CM_TRAIT_TYPE_SCAN_CONCRETE = 0,
     CM_TRAIT_TYPE_SCAN_INFERENCE,
@@ -76,6 +95,110 @@ static CmTraitSelectionResult cm_trait_result(CmTraitSolverResultKind kind)
 static CmTraitImplIndexState *cm_trait_index_state(CmTraitImplIndex *index)
 {
     return index == NULL ? NULL : (CmTraitImplIndexState *)index->state;
+}
+
+static CmTraitImplSelectionWitnessState *cm_trait_witness_state(
+    CmTraitImplSelectionWitness *witness)
+{
+    return witness == NULL ? NULL
+        : (CmTraitImplSelectionWitnessState *)witness->state;
+}
+
+static const CmTraitImplSelectionWitnessState *cm_trait_witness_state_const(
+    const CmTraitImplSelectionWitness *witness)
+{
+    return witness == NULL ? NULL
+        : (const CmTraitImplSelectionWitnessState *)witness->state;
+}
+
+void cm_trait_impl_selection_witness_init(
+    CmTraitImplSelectionWitness *witness)
+{
+    if (witness == NULL) return;
+    witness->state = cm_alloc_zeroed(1u,
+        sizeof(CmTraitImplSelectionWitnessState));
+}
+
+void cm_trait_impl_selection_witness_destroy(
+    CmTraitImplSelectionWitness *witness)
+{
+    CmTraitImplSelectionWitnessState *state;
+
+    state = cm_trait_witness_state(witness);
+    if (state == NULL) return;
+    cm_free(state->arguments);
+    memset(state, 0, sizeof(*state));
+    cm_free(state);
+    witness->state = NULL;
+}
+
+void cm_trait_impl_selection_witness_clear(
+    CmTraitImplSelectionWitness *witness)
+{
+    CmTraitImplSelectionWitnessState *state;
+
+    state = cm_trait_witness_state(witness);
+    if (state == NULL) return;
+    cm_free(state->arguments);
+    memset(state, 0, sizeof(*state));
+}
+
+int cm_trait_impl_selection_witness_is_current(
+    const CmTraitImplSelectionWitness *witness,
+    const CmTypeckContext *typeck)
+{
+    const CmTraitImplSelectionWitnessState *state;
+    CmTypeckInstantiation view;
+
+    state = cm_trait_witness_state_const(witness);
+    if (state == NULL || typeck == NULL
+        || state->term_owner != typeck
+        || state->term_lifetime == 0u
+        || state->term_lifetime != cm_typeck_lifetime_id(typeck)
+        || state->term_revision == 0u
+        || state->term_revision != cm_typeck_state_revision(typeck)
+        || state->hir == NULL
+        || cm_typeck_hir_context(typeck) != state->hir
+        || state->hir->storage.lifetime_id
+            != state->hir_storage_lifetime_id
+        || state->hir->semantic_generation
+            != state->hir_semantic_generation
+        || state->hir->rewind_generation != state->hir_rewind_generation
+        || state->hir->items.len != state->hir_item_count
+        || state->hir->types.len != state->hir_type_count
+        || state->hir->generic_parameters.len
+            != state->hir_generic_parameter_count
+        || state->hir->definitions.len != state->hir_definition_count
+        || state->hir->crates.len != state->hir_crate_count
+        || state->hir->modules.len != state->hir_module_count
+        || cm_hir_def_id_is_none(state->impl_definition)
+        || (state->argument_count == 0u) != (state->arguments == NULL)) {
+        return 0;
+    }
+    cm_typeck_instantiation_init(typeck, &view);
+    view.parameter_owner = state->impl_definition;
+    view.arguments = state->arguments;
+    view.argument_count = state->argument_count;
+    return cm_typeck_instantiation_is_valid(typeck, &view);
+}
+
+int cm_trait_impl_selection_witness_instantiation(
+    const CmTraitImplSelectionWitness *witness,
+    const CmTypeckContext *typeck, CmTypeckInstantiation *out_view)
+{
+    const CmTraitImplSelectionWitnessState *state;
+
+    if (out_view == NULL) return 0;
+    memset(out_view, 0, sizeof(*out_view));
+    if (!cm_trait_impl_selection_witness_is_current(witness, typeck)) {
+        return 0;
+    }
+    state = cm_trait_witness_state_const(witness);
+    cm_typeck_instantiation_init(typeck, out_view);
+    out_view->parameter_owner = state->impl_definition;
+    out_view->arguments = state->arguments;
+    out_view->argument_count = state->argument_count;
+    return 1;
 }
 
 static const CmTraitImplIndexState *cm_trait_index_state_const(
@@ -1407,7 +1530,8 @@ static CmTraitMatchResult cm_trait_match_candidate(
     CmHirDefId goal_owner, const CmTraitGoalEvaluator *evaluator,
     const CmTraitProjectionMatchGoal *projection_goal, int keep_bindings,
     CmHirDefId *out_associated_definition,
-    CmTypeckTypeId *out_target)
+    CmTypeckTypeId *out_target,
+    CmTraitImplSelectionWitnessState *witness)
 {
     const CmHirItem *item;
     CmTypeckGenericArg *impl_arguments;
@@ -1420,6 +1544,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
     CmTypeckStatus status;
     CmTraitMatchKind match;
     CmTraitSolverResultKind solver_kind;
+    CmTypeckGenericArg *witness_arguments;
     uint32_t index;
 
     status = cm_typeck_snapshot(typeck, &snapshot);
@@ -1433,6 +1558,7 @@ static CmTraitMatchResult cm_trait_match_candidate(
     candidate_self = CM_TYPECK_TYPE_NONE;
     associated_evidence = cm_hir_def_id_none();
     target_evidence = CM_TYPECK_TYPE_NONE;
+    witness_arguments = NULL;
     match = CM_TRAIT_MATCH_YES;
     solver_kind = CM_TRAIT_SOLVER_PROVEN;
     status = CM_TYPECK_OK;
@@ -1611,7 +1737,37 @@ static CmTraitMatchResult cm_trait_match_candidate(
         status = projection.typeck_status;
     }
     if (keep_bindings && match == CM_TRAIT_MATCH_YES) {
+        if (witness != NULL && item->generic_parameter_count != 0u) {
+            witness_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
+                item->generic_parameter_count,
+                sizeof(*witness_arguments));
+            for (index = 0u; index < item->generic_parameter_count;
+                 ++index) {
+                witness_arguments[index] = impl_arguments[index];
+                if (witness_arguments[index].kind
+                        != CM_HIR_GENERIC_ARG_TYPE) {
+                    match = CM_TRAIT_MATCH_TYPECK_FAILURE;
+                    status = CM_TYPECK_INVALID_ARGUMENT;
+                    break;
+                }
+                status = cm_typeck_resolve(typeck,
+                    witness_arguments[index].data.type,
+                    &witness_arguments[index].data.type);
+                if (status != CM_TYPECK_OK
+                    || cm_typeck_get_type(typeck,
+                        witness_arguments[index].data.type) == NULL) {
+                    match = CM_TRAIT_MATCH_TYPECK_FAILURE;
+                    if (status == CM_TYPECK_OK) {
+                        status = CM_TYPECK_INVALID_ID;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (keep_bindings && match == CM_TRAIT_MATCH_YES) {
         if (cm_typeck_commit(typeck, &snapshot) != CM_TYPECK_OK) {
+            cm_free(witness_arguments);
             cm_free(impl_arguments);
             return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
                 CM_TYPECK_INVALID_SNAPSHOT);
@@ -1620,11 +1776,35 @@ static CmTraitMatchResult cm_trait_match_candidate(
             *out_associated_definition = associated_evidence;
         }
         if (out_target != NULL) *out_target = target_evidence;
+        if (witness != NULL) {
+            witness->impl_definition = item->definition;
+            witness->arguments = witness_arguments;
+            witness->argument_count = item->generic_parameter_count;
+            witness->term_owner = typeck;
+            witness->term_lifetime = cm_typeck_lifetime_id(typeck);
+            witness->term_revision = cm_typeck_state_revision(typeck);
+            witness->hir = state->hir;
+            witness->hir_storage_lifetime_id =
+                state->hir_storage_lifetime_id;
+            witness->hir_semantic_generation =
+                state->hir_semantic_generation;
+            witness->hir_rewind_generation = state->hir_rewind_generation;
+            witness->hir_item_count = state->hir_item_count;
+            witness->hir_type_count = state->hir_type_count;
+            witness->hir_generic_parameter_count =
+                state->hir_generic_parameter_count;
+            witness->hir_definition_count = state->hir_definition_count;
+            witness->hir_crate_count = state->hir_crate_count;
+            witness->hir_module_count = state->hir_module_count;
+            witness_arguments = NULL;
+        }
     } else if (cm_typeck_rollback(typeck, &snapshot) != CM_TYPECK_OK) {
+        cm_free(witness_arguments);
         cm_free(impl_arguments);
         return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
             CM_TYPECK_INVALID_SNAPSHOT);
     }
+    cm_free(witness_arguments);
     cm_free(impl_arguments);
     {
         CmTraitMatchResult result;
@@ -1750,7 +1930,8 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type,
     CmHirDefId goal_owner, const CmTraitGoalEvaluator *evaluator,
     const CmTraitProjectionMatchGoal *projection_goal,
-    CmTypeckTypeId *out_target)
+    CmTypeckTypeId *out_target,
+    CmTraitImplSelectionWitness *witness)
 {
     const CmTraitImplIndexState *state;
     CmTraitSelectionResult result;
@@ -1765,6 +1946,10 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
 
     if (out_target != NULL) *out_target = CM_TYPECK_TYPE_NONE;
     result = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
+    if (witness != NULL) {
+        if (cm_trait_witness_state(witness) == NULL) return result;
+        cm_trait_impl_selection_witness_clear(witness);
+    }
     state = cm_trait_index_state_const(index);
     if (!cm_trait_index_is_current(state)) return result;
     validation = cm_trait_solver_validate_implemented_goal(state->hir,
@@ -1802,7 +1987,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
             if (header_unknown == 0u) {
                 match = cm_trait_match_candidate(state, entry, typeck,
                     self_type, trait_type, goal_owner, evaluator,
-                    NULL, 0, NULL, NULL);
+                    NULL, 0, NULL, NULL, NULL);
                 if (match.kind == CM_TRAIT_MATCH_NO) continue;
                 if (match.kind == CM_TRAIT_MATCH_OVERFLOW) {
                     result.kind = CM_TRAIT_SOLVER_OVERFLOW;
@@ -1827,7 +2012,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
         }
         match = cm_trait_match_candidate(state, entry, typeck,
             self_type, trait_type, goal_owner, evaluator, NULL,
-            0, NULL, NULL);
+            0, NULL, NULL, NULL);
         if (match.kind == CM_TRAIT_MATCH_YES) {
             result.supported_match_count += 1u;
             if (winner == NULL) winner = entry;
@@ -1872,7 +2057,8 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
 
         replay = cm_trait_match_candidate(state, winner, typeck,
             self_type, trait_type, goal_owner, evaluator, projection_goal,
-            1, &result.impl_associated_definition, out_target);
+            1, &result.impl_associated_definition, out_target,
+            cm_trait_witness_state(witness));
         if (replay.kind != CM_TRAIT_MATCH_YES) {
             if (replay.kind == CM_TRAIT_MATCH_OVERFLOW) {
                 result.kind = CM_TRAIT_SOLVER_OVERFLOW;
@@ -1905,7 +2091,16 @@ CmTraitSelectionResult cm_trait_solver_select(
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type)
 {
     return cm_trait_solver_select_inner(index, typeck, self_type,
-        trait_type, cm_hir_def_id_none(), NULL, NULL, NULL);
+        trait_type, cm_hir_def_id_none(), NULL, NULL, NULL, NULL);
+}
+
+CmTraitSelectionResult cm_trait_solver_select_with_witness(
+    const CmTraitImplIndex *index, CmTypeckContext *typeck,
+    CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type,
+    CmTraitImplSelectionWitness *witness)
+{
+    return cm_trait_solver_select_inner(index, typeck, self_type,
+        trait_type, cm_hir_def_id_none(), NULL, NULL, NULL, witness);
 }
 
 static int cm_trait_typeck_region_equal(const CmHirRegion *left,
@@ -2263,11 +2458,13 @@ static CmTraitMatchResult cm_trait_environment_equality_targets_compatible(
     return result;
 }
 
-CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
+CmTraitSelectionResult
+cm_trait_solver_solve_implemented_with_evaluator_and_witness(
     const CmTraitImplIndex *index, const CmParamEnv *environment,
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     const CmImplementedTraitGoal *goal,
-    const CmTraitGoalEvaluator *evaluator)
+    const CmTraitGoalEvaluator *evaluator,
+    CmTraitImplSelectionWitness *witness)
 {
     const CmTraitImplIndexState *index_state;
     const CmParamEnvFact *fact;
@@ -2278,6 +2475,10 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
     size_t winner_index;
 
     result = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
+    if (witness != NULL) {
+        if (cm_trait_witness_state(witness) == NULL) return result;
+        cm_trait_impl_selection_witness_clear(witness);
+    }
     index_state = cm_trait_index_state_const(index);
     if (!cm_trait_index_is_current(index_state)
         || !cm_param_env_is_current(environment)
@@ -2364,7 +2565,17 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
         return result;
     }
     return cm_trait_solver_select_inner(index, typeck, goal->self_type,
-        &goal->trait_type, goal->owner, evaluator, NULL, NULL);
+        &goal->trait_type, goal->owner, evaluator, NULL, NULL, witness);
+}
+
+CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    const CmImplementedTraitGoal *goal,
+    const CmTraitGoalEvaluator *evaluator)
+{
+    return cm_trait_solver_solve_implemented_with_evaluator_and_witness(
+        index, environment, typeck, substitution, goal, evaluator, NULL);
 }
 
 CmTraitSelectionResult cm_trait_solver_solve_implemented(
@@ -2372,8 +2583,18 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented(
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     const CmImplementedTraitGoal *goal)
 {
-    return cm_trait_solver_solve_implemented_with_evaluator(index,
-        environment, typeck, substitution, goal, NULL);
+    return cm_trait_solver_solve_implemented_with_evaluator_and_witness(
+        index, environment, typeck, substitution, goal, NULL, NULL);
+}
+
+CmTraitSelectionResult cm_trait_solver_solve_implemented_with_witness(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    const CmImplementedTraitGoal *goal,
+    CmTraitImplSelectionWitness *witness)
+{
+    return cm_trait_solver_solve_implemented_with_evaluator_and_witness(
+        index, environment, typeck, substitution, goal, NULL, witness);
 }
 
 CmProjectionTargetResult cm_trait_solver_select_projection_target(
@@ -2684,7 +2905,7 @@ CmProjectionTargetResult cm_trait_solver_select_projection_target(
     projection_goal.expected_type = goal->expected_type;
     target_result.selection = cm_trait_solver_select_inner(index, typeck,
         projection_self, &projection_trait, goal->owner, evaluator,
-        &projection_goal, &target_result.target);
+        &projection_goal, &target_result.target, NULL);
     if (target_result.selection.kind != CM_TRAIT_SOLVER_PROVEN) {
         target_result.target = CM_TYPECK_TYPE_NONE;
     }

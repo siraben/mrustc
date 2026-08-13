@@ -60,4 +60,10 @@ CmTraitSelectionResult cm_trait_goal_table_solve(CmTraitGoalTable *table,
     const CmParamEnvSubstitution *substitution,
     const CmTraitGoal *goal);
 
+/* Root implemented-goal proof with optional unique-impl replay evidence. */
+CmTraitSelectionResult cm_trait_goal_table_solve_with_impl_witness(
+    CmTraitGoalTable *table, CmTypeckContext *typeck,
+    const CmParamEnvSubstitution *substitution,
+    const CmTraitGoal *goal, CmTraitImplSelectionWitness *witness);
+
 #endif

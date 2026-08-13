@@ -83,6 +83,15 @@ typedef struct CmTraitImplIndex {
     void *state;
 } CmTraitImplIndex;
 
+/*
+ * Caller-owned evidence from the unique selected impl replay. Scratch generic
+ * arguments remain tied to the exact typeck lifetime and state revision that
+ * committed them; goal-table result records never own or cache this object.
+ */
+typedef struct CmTraitImplSelectionWitness {
+    void *state;
+} CmTraitImplSelectionWitness;
+
 typedef struct CmTraitSelectionResult {
     CmTraitSolverResultKind kind;
     /* Non-PROVEN results always report NONE and no fact/impl identity. */
@@ -140,6 +149,25 @@ CmTraitSolverResultKind cm_trait_impl_index_init_complete(
     const CmHirCrateFinalization *finalization);
 void cm_trait_impl_index_destroy(CmTraitImplIndex *index);
 
+void cm_trait_impl_selection_witness_init(
+    CmTraitImplSelectionWitness *witness);
+void cm_trait_impl_selection_witness_destroy(
+    CmTraitImplSelectionWitness *witness);
+void cm_trait_impl_selection_witness_clear(
+    CmTraitImplSelectionWitness *witness);
+int cm_trait_impl_selection_witness_is_current(
+    const CmTraitImplSelectionWitness *witness,
+    const CmTypeckContext *typeck);
+/*
+ * Authenticated declaration-ordered impl substitution view. The returned
+ * argument slice is borrowed from `witness` and remains valid only until that
+ * witness is cleared, destroyed, or passed to another witness-producing API.
+ * Consumers must copy any durable payload before mutating the witness.
+ */
+int cm_trait_impl_selection_witness_instantiation(
+    const CmTraitImplSelectionWitness *witness,
+    const CmTypeckContext *typeck, CmTypeckInstantiation *out_view);
+
 int cm_trait_impl_index_is_current(const CmTraitImplIndex *index);
 const CmHirContext *cm_trait_impl_index_hir(const CmTraitImplIndex *index);
 CmTraitImplUniverse cm_trait_impl_index_universe(
@@ -166,6 +194,10 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
 CmTraitSelectionResult cm_trait_solver_select(
     const CmTraitImplIndex *index, CmTypeckContext *typeck,
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type);
+CmTraitSelectionResult cm_trait_solver_select_with_witness(
+    const CmTraitImplIndex *index, CmTypeckContext *typeck,
+    CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type,
+    CmTraitImplSelectionWitness *witness);
 
 /*
  * Search authenticated environment assumptions first, then the immutable impl
@@ -175,6 +207,11 @@ CmTraitSelectionResult cm_trait_solver_solve_implemented(
     const CmTraitImplIndex *index, const CmParamEnv *environment,
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     const CmImplementedTraitGoal *goal);
+CmTraitSelectionResult cm_trait_solver_solve_implemented_with_witness(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    const CmImplementedTraitGoal *goal,
+    CmTraitImplSelectionWitness *witness);
 
 /* Canonical tables use this entry to discharge supported impl predicates. */
 CmTraitSelectionResult cm_trait_solver_solve_implemented_with_evaluator(

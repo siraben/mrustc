@@ -710,6 +710,58 @@ static void test_structural_keys_and_nonproven_rollback(void)
     fixture_destroy(&fixture);
 }
 
+static void test_nonproof_cache_hit_clears_impl_witness(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmTraitGoalTableLimits limits;
+    CmTraitGoal proof_goal;
+    CmTraitGoal nonproof_goal;
+    CmTraitSelectionResult result;
+    CmTraitImplSelectionWitness witness;
+    CmHirDefId proof_trait;
+    size_t hits;
+
+    memset(&limits, 0, sizeof(limits));
+    fixture_init(&fixture, 0);
+    proof_trait = add_trait(&fixture, "Proof");
+    (void)add_bool_impl(&fixture, proof_trait);
+    runtime_init(&runtime, &fixture, limits);
+    cm_trait_impl_selection_witness_init(&witness);
+    proof_goal = implemented_goal(fixture.owner_trait, proof_trait,
+        runtime.bool_type);
+    nonproof_goal = implemented_goal(fixture.owner_trait,
+        fixture.bound_trait, runtime.bool_type);
+
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &proof_goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_trait_impl_selection_witness_is_current(&witness,
+            &runtime.typeck));
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &nonproof_goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && !cm_trait_impl_selection_witness_is_current(&witness,
+            &runtime.typeck));
+
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &proof_goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_trait_impl_selection_witness_is_current(&witness,
+            &runtime.typeck));
+    hits = cm_trait_goal_table_cache_hit_count(&runtime.table);
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &nonproof_goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && !cm_trait_impl_selection_witness_is_current(&witness,
+            &runtime.typeck)
+        && cm_trait_goal_table_cache_hit_count(&runtime.table) == hits + 1u);
+
+    cm_trait_impl_selection_witness_destroy(&witness);
+    runtime_destroy(&runtime);
+    fixture_destroy(&fixture);
+}
+
 static void test_binder_and_region_canonicalization(void)
 {
     TestFixture fixture;
@@ -1203,6 +1255,8 @@ static void test_generic_predicate_proof_and_cycle_base(void)
     CmTraitGoalTableLimits limits;
     CmTraitGoal goal;
     CmTraitSelectionResult result;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckInstantiation impl_instantiation;
     CmTypeckNamedType query;
     CmHirDefId outer_trait;
     CmHirDefId cycle_a;
@@ -1219,6 +1273,7 @@ static void test_generic_predicate_proof_and_cycle_base(void)
         fixture.bound_trait, 1u, 0u, 0u);
     (void)add_bool_impl(&fixture, fixture.bound_trait);
     runtime_init(&runtime, &fixture, limits);
+    cm_trait_impl_selection_witness_init(&witness);
     saw_generic_impl = 0;
     for (entry_index = 0u;
          entry_index < cm_trait_impl_index_entry_count(&runtime.index);
@@ -1244,12 +1299,21 @@ static void test_generic_predicate_proof_and_cycle_base(void)
         && cm_typeck_type_count(&runtime.typeck) == type_count);
     goal = implemented_goal(fixture.owner_trait, outer_trait,
         runtime.bool_type);
-    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
-        &runtime.substitution, &goal);
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &goal, &witness);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && cm_hir_def_id_equal(result.impl_definition, generic_impl)
         && result.supported_match_count == 1u
-        && result.blocking_match_count == 0u);
+        && result.blocking_match_count == 0u
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &runtime.typeck, &impl_instantiation)
+        && cm_hir_def_id_equal(impl_instantiation.parameter_owner,
+            generic_impl)
+        && impl_instantiation.argument_count == 1u
+        && impl_instantiation.arguments != NULL
+        && impl_instantiation.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE);
+    cm_trait_impl_selection_witness_destroy(&witness);
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
 
@@ -1262,14 +1326,20 @@ static void test_generic_predicate_proof_and_cycle_base(void)
         1u, 0u, 0u);
     fixture.owner_trait = add_owner_with_bool_fact(&fixture, cycle_b);
     runtime_init(&runtime, &fixture, limits);
+    cm_trait_impl_selection_witness_init(&witness);
     goal = implemented_goal(fixture.owner_trait, cycle_a,
         runtime.bool_type);
-    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
-        &runtime.substitution, &goal);
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &goal, &witness);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && cm_hir_def_id_equal(result.impl_definition, generic_impl)
-        && result.blocking_match_count == 0u);
+        && result.blocking_match_count == 0u
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &runtime.typeck, &impl_instantiation)
+        && cm_hir_def_id_equal(impl_instantiation.parameter_owner,
+            generic_impl));
     assert(cm_trait_goal_table_entry_count(&runtime.table) == 0u);
+    cm_trait_impl_selection_witness_destroy(&witness);
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
 }
@@ -1281,6 +1351,8 @@ static void test_generic_predicate_cycle_ambiguity_and_rollback(void)
     CmTraitGoalTableLimits limits;
     CmTraitGoal goal;
     CmTraitSelectionResult result;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckInstantiation impl_instantiation;
     CmHirDefId cycle_a;
     CmHirDefId cycle_b;
     size_t hits;
@@ -1295,23 +1367,29 @@ static void test_generic_predicate_cycle_ambiguity_and_rollback(void)
     (void)add_generic_predicate_impl(&fixture, cycle_b, cycle_a,
         1u, 0u, 0u);
     runtime_init(&runtime, &fixture, limits);
+    cm_trait_impl_selection_witness_init(&witness);
     goal = implemented_goal(fixture.owner_trait, cycle_a,
         runtime.bool_type);
     type_count = cm_typeck_type_count(&runtime.typeck);
     hits = cm_trait_goal_table_cache_hit_count(&runtime.table);
-    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
-        &runtime.substitution, &goal);
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &goal, &witness);
     assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
         && result.supported_match_count == 0u
-        && result.blocking_match_count == 1u);
+        && result.blocking_match_count == 1u
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &runtime.typeck, &impl_instantiation));
     assert(cm_typeck_type_count(&runtime.typeck) == type_count);
     assert(cm_trait_goal_table_entry_count(&runtime.table) == 0u);
     assert(cm_trait_goal_table_cache_hit_count(&runtime.table) == hits);
-    result = cm_trait_goal_table_solve(&runtime.table, &runtime.typeck,
-        &runtime.substitution, &goal);
+    result = cm_trait_goal_table_solve_with_impl_witness(&runtime.table,
+        &runtime.typeck, &runtime.substitution, &goal, &witness);
     assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
         && cm_typeck_type_count(&runtime.typeck) == type_count
-        && cm_trait_goal_table_entry_count(&runtime.table) == 0u);
+        && cm_trait_goal_table_entry_count(&runtime.table) == 0u
+        && !cm_trait_impl_selection_witness_is_current(&witness,
+            &runtime.typeck));
+    cm_trait_impl_selection_witness_destroy(&witness);
     runtime_destroy(&runtime);
     fixture_destroy(&fixture);
 }
@@ -2637,6 +2715,7 @@ static void test_projection_target_selection(void)
 int main(void)
 {
     test_structural_keys_and_nonproven_rollback();
+    test_nonproof_cache_hit_clears_impl_witness();
     test_binder_and_region_canonicalization();
     test_uncacheable_const_inference();
     test_dag_shape_and_inference_aliasing();
