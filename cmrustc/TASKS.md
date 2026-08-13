@@ -1248,6 +1248,28 @@ never become success. Only an explicitly modeled coinductive auto-trait cycle
 may use coinduction, and negative candidates are considered before structural
 auto-trait recursion.
 
+The next semantic-pass foundation is now explicit without advancing an M4
+state. Type checking can transactionally bind every still-unresolved canonical
+integer variable to an exact HIR default such as `i32`, while leaving already
+constrained roots and general variables untouched. Projection normalization
+can publish an ordered, all-or-nothing trace containing the normalized input
+projection, the proof-selected raw target, the recursively normalized target,
+and the exact parameter-environment or impl/associated-item proof locator. The
+semantic-session wrapper authenticates the same session and substitution
+before exposing that trace; failed, stale, cyclic, or fuel-limited attempts
+expose no partial evidence. Durable semantic-result publication and consumer
+replay remain required before this closes projection proof obligations.
+
+MIR now has fail-closed schema support for tagged field/dereference place
+projections and shared-borrow rvalues over validated places. Dereference steps
+require a reference input and a canonical empty payload; shared borrows require
+an erased immutable reference target whose pointee exactly matches the source
+place. Storage sizing, deep copy, equality, replay scratch, and dumps preserve
+the tags. Source HIR borrow/dereference nodes, semantic recipe production, MIR
+lowering/replay of nonzero adjustments, reference layout, and C emission are
+still pending, so this is representation groundwork rather than executable
+borrow support.
+
 M4-01 now has a session-owned scratch type DAG for primitives, references,
 pointers, tuples, arrays, slices, function pointers, ADTs, rigid parameters,
 and projections. General, integer, and float inference variables use

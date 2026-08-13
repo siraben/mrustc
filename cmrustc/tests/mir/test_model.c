@@ -24,6 +24,9 @@ typedef struct TestHir {
     CmHirTypeId u8_type;
     CmHirTypeId alternate_u32_type;
     CmHirTypeId i32_type;
+    CmHirTypeId shared_u32_type;
+    CmHirTypeId mutable_u32_type;
+    CmHirTypeId shared_outer_type;
     CmHirDefId identity_definition;
     CmHirBodyId identity_body;
     CmHirDefId probe_definition;
@@ -392,6 +395,22 @@ static void test_hir_init(TestHir *fixture)
         CM_HIR_INT_U32, 5u);
     fixture->i32_type = add_integer_type(&fixture->context,
         CM_HIR_INT_I32, 7u);
+    {
+        CmHirType reference;
+
+        memset(&reference, 0, sizeof(reference));
+        reference.kind = CM_HIR_TYPE_REFERENCE_KIND;
+        reference.span = test_span(8u, 9u);
+        reference.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+        reference.data.reference_type.pointee = fixture->u32_type;
+        reference.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+        assert(cm_hir_add_type(&fixture->context, &reference,
+            &fixture->shared_u32_type) == CM_HIR_OK);
+        reference.span = test_span(9u, 10u);
+        reference.data.reference_type.mutability = CM_HIR_MUTABLE;
+        assert(cm_hir_add_type(&fixture->context, &reference,
+            &fixture->mutable_u32_type) == CM_HIR_OK);
+    }
 
     assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
         CM_HIR_ITEM_FUNCTION, test_span(10u, 50u),
@@ -1038,6 +1057,19 @@ static void test_hir_init(TestHir *fixture)
         fixture->outer_type = add_named_struct(&fixture->context, crate_id,
             root_module, "Outer", outer_names, outer_fields, 2u, 952u,
             &fixture->outer_definition);
+        {
+            CmHirType reference;
+
+            memset(&reference, 0, sizeof(reference));
+            reference.kind = CM_HIR_TYPE_REFERENCE_KIND;
+            reference.span = test_span(974u, 976u);
+            reference.data.reference_type.region.kind =
+                CM_HIR_REGION_ERASED;
+            reference.data.reference_type.pointee = fixture->outer_type;
+            reference.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+            assert(cm_hir_add_type(&fixture->context, &reference,
+                &fixture->shared_outer_type) == CM_HIR_OK);
+        }
 
         assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
             CM_HIR_ITEM_FUNCTION, test_span(700u, 730u),
@@ -2749,6 +2781,143 @@ static void assert_place_aggregate_model(CmMirContext *mir,
     assert(fclose(stream) == 0);
 }
 
+static void assert_borrow_dereference_schema(TestHir *fixture)
+{
+    CmMirContext dump_context;
+    CmMirBody body;
+    CmMirLocal locals[4];
+    CmMirStatement statement;
+    CmMirBasicBlock block;
+    CmMirPlace place;
+    CmMirPlaceProjection projections[2];
+    CmMirRvalue borrow;
+    FILE *stream;
+    char buffer[4096];
+    size_t length;
+
+    memset(locals, 0, sizeof(locals));
+    locals[0].kind = CM_MIR_LOCAL_RETURN;
+    locals[0].type = fixture->u32_type;
+    locals[1].kind = CM_MIR_LOCAL_ARGUMENT;
+    locals[1].type = fixture->u32_type;
+    locals[2].kind = CM_MIR_LOCAL_TEMPORARY;
+    locals[2].type = fixture->shared_u32_type;
+    locals[3].kind = CM_MIR_LOCAL_TEMPORARY;
+    locals[3].type = fixture->shared_outer_type;
+    memset(&body, 0, sizeof(body));
+    body.instance.definition = fixture->projection_definition;
+    body.owner = fixture->projection_definition;
+    body.source_body = fixture->projection_body;
+    body.locals = locals;
+    body.local_count = 4u;
+
+    memset(&place, 0, sizeof(place));
+    place.base = 2u;
+    place.type = fixture->u32_type;
+    place.span = test_span(748u, 752u);
+    memset(projections, 0, sizeof(projections));
+    projections[0].kind = CM_MIR_PROJECTION_DEREFERENCE;
+    place.projections = projections;
+    place.projection_count = 1u;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_OK);
+
+    projections[0].definition = fixture->outer_definition;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projections[0].definition = cm_hir_def_id_none();
+    projections[0].field_index = 1u;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projections[0].field_index = 0u;
+    projections[0].kind = (CmMirPlaceProjectionKind)99;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+
+    memset(projections, 0, sizeof(projections));
+    projections[0].kind = CM_MIR_PROJECTION_DEREFERENCE;
+    projections[1].kind = CM_MIR_PROJECTION_FIELD;
+    projections[1].definition = fixture->outer_definition;
+    projections[1].field_index = 0u;
+    place.base = 3u;
+    place.projections = projections;
+    place.projection_count = 2u;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_OK);
+    projections[1].kind = CM_MIR_PROJECTION_DEREFERENCE;
+    assert(cm_mir_validate_place(&fixture->context, &body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+
+    memset(&borrow, 0, sizeof(borrow));
+    borrow.kind = CM_MIR_RVALUE_BORROW;
+    borrow.type = fixture->shared_u32_type;
+    borrow.span = test_span(748u, 754u);
+    borrow.data.borrow.kind = CM_MIR_BORROW_SHARED;
+    borrow.data.borrow.source.base = 1u;
+    borrow.data.borrow.source.type = fixture->u32_type;
+    borrow.data.borrow.source.span = test_span(750u, 751u);
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_OK);
+
+    borrow.data.borrow.kind = (CmMirBorrowKind)99;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.data.borrow.kind = CM_MIR_BORROW_SHARED;
+    borrow.type = fixture->mutable_u32_type;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.type = fixture->shared_u32_type;
+    borrow.data.borrow.source.type = fixture->outer_type;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.data.borrow.source.type = fixture->u32_type;
+    borrow.data.borrow.source.span = test_span(747u, 751u);
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.data.borrow.source.span = test_span(750u, 751u);
+    borrow.span.source = 2u;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.span = test_span(748u, 754u);
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 16u)
+        == CM_MIR_INVALID_ARGUMENT);
+    assert(cm_mir_validate_rvalue(NULL, &body, &borrow, 0u)
+        == CM_MIR_INVALID_ARGUMENT);
+
+    memset(&statement, 0, sizeof(statement));
+    statement.kind = CM_MIR_STATEMENT_ASSIGN;
+    statement.data.assign.destination = 2u;
+    statement.data.assign.value = borrow;
+    statement.data.assign.value.data.borrow.source.base = 3u;
+    statement.data.assign.value.data.borrow.source.type = fixture->outer_type;
+    statement.data.assign.value.data.borrow.source.projections = projections;
+    statement.data.assign.value.data.borrow.source.projection_count = 1u;
+    statement.data.assign.value.data.borrow.source.span =
+        test_span(750u, 751u);
+    projections[0].kind = CM_MIR_PROJECTION_DEREFERENCE;
+    projections[0].definition = cm_hir_def_id_none();
+    projections[0].field_index = 0u;
+    memset(&block, 0, sizeof(block));
+    block.statements = &statement;
+    block.statement_count = 1u;
+    block.terminator.kind = CM_MIR_TERMINATOR_RETURN;
+    body.basic_blocks = &block;
+    body.basic_block_count = 1u;
+    cm_mir_context_init(&dump_context);
+    cm_vec_push(&dump_context.bodies, &body);
+    stream = tmpfile();
+    assert(stream != NULL && cm_mir_dump(stream, &dump_context) == 0);
+    assert(fflush(stream) == 0);
+    rewind(stream);
+    length = fread(buffer, 1u, sizeof(buffer) - 1u, stream);
+    assert(!ferror(stream));
+    buffer[length] = '\0';
+    assert(strstr(buffer, "borrow(shared,place(_3.deref,") != NULL);
+    assert(fclose(stream) == 0);
+    dump_context.bodies.len = 0u;
+    cm_mir_context_destroy(&dump_context);
+}
+
 static void assert_legacy_constant(const TestHir *fixture)
 {
     static const char expected[] =
@@ -3456,6 +3625,7 @@ int main(void)
     assert(cm_mir_get_body(&mir, 11u) == NULL);
     assert_let_model(&mir, &fixture, add_id);
     assert_place_aggregate_model(&mir, &fixture);
+    assert_borrow_dereference_schema(&fixture);
 
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&fixture.context);

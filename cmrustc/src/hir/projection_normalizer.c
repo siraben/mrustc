@@ -18,7 +18,12 @@ typedef struct CmProjectionNormalizeState {
     size_t visited_nodes;
     size_t projection_steps;
     CmVec active_projections;
+    CmVec trace_steps;
 } CmProjectionNormalizeState;
+
+typedef struct CmProjectionNormalizeTraceState {
+    CmVec steps;
+} CmProjectionNormalizeTraceState;
 
 typedef struct CmNormalizeTypePair {
     CmTypeckTypeId left;
@@ -31,6 +36,70 @@ typedef struct CmNormalizeCompareState {
     size_t max_pairs;
     int valid;
 } CmNormalizeCompareState;
+
+static CmProjectionNormalizeTraceState *cm_normalize_trace_state(
+    CmProjectionNormalizeTrace *trace)
+{
+    return trace == NULL ? NULL
+        : (CmProjectionNormalizeTraceState *)trace->state;
+}
+
+static const CmProjectionNormalizeTraceState *cm_normalize_trace_state_const(
+    const CmProjectionNormalizeTrace *trace)
+{
+    return trace == NULL ? NULL
+        : (const CmProjectionNormalizeTraceState *)trace->state;
+}
+
+void cm_projection_normalize_trace_init(CmProjectionNormalizeTrace *trace)
+{
+    CmProjectionNormalizeTraceState *state;
+
+    if (trace == NULL) return;
+    state = (CmProjectionNormalizeTraceState *)cm_alloc_zeroed(
+        1u, sizeof(*state));
+    cm_vec_init(&state->steps, sizeof(CmProjectionNormalizeStep));
+    trace->state = state;
+}
+
+void cm_projection_normalize_trace_destroy(CmProjectionNormalizeTrace *trace)
+{
+    CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state(trace);
+    if (state == NULL) return;
+    cm_vec_destroy(&state->steps);
+    cm_free(state);
+    trace->state = NULL;
+}
+
+void cm_projection_normalize_trace_clear(CmProjectionNormalizeTrace *trace)
+{
+    CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state(trace);
+    if (state != NULL) cm_vec_clear(&state->steps);
+}
+
+size_t cm_projection_normalize_trace_count(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL ? 0u : state->steps.len;
+}
+
+const CmProjectionNormalizeStep *cm_projection_normalize_trace_step(
+    const CmProjectionNormalizeTrace *trace, size_t index)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL ? NULL
+        : (const CmProjectionNormalizeStep *)cm_vec_at_const(
+            &state->steps, index);
+}
 
 static CmProjectionNormalizeResult cm_normalize_result(
     CmTraitSolverResultKind kind)
@@ -374,6 +443,7 @@ static CmProjectionNormalizeResult cm_normalize_projection(
     CmTypeckTypeId source_self;
     CmTypeckTypeId normalized_projection;
     size_t active_index;
+    size_t trace_step_index;
     size_t compared_pair_count;
     size_t remaining_nodes;
     int valid;
@@ -388,6 +458,7 @@ static CmProjectionNormalizeResult cm_normalize_projection(
     projection.data.projection_type.associated_type.arguments = NULL;
     changed = 0;
     pushed = 0;
+    trace_step_index = (size_t)-1;
     result = cm_normalize_child(state,
         source_self,
         &projection.data.projection_type.self_type, &changed);
@@ -456,8 +527,64 @@ static CmProjectionNormalizeResult cm_normalize_projection(
         result.typeck_status = target.selection.typeck_status;
         goto done;
     }
+    {
+        CmProjectionNormalizeStep step;
+        int valid_proof;
+
+        valid_proof = 0;
+        if (target.selection.proof_origin == CM_TRAIT_PROOF_PARAM_ENV) {
+            valid_proof = target.selection.param_env_fact_index
+                    != CM_TRAIT_PROOF_FACT_NONE
+                && target.selection.param_env_equality_index
+                    != CM_TRAIT_PROOF_EQUALITY_NONE
+                && cm_hir_def_id_is_none(
+                    target.selection.impl_definition)
+                && cm_hir_def_id_is_none(
+                    target.selection.impl_associated_definition);
+        } else if (target.selection.proof_origin == CM_TRAIT_PROOF_IMPL) {
+            valid_proof = target.selection.param_env_fact_index
+                    == CM_TRAIT_PROOF_FACT_NONE
+                && target.selection.param_env_equality_index
+                    == CM_TRAIT_PROOF_EQUALITY_NONE
+                && !cm_hir_def_id_is_none(
+                    target.selection.impl_definition)
+                && !cm_hir_def_id_is_none(
+                    target.selection.impl_associated_definition);
+        }
+        if (!valid_proof || target.target == CM_TYPECK_TYPE_NONE
+            || cm_typeck_get_type(state->typeck, target.target) == NULL) {
+            result = cm_normalize_result(CM_TRAIT_SOLVER_INVALID);
+            goto done;
+        }
+        memset(&step, 0, sizeof(step));
+        step.projection = normalized_projection;
+        step.target = target.target;
+        step.normalized_target = CM_TYPECK_TYPE_NONE;
+        step.proof_origin = target.selection.proof_origin;
+        step.param_env_fact_index =
+            target.selection.param_env_fact_index;
+        step.param_env_equality_index =
+            target.selection.param_env_equality_index;
+        step.impl_definition = target.selection.impl_definition;
+        step.impl_associated_definition =
+            target.selection.impl_associated_definition;
+        trace_step_index = state->trace_steps.len;
+        (void)cm_vec_push(&state->trace_steps, &step);
+    }
     state->projection_steps += 1u;
     result = cm_normalize_type_inner(state, target.target);
+    if (result.kind == CM_TRAIT_SOLVER_PROVEN) {
+        CmProjectionNormalizeStep *step;
+
+        step = (CmProjectionNormalizeStep *)cm_vec_at(
+            &state->trace_steps, trace_step_index);
+        if (step == NULL || result.type == CM_TYPECK_TYPE_NONE
+            || cm_typeck_get_type(state->typeck, result.type) == NULL) {
+            result = cm_normalize_result(CM_TRAIT_SOLVER_INVALID);
+        } else {
+            step->normalized_target = result.type;
+        }
+    }
 
 done:
     if (pushed) cm_vec_resize(&state->active_projections,
@@ -613,19 +740,24 @@ static CmProjectionNormalizeResult cm_normalize_type_inner(
     return result;
 }
 
-CmProjectionNormalizeResult cm_projection_normalize_type(
+static CmProjectionNormalizeResult cm_projection_normalize_type_impl(
     const CmTraitImplIndex *index, const CmParamEnv *environment,
     CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
     CmHirDefId owner, CmTypeckTypeId type,
     const CmTraitGoalEvaluator *evaluator,
-    CmProjectionNormalizeLimits limits)
+    CmProjectionNormalizeLimits limits,
+    CmProjectionNormalizeTrace *trace)
 {
     CmProjectionNormalizeState state;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTraceState *trace_state;
     CmTypeckSnapshot snapshot;
     CmTypeckStatus status;
 
     result = cm_normalize_result(CM_TRAIT_SOLVER_INVALID);
+    trace_state = cm_normalize_trace_state(trace);
+    if (trace != NULL && trace_state == NULL) return result;
+    if (trace_state != NULL) cm_vec_clear(&trace_state->steps);
     if (limits.max_nodes == 0u || type == CM_TYPECK_TYPE_NONE
         || cm_trait_solver_validate_session(index, environment, typeck,
             substitution, owner) != CM_TRAIT_SOLVER_PROVEN
@@ -639,9 +771,11 @@ CmProjectionNormalizeResult cm_projection_normalize_type(
     state.evaluator = evaluator;
     state.limits = limits;
     cm_vec_init(&state.active_projections, sizeof(CmTypeckTypeId));
+    cm_vec_init(&state.trace_steps, sizeof(CmProjectionNormalizeStep));
     status = cm_typeck_snapshot(typeck, &snapshot);
     if (status != CM_TYPECK_OK) {
         cm_vec_destroy(&state.active_projections);
+        cm_vec_destroy(&state.trace_steps);
         return cm_normalize_typeck_failure(status);
     }
     result = cm_normalize_type_inner(&state, type);
@@ -658,6 +792,35 @@ CmProjectionNormalizeResult cm_projection_normalize_type(
         result.visited_node_count = state.visited_nodes;
         result.projection_step_count = state.projection_steps;
     }
+    if (result.kind == CM_TRAIT_SOLVER_PROVEN
+        && trace_state != NULL) {
+        cm_vec_append(&trace_state->steps, state.trace_steps.data,
+            state.trace_steps.len);
+    }
     cm_vec_destroy(&state.active_projections);
+    cm_vec_destroy(&state.trace_steps);
     return result;
+}
+
+CmProjectionNormalizeResult cm_projection_normalize_type(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    CmHirDefId owner, CmTypeckTypeId type,
+    const CmTraitGoalEvaluator *evaluator,
+    CmProjectionNormalizeLimits limits)
+{
+    return cm_projection_normalize_type_impl(index, environment, typeck,
+        substitution, owner, type, evaluator, limits, NULL);
+}
+
+CmProjectionNormalizeResult cm_projection_normalize_type_traced(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    CmHirDefId owner, CmTypeckTypeId type,
+    const CmTraitGoalEvaluator *evaluator,
+    CmProjectionNormalizeLimits limits,
+    CmProjectionNormalizeTrace *trace)
+{
+    return cm_projection_normalize_type_impl(index, environment, typeck,
+        substitution, owner, type, evaluator, limits, trace);
 }

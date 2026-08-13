@@ -234,13 +234,35 @@ static int cm_mir_type_is_bool(const CmHirContext *hir, CmHirTypeId id)
 static const CmHirItem *cm_mir_named_struct(const CmHirContext *hir,
     CmHirDefId definition_id);
 
-static int cm_mir_type_equal(const CmHirContext *hir, CmHirTypeId left,
-    CmHirTypeId right)
+static int cm_mir_region_equal(const CmHirRegion *left,
+    const CmHirRegion *right)
+{
+    if (left->kind != right->kind) return 0;
+    switch (left->kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left->data.binder_index == right->data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_mir_type_equal_inner(const CmHirContext *hir,
+    CmHirTypeId left, CmHirTypeId right, size_t depth)
 {
     const CmHirType *left_type;
     const CmHirType *right_type;
 
-    if (left == right) return 1;
+    if (left == right) return cm_hir_get_type(hir, left) != NULL;
+    if (depth >= CM_MIR_EXPRESSION_RECURSION_LIMIT) return 0;
     if (cm_mir_type_is_u32(hir, left) && cm_mir_type_is_u32(hir, right)) {
         return 1;
     }
@@ -254,15 +276,30 @@ static int cm_mir_type_equal(const CmHirContext *hir, CmHirTypeId left,
     }
     left_type = cm_hir_get_type(hir, left);
     right_type = cm_hir_get_type(hir, right);
-    return left_type != NULL && right_type != NULL
-        && left_type->kind == CM_HIR_TYPE_ADT_KIND
-        && right_type->kind == CM_HIR_TYPE_ADT_KIND
+    if (left_type == NULL || right_type == NULL
+        || left_type->kind != right_type->kind) return 0;
+    if (left_type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        return left_type->data.reference_type.mutability
+                == right_type->data.reference_type.mutability
+            && cm_mir_region_equal(&left_type->data.reference_type.region,
+                &right_type->data.reference_type.region)
+            && cm_mir_type_equal_inner(hir,
+                left_type->data.reference_type.pointee,
+                right_type->data.reference_type.pointee, depth + 1u);
+    }
+    return left_type->kind == CM_HIR_TYPE_ADT_KIND
         && left_type->data.named_type.argument_count == 0u
         && left_type->data.named_type.arguments == NULL
         && right_type->data.named_type.argument_count == 0u
         && right_type->data.named_type.arguments == NULL
         && cm_hir_def_id_equal(left_type->data.named_type.definition,
             right_type->data.named_type.definition);
+}
+
+static int cm_mir_type_equal(const CmHirContext *hir, CmHirTypeId left,
+    CmHirTypeId right)
+{
+    return cm_mir_type_equal_inner(hir, left, right, 0u);
 }
 
 static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
@@ -280,6 +317,17 @@ static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
             || (type->kind == CM_HIR_TYPE_ADT_KIND
                 && type->data.named_type.argument_count == 0u
                 && type->data.named_type.arguments == NULL)
+            || (type->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && (type->data.reference_type.region.kind
+                        == CM_HIR_REGION_STATIC
+                    || type->data.reference_type.region.kind
+                        == CM_HIR_REGION_ERASED)
+                && (type->data.reference_type.mutability
+                        == CM_HIR_IMMUTABLE
+                    || type->data.reference_type.mutability
+                        == CM_HIR_MUTABLE)
+                && cm_mir_type_supported(hir,
+                    type->data.reference_type.pointee, pointer_bits))
             || type->kind == CM_HIR_TYPE_BOOL_KIND);
 }
 
@@ -335,6 +383,17 @@ static int cm_mir_type_target_valid(const CmHirContext *hir,
     if (type->kind == CM_HIR_TYPE_INTEGER_KIND) {
         return type->data.integer_type.kind != CM_HIR_INT_USIZE
             || cm_mir_pointer_bits_valid(pointer_bits);
+    }
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        return (type->data.reference_type.region.kind
+                    == CM_HIR_REGION_STATIC
+                || type->data.reference_type.region.kind
+                    == CM_HIR_REGION_ERASED)
+            && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+            && cm_mir_type_target_valid(hir,
+                type->data.reference_type.pointee, pointer_bits,
+                depth + 1u);
     }
     if (type->kind != CM_HIR_TYPE_ADT_KIND) return 1;
     item = type->data.named_type.argument_count != 0u
@@ -395,12 +454,22 @@ static int cm_mir_place_valid(const CmHirContext *hir,
     }
     current_type = body->locals[place->base].type;
     for (index = 0u; index < place->projection_count; ++index) {
-        const CmMirFieldProjection *projection;
+        const CmMirPlaceProjection *projection;
         const CmHirType *type;
         const CmHirItem *item;
 
         projection = &place->projections[index];
         type = cm_hir_get_type(hir, current_type);
+        if (projection->kind == CM_MIR_PROJECTION_DEREFERENCE) {
+            if (!cm_hir_def_id_is_none(projection->definition)
+                || projection->field_index != 0u || type == NULL
+                || type->kind != CM_HIR_TYPE_REFERENCE_KIND) {
+                return 0;
+            }
+            current_type = type->data.reference_type.pointee;
+            continue;
+        }
+        if (projection->kind != CM_MIR_PROJECTION_FIELD) return 0;
         item = type == NULL || type->kind != CM_HIR_TYPE_ADT_KIND
                 || type->data.named_type.argument_count != 0u
                 || type->data.named_type.arguments != NULL
@@ -696,7 +765,43 @@ static int cm_mir_rvalue_valid(const CmHirContext *hir,
         return cm_mir_aggregate_rvalue_valid(hir, body, rvalue,
             pointer_bits);
     }
+    if (rvalue->kind == CM_MIR_RVALUE_BORROW) {
+        const CmHirBody *source_body;
+        const CmHirType *reference;
+
+        source_body = cm_hir_get_body(hir, body->source_body);
+        reference = cm_hir_get_type(hir, rvalue->type);
+        return rvalue->data.borrow.kind == CM_MIR_BORROW_SHARED
+            && reference != NULL
+            && reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && reference->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            /* This model has no static-place proof; never mint 'static. */
+            && reference->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED
+            && source_body != NULL
+            && source_body->state == CM_HIR_BODY_TYPED
+            && cm_mir_span_within(rvalue->span, source_body->span)
+            && cm_mir_span_within(rvalue->data.borrow.source.span,
+                rvalue->span)
+            && cm_mir_place_valid(hir, body,
+                &rvalue->data.borrow.source)
+            && cm_mir_type_equal(hir,
+                reference->data.reference_type.pointee,
+                rvalue->data.borrow.source.type);
+    }
     return 0;
+}
+
+CmMirStatus cm_mir_validate_rvalue(const CmHirContext *hir,
+    const CmMirBody *body, const CmMirRvalue *rvalue,
+    unsigned int pointer_bits)
+{
+    if (hir == NULL || body == NULL || rvalue == NULL
+        || (pointer_bits != 0u && !cm_mir_pointer_bits_valid(pointer_bits))) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    return cm_mir_rvalue_valid(hir, body, rvalue, pointer_bits)
+        ? CM_MIR_OK : CM_MIR_INVARIANT_VIOLATION;
 }
 
 static int cm_mir_destination_type(const CmHirContext *hir,
@@ -730,7 +835,7 @@ typedef struct CmMirTreeMatch {
     CmMirLocalId next_temporary;
     uint32_t visible_local_count;
     CmHirExprId allowed_if_expression;
-    CmMirFieldProjection expected_projections[
+    CmMirPlaceProjection expected_projections[
         CM_MIR_EXPRESSION_RECURSION_LIMIT];
     size_t expected_projection_count;
 } CmMirTreeMatch;
@@ -998,7 +1103,9 @@ static int cm_mir_place_equal(const CmHirContext *hir,
         return 0;
     }
     for (index = 0u; index < left->projection_count; ++index) {
-        if (!cm_hir_def_id_equal(left->projections[index].definition,
+        if (left->projections[index].kind
+                != right->projections[index].kind
+            || !cm_hir_def_id_equal(left->projections[index].definition,
                 right->projections[index].definition)
             || left->projections[index].field_index
                 != right->projections[index].field_index) {
@@ -1226,8 +1333,10 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         if (base_projection_count != 0u) {
             memcpy(place.projections, base.data.place.projections,
                 (size_t)base_projection_count
-                    * sizeof(CmMirFieldProjection));
+                    * sizeof(CmMirPlaceProjection));
         }
+        place.projections[base_projection_count].kind =
+            CM_MIR_PROJECTION_FIELD;
         place.projections[base_projection_count].definition =
             expression->data.field.definition;
         place.projections[base_projection_count].field_index =
@@ -2151,7 +2260,7 @@ static int cm_mir_place_storage_size(size_t *total,
         && (place->projection_count == 0u)
             == (place->projections == NULL)
         && cm_mir_storage_add(total, place->projection_count,
-            sizeof(CmMirFieldProjection));
+            sizeof(CmMirPlaceProjection));
 }
 
 static int cm_mir_operand_storage_size(size_t *total,
@@ -2193,6 +2302,10 @@ static int cm_mir_rvalue_storage_size(size_t *total,
             && cm_mir_operand_storage_size(total,
                 &rvalue->data.less.right);
     }
+    if (rvalue->kind == CM_MIR_RVALUE_BORROW) {
+        return cm_mir_place_storage_size(total,
+            &rvalue->data.borrow.source);
+    }
     if (rvalue->kind != CM_MIR_RVALUE_AGGREGATE
         || rvalue->data.aggregate.field_count > CM_MIR_MAX_AGGREGATE_FIELDS
         || (rvalue->data.aggregate.field_count == 0u)
@@ -2215,12 +2328,12 @@ static void cm_mir_copy_place(unsigned char *storage, size_t *offset,
     const CmMirPlace *source, CmMirPlace *copy)
 {
     *copy = *source;
-    copy->projections = (CmMirFieldProjection *)cm_mir_storage_take(storage,
-        offset, source->projection_count, sizeof(CmMirFieldProjection));
+    copy->projections = (CmMirPlaceProjection *)cm_mir_storage_take(storage,
+        offset, source->projection_count, sizeof(CmMirPlaceProjection));
     if (source->projection_count != 0u) {
         memcpy(copy->projections, source->projections,
             (size_t)source->projection_count
-                * sizeof(CmMirFieldProjection));
+                * sizeof(CmMirPlaceProjection));
     }
 }
 
@@ -2259,6 +2372,9 @@ static void cm_mir_copy_rvalue(unsigned char *storage, size_t *offset,
             &copy->data.less.left);
         cm_mir_copy_operand(storage, offset, &source->data.less.right,
             &copy->data.less.right);
+    } else if (source->kind == CM_MIR_RVALUE_BORROW) {
+        cm_mir_copy_place(storage, offset, &source->data.borrow.source,
+            &copy->data.borrow.source);
     } else if (source->kind == CM_MIR_RVALUE_AGGREGATE) {
         copy->data.aggregate.fields = (CmMirAggregateField *)
             cm_mir_storage_take(storage, offset,

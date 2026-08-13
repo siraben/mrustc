@@ -206,6 +206,16 @@ CmTypeckStatus cm_typeck_new_variable(CmTypeckContext *context,
 CmTypeckStatus cm_typeck_unify(CmTypeckContext *context,
     CmTypeckTypeId left, CmTypeckTypeId right);
 
+/*
+ * Bind every still-unresolved canonical variable of `class_kind` to the
+ * exact concrete `default_hir_type`. Aliases are defaulted once, in canonical
+ * variable order.  The operation is transactional: an invalid default or
+ * any failed binding leaves the complete session unchanged.
+ */
+CmTypeckStatus cm_typeck_default_unresolved(CmTypeckContext *context,
+    CmHirInferenceKind class_kind, CmHirTypeId default_hir_type,
+    size_t *out_defaulted_count);
+
 /* Returns the deterministic canonical root or its structural binding. */
 CmTypeckStatus cm_typeck_resolve(const CmTypeckContext *context,
     CmTypeckTypeId type, CmTypeckTypeId *out_type);

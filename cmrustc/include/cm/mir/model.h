@@ -39,17 +39,30 @@ typedef struct CmMirLocal {
     CmHirTypeId type;
 } CmMirLocal;
 
-/* One source-independent declaration-ordinal field step. */
-typedef struct CmMirFieldProjection {
+typedef enum CmMirPlaceProjectionKind {
+    /* Zero preserves the representation of existing zero-initialized fields. */
+    CM_MIR_PROJECTION_FIELD = 0,
+    CM_MIR_PROJECTION_DEREFERENCE
+} CmMirPlaceProjectionKind;
+
+/*
+ * One source-independent place step.  The field payload must be zero for a
+ * dereference, which gives every accepted projection one canonical form.
+ */
+typedef struct CmMirPlaceProjection {
+    CmMirPlaceProjectionKind kind;
     CmHirDefId definition;
     uint32_t field_index;
-} CmMirFieldProjection;
+} CmMirPlaceProjection;
+
+/* Compatibility spelling for callers that only construct field steps. */
+typedef CmMirPlaceProjection CmMirFieldProjection;
 
 /* A flattened local/temporary place with a bounded, source-independent path. */
 typedef struct CmMirPlace {
     CmMirLocalId base;
     CmHirTypeId type;
-    CmMirFieldProjection *projections;
+    CmMirPlaceProjection *projections;
     uint32_t projection_count;
     /* Full source span of this place expression. */
     CmSpan span;
@@ -99,13 +112,19 @@ typedef enum CmMirRvalueKind {
     /* Exact u32 equality producing a bool temporary. */
     CM_MIR_RVALUE_EQUAL,
     /* Exact target-usize ordering producing a bool temporary. */
-    CM_MIR_RVALUE_LESS
+    CM_MIR_RVALUE_LESS,
+    /* Address of one validated place; initially shared references only. */
+    CM_MIR_RVALUE_BORROW
 } CmMirRvalueKind;
+
+typedef enum CmMirBorrowKind {
+    CM_MIR_BORROW_SHARED = 0
+} CmMirBorrowKind;
 
 typedef struct CmMirRvalue {
     CmMirRvalueKind kind;
     CmHirTypeId type;
-    /* Required for aggregate construction; zero remains valid for scalars. */
+    /* Required for aggregate construction and borrowing. */
     CmSpan span;
     union {
         CmMirOperand use;
@@ -122,6 +141,10 @@ typedef struct CmMirRvalue {
             CmMirOperand left;
             CmMirOperand right;
         } less;
+        struct {
+            CmMirBorrowKind kind;
+            CmMirPlace source;
+        } borrow;
         struct {
             CmHirDefId definition;
             /* Declaration order: fields[index].field_index must equal index. */
@@ -311,6 +334,11 @@ CmMirStatus cm_mir_find_instance(const CmMirContext *context,
  * against one exact MIR/HIR body. */
 CmMirStatus cm_mir_validate_place(const CmHirContext *hir,
     const CmMirBody *body, const CmMirPlace *place);
+
+/* Validate one rvalue against an exact MIR/HIR body without publishing it. */
+CmMirStatus cm_mir_validate_rvalue(const CmHirContext *hir,
+    const CmMirBody *body, const CmMirRvalue *rvalue,
+    unsigned int pointer_bits);
 
 const CmMirBody *cm_mir_get_body(const CmMirContext *context,
     CmMirBodyId id);

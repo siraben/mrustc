@@ -1587,7 +1587,7 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
     }
     if (expression->kind == CM_HIR_EXPR_FIELD) {
         CmMirOperand base;
-        CmMirFieldProjection projection_buffer[
+        CmMirPlaceProjection projection_buffer[
             CM_MIR_MAX_PLACE_PROJECTIONS];
         CmMirPlace place;
         size_t projection_start;
@@ -1621,12 +1621,14 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
             if (base_projection_count != 0u) {
                 memcpy(projection_buffer, base.data.place.projections,
                     (size_t)base_projection_count
-                        * sizeof(CmMirFieldProjection));
+                        * sizeof(CmMirPlaceProjection));
             }
         } else {
             return 0;
         }
         if (base_projection_count >= CM_MIR_MAX_PLACE_PROJECTIONS) return 0;
+        projection_buffer[base_projection_count].kind =
+            CM_MIR_PROJECTION_FIELD;
         projection_buffer[base_projection_count].definition =
             semantic_field.aggregate_definition;
         projection_buffer[base_projection_count].field_index =
@@ -1635,7 +1637,7 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         projection_start = output->projections->len;
         cm_vec_append(output->projections, projection_buffer,
             place.projection_count);
-        place.projections = (CmMirFieldProjection *)output->projections->data
+        place.projections = (CmMirPlaceProjection *)output->projections->data
             + projection_start;
         place.type = type;
         place.span = expression->span;
@@ -2141,7 +2143,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     cm_vec_init(&flow_block_starts, sizeof(size_t));
     cm_vec_init(&flow_arguments, sizeof(CmMirOperand));
     cm_vec_init(&flow_aggregate_fields, sizeof(CmMirAggregateField));
-    cm_vec_init(&flow_projections, sizeof(CmMirFieldProjection));
+    cm_vec_init(&flow_projections, sizeof(CmMirPlaceProjection));
     cm_vec_reserve(&flow_locals, local_count);
     cm_vec_reserve(&flow_statements, (size_t)plan.statement_count);
     cm_vec_reserve(&flow_blocks, planned_block_count);

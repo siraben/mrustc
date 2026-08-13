@@ -159,7 +159,7 @@ static CmHirDefId add_bool_impl(TestFixture *fixture,
     return definition;
 }
 
-static void add_impl_associated(TestFixture *fixture,
+static CmHirDefId add_impl_associated(TestFixture *fixture,
     CmHirDefId impl_definition, CmHirDefId trait_associated_definition,
     const char *name, CmHirTypeId target)
 {
@@ -176,6 +176,7 @@ static void add_impl_associated(TestFixture *fixture,
     item.data.type_alias_item.trait_item_definition =
         trait_associated_definition;
     assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
 }
 
 static CmHirDefId add_owner_equality(TestFixture *fixture,
@@ -280,6 +281,15 @@ static CmProjectionNormalizeResult normalize(TestFixture *fixture,
         fixture->owner, type, NULL, limits(128u, projection_fuel));
 }
 
+static CmProjectionNormalizeResult normalize_traced(TestFixture *fixture,
+    TestRuntime *runtime, CmTypeckTypeId type, size_t projection_fuel,
+    CmProjectionNormalizeTrace *trace)
+{
+    return cm_projection_normalize_type_traced(&runtime->index,
+        &runtime->environment, &runtime->typeck, &runtime->substitution,
+        fixture->owner, type, NULL, limits(128u, projection_fuel), trace);
+}
+
 static void test_root_environment_and_impl(void)
 {
     TestFixture fixture;
@@ -287,9 +297,12 @@ static void test_root_environment_and_impl(void)
     CmHirDefId trait_definition;
     CmHirDefId associated_definition;
     CmHirDefId impl_definition;
+    CmHirDefId impl_associated_definition;
     CmHirTypeId projection_hir;
     CmTypeckTypeId projection_type;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
+    const CmProjectionNormalizeStep *step;
 
     fixture_init(&fixture);
     trait_definition = add_trait(&fixture, "Environment");
@@ -300,27 +313,50 @@ static void test_root_environment_and_impl(void)
     fixture.owner = add_owner_equality(&fixture, trait_definition,
         associated_definition, fixture.u8_hir);
     impl_definition = add_bool_impl(&fixture, trait_definition);
-    add_impl_associated(&fixture, impl_definition, associated_definition,
-        "Assoc", fixture.bool_hir);
+    impl_associated_definition = add_impl_associated(&fixture,
+        impl_definition, associated_definition, "Assoc", fixture.bool_hir);
     runtime_init(&runtime, &fixture);
     assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
         &projection_type) == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&trace);
     {
         size_t type_count;
 
         type_count = cm_typeck_type_count(&runtime.typeck);
-        result = normalize(&fixture, &runtime, projection_type, 0u);
+        result = normalize_traced(&fixture, &runtime, projection_type, 0u,
+            &trace);
         assert(result.kind == CM_TRAIT_SOLVER_OVERFLOW
             && result.cause
                 == CM_PROJECTION_NORMALIZE_CAUSE_PROJECTION_LIMIT
             && result.type == CM_TYPECK_TYPE_NONE
             && result.projection_step_count == 0u
+            && cm_projection_normalize_trace_count(&trace) == 0u
             && cm_typeck_type_count(&runtime.typeck) == type_count);
     }
-    result = normalize(&fixture, &runtime, projection_type, 1u);
+    result = normalize_traced(&fixture, &runtime, projection_type, 1u,
+        &trace);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 1u);
+    assert(cm_projection_normalize_trace_count(&trace) == 1u
+        && cm_projection_normalize_trace_step(&trace, 1u) == NULL);
+    step = cm_projection_normalize_trace_step(&trace, 0u);
+    assert(step != NULL && step->projection == projection_type
+        && step->target == result.type
+        && step->normalized_target == result.type
+        && step->proof_origin == CM_TRAIT_PROOF_PARAM_ENV
+        && step->param_env_fact_index == 0u
+        && step->param_env_equality_index == 0u
+        && cm_hir_def_id_is_none(step->impl_definition)
+        && cm_hir_def_id_is_none(step->impl_associated_definition));
     assert_u8(&runtime, result.type);
+    result = cm_projection_normalize_type_traced(&runtime.index,
+        &runtime.environment, &runtime.typeck, &runtime.substitution,
+        fixture.owner, projection_type, NULL, limits(0u, 1u), &trace);
+    assert(result.kind == CM_TRAIT_SOLVER_INVALID
+        && cm_projection_normalize_trace_count(&trace) == 0u);
+    cm_projection_normalize_trace_clear(&trace);
+    assert(cm_projection_normalize_trace_count(&trace) == 0u);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 
@@ -331,16 +367,31 @@ static void test_root_environment_and_impl(void)
     projection_hir = add_projection(&fixture, trait_definition,
         associated_definition);
     impl_definition = add_bool_impl(&fixture, trait_definition);
-    add_impl_associated(&fixture, impl_definition, associated_definition,
-        "Assoc", fixture.u8_hir);
+    impl_associated_definition = add_impl_associated(&fixture,
+        impl_definition, associated_definition, "Assoc", fixture.u8_hir);
     fixture.owner = add_trait(&fixture, "Owner");
     runtime_init(&runtime, &fixture);
     assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
         &projection_type) == CM_TYPECK_OK);
-    result = normalize(&fixture, &runtime, projection_type, 1u);
+    cm_projection_normalize_trace_init(&trace);
+    result = normalize_traced(&fixture, &runtime, projection_type, 1u,
+        &trace);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 1u);
+    assert(cm_projection_normalize_trace_count(&trace) == 1u);
+    step = cm_projection_normalize_trace_step(&trace, 0u);
+    assert(step != NULL && step->projection == projection_type
+        && step->target == result.type
+        && step->normalized_target == result.type
+        && step->proof_origin == CM_TRAIT_PROOF_IMPL
+        && step->param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+        && step->param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && cm_hir_def_id_equal(step->impl_definition, impl_definition)
+        && cm_hir_def_id_equal(step->impl_associated_definition,
+            impl_associated_definition));
     assert_u8(&runtime, result.type);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 }
@@ -360,6 +411,9 @@ static void test_structural_rebuild_and_siblings(void)
     CmTypeckTypeId reference_type;
     CmTypeckTypeId tuple_type;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
+    const CmProjectionNormalizeStep *first_step;
+    const CmProjectionNormalizeStep *second_step;
     const CmTypeckType *normalized;
 
     fixture_init(&fixture);
@@ -392,9 +446,18 @@ static void test_structural_rebuild_and_siblings(void)
     tuple.data.tuple_type.element_count = 2u;
     assert(cm_typeck_add_type(&runtime.typeck, &tuple, &tuple_type)
         == CM_TYPECK_OK);
-    result = normalize(&fixture, &runtime, tuple_type, 2u);
+    cm_projection_normalize_trace_init(&trace);
+    result = normalize_traced(&fixture, &runtime, tuple_type, 2u, &trace);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 2u);
+    assert(cm_projection_normalize_trace_count(&trace) == 2u);
+    first_step = cm_projection_normalize_trace_step(&trace, 0u);
+    second_step = cm_projection_normalize_trace_step(&trace, 1u);
+    assert(first_step != NULL && second_step != NULL
+        && first_step->projection == projection_type
+        && first_step->target == first_step->normalized_target
+        && second_step->projection == projection_type
+        && second_step->target == second_step->normalized_target);
     normalized = cm_typeck_get_type(&runtime.typeck, result.type);
     assert(normalized != NULL && normalized->kind == CM_TYPECK_TYPE_TUPLE
         && normalized->data.tuple_type.element_count == 2u);
@@ -413,6 +476,7 @@ static void test_structural_rebuild_and_siblings(void)
             normalized_reference->data.reference_type.pointee);
     }
     assert_u8(&runtime, normalized->data.tuple_type.elements[1]);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 }
@@ -431,6 +495,9 @@ static void test_chain_fuel_cycle_and_rollback(void)
     CmHirTypeId second_projection_hir;
     CmTypeckTypeId first_projection;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
+    const CmProjectionNormalizeStep *first_step;
+    const CmProjectionNormalizeStep *second_step;
     size_t type_count;
 
     fixture_init(&fixture);
@@ -454,20 +521,36 @@ static void test_chain_fuel_cycle_and_rollback(void)
     runtime_init(&runtime, &fixture);
     assert(cm_typeck_import_hir_type(&runtime.typeck, first_projection_hir,
         &first_projection) == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&trace);
     result = normalize(&fixture, &runtime, runtime.u8_type, 0u);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 0u);
     type_count = cm_typeck_type_count(&runtime.typeck);
-    result = normalize(&fixture, &runtime, first_projection, 1u);
+    result = normalize_traced(&fixture, &runtime, first_projection, 1u,
+        &trace);
     assert(result.kind == CM_TRAIT_SOLVER_OVERFLOW
         && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_PROJECTION_LIMIT
         && result.type == CM_TYPECK_TYPE_NONE
         && result.projection_step_count == 1u
+        && cm_projection_normalize_trace_count(&trace) == 0u
         && cm_typeck_type_count(&runtime.typeck) == type_count);
-    result = normalize(&fixture, &runtime, first_projection, 2u);
+    result = normalize_traced(&fixture, &runtime, first_projection, 2u,
+        &trace);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 2u);
+    assert(cm_projection_normalize_trace_count(&trace) == 2u);
+    first_step = cm_projection_normalize_trace_step(&trace, 0u);
+    second_step = cm_projection_normalize_trace_step(&trace, 1u);
+    assert(first_step != NULL && second_step != NULL
+        && first_step->projection == first_projection
+        && first_step->target == second_step->projection
+        && first_step->normalized_target == result.type
+        && second_step->target == result.type
+        && second_step->normalized_target == result.type
+        && first_step->proof_origin == CM_TRAIT_PROOF_IMPL
+        && second_step->proof_origin == CM_TRAIT_PROOF_IMPL);
     assert_u8(&runtime, result.type);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 
@@ -496,12 +579,16 @@ static void test_chain_fuel_cycle_and_rollback(void)
         first_projection = fresh_projection_id;
     }
     type_count = cm_typeck_type_count(&runtime.typeck);
-    result = normalize(&fixture, &runtime, first_projection, 32u);
+    cm_projection_normalize_trace_init(&trace);
+    result = normalize_traced(&fixture, &runtime, first_projection, 32u,
+        &trace);
     assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
         && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_CYCLE
         && result.type == CM_TYPECK_TYPE_NONE
         && result.projection_step_count == 1u
+        && cm_projection_normalize_trace_count(&trace) == 0u
         && cm_typeck_type_count(&runtime.typeck) == type_count);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 }
@@ -519,25 +606,29 @@ static void test_authentication_and_node_limit(void)
     CmHirDefId wrong_owner;
     CmHirType appended;
     CmHirTypeId appended_id;
+    CmProjectionNormalizeTrace trace;
     size_t type_count;
 
     fixture_init(&fixture);
     fixture.owner = add_trait(&fixture, "Owner");
     wrong_owner = add_trait(&fixture, "WrongOwner");
     runtime_init(&runtime, &fixture);
+    cm_projection_normalize_trace_init(&trace);
     type_count = cm_typeck_type_count(&runtime.typeck);
-    result = cm_projection_normalize_type(&runtime.index,
+    result = cm_projection_normalize_type_traced(&runtime.index,
         &runtime.environment, &runtime.typeck, &runtime.substitution,
-        wrong_owner, runtime.u8_type, NULL, limits(8u, 0u));
+        wrong_owner, runtime.u8_type, NULL, limits(8u, 0u), &trace);
     assert(result.kind == CM_TRAIT_SOLVER_INVALID
         && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u
         && cm_typeck_type_count(&runtime.typeck) == type_count);
     runtime.exact.parameter_owner = wrong_owner;
-    result = cm_projection_normalize_type(&runtime.index,
+    result = cm_projection_normalize_type_traced(&runtime.index,
         &runtime.environment, &runtime.typeck, &runtime.substitution,
-        fixture.owner, runtime.u8_type, NULL, limits(8u, 0u));
+        fixture.owner, runtime.u8_type, NULL, limits(8u, 0u), &trace);
     assert(result.kind == CM_TRAIT_SOLVER_INVALID
         && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u
         && cm_typeck_type_count(&runtime.typeck) == type_count);
     runtime.exact.parameter_owner = fixture.owner;
     fixture_init(&foreign_fixture);
@@ -580,11 +671,13 @@ static void test_authentication_and_node_limit(void)
         == CM_HIR_OK);
     assert(!cm_param_env_is_current(&runtime.environment)
         && !cm_trait_impl_index_is_current(&runtime.index));
-    result = cm_projection_normalize_type(&runtime.index,
+    result = cm_projection_normalize_type_traced(&runtime.index,
         &runtime.environment, &runtime.typeck, &runtime.substitution,
-        fixture.owner, runtime.u8_type, NULL, limits(8u, 0u));
+        fixture.owner, runtime.u8_type, NULL, limits(8u, 0u), &trace);
     assert(result.kind == CM_TRAIT_SOLVER_INVALID
-        && result.type == CM_TYPECK_TYPE_NONE);
+        && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u);
+    cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
 }
@@ -692,6 +785,7 @@ static void test_mutual_cycle_and_late_child_rollback(void)
     CmHirTypeId second_hir;
     CmTypeckTypeId first_type;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
     size_t type_count;
 
     fixture_init(&fixture);
@@ -767,20 +861,25 @@ static void test_mutual_cycle_and_late_child_rollback(void)
         assert(cm_typeck_add_type(&runtime.typeck, &tuple, &tuple_type)
             == CM_TYPECK_OK);
         type_count = cm_typeck_type_count(&runtime.typeck);
-        result = cm_projection_normalize_type(&runtime.index,
+        cm_projection_normalize_trace_init(&trace);
+        result = cm_projection_normalize_type_traced(&runtime.index,
             &runtime.environment, &runtime.typeck, &runtime.substitution,
-            fixture.owner, tuple_type, NULL, limits(4u, 8u));
+            fixture.owner, tuple_type, NULL, limits(4u, 8u), &trace);
         assert(result.kind == CM_TRAIT_SOLVER_OVERFLOW
             && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_NODE_LIMIT
             && result.type == CM_TYPECK_TYPE_NONE
             && result.visited_node_count == 4u
             && result.projection_step_count == 1u
+            && cm_projection_normalize_trace_count(&trace) == 0u
             && cm_typeck_type_count(&runtime.typeck) == type_count);
-        result = normalize(&fixture, &runtime, tuple_type, 8u);
+        result = normalize_traced(&fixture, &runtime, tuple_type, 8u,
+            &trace);
         assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
             && result.type == CM_TYPECK_TYPE_NONE
             && result.projection_step_count == 1u
+            && cm_projection_normalize_trace_count(&trace) == 0u
             && cm_typeck_type_count(&runtime.typeck) == type_count);
+        cm_projection_normalize_trace_destroy(&trace);
     }
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);

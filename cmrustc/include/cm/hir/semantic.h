@@ -78,4 +78,15 @@ CmProjectionNormalizeResult cm_semantic_session_normalize_type(
     const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
     CmProjectionNormalizeLimits limits);
 
+/*
+ * Traced form of cm_semantic_session_normalize_type. The trace is cleared
+ * before session authentication and receives steps only after the complete
+ * normalization transaction commits.
+ */
+CmProjectionNormalizeResult cm_semantic_session_normalize_type_traced(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
+    CmProjectionNormalizeLimits limits,
+    CmProjectionNormalizeTrace *trace);
+
 #endif

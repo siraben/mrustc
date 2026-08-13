@@ -26,6 +26,33 @@ typedef struct CmProjectionNormalizeResult {
     size_t projection_step_count;
 } CmProjectionNormalizeResult;
 
+/* One authenticated projection reduction in causal traversal order. */
+typedef struct CmProjectionNormalizeStep {
+    CmTypeckTypeId projection;
+    /* Raw target selected by the authenticated proof. */
+    CmTypeckTypeId target;
+    /* Same target after all recursively required normalization succeeds. */
+    CmTypeckTypeId normalized_target;
+    CmTraitProofOrigin proof_origin;
+    size_t param_env_fact_index;
+    uint32_t param_env_equality_index;
+    CmHirDefId impl_definition;
+    CmHirDefId impl_associated_definition;
+} CmProjectionNormalizeStep;
+
+/* Caller-owned output. A non-PROVEN normalization always leaves it empty. */
+typedef struct CmProjectionNormalizeTrace {
+    void *state;
+} CmProjectionNormalizeTrace;
+
+void cm_projection_normalize_trace_init(CmProjectionNormalizeTrace *trace);
+void cm_projection_normalize_trace_destroy(CmProjectionNormalizeTrace *trace);
+void cm_projection_normalize_trace_clear(CmProjectionNormalizeTrace *trace);
+size_t cm_projection_normalize_trace_count(
+    const CmProjectionNormalizeTrace *trace);
+const CmProjectionNormalizeStep *cm_projection_normalize_trace_step(
+    const CmProjectionNormalizeTrace *trace, size_t index);
+
 /*
  * Recursively normalize one typeck term using bounds-first projection target
  * selection. The complete operation is transactional: every non-proof leaves
@@ -37,5 +64,18 @@ CmProjectionNormalizeResult cm_projection_normalize_type(
     CmHirDefId owner, CmTypeckTypeId type,
     const CmTraitGoalEvaluator *evaluator,
     CmProjectionNormalizeLimits limits);
+
+/*
+ * Traced form of cm_projection_normalize_type. Steps are published only after
+ * the complete typeck transaction commits. The legacy entry point above is
+ * exactly this operation with no trace output.
+ */
+CmProjectionNormalizeResult cm_projection_normalize_type_traced(
+    const CmTraitImplIndex *index, const CmParamEnv *environment,
+    CmTypeckContext *typeck, const CmParamEnvSubstitution *substitution,
+    CmHirDefId owner, CmTypeckTypeId type,
+    const CmTraitGoalEvaluator *evaluator,
+    CmProjectionNormalizeLimits limits,
+    CmProjectionNormalizeTrace *trace);
 
 #endif

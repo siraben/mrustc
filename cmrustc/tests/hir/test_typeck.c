@@ -12,10 +12,12 @@ typedef struct TestFixture {
     CmHirDefId definitions[6];
     CmHirGenericParamId parameters[2];
     CmHirTypeId hir_u32;
+    CmHirTypeId hir_i32;
     CmHirTypeId hir_usize;
     CmHirTypeId hir_f64;
     CmHirTypeId hir_bool;
     CmTypeckTypeId u32_type;
+    CmTypeckTypeId i32_type;
     CmTypeckTypeId usize_type;
     CmTypeckTypeId f64_type;
     CmTypeckTypeId bool_type;
@@ -81,6 +83,8 @@ static void fixture_init(TestFixture *fixture)
         &fixture->parameters[1]) == CM_HIR_OK);
     fixture->hir_u32 = add_hir_scalar(&fixture->hir,
         CM_HIR_TYPE_INTEGER_KIND, (unsigned int)CM_HIR_INT_U32);
+    fixture->hir_i32 = add_hir_scalar(&fixture->hir,
+        CM_HIR_TYPE_INTEGER_KIND, (unsigned int)CM_HIR_INT_I32);
     fixture->hir_usize = add_hir_scalar(&fixture->hir,
         CM_HIR_TYPE_INTEGER_KIND, (unsigned int)CM_HIR_INT_USIZE);
     fixture->hir_f64 = add_hir_scalar(&fixture->hir,
@@ -90,6 +94,8 @@ static void fixture_init(TestFixture *fixture)
     cm_typeck_context_init(&fixture->typeck, &fixture->hir);
     assert(cm_typeck_import_hir_type(&fixture->typeck, fixture->hir_u32,
         &fixture->u32_type) == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&fixture->typeck, fixture->hir_i32,
+        &fixture->i32_type) == CM_TYPECK_OK);
     assert(cm_typeck_import_hir_type(&fixture->typeck, fixture->hir_usize,
         &fixture->usize_type) == CM_TYPECK_OK);
     assert(cm_typeck_import_hir_type(&fixture->typeck, fixture->hir_f64,
@@ -344,6 +350,55 @@ static void test_balanced_deterministic_variable_roots(void)
         assert(cm_typeck_resolve(&fixture.typeck, variables[index],
             &resolved) == CM_TYPECK_OK && resolved == variables[0]);
     }
+    fixture_destroy(&fixture);
+}
+
+static void test_transactional_numeric_defaulting(void)
+{
+    TestFixture fixture;
+    CmTypeckTypeId first;
+    CmTypeckTypeId second;
+    CmTypeckTypeId constrained;
+    CmTypeckTypeId general;
+    CmTypeckTypeId resolved;
+    size_t count;
+
+    fixture_init(&fixture);
+    first = new_variable(&fixture, CM_HIR_INFER_INTEGER);
+    second = new_variable(&fixture, CM_HIR_INFER_INTEGER);
+    constrained = new_variable(&fixture, CM_HIR_INFER_INTEGER);
+    general = new_variable(&fixture, CM_HIR_INFER_GENERAL);
+    assert(cm_typeck_unify(&fixture.typeck, second, first)
+        == CM_TYPECK_OK);
+    assert(cm_typeck_unify(&fixture.typeck, constrained, fixture.u32_type)
+        == CM_TYPECK_OK);
+    count = 99u;
+    assert(cm_typeck_default_unresolved(&fixture.typeck,
+        CM_HIR_INFER_INTEGER, fixture.hir_i32, &count) == CM_TYPECK_OK
+        && count == 1u);
+    assert(cm_typeck_resolve(&fixture.typeck, first, &resolved)
+            == CM_TYPECK_OK
+        && resolved == fixture.i32_type);
+    assert(cm_typeck_resolve(&fixture.typeck, second, &resolved)
+            == CM_TYPECK_OK
+        && resolved == fixture.i32_type);
+    assert(cm_typeck_resolve(&fixture.typeck, constrained, &resolved)
+            == CM_TYPECK_OK
+        && resolved == fixture.u32_type);
+    assert_unresolved(&fixture, general);
+
+    count = 99u;
+    assert(cm_typeck_default_unresolved(&fixture.typeck,
+        CM_HIR_INFER_INTEGER, fixture.hir_f64, &count)
+        == CM_TYPECK_KIND_CONFLICT && count == 0u);
+    count = 99u;
+    assert(cm_typeck_default_unresolved(&fixture.typeck,
+        CM_HIR_INFER_INTEGER, CM_HIR_TYPE_NONE, &count)
+        == CM_TYPECK_INVALID_ARGUMENT && count == 0u);
+    count = 99u;
+    assert(cm_typeck_default_unresolved(&fixture.typeck,
+        CM_HIR_INFER_INTEGER, fixture.hir_i32, &count) == CM_TYPECK_OK
+        && count == 0u);
     fixture_destroy(&fixture);
 }
 
@@ -1341,6 +1396,7 @@ int main(void)
 {
     test_variable_classes_and_aliases();
     test_balanced_deterministic_variable_roots();
+    test_transactional_numeric_defaulting();
     test_region_erased_unification();
     test_structural_unification_and_rollback();
     test_functions_parameters_and_projections();

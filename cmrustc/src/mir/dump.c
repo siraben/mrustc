@@ -39,13 +39,20 @@ static int cm_mir_dump_place(FILE *stream, const CmMirPlace *place)
         return -1;
     }
     for (index = 0u; index < place->projection_count; ++index) {
-        const CmMirFieldProjection *projection;
+        const CmMirPlaceProjection *projection;
 
         projection = &place->projections[index];
-        if (fprintf(stream, ".field(%u:%u#%u)",
+        if (projection->kind == CM_MIR_PROJECTION_DEREFERENCE) {
+            if (!cm_hir_def_id_is_none(projection->definition)
+                || projection->field_index != 0u
+                || fputs(".deref", stream) == EOF) return -1;
+        } else if (projection->kind == CM_MIR_PROJECTION_FIELD
+            && fprintf(stream, ".field(%u:%u#%u)",
                 (unsigned int)projection->definition.crate_id,
                 (unsigned int)projection->definition.index,
                 (unsigned int)projection->field_index) < 0) {
+            return -1;
+        } else if (projection->kind != CM_MIR_PROJECTION_FIELD) {
             return -1;
         }
     }
@@ -165,6 +172,19 @@ static int cm_mir_dump_rvalue(FILE *stream, const CmMirRvalue *rvalue)
                 != 0
             || fprintf(stream, ") type=ty#%u",
                 (unsigned int)rvalue->type) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+    if (rvalue->kind == CM_MIR_RVALUE_BORROW) {
+        if (rvalue->data.borrow.kind != CM_MIR_BORROW_SHARED
+            || fputs("borrow(shared,", stream) == EOF
+            || cm_mir_dump_place(stream, &rvalue->data.borrow.source) != 0
+            || fprintf(stream, ") type=ty#%u span=%u:%u..%u",
+                (unsigned int)rvalue->type,
+                (unsigned int)rvalue->span.source,
+                (unsigned int)rvalue->span.start,
+                (unsigned int)rvalue->span.end) < 0) {
             return -1;
         }
         return 0;

@@ -603,6 +603,8 @@ static void test_session_projection_normalization(void)
     CmTypeckTypeId bool_type;
     CmTypeckTypeId projection_type;
     CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
+    const CmProjectionNormalizeStep *step;
     const CmTypeckType *normalized;
     size_t type_count;
 
@@ -634,27 +636,55 @@ static void test_session_projection_normalization(void)
     projection.data.projection_type.associated_type.definition = associated;
     assert(cm_typeck_add_type(typeck, &projection, &projection_type)
         == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&trace);
     type_count = cm_typeck_type_count(typeck);
-    result = cm_semantic_session_normalize_type(&session, typeck,
+    result = cm_semantic_session_normalize_type_traced(&session, typeck,
         &substitution, projection_type,
-        (CmProjectionNormalizeLimits){64u, 0u});
+        (CmProjectionNormalizeLimits){64u, 0u}, &trace);
     assert(result.kind == CM_TRAIT_SOLVER_OVERFLOW
         && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_PROJECTION_LIMIT
         && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u
         && cm_typeck_type_count(typeck) == type_count);
+    result = cm_semantic_session_normalize_type_traced(&session, typeck,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 1u}, &trace);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.projection_step_count == 1u
+        && cm_projection_normalize_trace_count(&trace) == 1u);
+    step = cm_projection_normalize_trace_step(&trace, 0u);
+    assert(step != NULL && step->projection == projection_type
+        && step->target == result.type
+        && step->normalized_target == result.type
+        && step->proof_origin == CM_TRAIT_PROOF_IMPL
+        && step->param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+        && step->param_env_equality_index
+            == CM_TRAIT_PROOF_EQUALITY_NONE
+        && !cm_hir_def_id_is_none(step->impl_definition)
+        && !cm_hir_def_id_is_none(step->impl_associated_definition));
+    normalized = cm_typeck_get_type(typeck, result.type);
+    assert(normalized != NULL && normalized->kind == CM_TYPECK_TYPE_INTEGER
+        && normalized->data.integer_type == CM_HIR_INT_U8);
+    result = cm_semantic_session_normalize_type_traced(&session, NULL,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 1u}, &trace);
+    assert(result.kind == CM_TRAIT_SOLVER_INVALID
+        && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u);
     result = cm_semantic_session_normalize_type(&session, typeck,
         &substitution, projection_type,
         (CmProjectionNormalizeLimits){64u, 1u});
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 1u);
-    normalized = cm_typeck_get_type(typeck, result.type);
-    assert(normalized != NULL && normalized->kind == CM_TYPECK_TYPE_INTEGER
-        && normalized->data.integer_type == CM_HIR_INT_U8);
-    result = cm_semantic_session_normalize_type(&session, NULL,
+    (void)add_scalar(&fixture.hir, CM_HIR_TYPE_INTEGER_KIND,
+        CM_HIR_INT_U16);
+    result = cm_semantic_session_normalize_type_traced(&session, typeck,
         &substitution, projection_type,
-        (CmProjectionNormalizeLimits){64u, 1u});
+        (CmProjectionNormalizeLimits){64u, 1u}, &trace);
     assert(result.kind == CM_TRAIT_SOLVER_INVALID
-        && result.type == CM_TYPECK_TYPE_NONE);
+        && result.type == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_count(&trace) == 0u);
+    cm_projection_normalize_trace_destroy(&trace);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
 }

@@ -331,10 +331,10 @@ CmTraitSelectionResult cm_semantic_session_solve_implemented(
         substitution, goal);
 }
 
-CmProjectionNormalizeResult cm_semantic_session_normalize_type(
+static CmProjectionNormalizeResult cm_semantic_session_normalize_type_impl(
     CmSemanticSession *session, const CmTypeckContext *term_owner,
     const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
-    CmProjectionNormalizeLimits limits)
+    CmProjectionNormalizeLimits limits, CmProjectionNormalizeTrace *trace)
 {
     CmSemanticSessionState *state;
     CmSemanticNormalizeEvaluator recursive;
@@ -344,6 +344,7 @@ CmProjectionNormalizeResult cm_semantic_session_normalize_type(
     memset(&result, 0, sizeof(result));
     result.kind = CM_TRAIT_SOLVER_INVALID;
     result.type = CM_TYPECK_TYPE_NONE;
+    if (trace != NULL) cm_projection_normalize_trace_clear(trace);
     state = cm_semantic_state(session);
     if (!cm_semantic_state_is_current(state)
         || term_owner != &state->typeck || substitution == NULL) {
@@ -355,7 +356,26 @@ CmProjectionNormalizeResult cm_semantic_session_normalize_type(
     evaluator.context = &recursive;
     evaluator.evaluate = cm_semantic_normalize_implemented;
     evaluator.evaluate_projection = cm_semantic_normalize_projection;
-    return cm_projection_normalize_type(&state->index,
+    return cm_projection_normalize_type_traced(&state->index,
         &state->environment, &state->typeck, substitution,
-        state->exact_owner, type, &evaluator, limits);
+        state->exact_owner, type, &evaluator, limits, trace);
+}
+
+CmProjectionNormalizeResult cm_semantic_session_normalize_type(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
+    CmProjectionNormalizeLimits limits)
+{
+    return cm_semantic_session_normalize_type_impl(session, term_owner,
+        substitution, type, limits, NULL);
+}
+
+CmProjectionNormalizeResult cm_semantic_session_normalize_type_traced(
+    CmSemanticSession *session, const CmTypeckContext *term_owner,
+    const CmParamEnvSubstitution *substitution, CmTypeckTypeId type,
+    CmProjectionNormalizeLimits limits,
+    CmProjectionNormalizeTrace *trace)
+{
+    return cm_semantic_session_normalize_type_impl(session, term_owner,
+        substitution, type, limits, trace);
 }

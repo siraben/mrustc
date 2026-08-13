@@ -2148,6 +2148,68 @@ CmTypeckStatus cm_typeck_unify(CmTypeckContext *context,
     return status;
 }
 
+CmTypeckStatus cm_typeck_default_unresolved(CmTypeckContext *context,
+    CmHirInferenceKind class_kind, CmHirTypeId default_hir_type,
+    size_t *out_defaulted_count)
+{
+    CmTypeckState *state;
+    CmTypeckTypeId default_type;
+    CmTypeckSnapshot snapshot;
+    CmTypeckStatus status;
+    size_t defaulted_count;
+    size_t index;
+
+    if (out_defaulted_count != NULL) *out_defaulted_count = 0u;
+    state = cm_typeck_state(context);
+    if (!cm_typeck_state_is_current(state)
+        || out_defaulted_count == NULL
+        || (unsigned int)class_kind > (unsigned int)CM_HIR_INFER_FLOAT
+        || cm_hir_get_type(state == NULL ? NULL : state->hir,
+            default_hir_type) == NULL) {
+        return CM_TYPECK_INVALID_ARGUMENT;
+    }
+    status = cm_typeck_snapshot(context, &snapshot);
+    if (status != CM_TYPECK_OK) return status;
+    status = cm_typeck_import_hir_type(context, default_hir_type,
+        &default_type);
+    if (status != CM_TYPECK_OK
+        || !cm_typeck_class_accepts(state, class_kind, default_type)) {
+        if (status == CM_TYPECK_OK) status = CM_TYPECK_KIND_CONFLICT;
+        (void)cm_typeck_rollback(context, &snapshot);
+        return status;
+    }
+    defaulted_count = 0u;
+    for (index = 0u; index < state->variables.len; ++index) {
+        CmTypeckVariable *variable;
+        uint32_t variable_id;
+
+        variable_id = (uint32_t)(index + 1u);
+        variable = cm_typeck_variable(state, variable_id);
+        if (variable == NULL) {
+            status = CM_TYPECK_INVALID_ID;
+            break;
+        }
+        if (variable->parent != variable_id
+            || variable->binding != CM_TYPECK_TYPE_NONE
+            || variable->class_kind != class_kind) {
+            continue;
+        }
+        status = cm_typeck_bind_variable(state, variable_id,
+            default_type);
+        if (status != CM_TYPECK_OK) break;
+        defaulted_count += 1u;
+    }
+    if (status == CM_TYPECK_OK) {
+        status = cm_typeck_commit(context, &snapshot);
+        if (status == CM_TYPECK_OK) {
+            *out_defaulted_count = defaulted_count;
+        }
+    } else {
+        (void)cm_typeck_rollback(context, &snapshot);
+    }
+    return status;
+}
+
 static int cm_typeck_caller_mark_valid(const CmHirContext *hir,
     const CmHirContextMark *mark)
 {
