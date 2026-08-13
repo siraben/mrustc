@@ -2254,6 +2254,247 @@ static void test_projection_const_identity_normalization(void)
     destroy_graph(&sources, &graph, &imports);
 }
 
+static void test_dyn_trait_alias_normalization(void)
+{
+    CmHirContext hir;
+    CmSpan span;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirDefId principal_definition;
+    CmHirDefId id_definition;
+    CmHirDefId owner_definition;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId principal_lifetime;
+    CmHirGenericParamId principal_type;
+    CmHirGenericParamId id_parameter;
+    CmHirGenericParamId owner_lifetime;
+    CmHirGenericParamId owner_type;
+    CmHirGenericArg argument;
+    CmHirGenericArg principal_arguments[2];
+    CmHirGenericArg instantiation_arguments[2];
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirType type;
+    CmHirTypeId u16_type;
+    CmHirTypeId id_parameter_type;
+    CmHirTypeId owner_parameter_type;
+    CmHirTypeId id_application;
+    CmHirTypeId dyn_type;
+    CmHirTypeId normalized_type;
+    CmHirTypeAliasResult result;
+    const CmHirType *normalized;
+    const CmHirType *original;
+    size_t type_count;
+    size_t arena_bytes;
+
+    cm_hir_context_init(&hir);
+    span.source = 113u;
+    span.start = 10u;
+    span.end = 90u;
+    check(cm_hir_create_crate(&hir,
+            cm_hir_intern(&hir, "dyn_alias_api"),
+            CM_HIR_EDITION_2024, span, &crate_id, &root_module)
+            == CM_HIR_OK,
+        "dyn alias setup could not create a crate");
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = span;
+    type.data.integer_type.kind = CM_HIR_INT_U16;
+    check(cm_hir_add_type(&hir, &type, &u16_type) == CM_HIR_OK,
+        "dyn alias setup could not add u16");
+
+    check(cm_hir_reserve_item_definition(&hir, crate_id, span,
+            &principal_definition) == CM_HIR_OK,
+        "dyn alias setup could not reserve its principal trait");
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_LIFETIME;
+    parameter.owner = principal_definition;
+    parameter.name = cm_hir_intern(&hir, "'p");
+    parameter.span = span;
+    check(cm_hir_add_generic_param(&hir, &parameter,
+            &principal_lifetime) == CM_HIR_OK,
+        "dyn alias setup could not add its principal lifetime");
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = principal_definition;
+    parameter.index = 1u;
+    parameter.name = cm_hir_intern(&hir, "P");
+    parameter.span = span;
+    check(cm_hir_add_generic_param(&hir, &parameter,
+            &principal_type) == CM_HIR_OK,
+        "dyn alias setup could not add its principal type");
+    init_projection_test_item(&hir, &item, CM_HIR_ITEM_TRAIT,
+        principal_definition, cm_hir_def_id_none(), root_module,
+        "Principal", span);
+    item.generic_parameter_start = principal_lifetime;
+    item.generic_parameter_count = 2u;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    check(principal_type == principal_lifetime + 1u
+        && cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK,
+        "dyn alias setup could not bind its principal trait");
+
+    check(cm_hir_reserve_item_definition(&hir, crate_id, span,
+            &id_definition) == CM_HIR_OK,
+        "dyn alias setup could not reserve Id");
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = id_definition;
+    parameter.name = cm_hir_intern(&hir, "I");
+    parameter.span = span;
+    check(cm_hir_add_generic_param(&hir, &parameter, &id_parameter)
+            == CM_HIR_OK,
+        "dyn alias setup could not add Id's parameter");
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = span;
+    type.data.parameter_type.parameter = id_parameter;
+    check(cm_hir_add_type(&hir, &type, &id_parameter_type) == CM_HIR_OK,
+        "dyn alias setup could not add Id's parameter type");
+    init_projection_test_item(&hir, &item, CM_HIR_ITEM_TYPE_ALIAS,
+        id_definition, cm_hir_def_id_none(), root_module, "Id", span);
+    item.generic_parameter_start = id_parameter;
+    item.generic_parameter_count = 1u;
+    item.data.type_alias_item.target = id_parameter_type;
+    check(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK,
+        "dyn alias setup could not bind Id");
+
+    check(cm_hir_reserve_item_definition(&hir, crate_id, span,
+            &owner_definition) == CM_HIR_OK,
+        "dyn alias setup could not reserve DynAlias");
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_LIFETIME;
+    parameter.owner = owner_definition;
+    parameter.name = cm_hir_intern(&hir, "'a");
+    parameter.span = span;
+    check(cm_hir_add_generic_param(&hir, &parameter, &owner_lifetime)
+            == CM_HIR_OK,
+        "dyn alias setup could not add DynAlias's lifetime");
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = owner_definition;
+    parameter.index = 1u;
+    parameter.name = cm_hir_intern(&hir, "T");
+    parameter.span = span;
+    check(cm_hir_add_generic_param(&hir, &parameter, &owner_type)
+            == CM_HIR_OK,
+        "dyn alias setup could not add DynAlias's type");
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = span;
+    type.data.parameter_type.parameter = owner_type;
+    check(cm_hir_add_type(&hir, &type, &owner_parameter_type)
+            == CM_HIR_OK,
+        "dyn alias setup could not add DynAlias's parameter type");
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = owner_parameter_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ALIAS_APPLICATION_KIND;
+    type.span = span;
+    type.data.named_type.definition = id_definition;
+    type.data.named_type.arguments = &argument;
+    type.data.named_type.argument_count = 1u;
+    check(cm_hir_add_type(&hir, &type, &id_application) == CM_HIR_OK,
+        "dyn alias setup could not add Id<T>");
+    memset(principal_arguments, 0, sizeof(principal_arguments));
+    principal_arguments[0].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    principal_arguments[0].data.lifetime.kind =
+        CM_HIR_REGION_EARLY_BOUND;
+    principal_arguments[0].data.lifetime.data.parameter = owner_lifetime;
+    principal_arguments[1].kind = CM_HIR_GENERIC_ARG_TYPE;
+    principal_arguments[1].data.type = id_application;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
+    type.span = span;
+    type.data.dyn_trait_type.principal_trait.definition =
+        principal_definition;
+    type.data.dyn_trait_type.principal_trait.arguments =
+        principal_arguments;
+    type.data.dyn_trait_type.principal_trait.argument_count = 2u;
+    type.data.dyn_trait_type.region.kind = CM_HIR_REGION_EARLY_BOUND;
+    type.data.dyn_trait_type.region.data.parameter = owner_lifetime;
+    check(cm_hir_add_type(&hir, &type, &dyn_type) == CM_HIR_OK,
+        "dyn alias setup could not add its dyn trait type");
+    init_projection_test_item(&hir, &item, CM_HIR_ITEM_TYPE_ALIAS,
+        owner_definition, cm_hir_def_id_none(), root_module, "DynAlias",
+        span);
+    item.generic_parameter_start = owner_lifetime;
+    item.generic_parameter_count = 2u;
+    item.data.type_alias_item.target = dyn_type;
+    check(owner_type == owner_lifetime + 1u
+        && cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK,
+        "dyn alias setup could not bind DynAlias");
+
+    original = cm_hir_get_type(&hir, dyn_type);
+    result = cm_hir_normalize_type_aliases(&hir, dyn_type);
+    normalized = cm_hir_get_type(&hir, result.type);
+    check(result.status == CM_HIR_TYPE_ALIAS_OK
+        && result.type != CM_HIR_TYPE_NONE && result.type != dyn_type
+        && result.allocated_type_count != 0u
+        && normalized != NULL
+        && normalized->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && cm_hir_def_id_equal(
+            normalized->data.dyn_trait_type.principal_trait.definition,
+            principal_definition)
+        && normalized->data.dyn_trait_type.principal_trait.argument_count
+            == 2u
+        && normalized->data.dyn_trait_type.principal_trait.arguments[0]
+            .kind == CM_HIR_GENERIC_ARG_LIFETIME
+        && normalized->data.dyn_trait_type.principal_trait.arguments[0]
+            .data.lifetime.kind == CM_HIR_REGION_EARLY_BOUND
+        && normalized->data.dyn_trait_type.principal_trait.arguments[0]
+            .data.lifetime.data.parameter == owner_lifetime
+        && normalized->data.dyn_trait_type.principal_trait.arguments[1]
+            .kind == CM_HIR_GENERIC_ARG_TYPE
+        && parameter_type_is(&hir,
+            normalized->data.dyn_trait_type.principal_trait.arguments[1]
+                .data.type,
+            owner_type)
+        && normalized->data.dyn_trait_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && normalized->data.dyn_trait_type.region.data.parameter
+            == owner_lifetime
+        && original != NULL
+        && original->data.dyn_trait_type.principal_trait.arguments[1]
+            .data.type == id_application,
+        "dyn trait normalization lost its principal arguments, region, or source immutability");
+    normalized_type = result.type;
+
+    memset(instantiation_arguments, 0, sizeof(instantiation_arguments));
+    instantiation_arguments[0].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    instantiation_arguments[0].data.lifetime.kind = CM_HIR_REGION_STATIC;
+    instantiation_arguments[1].kind = CM_HIR_GENERIC_ARG_TYPE;
+    instantiation_arguments[1].data.type = u16_type;
+    result = cm_hir_instantiate_type(&hir, normalized_type,
+        owner_definition, instantiation_arguments, 2u);
+    normalized = cm_hir_get_type(&hir, result.type);
+    check(result.status == CM_HIR_TYPE_ALIAS_OK
+        && result.type != CM_HIR_TYPE_NONE
+        && normalized != NULL
+        && normalized->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && normalized->data.dyn_trait_type.principal_trait.arguments[0]
+            .data.lifetime.kind == CM_HIR_REGION_STATIC
+        && type_is_integer(&hir,
+            normalized->data.dyn_trait_type.principal_trait.arguments[1]
+                .data.type,
+            CM_HIR_INT_U16)
+        && normalized->data.dyn_trait_type.region.kind
+            == CM_HIR_REGION_STATIC,
+        "dyn trait instantiation did not substitute its principal arguments and exact region");
+
+    normalized_type = result.type;
+    type_count = hir.types.len;
+    arena_bytes = cm_arena_bytes_used(&hir.storage);
+    result = cm_hir_normalize_type_aliases(&hir, normalized_type);
+    check(result.status == CM_HIR_TYPE_ALIAS_OK
+        && result.type == normalized_type
+        && result.allocated_type_count == 0u
+        && hir.types.len == type_count
+        && cm_arena_bytes_used(&hir.storage) == arena_bytes,
+        "unchanged dyn trait normalization grew the type arena");
+    cm_hir_context_destroy(&hir);
+}
+
 int main(void)
 {
     test_structural_aliases();
@@ -2266,6 +2507,7 @@ int main(void)
     test_type_instantiation_api();
     test_symbolic_self_normalization();
     test_projection_const_identity_normalization();
+    test_dyn_trait_alias_normalization();
     if (failures != 0) return 1;
     puts("HIR type alias tests: ok");
     return 0;

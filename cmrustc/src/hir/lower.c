@@ -148,6 +148,9 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
 static int cm_lower_trait_identity_arguments(CmLowerState *state,
     CmAstItemId ast_item_id, const CmHirItem *trait_item, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count);
+static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
+    CmAstTypeId ast_type_id, const CmAstType *ast_type,
+    CmHirModuleId module, CmHirDefId owner);
 static CmInternId cm_lower_copy_graph_attribute_metadata(
     CmLowerState *state, const CmModuleGraph *graph, CmResolveStringId id,
     CmSpan span, CmAstItemId declaration);
@@ -4400,61 +4403,8 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         return CM_HIR_TYPE_NONE;
     }
     case CM_AST_TYPE_DYN_TRAIT:
-        if (ast_type->bound_count == 0u || ast_type->bounds == NULL) {
-            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "dynamic trait type has no bound storage");
-            return CM_HIR_TYPE_NONE;
-        }
-        for (index = 0u; index < ast_type->bound_count; ++index) {
-            const CmAstType *bound_type;
-            int has_lifetime;
-
-            has_lifetime = ast_type->bounds[index].lifetime
-                != CM_INTERN_ID_NONE;
-            bound_type = cm_ast_get_type(state->ast,
-                ast_type->bounds[index].trait_type);
-            if ((has_lifetime
-                    && ast_type->bounds[index].trait_type
-                        != CM_AST_TYPE_NONE)
-                || (has_lifetime
-                    && (ast_type->bounds[index].binder.lifetime_count != 0u
-                        || ast_type->bounds[index].binder.lifetimes != NULL
-                        || ast_type->bounds[index].binder.span.start != 0u
-                        || ast_type->bounds[index].binder.span.end != 0u))
-                || (ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_REQUIRED
-                    && ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_RELAXED
-                    && ast_type->bounds[index].modifier
-                        != CM_AST_TYPE_BOUND_CONDITIONALLY_CONST)
-                || (has_lifetime && ast_type->bounds[index].modifier
-                    != CM_AST_TYPE_BOUND_REQUIRED)
-                || (!has_lifetime
-                    && (bound_type == NULL
-                        || bound_type->kind != CM_AST_TYPE_PATH
-                        || !cm_lower_lifetime_binder_is_valid(
-                            &ast_type->bounds[index].binder,
-                            ast_type->bounds[index].span, bound_type)))
-                || ast_type->bounds[index].span.start
-                    >= ast_type->bounds[index].span.end
-                || ast_type->bounds[index].span.start
-                    < ast_type->span.start
-                || ast_type->bounds[index].span.end > ast_type->span.end
-                || (index != 0u
-                    && ast_type->bounds[index - 1u].span.end
-                        >= ast_type->bounds[index].span.start)) {
-                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
-                    CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
-                    CM_HIR_OK,
-                    "dynamic trait bound storage is invalid");
-                return CM_HIR_TYPE_NONE;
-            }
-        }
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
-            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-            "dynamic trait types are not lowered yet");
-        return CM_HIR_TYPE_NONE;
+        return cm_lower_dyn_trait_type(state, ast_type_id, ast_type, module,
+            owner);
     case CM_AST_TYPE_MACRO:
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
             CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -7743,6 +7693,182 @@ static int cm_lower_trait_reference(CmLowerState *state,
         }
     }
     return 1;
+}
+
+static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
+    CmAstTypeId ast_type_id, const CmAstType *ast_type,
+    CmHirModuleId module, CmHirDefId owner)
+{
+    const CmAstTypeBound *principal_bound;
+    const CmAstTypeBound *lifetime_bound;
+    CmLowerTraitTarget trait_target;
+    CmHirNamedType principal_trait;
+    CmHirType type;
+    CmSpan span;
+    uint32_t index;
+
+    span = cm_lower_span(state, ast_type->span);
+    if (ast_type->bound_count == 0u || ast_type->bounds == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "dynamic trait type has no bound storage");
+        return CM_HIR_TYPE_NONE;
+    }
+    principal_bound = NULL;
+    lifetime_bound = NULL;
+    for (index = 0u; index < ast_type->bound_count; ++index) {
+        const CmAstTypeBound *bound;
+        const CmAstType *bound_type;
+        const CmAstPath *bound_path;
+        int has_lifetime;
+
+        bound = &ast_type->bounds[index];
+        has_lifetime = bound->lifetime != CM_INTERN_ID_NONE;
+        bound_type = cm_ast_get_type(state->ast, bound->trait_type);
+        bound_path = bound_type == NULL
+                || bound_type->kind != CM_AST_TYPE_PATH
+            ? NULL : cm_ast_get_path(state->ast, bound_type->path);
+        if ((has_lifetime && bound->trait_type != CM_AST_TYPE_NONE)
+            || (has_lifetime
+                && (bound->binder.lifetime_count != 0u
+                    || bound->binder.lifetimes != NULL
+                    || bound->binder.span.start != 0u
+                    || bound->binder.span.end != 0u))
+            || (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED
+                && bound->modifier != CM_AST_TYPE_BOUND_RELAXED
+                && bound->modifier
+                    != CM_AST_TYPE_BOUND_CONDITIONALLY_CONST)
+            || (has_lifetime
+                && (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED
+                    || cm_lower_ast_string(state, bound->lifetime)
+                        == NULL))
+            || (!has_lifetime
+                && (bound_type == NULL
+                    || bound_type->kind != CM_AST_TYPE_PATH
+                    || !cm_lower_ast_path_storage_valid(bound_path)
+                    || !cm_lower_lifetime_binder_is_valid(&bound->binder,
+                        bound->span, bound_type)))
+            || bound->span.start >= bound->span.end
+            || bound->span.start < ast_type->span.start
+            || bound->span.end > ast_type->span.end
+            || (index != 0u
+                && ast_type->bounds[index - 1u].span.end
+                    >= bound->span.start)) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                CM_AST_ITEM_NONE, ast_type_id,
+                bound_type == NULL ? CM_AST_PATH_NONE : bound_type->path,
+                CM_HIR_OK, "dynamic trait bound storage is invalid");
+            return CM_HIR_TYPE_NONE;
+        }
+        if (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                cm_lower_span(state, bound->span), CM_AST_ITEM_NONE,
+                ast_type_id,
+                bound_type == NULL ? CM_AST_PATH_NONE : bound_type->path,
+                CM_HIR_OK,
+                "dynamic trait bounds with relaxed or const modifiers are "
+                "not representable in HIR");
+            return CM_HIR_TYPE_NONE;
+        }
+        if (has_lifetime) {
+            if (lifetime_bound != NULL) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+                    CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                    CM_HIR_OK,
+                    "dynamic trait HIR requires exactly one explicit "
+                    "lifetime bound");
+                return CM_HIR_TYPE_NONE;
+            }
+            lifetime_bound = bound;
+        } else {
+            if (bound->binder.lifetime_count != 0u) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                    cm_lower_span(state, bound->span), CM_AST_ITEM_NONE,
+                    ast_type_id, bound_type->path, CM_HIR_OK,
+                    "higher-ranked dynamic trait bounds are not "
+                    "representable in HIR");
+                return CM_HIR_TYPE_NONE;
+            }
+            if (principal_bound != NULL) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+                    CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
+                    CM_HIR_OK,
+                    "dynamic trait HIR cannot represent additional trait "
+                    "bounds");
+                return CM_HIR_TYPE_NONE;
+            }
+            principal_bound = bound;
+        }
+    }
+    if (principal_bound == NULL
+        || ast_type->bound_count != (lifetime_bound == NULL ? 1u : 2u)) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "dynamic trait HIR requires exactly one principal trait and "
+            "at most one explicit lifetime bound");
+        return CM_HIR_TYPE_NONE;
+    }
+    memset(&principal_trait, 0, sizeof(principal_trait));
+    memset(&trait_target, 0, sizeof(trait_target));
+    if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
+            principal_bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
+            &principal_trait, &trait_target, 1, 0, 0)) {
+        return CM_HIR_TYPE_NONE;
+    }
+    if (trait_target.item != NULL) {
+        if (trait_target.item->kind != CM_HIR_ITEM_TRAIT
+            || trait_target.item->data.trait_item.is_auto) {
+            cm_free(principal_trait.arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                cm_lower_span(state, principal_bound->span),
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "dynamic trait principal must be an authenticated "
+                "non-auto trait");
+            return CM_HIR_TYPE_NONE;
+        }
+    } else {
+        const CmAstItem *target_ast_item;
+
+        target_ast_item = trait_target.local_record == NULL ? NULL
+            : cm_ast_get_item(trait_target.local_record->ast,
+                trait_target.local_record->ast_id);
+        if (target_ast_item == NULL
+            || target_ast_item->kind != CM_AST_ITEM_TRAIT
+            || target_ast_item->data.trait_item.is_alias
+            || target_ast_item->data.trait_item.is_auto) {
+            cm_free(principal_trait.arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                cm_lower_span(state, principal_bound->span),
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "dynamic trait principal must be an authenticated "
+                "non-auto trait");
+            return CM_HIR_TYPE_NONE;
+        }
+    }
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
+    type.span = span;
+    type.data.dyn_trait_type.principal_trait = principal_trait;
+    if (lifetime_bound == NULL) {
+        type.data.dyn_trait_type.region.kind = CM_HIR_REGION_INFER;
+        type.data.dyn_trait_type.region.data.inference_variable =
+            state->next_region_inference;
+        state->next_region_inference += 1u;
+    } else {
+        if (!cm_lower_lifetime(state, lifetime_bound->lifetime, owner,
+                cm_lower_span(state, lifetime_bound->span),
+                &type.data.dyn_trait_type.region)) {
+            cm_free(principal_trait.arguments);
+            return CM_HIR_TYPE_NONE;
+        }
+    }
+    {
+        CmHirTypeId result;
+
+        result = cm_lower_add_type(state, &type, ast_type_id);
+        cm_free(principal_trait.arguments);
+        return result;
+    }
 }
 
 static int cm_lower_ast_path_storage_valid(const CmAstPath *path)

@@ -334,6 +334,48 @@ static int cm_alias_normalize_nominal(CmAliasNormalizeState *state,
     return 1;
 }
 
+static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
+    CmHirTypeId source_id, const CmHirType *source, CmHirTypeId *out_type)
+{
+    CmHirType replacement;
+    CmHirGenericArg *arguments;
+    CmHirRegion region;
+    int arguments_changed;
+
+    if (cm_alias_def_is_none(
+            source->data.dyn_trait_type.principal_trait.definition)) {
+        return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
+            source_id,
+            source->data.dyn_trait_type.principal_trait.definition,
+            CM_HIR_GENERIC_PARAM_NONE, CM_HIR_INVALID_ID);
+    }
+    if (!cm_alias_normalize_named_arguments(state, source_id,
+            &source->data.dyn_trait_type.principal_trait, &arguments,
+            &arguments_changed)) {
+        return 0;
+    }
+    if (!cm_alias_normalize_region(state, source_id,
+            &source->data.dyn_trait_type.region, &region)) {
+        cm_free(arguments);
+        return 0;
+    }
+    if (!arguments_changed && cm_alias_region_equal(&region,
+            &source->data.dyn_trait_type.region)) {
+        cm_free(arguments);
+        *out_type = source_id;
+        return 1;
+    }
+    replacement = *source;
+    replacement.data.dyn_trait_type.principal_trait.arguments = arguments;
+    replacement.data.dyn_trait_type.region = region;
+    if (!cm_alias_add_type(state, source_id, &replacement, out_type)) {
+        cm_free(arguments);
+        return 0;
+    }
+    cm_free(arguments);
+    return 1;
+}
+
 static int cm_alias_validate_projection(CmAliasNormalizeState *state,
     CmHirTypeId source_id, const CmHirType *source)
 {
@@ -1047,9 +1089,8 @@ static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
         return cm_alias_normalize_projection(state, source_id, &source,
             out_type);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_alias_fail(state,
-            CM_HIR_TYPE_ALIAS_UNSUPPORTED_DYN_TRAIT, source_id,
-            cm_hir_def_id_none(), CM_HIR_GENERIC_PARAM_NONE, CM_HIR_OK);
+        return cm_alias_normalize_dyn_trait(state, source_id, &source,
+            out_type);
     case CM_HIR_TYPE_OPAQUE_KIND:
         return cm_alias_fail(state,
             CM_HIR_TYPE_ALIAS_UNSUPPORTED_OPAQUE, source_id,

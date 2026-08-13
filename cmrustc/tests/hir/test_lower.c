@@ -1011,22 +1011,6 @@ static void test_unsupported_constructs_are_errors(void)
     assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
     cm_hir_context_destroy(&context);
 
-    result = lower_source(
-        "trait Error {} fn source(error: &dyn Error) {}",
-        &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    assert(strstr(result.first_error.message, "dynamic trait") != NULL);
-    cm_hir_context_destroy(&context);
-
-    result = lower_source(
-        "trait Error {} fn source(error: &(dyn Error + 'static)) {}",
-        &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    assert(strstr(result.first_error.message, "dynamic trait") != NULL);
-    cm_hir_context_destroy(&context);
-
     result = lower_source("#[repr(C)] struct Bad;", &context, NULL);
     assert(result.error_count == 1u);
     assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM);
@@ -6087,6 +6071,117 @@ static void test_relaxed_sized_generic_parameter(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_bounded_dynamic_trait_lowering(void)
+{
+    static const char accepted[] =
+        "trait Error {} "
+        "fn source(error: &(dyn Error + 'static)) {}";
+    static const char inferred[] =
+        "trait Error {} fn cause(error: &dyn Error) {}";
+    static const char *const rejected[] = {
+        "trait Error {} trait Send {} "
+            "fn source(error: &(dyn Error + Send + 'static)) {}",
+        "trait Error {} "
+            "fn source(error: &(dyn Error + 'static + 'static)) {}",
+        "trait Error {} "
+            "fn source(error: &(dyn for<'a> Error + 'static)) {}",
+        "trait Error {} fn source(error: &(dyn ?Error + 'static)) {}",
+        "trait Error {} "
+            "fn source(error: &(dyn ~const Error + 'static)) {}",
+        "struct Error; fn source(error: &(dyn Error + 'static)) {}"
+    };
+    const CmHirItem *error_trait;
+    const CmHirItem *source_function;
+    const CmHirType *reference_type;
+    const CmHirType *dynamic_type;
+    CmHirContext context;
+    CmHirLowerResult result;
+    size_t index;
+
+    result = lower_source(accepted, &context, NULL);
+    error_trait = find_item(&context, "Error");
+    source_function = find_item(&context, "source");
+    reference_type = source_function == NULL
+            || source_function->kind != CM_HIR_ITEM_FUNCTION
+            || source_function->data.function_item.signature.parameter_count
+                != 1u
+            || source_function->data.function_item.signature.parameters
+                == NULL
+        ? NULL : cm_hir_get_type(&context,
+            source_function->data.function_item.signature.parameters[0].type);
+    dynamic_type = reference_type == NULL
+            || reference_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            reference_type->data.reference_type.pointee);
+    assert(result.error_count == 0u
+        && error_trait != NULL && error_trait->kind == CM_HIR_ITEM_TRAIT
+        && source_function != NULL
+        && reference_type != NULL
+        && dynamic_type != NULL
+        && dynamic_type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.principal_trait.definition,
+            error_trait->definition)
+        && dynamic_type->data.dyn_trait_type.principal_trait.argument_count
+            == 0u
+        && dynamic_type->data.dyn_trait_type.principal_trait.arguments == NULL
+        && dynamic_type->data.dyn_trait_type.region.kind
+            == CM_HIR_REGION_STATIC);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(inferred, &context, NULL);
+    error_trait = find_item(&context, "Error");
+    source_function = find_item(&context, "cause");
+    reference_type = source_function == NULL
+            || source_function->kind != CM_HIR_ITEM_FUNCTION
+            || source_function->data.function_item.signature.parameter_count
+                != 1u
+            || source_function->data.function_item.signature.parameters
+                == NULL
+        ? NULL : cm_hir_get_type(&context,
+            source_function->data.function_item.signature.parameters[0].type);
+    dynamic_type = reference_type == NULL
+            || reference_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            reference_type->data.reference_type.pointee);
+    assert(result.error_count == 0u
+        && error_trait != NULL && error_trait->kind == CM_HIR_ITEM_TRAIT
+        && source_function != NULL
+        && reference_type != NULL
+        && dynamic_type != NULL
+        && dynamic_type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.principal_trait.definition,
+            error_trait->definition)
+        && dynamic_type->data.dyn_trait_type.principal_trait.argument_count
+            == 0u
+        && dynamic_type->data.dyn_trait_type.principal_trait.arguments == NULL
+        && dynamic_type->data.dyn_trait_type.region.kind
+            == CM_HIR_REGION_INFER
+        && dynamic_type->data.dyn_trait_type.region.data.inference_variable
+            != 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        size_t type_index;
+
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && (result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+                || result.first_error.kind
+                    == CM_HIR_LOWER_WRONG_NAMESPACE));
+        for (type_index = 0u; type_index < context.types.len; ++type_index) {
+            const CmHirType *type;
+
+            type = (const CmHirType *)cm_vec_at_const(
+                &context.types, type_index);
+            assert(type != NULL && type->kind != CM_HIR_TYPE_DYN_TRAIT_KIND);
+        }
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_conditionally_const_generic_parameter_bound(void)
 {
     static const char source[] =
@@ -6182,6 +6277,7 @@ int main(void)
     test_associated_type_lifetime_bounds();
     test_associated_type_bound_scope_errors();
     test_relaxed_sized_generic_parameter();
+    test_bounded_dynamic_trait_lowering();
     test_conditionally_const_generic_parameter_bound();
     return 0;
 }
