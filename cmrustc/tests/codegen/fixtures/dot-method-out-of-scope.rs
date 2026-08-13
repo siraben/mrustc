@@ -15,6 +15,6 @@ mod hidden {
 }
 
 #[no_mangle]
-pub extern "C" fn dot_value(input: u32) -> u32 {
-    input.value(7u32)
+pub extern "C" fn dot_value(input: u32, other: u32) -> u32 {
+    input.value(other)
 }
