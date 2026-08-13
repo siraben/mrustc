@@ -3366,6 +3366,12 @@ static void test_publication_atomicity(TestHir *fixture)
     identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
     cm_mir_context_init(&mir);
     cm_mir_publication_init(&publication);
+    assert(cm_semantic_admission_barrier_capability_id(&admission)
+            == UINT64_C(0)
+        && cm_mir_publication_begin_regions(&publication, &mir,
+            &admission) == CM_MIR_INVALID_ADMISSION
+        && publication.implementation == NULL
+        && cm_mir_body_count(&mir) == 0u);
     assert(cm_mir_publication_begin(&publication, &mir, &admission)
         == CM_MIR_OK);
     assert(cm_mir_publication_reserve(&publication,

@@ -1,6 +1,8 @@
 #include "cm/hir/semantic_barrier.h"
+#include "semantic_barrier_internal.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/admission.h"
 #include "cm/hir/finalization.h"
 #include "cm/hir/module_map.h"
 #include "cm/hir/semantic_mark.h"
@@ -8,7 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct CmSemanticBarrierState {
+struct CmSemanticBarrierState {
+    size_t reference_count;
+    int wrapper_live;
     CmHirContext *hir;
     CmHirCrateId local_crate;
     uint64_t storage_lifetime_id;
@@ -51,7 +55,7 @@ typedef struct CmSemanticBarrierState {
     void *typed_definitions;
     uint64_t typed_payload_fingerprint;
     int has_typed_snapshot;
-} CmSemanticBarrierState;
+};
 
 static uint64_t cm_semantic_barrier_capability_counter;
 
@@ -71,6 +75,17 @@ static int cm_semantic_barrier_typed_snapshot_matches(
     const CmSemanticBarrierState *state);
 static void cm_semantic_barrier_release_typed_snapshot(
     CmSemanticBarrierState *state);
+
+static void cm_semantic_barrier_state_release(CmSemanticBarrierState *state)
+{
+    if (state == NULL || state->reference_count == 0u) return;
+    state->reference_count -= 1u;
+    if (state->reference_count != 0u) return;
+    cm_semantic_barrier_release_typed_snapshot(state);
+    cm_free(state->atoms);
+    memset(state, 0, sizeof(*state));
+    cm_free(state);
+}
 
 static uint64_t cm_semantic_barrier_new_capability_id(void)
 {
@@ -519,8 +534,9 @@ static CmSemanticBarrierResult cm_semantic_barrier_result(
     return result;
 }
 
-CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
-    CmSemanticBarrier *barrier)
+static CmSemanticBarrierResult cm_semantic_barrier_advance_marked_impl(
+    CmSemanticBarrier *barrier,
+    const CmSemanticAdmission *typed_admission)
 {
     CmSemanticBarrierState *state;
     CmSemanticBarrierResult result;
@@ -545,6 +561,16 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
         result.status = CM_SEMANTIC_BARRIER_PHASE_ORDER;
         return result;
     }
+    if (typed_admission != NULL
+        && (!cm_semantic_admission_is_current(typed_admission)
+        || cm_semantic_admission_hir(typed_admission) != state->hir
+        || cm_semantic_admission_crate(typed_admission)
+            != state->local_crate
+        || cm_semantic_admission_generation(typed_admission)
+            != state->semantic_generation)) {
+        result.status = CM_SEMANTIC_BARRIER_STALE;
+        return result;
+    }
     if (!cm_semantic_barrier_typed_snapshot_matches(state)) {
         result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
         return result;
@@ -566,8 +592,11 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
         : (CmHirBodyId *)cm_alloc(body_bytes);
     for (index = 0u; index < state->atom_count; ++index)
         bodies[index] = state->atoms[index].body;
-    mark_result = cm_hir_semantic_mark_bodies(state->hir, bodies,
-        state->atom_count);
+    mark_result = typed_admission == NULL
+        ? cm_hir_semantic_mark_bodies(state->hir, bodies,
+            state->atom_count)
+        : cm_hir_semantic_mark_admitted_bodies(state->hir, bodies,
+            state->atom_count, typed_admission);
     cm_free(bodies);
     if (mark_result.status != CM_SEMANTIC_MARK_OK) {
         result.status = mark_result.status
@@ -596,8 +625,28 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
     return result;
 }
 
-CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
+CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
     CmSemanticBarrier *barrier)
+{
+    return cm_semantic_barrier_advance_marked_impl(barrier, NULL);
+}
+
+CmSemanticBarrierResult cm_semantic_barrier_advance_marked_admitted(
+    CmSemanticBarrier *barrier,
+    const CmSemanticAdmission *typed_admission)
+{
+    if (typed_admission == NULL) {
+        return cm_semantic_barrier_result(
+            CM_SEMANTIC_BARRIER_INVALID_ARGUMENT,
+            CM_SEMANTIC_BARRIER_NONE);
+    }
+    return cm_semantic_barrier_advance_marked_impl(barrier,
+        typed_admission);
+}
+
+static CmSemanticBarrierResult cm_semantic_barrier_advance_regions_impl(
+    CmSemanticBarrier *barrier,
+    const CmSemanticAdmission *marked_admission)
 {
     CmSemanticBarrierState *state;
     CmSemanticBarrierResult result;
@@ -622,6 +671,16 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
         result.status = CM_SEMANTIC_BARRIER_PHASE_ORDER;
         return result;
     }
+    if (marked_admission != NULL
+        && (!cm_semantic_admission_is_current(marked_admission)
+        || cm_semantic_admission_hir(marked_admission) != state->hir
+        || cm_semantic_admission_crate(marked_admission)
+            != state->local_crate
+        || cm_semantic_admission_generation(marked_admission)
+            != state->semantic_generation)) {
+        result.status = CM_SEMANTIC_BARRIER_STALE;
+        return result;
+    }
     if (!cm_semantic_barrier_typed_snapshot_matches(state)) {
         result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
         return result;
@@ -643,8 +702,11 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
         : (CmHirBodyId *)cm_alloc(body_bytes);
     for (index = 0u; index < state->atom_count; ++index)
         bodies[index] = state->atoms[index].body;
-    regions_result = cm_hir_semantic_check_regions(state->hir, bodies,
-        state->atom_count);
+    regions_result = marked_admission == NULL
+        ? cm_hir_semantic_check_regions(state->hir, bodies,
+            state->atom_count)
+        : cm_hir_semantic_check_admitted_regions(state->hir,
+            bodies, state->atom_count, marked_admission);
     cm_free(bodies);
     if (regions_result.status != CM_SEMANTIC_REGIONS_OK) {
         result.status = regions_result.status
@@ -668,6 +730,25 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
     result.status = CM_SEMANTIC_BARRIER_OK;
     result.phase = CM_SEMANTIC_BARRIER_REGIONS;
     return result;
+}
+
+CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
+    CmSemanticBarrier *barrier)
+{
+    return cm_semantic_barrier_advance_regions_impl(barrier, NULL);
+}
+
+CmSemanticBarrierResult cm_semantic_barrier_advance_regions_admitted(
+    CmSemanticBarrier *barrier,
+    const CmSemanticAdmission *marked_admission)
+{
+    if (marked_admission == NULL) {
+        return cm_semantic_barrier_result(
+            CM_SEMANTIC_BARRIER_INVALID_ARGUMENT,
+            CM_SEMANTIC_BARRIER_NONE);
+    }
+    return cm_semantic_barrier_advance_regions_impl(barrier,
+        marked_admission);
 }
 
 static void cm_semantic_barrier_capture_generation(
@@ -946,6 +1027,8 @@ CmSemanticBarrierResult cm_semantic_barrier_init_structural(
         }
     }
     state = (CmSemanticBarrierState *)cm_alloc_zeroed(1u, sizeof(*state));
+    state->reference_count = 1u;
+    state->wrapper_live = 1;
     state->atoms = atom_count == 0u ? NULL
         : (CmSemanticAtomView *)cm_alloc_zeroed(atom_count,
             sizeof(*state->atoms));
@@ -1190,12 +1273,47 @@ void cm_semantic_barrier_destroy(CmSemanticBarrier *barrier)
     if (barrier == NULL) return;
     state = (CmSemanticBarrierState *)barrier->state;
     if (state != NULL) {
-        cm_semantic_barrier_release_typed_snapshot(state);
-        cm_free(state->atoms);
-        memset(state, 0, sizeof(*state));
-        cm_free(state);
+        state->wrapper_live = 0;
+        state->capability_id = UINT64_C(0);
+        cm_semantic_barrier_state_release(state);
     }
     barrier->state = NULL;
+}
+
+CmSemanticBarrierAuthority *cm_semantic_barrier_authority_retain(
+    const CmSemanticBarrier *barrier)
+{
+    CmSemanticBarrierState *state;
+
+    state = barrier == NULL ? NULL
+        : (CmSemanticBarrierState *)barrier->state;
+    if (!cm_semantic_barrier_state_current(state)
+        || !state->wrapper_live
+        || state->reference_count == (size_t)-1) return NULL;
+    state->reference_count += 1u;
+    return state;
+}
+
+void cm_semantic_barrier_authority_release(
+    CmSemanticBarrierAuthority *authority)
+{
+    cm_semantic_barrier_state_release(authority);
+}
+
+int cm_semantic_barrier_authority_matches(
+    const CmSemanticBarrierAuthority *authority,
+    uint64_t capability_id, CmSemanticBarrierPhase phase,
+    const CmHirContext *hir, CmHirCrateId crate_id,
+    uint64_t semantic_generation)
+{
+    return authority != NULL && authority->wrapper_live
+        && authority->capability_id == capability_id
+        && capability_id != UINT64_C(0)
+        && authority->phase == phase
+        && authority->hir == hir
+        && authority->local_crate == crate_id
+        && authority->semantic_generation == semantic_generation
+        && cm_semantic_barrier_state_current(authority);
 }
 
 int cm_semantic_barrier_is_current(const CmSemanticBarrier *barrier)

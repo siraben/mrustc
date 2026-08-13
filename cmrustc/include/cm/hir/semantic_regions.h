@@ -3,6 +3,8 @@
 
 #include "cm/hir/model.h"
 
+struct CmSemanticAdmission;
+
 typedef enum CmSemanticRegionsStatus {
     CM_SEMANTIC_REGIONS_OK = 0,
     CM_SEMANTIC_REGIONS_INVALID_ARGUMENT,
@@ -37,15 +39,23 @@ typedef struct CmSemanticRegionsResult {
  * Every expression owned by a manifest body must be reachable exactly once
  * and retain the bounded marker's recomputed builtin-Copy usage plus its
  * NOT_PROMOTED sentinel. The body array selects what to check; it does not
- * prove crate completeness. Predicates, supertraits, associated bounds, ADT
- * fields, enum discriminants, and type-position expressions are not roots of
- * this checker. A manifest body owner or enclosing trait/impl with any
- * predicate or outlives constraint is rejected fail-closed. As throughout the
+ * prove crate completeness. Generic predicates on a manifest body owner and
+ * enclosing trait/impl are structural roots: their already-proven subjects,
+ * trait arguments, associated-equality values, and outlives regions must be
+ * closed and scoped, including late-bound regions under the exact predicate
+ * binder. This does not prove trait satisfaction or solve outlives relations.
+ * Supertraits, associated bounds, ADT fields, enum discriminants, and
+ * type-position expressions are not roots of this checker. As throughout the
  * HIR model, callers must not bypass public mutators with raw writes.
  */
 CmSemanticRegionsResult cm_hir_semantic_check_regions(
     const CmHirContext *hir, const CmHirBodyId *bodies,
     size_t body_count);
+
+/* As above, but consume durable semantic call recipes for selected calls. */
+CmSemanticRegionsResult cm_hir_semantic_check_admitted_regions(
+    const CmHirContext *hir, const CmHirBodyId *bodies,
+    size_t body_count, const struct CmSemanticAdmission *admission);
 
 const char *cm_semantic_regions_status_name(
     CmSemanticRegionsStatus status);

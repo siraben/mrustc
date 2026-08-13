@@ -41,7 +41,8 @@ CmMirLowerResult cm_mir_lower_body(CmMirContext *context,
 /*
  * Lower one exact reachable instance. Direct callees must already be
  * published in the MIR context, making reachability order explicit. Calls
- * may pass one or two exact u32 or checked same-crate named-aggregate values;
+ * may pass zero, one, or two exact scalar or checked same-crate
+ * named-aggregate values;
  * aggregate arguments require a monomorphic callee and every call result
  * remains exact u32.
  */

@@ -268,6 +268,10 @@ typedef struct CmMirContext {
     uint64_t admitted_rewind_generation;
     /* Exact semantic authority which admitted every retained body. */
     uint64_t admitted_admission_capability_id;
+    /* Exact REGIONS authority from which that admission was derived. */
+    uint64_t admitted_barrier_capability_id;
+    /* Whole-local REGIONS semantic authority used to discover the slice. */
+    uint64_t admitted_parent_capability_id;
     /* Zero is the legacy target-neutral state; usize requires 32 or 64. */
     unsigned int pointer_bits;
 } CmMirContext;
@@ -286,6 +290,9 @@ void cm_mir_context_destroy(CmMirContext *context);
 void cm_mir_publication_init(CmMirPublication *publication);
 void cm_mir_publication_destroy(CmMirPublication *publication);
 CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
+    CmMirContext *context, const CmSemanticAdmission *admission);
+/* Production boundary: additionally require an exact bound REGIONS authority. */
+CmMirStatus cm_mir_publication_begin_regions(CmMirPublication *publication,
     CmMirContext *context, const CmSemanticAdmission *admission);
 CmMirStatus cm_mir_publication_reserve(CmMirPublication *publication,
     CmHirDefId definition, const CmHirTypeId *substitutions,

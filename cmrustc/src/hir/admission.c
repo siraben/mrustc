@@ -1,13 +1,27 @@
 #include "cm/hir/admission.h"
 
 #include "admission_internal.h"
+#include "admission_authority_internal.h"
+#include "semantic_barrier_internal.h"
 #include "semantic_results_internal.h"
 
 #include "cm/alloc.h"
 #include "cm/hir/instance.h"
+#include "cm/hir/semantic_barrier.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+struct CmSemanticAdmissionAuthority {
+    size_t reference_count;
+    int owner_live;
+    int whole_local_regions;
+    uint64_t capability_id;
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+    uint64_t semantic_generation;
+    uint64_t regions_capability_id;
+};
 
 typedef struct CmSemanticAdmissionState {
     const CmHirContext *hir;
@@ -15,7 +29,11 @@ typedef struct CmSemanticAdmissionState {
     uint64_t storage_lifetime_id;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
-    uint64_t capability_id;
+    CmSemanticAdmissionAuthority *authority;
+    CmSemanticBarrierAuthority *regions_authority;
+    uint64_t regions_capability_id;
+    CmSemanticAdmissionAuthority *parent_authority;
+    uint64_t parent_capability_id;
     CmSemanticResults *results;
 } CmSemanticAdmissionState;
 
@@ -26,6 +44,49 @@ static uint64_t cm_admission_new_capability_id(void)
     if (cm_admission_capability_counter == UINT64_MAX) abort();
     cm_admission_capability_counter += 1u;
     return cm_admission_capability_counter;
+}
+
+static void cm_admission_authority_release(
+    CmSemanticAdmissionAuthority *authority)
+{
+    if (authority == NULL || authority->reference_count == 0u) return;
+    authority->reference_count -= 1u;
+    if (authority->reference_count == 0u) {
+        memset(authority, 0, sizeof(*authority));
+        cm_free(authority);
+    }
+}
+
+static void cm_admission_state_discard(CmSemanticAdmissionState *state)
+{
+    if (state == NULL) return;
+    if (state->authority != NULL) state->authority->owner_live = 0;
+    cm_admission_authority_release(state->parent_authority);
+    cm_semantic_barrier_authority_release(state->regions_authority);
+    cm_admission_authority_release(state->authority);
+    cm_semantic_results_destroy(state->results);
+    memset(state, 0, sizeof(*state));
+    cm_free(state);
+}
+
+static CmSemanticAdmissionAuthority *cm_admission_authority_new(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    uint64_t semantic_generation, uint64_t regions_capability_id,
+    int whole_local_regions)
+{
+    CmSemanticAdmissionAuthority *authority;
+
+    authority = (CmSemanticAdmissionAuthority *)cm_alloc_zeroed(1u,
+        sizeof(*authority));
+    authority->reference_count = 1u;
+    authority->owner_live = 1;
+    authority->whole_local_regions = whole_local_regions;
+    authority->capability_id = cm_admission_new_capability_id();
+    authority->hir = hir;
+    authority->local_crate = local_crate;
+    authority->semantic_generation = semantic_generation;
+    authority->regions_capability_id = regions_capability_id;
+    return authority;
 }
 
 static CmSemanticAdmissionResult cm_admission_result(
@@ -58,14 +119,75 @@ static CmSemanticAdmissionResult cm_admission_result(
 static int cm_admission_state_current(const CmSemanticAdmissionState *state)
 {
     const CmHirContext *hir;
+    CmSemanticResultsSealKind seal_kind;
     if (state == NULL || state->hir == NULL
         || state->local_crate == CM_HIR_CRATE_NONE) return 0;
     hir = state->hir;
-    return state->capability_id != UINT64_C(0)
+    seal_kind = cm_semantic_results_seal_kind(state->results);
+    return state->authority != NULL && state->authority->owner_live
+        && state->authority->capability_id != UINT64_C(0)
+        && state->authority->hir == hir
+        && state->authority->local_crate == state->local_crate
+        && state->authority->semantic_generation == state->semantic_generation
+        && state->authority->regions_capability_id
+            == state->regions_capability_id
         && hir->storage.lifetime_id == state->storage_lifetime_id
         && hir->semantic_generation == state->semantic_generation
         && hir->rewind_generation == state->rewind_generation
-        && cm_hir_get_crate(hir, state->local_crate) != NULL;
+        && cm_hir_get_crate(hir, state->local_crate) != NULL
+        && seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        && (!state->authority->whole_local_regions
+            || seal_kind == CM_SEMANTIC_RESULTS_SEAL_WHOLE_LOCAL)
+        && (state->parent_authority == NULL
+            || seal_kind == CM_SEMANTIC_RESULTS_SEAL_INSTANCE_CLOSURE)
+        && ((state->regions_authority == NULL
+                && state->regions_capability_id == UINT64_C(0))
+            || (state->regions_authority != NULL
+                && state->regions_capability_id != UINT64_C(0)
+                && cm_semantic_barrier_authority_matches(
+                    state->regions_authority,
+                    state->regions_capability_id,
+                    CM_SEMANTIC_BARRIER_REGIONS, hir,
+                    state->local_crate, state->semantic_generation)))
+        && ((state->parent_authority == NULL
+                && state->parent_capability_id == UINT64_C(0))
+            || (state->parent_authority != NULL
+                && state->parent_capability_id != UINT64_C(0)
+                && state->parent_authority->owner_live
+                && state->parent_authority->whole_local_regions
+                && state->parent_authority->capability_id
+                    == state->parent_capability_id
+                && state->parent_authority->hir == hir
+                && state->parent_authority->local_crate
+                    == state->local_crate
+                && state->parent_authority->semantic_generation
+                    == state->semantic_generation
+                && state->parent_authority->regions_capability_id
+                    == state->regions_capability_id));
+}
+
+static int cm_admission_regions_authority(
+    const CmSemanticBarrier *barrier, const CmHirContext **out_hir,
+    CmHirCrateId *out_crate)
+{
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+
+    if (barrier == NULL || out_hir == NULL || out_crate == NULL
+        || !cm_semantic_barrier_is_current(barrier)
+        || cm_semantic_barrier_phase(barrier) != CM_SEMANTIC_BARRIER_REGIONS
+        || cm_semantic_barrier_capability_id(barrier) == UINT64_C(0)) {
+        return 0;
+    }
+    hir = cm_semantic_barrier_hir(barrier);
+    crate_id = cm_semantic_barrier_crate(barrier);
+    if (hir == NULL || crate_id == CM_HIR_CRATE_NONE
+        || cm_semantic_barrier_generation(barrier)
+            != hir->semantic_generation
+        || cm_hir_get_crate(hir, crate_id) == NULL) return 0;
+    *out_hir = hir;
+    *out_crate = crate_id;
+    return 1;
 }
 
 static const CmHirItem *cm_admission_item(const CmHirContext *hir,
@@ -274,7 +396,8 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
-    state->capability_id = cm_admission_new_capability_id();
+    state->authority = cm_admission_authority_new(hir, local_crate,
+        hir->semantic_generation, UINT64_C(0), 0);
     state->results = semantic_results;
     admission->state = state;
     cm_free(journal);
@@ -298,8 +421,178 @@ rollback:
         }
     }
     cm_semantic_results_destroy(semantic_results);
-    cm_free(state);
+    cm_admission_state_discard(state);
     cm_free(journal);
+    return result;
+}
+
+CmSemanticAdmissionResult cm_semantic_admit_regions_local_crate(
+    CmSemanticAdmission *admission, const CmSemanticBarrier *barrier)
+{
+    CmSemanticAdmissionResult result;
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticResults *semantic_results;
+    CmSemanticResultsBodyStage body_stage;
+    CmSemanticAdmissionState *state;
+    CmSemanticResultsStatus results_status;
+    size_t item_index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_BARRIER);
+    hir = NULL;
+    local_crate = CM_HIR_CRATE_NONE;
+    if (admission == NULL || admission->state != NULL
+        || !cm_admission_regions_authority(barrier, &hir, &local_crate)) {
+        return result;
+    }
+    memset(&finalization, 0, sizeof(finalization));
+    memset(&session, 0, sizeof(session));
+    semantic_results = NULL;
+    state = NULL;
+    cm_semantic_results_body_stage_init(&body_stage);
+
+    result.hir_status = cm_hir_crate_finalization_init(&finalization, hir,
+        local_crate);
+    if (result.hir_status != CM_HIR_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_FINALIZATION_FAILURE;
+        goto cleanup_regions;
+    }
+    {
+        CmProjectionNormalizeLimits limits;
+
+        limits.max_nodes = 4096u;
+        limits.max_projection_steps = 256u;
+        result.item_result =
+            cm_semantic_item_check_finalized_local_trait_impls(
+                &finalization, limits);
+    }
+    if (result.item_result.status != CM_SEMANTIC_ITEM_OK) {
+        result.owner = cm_hir_def_id_is_none(result.item_result.impl_member)
+            ? result.item_result.impl_definition
+            : result.item_result.impl_member;
+        result.status = CM_SEMANTIC_ADMISSION_ITEM_FAILURE;
+        goto cleanup_regions;
+    }
+    results_status = cm_semantic_results_begin(hir, local_crate,
+        &semantic_results);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto cleanup_regions;
+    }
+    for (item_index = 0u; item_index < hir->items.len; ++item_index) {
+        const CmHirItem *item;
+        const CmHirBody *body;
+        CmSemanticAtomView atom;
+        CmSemanticSessionOptions options;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, item_index);
+        if (item == NULL) {
+            result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+            result.hir_status = CM_HIR_INVARIANT_VIOLATION;
+            goto cleanup_regions;
+        }
+        if (item->definition.crate_id != local_crate
+            || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->data.function_item.body == CM_HIR_BODY_NONE) continue;
+        result.item = (CmHirItemId)(item_index + 1u);
+        result.owner = item->definition;
+        result.body = item->data.function_item.body;
+        body = cm_hir_get_body(hir, result.body);
+        memset(&atom, 0, sizeof(atom));
+        if (body == NULL || body->state != CM_HIR_BODY_TYPED
+            || body->root_expression == CM_HIR_EXPR_NONE
+            || !cm_hir_def_id_equal(body->owner, item->definition)
+            || !cm_semantic_barrier_contains_body(barrier, result.body,
+                &atom)
+            || atom.kind != CM_SEMANTIC_ATOM_FUNCTION
+            || atom.body != result.body
+            || !cm_hir_def_id_equal(atom.owner, item->definition)) {
+            result.status = CM_SEMANTIC_ADMISSION_INVALID_BARRIER;
+            goto cleanup_regions;
+        }
+        cm_semantic_session_options_init(&options);
+        options.local_crate = local_crate;
+        options.exact_owner = item->definition;
+        options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+        options.finalization = &finalization;
+        result.session_status = cm_semantic_session_init(&session, hir,
+            &options);
+        if (result.session_status != CM_TRAIT_SOLVER_PROVEN) {
+            result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
+            goto cleanup_regions;
+        }
+        {
+            CmSemanticBodyEvidenceWriteback writeback;
+
+            memset(&writeback, 0, sizeof(writeback));
+            writeback.context = &body_stage;
+            writeback.checked_body = cm_semantic_results_stage_checked_body;
+            writeback.projection_decision =
+                cm_semantic_results_stage_projection_decision;
+            writeback.discard = cm_semantic_results_discard_body_stage;
+            result.body_result =
+                cm_semantic_body_check_definition_with_evidence(&session,
+                    result.body, &writeback);
+        }
+        if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
+            goto cleanup_regions;
+        }
+        results_status = cm_semantic_results_commit_checked_body(
+            semantic_results, &session, &result.body_result, &body_stage);
+        cm_semantic_session_destroy(&session);
+        if (results_status != CM_SEMANTIC_RESULTS_OK) {
+            result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+            result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+                ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+            goto cleanup_regions;
+        }
+    }
+    results_status = cm_semantic_results_seal(semantic_results);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        result.status = CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+        result.hir_status = results_status == CM_SEMANTIC_RESULTS_OVERFLOW
+            ? CM_HIR_ID_EXHAUSTED : CM_HIR_INVARIANT_VIOLATION;
+        goto cleanup_regions;
+    }
+    state = (CmSemanticAdmissionState *)cm_alloc_zeroed(1u,
+        sizeof(*state));
+    state->hir = hir;
+    state->local_crate = local_crate;
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->regions_authority =
+        cm_semantic_barrier_authority_retain(barrier);
+    state->regions_capability_id =
+        cm_semantic_barrier_capability_id(barrier);
+    state->authority = cm_admission_authority_new(hir, local_crate,
+        hir->semantic_generation, state->regions_capability_id, 1);
+    state->results = semantic_results;
+    semantic_results = NULL;
+    if (!cm_admission_state_current(state)) {
+        result.status = CM_SEMANTIC_ADMISSION_INVALID_BARRIER;
+        goto cleanup_regions;
+    }
+    admission->state = state;
+    state = NULL;
+    result.status = CM_SEMANTIC_ADMISSION_OK;
+    result.local_bodies.status = CM_HIR_LOCAL_BODIES_OK;
+    result.item_result.status = CM_SEMANTIC_ITEM_OK;
+    result.body_result.status = CM_SEMANTIC_BODY_OK;
+    result.body_result.solver_kind = CM_TRAIT_SOLVER_PROVEN;
+    result.session_status = CM_TRAIT_SOLVER_PROVEN;
+
+cleanup_regions:
+    cm_semantic_results_body_stage_destroy(&body_stage);
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    cm_semantic_results_destroy(semantic_results);
+    cm_admission_state_discard(state);
     return result;
 }
 
@@ -458,7 +751,8 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
-    state->capability_id = cm_admission_new_capability_id();
+    state->authority = cm_admission_authority_new(hir, local_crate,
+        hir->semantic_generation, UINT64_C(0), 0);
     state->results = semantic_results;
     admission->state = state;
     semantic_results = NULL;
@@ -643,6 +937,8 @@ static int cm_admission_canonical_instance_supported(
 static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
     CmSemanticAdmission *admission, CmHirContext *hir,
     CmHirCrateId local_crate,
+    const CmSemanticBarrier *regions_authority,
+    const CmSemanticAdmission *parent_admission,
     const CmSemanticCanonicalReachableInstance *instances,
     size_t instance_count, const CmAdmissionCanonicalCallInput *calls,
     size_t call_count, int leaf_only)
@@ -657,14 +953,31 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
     CmHirDecodedCanonicalInstance *decoded;
     size_t allocation_size;
     size_t index;
+    const CmHirContext *authority_hir;
+    CmHirCrateId authority_crate;
 
     result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    authority_hir = NULL;
+    authority_crate = CM_HIR_CRATE_NONE;
     if (admission == NULL || admission->state != NULL || hir == NULL
         || local_crate == CM_HIR_CRATE_NONE || instances == NULL
         || instance_count == 0u
         || (call_count == 0u) != (calls == NULL)
         || (leaf_only && call_count != 0u)
         || cm_hir_get_crate(hir, local_crate) == NULL
+        || ((regions_authority == NULL) != (parent_admission == NULL))
+        || (regions_authority != NULL
+            && (!cm_admission_regions_authority(regions_authority,
+                    &authority_hir, &authority_crate)
+                || authority_hir != hir || authority_crate != local_crate
+                || !cm_semantic_admission_is_current(parent_admission)
+                || cm_semantic_admission_hir(parent_admission) != hir
+                || cm_semantic_admission_crate(parent_admission)
+                    != local_crate
+                || cm_semantic_admission_barrier_capability_id(
+                    parent_admission)
+                    != cm_semantic_barrier_capability_id(
+                        regions_authority)))
         || !cm_size_mul(instance_count, sizeof(*identities), NULL)
         || !cm_size_mul(instance_count, sizeof(*decoded),
             &allocation_size)) return result;
@@ -679,6 +992,9 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
         allocation_size);
     for (index = 0u; index < instance_count; ++index) {
         const CmHirBody *body;
+        CmSemanticAtomView atom;
+        CmSemanticBodyView parent_body;
+        const CmSemanticResults *parent_results;
         size_t previous;
 
         cm_hir_canonical_instance_init(&identities[index]);
@@ -693,8 +1009,28 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
         result.owner = identities[index].body_definition;
         result.body = identities[index].body;
         body = cm_hir_get_body(hir, identities[index].body);
+        memset(&atom, 0, sizeof(atom));
+        memset(&parent_body, 0, sizeof(parent_body));
+        parent_results = parent_admission == NULL ? NULL
+            : cm_semantic_admission_results(parent_admission);
         if (!cm_admission_canonical_instance_supported(hir, local_crate,
-                &decoded[index], body, leaf_only)) goto cleanup_instances;
+                &decoded[index], body, leaf_only)
+            || (regions_authority != NULL
+                && (parent_results == NULL
+                    || cm_semantic_results_body(parent_results,
+                        parent_admission, identities[index].body,
+                        &parent_body) != CM_SEMANTIC_RESULTS_OK
+                    || parent_body.body != identities[index].body
+                    || !cm_hir_def_id_equal(parent_body.owner,
+                        identities[index].body_definition)
+                    || !cm_semantic_barrier_contains_body(
+                        regions_authority, identities[index].body, &atom)
+                    || atom.kind != CM_SEMANTIC_ATOM_FUNCTION
+                    || atom.body != identities[index].body
+                    || !cm_hir_def_id_equal(atom.owner,
+                        identities[index].body_definition)))) {
+            goto cleanup_instances;
+        }
         for (previous = 0u; previous < index; ++previous) {
             int equal;
 
@@ -903,10 +1239,26 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
-    state->capability_id = cm_admission_new_capability_id();
+    state->regions_authority = regions_authority == NULL ? NULL
+        : cm_semantic_barrier_authority_retain(regions_authority);
+    state->regions_capability_id = regions_authority == NULL
+        ? UINT64_C(0)
+        : cm_semantic_barrier_capability_id(regions_authority);
+    state->parent_authority = parent_admission == NULL ? NULL
+        : cm_semantic_admission_authority_retain(parent_admission, 1);
+    state->parent_capability_id = parent_admission == NULL
+        ? UINT64_C(0)
+        : cm_semantic_admission_capability_id(parent_admission);
+    state->authority = cm_admission_authority_new(hir, local_crate,
+        hir->semantic_generation, state->regions_capability_id, 0);
     state->results = semantic_results;
     semantic_results = NULL;
+    if (!cm_admission_state_current(state)) {
+        result.status = CM_SEMANTIC_ADMISSION_INVALID_BARRIER;
+        goto cleanup_instances;
+    }
     admission->state = state;
+    state = NULL;
     result.status = CM_SEMANTIC_ADMISSION_OK;
     result.item_result.status = CM_SEMANTIC_ITEM_OK;
     result.body_result.status = CM_SEMANTIC_BODY_OK;
@@ -918,6 +1270,7 @@ cleanup_instances:
     cm_semantic_session_destroy(&session);
     cm_hir_crate_finalization_destroy(&finalization);
     cm_semantic_results_destroy(semantic_results);
+    cm_admission_state_discard(state);
     for (index = 0u; index < instance_count; ++index) {
         cm_hir_decoded_canonical_instance_destroy(&decoded[index]);
         cm_hir_canonical_instance_destroy(&identities[index]);
@@ -959,7 +1312,7 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_leaf_instances(
         canonical[index].identity = &identities[index];
     }
     result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
-        canonical, instance_count, NULL, 0u, 1);
+        NULL, NULL, canonical, instance_count, NULL, 0u, 1);
 
 cleanup:
     for (index = 0u; index < instance_count; ++index) {
@@ -1054,7 +1407,8 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_instance_closure(
         canonical_calls[index].callee = &identities[callee_index];
     }
     result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
-        canonical, instance_count, canonical_calls, call_count, 0);
+        NULL, NULL, canonical, instance_count, canonical_calls, call_count,
+        0);
 
 cleanup:
     for (index = 0u; index < instance_count; ++index) {
@@ -1091,7 +1445,46 @@ cm_semantic_admit_typed_canonical_instance_closure(
         inputs[index].callee = calls[index].callee;
     }
     result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
-        instances, instance_count, inputs, call_count, 0);
+        NULL, NULL, instances, instance_count, inputs, call_count, 0);
+    cm_free(inputs);
+    return result;
+}
+
+CmSemanticAdmissionResult
+cm_semantic_admit_regions_canonical_instance_closure(
+    CmSemanticAdmission *admission,
+    const CmSemanticBarrier *regions_authority,
+    const CmSemanticAdmission *all_local_admission,
+    const CmSemanticCanonicalReachableInstance *instances,
+    size_t instance_count,
+    const CmSemanticCanonicalReachableInstanceCall *calls,
+    size_t call_count)
+{
+    CmAdmissionCanonicalCallInput *inputs;
+    CmSemanticAdmissionResult result;
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+    size_t bytes;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_BARRIER);
+    hir = NULL;
+    local_crate = CM_HIR_CRATE_NONE;
+    if (!cm_admission_regions_authority(regions_authority, &hir,
+            &local_crate)
+        || all_local_admission == NULL
+        || (call_count == 0u) != (calls == NULL)
+        || !cm_size_mul(call_count, sizeof(*inputs), &bytes)) return result;
+    inputs = call_count == 0u ? NULL
+        : (CmAdmissionCanonicalCallInput *)cm_alloc_zeroed(1u, bytes);
+    for (index = 0u; index < call_count; ++index) {
+        inputs[index].caller = calls[index].caller;
+        inputs[index].expression = calls[index].expression;
+        inputs[index].callee = calls[index].callee;
+    }
+    result = cm_admit_typed_canonical_instances(admission, (CmHirContext *)hir,
+        local_crate, regions_authority, all_local_admission, instances,
+        instance_count, inputs, call_count, 0);
     cm_free(inputs);
     return result;
 }
@@ -1102,11 +1495,43 @@ void cm_semantic_admission_destroy(CmSemanticAdmission *admission)
     if (admission->state != NULL) {
         CmSemanticAdmissionState *state;
         state = (CmSemanticAdmissionState *)admission->state;
-        cm_semantic_results_destroy(state->results);
-        memset(admission->state, 0, sizeof(CmSemanticAdmissionState));
-        cm_free(admission->state);
+        cm_admission_state_discard(state);
     }
     admission->state = NULL;
+}
+
+CmSemanticAdmissionAuthority *cm_semantic_admission_authority_retain(
+    const CmSemanticAdmission *admission, int require_regions_whole_local)
+{
+    CmSemanticAdmissionState *state;
+    CmSemanticAdmissionAuthority *authority;
+
+    state = admission == NULL ? NULL
+        : (CmSemanticAdmissionState *)admission->state;
+    if (!cm_admission_state_current(state)) return NULL;
+    authority = state->authority;
+    if (authority == NULL
+        || (require_regions_whole_local
+            && (!authority->whole_local_regions
+                || state->regions_capability_id == UINT64_C(0)))
+        || authority->reference_count == (size_t)-1) return NULL;
+    authority->reference_count += 1u;
+    return authority;
+}
+
+void cm_semantic_admission_authority_release(
+    CmSemanticAdmissionAuthority *authority)
+{
+    cm_admission_authority_release(authority);
+}
+
+uint64_t cm_semantic_admission_parent_capability_id(
+    const CmSemanticAdmission *admission)
+{
+    const CmSemanticAdmissionState *state = admission == NULL ? NULL
+        : (const CmSemanticAdmissionState *)admission->state;
+    return cm_admission_state_current(state)
+        ? state->parent_capability_id : UINT64_C(0);
 }
 
 const CmSemanticResults *cm_semantic_admission_results(
@@ -1152,7 +1577,16 @@ uint64_t cm_semantic_admission_capability_id(
     const CmSemanticAdmissionState *state = admission == NULL ? NULL
         : (const CmSemanticAdmissionState *)admission->state;
     return cm_admission_state_current(state)
-        ? state->capability_id : UINT64_C(0);
+        ? state->authority->capability_id : UINT64_C(0);
+}
+
+uint64_t cm_semantic_admission_barrier_capability_id(
+    const CmSemanticAdmission *admission)
+{
+    const CmSemanticAdmissionState *state = admission == NULL ? NULL
+        : (const CmSemanticAdmissionState *)admission->state;
+    return cm_admission_state_current(state)
+        ? state->regions_capability_id : UINT64_C(0);
 }
 
 const char *cm_semantic_admission_status_name(CmSemanticAdmissionStatus status)
@@ -1166,6 +1600,7 @@ const char *cm_semantic_admission_status_name(CmSemanticAdmissionStatus status)
     case CM_SEMANTIC_ADMISSION_SESSION_FAILURE: return "session-failure";
     case CM_SEMANTIC_ADMISSION_BODY_FAILURE: return "body-failure";
     case CM_SEMANTIC_ADMISSION_HIR_FAILURE: return "hir-failure";
+    case CM_SEMANTIC_ADMISSION_INVALID_BARRIER: return "invalid-barrier";
     }
     return "unknown";
 }

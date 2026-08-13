@@ -29,6 +29,13 @@ CmCEmitStatus cm_c_emit_program(CmStrBuf *output,
     const CmHirContext *hir, const CmMirBody *body,
     CmHirItemId entry_item, const CmTargetDesc *target);
 
+/* Production hosted-main boundary. The root must be exact MIR published by
+ * the supplied current REGIONS-derived admission. */
+CmCEmitStatus cm_c_emit_admitted_program(CmStrBuf *output,
+    const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission, CmMirBodyId root,
+    CmHirItemId entry_item, const CmTargetDesc *target);
+
 /*
  * Emit every and only exact MIR instance reachable from explicit exports.
  * The current C99 boundary includes scalar i32/u32 locals and checked local

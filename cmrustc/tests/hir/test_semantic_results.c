@@ -312,6 +312,8 @@ static void test_successful_results(void)
     assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
     results = cm_semantic_admission_results(&admission);
     assert(results != NULL
+        && cm_semantic_results_seal_kind(results)
+            == CM_SEMANTIC_RESULTS_SEAL_WHOLE_LOCAL
         && cm_semantic_results_is_current(results, &admission)
         && cm_semantic_results_hir(results, &admission) == &fixture.hir
         && cm_semantic_results_crate(results, &admission) == 1u
@@ -943,12 +945,16 @@ static void test_partial_checked_draft_does_not_seal(void)
     assert(cm_semantic_results_begin(&fixture.hir, 1u, &draft)
             == CM_SEMANTIC_RESULTS_OK
         && draft != NULL
+        && cm_semantic_results_seal_kind(draft)
+            == CM_SEMANTIC_RESULTS_SEAL_UNSEALED
         && cm_semantic_results_commit_checked_body(draft, &session,
             &body_result, &stage) == CM_SEMANTIC_RESULTS_OK
         && cm_semantic_results_commit_checked_body(draft, &session,
             &body_result, &stage) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_seal(draft)
-            == CM_SEMANTIC_RESULTS_INVALID_HIR);
+            == CM_SEMANTIC_RESULTS_INVALID_HIR
+        && cm_semantic_results_seal_kind(draft)
+            == CM_SEMANTIC_RESULTS_SEAL_UNSEALED);
     cm_semantic_results_body_stage_destroy(&stage);
     cm_semantic_results_destroy(draft);
     cm_semantic_session_destroy(&session);

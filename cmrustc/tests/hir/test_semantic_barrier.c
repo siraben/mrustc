@@ -670,122 +670,93 @@ static void test_regions_closure_and_atomicity(void)
     fixture_destroy(&fixture);
 }
 
-static void assert_parent_constraint_rejection(Fixture *fixture,
-    CmSemanticBarrier *barrier, CmHirItem *parent,
-    const CmHirBodyId *bodies, size_t body_count, uint64_t generation,
-    uint64_t rewind_generation, uint64_t capability)
+static void test_regions_predicate_terms_and_binders(void)
 {
-    CmHirPredicateScope predicate_scope;
-    CmHirTraitPredicate predicate;
-    CmHirOutlivesPredicate outlives;
-    CmSemanticRegionsResult regions;
-    CmSemanticBarrierResult result;
-
-#define CM_ASSERT_PARENT_CONSTRAINT_INVALID() do { \
-        regions = cm_hir_semantic_check_regions(&fixture->hir, bodies, \
-            body_count); \
-        assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR \
-            && regions.body_index == 0u); \
-        result = advance_regions(barrier); \
-        assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR \
-            && result.phase == CM_SEMANTIC_BARRIER_MARKED \
-            && fixture->hir.semantic_generation == generation \
-            && fixture->hir.rewind_generation == rewind_generation \
-            && cm_semantic_barrier_capability_id(barrier) == capability); \
-    } while (0)
-
-    assert(parent != NULL && parent->predicate_scope_count == 0u
-        && parent->predicate_scopes == NULL
-        && parent->predicate_count == 0u && parent->predicates == NULL
-        && parent->outlives_predicate_count == 0u
-        && parent->outlives_predicates == NULL);
-    memset(&predicate_scope, 0, sizeof(predicate_scope));
-    parent->predicate_scopes = &predicate_scope;
-    parent->predicate_scope_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicate_scope_count = 0u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicate_scopes = NULL;
-    parent->predicate_scope_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicate_scope_count = 0u;
-
-    memset(&predicate, 0, sizeof(predicate));
-    parent->predicates = &predicate;
-    parent->predicate_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicate_count = 0u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicates = NULL;
-    parent->predicate_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->predicate_count = 0u;
-
-    memset(&outlives, 0, sizeof(outlives));
-    parent->outlives_predicates = &outlives;
-    parent->outlives_predicate_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->outlives_predicate_count = 0u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->outlives_predicates = NULL;
-    parent->outlives_predicate_count = 1u;
-    CM_ASSERT_PARENT_CONSTRAINT_INVALID();
-    parent->outlives_predicate_count = 0u;
-
-    regions = cm_hir_semantic_check_regions(&fixture->hir, bodies,
-        body_count);
-    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
-#undef CM_ASSERT_PARENT_CONSTRAINT_INVALID
-}
-
-static void test_regions_parent_constraints_fail_closed(void)
-{
-    static const char *sources[] = {
-        "trait Closed { fn value(input: u32) -> u32 { input } }",
-        "trait Echo { fn value(input: u32) -> u32; } "
-        "impl Echo for u32 { fn value(input: u32) -> u32 { input } }"
-    };
+    static const char source[] =
+        "struct Wrap<'a, T>(&'a T); "
+        "trait Bound<T> {} "
+        "fn bounded<'outer, T: Bound<Wrap<'outer, T>>>(value: T) -> T "
+        "where for<'inner> T: Bound<Wrap<'inner, T>> + 'inner { value }";
     Fixture fixture;
     CmSemanticBarrier barrier;
     CmSemanticBarrierResult result;
     CmSemanticAtomView atom;
-    CmHirBodyId body;
+    CmSemanticRegionsResult regions;
     CmHirItem *owner;
-    CmHirItem *parent;
-    uint64_t generation;
-    uint64_t rewind_generation;
-    uint64_t capability;
-    size_t source_index;
+    CmHirPredicateScope *scope;
+    CmHirType *late_type;
+    CmHirRegion saved_bound;
+    uint32_t saved_binder_index;
+    uint32_t saved_scope_count;
 
-    for (source_index = 0u;
-         source_index < sizeof(sources) / sizeof(sources[0]);
-         ++source_index) {
-        fixture_init(&fixture, sources[source_index]);
-        memset(&barrier, 0, sizeof(barrier));
-        result = init_barrier(&fixture, &barrier);
-        assert(result.status == CM_SEMANTIC_BARRIER_OK
-            && cm_semantic_barrier_atom_count(&barrier) == 1u);
-        result = advance_typed(&fixture, &barrier);
-        assert(result.status == CM_SEMANTIC_BARRIER_OK);
-        result = advance_marked(&barrier);
-        assert(result.status == CM_SEMANTIC_BARRIER_OK
-            && cm_semantic_barrier_atom_at(&barrier, 0u, &atom)
-                == CM_SEMANTIC_BARRIER_OK);
-        body = atom.body;
-        owner = mutable_item_for_definition(&fixture, atom.owner);
-        parent = owner == NULL ? NULL : mutable_item_for_definition(
-            &fixture, owner->parent_definition);
-        assert(owner != NULL && parent != NULL
-            && parent->kind == (source_index == 0u
-                ? CM_HIR_ITEM_TRAIT : CM_HIR_ITEM_IMPL));
-        generation = fixture.hir.semantic_generation;
-        rewind_generation = fixture.hir.rewind_generation;
-        capability = cm_semantic_barrier_capability_id(&barrier);
-        assert_parent_constraint_rejection(&fixture, &barrier, parent,
-            &body, 1u, generation, rewind_generation, capability);
-        cm_semantic_barrier_destroy(&barrier);
-        fixture_destroy(&fixture);
-    }
+    fixture_init(&fixture, source);
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && cm_semantic_barrier_atom_count(&barrier) == 1u);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && cm_semantic_barrier_atom_at(&barrier, 0u, &atom)
+            == CM_SEMANTIC_BARRIER_OK);
+    owner = mutable_item_for_definition(&fixture, atom.owner);
+    assert(owner != NULL && owner->predicate_scope_count == 1u
+        && owner->predicate_count == 2u
+        && owner->outlives_predicate_count == 1u);
+    scope = &owner->predicate_scopes[0];
+    assert(scope->binder.lifetime_count == 1u
+        && owner->predicates[1].scope == 1u
+        && owner->predicates[1].trait_type.argument_count == 1u
+        && owner->predicates[1].trait_type.arguments != NULL
+        && owner->predicates[1].trait_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE);
+    late_type = (CmHirType *)cm_vec_at(&fixture.hir.types,
+        (size_t)owner->predicates[1].trait_type.arguments[0].data.type - 1u);
+    assert(late_type != NULL && late_type->kind == CM_HIR_TYPE_ADT_KIND
+        && late_type->data.named_type.argument_count == 2u
+        && late_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && late_type->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_LATE_BOUND);
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+
+    saved_binder_index = late_type->data.named_type.arguments[0]
+        .data.lifetime.data.binder_index;
+    late_type->data.named_type.arguments[0].data.lifetime.data.binder_index =
+        scope->binder.lifetime_count;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.has_region
+        && regions.region_kind == CM_HIR_REGION_LATE_BOUND);
+    late_type->data.named_type.arguments[0].data.lifetime.data.binder_index =
+        saved_binder_index;
+
+    saved_scope_count = scope->trait_predicate_count;
+    scope->trait_predicate_count = 0u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    scope->trait_predicate_count = saved_scope_count;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+
+    saved_bound = owner->outlives_predicates[0].bound;
+    owner->outlives_predicates[0].bound.kind = CM_HIR_REGION_INFER;
+    owner->outlives_predicates[0].bound.data.inference_variable = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_UNRESOLVED_REGION
+        && regions.has_region
+        && regions.region_kind == CM_HIR_REGION_INFER);
+    owner->outlives_predicates[0].bound = saved_bound;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_REGIONS);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
 }
 
 static int atom_equal(const CmSemanticAtomView *left,
@@ -1405,7 +1376,7 @@ int main(void)
     test_marked_usage_rules_and_dump();
     test_marked_preflight_is_atomic();
     test_regions_closure_and_atomicity();
-    test_regions_parent_constraints_fail_closed();
+    test_regions_predicate_terms_and_binders();
     test_manifest_is_complete_stable_and_immutable();
     test_typed_success_and_phase_order();
     test_typed_snapshot_authenticates_body_origin();

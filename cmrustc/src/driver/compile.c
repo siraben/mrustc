@@ -14,6 +14,7 @@
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/semantic_item.h"
 #include "cm/hir/semantic_results.h"
+#include "cm/hir/semantic_barrier.h"
 #include "../hir/admission_internal.h"
 #include "../hir/instance_internal.h"
 #include "../hir/semantic_results_internal.h"
@@ -181,6 +182,8 @@ typedef struct CmCompileExactState {
     CmHirCrateId local_crate;
     uint64_t all_local_generation;
     uint64_t all_local_capability_id;
+    const CmSemanticBarrier *regions_authority;
+    uint64_t regions_capability_id;
     const CmSemanticAdmission *admission;
 } CmCompileExactState;
 
@@ -201,7 +204,19 @@ static int cm_compile_all_local_admission_current(
 static int cm_compile_exact_all_local_current(
     const CmCompileExactState *state)
 {
-    return state != NULL && cm_compile_all_local_admission_current(
+    return state != NULL && state->regions_authority != NULL
+        && state->regions_capability_id != UINT64_C(0)
+        && cm_semantic_barrier_is_current(state->regions_authority)
+        && cm_semantic_barrier_phase(state->regions_authority)
+            == CM_SEMANTIC_BARRIER_REGIONS
+        && cm_semantic_barrier_hir(state->regions_authority) == state->hir
+        && cm_semantic_barrier_crate(state->regions_authority)
+            == state->local_crate
+        && cm_semantic_barrier_capability_id(state->regions_authority)
+            == state->regions_capability_id
+        && cm_semantic_admission_barrier_capability_id(
+            state->all_local_admission) == state->regions_capability_id
+        && cm_compile_all_local_admission_current(
         state->all_local_admission, state->hir, state->local_crate,
         state->all_local_generation, state->all_local_capability_id);
 }
@@ -1192,9 +1207,9 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
         }
     }
     admission_result =
-        cm_semantic_admit_typed_canonical_instance_closure(admission,
-        state->hir, local_crate, reachable, state->instances.len, calls,
-        state->edges.len);
+        cm_semantic_admit_regions_canonical_instance_closure(admission,
+        state->regions_authority, state->all_local_admission, reachable,
+        state->instances.len, calls, state->edges.len);
     if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
         if (admission_result.status == CM_SEMANTIC_ADMISSION_ITEM_FAILURE) {
             (void)snprintf(message, message_capacity, "%s",
@@ -1242,7 +1257,7 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
     }
     cm_mir_publication_init(&publication);
     ok = 0;
-    status = cm_mir_publication_begin(&publication, state->mir,
+    status = cm_mir_publication_begin_regions(&publication, state->mir,
         state->admission);
     if (status != CM_MIR_OK) goto fail;
     for (index = 0u; index < state->instances.len; ++index) {
@@ -1392,10 +1407,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmHirLowerOptions hir_options;
     CmHirLowerResult hir_result;
     CmHirItemId entry_id;
-    const CmHirItem *entry;
     CmMirContext mir;
-    CmMirLowerResult mir_result;
-    const CmMirBody *mir_body;
     CmStrBuf c_output;
     CmStrBuf temporary_path;
     CmCEmitStatus emit_status;
@@ -1411,10 +1423,11 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmVec exact_root_instances;
     CmVec exact_root_bodies;
     CmCompileExactState exact_state;
-    CmSemanticSession legacy_semantic;
     CmSemanticAdmission all_local_admission;
+    CmSemanticAdmission marked_admission;
     CmSemanticAdmission reachable_admission;
-    int use_legacy_entry;
+    CmSemanticBarrier semantic_barrier;
+    int use_hosted_entry;
 
     result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
         "invalid compile request");
@@ -1440,9 +1453,10 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     cm_vec_init(&exact_root_instances, sizeof(size_t));
     cm_vec_init(&exact_root_bodies, sizeof(CmMirBodyId));
     memset(&exact_state, 0, sizeof(exact_state));
-    memset(&legacy_semantic, 0, sizeof(legacy_semantic));
     memset(&all_local_admission, 0, sizeof(all_local_admission));
+    memset(&marked_admission, 0, sizeof(marked_admission));
     memset(&reachable_admission, 0, sizeof(reachable_admission));
+    memset(&semantic_barrier, 0, sizeof(semantic_barrier));
     cm_vec_init(&exact_state.instances,
         sizeof(CmCompileReachableInstance));
     cm_vec_init(&exact_state.edges, sizeof(CmCompileReachableEdge));
@@ -1516,11 +1530,57 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
         goto cleanup;
     }
     {
+        CmSemanticBarrierResult barrier_result;
         CmSemanticAdmissionResult admission_result;
 
+        barrier_result = cm_semantic_barrier_init_structural(
+            &semantic_barrier, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup;
+        }
+        barrier_result = cm_semantic_barrier_advance_typed(
+            &semantic_barrier, &graph, graph_result.revision, &imports,
+            &module_map);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup;
+        }
         admission_result = cm_semantic_admit_local_crate(
             &all_local_admission, &hir, hir_result.crate_id, &graph,
             graph_result.revision, &imports, &module_map);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup;
+        }
+        barrier_result = cm_semantic_barrier_advance_marked_admitted(
+            &semantic_barrier, &all_local_admission);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup;
+        }
+        cm_semantic_admission_destroy(&all_local_admission);
+        admission_result = cm_semantic_admit_local_crate(
+            &marked_admission, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup;
+        }
+        barrier_result = cm_semantic_barrier_advance_regions_admitted(
+            &semantic_barrier, &marked_admission);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup;
+        }
+        cm_semantic_admission_destroy(&marked_admission);
+        admission_result = cm_semantic_admit_regions_local_crate(
+            &all_local_admission, &semantic_barrier);
         if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
             result = cm_compile_local_admission_failure(&admission_result);
             goto cleanup;
@@ -1534,6 +1594,9 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
         cm_semantic_admission_generation(&all_local_admission);
     exact_state.all_local_capability_id =
         cm_semantic_admission_capability_id(&all_local_admission);
+    exact_state.regions_authority = &semantic_barrier;
+    exact_state.regions_capability_id =
+        cm_semantic_barrier_capability_id(&semantic_barrier);
     if (!cm_compile_exact_all_local_current(&exact_state)) {
         result = cm_compile_result(CM_COMPILE_SEMANTIC,
             "whole-crate semantic admission was not retained");
@@ -1541,70 +1604,10 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     }
     /* Every cfg-active supported local definition is typed before roots. */
     entry_id = cm_compile_find_entry(&hir, hir_result.root_module);
-    use_legacy_entry = hir.items.len == 1u
+    use_hosted_entry = hir.items.len == 1u
         && entry_id != CM_HIR_ITEM_NONE;
-    if (use_legacy_entry) {
-        entry = cm_hir_get_item(&hir, entry_id);
-        if (entry == NULL
-            || entry->data.function_item.body == CM_HIR_BODY_NONE) {
-            result = cm_compile_result(CM_COMPILE_HIR,
-                "crate has no source-backed root main entry");
-            goto cleanup;
-        }
-        {
-            CmSemanticItemResult item_result;
-
-            item_result = cm_semantic_item_check_local_trait_impls(&hir,
-                hir_result.crate_id);
-            if (item_result.status != CM_SEMANTIC_ITEM_OK) {
-                result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                    cm_semantic_item_status_name(item_result.status));
-                goto cleanup;
-            }
-        }
-        {
-            CmSemanticSessionOptions semantic_options;
-            CmTraitSolverResultKind semantic_status;
-            CmSemanticBodyResult semantic_result;
-
-            cm_semantic_session_options_init(&semantic_options);
-            semantic_options.local_crate = hir_result.crate_id;
-            semantic_options.exact_owner = entry->definition;
-            semantic_status = cm_semantic_session_init(&legacy_semantic,
-                &hir, &semantic_options);
-            if (semantic_status != CM_TRAIT_SOLVER_PROVEN) {
-                result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                    cm_trait_solver_result_name(semantic_status));
-                goto cleanup;
-            }
-            semantic_result = cm_semantic_body_check_calls(
-                &legacy_semantic, entry->data.function_item.body,
-                NULL, 0u);
-            if (semantic_result.status != CM_SEMANTIC_BODY_OK) {
-                result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                    cm_semantic_body_status_name(semantic_result.status));
-                goto cleanup;
-            }
-        }
-        if (!cm_compile_exact_all_local_current(&exact_state)) {
-            result = cm_compile_result(CM_COMPILE_SEMANTIC,
-                "whole-crate semantic admission became stale before MIR");
-            goto cleanup;
-        }
-        /* HIR and semantics are complete before the legacy MIR phase. */
-        mir_result = cm_mir_lower_body(&mir, &hir,
-            entry->data.function_item.body);
-        if (mir_result.error_count != 0u
-            || mir_result.body == CM_MIR_BODY_NONE) {
-            result = cm_compile_result(CM_COMPILE_MIR,
-                mir_result.error_count == 0u
-                    ? "MIR lowering produced no body"
-                    : mir_result.first_error.message);
-            goto cleanup;
-        }
-        mir_body = cm_mir_get_body(&mir, mir_result.body);
-        emit_status = cm_c_emit_program(&c_output, &hir, mir_body,
-            entry_id, target);
+    if (use_hosted_entry) {
+        (void)cm_vec_push(&exact_root_items, &entry_id);
     } else {
         size_t item_index;
 
@@ -1619,12 +1622,16 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
                 (void)cm_vec_push(&exact_root_items, &candidate_id);
             }
         }
-        if (exact_root_items.len == 0u
-            || exact_root_items.len > (size_t)UINT32_MAX) {
-            result = cm_compile_result(CM_COMPILE_HIR,
-                "crate has no supported exported root");
-            goto cleanup;
-        }
+    }
+    if (exact_root_items.len == 0u
+        || exact_root_items.len > (size_t)UINT32_MAX) {
+        result = cm_compile_result(CM_COMPILE_HIR,
+            "crate has no supported exported root");
+        goto cleanup;
+    }
+    {
+        size_t item_index;
+
         for (item_index = 0u; item_index < exact_root_items.len;
              ++item_index) {
             const CmHirItemId *root_item_id;
@@ -1706,10 +1713,21 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             root_body = instance->mir_body;
             (void)cm_vec_push(&exact_root_bodies, &root_body);
         }
-        emit_status = cm_c_emit_reachable_program(&c_output, &hir, &mir,
-            &reachable_admission,
-            (const CmMirBodyId *)exact_root_bodies.data,
-            (uint32_t)exact_root_bodies.len, target);
+        if (use_hosted_entry) {
+            const CmMirBodyId *hosted_root;
+
+            hosted_root = (const CmMirBodyId *)cm_vec_at_const(
+                &exact_root_bodies, 0u);
+            emit_status = hosted_root == NULL
+                ? CM_C_EMIT_INVALID_MIR
+                : cm_c_emit_admitted_program(&c_output, &hir, &mir,
+                    &reachable_admission, *hosted_root, entry_id, target);
+        } else {
+            emit_status = cm_c_emit_reachable_program(&c_output, &hir, &mir,
+                &reachable_admission,
+                (const CmMirBodyId *)exact_root_bodies.data,
+                (uint32_t)exact_root_bodies.len, target);
+        }
     }
     if (emit_status != CM_C_EMIT_OK || c_output.len == 0u) {
         result = cm_compile_result(CM_COMPILE_CODEGEN,
@@ -1759,7 +1777,6 @@ cleanup:
     if (temporary_exists) (void)remove(temporary_path.data);
     cm_str_buf_destroy(&temporary_path);
     cm_str_buf_destroy(&c_output);
-    cm_semantic_session_destroy(&legacy_semantic);
     for (cleanup_index = 0u; cleanup_index < exact_state.edges.len;
          ++cleanup_index) {
         CmCompileReachableEdge *edge;
@@ -1788,6 +1805,8 @@ cleanup:
     cm_mir_context_destroy(&mir);
     cm_semantic_admission_destroy(&reachable_admission);
     cm_semantic_admission_destroy(&all_local_admission);
+    cm_semantic_admission_destroy(&marked_admission);
+    cm_semantic_barrier_destroy(&semantic_barrier);
     cm_hir_module_map_destroy(&module_map);
     cm_hir_context_destroy(&hir);
     cm_import_resolver_destroy(&imports);

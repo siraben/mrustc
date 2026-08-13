@@ -28,6 +28,8 @@ typedef struct CmMirPublicationImpl {
     size_t context_body_count;
     uint64_t context_lifetime_id;
     uint64_t admission_capability_id;
+    uint64_t barrier_capability_id;
+    uint64_t parent_capability_id;
     uint64_t storage_lifetime_id;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
@@ -62,6 +64,10 @@ static int cm_mir_context_valid(const CmMirContext *context)
                 && context->admitted_semantic_generation == UINT64_C(0)
                 && context->admitted_rewind_generation == UINT64_C(0)
                 && context->admitted_admission_capability_id
+                    == UINT64_C(0)
+                && context->admitted_barrier_capability_id
+                    == UINT64_C(0)
+                && context->admitted_parent_capability_id
                     == UINT64_C(0))
             || (context->admitted_crate != CM_HIR_CRATE_NONE
                 && context->hir_owner != NULL
@@ -69,7 +75,15 @@ static int cm_mir_context_valid(const CmMirContext *context)
                 && context->admitted_semantic_generation != UINT64_C(0)
                 && context->admitted_rewind_generation != UINT64_C(0)
                 && context->admitted_admission_capability_id
-                    != UINT64_C(0)));
+                    != UINT64_C(0)
+                && ((context->admitted_barrier_capability_id
+                            == UINT64_C(0)
+                        && context->admitted_parent_capability_id
+                            == UINT64_C(0))
+                    || (context->admitted_barrier_capability_id
+                            != UINT64_C(0)
+                        && context->admitted_parent_capability_id
+                            != UINT64_C(0)))));
 }
 
 static int cm_mir_admission_identity(const CmSemanticAdmission *admission,
@@ -94,9 +108,15 @@ static int cm_mir_context_accepts_admission(const CmMirContext *context,
     CmHirCrateId crate_id)
 {
     uint64_t capability_id;
+    uint64_t barrier_capability_id;
+    uint64_t parent_capability_id;
 
     if (!cm_mir_context_valid(context)) return 0;
     capability_id = cm_semantic_admission_capability_id(admission);
+    barrier_capability_id =
+        cm_semantic_admission_barrier_capability_id(admission);
+    parent_capability_id =
+        cm_semantic_admission_parent_capability_id(admission);
     if (capability_id == UINT64_C(0)) return 0;
     if (context->admitted_crate == CM_HIR_CRATE_NONE) {
         return context->bodies.len == 0u && context->hir_owner == NULL;
@@ -106,7 +126,10 @@ static int cm_mir_context_accepts_admission(const CmMirContext *context,
         && context->admitted_storage_lifetime_id == hir->storage.lifetime_id
         && context->admitted_semantic_generation == hir->semantic_generation
         && context->admitted_rewind_generation == hir->rewind_generation
-        && context->admitted_admission_capability_id == capability_id;
+        && context->admitted_admission_capability_id == capability_id
+        && context->admitted_barrier_capability_id
+            == barrier_capability_id
+        && context->admitted_parent_capability_id == parent_capability_id;
 }
 
 static void cm_mir_context_latch_admission(CmMirContext *context,
@@ -120,6 +143,10 @@ static void cm_mir_context_latch_admission(CmMirContext *context,
     context->admitted_rewind_generation = hir->rewind_generation;
     context->admitted_admission_capability_id =
         cm_semantic_admission_capability_id(admission);
+    context->admitted_barrier_capability_id =
+        cm_semantic_admission_barrier_capability_id(admission);
+    context->admitted_parent_capability_id =
+        cm_semantic_admission_parent_capability_id(admission);
 }
 
 static int cm_mir_instance_is_empty(const CmMirInstance *instance)
@@ -3450,6 +3477,10 @@ static int cm_mir_publication_current(
             == publication->crate_id
         && cm_semantic_admission_capability_id(publication->admission)
             == publication->admission_capability_id
+        && cm_semantic_admission_barrier_capability_id(
+            publication->admission) == publication->barrier_capability_id
+        && cm_semantic_admission_parent_capability_id(
+            publication->admission) == publication->parent_capability_id
         && publication->context->lifetime_id
             == publication->context_lifetime_id
         && publication->context->bodies.len
@@ -3577,6 +3608,10 @@ CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
     implementation->context_lifetime_id = context->lifetime_id;
     implementation->admission_capability_id =
         cm_semantic_admission_capability_id(admission);
+    implementation->barrier_capability_id =
+        cm_semantic_admission_barrier_capability_id(admission);
+    implementation->parent_capability_id =
+        cm_semantic_admission_parent_capability_id(admission);
     implementation->storage_lifetime_id = hir->storage.lifetime_id;
     implementation->semantic_generation = hir->semantic_generation;
     implementation->rewind_generation = hir->rewind_generation;
@@ -3585,6 +3620,23 @@ CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
         sizeof(CmMirPublicationEntry));
     publication->implementation = implementation;
     return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_publication_begin_regions(CmMirPublication *publication,
+    CmMirContext *context, const CmSemanticAdmission *admission)
+{
+    const CmSemanticResults *results;
+
+    results = cm_semantic_admission_results(admission);
+    if (cm_semantic_results_seal_kind(results)
+            != CM_SEMANTIC_RESULTS_SEAL_INSTANCE_CLOSURE
+        || cm_semantic_admission_barrier_capability_id(admission)
+            == UINT64_C(0)
+        || cm_semantic_admission_parent_capability_id(admission)
+            == UINT64_C(0)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    return cm_mir_publication_begin(publication, context, admission);
 }
 
 static CmMirStatus cm_mir_publication_find_key(

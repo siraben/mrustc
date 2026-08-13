@@ -1,6 +1,8 @@
 #include "cm/hir/semantic_mark.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/admission.h"
+#include "cm/hir/semantic_results.h"
 
 #include <string.h>
 
@@ -8,10 +10,86 @@ typedef struct CmSemanticMarkScratch {
     CmHirContext *hir;
     unsigned char *visit;
     CmHirValueUsage *usage;
+    const CmSemanticAdmission *admission;
+    const CmSemanticResults *results;
     size_t body_index;
     CmHirBodyId body;
     CmSemanticMarkResult result;
 } CmSemanticMarkScratch;
+
+static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
+    CmHirExprId expression_id, CmHirValueUsage usage, size_t depth);
+
+static int cm_semantic_mark_selected_call(CmSemanticMarkScratch *scratch,
+    const CmHirExpr *expression, CmHirExprId expression_id, size_t depth)
+{
+    CmSemanticCallableSelectionView selection;
+    CmHirExprId argument_storage[2];
+    const CmHirExprId *arguments;
+    uint32_t argument_count;
+    uint32_t index;
+
+    memset(&selection, 0, sizeof(selection));
+    arguments = NULL;
+    argument_count = 0u;
+    if (scratch->results == NULL || scratch->admission == NULL) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        arguments = expression->data.qualified_call.arguments;
+        argument_count = expression->data.qualified_call.argument_count;
+        if ((argument_count == 0u) != (arguments == NULL)
+            || expression->data.qualified_call.syntax
+                != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD) return 0;
+    } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+        if (expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+            || expression->data.method_call.argument_count > 1u
+            || (expression->data.method_call.argument_count != 0u
+                && expression->data.method_call.arguments == NULL)
+            || expression->data.method_call.syntax
+                != CM_HIR_CALLABLE_DOT_METHOD) return 0;
+        argument_storage[0] = expression->data.method_call.receiver;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            argument_storage[index + 1u] =
+                expression->data.method_call.arguments[index];
+        }
+        arguments = argument_storage;
+        argument_count = expression->data.method_call.argument_count + 1u;
+    } else {
+        return 0;
+    }
+    if (cm_semantic_results_callable_selection(scratch->results,
+            scratch->admission, scratch->body, expression_id, &selection)
+            != CM_SEMANTIC_RESULTS_OK
+        || selection.syntax != (expression->kind
+                == CM_HIR_EXPR_QUALIFIED_CALL
+            ? expression->data.qualified_call.syntax
+            : expression->data.method_call.syntax)
+        || selection.argument_count != argument_count
+        || cm_hir_def_id_is_none(selection.selected_impl)
+        || cm_hir_def_id_is_none(selection.selected_callable)
+        || cm_hir_def_id_is_none(selection.body_definition)) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        && (!cm_hir_def_id_equal(selection.requested_trait,
+                expression->data.qualified_call.requested_trait)
+            || !cm_hir_def_id_equal(selection.declared_trait_callable,
+                expression->data.qualified_call.declared_trait_callable)
+            || selection.receiver_argument
+                != expression->data.qualified_call.receiver_argument)) {
+        return 0;
+    }
+    for (index = 0u; index < argument_count; ++index) {
+        CmHirExprId retained;
+
+        retained = CM_HIR_EXPR_NONE;
+        if (cm_semantic_results_callable_argument(scratch->results,
+                scratch->admission, scratch->body, expression_id, index,
+                &retained) != CM_SEMANTIC_RESULTS_OK
+            || retained != arguments[index]
+            || !cm_semantic_mark_visit(scratch, arguments[index],
+                CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+    }
+    return 1;
+}
 
 static CmSemanticMarkResult cm_semantic_mark_result(
     CmSemanticMarkStatus status)
@@ -204,6 +282,15 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
         break;
     case CM_HIR_EXPR_METHOD_CALL:
     case CM_HIR_EXPR_QUALIFIED_CALL:
+        if (!cm_semantic_mark_selected_call(scratch, expression,
+                expression_id, depth)) {
+            scratch->result.status = scratch->results == NULL
+                ? CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+                : CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch->result.expression = expression_id;
+            return 0;
+        }
+        break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
         scratch->result.status =
@@ -219,8 +306,9 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
     return 1;
 }
 
-CmSemanticMarkResult cm_hir_semantic_mark_bodies(CmHirContext *hir,
-    const CmHirBodyId *bodies, size_t body_count)
+static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
+    CmHirContext *hir, const CmHirBodyId *bodies, size_t body_count,
+    const CmSemanticAdmission *admission)
 {
     CmSemanticMarkScratch scratch;
     size_t expression_count;
@@ -231,6 +319,13 @@ CmSemanticMarkResult cm_hir_semantic_mark_bodies(CmHirContext *hir,
         return cm_semantic_mark_result(CM_SEMANTIC_MARK_INVALID_ARGUMENT);
     memset(&scratch, 0, sizeof(scratch));
     scratch.hir = hir;
+    scratch.admission = admission;
+    scratch.results = admission == NULL ? NULL
+        : cm_semantic_admission_results(admission);
+    if (admission != NULL && (scratch.results == NULL
+            || cm_semantic_admission_hir(admission) != hir)) {
+        return cm_semantic_mark_result(CM_SEMANTIC_MARK_INVALID_ARGUMENT);
+    }
     scratch.result = cm_semantic_mark_result(CM_SEMANTIC_MARK_OK);
     expression_count = hir->expressions.len;
     scratch.visit = (unsigned char *)cm_alloc_zeroed(
@@ -305,6 +400,23 @@ done:
     cm_free(scratch.usage);
     cm_free(scratch.visit);
     return scratch.result;
+}
+
+CmSemanticMarkResult cm_hir_semantic_mark_bodies(CmHirContext *hir,
+    const CmHirBodyId *bodies, size_t body_count)
+{
+    return cm_hir_semantic_mark_bodies_impl(hir, bodies, body_count, NULL);
+}
+
+CmSemanticMarkResult cm_hir_semantic_mark_admitted_bodies(
+    CmHirContext *hir, const CmHirBodyId *bodies, size_t body_count,
+    const CmSemanticAdmission *admission)
+{
+    if (admission == NULL) {
+        return cm_semantic_mark_result(CM_SEMANTIC_MARK_INVALID_ARGUMENT);
+    }
+    return cm_hir_semantic_mark_bodies_impl(hir, bodies, body_count,
+        admission);
 }
 
 const char *cm_semantic_mark_status_name(CmSemanticMarkStatus status)

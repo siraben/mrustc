@@ -2787,12 +2787,13 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
         return result;
     }
     signature = &item->data.function_item.signature;
-    if (signature->parameter_count == 0u
-        || signature->parameter_count > 2u || signature->parameters == NULL
+    if (signature->parameter_count > 2u
+        || (signature->parameter_count != 0u
+            && signature->parameters == NULL)
         || signature->is_variadic
         || hir_body->parameter_count != signature->parameter_count
         || hir_body->local_count < signature->parameter_count
-        || hir_body->locals == NULL
+        || (hir_body->local_count != 0u && hir_body->locals == NULL)
         || !cm_mir_lower_type(hir, item, substitutions,
             substitution_count, signature->return_type, &return_type)
         || !cm_mir_lower_type_target_valid(context, hir, item,
@@ -2800,7 +2801,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
         || cm_mir_lower_type_is_bool(hir, return_type)) {
         cm_mir_lower_fail(&result, CM_MIR_LOWER_UNSUPPORTED_TYPE, body_id,
             hir_body->root_expression, CM_MIR_OK,
-            "exact MIR lowering supports one or two checked arguments "
+            "exact MIR lowering supports up to two checked arguments "
             "and result");
         return result;
     }
@@ -3165,6 +3166,10 @@ static const CmHirContext *cm_mir_lower_admitted_hir(
             || context->admitted_semantic_generation != UINT64_C(0)
             || context->admitted_rewind_generation != UINT64_C(0)
             || context->admitted_admission_capability_id
+                != UINT64_C(0)
+            || context->admitted_barrier_capability_id
+                != UINT64_C(0)
+            || context->admitted_parent_capability_id
                 != UINT64_C(0)) {
             return NULL;
         }
@@ -3174,7 +3179,11 @@ static const CmHirContext *cm_mir_lower_admitted_hir(
         || context->admitted_semantic_generation != hir->semantic_generation
         || context->admitted_rewind_generation != hir->rewind_generation
         || context->admitted_admission_capability_id
-            != cm_semantic_admission_capability_id(admission)) {
+            != cm_semantic_admission_capability_id(admission)
+        || context->admitted_barrier_capability_id
+            != cm_semantic_admission_barrier_capability_id(admission)
+        || context->admitted_parent_capability_id
+            != cm_semantic_admission_parent_capability_id(admission)) {
         return NULL;
     }
     *out_crate = crate_id;
@@ -3192,6 +3201,10 @@ static void cm_mir_lower_latch_admission(CmMirContext *context,
     context->admitted_rewind_generation = hir->rewind_generation;
     context->admitted_admission_capability_id =
         cm_semantic_admission_capability_id(admission);
+    context->admitted_barrier_capability_id =
+        cm_semantic_admission_barrier_capability_id(admission);
+    context->admitted_parent_capability_id =
+        cm_semantic_admission_parent_capability_id(admission);
 }
 
 static CmMirLowerResult cm_mir_lower_admission_failure(CmHirBodyId body_id)

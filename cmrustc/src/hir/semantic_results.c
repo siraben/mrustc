@@ -200,7 +200,7 @@ struct CmSemanticResults {
     size_t admitted_body_count;
     CmSemanticInstanceRecord *instances;
     size_t instance_count;
-    int sealed;
+    CmSemanticResultsSealKind seal_kind;
 };
 
 typedef struct CmSemanticResultsBodyStageState {
@@ -3815,7 +3815,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
 
     state = stage == NULL ? NULL
         : (CmSemanticResultsBodyStageState *)stage->state;
-    if (results == NULL || session == NULL || results->sealed
+    if (results == NULL || session == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
         || check == NULL || check->status != CM_SEMANTIC_BODY_OK
         || state == NULL || !cm_semantic_session_is_current(session)) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
@@ -4217,7 +4218,9 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
 
     state = stage == NULL ? NULL
         : (CmSemanticResultsBodyStageState *)stage->state;
-    if (results == NULL || results->sealed || session == NULL
+    if (results == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        || session == NULL
         || instance == NULL || check == NULL
         || check->status != CM_SEMANTIC_BODY_OK || state == NULL
         || (call_count == 0u) != (calls == NULL)
@@ -4401,7 +4404,8 @@ CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
     CmSemanticResultsStatus status;
     size_t item_index;
 
-    if (results == NULL || results->sealed) {
+    if (results == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
     hir = results->hir;
@@ -4435,7 +4439,7 @@ CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
     if (!cm_results_body_recipes_valid(results, hir)) {
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
-    results->sealed = 1;
+    results->seal_kind = CM_SEMANTIC_RESULTS_SEAL_WHOLE_LOCAL;
     return CM_SEMANTIC_RESULTS_OK;
 
 }
@@ -4449,7 +4453,9 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
     size_t index;
     CmSemanticResultsStatus status;
 
-    if (results == NULL || results->sealed || bodies == NULL
+    if (results == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        || bodies == NULL
         || body_count == 0u || body_count != results->admitted_body_count) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
@@ -4568,7 +4574,7 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
         }
     }
     cm_free(selected);
-    results->sealed = 1;
+    results->seal_kind = CM_SEMANTIC_RESULTS_SEAL_REACHABLE_BODIES;
     return CM_SEMANTIC_RESULTS_OK;
 }
 
@@ -4577,7 +4583,9 @@ CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
 {
     const CmHirContext *hir;
 
-    if (results == NULL || results->sealed || instance_count == 0u
+    if (results == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        || instance_count == 0u
         || results->admitted_body_count != 0u
         || results->instance_count != instance_count) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
@@ -4614,7 +4622,7 @@ CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
             }
         }
     }
-    results->sealed = 1;
+    results->seal_kind = CM_SEMANTIC_RESULTS_SEAL_LEAF_INSTANCES;
     return CM_SEMANTIC_RESULTS_OK;
 }
 
@@ -4639,7 +4647,9 @@ CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
     const CmHirContext *hir;
     size_t instance_index;
 
-    if (results == NULL || results->sealed || instance_count == 0u
+    if (results == NULL
+        || results->seal_kind != CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        || instance_count == 0u
         || results->admitted_body_count != 0u
         || results->instance_count != instance_count) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
@@ -4772,8 +4782,15 @@ CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
     }
-    results->sealed = 1;
+    results->seal_kind = CM_SEMANTIC_RESULTS_SEAL_INSTANCE_CLOSURE;
     return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsSealKind cm_semantic_results_seal_kind(
+    const CmSemanticResults *results)
+{
+    return results == NULL ? CM_SEMANTIC_RESULTS_SEAL_UNSEALED
+        : results->seal_kind;
 }
 
 void cm_semantic_results_destroy(CmSemanticResults *results)
@@ -6994,7 +7011,9 @@ static CmSemanticResultsStatus cm_results_validate(
     if (results == NULL || admission == NULL) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    if (!results->sealed) return CM_SEMANTIC_RESULTS_STALE;
+    if (results->seal_kind == CM_SEMANTIC_RESULTS_SEAL_UNSEALED) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
     if (!cm_semantic_admission_is_current(admission)) {
         return CM_SEMANTIC_RESULTS_STALE;
     }

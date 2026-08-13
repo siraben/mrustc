@@ -260,6 +260,49 @@ CmCEmitStatus cm_c_emit_program(CmStrBuf *output,
     return CM_C_EMIT_OK;
 }
 
+CmCEmitStatus cm_c_emit_admitted_program(CmStrBuf *output,
+    const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission, CmMirBodyId root,
+    CmHirItemId entry_item, const CmTargetDesc *target)
+{
+    const CmHirItem *item;
+    const CmMirBody *body;
+
+    item = hir == NULL ? NULL : cm_hir_get_item(hir, entry_item);
+    body = mir == NULL || root == CM_MIR_BODY_NONE ? NULL
+        : cm_mir_get_body(mir, root);
+    if (output == NULL || hir == NULL || mir == NULL || admission == NULL
+        || target == NULL || item == NULL
+        || item->kind != CM_HIR_ITEM_FUNCTION || body == NULL
+        || cm_semantic_admission_hir(admission) != hir
+        || cm_semantic_admission_barrier_capability_id(admission)
+            == UINT64_C(0)
+        || mir->hir_owner != hir
+        || mir->admitted_crate != cm_semantic_admission_crate(admission)
+        || mir->admitted_admission_capability_id
+            != cm_semantic_admission_capability_id(admission)
+        || mir->admitted_barrier_capability_id
+            != cm_semantic_admission_barrier_capability_id(admission)
+        || mir->admitted_parent_capability_id
+            != cm_semantic_admission_parent_capability_id(admission)
+        || cm_mir_validate_admitted_monomorphized_body(mir, admission,
+            root) != CM_MIR_OK
+        || body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || body->instance.identity_bytes == NULL
+        || body->instance.identity_size == 0u
+        || !cm_hir_def_id_equal(body->instance.definition,
+            item->definition)
+        || !cm_hir_def_id_equal(body->instance.body_definition,
+            item->definition)
+        || !cm_hir_def_id_equal(body->owner, item->definition)
+        || body->instance.body != item->data.function_item.body
+        || body->source_body != item->data.function_item.body) {
+        return CM_C_EMIT_INVALID_MIR;
+    }
+    return cm_c_emit_program(output, hir, body, entry_item, target);
+}
+
 #define CM_C_EXACT_NAME_CAPACITY ((size_t)256u)
 
 static int cm_c_item_has_attribute(const CmHirContext *hir,

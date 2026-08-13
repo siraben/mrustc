@@ -74,6 +74,25 @@ static CmSemanticAdmissionResult admit(Fixture *f,
         &f->graph, f->graph_result.revision, &f->imports, &f->modules);
 }
 
+static CmSemanticBarrierResult init_barrier(Fixture *f,
+    CmSemanticBarrier *barrier)
+{
+    return cm_semantic_barrier_init_structural(barrier, &f->hir, 1u,
+        &f->graph, f->graph_result.revision, &f->imports, &f->modules);
+}
+
+static void advance_barrier_to_regions(Fixture *f,
+    CmSemanticBarrier *barrier)
+{
+    assert(cm_semantic_barrier_advance_typed(barrier, &f->graph,
+            f->graph_result.revision, &f->imports, &f->modules).status
+        == CM_SEMANTIC_BARRIER_OK);
+    assert(cm_semantic_barrier_advance_marked(barrier).status
+        == CM_SEMANTIC_BARRIER_OK);
+    assert(cm_semantic_barrier_advance_regions(barrier).status
+        == CM_SEMANTIC_BARRIER_OK);
+}
+
 static const CmHirItem *find_impl_method(const CmHirContext *hir,
     const char *name)
 {
@@ -2367,10 +2386,258 @@ static void test_invalid_api(void)
         CM_MODULE_GRAPH_REVISION_NONE, NULL, NULL);
     assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
         && admission.state == NULL);
-    for (status = 0u; status <= (unsigned int)CM_SEMANTIC_ADMISSION_HIR_FAILURE;
+    for (status = 0u;
+         status <= (unsigned int)CM_SEMANTIC_ADMISSION_INVALID_BARRIER;
          ++status)
         assert(strcmp(cm_semantic_admission_status_name(
             (CmSemanticAdmissionStatus)status), "unknown") != 0);
+}
+
+static void test_regions_admission_authority_gates(void)
+{
+    Fixture f;
+    Fixture foreign;
+    Fixture replacement;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrier foreign_barrier;
+    CmSemanticAdmission admission;
+    CmSemanticAdmission foreign_admission;
+    CmSemanticAdmission marked_admission;
+    CmSemanticAdmission exact_admission;
+    CmSemanticAdmission rejected_admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticCanonicalReachableInstance instance;
+    CmHirCanonicalInstance identity;
+    CmHirInstanceSpec spec;
+    const CmHirItem *function;
+    CmHirItem *second;
+    CmHirBodyId saved_body;
+    CmMirContext mir;
+    CmMirPublication publication;
+    uint64_t marked_capability;
+    uint64_t regions_capability;
+    uint64_t admission_capability;
+
+    fixture_init(&f,
+        "fn first(value: u32) -> u32 { value } "
+        "fn second(value: u32) -> u32 { first(value) }");
+    fixture_init(&foreign, "fn foreign(value: u32) -> u32 { value }");
+    fixture_init(&replacement, "fn replacement() -> u32 { 2u32 }");
+    memset(&barrier, 0, sizeof(barrier));
+    memset(&foreign_barrier, 0, sizeof(foreign_barrier));
+    memset(&admission, 0, sizeof(admission));
+    memset(&foreign_admission, 0, sizeof(foreign_admission));
+    memset(&marked_admission, 0, sizeof(marked_admission));
+    memset(&exact_admission, 0, sizeof(exact_admission));
+    memset(&rejected_admission, 0, sizeof(rejected_admission));
+
+    assert(init_barrier(&f, &barrier).status == CM_SEMANTIC_BARRIER_OK);
+    result = cm_semantic_admit_regions_local_crate(&admission, &barrier);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_BARRIER
+        && admission.state == NULL);
+    assert(cm_semantic_barrier_advance_typed(&barrier, &f.graph,
+            f.graph_result.revision, &f.imports, &f.modules).status
+        == CM_SEMANTIC_BARRIER_OK);
+    result = cm_semantic_admit_regions_local_crate(&admission, &barrier);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_BARRIER
+        && admission.state == NULL);
+    assert(cm_semantic_barrier_advance_marked(&barrier).status
+        == CM_SEMANTIC_BARRIER_OK);
+    marked_capability = cm_semantic_barrier_capability_id(&barrier);
+    assert(marked_capability != UINT64_C(0)
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_MARKED);
+    result = cm_semantic_admit_regions_local_crate(&admission, &barrier);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_BARRIER
+        && admission.state == NULL);
+
+    /* A same-generation compatibility admission is not REGIONS authority. */
+    assert(admit(&f, &marked_admission).status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_barrier_capability_id(&marked_admission)
+            == UINT64_C(0));
+    assert(cm_semantic_barrier_advance_regions_admitted(&barrier,
+            &marked_admission).status == CM_SEMANTIC_BARRIER_OK);
+    regions_capability = cm_semantic_barrier_capability_id(&barrier);
+    assert(regions_capability != UINT64_C(0)
+        && regions_capability != marked_capability
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_REGIONS);
+    result = cm_semantic_admit_regions_local_crate(&admission, &barrier);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_is_current(&admission)
+        && cm_semantic_results_seal_kind(
+            cm_semantic_admission_results(&admission))
+                == CM_SEMANTIC_RESULTS_SEAL_WHOLE_LOCAL
+        && cm_semantic_admission_barrier_capability_id(&admission)
+            == regions_capability);
+
+    /* A live barrier still fails closed if an item no longer matches its
+     * captured body/owner manifest. */
+    second = (CmHirItem *)cm_hir_get_item(&f.hir, 2u);
+    assert(second != NULL && second->kind == CM_HIR_ITEM_FUNCTION);
+    saved_body = second->data.function_item.body;
+    second->data.function_item.body = 1u;
+    assert(cm_semantic_barrier_is_current(&barrier));
+    result = cm_semantic_admit_regions_local_crate(&foreign_admission,
+        &barrier);
+    assert(result.status != CM_SEMANTIC_ADMISSION_OK
+        && foreign_admission.state == NULL);
+    second->data.function_item.body = saved_body;
+
+    function = find_free_function(&f.hir, "first");
+    assert(function != NULL);
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = function->definition;
+    spec.body_definition = function->definition;
+    cm_hir_canonical_instance_init(&identity);
+    assert(cm_hir_canonical_instance_encode(&f.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_OK);
+    instance.identity = &identity;
+
+    /* Exact admissions require a parent admitted by this precise barrier. */
+    result = cm_semantic_admit_regions_canonical_instance_closure(
+        &exact_admission, &barrier, &marked_admission, &instance, 1u,
+        NULL, 0u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && exact_admission.state == NULL);
+    result = cm_semantic_admit_regions_canonical_instance_closure(
+        &exact_admission, &barrier, &admission, &instance, 1u, NULL, 0u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_is_current(&exact_admission)
+        && cm_semantic_results_seal_kind(
+            cm_semantic_admission_results(&exact_admission))
+                == CM_SEMANTIC_RESULTS_SEAL_INSTANCE_CLOSURE
+        && cm_semantic_admission_barrier_capability_id(&exact_admission)
+            == regions_capability);
+    cm_mir_context_init(&mir);
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin_regions(&publication, &mir,
+            &exact_admission) == CM_MIR_OK);
+
+    assert(init_barrier(&foreign, &foreign_barrier).status
+        == CM_SEMANTIC_BARRIER_OK);
+    advance_barrier_to_regions(&foreign, &foreign_barrier);
+    assert(cm_semantic_admit_regions_local_crate(&foreign_admission,
+            &foreign_barrier).status == CM_SEMANTIC_ADMISSION_OK);
+    result = cm_semantic_admit_regions_canonical_instance_closure(
+        &rejected_admission, &barrier, &foreign_admission, &instance, 1u,
+        NULL, 0u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && rejected_admission.state == NULL);
+
+    /* Replacing a parent with a fresh capability does not revive a child
+     * that retained the previous exact parent capability. */
+    admission_capability = cm_semantic_admission_capability_id(&admission);
+    assert(admission_capability != UINT64_C(0));
+    cm_semantic_admission_destroy(&admission);
+    assert(!cm_semantic_admission_is_current(&exact_admission)
+        && cm_mir_publication_validate(&publication)
+            == CM_MIR_INVALID_ADMISSION
+        && cm_mir_publication_commit(&publication)
+            == CM_MIR_INVALID_ADMISSION);
+    cm_mir_publication_destroy(&publication);
+    cm_mir_context_destroy(&mir);
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_capability_id(&admission)
+            != admission_capability
+        && !cm_semantic_admission_is_current(&exact_admission));
+
+    cm_hir_canonical_instance_destroy(&identity);
+    cm_semantic_admission_destroy(&rejected_admission);
+    cm_semantic_admission_destroy(&exact_admission);
+    cm_semantic_admission_destroy(&foreign_admission);
+    cm_semantic_admission_destroy(&marked_admission);
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&foreign_barrier);
+
+    /* Destroying and reinitializing the same wrapper cannot revive an old
+     * admission, even when the replacement barrier is itself current. */
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    cm_semantic_barrier_destroy(&barrier);
+    assert(!cm_semantic_admission_is_current(&admission));
+    assert(init_barrier(&replacement, &barrier).status
+            == CM_SEMANTIC_BARRIER_OK
+        && !cm_semantic_admission_is_current(&admission));
+    advance_barrier_to_regions(&replacement, &barrier);
+    assert(!cm_semantic_admission_is_current(&admission)
+        && cm_semantic_admission_barrier_capability_id(&admission)
+            == UINT64_C(0));
+
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&replacement);
+    fixture_destroy(&foreign);
+    fixture_destroy(&f);
+}
+
+static void test_regions_admission_snapshot_invalidation(void)
+{
+    Fixture f;
+    CmSemanticBarrier barrier;
+    CmSemanticAdmission admission;
+    CmHirType type;
+    CmHirTypeId type_id;
+
+    fixture_init(&f, "fn value() -> u32 { 1u32 }");
+    memset(&barrier, 0, sizeof(barrier));
+    memset(&admission, 0, sizeof(admission));
+    assert(init_barrier(&f, &barrier).status == CM_SEMANTIC_BARRIER_OK);
+    advance_barrier_to_regions(&f, &barrier);
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_BOOL_KIND;
+    type.span = (CmSpan){ f.source, 0u, 1u };
+    assert(cm_hir_add_type(&f.hir, &type, &type_id) == CM_HIR_OK
+        && !cm_semantic_barrier_is_current(&barrier)
+        && !cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&f);
+
+    fixture_init(&f, "fn value() -> u32 { 1u32 }");
+    memset(&barrier, 0, sizeof(barrier));
+    assert(init_barrier(&f, &barrier).status == CM_SEMANTIC_BARRIER_OK);
+    advance_barrier_to_regions(&f, &barrier);
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    cm_module_graph_destroy(&f.graph);
+    cm_module_graph_init(&f.graph);
+    assert(!cm_semantic_barrier_is_current(&barrier)
+        && !cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&f);
+
+    fixture_init(&f, "fn value() -> u32 { 1u32 }");
+    memset(&barrier, 0, sizeof(barrier));
+    assert(init_barrier(&f, &barrier).status == CM_SEMANTIC_BARRIER_OK);
+    advance_barrier_to_regions(&f, &barrier);
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    cm_import_resolver_destroy(&f.imports);
+    cm_import_resolver_init(&f.imports);
+    assert(!cm_semantic_barrier_is_current(&barrier)
+        && !cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&f);
+
+    fixture_init(&f, "fn value() -> u32 { 1u32 }");
+    memset(&barrier, 0, sizeof(barrier));
+    assert(init_barrier(&f, &barrier).status == CM_SEMANTIC_BARRIER_OK);
+    advance_barrier_to_regions(&f, &barrier);
+    assert(cm_semantic_admit_regions_local_crate(&admission, &barrier).status
+        == CM_SEMANTIC_ADMISSION_OK);
+    cm_hir_module_map_destroy(&f.modules);
+    cm_hir_module_map_init(&f.modules);
+    assert(!cm_semantic_barrier_is_current(&barrier)
+        && !cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&f);
 }
 
 int main(void)
@@ -2398,6 +2665,8 @@ int main(void)
     test_exact_instance_closure_prefers_trait_override();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();
+    test_regions_admission_authority_gates();
+    test_regions_admission_snapshot_invalidation();
     test_invalid_api();
     puts("hir semantic admission tests passed");
     return 0;

@@ -4,6 +4,8 @@
 #include "cm/hir/body.h"
 #include "cm/hir/semantic_regions.h"
 
+struct CmSemanticAdmission;
+
 typedef enum CmSemanticBarrierPhase {
     CM_SEMANTIC_BARRIER_NONE = 0,
     CM_SEMANTIC_BARRIER_STRUCTURAL,
@@ -109,6 +111,9 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_typed(
  */
 CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
     CmSemanticBarrier *barrier);
+CmSemanticBarrierResult cm_semantic_barrier_advance_marked_admitted(
+    CmSemanticBarrier *barrier,
+    const struct CmSemanticAdmission *typed_admission);
 
 /*
  * Prove bounded structural region closure for the represented roots of the
@@ -118,6 +123,9 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
  */
 CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
     CmSemanticBarrier *barrier);
+CmSemanticBarrierResult cm_semantic_barrier_advance_regions_admitted(
+    CmSemanticBarrier *barrier,
+    const struct CmSemanticAdmission *marked_admission);
 
 void cm_semantic_barrier_destroy(CmSemanticBarrier *barrier);
 int cm_semantic_barrier_is_current(const CmSemanticBarrier *barrier);

@@ -3,6 +3,8 @@
 
 #include "cm/hir/model.h"
 
+struct CmSemanticAdmission;
+
 typedef enum CmSemanticMarkStatus {
     CM_SEMANTIC_MARK_OK = 0,
     CM_SEMANTIC_MARK_INVALID_ARGUMENT,
@@ -27,6 +29,11 @@ typedef struct CmSemanticMarkResult {
  */
 CmSemanticMarkResult cm_hir_semantic_mark_bodies(CmHirContext *hir,
     const CmHirBodyId *bodies, size_t body_count);
+
+/* As above, but consume durable semantic call recipes for selected calls. */
+CmSemanticMarkResult cm_hir_semantic_mark_admitted_bodies(
+    CmHirContext *hir, const CmHirBodyId *bodies, size_t body_count,
+    const struct CmSemanticAdmission *admission);
 
 const char *cm_semantic_mark_status_name(CmSemanticMarkStatus status);
 

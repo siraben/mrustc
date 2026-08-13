@@ -54,22 +54,25 @@ command. Task IDs are stable.
   expression slice's value usage with its builtin-Copy subset and writes a
   NOT_PROMOTED sentinel because that slice admits no promotion-ready borrow
   form. REGIONS is a read-only structural closure proof over represented
-  parameter/result/value types, body locals, expression types, direct-call
-  substitutions, generic arguments/defaults, const-argument types, and their
-  conservatively bounded nested type forms. It accepts static/erased regions
-  and exact early-bound lifetime parameters owned by the body item or its
-  authenticated enclosing trait/impl, while rejecting inference/error/
-  late-bound regions, inference/error types and consts, wrong parameter
-  ownership, cycles, shared DAGs, wrong body ownership, and inconsistent
-  MARKED evidence. Success changes no HIR generation and mints a fresh REGIONS
-  capability; every failure preserves phase, generation, and capability.
+  parameter/result/value types, body locals, expression types, direct and
+  selected-call arguments, substitutions, generic arguments/defaults,
+  predicate subjects/bounds/equality terms, outlives terms, const-argument
+  types, and their conservatively bounded nested type forms. It accepts
+  static/erased regions, exact early-bound lifetime parameters owned by the
+  body item or its authenticated enclosing trait/impl, and exact late-bound
+  indices owned by the active predicate binder. It rejects inference/error
+  regions, inference/error types and consts, wrong parameter or binder
+  ownership, cycles, shared DAGs, wrong body ownership, malformed slices, and
+  inconsistent MARKED evidence. Success changes no HIR generation and mints a
+  fresh REGIONS capability; every failure preserves phase, generation, and
+  capability.
 - This first REGIONS checkpoint is deliberately narrower than original
-  mrustc's lifetime solver. It does not traverse item predicates, supertraits,
-  associated bounds, ADT field declarations, enum discriminants, or
-  type-position expressions; represented body owners and their enclosing
-  trait/impl are rejected if any predicate or outlives constraint is present.
-  It does not claim lifetime inference,
-  early-bound outlives/equality, promotion eligibility, or borrow semantics.
+  mrustc's lifetime solver. Predicate traversal proves only structural closure
+  and exact scoping; it does not solve traits, equality, or outlives facts. It
+  does not yet traverse supertraits, associated bounds, ADT field declarations,
+  enum discriminants, or type-position expressions. It does not claim lifetime
+  inference, outlives/equality solving, promotion eligibility, or borrow
+  semantics.
   Enum discriminants and unevaluated array lengths remain outside the body
   manifest until they have stable type-position atom identities. The next
   checkpoint begins the ordered closure/static-promotion/vtable/UFCS/reborrow/
@@ -1794,7 +1797,7 @@ The complete strict GCC and TinyCC suites pass, as do focused Clang
 ASan/UBSan/leak HIR admission/results, MIR model/lowering, C codegen, and live
 blanket acceptance.
 
-The next architectural gate is the all-local semantic barrier. Original mrustc
+The active architectural gate is the all-local semantic barrier. Original mrustc
 runs outer and expression typecheck, then usage/static-borrow/lifetime/closure/
 vtable/UFCS/reborrow/erased-type rewrites, independent expression validation,
 whole-crate MIR lowering/validation/cleanup/borrowcheck, and only then
@@ -1803,9 +1806,10 @@ MIR-driven translation enumeration. cmrustc must seal a generation-bound
 for every
 cfg-active function, const, static, and represented type-position body atom;
 rollback or HIR mutation/ABA must stale the whole capability. Exact closure
-admission must derive from that barrier, MIR publication must pin both
-capabilities, and the production driver's legacy one-body bypass must be
-removed. Rewrites must precede durable final semantic-results allocation, and
+admission must derive from that barrier and MIR publication must pin both
+capabilities. The production emit-C path now has no raw semantic, MIR-lowering,
+or C-emission bypass; a source-boundary regression guard enforces that route.
+Rewrites must precede durable final semantic-results allocation, and
 phase names may advance only after a real validator rather than treating an
 unsupported form as completed.
 
@@ -1852,16 +1856,33 @@ The complete typed manifest now mints MARKED
 by atomically publishing value-usage and checked-not-promoted static-borrow
 evidence. A separate read-only `MARKED -> REGIONS` validator authenticates
 owner/body links, signature/local/expression/direct-call type roots, bounded
-MARKED evidence, nested type/const/generic structure, scoped early-bound
-regions, and graph integrity. Success preserves both HIR generations and
-rotates only the process-local capability. This proves zero inference
-variables in the represented body roots, not lifetime inference/equality,
-outlives, promotion eligibility, or borrow validity. Constrained body owners,
-declaration bounds/fields, discriminants, and type-position expression bodies
-remain outside this checkpoint. No API can yet mint REWRITTEN or VALIDATED, and normalized
-array lengths/discriminants are not
+MARKED evidence, selected method/qualified-call argument recipes, nested
+type/const/generic structure, structurally closed predicates/outlives terms,
+scoped early- and late-bound regions, and graph integrity. Success preserves
+both HIR generations and rotates only the process-local capability. This proves
+zero inference variables and structurally scoped regions in the represented
+roots, not lifetime inference, trait/equality/outlives solving, promotion
+eligibility, or borrow validity. Declaration fields, discriminants, and
+type-position expression bodies remain outside this checkpoint. No API can yet
+mint REWRITTEN or VALIDATED, and normalized array lengths/discriminants are not
 misrepresented as type-position body atoms while HIR lacks stable source body
 identities for them.
+
+REGIONS now owns the production authority chain rather than serving only as a
+diagnostic phase. A read-only whole-local admission is derived from the exact
+REGIONS barrier capability. A canonical reachable instance closure is then
+derived from that whole-local parent and the same retained barrier authority;
+destroy/reinitialize ABA of either wrapper cannot revive descendants because
+retained authority tokens carry liveness and capability identity. Durable
+semantic results distinguish `WHOLE_LOCAL`, `REACHABLE_BODIES`,
+`LEAF_INSTANCES`, and `INSTANCE_CLOSURE` seals. REGIONS publication accepts only
+an exact `INSTANCE_CLOSURE` child with a live whole-local parent and latches all
+three admission, barrier, and parent capabilities into MIR. Hosted `main` uses
+that transactional publication and admitted C emitter. Direct negative tests
+cover foreign, recreated, stale, destroyed-parent/barrier, unpublished-MIR,
+wrong-root/body/source, and sentinel-preserving emission rejection. Full normal,
+strict GCC, and TinyCC matrices exercise the same route; sanitizer validation
+is part of each checkpoint gate.
 
 The remaining non-item body frontier is explicit enum discriminants followed
 by array-length expressions. Discriminants can reuse stable variant DefIds but

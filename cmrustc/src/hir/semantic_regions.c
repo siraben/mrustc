@@ -1,7 +1,9 @@
 #include "cm/hir/semantic_regions.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/admission.h"
 #include "cm/hir/body.h"
+#include "cm/hir/semantic_results.h"
 
 #include <string.h>
 
@@ -13,6 +15,7 @@ typedef enum CmSemanticRegionsNamedTarget {
     CM_SEMANTIC_REGIONS_NAMED_ADT,
     CM_SEMANTIC_REGIONS_NAMED_ALIAS,
     CM_SEMANTIC_REGIONS_NAMED_TRAIT,
+    CM_SEMANTIC_REGIONS_NAMED_TRAIT_BOUND,
     CM_SEMANTIC_REGIONS_NAMED_FOREIGN
 } CmSemanticRegionsNamedTarget;
 
@@ -22,6 +25,8 @@ typedef struct CmSemanticRegionsScratch {
     size_t body_count;
     unsigned char *visited;
     unsigned char *type_gray;
+    const CmSemanticAdmission *admission;
+    const CmSemanticResults *results;
     size_t body_index;
     CmHirBodyId body;
     CmHirExprId expression;
@@ -31,8 +36,92 @@ typedef struct CmSemanticRegionsScratch {
     const CmHirItem *scope_parent;
     uint32_t scope_parameter_limit;
     int scope_parameter_limited;
+    uint32_t late_bound_limit;
+    int late_bound_allowed;
     CmSemanticRegionsResult result;
 } CmSemanticRegionsScratch;
+
+static int cm_semantic_regions_scan_type(
+    CmSemanticRegionsScratch *scratch, CmHirTypeId type_id, size_t depth);
+static int cm_semantic_regions_visit_expression(
+    CmSemanticRegionsScratch *scratch, CmHirExprId expression_id,
+    CmHirValueUsage expected_usage, size_t depth);
+
+static int cm_semantic_regions_selected_call(
+    CmSemanticRegionsScratch *scratch, const CmHirExpr *expression,
+    CmHirExprId expression_id, size_t depth)
+{
+    CmSemanticCallableSelectionView selection;
+    CmHirExprId argument_storage[2];
+    const CmHirExprId *arguments;
+    uint32_t argument_count;
+    uint32_t index;
+
+    memset(&selection, 0, sizeof(selection));
+    arguments = NULL;
+    argument_count = 0u;
+    if (scratch->results == NULL || scratch->admission == NULL) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        arguments = expression->data.qualified_call.arguments;
+        argument_count = expression->data.qualified_call.argument_count;
+        if ((argument_count == 0u) != (arguments == NULL)
+            || expression->data.qualified_call.syntax
+                != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+            || !cm_semantic_regions_scan_type(scratch,
+                expression->data.qualified_call.requested_self_type, 0u)) {
+            return 0;
+        }
+    } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+        if (expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+            || expression->data.method_call.argument_count > 1u
+            || (expression->data.method_call.argument_count != 0u
+                && expression->data.method_call.arguments == NULL)
+            || expression->data.method_call.syntax
+                != CM_HIR_CALLABLE_DOT_METHOD) return 0;
+        argument_storage[0] = expression->data.method_call.receiver;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            argument_storage[index + 1u] =
+                expression->data.method_call.arguments[index];
+        }
+        arguments = argument_storage;
+        argument_count = expression->data.method_call.argument_count + 1u;
+    } else {
+        return 0;
+    }
+    if (cm_semantic_results_callable_selection(scratch->results,
+            scratch->admission, scratch->body, expression_id, &selection)
+            != CM_SEMANTIC_RESULTS_OK
+        || selection.syntax != (expression->kind
+                == CM_HIR_EXPR_QUALIFIED_CALL
+            ? expression->data.qualified_call.syntax
+            : expression->data.method_call.syntax)
+        || selection.argument_count != argument_count
+        || cm_hir_def_id_is_none(selection.selected_impl)
+        || cm_hir_def_id_is_none(selection.selected_callable)
+        || cm_hir_def_id_is_none(selection.body_definition)) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        && (!cm_hir_def_id_equal(selection.requested_trait,
+                expression->data.qualified_call.requested_trait)
+            || !cm_hir_def_id_equal(selection.declared_trait_callable,
+                expression->data.qualified_call.declared_trait_callable)
+            || selection.receiver_argument
+                != expression->data.qualified_call.receiver_argument)) {
+        return 0;
+    }
+    for (index = 0u; index < argument_count; ++index) {
+        CmHirExprId retained;
+
+        retained = CM_HIR_EXPR_NONE;
+        if (cm_semantic_results_callable_argument(scratch->results,
+                scratch->admission, scratch->body, expression_id, index,
+                &retained) != CM_SEMANTIC_RESULTS_OK
+            || retained != arguments[index]
+            || !cm_semantic_regions_visit_expression(scratch,
+                arguments[index], CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+    }
+    return 1;
+}
 
 static CmSemanticRegionsResult cm_semantic_regions_result(
     CmSemanticRegionsStatus status)
@@ -88,17 +177,6 @@ static const CmHirItem *cm_semantic_regions_item(
     return item != NULL
             && cm_hir_def_id_equal(item->definition, definition)
         ? item : NULL;
-}
-
-static int cm_semantic_regions_constraints_empty(const CmHirItem *item)
-{
-    return item != NULL
-        && item->predicate_scope_count == 0u
-        && item->predicate_scopes == NULL
-        && item->predicate_count == 0u
-        && item->predicates == NULL
-        && item->outlives_predicate_count == 0u
-        && item->outlives_predicates == NULL;
 }
 
 static int cm_semantic_regions_parameter_owned_by(
@@ -375,6 +453,15 @@ static int cm_semantic_regions_scan_region(
         return cm_semantic_regions_fail_region(scratch,
             CM_SEMANTIC_REGIONS_INVALID_HIR, type_id, region);
     case CM_HIR_REGION_LATE_BOUND:
+        if (scratch->late_bound_allowed
+            && region->data.binder_index < scratch->late_bound_limit) {
+            return 1;
+        }
+        return cm_semantic_regions_fail_region(scratch,
+            scratch->late_bound_allowed
+                ? CM_SEMANTIC_REGIONS_INVALID_HIR
+                : CM_SEMANTIC_REGIONS_UNRESOLVED_REGION,
+            type_id, region);
     case CM_HIR_REGION_INFER:
     case CM_HIR_REGION_ERROR:
         return cm_semantic_regions_fail_region(scratch,
@@ -471,12 +558,16 @@ static int cm_semantic_regions_scan_named(
                 ? target->kind != CM_HIR_ITEM_TYPE_ALIAS
             : target_kind == CM_SEMANTIC_REGIONS_NAMED_TRAIT
                 ? target->kind != CM_HIR_ITEM_TRAIT
+            : target_kind == CM_SEMANTIC_REGIONS_NAMED_TRAIT_BOUND
+                ? target->kind != CM_HIR_ITEM_TRAIT
+                    && target->kind != CM_HIR_ITEM_TRAIT_ALIAS
             : target_kind == CM_SEMANTIC_REGIONS_NAMED_FOREIGN
                 ? target->kind != CM_HIR_ITEM_EXTERN_TYPE
                 : 1)
         || ((target_kind == CM_SEMANTIC_REGIONS_NAMED_FUNCTION
                 || target_kind == CM_SEMANTIC_REGIONS_NAMED_ADT
                 || target_kind == CM_SEMANTIC_REGIONS_NAMED_TRAIT
+                || target_kind == CM_SEMANTIC_REGIONS_NAMED_TRAIT_BOUND
                 || target_kind == CM_SEMANTIC_REGIONS_NAMED_FOREIGN)
             && !cm_hir_def_id_is_none(target->parent_definition))
         || (target_kind == CM_SEMANTIC_REGIONS_NAMED_FUNCTION
@@ -868,6 +959,313 @@ fail:
     return 0;
 }
 
+static int cm_semantic_regions_binder_valid(
+    const CmSemanticRegionsScratch *scratch,
+    const CmHirLifetimeBinder *binder, int require_nonempty)
+{
+    uint32_t index;
+    uint32_t prior;
+
+    if (binder == NULL
+        || binder->lifetime_count > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+        || (binder->lifetime_count == 0u) != (binder->lifetimes == NULL)
+        || (require_nonempty && binder->lifetime_count == 0u)
+        || (binder->lifetime_count == 0u
+            && (binder->span.source != 0u || binder->span.start != 0u
+                || binder->span.end != 0u))) return 0;
+    for (index = 0u; index < binder->lifetime_count; ++index) {
+        const CmInternedString *name;
+
+        name = cm_interner_get(&scratch->hir->strings,
+            binder->lifetimes[index]);
+        if (name == NULL || name->len == 0u) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (binder->lifetimes[prior] == binder->lifetimes[index]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static const CmHirPredicateScope *cm_semantic_regions_predicate_scope(
+    const CmHirItem *item, CmHirPredicateScopeId scope)
+{
+    if (item == NULL || scope == CM_HIR_PREDICATE_SCOPE_NONE
+        || scope > item->predicate_scope_count
+        || item->predicate_scopes == NULL) return NULL;
+    return &item->predicate_scopes[scope - 1u];
+}
+
+static int cm_semantic_regions_scan_predicate_region(
+    CmSemanticRegionsScratch *scratch, const CmHirRegion *region,
+    const CmHirLifetimeBinder *binder)
+{
+    uint32_t saved_late_bound_limit;
+    int saved_late_bound_allowed;
+    int ok;
+
+    saved_late_bound_limit = scratch->late_bound_limit;
+    saved_late_bound_allowed = scratch->late_bound_allowed;
+    scratch->late_bound_allowed = binder != NULL;
+    scratch->late_bound_limit = binder == NULL ? 0u : binder->lifetime_count;
+    ok = cm_semantic_regions_scan_region(scratch, CM_HIR_TYPE_NONE,
+        region);
+    scratch->late_bound_limit = saved_late_bound_limit;
+    scratch->late_bound_allowed = saved_late_bound_allowed;
+    return ok;
+}
+
+static int cm_semantic_regions_scan_predicate_type(
+    CmSemanticRegionsScratch *scratch, CmHirTypeId type,
+    const CmHirLifetimeBinder *binder)
+{
+    uint32_t saved_late_bound_limit;
+    int saved_late_bound_allowed;
+    int ok;
+
+    saved_late_bound_limit = scratch->late_bound_limit;
+    saved_late_bound_allowed = scratch->late_bound_allowed;
+    scratch->late_bound_allowed = binder != NULL;
+    scratch->late_bound_limit = binder == NULL ? 0u : binder->lifetime_count;
+    ok = cm_semantic_regions_scan_type(scratch, type, 0u);
+    scratch->late_bound_limit = saved_late_bound_limit;
+    scratch->late_bound_allowed = saved_late_bound_allowed;
+    return ok;
+}
+
+static int cm_semantic_regions_scan_predicate_named(
+    CmSemanticRegionsScratch *scratch, const CmHirNamedType *named,
+    CmHirTypeId container_type, const CmHirLifetimeBinder *binder)
+{
+    uint32_t saved_late_bound_limit;
+    int saved_late_bound_allowed;
+    int ok;
+
+    saved_late_bound_limit = scratch->late_bound_limit;
+    saved_late_bound_allowed = scratch->late_bound_allowed;
+    scratch->late_bound_allowed = binder != NULL;
+    scratch->late_bound_limit = binder == NULL ? 0u : binder->lifetime_count;
+    ok = cm_semantic_regions_scan_named(scratch, named, container_type,
+        CM_SEMANTIC_REGIONS_NAMED_TRAIT_BOUND, 0u);
+    scratch->late_bound_limit = saved_late_bound_limit;
+    scratch->late_bound_allowed = saved_late_bound_allowed;
+    return ok;
+}
+
+static int cm_semantic_regions_scan_predicates(
+    CmSemanticRegionsScratch *scratch, const CmHirItem *item)
+{
+    uint32_t scope_index;
+    uint32_t index;
+
+    if (item == NULL
+        || item->predicate_scope_count > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+        || item->predicate_count > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+        || item->outlives_predicate_count
+            > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+        || (item->predicate_scope_count == 0u)
+            != (item->predicate_scopes == NULL)
+        || (item->predicate_count == 0u) != (item->predicates == NULL)
+        || (item->outlives_predicate_count == 0u)
+            != (item->outlives_predicates == NULL)) {
+        return cm_semantic_regions_fail(scratch,
+            CM_SEMANTIC_REGIONS_INVALID_HIR, CM_HIR_TYPE_NONE);
+    }
+    for (scope_index = 0u; scope_index < item->predicate_scope_count;
+         ++scope_index) {
+        const CmHirPredicateScope *scope;
+        uint32_t trait_count;
+        uint32_t outlives_count;
+
+        scope = &item->predicate_scopes[scope_index];
+        if ((unsigned int)scope->subject_kind
+                > (unsigned int)CM_HIR_OUTLIVES_LIFETIME
+            || scope->span.start > scope->span.end
+            || scope->span.source != item->span.source
+            || scope->span.start < item->span.start
+            || scope->span.end > item->span.end
+            || scope->binder.span.start > scope->binder.span.end
+            || scope->binder.span.source != scope->span.source
+            || scope->binder.span.start < scope->span.start
+            || scope->binder.span.end > scope->span.end
+            || !cm_semantic_regions_binder_valid(scratch,
+                &scope->binder, 1)) {
+            return cm_semantic_regions_fail(scratch,
+                CM_SEMANTIC_REGIONS_INVALID_HIR, CM_HIR_TYPE_NONE);
+        }
+        if (scope->subject_kind == CM_HIR_OUTLIVES_TYPE) {
+            if (!cm_semantic_regions_scan_predicate_type(scratch,
+                    scope->subject.type, &scope->binder)) return 0;
+        } else if (!cm_semantic_regions_scan_predicate_region(scratch,
+                &scope->subject.lifetime, &scope->binder)) {
+            return 0;
+        }
+        trait_count = 0u;
+        for (index = 0u; index < item->predicate_count; ++index) {
+            if (item->predicates[index].scope == scope_index + 1u) {
+                if (trait_count == UINT32_MAX) {
+                    return cm_semantic_regions_fail(scratch,
+                        CM_SEMANTIC_REGIONS_INVALID_HIR,
+                        CM_HIR_TYPE_NONE);
+                }
+                ++trait_count;
+            }
+        }
+        outlives_count = 0u;
+        for (index = 0u; index < item->outlives_predicate_count; ++index) {
+            if (item->outlives_predicates[index].scope
+                    == scope_index + 1u) {
+                if (outlives_count == UINT32_MAX) {
+                    return cm_semantic_regions_fail(scratch,
+                        CM_SEMANTIC_REGIONS_INVALID_HIR,
+                        CM_HIR_TYPE_NONE);
+                }
+                ++outlives_count;
+            }
+        }
+        if ((trait_count == 0u && outlives_count == 0u)
+            || trait_count != scope->trait_predicate_count
+            || outlives_count != scope->outlives_predicate_count) {
+            return cm_semantic_regions_fail(scratch,
+                CM_SEMANTIC_REGIONS_INVALID_HIR, CM_HIR_TYPE_NONE);
+        }
+    }
+    for (index = 0u; index < item->predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+        const CmHirPredicateScope *scope;
+        const CmHirLifetimeBinder *binder;
+        uint32_t equality_index;
+
+        predicate = &item->predicates[index];
+        scope = cm_semantic_regions_predicate_scope(item,
+            predicate->scope);
+        if (predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE) {
+            if (!cm_semantic_regions_binder_valid(scratch,
+                    &predicate->binder, 0)) {
+                return cm_semantic_regions_fail(scratch,
+                    CM_SEMANTIC_REGIONS_INVALID_HIR, predicate->subject);
+            }
+            binder = predicate->binder.lifetime_count == 0u
+                ? NULL : &predicate->binder;
+        } else {
+            if (scope == NULL || predicate->binder.lifetime_count != 0u
+                || predicate->binder.lifetimes != NULL
+                || predicate->binder.span.source != 0u
+                || predicate->binder.span.start != 0u
+                || predicate->binder.span.end != 0u
+                || scope->subject_kind != CM_HIR_OUTLIVES_TYPE
+                || scope->subject.type != predicate->subject) {
+                return cm_semantic_regions_fail(scratch,
+                    CM_SEMANTIC_REGIONS_INVALID_HIR, predicate->subject);
+            }
+            binder = &scope->binder;
+        }
+        if ((unsigned int)predicate->modifier
+                > (unsigned int)CM_HIR_PREDICATE_CONST
+            || predicate->span.start > predicate->span.end
+            || predicate->span.source != item->span.source
+            || predicate->span.start < item->span.start
+            || predicate->span.end > item->span.end
+            || (binder != NULL && predicate->scope
+                    == CM_HIR_PREDICATE_SCOPE_NONE
+                && (predicate->binder.span.start
+                    > predicate->binder.span.end
+                    || predicate->binder.span.source
+                        != predicate->span.source
+                    || predicate->binder.span.start
+                        < predicate->span.start
+                    || predicate->binder.span.end
+                        > predicate->span.end))
+            || (scope != NULL
+                && (scope->span.source != predicate->span.source
+                    || scope->span.start != predicate->span.start
+                    || scope->span.end != predicate->span.end))
+            || predicate->equality_count > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+            || (predicate->equality_count == 0u)
+                != (predicate->equalities == NULL)
+            || !cm_semantic_regions_scan_predicate_type(scratch,
+                predicate->subject, binder)
+            || !cm_semantic_regions_scan_predicate_named(scratch,
+                &predicate->trait_type, predicate->subject, binder)) {
+            if (scratch->result.status == CM_SEMANTIC_REGIONS_OK) {
+                cm_semantic_regions_fail(scratch,
+                    CM_SEMANTIC_REGIONS_INVALID_HIR, predicate->subject);
+            }
+            return 0;
+        }
+        for (equality_index = 0u;
+             equality_index < predicate->equality_count;
+             ++equality_index) {
+            const CmHirItem *associated;
+
+            associated = cm_semantic_regions_item(scratch->hir,
+                predicate->equalities[equality_index].associated_type);
+            if (associated == NULL
+                || associated->kind != CM_HIR_ITEM_TYPE_ALIAS
+                || associated->data.type_alias_item.target
+                    != CM_HIR_TYPE_NONE
+                || !cm_hir_def_id_equal(associated->parent_definition,
+                    predicate->trait_type.definition)
+                || !cm_semantic_regions_scan_predicate_type(scratch,
+                    predicate->equalities[equality_index].value,
+                    binder)) {
+                if (scratch->result.status == CM_SEMANTIC_REGIONS_OK) {
+                    cm_semantic_regions_fail(scratch,
+                        CM_SEMANTIC_REGIONS_INVALID_HIR,
+                        predicate->equalities[equality_index].value);
+                }
+                return 0;
+            }
+        }
+    }
+    for (index = 0u; index < item->outlives_predicate_count; ++index) {
+        const CmHirOutlivesPredicate *predicate;
+        const CmHirPredicateScope *scope;
+        const CmHirLifetimeBinder *binder;
+
+        predicate = &item->outlives_predicates[index];
+        scope = cm_semantic_regions_predicate_scope(item,
+            predicate->scope);
+        if ((unsigned int)predicate->subject_kind
+                > (unsigned int)CM_HIR_OUTLIVES_LIFETIME
+            || predicate->span.start > predicate->span.end
+            || predicate->span.source != item->span.source
+            || predicate->span.start < item->span.start
+            || predicate->span.end > item->span.end
+            || (predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+                && (scope == NULL
+                    || scope->subject_kind != predicate->subject_kind
+                    || scope->span.source != predicate->span.source
+                    || scope->span.start != predicate->span.start
+                    || scope->span.end != predicate->span.end))) {
+            return cm_semantic_regions_fail(scratch,
+                CM_SEMANTIC_REGIONS_INVALID_HIR, CM_HIR_TYPE_NONE);
+        }
+        binder = scope == NULL ? NULL : &scope->binder;
+        if (predicate->subject_kind == CM_HIR_OUTLIVES_TYPE) {
+            if ((scope != NULL
+                    && scope->subject.type != predicate->subject.type)
+                || !cm_semantic_regions_scan_predicate_type(scratch,
+                    predicate->subject.type, binder)) return 0;
+        } else if ((scope != NULL
+                && !cm_semantic_regions_region_equal(
+                    &scope->subject.lifetime,
+                    &predicate->subject.lifetime))
+            || !cm_semantic_regions_scan_predicate_region(scratch,
+                &predicate->subject.lifetime, binder)) {
+            if (scratch->result.status == CM_SEMANTIC_REGIONS_OK) {
+                cm_semantic_regions_fail(scratch,
+                    CM_SEMANTIC_REGIONS_INVALID_HIR, CM_HIR_TYPE_NONE);
+            }
+            return 0;
+        }
+        if (!cm_semantic_regions_scan_predicate_region(scratch,
+                &predicate->bound, binder)) return 0;
+    }
+    return 1;
+}
+
 static int cm_semantic_regions_scan_declaration(
     CmSemanticRegionsScratch *scratch, const CmHirBody *body)
 {
@@ -877,6 +1275,13 @@ static int cm_semantic_regions_scan_declaration(
             scratch->parent)
         || !cm_semantic_regions_scan_generic_parameters(scratch,
             scratch->owner)) return 0;
+    if (scratch->parent != NULL) {
+        scratch->scope_owner = scratch->parent;
+        scratch->scope_parent = NULL;
+        scratch->scope_parameter_limited = 0;
+        if (!cm_semantic_regions_scan_predicates(scratch,
+                scratch->parent)) return 0;
+    }
     if (scratch->parent != NULL
         && scratch->parent->kind == CM_HIR_ITEM_IMPL) {
         scratch->scope_owner = scratch->parent;
@@ -895,6 +1300,8 @@ static int cm_semantic_regions_scan_declaration(
     scratch->scope_owner = scratch->owner;
     scratch->scope_parent = scratch->parent;
     scratch->scope_parameter_limited = 0;
+    if (!cm_semantic_regions_scan_predicates(scratch,
+            scratch->owner)) return 0;
     if (!cm_semantic_regions_scan_type(scratch, body->expected_type,
             0u)) return 0;
     if (scratch->owner->kind == CM_HIR_ITEM_FUNCTION) {
@@ -1148,6 +1555,15 @@ static int cm_semantic_regions_visit_expression(
         break;
     case CM_HIR_EXPR_METHOD_CALL:
     case CM_HIR_EXPR_QUALIFIED_CALL:
+        if (!cm_semantic_regions_selected_call(scratch, expression,
+                expression_id, depth)) {
+            return cm_semantic_regions_fail(scratch,
+                scratch->results == NULL
+                    ? CM_SEMANTIC_REGIONS_UNSUPPORTED_EXPRESSION
+                    : CM_SEMANTIC_REGIONS_INVALID_HIR,
+                expression->type);
+        }
+        break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
         return cm_semantic_regions_fail(scratch,
@@ -1160,9 +1576,9 @@ static int cm_semantic_regions_visit_expression(
     return 1;
 }
 
-CmSemanticRegionsResult cm_hir_semantic_check_regions(
+static CmSemanticRegionsResult cm_hir_semantic_check_regions_impl(
     const CmHirContext *hir, const CmHirBodyId *bodies,
-    size_t body_count)
+    size_t body_count, const CmSemanticAdmission *admission)
 {
     CmSemanticRegionsScratch scratch;
     size_t body_index;
@@ -1175,6 +1591,14 @@ CmSemanticRegionsResult cm_hir_semantic_check_regions(
     }
     memset(&scratch, 0, sizeof(scratch));
     scratch.hir = hir;
+    scratch.admission = admission;
+    scratch.results = admission == NULL ? NULL
+        : cm_semantic_admission_results(admission);
+    if (admission != NULL && (scratch.results == NULL
+            || cm_semantic_admission_hir(admission) != hir)) {
+        return cm_semantic_regions_result(
+            CM_SEMANTIC_REGIONS_INVALID_ARGUMENT);
+    }
     scratch.bodies = bodies;
     scratch.body_count = body_count;
     scratch.result = cm_semantic_regions_result(CM_SEMANTIC_REGIONS_OK);
@@ -1214,7 +1638,6 @@ CmSemanticRegionsResult cm_hir_semantic_check_regions(
         }
         scratch.owner = cm_semantic_regions_item(hir, body->owner);
         if (scratch.owner == NULL
-            || !cm_semantic_regions_constraints_empty(scratch.owner)
             || (scratch.owner->kind == CM_HIR_ITEM_FUNCTION
                 ? cm_hir_body_function_owner_kind(hir, scratch.owner)
                     == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED
@@ -1231,7 +1654,6 @@ CmSemanticRegionsResult cm_hir_semantic_check_regions(
             scratch.parent = cm_semantic_regions_item(hir,
                 scratch.owner->parent_definition);
             if (scratch.parent == NULL
-                || !cm_semantic_regions_constraints_empty(scratch.parent)
                 || (scratch.parent->kind != CM_HIR_ITEM_TRAIT
                     && scratch.parent->kind != CM_HIR_ITEM_IMPL)
                 || scratch.parent->owner_module
@@ -1306,6 +1728,25 @@ done:
     cm_free(scratch.type_gray);
     cm_free(scratch.visited);
     return scratch.result;
+}
+
+CmSemanticRegionsResult cm_hir_semantic_check_regions(
+    const CmHirContext *hir, const CmHirBodyId *bodies,
+    size_t body_count)
+{
+    return cm_hir_semantic_check_regions_impl(hir, bodies, body_count, NULL);
+}
+
+CmSemanticRegionsResult cm_hir_semantic_check_admitted_regions(
+    const CmHirContext *hir, const CmHirBodyId *bodies,
+    size_t body_count, const CmSemanticAdmission *admission)
+{
+    if (admission == NULL) {
+        return cm_semantic_regions_result(
+            CM_SEMANTIC_REGIONS_INVALID_ARGUMENT);
+    }
+    return cm_hir_semantic_check_regions_impl(hir, bodies, body_count,
+        admission);
 }
 
 const char *cm_semantic_regions_status_name(

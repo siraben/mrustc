@@ -169,6 +169,7 @@ HIR_LAYOUT_TEST_PROGRAM := $(BUILD_DIR)/test_hir_layout
 MIR_MODEL_TEST_PROGRAM := $(BUILD_DIR)/test_mir_model
 MIR_LOWER_TEST_PROGRAM := $(BUILD_DIR)/test_mir_lower
 CODEGEN_C_TEST_PROGRAM := $(BUILD_DIR)/test_codegen_c
+CODEGEN_PRODUCTION_BARRIER_SCRIPT := tests/codegen/run_production_barrier.sh
 CORE_HIR_PROBE_PROGRAM := $(BUILD_DIR)/probe_core_hir
 AST_DUMP_PROGRAM := $(BUILD_DIR)/dump_ast
 AST_DIFFERENTIAL_SCRIPT := tests/syntax/run_ast_differential.sh
@@ -188,7 +189,8 @@ $(BUILD_DIR)/obj/%.o: src/%.c $(HEADER_FILES)
 $(BUILD_DIR)/obj/hir/library.o: src/hir/library_internal.h
 $(BUILD_DIR)/obj/hir/metadata.o: src/hir/library_internal.h src/hir/metadata_codec.h
 $(BUILD_DIR)/obj/hir/metadata_codec.o: src/hir/metadata_codec.h
-$(BUILD_DIR)/obj/hir/admission.o: src/hir/admission_internal.h src/hir/instance_internal.h src/hir/semantic_results_internal.h
+$(BUILD_DIR)/obj/hir/admission.o: src/hir/admission_internal.h src/hir/admission_authority_internal.h src/hir/instance_internal.h src/hir/semantic_barrier_internal.h src/hir/semantic_results_internal.h
+$(BUILD_DIR)/obj/hir/semantic_barrier.o: src/hir/semantic_barrier_internal.h
 $(BUILD_DIR)/obj/hir/semantic_body.o: src/hir/semantic_body_internal.h
 $(BUILD_DIR)/obj/hir/semantic_results.o: src/hir/semantic_results_internal.h
 
@@ -232,9 +234,9 @@ $(IMPORT_TEST_PROGRAM): tests/resolve/test_imports.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBRARY_OBJECTS) $(LDLIBS)
 
-$(HIR_TEST_PROGRAM): tests/hir/test_model.c $(HIR_MODEL_OBJECTS) $(BASE_OBJECTS)
+$(HIR_TEST_PROGRAM): tests/hir/test_model.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(HIR_MODEL_OBJECTS) $(BASE_OBJECTS) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIBRARY_OBJECTS) $(LDLIBS)
 
 $(HIR_LOWER_TEST_PROGRAM): tests/hir/test_lower.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)
@@ -393,8 +395,10 @@ test check: all $(TEST_PROGRAM) $(TARGET_CFG_TEST_PROGRAM) $(BASE_TEST_PROGRAMS)
 	$(MIR_MODEL_TEST_PROGRAM)
 	$(MIR_LOWER_TEST_PROGRAM)
 	$(CODEGEN_C_TEST_PROGRAM)
+	sh $(CODEGEN_PRODUCTION_BARRIER_SCRIPT) src/driver/compile.c
 	CC="$(CC)" CFLAGS="$(CFLAGS)" $(ABI_PROBE_SCRIPT)
-	CMRUSTC=$(abspath $(PROGRAM)) TEST_SOURCE_DIAG=$(abspath $(TEST_PROGRAM)) \
+	CC="$(CC)" CFLAGS="$(CFLAGS)" CMRUSTC=$(abspath $(PROGRAM)) \
+		TEST_SOURCE_DIAG=$(abspath $(TEST_PROGRAM)) \
 		EXPECT_TCC=$(if $(CM_REQUIRE_TCC),1,0) tests/run.sh
 
 strict:

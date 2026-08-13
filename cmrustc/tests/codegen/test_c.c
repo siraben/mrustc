@@ -1,6 +1,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cm/codegen/c.h"
+#include "cm/hir/lower.h"
+#include "cm/hir/semantic_barrier.h"
+#include "cm/mir/lower.h"
+#include "cm/source.h"
+
+#include "../../src/hir/admission_internal.h"
+#include "../../src/hir/admission_authority_internal.h"
+#include "../../src/hir/instance_internal.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -23,14 +31,21 @@ CmCEmitStatus cm_c_emit_reachable_program_reference_test_copy(
     const CmSemanticAdmission *admission,
     const CmMirBodyId *roots, uint32_t root_count,
     const CmTargetDesc *target);
+CmCEmitStatus cm_c_emit_admitted_program_reference_test_copy(
+    CmStrBuf *output, const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission, CmMirBodyId root,
+    CmHirItemId entry_item, const CmTargetDesc *target);
 const char *cm_c_emit_status_name_reference_test_copy(CmCEmitStatus status);
 
 #define cm_c_emit_program cm_c_emit_program_reference_test_copy
 #define cm_c_emit_reachable_program \
     cm_c_emit_reachable_program_reference_test_copy
+#define cm_c_emit_admitted_program \
+    cm_c_emit_admitted_program_reference_test_copy
 #define cm_c_emit_status_name cm_c_emit_status_name_reference_test_copy
 #include "../../src/codegen/c.c"
 #undef cm_c_emit_status_name
+#undef cm_c_emit_admitted_program
 #undef cm_c_emit_reachable_program
 #undef cm_c_emit_program
 
@@ -630,6 +645,307 @@ static void compile_and_run_c(const CmStrBuf *source)
     assert(unlink(source_path) == 0);
 }
 
+typedef struct AdmittedHostedProgram {
+    CmSourceSet sources;
+    CmSourceId source;
+    CmCfgSet cfg;
+    CmModuleGraph graph;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmHirContext hir;
+    CmHirModuleMap modules;
+    CmSemanticBarrier barrier;
+    CmSemanticAdmission all_local;
+    CmSemanticAdmission exact;
+    CmHirCanonicalInstance identity;
+    CmSemanticCanonicalReachableInstance reachable;
+    CmMirContext mir;
+    CmMirBodyId root;
+    CmHirItemId entry;
+} AdmittedHostedProgram;
+
+static void admitted_hosted_program_init(AdmittedHostedProgram *program)
+{
+    static const char source[] =
+        "#![feature(no_core)]\n"
+        "#![no_core]\n"
+        "#![no_main]\n"
+        "#[no_mangle]\n"
+        "pub extern \"C\" fn main() -> i32 { 0 }\n";
+    CmModuleGraphOptions graph_options;
+    CmImportResult import_result;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    CmSemanticBarrierResult barrier_result;
+    CmSemanticAdmissionResult admission_result;
+    CmHirInstanceSpec spec;
+    CmMirPublication publication;
+    CmMirInstance instance;
+    CmMirLowerResult mir_result;
+    const CmHirItem *entry;
+
+    memset(program, 0, sizeof(*program));
+    cm_source_set_init(&program->sources);
+    assert(cm_source_add_memory(&program->sources, "hosted/main.rs",
+        (const unsigned char *)source, strlen(source), &program->source)
+        == CM_SOURCE_OK);
+    cm_cfg_set_init(&program->cfg);
+    cm_module_graph_init(&program->graph);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.edition = CM_EDITION_2021;
+    graph_options.cfg = &program->cfg;
+    program->graph_result = cm_module_graph_build(&program->graph,
+        &program->sources, program->source, &graph_options);
+    assert(program->graph_result.error_count == 0u);
+    cm_import_resolver_init(&program->imports);
+    import_result = cm_import_resolve(&program->imports, &program->graph,
+        program->graph_result.revision);
+    assert(import_result.error_count == 0u);
+    cm_hir_context_init(&program->hir);
+    cm_hir_module_map_init(&program->modules);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "admitted_hosted";
+    lower_options.edition = CM_HIR_EDITION_2021;
+    lower_result = cm_hir_lower_module_graph(&program->hir,
+        &program->graph, program->graph_result.revision, &program->imports,
+        &program->modules, &lower_options);
+    assert(lower_result.error_count == 0u
+        && lower_result.crate_id != CM_HIR_CRATE_NONE
+        && program->hir.items.len == 1u);
+    program->entry = 1u;
+    entry = cm_hir_get_item(&program->hir, program->entry);
+    assert(entry != NULL && entry->kind == CM_HIR_ITEM_FUNCTION
+        && entry->data.function_item.body != CM_HIR_BODY_NONE);
+
+    barrier_result = cm_semantic_barrier_init_structural(&program->barrier,
+        &program->hir, lower_result.crate_id, &program->graph,
+        program->graph_result.revision, &program->imports,
+        &program->modules);
+    assert(barrier_result.status == CM_SEMANTIC_BARRIER_OK);
+    barrier_result = cm_semantic_barrier_advance_typed(&program->barrier,
+        &program->graph, program->graph_result.revision, &program->imports,
+        &program->modules);
+    assert(barrier_result.status == CM_SEMANTIC_BARRIER_OK);
+    barrier_result = cm_semantic_barrier_advance_marked(&program->barrier);
+    assert(barrier_result.status == CM_SEMANTIC_BARRIER_OK);
+    barrier_result = cm_semantic_barrier_advance_regions(&program->barrier);
+    assert(barrier_result.status == CM_SEMANTIC_BARRIER_OK);
+    admission_result = cm_semantic_admit_regions_local_crate(
+        &program->all_local, &program->barrier);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = entry->definition;
+    spec.body_definition = entry->definition;
+    cm_hir_canonical_instance_init(&program->identity);
+    assert(cm_hir_canonical_instance_encode(&program->hir,
+        lower_result.crate_id, &spec, &program->identity)
+        == CM_HIR_INSTANCE_OK);
+    program->reachable.identity = &program->identity;
+    admission_result = cm_semantic_admit_regions_canonical_instance_closure(
+        &program->exact, &program->barrier, &program->all_local,
+        &program->reachable, 1u, NULL, 0u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+
+    cm_mir_context_init(&program->mir);
+    cm_mir_publication_init(&publication);
+    memset(&instance, 0, sizeof(instance));
+    instance.definition = program->identity.definition;
+    instance.body_definition = program->identity.body_definition;
+    instance.body = program->identity.body;
+    instance.identity_bytes = program->identity.bytes;
+    instance.identity_size = program->identity.size;
+    assert(cm_mir_publication_begin_regions(&publication, &program->mir,
+            &program->exact) == CM_MIR_OK
+        && cm_mir_publication_reserve_canonical(&publication, &instance,
+            program->identity.body, &program->root) == CM_MIR_OK);
+    mir_result = cm_mir_lower_admitted_publication_canonical(&program->mir,
+        &publication, &program->exact, program->root);
+    assert(mir_result.error_count == 0u && mir_result.body == program->root
+        && cm_mir_publication_validate(&publication) == CM_MIR_OK
+        && cm_mir_publication_commit(&publication) == CM_MIR_OK);
+    cm_mir_publication_destroy(&publication);
+}
+
+static void admitted_hosted_program_destroy(AdmittedHostedProgram *program)
+{
+    cm_mir_context_destroy(&program->mir);
+    cm_semantic_admission_destroy(&program->exact);
+    cm_semantic_admission_destroy(&program->all_local);
+    cm_semantic_barrier_destroy(&program->barrier);
+    cm_hir_canonical_instance_destroy(&program->identity);
+    cm_hir_module_map_destroy(&program->modules);
+    cm_hir_context_destroy(&program->hir);
+    cm_import_resolver_destroy(&program->imports);
+    cm_module_graph_destroy(&program->graph);
+    cm_source_set_destroy(&program->sources);
+    memset(program, 0, sizeof(*program));
+}
+
+static void assert_admitted_hosted_failure(CmStrBuf *output,
+    const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission, CmMirBodyId root,
+    CmHirItemId entry)
+{
+    size_t length;
+
+    length = output->len;
+    assert(cm_c_emit_admitted_program(output, hir, mir, admission, root,
+        entry, &test_target) == CM_C_EMIT_INVALID_MIR
+        && output->len == length
+        && strcmp(cm_str_buf_c_str(output), "sentinel") == 0);
+}
+
+static void test_admitted_hosted_program_authority(void)
+{
+    AdmittedHostedProgram program;
+    AdmittedHostedProgram foreign;
+    AdmittedHostedProgram parent_invalidated;
+    AdmittedHostedProgram barrier_invalidated;
+    CmSemanticAdmission unbound;
+    CmSemanticAdmission wrong;
+    CmSemanticAdmissionResult admission_result;
+    CmMirContext unpublished;
+    CmMirContext open_mir;
+    CmMirPublication publication;
+    CmMirInstance instance;
+    CmMirLowerResult lower_result;
+    CmMirBodyId open_root;
+    CmMirBody *body;
+    const CmMirBody *published_body;
+    CmHirBodyId saved_instance_body;
+    CmHirBodyId saved_source_body;
+    CmHirDefId saved_owner;
+    CmStrBuf output;
+    CmStrBuf raw_output;
+
+    admitted_hosted_program_init(&program);
+    admitted_hosted_program_init(&foreign);
+    admitted_hosted_program_init(&parent_invalidated);
+    admitted_hosted_program_init(&barrier_invalidated);
+    memset(&unbound, 0, sizeof(unbound));
+    memset(&wrong, 0, sizeof(wrong));
+
+    cm_str_buf_init(&output);
+    cm_str_buf_init(&raw_output);
+    assert(cm_c_emit_admitted_program(&output, &program.hir, &program.mir,
+        &program.exact, program.root, program.entry, &test_target)
+        == CM_C_EMIT_OK
+        && strstr(cm_str_buf_c_str(&output), "int main(void)") != NULL
+        && strstr(cm_str_buf_c_str(&output), "(int32_t)(0)") != NULL);
+    published_body = cm_mir_get_body(&program.mir, program.root);
+    assert(published_body != NULL
+        && cm_c_emit_program(&raw_output, &program.hir, published_body,
+            program.entry, &test_target) == CM_C_EMIT_OK
+        && strcmp(cm_str_buf_c_str(&output),
+            cm_str_buf_c_str(&raw_output)) == 0
+        && program.mir.admitted_admission_capability_id
+            == cm_semantic_admission_capability_id(&program.exact)
+        && program.mir.admitted_barrier_capability_id
+            == cm_semantic_admission_barrier_capability_id(&program.exact)
+        && program.mir.admitted_parent_capability_id
+            == cm_semantic_admission_parent_capability_id(&program.exact));
+    compile_and_run_c(&output);
+    cm_str_buf_clear(&output);
+    cm_str_buf_append(&output, "sentinel");
+
+    admission_result = cm_semantic_admit_typed_canonical_instance_closure(
+        &unbound, &program.hir, program.identity.definition.crate_id,
+        &program.reachable, 1u, NULL, 0u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_barrier_capability_id(&unbound)
+            == UINT64_C(0));
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &unbound, program.root, program.entry);
+
+    admission_result = cm_semantic_admit_regions_canonical_instance_closure(
+        &wrong, &program.barrier, &program.all_local, &program.reachable,
+        1u, NULL, 0u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_capability_id(&wrong)
+            != cm_semantic_admission_capability_id(&program.exact));
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &wrong, program.root, program.entry);
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &foreign.exact, program.root, program.entry);
+
+    cm_mir_context_init(&unpublished);
+    assert_admitted_hosted_failure(&output, &program.hir, &unpublished,
+        &program.exact, program.root, program.entry);
+    cm_mir_context_destroy(&unpublished);
+
+    cm_mir_context_init(&open_mir);
+    cm_mir_publication_init(&publication);
+    memset(&instance, 0, sizeof(instance));
+    instance.definition = program.identity.definition;
+    instance.body_definition = program.identity.body_definition;
+    instance.body = program.identity.body;
+    instance.identity_bytes = program.identity.bytes;
+    instance.identity_size = program.identity.size;
+    assert(cm_mir_publication_begin_regions(&publication, &open_mir,
+            &program.exact) == CM_MIR_OK
+        && cm_mir_publication_reserve_canonical(&publication, &instance,
+            program.identity.body, &open_root) == CM_MIR_OK);
+    lower_result = cm_mir_lower_admitted_publication_canonical(&open_mir,
+        &publication, &program.exact, open_root);
+    assert(lower_result.error_count == 0u && lower_result.body == open_root
+        && cm_mir_publication_validate(&publication) == CM_MIR_OK);
+    assert_admitted_hosted_failure(&output, &program.hir, &open_mir,
+        &program.exact, open_root, program.entry);
+    cm_mir_publication_destroy(&publication);
+    cm_mir_context_destroy(&open_mir);
+
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, CM_MIR_BODY_NONE, program.entry);
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root + 1u, program.entry);
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root, CM_HIR_ITEM_NONE);
+
+    body = (CmMirBody *)cm_mir_get_body(&program.mir, program.root);
+    assert(body != NULL);
+    saved_instance_body = body->instance.body;
+    body->instance.body = CM_HIR_BODY_NONE;
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root, program.entry);
+    body->instance.body = saved_instance_body;
+    saved_source_body = body->source_body;
+    body->source_body = CM_HIR_BODY_NONE;
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root, program.entry);
+    body->source_body = saved_source_body;
+    saved_owner = body->owner;
+    body->owner = cm_hir_def_id_none();
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root, program.entry);
+    body->owner = saved_owner;
+
+    cm_semantic_admission_destroy(&parent_invalidated.all_local);
+    assert(!cm_semantic_admission_is_current(&parent_invalidated.exact));
+    assert_admitted_hosted_failure(&output, &parent_invalidated.hir,
+        &parent_invalidated.mir, &parent_invalidated.exact,
+        parent_invalidated.root, parent_invalidated.entry);
+    cm_semantic_barrier_destroy(&barrier_invalidated.barrier);
+    assert(!cm_semantic_admission_is_current(&barrier_invalidated.exact));
+    assert_admitted_hosted_failure(&output, &barrier_invalidated.hir,
+        &barrier_invalidated.mir, &barrier_invalidated.exact,
+        barrier_invalidated.root, barrier_invalidated.entry);
+
+    cm_semantic_admission_destroy(&program.exact);
+    assert(!cm_semantic_admission_is_current(&program.exact));
+    assert_admitted_hosted_failure(&output, &program.hir, &program.mir,
+        &program.exact, program.root, program.entry);
+
+    cm_str_buf_destroy(&raw_output);
+    cm_str_buf_destroy(&output);
+    cm_semantic_admission_destroy(&wrong);
+    cm_semantic_admission_destroy(&unbound);
+    admitted_hosted_program_destroy(&barrier_invalidated);
+    admitted_hosted_program_destroy(&parent_invalidated);
+    admitted_hosted_program_destroy(&foreign);
+    admitted_hosted_program_destroy(&program);
+}
+
 static void init_reference_export_mir(const TestReferenceProgram *program,
     CmMirBody *body, CmMirLocal locals[3], CmMirStatement *statement,
     CmMirBasicBlock *block)
@@ -965,5 +1281,6 @@ int main(void)
     test_reference_export_and_rejection();
     test_reference_formatter_shapes();
     test_canonical_instance_identity_and_name();
+    test_admitted_hosted_program_authority();
     return 0;
 }

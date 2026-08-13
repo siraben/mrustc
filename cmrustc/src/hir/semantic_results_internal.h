@@ -9,6 +9,17 @@ typedef struct CmSemanticResultsBodyStage {
     void *state;
 } CmSemanticResultsBodyStage;
 
+/* The coverage proven when a durable result set becomes immutable.  These
+ * domains are intentionally distinct: membership in a whole-local body set
+ * is not authority for an exact instance closure, and vice versa. */
+typedef enum CmSemanticResultsSealKind {
+    CM_SEMANTIC_RESULTS_SEAL_UNSEALED = 0,
+    CM_SEMANTIC_RESULTS_SEAL_WHOLE_LOCAL,
+    CM_SEMANTIC_RESULTS_SEAL_REACHABLE_BODIES,
+    CM_SEMANTIC_RESULTS_SEAL_LEAF_INSTANCES,
+    CM_SEMANTIC_RESULTS_SEAL_INSTANCE_CLOSURE
+} CmSemanticResultsSealKind;
+
 typedef struct CmSemanticCanonicalCallInput {
     CmHirExprId expression;
     const CmHirCanonicalInstance *callee;
@@ -172,6 +183,8 @@ CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
     CmSemanticResults *results, size_t instance_count);
 CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
     CmSemanticResults *results, size_t instance_count);
+CmSemanticResultsSealKind cm_semantic_results_seal_kind(
+    const CmSemanticResults *results);
 void cm_semantic_results_destroy(CmSemanticResults *results);
 
 #endif

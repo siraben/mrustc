@@ -6,6 +6,8 @@
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/semantic_item.h"
 
+struct CmSemanticBarrier;
+
 typedef enum CmSemanticAdmissionStatus {
     CM_SEMANTIC_ADMISSION_OK = 0,
     CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT,
@@ -14,7 +16,8 @@ typedef enum CmSemanticAdmissionStatus {
     CM_SEMANTIC_ADMISSION_ITEM_FAILURE,
     CM_SEMANTIC_ADMISSION_SESSION_FAILURE,
     CM_SEMANTIC_ADMISSION_BODY_FAILURE,
-    CM_SEMANTIC_ADMISSION_HIR_FAILURE
+    CM_SEMANTIC_ADMISSION_HIR_FAILURE,
+    CM_SEMANTIC_ADMISSION_INVALID_BARRIER
 } CmSemanticAdmissionStatus;
 
 typedef struct CmSemanticAdmissionResult {
@@ -61,6 +64,16 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     const CmHirModuleMap *modules);
 
 /*
+ * Read-only whole-crate admission derived from one exact live REGIONS
+ * authority. The barrier and all snapshots borrowed by it must outlive the
+ * admission. Unlike the compatibility constructor above, this does not
+ * lower, mark, rewind, or otherwise mutate HIR.
+ */
+CmSemanticAdmissionResult cm_semantic_admit_regions_local_crate(
+    CmSemanticAdmission *admission,
+    const struct CmSemanticBarrier *barrier);
+
+/*
  * Admit one closed set of already-typed, monomorphic local function bodies.
  * Generic functions and associated functions are not accepted. Unlisted
  * bodies remain outside the capability and may remain unlowered. Local trait
@@ -96,6 +109,12 @@ uint64_t cm_semantic_admission_generation(
     const CmSemanticAdmission *admission);
 /* Process-unique identity of this live capability; zero if empty or stale. */
 uint64_t cm_semantic_admission_capability_id(
+    const CmSemanticAdmission *admission);
+uint64_t cm_semantic_admission_barrier_capability_id(
+    const CmSemanticAdmission *admission);
+/* Nonzero only for an exact slice derived from a live whole-local REGIONS
+ * admission. Production MIR publication requires this second authority. */
+uint64_t cm_semantic_admission_parent_capability_id(
     const CmSemanticAdmission *admission);
 const char *cm_semantic_admission_status_name(
     CmSemanticAdmissionStatus status);
