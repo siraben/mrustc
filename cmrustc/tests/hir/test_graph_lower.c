@@ -8746,7 +8746,7 @@ static void test_generic_associated_type_declaration(void)
     cm_source_set_destroy(&sources);
 }
 
-static void test_transitive_generic_self_projection_graph_rollback(void)
+static void test_transitive_generic_self_projection_graph(void)
 {
     static const unsigned char source[] =
         "trait Future { type Output; }\n"
@@ -8765,6 +8765,15 @@ static void test_transitive_generic_self_projection_graph_rollback(void)
     CmHirModuleMap map;
     CmHirLowerOptions options;
     CmHirLowerResult result;
+    const CmHirItem *future;
+    const CmHirItem *future_output;
+    const CmHirItem *leaf;
+    const CmHirItem *mid;
+    const CmHirItem *base;
+    const CmHirItem *base_output;
+    const CmHirItem *gat;
+    const CmHirType *equality;
+    const CmHirType *trait_argument;
 
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
@@ -8781,13 +8790,57 @@ static void test_transitive_generic_self_projection_graph_rollback(void)
     cm_hir_lower_options_init(&options);
     result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
         &options);
-    check(graph_result.error_count == 0u && result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && strstr(result.first_error.message,
-            "transitive generic supertraits requires structural substitution")
-            != NULL
-        && hir_is_empty(&hir) && cm_hir_module_map_count(&map) == 0u,
-        "transitive generic GAT failure escaped its graph transaction");
+    future = find_hir_item_anywhere(&hir, "Future");
+    future_output = future == NULL ? NULL
+        : find_hir_associated_item(&hir, future->definition,
+            CM_HIR_ITEM_TYPE_ALIAS, "Output");
+    leaf = find_hir_item_anywhere(&hir, "Leaf");
+    mid = find_hir_item_anywhere(&hir, "Mid");
+    base = find_hir_item_anywhere(&hir, "Base");
+    base_output = base == NULL ? NULL
+        : find_hir_associated_item(&hir, base->definition,
+            CM_HIR_ITEM_TYPE_ALIAS, "Output");
+    gat = leaf == NULL ? NULL
+        : find_hir_associated_item(&hir, leaf->definition,
+            CM_HIR_ITEM_TYPE_ALIAS, "Gat");
+    equality = gat == NULL
+            || gat->data.type_alias_item.bound_count != 1u
+            || gat->data.type_alias_item.bounds[0].equality_count != 1u
+        ? NULL : cm_hir_get_type(&hir,
+            gat->data.type_alias_item.bounds[0].equalities[0].value);
+    trait_argument = equality == NULL
+            || equality->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || equality->data.projection_type.trait_type.argument_count != 1u
+            || equality->data.projection_type.trait_type.arguments == NULL
+            || equality->data.projection_type.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&hir,
+            equality->data.projection_type.trait_type.arguments[0]
+                .data.type);
+    check(graph_result.error_count == 0u && result.error_count == 0u
+        && cm_hir_module_map_count(&map) == 1u
+        && future != NULL && future_output != NULL && leaf != NULL
+        && mid != NULL && base != NULL && base_output != NULL && gat != NULL
+        && leaf->generic_parameter_count == 1u
+        && equality != NULL
+        && equality->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && hir_type_is_self(&hir,
+            equality->data.projection_type.self_type, leaf->definition)
+        && cm_hir_def_id_equal(equality->data.projection_type
+                .trait_type.definition,
+            base->definition)
+        && cm_hir_def_id_equal(equality->data.projection_type
+                .associated_type.definition,
+            base_output->definition)
+        && trait_argument != NULL
+        && trait_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && trait_argument->data.parameter_type.parameter
+            == leaf->generic_parameter_start
+        && cm_hir_def_id_equal(gat->data.type_alias_item.bounds[0]
+                .equalities[0].associated_type,
+            future_output->definition),
+        "transitive generic GAT projection did not substitute Leaf<V> "
+        "through Mid<V> to Base<V>");
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
@@ -11842,7 +11895,7 @@ int main(void)
     test_associated_type_lifetime_bounds_graph();
     test_adt_generic_type_defaults_fail_closed();
     test_generic_associated_type_declaration();
-    test_transitive_generic_self_projection_graph_rollback();
+    test_transitive_generic_self_projection_graph();
     test_attributed_async_trait_method();
     test_predicate_prefix_lifetime_binder();
     test_generated_declarations();

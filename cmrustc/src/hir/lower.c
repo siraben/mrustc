@@ -7713,7 +7713,7 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstPathSegment *segment,
     const CmLowerTraitTarget *trait_target, CmHirModuleId module,
     CmHirDefId owner, CmHirTypeId default_self, int allow_bindings,
-    int allow_synthesized_default_self, CmSpan span,
+    int allow_constraints, int allow_synthesized_default_self, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count)
 {
     CmHirGenericArg *arguments;
@@ -7741,11 +7741,16 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
             return 0;
         }
         if (ast_argument->kind == CM_AST_GENERIC_CONSTRAINT) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-                cm_lower_span(state, ast_argument->span), ast_item_id,
-                CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-                "associated-type constraints are not supported in HIR");
-            return 0;
+            if (!allow_constraints) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, ast_argument->span), ast_item_id,
+                    CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "associated-type constraints are not supported in this "
+                    "HIR position");
+                return 0;
+            }
+            saw_binding = 1;
+            continue;
         }
         if (ast_argument->kind == CM_AST_GENERIC_BINDING) {
             if (!allow_bindings) {
@@ -7764,7 +7769,7 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
                 cm_lower_span(state, ast_argument->span), ast_item_id,
                 ast_argument->type, CM_AST_PATH_NONE, CM_HIR_OK,
                 "positional trait arguments must precede associated "
-                "equalities");
+                "equalities or constraints");
             return 0;
         }
         if (ast_argument->kind != CM_AST_GENERIC_TYPE
@@ -7795,7 +7800,8 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
         const CmHirGenericParam *parameter;
 
         ast_argument = &segment->arguments[index];
-        if (ast_argument->kind == CM_AST_GENERIC_BINDING) continue;
+        if (ast_argument->kind == CM_AST_GENERIC_BINDING
+            || ast_argument->kind == CM_AST_GENERIC_CONSTRAINT) continue;
         parameter = cm_hir_get_generic_param(state->hir,
             trait_target->generic_parameter_start + explicit_count);
         if (parameter == NULL
@@ -7925,7 +7931,8 @@ static int cm_lower_trait_reference(CmLowerState *state,
     CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
     CmHirModuleId module, CmHirDefId owner, CmHirTypeId default_self,
     CmHirNamedType *out_trait, CmLowerTraitTarget *out_target,
-    int is_supertrait, int allow_bindings, int allow_trait_alias)
+    int is_supertrait, int allow_bindings, int allow_constraints,
+    int allow_trait_alias)
 {
     const CmAstType *ast_type;
     const CmAstPath *path;
@@ -8090,7 +8097,8 @@ static int cm_lower_trait_reference(CmLowerState *state,
     if (is_supertrait) {
         if (!cm_lower_trait_positional_arguments(state, ast_item_id,
                 &path->segments[path->segment_count - 1u], out_target, module,
-                owner, default_self, allow_bindings, 1, span,
+                owner, default_self, allow_bindings, allow_constraints, 1,
+                span,
                 &out_trait->arguments,
                 &out_trait->argument_count)) {
             return 0;
@@ -8216,7 +8224,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
     memset(&trait_target, 0, sizeof(trait_target));
     if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
             principal_bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
-            &principal_trait, &trait_target, 1, 0, 0)) {
+            &principal_trait, &trait_target, 1, 0, 0, 0)) {
         return CM_HIR_TYPE_NONE;
     }
     if (trait_target.item != NULL) {
@@ -8298,8 +8306,8 @@ static int cm_lower_ast_path_storage_valid(const CmAstPath *path)
 static int cm_lower_predicate_equalities(CmLowerState *state,
     CmAstItemId ast_item_id, CmAstTypeId trait_ast_type,
     const CmLowerTraitTarget *trait_target, CmHirModuleId module,
-    CmHirDefId owner, CmHirAssociatedTypeEquality **out_equalities,
-    uint32_t *out_count)
+    CmHirDefId owner, int allow_constraints,
+    CmHirAssociatedTypeEquality **out_equalities, uint32_t *out_count)
 {
     const CmAstType *ast_type;
     const CmAstPath *path;
@@ -8334,6 +8342,7 @@ static int cm_lower_predicate_equalities(CmLowerState *state,
         }
         if (segment->arguments[index].kind
             == CM_AST_GENERIC_CONSTRAINT) {
+            if (allow_constraints) continue;
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                 cm_lower_span(state, segment->arguments[index].span),
                 ast_item_id, CM_AST_TYPE_NONE, ast_type->path, CM_HIR_OK,
@@ -8431,6 +8440,151 @@ static int cm_lower_predicate_equalities(CmLowerState *state,
     return 1;
 }
 
+static int cm_lower_associated_constraint_count(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId trait_ast_type,
+    uint32_t *out_count)
+{
+    const CmAstType *ast_type;
+    const CmAstPath *path;
+    const CmAstPathSegment *segment;
+    uint32_t count;
+    uint32_t index;
+
+    *out_count = 0u;
+    ast_type = cm_ast_get_type(state->ast, trait_ast_type);
+    path = ast_type == NULL || ast_type->kind != CM_AST_TYPE_PATH ? NULL
+        : cm_ast_get_path(state->ast, ast_type->path);
+    if (path == NULL || !cm_lower_ast_path_storage_valid(path)
+        || path->segment_count == 0u || path->segments == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            ast_type == NULL
+                ? cm_lower_span(state, (CmAstSpan){ 0u, 0u })
+                : cm_lower_span(state, ast_type->span),
+            ast_item_id, trait_ast_type,
+            ast_type == NULL ? CM_AST_PATH_NONE : ast_type->path,
+            CM_HIR_OK, "predicate trait path storage is invalid");
+        return 0;
+    }
+    segment = &path->segments[path->segment_count - 1u];
+    count = 0u;
+    for (index = 0u; index < segment->argument_count; ++index) {
+        const CmAstGenericArg *argument;
+        CmInternId associated_name;
+        uint32_t bound_index;
+        uint32_t prior;
+
+        argument = &segment->arguments[index];
+        if (!cm_lower_validate_generic_constraint(state, ast_item_id,
+                ast_type->path, argument)) {
+            return 0;
+        }
+        if (argument->kind != CM_AST_GENERIC_CONSTRAINT) continue;
+        associated_name = argument->name;
+        for (prior = 0u; prior < index; ++prior) {
+            const CmAstGenericArg *prior_argument;
+
+            prior_argument = &segment->arguments[prior];
+            if ((prior_argument->kind == CM_AST_GENERIC_BINDING
+                    || prior_argument->kind
+                        == CM_AST_GENERIC_CONSTRAINT)
+                && cm_lower_strings_equal(state, prior_argument->name,
+                    associated_name)) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_TRAIT,
+                    cm_lower_span(state, argument->span), ast_item_id,
+                    trait_ast_type, ast_type->path, CM_HIR_OK,
+                    "duplicate predicate associated-type binding or "
+                    "constraint");
+                return 0;
+            }
+        }
+        if (argument->name_argument_count != 0u) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path, CM_HIR_OK,
+                "GAT associated-type constraint names are not supported "
+                "in HIR predicates");
+            return 0;
+        }
+        for (bound_index = 0u; bound_index < argument->bound_count;
+             ++bound_index) {
+            const CmAstGenericParamBound *bound;
+            const CmAstType *bound_type;
+            const CmAstPath *bound_path;
+            const CmAstPathSegment *bound_segment;
+            uint32_t nested_index;
+
+            bound = &argument->bounds[bound_index];
+            if (bound->kind != CM_AST_GENERIC_BOUND_TRAIT) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, bound->span), ast_item_id,
+                    trait_ast_type, ast_type->path, CM_HIR_OK,
+                    "associated-type lifetime constraints are not "
+                    "supported in HIR predicates");
+                return 0;
+            }
+            if (bound->modifier != CM_AST_GENERIC_BOUND_REQUIRED) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, bound->span), ast_item_id,
+                    bound->trait_type, ast_type->path, CM_HIR_OK,
+                    "associated-type constraint modifiers are not "
+                    "supported in HIR predicates");
+                return 0;
+            }
+            bound_type = cm_ast_get_type(state->ast, bound->trait_type);
+            bound_path = bound_type == NULL
+                    || bound_type->kind != CM_AST_TYPE_PATH
+                ? NULL : cm_ast_get_path(state->ast, bound_type->path);
+            bound_segment = bound_path == NULL
+                    || !cm_lower_ast_path_storage_valid(bound_path)
+                    || bound_path->segment_count == 0u
+                ? NULL
+                : &bound_path->segments[bound_path->segment_count - 1u];
+            if (bound_segment == NULL) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    cm_lower_span(state, bound->span), ast_item_id,
+                    bound->trait_type,
+                    bound_type == NULL ? CM_AST_PATH_NONE
+                        : bound_type->path,
+                    CM_HIR_OK,
+                    "associated-type constraint trait path is malformed");
+                return 0;
+            }
+            for (nested_index = 0u;
+                 nested_index < bound_segment->argument_count;
+                 ++nested_index) {
+                const CmAstGenericArg *nested;
+
+                nested = &bound_segment->arguments[nested_index];
+                if (!cm_lower_validate_generic_constraint(state,
+                        ast_item_id, bound_type->path, nested)) {
+                    return 0;
+                }
+                if (nested->kind == CM_AST_GENERIC_CONSTRAINT) {
+                    cm_lower_fail(state,
+                        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                        cm_lower_span(state, nested->span), ast_item_id,
+                        bound->trait_type, bound_type->path, CM_HIR_OK,
+                        "nested associated-type constraints require "
+                        "recursive predicate expansion");
+                    return 0;
+                }
+            }
+            if (count == UINT32_MAX) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    cm_lower_span(state, argument->span), ast_item_id,
+                    trait_ast_type, ast_type->path,
+                    CM_HIR_ID_EXHAUSTED,
+                    "associated-type constraint predicate count "
+                    "overflow");
+                return 0;
+            }
+            count += 1u;
+        }
+    }
+    *out_count = count;
+    return 1;
+}
+
 static int cm_lower_copy_lifetime_binder(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstLifetimeBinder *ast_binder,
     CmHirLifetimeBinder *out_binder)
@@ -8480,10 +8634,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     }
     if (!cm_lower_trait_reference(state, ast_item_id, trait_ast_type,
             record->owner_module, record->definition, subject,
-            &out_predicate->trait_type, &trait_target, 1, 1, 1)
+            &out_predicate->trait_type, &trait_target, 1, 1, 1, 1)
         || !cm_lower_predicate_equalities(state, ast_item_id,
             trait_ast_type, &trait_target, record->owner_module,
-            record->definition, &out_predicate->equalities,
+            record->definition, 1, &out_predicate->equalities,
             &out_predicate->equality_count)) {
         state->active_lifetime_binder = previous_binder;
         cm_free(out_predicate->trait_type.arguments);
@@ -8494,6 +8648,156 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     }
     state->active_lifetime_binder = previous_binder;
     return 1;
+}
+
+static int cm_lower_associated_constraint_predicates(
+    CmLowerState *state, CmAstItemId ast_item_id,
+    const CmLowerItemRecord *record, CmAstTypeId trait_ast_type,
+    const CmHirTraitPredicate *outer_predicate,
+    CmHirTraitPredicate *predicates, uint32_t *in_out_predicate_count)
+{
+    const CmAstType *ast_type;
+    const CmAstPath *path;
+    const CmAstPathSegment *segment;
+    uint32_t expected_count;
+    uint32_t index;
+
+    if (!cm_lower_associated_constraint_count(state, ast_item_id,
+            trait_ast_type, &expected_count)) {
+        return 0;
+    }
+    if (expected_count == 0u) return 1;
+    ast_type = cm_ast_get_type(state->ast, trait_ast_type);
+    path = cm_ast_get_path(state->ast, ast_type->path);
+    segment = &path->segments[path->segment_count - 1u];
+    for (index = 0u; index < segment->argument_count && !state->failed;
+         ++index) {
+        const CmAstGenericArg *argument;
+        CmLowerAssociatedTarget associated;
+        const CmHirItem *associated_item;
+        CmHirDefId defining_trait;
+        uint32_t matches;
+        uint32_t bound_index;
+
+        argument = &segment->arguments[index];
+        if (argument->kind != CM_AST_GENERIC_CONSTRAINT) continue;
+        cm_lower_find_inherited_associated_type(state,
+            outer_predicate->trait_type.definition, argument->name,
+            &associated, &matches);
+        if (matches == 0u) {
+            int wrong_namespace;
+
+            wrong_namespace = cm_lower_associated_name_exists(state,
+                outer_predicate->trait_type.definition, argument->name,
+                CM_AST_ITEM_FUNCTION);
+            cm_lower_fail(state,
+                wrong_namespace ? CM_HIR_LOWER_WRONG_NAMESPACE
+                    : CM_HIR_LOWER_UNRESOLVED_PATH,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path, CM_HIR_OK,
+                wrong_namespace
+                    ? "associated-type constraint name resolves in the "
+                      "value namespace instead of naming a type"
+                    : "predicate trait has no associated type named by "
+                      "constraint");
+            break;
+        }
+        if (matches != 1u) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_TRAIT,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path, CM_HIR_OK,
+                "predicate associated-type constraint is ambiguous "
+                "through the supertrait graph");
+            break;
+        }
+        if (associated.generic_parameter_count != 0u) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path, CM_HIR_OK,
+                "GAT associated-type constraints require structural "
+                "associated arguments");
+            break;
+        }
+        associated_item = associated.item != NULL ? associated.item
+            : cm_lower_bound_item(state, associated.definition);
+        defining_trait = associated_item != NULL
+            ? associated_item->parent_definition
+            : associated.local_record != NULL
+                ? associated.local_record->parent_definition
+                : cm_hir_def_id_none();
+        if (cm_hir_def_id_is_none(defining_trait)) {
+            cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path,
+                CM_HIR_INVARIANT_VIOLATION,
+                "associated-type constraint lost its defining trait");
+            break;
+        }
+        for (bound_index = 0u; bound_index < argument->bound_count
+                && !state->failed;
+             ++bound_index) {
+            const CmAstGenericParamBound *bound;
+            CmHirNamedType projection_trait;
+            CmHirGenericArg *owned_arguments;
+            CmHirType projection;
+            CmHirTypeId projection_id;
+
+            bound = &argument->bounds[bound_index];
+            memset(&projection_trait, 0, sizeof(projection_trait));
+            owned_arguments = NULL;
+            if (cm_hir_def_id_equal(defining_trait,
+                    outer_predicate->trait_type.definition)) {
+                projection_trait = outer_predicate->trait_type;
+            } else {
+                uint32_t argument_count;
+                uint32_t path_matches;
+
+                argument_count = 0u;
+                path_matches = 0u;
+                if (!cm_lower_find_instantiated_supertrait(state,
+                        &outer_predicate->trait_type, defining_trait,
+                        outer_predicate->subject,
+                        cm_lower_span(state, argument->span),
+                        &owned_arguments, &argument_count,
+                        &path_matches)) {
+                    break;
+                }
+                if (path_matches != 1u) {
+                    cm_free(owned_arguments);
+                    cm_lower_fail(state, CM_HIR_LOWER_INVALID_TRAIT,
+                        cm_lower_span(state, argument->span), ast_item_id,
+                        trait_ast_type, ast_type->path, CM_HIR_OK,
+                        "associated-type constraint has no unique "
+                        "instantiated defining supertrait");
+                    break;
+                }
+                projection_trait.definition = defining_trait;
+                projection_trait.arguments = owned_arguments;
+                projection_trait.argument_count = argument_count;
+            }
+            memset(&projection, 0, sizeof(projection));
+            projection.kind = CM_HIR_TYPE_PROJECTION_KIND;
+            projection.span = cm_lower_span(state, argument->span);
+            projection.data.projection_type.self_type =
+                outer_predicate->subject;
+            projection.data.projection_type.trait_type = projection_trait;
+            projection.data.projection_type.associated_type.definition =
+                associated.definition;
+            projection_id = cm_lower_add_type(state, &projection,
+                trait_ast_type);
+            cm_free(owned_arguments);
+            if (state->failed) break;
+            if (!cm_lower_one_trait_predicate(state, ast_item_id, record,
+                    projection_id, bound->trait_type,
+                    cm_lower_span(state, bound->span), NULL,
+                    CM_HIR_PREDICATE_REQUIRED,
+                    &predicates[*in_out_predicate_count])) {
+                break;
+            }
+            *in_out_predicate_count += 1u;
+        }
+    }
+    return !state->failed;
 }
 
 static int cm_lower_predicate_subject_kind_supported(CmLowerState *state,
@@ -8552,6 +8856,8 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
         parameter = &ast_item->generic_parameters[parameter_index];
         for (bound_index = 0u; bound_index < parameter->bound_count;
              ++bound_index) {
+            uint32_t nested_count;
+
             if (parameter->bounds[bound_index].modifier
                     == CM_AST_GENERIC_BOUND_RELAXED) {
                 continue;
@@ -8577,6 +8883,23 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 return 0;
             }
             total_count += 1u;
+            nested_count = 0u;
+            if (parameter->bounds[bound_index].trait_type
+                    != CM_AST_TYPE_NONE
+                && !cm_lower_associated_constraint_count(state, ast_item_id,
+                    parameter->bounds[bound_index].trait_type,
+                    &nested_count)) {
+                return 0;
+            }
+            if (total_count > UINT32_MAX - nested_count) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    item_span, ast_item_id,
+                    parameter->bounds[bound_index].trait_type,
+                    CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+                    "trait predicate count overflow");
+                return 0;
+            }
+            total_count += nested_count;
             has_inline_predicate = 1;
         }
     }
@@ -8601,6 +8924,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
              ++bound_index) {
             const CmAstTypeBound *bound;
             uint32_t *count;
+            uint32_t nested_count;
 
             bound = &apit_type->bounds[bound_index];
             if (bound->modifier == CM_AST_TYPE_BOUND_RELAXED) continue;
@@ -8614,6 +8938,30 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 return 0;
             }
             *count += 1u;
+            nested_count = 0u;
+            if (bound->lifetime == CM_INTERN_ID_NONE
+                && bound->trait_type != CM_AST_TYPE_NONE
+                && !cm_lower_associated_constraint_count(state,
+                    ast_item_id, bound->trait_type, &nested_count)) {
+                return 0;
+            }
+            if (nested_count != 0u
+                && bound->binder.lifetime_count != 0u) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, bound->span), ast_item_id,
+                    bound->trait_type, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "higher-ranked associated-type constraints require "
+                    "binder depth in HIR");
+                return 0;
+            }
+            if (*count > UINT32_MAX - nested_count) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    item_span, ast_item_id, bound->trait_type,
+                    CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+                    "item predicate count overflow");
+                return 0;
+            }
+            *count += nested_count;
             has_inline_predicate = 1;
         }
     }
@@ -8630,7 +8978,9 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
 
         for (bound_index = 0u;
              bound_index < ast_predicate->bound_count; ++bound_index) {
+            const CmAstWhereBound *bound;
             uint32_t *count;
+            uint32_t nested_count;
 
             if (cm_lower_where_bound_relaxes_generic_parameter(state,
                     ast_item, ast_predicate,
@@ -8638,7 +8988,8 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 continue;
             }
 
-            count = ast_predicate->bounds[bound_index].kind
+            bound = &ast_predicate->bounds[bound_index];
+            count = bound->kind
                     == CM_AST_WHERE_BOUND_LIFETIME
                 ? &outlives_total_count : &total_count;
             if (*count == UINT32_MAX) {
@@ -8648,6 +8999,31 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 return 0;
             }
             *count += 1u;
+            nested_count = 0u;
+            if (bound->kind == CM_AST_WHERE_BOUND_TRAIT
+                && bound->trait_type != CM_AST_TYPE_NONE
+                && !cm_lower_associated_constraint_count(state,
+                    ast_item_id, bound->trait_type, &nested_count)) {
+                return 0;
+            }
+            if (nested_count != 0u
+                && (ast_predicate->binder.lifetime_count != 0u
+                    || bound->binder.lifetime_count != 0u)) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, bound->span), ast_item_id,
+                    bound->trait_type, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "higher-ranked associated-type constraints require "
+                    "binder depth in HIR");
+                return 0;
+            }
+            if (*count > UINT32_MAX - nested_count) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    item_span, ast_item_id, bound->trait_type,
+                    CM_AST_PATH_NONE, CM_HIR_ID_EXHAUSTED,
+                    "item predicate count overflow");
+                return 0;
+            }
+            *count += nested_count;
         }
     }
     if (total_count == 0u && outlives_total_count == 0u) return 1;
@@ -8804,6 +9180,13 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
             }
             predicate_count += 1u;
             hir_item->predicate_count = predicate_count;
+            if (!cm_lower_associated_constraint_predicates(state,
+                    ast_item_id, record, bound->trait_type,
+                    &predicates[predicate_count - 1u], predicates,
+                    &predicate_count)) {
+                break;
+            }
+            hir_item->predicate_count = predicate_count;
         }
     }
     for (apit_index = 0u;
@@ -8875,6 +9258,13 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
                 break;
             }
             predicate_count += 1u;
+            hir_item->predicate_count = predicate_count;
+            if (!cm_lower_associated_constraint_predicates(state,
+                    ast_item_id, record, bound->trait_type,
+                    &predicates[predicate_count - 1u], predicates,
+                    &predicate_count)) {
+                break;
+            }
             hir_item->predicate_count = predicate_count;
         }
     }
@@ -9057,6 +9447,14 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
             state->active_lifetime_binder = previous_lifetime_binder;
             predicates[predicate_count].scope = predicate_scope_id;
             predicate_count += 1u;
+            hir_item->predicate_count = predicate_count;
+            if (!cm_lower_associated_constraint_predicates(state,
+                    ast_item_id, record, bound->trait_type,
+                    &predicates[predicate_count - 1u], predicates,
+                    &predicate_count)) {
+                state->active_lifetime_binder = previous_lifetime_binder;
+                break;
+            }
             hir_item->predicate_count = predicate_count;
         }
     }
@@ -9269,7 +9667,7 @@ static int cm_lower_associated_type_bound(CmLowerState *state,
     }
     if (!cm_lower_trait_positional_arguments(state, ast_item_id,
             last_segment, &trait_target, record->owner_module,
-            record->definition, *projection_subject, 1, 0, span,
+            record->definition, *projection_subject, 1, 0, 0, span,
             &out_bound->trait_type.arguments,
             &out_bound->trait_type.argument_count)) {
         return 0;
@@ -10000,7 +10398,8 @@ static int cm_lower_impl_item(CmLowerState *state,
     if (!cm_lower_trait_reference(state, ast_item_id,
             ast_item->data.impl_item.trait_type, record->owner_module,
             record->definition, CM_HIR_TYPE_NONE,
-            &hir_item->data.impl_item.trait_type, &trait_target, 0, 0, 0)) {
+            &hir_item->data.impl_item.trait_type, &trait_target,
+            0, 0, 0, 0)) {
         return 0;
     }
     trait_item = trait_target.item;
@@ -10138,10 +10537,10 @@ static int cm_lower_trait_alias_item(CmLowerState *state,
                     ast_bound->type, record->owner_module,
                     record->definition, CM_HIR_TYPE_NONE,
                     &bound->data.trait_bound.trait_type, &target_trait,
-                    1, 1, 1)
+                    1, 1, 0, 1)
                 || !cm_lower_predicate_equalities(state, ast_item_id,
                     ast_bound->type, &target_trait, record->owner_module,
-                    record->definition,
+                    record->definition, 0,
                     &bound->data.trait_bound.equalities,
                     &bound->data.trait_bound.equality_count)) {
                 break;
@@ -10404,12 +10803,12 @@ static int cm_lower_trait_item(CmLowerState *state,
                 ast_supertrait->type, record->owner_module,
                 record->definition, CM_HIR_TYPE_NONE,
                 &supertraits[supertrait_count].trait_type, &target_trait,
-                1, 1, 1)) {
+                1, 1, 0, 1)) {
             break;
         }
         if (!cm_lower_predicate_equalities(state, ast_item_id,
                 ast_supertrait->type, &target_trait,
-                record->owner_module, record->definition,
+                record->owner_module, record->definition, 0,
                 &supertraits[supertrait_count].equalities,
                 &supertraits[supertrait_count].equality_count)) {
             break;
@@ -10645,13 +11044,11 @@ static int cm_lower_one_record_internal(CmLowerState *state,
         return 0;
     }
     record_marked = 0;
-    if (!prebind_associated_type
-        && record->kind == CM_AST_ITEM_TYPE_ALIAS
-        && record->parent_kind == CM_LOWER_PARENT_TRAIT) {
+    if (!prebind_associated_type) {
         status = cm_hir_context_mark(state->hir, &record_mark);
         if (status != CM_HIR_OK) {
             cm_lower_fail_hir(state, record->effective_span, ast_item_id,
-                status, "cannot mark associated-type lowering record");
+                status, "cannot mark item lowering record transaction");
             return 0;
         }
         record_marked = 1;
@@ -10680,10 +11077,16 @@ static int cm_lower_one_record_internal(CmLowerState *state,
                 ast_item_id, status,
                 "cannot store effective module declaration attributes");
             cm_free(hir_item.attributes);
+            if (record_marked) {
+                (void)cm_hir_context_rewind(state->hir, &record_mark);
+            }
             return 0;
         }
         state->result.lowered_item_count += 1u;
         cm_free(hir_item.attributes);
+        if (record_marked) {
+            (void)cm_hir_context_commit(state->hir, &record_mark);
+        }
         return 1;
     }
     state->active_item = &hir_item;

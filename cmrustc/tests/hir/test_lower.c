@@ -4264,6 +4264,282 @@ static void test_post_value_where_predicate_storage_mismatch(void)
     cm_ast_destroy(&ast);
 }
 
+static void test_associated_type_constraint_predicates(void)
+{
+    static const char source[] =
+        "trait Try { type Residual; } "
+        "trait Residual<B> {} "
+        "trait Owner { fn check<T, B>() where "
+        "T: Try<Residual: Residual<B>>; }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *try_item;
+    const CmHirItem *residual_trait;
+    const CmHirItem *residual_type;
+    const CmHirItem *owner;
+    const CmHirItem *method;
+    const CmHirTraitPredicate *outer;
+    const CmHirTraitPredicate *derived;
+    const CmHirType *outer_subject;
+    const CmHirType *projection;
+    const CmHirType *argument;
+
+    result = lower_source(source, &context, NULL);
+    try_item = find_item(&context, "Try");
+    residual_trait = find_item(&context, "Residual");
+    residual_type = try_item == NULL ? NULL
+        : find_child(&context, try_item->definition, "Residual");
+    owner = find_item(&context, "Owner");
+    method = owner == NULL ? NULL
+        : find_child(&context, owner->definition, "check");
+    outer = method == NULL || method->predicate_count != 2u
+            || method->predicates == NULL
+        ? NULL : &method->predicates[0];
+    derived = outer == NULL ? NULL : &method->predicates[1];
+    outer_subject = outer == NULL ? NULL
+        : cm_hir_get_type(&context, outer->subject);
+    projection = derived == NULL ? NULL
+        : cm_hir_get_type(&context, derived->subject);
+    argument = derived == NULL
+            || derived->trait_type.argument_count != 1u
+            || derived->trait_type.arguments == NULL
+            || derived->trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            derived->trait_type.arguments[0].data.type);
+    assert(result.error_count == 0u && try_item != NULL
+        && residual_trait != NULL && residual_type != NULL
+        && method != NULL && method->generic_parameter_count == 2u
+        && outer != NULL && derived != NULL
+        && outer_subject != NULL
+        && outer_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && outer_subject->data.parameter_type.parameter
+            == method->generic_parameter_start
+        && cm_hir_def_id_equal(outer->trait_type.definition,
+            try_item->definition)
+        && outer->trait_type.argument_count == 0u
+        && outer->equality_count == 0u
+        && projection != NULL
+        && projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && projection->data.projection_type.self_type == outer->subject
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            try_item->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            residual_type->definition)
+        && cm_hir_def_id_equal(derived->trait_type.definition,
+            residual_trait->definition)
+        && argument != NULL
+        && argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && argument->data.parameter_type.parameter
+            == method->generic_parameter_start + 1u
+        && derived->equality_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    {
+        static const struct {
+            const char *source;
+            CmHirLowerErrorKind kind;
+            const char *message;
+        } rejected[] = {
+            {
+                "trait A {} trait B {} trait Try { type Item; } "
+                "trait Owner { fn check<T>() where "
+                "T: Try<Item: A, Item: B>; }",
+                CM_HIR_LOWER_INVALID_TRAIT,
+                "duplicate predicate associated-type"
+            },
+            {
+                "trait A {} trait Try { type Item; } "
+                "trait Owner { fn check<T>() where "
+                "T: Try<Item = u8, Item: A>; }",
+                CM_HIR_LOWER_INVALID_TRAIT,
+                "duplicate predicate associated-type"
+            },
+            {
+                "trait A {} trait Try {} "
+                "trait Owner { fn check<T>() where T: Try<Item: A>; }",
+                CM_HIR_LOWER_UNRESOLVED_PATH,
+                "has no associated type"
+            },
+            {
+                "trait A {} trait Try { fn Item(); } "
+                "trait Owner { fn check<T>() where T: Try<Item: A>; }",
+                CM_HIR_LOWER_WRONG_NAMESPACE,
+                "value namespace"
+            },
+            {
+                "trait A {} trait Try { type Item; } "
+                "trait Owner { fn check<T>() where T: Try<Item: 'static>; }",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "lifetime constraints"
+            },
+            {
+                "trait Try { type Item; } trait Bound { type Nested; } "
+                "trait A {} trait Owner { fn check<T>() where "
+                "T: Try<Item: Bound<Nested: A>>; }",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "recursive predicate expansion"
+            },
+            {
+                "trait Try { type Item; } trait Owner { fn check<T>() "
+                "where T: Try<Item: ?Sized>; }",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "constraint modifiers"
+            },
+            {
+                "trait A {} trait Try { type Item; } "
+                "trait Owner { fn check<T>() where "
+                "T: Try<Item: ~const A>; }",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "constraint modifiers"
+            },
+            {
+                "trait A {} trait Left { type Item; } "
+                "trait Right { type Item; } trait Both: Left + Right {} "
+                "trait Owner { fn check<T>() where T: Both<Item: A>; }",
+                CM_HIR_LOWER_INVALID_TRAIT,
+                "ambiguous through the supertrait graph"
+            },
+            {
+                "trait A {} trait Base { type Item; } trait L: Base {} "
+                "trait R: Base {} trait Both: L + R {} trait Owner { "
+                "fn check<T>() where T: Both<Item: A>; }",
+                CM_HIR_LOWER_INVALID_TRAIT,
+                "no unique instantiated defining supertrait"
+            },
+            {
+                "trait A<'a> {} trait Try { type Item; } "
+                "fn check<T>() where for<'a> T: Try<Item: A<'a>> {}",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "higher-ranked associated-type constraints"
+            },
+            {
+                "trait A<'a> {} trait Try { type Item; } "
+                "fn check<T>() where T: for<'a> Try<Item: A<'a>> {}",
+                CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                "higher-ranked associated-type constraints"
+            }
+        };
+        size_t rejected_index;
+
+        for (rejected_index = 0u;
+             rejected_index < sizeof(rejected) / sizeof(rejected[0]);
+             ++rejected_index) {
+            result = lower_source(rejected[rejected_index].source,
+                &context, NULL);
+            if (result.error_count != 1u
+                || result.first_error.kind
+                    != rejected[rejected_index].kind
+                || strstr(result.first_error.message,
+                    rejected[rejected_index].message) == NULL) {
+                fprintf(stderr,
+                    "associated constraint rejection mismatch for %s: "
+                    "count=%lu kind=%s message=%s\n",
+                    rejected[rejected_index].source,
+                    (unsigned long)result.error_count,
+                    cm_hir_lower_error_kind_name(result.first_error.kind),
+                    result.first_error.message);
+            }
+            assert(result.error_count == 1u
+                && result.first_error.kind
+                    == rejected[rejected_index].kind
+                && strstr(result.first_error.message,
+                    rejected[rejected_index].message) != NULL);
+            cm_hir_context_destroy(&context);
+        }
+    }
+}
+
+static void test_associated_type_constraint_record_rollback(void)
+{
+    static const char source[] =
+        "trait Good {} trait Try { type Residual; } "
+        "trait Owner { fn check<T>() where "
+        "T: Try<Residual: Good + Missing>; }";
+    const CmAstItemId *owner_id;
+    CmAst ast;
+    CmParseResult parse_result;
+    CmAstItem *owner;
+    CmAstItem *method;
+    CmAstWherePredicate *predicate;
+    CmAstType *trait_type;
+    CmAstPath *trait_path;
+    CmAstGenericArg *constraint;
+    CmAstTypeId saved_first_type;
+    CmHirLowerOptions options;
+    CmHirContext first_context;
+    CmHirContext second_context;
+    CmHirLowerResult first_result;
+    CmHirLowerResult second_result;
+
+    cm_ast_init(&ast);
+    parse_result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
+        CM_EDITION_2024);
+    owner_id = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 2u);
+    owner = owner_id == NULL ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
+        (size_t)*owner_id - 1u);
+    method = owner == NULL || owner->data.trait_item.item_count != 1u
+        ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
+            (size_t)owner->data.trait_item.items[0] - 1u);
+    predicate = method == NULL || method->where_predicate_count != 1u
+        ? NULL : &method->where_predicates[0];
+    trait_type = predicate == NULL || predicate->bound_count != 1u
+        ? NULL : (CmAstType *)cm_vec_at(&ast.types,
+            (size_t)predicate->bounds[0].trait_type - 1u);
+    trait_path = trait_type == NULL || trait_type->kind != CM_AST_TYPE_PATH
+        ? NULL : (CmAstPath *)cm_vec_at(&ast.paths,
+            (size_t)trait_type->path - 1u);
+    constraint = trait_path == NULL || trait_path->segment_count != 1u
+            || trait_path->segments[0].argument_count != 1u
+        ? NULL : &trait_path->segments[0].arguments[0];
+    assert(parse_result.error_count == 0u && constraint != NULL
+        && constraint->kind == CM_AST_GENERIC_CONSTRAINT
+        && constraint->bound_count == 2u
+        && constraint->bounds != NULL);
+
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "associated_constraint_record_rollback";
+    options.source = 7u;
+    saved_first_type = constraint->bounds[0].trait_type;
+    constraint->bounds[0].trait_type = constraint->bounds[1].trait_type;
+    cm_hir_context_init(&first_context);
+    first_result = cm_hir_lower_crate(&first_context, &ast, &options);
+    constraint->bounds[0].trait_type = saved_first_type;
+    cm_hir_context_init(&second_context);
+    second_result = cm_hir_lower_crate(&second_context, &ast, &options);
+
+    assert(first_result.error_count == 1u
+        && second_result.error_count == 1u
+        && first_result.first_error.kind == CM_HIR_LOWER_UNRESOLVED_PATH
+        && second_result.first_error.kind == CM_HIR_LOWER_UNRESOLVED_PATH
+        && first_context.crates.len == second_context.crates.len
+        && first_context.modules.len == second_context.modules.len
+        && first_context.items.len == second_context.items.len
+        && first_context.types.len == second_context.types.len
+        && first_context.generic_parameters.len
+            == second_context.generic_parameters.len
+        && first_context.definitions.len == second_context.definitions.len
+        && first_context.prebound_associated_types.len
+            == second_context.prebound_associated_types.len
+        && cm_arena_bytes_used(&first_context.storage)
+            == cm_arena_bytes_used(&second_context.storage)
+        && cm_interner_length(&first_context.strings)
+            == cm_interner_length(&second_context.strings)
+        && cm_arena_bytes_used(&first_context.strings.strings)
+            == cm_arena_bytes_used(&second_context.strings.strings)
+        && find_child(&first_context,
+            find_item(&first_context, "Owner")->definition, "check")
+            == NULL
+        && find_child(&second_context,
+            find_item(&second_context, "Owner")->definition, "check")
+            == NULL);
+    cm_hir_context_destroy(&second_context);
+    cm_hir_context_destroy(&first_context);
+    cm_ast_destroy(&ast);
+}
+
 static void test_associated_type_constraint_fails_closed(void)
 {
     static const char source[] =
@@ -4331,7 +4607,7 @@ static void test_associated_type_constraint_fails_closed(void)
     assert(result.error_count == 1u
         && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
         && strstr(result.first_error.message,
-            "associated-type constraints") != NULL);
+            "GAT associated-type constraint names") != NULL);
     cm_hir_context_destroy(&context);
 
     constraint->bound_count = 0u;
@@ -6436,6 +6712,8 @@ int main(void)
     test_parenthesized_and_singleton_tuple_types();
     test_trait_method_predicate_storage_mismatch();
     test_post_value_where_predicate_storage_mismatch();
+    test_associated_type_constraint_predicates();
+    test_associated_type_constraint_record_rollback();
     test_associated_type_constraint_fails_closed();
     test_lifetime_where_predicates_retained();
     test_lifetime_generic_parameter_bounds();
