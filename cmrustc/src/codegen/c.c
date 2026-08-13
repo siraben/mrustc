@@ -456,36 +456,11 @@ static int cm_c_place_present(const CmMirPlace *place)
 static int cm_c_instance_type_is_u32(const CmHirContext *hir,
     const CmHirItem *item, const CmMirBody *body, CmHirTypeId id)
 {
-    const CmHirDefinition *parent_definition;
     const CmHirGenericParam *parameter;
-    const CmHirItem *parent_item;
     const CmHirType *type;
 
     if (cm_c_type_is_u32(hir, id)) return 1;
     type = cm_hir_get_type(hir, id);
-    if (type != NULL && type->kind == CM_HIR_TYPE_SELF_KIND
-        && item != NULL
-        && body != NULL
-        && item->generic_parameter_count == 0u
-        && body->instance.substitution_count == 0u
-        && body->instance.substitutions == NULL
-        && !cm_hir_def_id_is_none(item->parent_definition)
-        && cm_hir_def_id_equal(type->data.self_type.owner,
-            item->parent_definition)) {
-        parent_definition = cm_hir_lookup_definition(hir,
-            item->parent_definition);
-        parent_item = parent_definition == NULL
-                || parent_definition->kind != CM_HIR_DEFINITION_ITEM
-                || parent_definition->state != CM_HIR_DEFINITION_BOUND
-            ? NULL : cm_hir_get_item(hir,
-                parent_definition->entity.item_id);
-        return parent_item != NULL && parent_item->kind == CM_HIR_ITEM_IMPL
-            && parent_item->generic_parameter_count == 0u
-            && parent_item->data.impl_item.has_trait
-            && !parent_item->data.impl_item.is_negative
-            && cm_c_type_is_u32(hir,
-                parent_item->data.impl_item.self_type);
-    }
     if (item == NULL || body == NULL
         || item->generic_parameter_count != 1u
         || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
@@ -556,6 +531,32 @@ static const CmHirItem *cm_c_instance_item(const CmHirContext *hir,
         && cm_hir_def_id_equal(item->definition, body->owner)
         && item->data.function_item.body == body->source_body
         ? item : NULL;
+}
+
+static int cm_c_body_parameter_count(const CmHirContext *hir,
+    const CmMirContext *mir, const CmSemanticAdmission *admission,
+    CmMirBodyId body_id, uint32_t *out_count)
+{
+    const CmMirBody *body;
+    const CmHirItem *item;
+    CmSemanticFunctionSignatureView semantic_signature;
+
+    if (out_count == NULL) return 0;
+    *out_count = 0u;
+    body = cm_mir_get_body(mir, body_id);
+    if (body == NULL) return 0;
+    if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        memset(&semantic_signature, 0, sizeof(semantic_signature));
+        if (cm_mir_admitted_signature(mir, admission, body_id,
+                &semantic_signature) != CM_MIR_OK) return 0;
+        *out_count = semantic_signature.parameter_count;
+        return 1;
+    }
+    if (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_NONE) return 0;
+    item = cm_c_instance_item(hir, body);
+    if (item == NULL) return 0;
+    *out_count = item->data.function_item.signature.parameter_count;
+    return 1;
 }
 
 static int cm_c_interned_identifier(const CmHirContext *hir, CmInternId id,
@@ -844,33 +845,57 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
     const CmMirContext *mir, const CmSemanticAdmission *admission,
     CmMirBodyId body_id)
 {
+    const CmSemanticResults *semantic_results;
     const CmMirBody *body;
     const CmHirBody *source_body;
     const CmHirItem *item;
     const CmHirFunctionSignature *signature;
+    CmSemanticFunctionSignatureView semantic_signature;
+    CmSemanticTypeView semantic_parameter;
     uint32_t block_index;
     uint32_t first_temporary;
     uint32_t local_index;
+    uint32_t parameter_count;
     uint32_t parameter_index;
     CmMirLocalId diamond_bool_local;
+    int admitted;
+    int type_matches;
     int is_if_diamond;
 
     body = cm_mir_get_body(mir, body_id);
+    admitted = body != NULL
+        && body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    memset(&semantic_signature, 0, sizeof(semantic_signature));
+    semantic_signature.definition = cm_hir_def_id_none();
+    semantic_results = admitted && admission != NULL
+        ? cm_semantic_admission_results(admission) : NULL;
     if (body == NULL
         || (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_NONE
             ? cm_mir_validate_monomorphized_body(mir, hir, body_id)
                 != CM_MIR_OK
-            : body->semantic_evidence
-                    != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+            : !admitted
                 || admission == NULL
                 || cm_mir_validate_admitted_monomorphized_body(mir,
-                    admission, body_id) != CM_MIR_OK)) {
+                    admission, body_id) != CM_MIR_OK
+                || cm_mir_admitted_signature(mir, admission, body_id,
+                    &semantic_signature) != CM_MIR_OK)) {
         return 0;
     }
     item = cm_c_instance_item(hir, body);
     signature = item == NULL ? NULL : &item->data.function_item.signature;
     source_body = body == NULL ? NULL
         : cm_hir_get_body(hir, body->source_body);
+    parameter_count = admitted ? semantic_signature.parameter_count
+                               : signature == NULL ? 0u
+                                                   : signature->parameter_count;
+    type_matches = 0;
+    if (admitted && (semantic_results == NULL
+        || cm_semantic_type_view_matches_monomorphic_hir(semantic_results,
+            admission, &semantic_signature.return_type,
+            body->locals == NULL ? CM_HIR_TYPE_NONE : body->locals[0].type,
+            &type_matches) != CM_SEMANTIC_RESULTS_OK)) {
+        return 0;
+    }
     if (signature == NULL
         || source_body == NULL
         || body->instance.substitution_count
@@ -882,21 +907,23 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
             && (body->instance.substitutions == NULL
                 || !cm_c_type_is_u32(hir,
                     body->instance.substitutions[0])))
-        || (item->generic_parameter_count == 0u
+        || (!admitted && (item->generic_parameter_count == 0u
             ? !cm_c_type_is_codegen_scalar(hir, signature->return_type)
             : !cm_c_instance_type_is_u32(hir, item, body,
-                signature->return_type))
-        || signature->parameter_count == 0u
-        || signature->parameter_count > 2u
-        || signature->parameters == NULL
-        || signature->parameter_count == UINT32_MAX
-        || source_body->local_count < signature->parameter_count
+                signature->return_type)))
+        || (admitted && !type_matches)
+        || parameter_count == 0u
+        || parameter_count > 2u
+        || (!admitted && signature->parameters == NULL)
+        || parameter_count == UINT32_MAX
+        || source_body->parameter_count != parameter_count
+        || source_body->local_count < parameter_count
         || source_body->local_count == UINT32_MAX
         || body->local_count < source_body->local_count + 1u
         || body->locals == NULL
         || body->locals[0].kind != CM_MIR_LOCAL_RETURN
         || !cm_c_type_is_codegen_scalar(hir, body->locals[0].type)
-        || (item->generic_parameter_count == 0u
+        || (!admitted && item->generic_parameter_count == 0u
             && !cm_c_type_equal(hir, body->locals[0].type,
                 signature->return_type))
         || body->basic_block_count == 0u
@@ -904,12 +931,24 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
         return 0;
     }
     for (parameter_index = 0u;
-         parameter_index < signature->parameter_count; ++parameter_index) {
+         parameter_index < parameter_count; ++parameter_index) {
+        type_matches = 0;
+        memset(&semantic_parameter, 0, sizeof(semantic_parameter));
+        if (admitted
+            && (cm_mir_admitted_signature_parameter(mir, admission, body_id,
+                    parameter_index, &semantic_parameter) != CM_MIR_OK
+                || cm_semantic_type_view_matches_monomorphic_hir(
+                    semantic_results, admission, &semantic_parameter,
+                    body->locals[parameter_index + 1u].type,
+                    &type_matches) != CM_SEMANTIC_RESULTS_OK)) {
+            return 0;
+        }
         if (body->locals[parameter_index + 1u].kind
                 != CM_MIR_LOCAL_ARGUMENT
-            || !cm_c_instance_parameter_matches(hir, item, body,
+            || (admitted ? !type_matches
+                : !cm_c_instance_parameter_matches(hir, item, body,
                 body->locals[parameter_index + 1u].type,
-                signature->parameters[parameter_index].type)
+                signature->parameters[parameter_index].type))
             || (cm_c_type_is_codegen_scalar(hir,
                     body->locals[parameter_index + 1u].type)
                 && !cm_c_type_equal(hir, body->locals[0].type,
@@ -921,7 +960,7 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
     diamond_bool_local = CM_MIR_RETURN_LOCAL;
     is_if_diamond = cm_c_exact_if_diamond(hir, body,
         &diamond_bool_local);
-    for (local_index = signature->parameter_count + 1u;
+    for (local_index = parameter_count + 1u;
          local_index < first_temporary; ++local_index) {
         if (body->locals[local_index].kind != CM_MIR_LOCAL_USER
             || !cm_c_type_is_supported(hir,
@@ -989,6 +1028,10 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
             const CmMirBody *callee_body;
             const CmHirItem *callee_item;
             const CmHirFunctionSignature *callee_signature;
+            CmSemanticFunctionSignatureView callee_semantic_signature;
+            CmSemanticTypeView callee_semantic_parameter;
+            CmMirBodyId callee_id;
+            uint32_t callee_parameter_count;
             CmMirLocalId destination;
             uint32_t argument_index;
 
@@ -1002,11 +1045,23 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
                 return 0;
             }
             destination = terminator->data.call.destination;
-            callee_body = cm_mir_get_body(mir,
-                terminator->data.call.callee_instance);
+            callee_id = terminator->data.call.callee_instance;
+            callee_body = cm_mir_get_body(mir, callee_id);
             callee_item = cm_c_instance_item(hir, callee_body);
             callee_signature = callee_item == NULL ? NULL
                 : &callee_item->data.function_item.signature;
+            memset(&callee_semantic_signature, 0,
+                sizeof(callee_semantic_signature));
+            callee_parameter_count = callee_signature == NULL ? 0u
+                : callee_signature->parameter_count;
+            if (admitted) {
+                if (cm_mir_admitted_signature(mir, admission, callee_id,
+                        &callee_semantic_signature) != CM_MIR_OK) {
+                    return 0;
+                }
+                callee_parameter_count =
+                    callee_semantic_signature.parameter_count;
+            }
             if (destination >= body->local_count
                 || body->locals[destination].kind == CM_MIR_LOCAL_ARGUMENT
                 || !cm_c_type_is_codegen_scalar(hir,
@@ -1014,7 +1069,7 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
                 || callee_signature == NULL
                 || !cm_c_instance_equal(&terminator->data.call.callee,
                     &callee_body->instance)
-                || callee_signature->parameter_count
+                || callee_parameter_count
                     != terminator->data.call.argument_count
                 || !cm_c_type_equal(hir,
                     body->locals[destination].type,
@@ -1026,14 +1081,30 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
             for (argument_index = 0u;
                  argument_index < terminator->data.call.argument_count;
                  ++argument_index) {
+                type_matches = 0;
+                memset(&callee_semantic_parameter, 0,
+                    sizeof(callee_semantic_parameter));
+                if (admitted
+                    && (cm_mir_admitted_signature_parameter(mir, admission,
+                            callee_id, argument_index,
+                            &callee_semantic_parameter) != CM_MIR_OK
+                        || cm_semantic_type_view_matches_monomorphic_hir(
+                            semantic_results, admission,
+                            &callee_semantic_parameter,
+                            terminator->data.call.arguments[argument_index]
+                                .type,
+                            &type_matches) != CM_SEMANTIC_RESULTS_OK)) {
+                    return 0;
+                }
                 if (!cm_c_exact_operand_shape(hir, body,
                         &terminator->data.call.arguments[argument_index])
-                    || !cm_c_instance_parameter_matches(hir,
+                    || (admitted ? !type_matches
+                        : !cm_c_instance_parameter_matches(hir,
                         callee_item, callee_body,
                         terminator->data.call.arguments[argument_index]
                             .type,
                         callee_signature->parameters[argument_index]
-                            .type)) {
+                            .type))) {
                     return 0;
                 }
             }
@@ -1795,11 +1866,14 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
     }
     for (index = 0u; index < body_count; ++index) {
         const CmMirBody *body;
-        const CmHirItem *item;
+        uint32_t parameter_count;
 
         if (reachable[index] == 0u) continue;
         body = cm_mir_get_body(mir, (CmMirBodyId)(index + 1u));
-        item = cm_c_instance_item(hir, body);
+        if (!cm_c_body_parameter_count(hir, mir, admission,
+                (CmMirBodyId)(index + 1u), &parameter_count)) {
+            goto cleanup_exact;
+        }
         if (exported[index] == 0u) cm_str_buf_append(output, "static ");
         cm_c_append_type(output, hir,
             body->locals[CM_MIR_RETURN_LOCAL].type);
@@ -1807,21 +1881,23 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
         cm_str_buf_append(output,
             names + index * CM_C_EXACT_NAME_CAPACITY);
         cm_str_buf_append(output, "(");
-        cm_c_append_parameters(output, hir, body,
-            item->data.function_item.signature.parameter_count);
+        cm_c_append_parameters(output, hir, body, parameter_count);
         cm_str_buf_append(output, ");\n");
     }
     cm_str_buf_append(output, "\n");
     for (index = 0u; index < body_count; ++index) {
         const CmMirBody *body;
-        const CmHirItem *item;
         const char *name;
         char line[768];
         int length;
         uint32_t local_index;
+        uint32_t parameter_count;
 
         body = cm_mir_get_body(mir, (CmMirBodyId)(index + 1u));
-        item = cm_c_instance_item(hir, body);
+        if (!cm_c_body_parameter_count(hir, mir, admission,
+                (CmMirBodyId)(index + 1u), &parameter_count)) {
+            goto cleanup_exact;
+        }
         name = names + index * CM_C_EXACT_NAME_CAPACITY;
         if (exported[index] == 0u) cm_str_buf_append(output, "static ");
         cm_c_append_type(output, hir,
@@ -1829,14 +1905,12 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
         cm_str_buf_append(output, " ");
         cm_str_buf_append(output, name);
         cm_str_buf_append(output, "(");
-        cm_c_append_parameters(output, hir, body,
-            item->data.function_item.signature.parameter_count);
+        cm_c_append_parameters(output, hir, body, parameter_count);
         cm_str_buf_append(output, ")\n{\n    ");
         cm_c_append_type(output, hir,
             body->locals[CM_MIR_RETURN_LOCAL].type);
         cm_str_buf_append(output, " _0;\n");
-        for (local_index =
-                item->data.function_item.signature.parameter_count + 1u;
+        for (local_index = parameter_count + 1u;
              local_index < body->local_count; ++local_index) {
             cm_str_buf_append(output, "    ");
             cm_c_append_type(output, hir, body->locals[local_index].type);

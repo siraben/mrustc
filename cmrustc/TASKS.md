@@ -1516,12 +1516,13 @@ positive trait impls and methods with the currently supported scalar call
 shape. Trait defaults, inherent and dot-syntax method lookup, generic
 traits/impls/methods, broader substitutions and projections, coercions,
 autoderef/autoref/reborrow adjustments, cross-crate incomplete metadata, and
-general callable traits remain fail-closed. Stored MIR locals already carry the
-normalized semantic signature types, but the C backend still authenticates an
-impl-owned symbolic `Self` by inspecting the exact parent impl. That is bounded
-compatibility debt: admitted MIR validation and codegen must ultimately consume
-the sealed normalized signature view directly, leaving declaration inspection
-only for exact identity authentication.
+general callable traits remain fail-closed. Stored MIR locals carry the
+normalized semantic signature types. MIR now exposes narrow admission-bound
+signature and parameter views by reconstructing the exact instance internally;
+the C backend validates admitted caller and callee locals through those sealed
+views and no longer interprets impl-owned symbolic `Self`. Declaration
+inspection remains only on the legacy evidence-free compatibility path and for
+exact callable identity authentication.
 
 The next callable milestone generalizes body constraints rather than adding a
 new reachability special case. Source HIR will retain unresolved

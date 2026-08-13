@@ -3470,6 +3470,98 @@ CmMirStatus cm_mir_validate_admitted_monomorphized_body(
     return CM_MIR_OK;
 }
 
+CmMirStatus cm_mir_admitted_signature(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id, CmSemanticFunctionSignatureView *out_view)
+{
+    const CmHirContext *hir;
+    const CmSemanticResults *semantic_results;
+    const CmMirBody *body;
+    CmMirSemanticInstanceQuery query;
+    CmHirCrateId crate_id;
+    CmSemanticResultsStatus results_status;
+
+    if (out_view == NULL) return CM_MIR_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->definition = cm_hir_def_id_none();
+    if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
+    if (!cm_mir_admission_identity(admission, &hir, &crate_id)
+        || context->admitted_crate == CM_HIR_CRATE_NONE
+        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    semantic_results = cm_semantic_admission_results(admission);
+    body = cm_mir_get_body(context, id);
+    if (semantic_results == NULL) return CM_MIR_INVALID_ADMISSION;
+    if (body == NULL) return CM_MIR_INVALID_ID;
+    memset(&query, 0, sizeof(query));
+    if (!cm_mir_semantic_instance_query_init(&query, hir, body)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    results_status = cm_mir_semantic_signature_query(semantic_results,
+        admission, body, &query.spec, out_view);
+    cm_mir_semantic_instance_query_destroy(&query);
+    if (results_status != CM_SEMANTIC_RESULTS_OK
+        || !cm_hir_def_id_equal(out_view->definition,
+            body->instance.definition)
+        || out_view->body != body->source_body) {
+        memset(out_view, 0, sizeof(*out_view));
+        out_view->definition = cm_hir_def_id_none();
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_admitted_signature_parameter(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id, uint32_t parameter, CmSemanticTypeView *out_view)
+{
+    const CmHirContext *hir;
+    const CmSemanticResults *semantic_results;
+    const CmMirBody *body;
+    CmMirSemanticInstanceQuery query;
+    CmSemanticFunctionSignatureView signature;
+    CmHirCrateId crate_id;
+    CmSemanticResultsStatus results_status;
+
+    if (out_view == NULL) return CM_MIR_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
+    if (!cm_mir_admission_identity(admission, &hir, &crate_id)
+        || context->admitted_crate == CM_HIR_CRATE_NONE
+        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    semantic_results = cm_semantic_admission_results(admission);
+    body = cm_mir_get_body(context, id);
+    if (semantic_results == NULL) return CM_MIR_INVALID_ADMISSION;
+    if (body == NULL) return CM_MIR_INVALID_ID;
+    memset(&query, 0, sizeof(query));
+    memset(&signature, 0, sizeof(signature));
+    if (!cm_mir_semantic_instance_query_init(&query, hir, body)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    results_status = cm_mir_semantic_signature_query(semantic_results,
+        admission, body, &query.spec, &signature);
+    if (results_status == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(signature.definition,
+            body->instance.definition)
+        && signature.body == body->source_body
+        && parameter < signature.parameter_count) {
+        results_status = cm_mir_semantic_signature_parameter_query(
+            semantic_results, admission, body, &query.spec, parameter,
+            out_view);
+    } else {
+        results_status = CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    cm_mir_semantic_instance_query_destroy(&query);
+    if (results_status != CM_SEMANTIC_RESULTS_OK) {
+        memset(out_view, 0, sizeof(*out_view));
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    return CM_MIR_OK;
+}
+
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,
     CmHirDefId definition, const CmHirTypeId *substitutions,
     uint32_t substitution_count, CmMirBodyId *out_id)

@@ -5,6 +5,7 @@
 
 #include "cm/hir/admission.h"
 #include "cm/hir/model.h"
+#include "cm/hir/semantic_results.h"
 #include "cm/vec.h"
 
 /* MIR body IDs are one-based. Local and basic-block indices are zero-based. */
@@ -324,6 +325,18 @@ CmMirStatus cm_mir_validate_monomorphized_body(
 CmMirStatus cm_mir_validate_admitted_monomorphized_body(
     const CmMirContext *context, const CmSemanticAdmission *admission,
     CmMirBodyId id);
+
+/*
+ * Borrow the sealed signature selected for one admitted MIR body.  Exact
+ * instance reconstruction remains private to MIR; stale or foreign admission
+ * returns CM_MIR_INVALID_ADMISSION and clears the requested view.
+ */
+CmMirStatus cm_mir_admitted_signature(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id, CmSemanticFunctionSignatureView *out_view);
+CmMirStatus cm_mir_admitted_signature_parameter(
+    const CmMirContext *context, const CmSemanticAdmission *admission,
+    CmMirBodyId id, uint32_t parameter, CmSemanticTypeView *out_view);
 
 /* Resolve one already-published exact instance by its complete key. */
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,

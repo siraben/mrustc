@@ -371,6 +371,8 @@ static void test_mir_admission_gates(void)
     CmHirDefId first_definition;
     CmHirType type;
     CmHirTypeId type_id;
+    CmSemanticFunctionSignatureView signature_view;
+    CmSemanticTypeView parameter_view;
     size_t body_count;
 
     fixture_init(&f,
@@ -409,6 +411,42 @@ static void test_mir_admission_gates(void)
     stored = cm_mir_get_body(&mir, lower_result.body);
     assert(stored != NULL);
     first_definition = stored->instance.definition;
+    memset(&signature_view, 0xA5, sizeof(signature_view));
+    memset(&parameter_view, 0xA5, sizeof(parameter_view));
+    assert(cm_mir_admitted_signature(&mir, &admission, lower_result.body,
+            &signature_view) == CM_MIR_OK
+        && cm_hir_def_id_equal(signature_view.definition, first_definition)
+        && signature_view.body == stored->source_body
+        && signature_view.parameter_count == 1u
+        && signature_view.return_type.bytes != NULL
+        && signature_view.return_type.size != 0u
+        && cm_mir_admitted_signature_parameter(&mir, &admission,
+            lower_result.body, 0u, &parameter_view) == CM_MIR_OK
+        && parameter_view.bytes != NULL && parameter_view.size != 0u);
+    memset(&signature_view, 0xA5, sizeof(signature_view));
+    assert(cm_mir_admitted_signature(&mir, &missing, lower_result.body,
+            &signature_view) == CM_MIR_INVALID_ADMISSION
+        && cm_hir_def_id_is_none(signature_view.definition)
+        && signature_view.body == CM_HIR_BODY_NONE
+        && signature_view.parameter_count == 0u
+        && signature_view.return_type.bytes == NULL
+        && signature_view.return_type.size == 0u);
+    memset(&parameter_view, 0xA5, sizeof(parameter_view));
+    assert(cm_mir_admitted_signature_parameter(&mir, &foreign_admission,
+            lower_result.body, 0u, &parameter_view)
+            == CM_MIR_INVALID_ADMISSION
+        && parameter_view.bytes == NULL && parameter_view.size == 0u);
+    memset(&signature_view, 0xA5, sizeof(signature_view));
+    assert(cm_mir_admitted_signature(&mir, &admission, 99u,
+            &signature_view) == CM_MIR_INVALID_ID
+        && cm_hir_def_id_is_none(signature_view.definition)
+        && signature_view.return_type.bytes == NULL
+        && signature_view.return_type.size == 0u);
+    memset(&parameter_view, 0xA5, sizeof(parameter_view));
+    assert(cm_mir_admitted_signature_parameter(&mir, &admission,
+            lower_result.body, 1u, &parameter_view)
+            == CM_MIR_INVALID_ADMISSION
+        && parameter_view.bytes == NULL && parameter_view.size == 0u);
 
     lower_result = cm_mir_lower_admitted_body(&mir, &admission, 2u);
     assert(lower_result.error_count == 0u
@@ -487,6 +525,16 @@ static void test_mir_admission_gates(void)
     type.span = (CmSpan){ f.source, 0u, 1u };
     assert(cm_hir_add_type(&f.hir, &type, &type_id) == CM_HIR_OK);
     assert(!cm_semantic_admission_is_current(&admission));
+    memset(&signature_view, 0xA5, sizeof(signature_view));
+    memset(&parameter_view, 0xA5, sizeof(parameter_view));
+    assert(cm_mir_admitted_signature(&mir, &admission, 1u,
+            &signature_view) == CM_MIR_INVALID_ADMISSION
+        && cm_hir_def_id_is_none(signature_view.definition)
+        && signature_view.return_type.bytes == NULL
+        && signature_view.return_type.size == 0u
+        && cm_mir_admitted_signature_parameter(&mir, &admission, 1u, 0u,
+            &parameter_view) == CM_MIR_INVALID_ADMISSION
+        && parameter_view.bytes == NULL && parameter_view.size == 0u);
     lower_result = cm_mir_lower_admitted_body(&mir, &admission, 2u);
     assert(lower_result.error_count == 1u
         && lower_result.first_error.kind == CM_MIR_LOWER_INVALID_ADMISSION
@@ -1235,10 +1283,19 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
     const CmSemanticResults *results;
     CmSemanticCallableSelectionView selection;
     CmSemanticTypeView parameter;
+    CmSemanticFunctionSignatureView signature;
+    CmSemanticTypeView signature_parameter;
     CmSemanticExpressionView argument_view;
+    CmMirContext mir;
+    CmMirPublication publication;
+    CmMirLowerResult lower_result;
+    const CmMirBody *callee_body;
+    CmMirBodyId callee_body_id;
+    CmMirBodyId caller_body_id;
     CmHirExprId call_expression;
     CmHirExprId argument;
     int equal;
+    int matches;
 
     fixture_init(&f,
         "trait Convert { fn convert(value: u32) -> u32; } "
@@ -1300,6 +1357,49 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
         && cm_semantic_results_instance_callable_argument(results,
             &admission, &caller_spec, call_expression, 1u, &argument)
             == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_mir_context_init(&mir);
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+            == CM_MIR_OK
+        && cm_mir_publication_reserve(&publication, callee->definition,
+            NULL, 0u, callee->data.function_item.body, &callee_body_id)
+            == CM_MIR_OK
+        && cm_mir_publication_reserve(&publication, caller->definition,
+            NULL, 0u, caller->data.function_item.body, &caller_body_id)
+            == CM_MIR_OK);
+    lower_result = cm_mir_lower_admitted_publication_instance(&mir,
+        &publication, &admission, callee_body_id,
+        callee->data.function_item.body, NULL, 0u);
+    assert(lower_result.error_count == 0u
+        && lower_result.body == callee_body_id);
+    lower_result = cm_mir_lower_admitted_publication_instance(&mir,
+        &publication, &admission, caller_body_id,
+        caller->data.function_item.body, NULL, 0u);
+    assert(lower_result.error_count == 0u
+        && lower_result.body == caller_body_id
+        && cm_mir_publication_validate(&publication) == CM_MIR_OK
+        && cm_mir_publication_commit(&publication) == CM_MIR_OK);
+    cm_mir_publication_destroy(&publication);
+    callee_body = cm_mir_get_body(&mir, callee_body_id);
+    memset(&signature, 0, sizeof(signature));
+    memset(&signature_parameter, 0, sizeof(signature_parameter));
+    matches = 0;
+    assert(callee_body != NULL && callee_body->local_count == 2u
+        && cm_mir_admitted_signature(&mir, &admission, callee_body_id,
+            &signature) == CM_MIR_OK
+        && cm_hir_def_id_equal(signature.definition, callee->definition)
+        && signature.body == callee->data.function_item.body
+        && signature.parameter_count == 1u
+        && cm_semantic_type_view_matches_monomorphic_hir(results,
+            &admission, &signature.return_type, callee_body->locals[0].type,
+            &matches) == CM_SEMANTIC_RESULTS_OK && matches
+        && cm_mir_admitted_signature_parameter(&mir, &admission,
+            callee_body_id, 0u, &signature_parameter) == CM_MIR_OK);
+    matches = 0;
+    assert(cm_semantic_type_view_matches_monomorphic_hir(results,
+            &admission, &signature_parameter, callee_body->locals[1].type,
+            &matches) == CM_SEMANTIC_RESULTS_OK && matches);
+    cm_mir_context_destroy(&mir);
     memset(&foreign, 0, sizeof(foreign));
     assert(cm_semantic_results_instance_callable_selection(results,
         &foreign, &caller_spec, call_expression, &selection)
