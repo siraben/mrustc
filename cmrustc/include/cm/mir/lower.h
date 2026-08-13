@@ -59,6 +59,14 @@ CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
     const CmSemanticAdmission *admission, CmHirBodyId body,
     const CmHirTypeId *substitutions, uint32_t substitution_count);
 
+/* Lower and define one pre-reserved exact instance without publishing any
+ * transaction member into the destination context. */
+CmMirLowerResult cm_mir_lower_admitted_publication_instance(
+    CmMirContext *context, CmMirPublication *publication,
+    const CmSemanticAdmission *admission, CmMirBodyId reserved_body,
+    CmHirBodyId body, const CmHirTypeId *substitutions,
+    uint32_t substitution_count);
+
 const char *cm_mir_lower_error_kind_name(CmMirLowerErrorKind kind);
 
 #endif

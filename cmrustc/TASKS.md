@@ -1348,7 +1348,8 @@ conservative borrowing; then CTFE and broad validated MIR. No later pass may
 consume partially typed local HIR or reinterpret an unsupported semantic state
 as proof.
 
-Exact acyclic free-function closures now cross the admitted HIR-to-MIR
+Exact free-function closures, including recursive strongly connected
+components, now cross the admitted HIR-to-MIR
 boundary with type-only item arguments and the currently supported proven
 callee predicates. Admission derives every
 callee's canonical identity from the authenticated caller instance and the HIR
@@ -1359,8 +1360,14 @@ and replay; an unselected or phantom substitution cannot fall back to a
 definition-level `DefId`. Semantic type-view authentication recognizes each
 sealed instance-owned byte arena. This remains a bounded bridge: stored MIR
 identity is still `DefId + CmHirTypeId[]`, the driver materializes only its
-existing optional-u32 substitution subset, and recursive/SCC publication is
-absent. M4 remains active until the all-local semantic barrier and the pass
+existing optional-u32 substitution subset. MIR publication reserves stable
+instance IDs, defines and validates the complete overlay, and commits all
+bodies atomically; incomplete reservations never become visible through the
+public MIR context. Transactions pin process-unique MIR-context lifetime and
+semantic-admission capability identities, so destroy/reinitialize ABA cannot
+re-authorize a draft. Compile-only self and mutual recursion pass, while useful
+terminating recursion still needs calls nested in general conditional control
+flow. M4 remains active until the all-local semantic barrier and the pass
 sequence above replace these bounded slices.
 
 ## M5: MIR, monomorphization, and TCC C backend
@@ -1375,16 +1382,17 @@ sequence above replace these bounded slices.
 | M5-06 | TODO | Runtime shims: atomics/TLS/u128/panic | Core/std runtime probes pass |
 | M5-07 | TODO | External C/link driver | No-core and core-linked executables run |
 
-For M5-03, the compile driver's acyclic worklist now owns and deduplicates
+For M5-03, the compile driver's reachability worklist now owns and deduplicates
 canonical free-function identities, retains canonical callee identity on every
 edge, admits the entire reachable set through one closed exact-instance
-semantic transaction, and lowers/revalidates every node with exact evidence.
+semantic transaction, reserves all MIR instance IDs before lowering, then
+defines, revalidates, and commits the complete graph atomically. This accepts
+self and mutually recursive SCCs without exposing placeholders; the C backend
+now emits forward declarations for every reachable private or exported body.
 The former open-session/raw-MIR generic fallback is gone. Flat `DefId +
 optional u32` remains temporary lowering material, so this is still bounded
 monomorphization evidence rather than the completed task. The next authority
-checkpoint is transactional reserve/define/validate/commit publication for
-recursive SCCs, followed by general substitutions and the full semantic/MIR
-pass sequence.
+checkpoints are general substitutions and the full semantic/MIR pass sequence.
 
 ## M6: Build orchestration
 

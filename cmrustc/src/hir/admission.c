@@ -5,6 +5,7 @@
 #include "cm/alloc.h"
 #include "cm/hir/instance.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmSemanticAdmissionState {
@@ -13,8 +14,18 @@ typedef struct CmSemanticAdmissionState {
     uint64_t storage_lifetime_id;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
+    uint64_t capability_id;
     CmSemanticResults *results;
 } CmSemanticAdmissionState;
+
+static uint64_t cm_admission_capability_counter;
+
+static uint64_t cm_admission_new_capability_id(void)
+{
+    if (cm_admission_capability_counter == UINT64_MAX) abort();
+    cm_admission_capability_counter += 1u;
+    return cm_admission_capability_counter;
+}
 
 static CmSemanticAdmissionResult cm_admission_result(
     CmSemanticAdmissionStatus status)
@@ -49,7 +60,8 @@ static int cm_admission_state_current(const CmSemanticAdmissionState *state)
     if (state == NULL || state->hir == NULL
         || state->local_crate == CM_HIR_CRATE_NONE) return 0;
     hir = state->hir;
-    return hir->storage.lifetime_id == state->storage_lifetime_id
+    return state->capability_id != UINT64_C(0)
+        && hir->storage.lifetime_id == state->storage_lifetime_id
         && hir->semantic_generation == state->semantic_generation
         && hir->rewind_generation == state->rewind_generation
         && cm_hir_get_crate(hir, state->local_crate) != NULL;
@@ -235,6 +247,7 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
+    state->capability_id = cm_admission_new_capability_id();
     state->results = semantic_results;
     admission->state = state;
     cm_free(journal);
@@ -409,6 +422,7 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
+    state->capability_id = cm_admission_new_capability_id();
     state->results = semantic_results;
     admission->state = state;
     semantic_results = NULL;
@@ -716,6 +730,7 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
+    state->capability_id = cm_admission_new_capability_id();
     state->results = semantic_results;
     semantic_results = NULL;
     admission->state = state;
@@ -809,6 +824,15 @@ uint64_t cm_semantic_admission_generation(
         : (const CmSemanticAdmissionState *)admission->state;
     return cm_admission_state_current(state)
         ? state->semantic_generation : UINT64_C(0);
+}
+
+uint64_t cm_semantic_admission_capability_id(
+    const CmSemanticAdmission *admission)
+{
+    const CmSemanticAdmissionState *state = admission == NULL ? NULL
+        : (const CmSemanticAdmissionState *)admission->state;
+    return cm_admission_state_current(state)
+        ? state->capability_id : UINT64_C(0);
 }
 
 const char *cm_semantic_admission_status_name(CmSemanticAdmissionStatus status)

@@ -1,5 +1,7 @@
 #include "cm/mir/model.h"
 
+#include "cm/hir/instance.h"
+
 #include "cm/alloc.h"
 
 #include <assert.h>
@@ -2952,6 +2954,148 @@ static void test_context_pointer_bits(void)
     cm_mir_context_destroy(&context);
 }
 
+static void test_publication_atomicity(TestHir *fixture)
+{
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult admission_result;
+    CmSemanticReachableInstance reachable;
+    CmHirInstanceSpec spec;
+    CmHirGenericArg argument;
+    CmMirContext mir;
+    CmMirPublication publication;
+    CmMirBody identity;
+    CmMirLocal identity_locals[2];
+    CmMirStatement identity_statement;
+    CmMirBasicBlock identity_block;
+    CmHirTypeId substitution;
+    CmMirBodyId reserved;
+    CmMirBodyId duplicate;
+    const CmMirBody *stored;
+    uint64_t context_lifetime;
+    uint64_t admission_capability;
+    uint64_t admission_generation;
+
+    memset(&admission, 0, sizeof(admission));
+    cm_hir_instance_spec_init(&spec);
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = fixture->u32_type;
+    spec.selected_callable = fixture->identity_definition;
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    reachable.body = fixture->identity_body;
+    reachable.spec = &spec;
+    admission_result = cm_semantic_admit_typed_leaf_instances(&admission,
+        &fixture->context, fixture->identity_definition.crate_id,
+        &reachable, 1u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+
+    substitution = fixture->u32_type;
+    init_identity_mir(&identity, identity_locals, &identity_statement,
+        &identity_block, fixture, &substitution, fixture->u32_type);
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    cm_mir_context_init(&mir);
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    assert(cm_mir_publication_reserve(&publication,
+        fixture->identity_definition, &substitution, 1u,
+        fixture->identity_body, &reserved) == CM_MIR_OK
+        && reserved == 1u);
+    duplicate = 99u;
+    assert(cm_mir_publication_reserve(&publication,
+        fixture->identity_definition, &substitution, 1u,
+        fixture->identity_body, &duplicate) == CM_MIR_INVARIANT_VIOLATION
+        && duplicate == CM_MIR_BODY_NONE);
+    assert(cm_mir_body_count(&mir) == 0u
+        && cm_mir_get_body(&mir, reserved) == NULL
+        && cm_mir_publication_get_body(&publication, reserved) == NULL);
+    assert(cm_mir_publication_define(&publication, reserved + 1u,
+        &identity) == CM_MIR_INVALID_ID);
+    assert(cm_mir_publication_validate(&publication)
+        == CM_MIR_INVARIANT_VIOLATION);
+    assert(cm_mir_publication_commit(&publication)
+        == CM_MIR_INVARIANT_VIOLATION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_publication_destroy(&publication);
+    assert(cm_mir_body_count(&mir) == 0u && mir.hir_owner == NULL);
+
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    assert(cm_mir_publication_reserve(&publication,
+        fixture->identity_definition, &substitution, 1u,
+        fixture->identity_body, &reserved) == CM_MIR_OK);
+    context_lifetime = mir.lifetime_id;
+    cm_mir_context_destroy(&mir);
+    cm_mir_context_init(&mir);
+    assert(mir.lifetime_id != UINT64_C(0)
+        && mir.lifetime_id != context_lifetime
+        && cm_mir_publication_validate(&publication)
+            == CM_MIR_INVALID_ADMISSION
+        && cm_mir_publication_commit(&publication)
+            == CM_MIR_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_publication_destroy(&publication);
+
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    assert(cm_mir_publication_reserve(&publication,
+        fixture->identity_definition, &substitution, 1u,
+        fixture->identity_body, &reserved) == CM_MIR_OK);
+    admission_capability = cm_semantic_admission_capability_id(&admission);
+    admission_generation = cm_semantic_admission_generation(&admission);
+    assert(admission_capability != UINT64_C(0));
+    cm_semantic_admission_destroy(&admission);
+    assert(cm_semantic_admission_capability_id(&admission)
+        == UINT64_C(0));
+    admission_result = cm_semantic_admit_typed_leaf_instances(&admission,
+        &fixture->context, fixture->identity_definition.crate_id,
+        &reachable, 1u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_generation(&admission)
+            == admission_generation
+        && cm_semantic_admission_capability_id(&admission)
+            != UINT64_C(0)
+        && cm_semantic_admission_capability_id(&admission)
+            != admission_capability
+        && cm_mir_publication_validate(&publication)
+            == CM_MIR_INVALID_ADMISSION
+        && cm_mir_publication_commit(&publication)
+            == CM_MIR_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_publication_destroy(&publication);
+
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    assert(cm_mir_publication_reserve(&publication,
+        fixture->identity_definition, &substitution, 1u,
+        fixture->identity_body, &reserved) == CM_MIR_OK
+        && reserved == 1u);
+    assert(cm_mir_publication_define(&publication, reserved, &identity)
+        == CM_MIR_OK);
+    identity_locals[1].type = fixture->u8_type;
+    stored = cm_mir_publication_get_body(&publication, reserved);
+    assert(stored != NULL && stored->owned_storage != NULL
+        && stored->locals != identity_locals
+        && stored->locals[1].type == fixture->u32_type
+        && cm_mir_body_count(&mir) == 0u
+        && cm_mir_get_body(&mir, reserved) == NULL);
+    assert(cm_mir_publication_validate(&publication) == CM_MIR_OK);
+    assert(cm_mir_publication_commit(&publication) == CM_MIR_OK
+        && publication.implementation == NULL
+        && cm_mir_body_count(&mir) == 1u);
+    stored = cm_mir_get_body(&mir, reserved);
+    assert(stored != NULL && stored->locals[1].type == fixture->u32_type
+        && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+            reserved) == CM_MIR_OK);
+
+    cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&admission);
+}
+
 int main(void)
 {
     TestHir fixture;
@@ -3005,6 +3149,7 @@ int main(void)
 
     test_context_pointer_bits();
     test_hir_init(&fixture);
+    test_publication_atomicity(&fixture);
     assert_legacy_constant(&fixture);
     cm_mir_context_init(&mir);
 

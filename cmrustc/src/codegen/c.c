@@ -1588,9 +1588,10 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
         const CmMirBody *body;
         const CmHirItem *item;
 
-        if (exported[index] == 0u) continue;
+        if (reachable[index] == 0u) continue;
         body = cm_mir_get_body(mir, (CmMirBodyId)(index + 1u));
         item = cm_c_instance_item(hir, body);
+        if (exported[index] == 0u) cm_str_buf_append(output, "static ");
         cm_c_append_type(output, hir,
             body->locals[CM_MIR_RETURN_LOCAL].type);
         cm_str_buf_append(output, " ");

@@ -93,6 +93,9 @@ CmHirCrateId cm_semantic_admission_crate(
     const CmSemanticAdmission *admission);
 uint64_t cm_semantic_admission_generation(
     const CmSemanticAdmission *admission);
+/* Process-unique identity of this live capability; zero if empty or stale. */
+uint64_t cm_semantic_admission_capability_id(
+    const CmSemanticAdmission *admission);
 const char *cm_semantic_admission_status_name(
     CmSemanticAdmissionStatus status);
 

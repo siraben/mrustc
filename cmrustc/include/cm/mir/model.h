@@ -217,6 +217,8 @@ typedef struct CmMirBody {
 
 typedef struct CmMirContext {
     CmVec bodies;
+    /* Process-unique identity of this initialized context lifetime. */
+    uint64_t lifetime_id;
     /* Identity only; exact bodies retain no borrowed HIR storage. */
     const CmHirContext *hir_owner;
     /* Nonzero only after a successful admission-gated publication. */
@@ -228,8 +230,40 @@ typedef struct CmMirContext {
     unsigned int pointer_bits;
 } CmMirContext;
 
+/* An isolated exact-body publication transaction.  Its implementation is
+ * private; initialize before use and destroy after either commit or abort.
+ * The context and admission objects must remain addressable until destroy;
+ * destroying or reinitializing either invalidates the transaction. */
+typedef struct CmMirPublication {
+    void *implementation;
+} CmMirPublication;
+
 void cm_mir_context_init(CmMirContext *context);
 void cm_mir_context_destroy(CmMirContext *context);
+
+void cm_mir_publication_init(CmMirPublication *publication);
+void cm_mir_publication_destroy(CmMirPublication *publication);
+CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
+    CmMirContext *context, const CmSemanticAdmission *admission);
+CmMirStatus cm_mir_publication_reserve(CmMirPublication *publication,
+    CmHirDefId definition, const CmHirTypeId *substitutions,
+    uint32_t substitution_count, CmHirBodyId source_body,
+    CmMirBodyId *out_id);
+CmMirStatus cm_mir_publication_find_instance(
+    const CmMirPublication *publication, CmHirDefId definition,
+    const CmHirTypeId *substitutions, uint32_t substitution_count,
+    CmMirBodyId *out_id);
+/* The returned instance substitutions are borrowed from the publication. */
+CmMirStatus cm_mir_publication_get_instance(
+    const CmMirPublication *publication, CmMirBodyId id,
+    CmMirInstance *out_instance, CmHirBodyId *out_source_body);
+const CmMirBody *cm_mir_publication_get_body(
+    const CmMirPublication *publication, CmMirBodyId id);
+CmMirStatus cm_mir_publication_define(CmMirPublication *publication,
+    CmMirBodyId id, const CmMirBody *body);
+CmMirStatus cm_mir_publication_validate(
+    const CmMirPublication *publication);
+CmMirStatus cm_mir_publication_commit(CmMirPublication *publication);
 
 /* Qualify an empty context for target-usize MIR. Repeated equal settings are
  * harmless; changing a set width or changing any published context rejects. */

@@ -156,6 +156,8 @@ CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_generic_chain_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
+    tests/codegen/run_recursive_publication_acceptance.sh
+CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_identity_add_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_u32_add_acceptance.sh

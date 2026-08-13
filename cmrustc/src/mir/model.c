@@ -4,14 +4,49 @@
 #include "cm/hir/instance.h"
 #include "cm/hir/semantic_results.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define CM_MIR_STORAGE_ALIGNMENT ((size_t)16u)
 #define CM_MIR_EXPRESSION_RECURSION_LIMIT ((size_t)512u)
 
+typedef struct CmMirPublicationEntry {
+    CmMirInstance instance;
+    CmHirBodyId source_body;
+    CmMirBody body;
+    int defined;
+} CmMirPublicationEntry;
+
+typedef struct CmMirPublicationImpl {
+    CmMirContext *context;
+    const CmSemanticAdmission *admission;
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+    size_t context_body_count;
+    uint64_t context_lifetime_id;
+    uint64_t admission_capability_id;
+    uint64_t storage_lifetime_id;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+    unsigned int pointer_bits;
+    CmVec entries;
+} CmMirPublicationImpl;
+
+static uint64_t cm_mir_context_lifetime_counter;
+
+static uint64_t cm_mir_new_context_lifetime_id(void)
+{
+    if (cm_mir_context_lifetime_counter == UINT64_MAX) abort();
+    cm_mir_context_lifetime_counter += 1u;
+    return cm_mir_context_lifetime_counter;
+}
+
+static const CmMirBody *cm_mir_resolve_body(const CmMirContext *context,
+    const CmMirPublicationImpl *publication, CmMirBodyId id);
+
 static int cm_mir_context_valid(const CmMirContext *context)
 {
-    return context != NULL
+    return context != NULL && context->lifetime_id != UINT64_C(0)
         && (context->pointer_bits == 0u || context->pointer_bits == 32u
             || context->pointer_bits == 64u)
         && context->bodies.elem_size == sizeof(CmMirBody)
@@ -682,6 +717,7 @@ static int cm_mir_destination_type(const CmHirContext *hir,
 
 typedef struct CmMirTreeMatch {
     const CmMirContext *context;
+    const CmMirPublicationImpl *publication;
     const CmHirContext *hir;
     const CmHirItem *item;
     const CmMirBody *body;
@@ -1452,7 +1488,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         block = &match->body->basic_blocks[match->basic_block_index];
         terminator = &block->terminator;
         callee_body = terminator->kind == CM_MIR_TERMINATOR_CALL
-            ? cm_mir_get_body(match->context,
+            ? cm_mir_resolve_body(match->context, match->publication,
                 terminator->data.call.callee_instance) : NULL;
         destination = has_destination ? requested_destination
                                       : match->next_temporary;
@@ -1578,6 +1614,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
 }
 
 static int cm_mir_root_shape_valid(const CmMirContext *context,
+    const CmMirPublicationImpl *publication,
     const CmHirContext *hir,
     const CmHirItem *item, const CmMirBody *body,
     unsigned int pointer_bits, uint32_t parameter_count,
@@ -1601,6 +1638,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
     }
     memset(&match, 0, sizeof(match));
     match.context = context;
+    match.publication = publication;
     match.hir = hir;
     match.item = item;
     match.body = body;
@@ -1679,7 +1717,8 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
 }
 
 static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
-    const CmHirContext *hir, const CmMirBody *body, int stored,
+    const CmMirPublicationImpl *publication, const CmHirContext *hir,
+    const CmMirBody *body, int stored,
     const CmSemanticAdmission *admission,
     const CmSemanticResults *semantic_results,
     const CmHirInstanceSpec *semantic_instance)
@@ -1848,7 +1887,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
             uint32_t argument_index;
 
             terminator = &block->terminator;
-            callee = cm_mir_get_body(context,
+            callee = cm_mir_resolve_body(context, publication,
                 terminator->data.call.callee_instance);
             callee_item = callee == NULL ? NULL
                 : cm_mir_instance_function(hir, callee);
@@ -1938,12 +1977,13 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
             return 0;
         }
     }
-    return cm_mir_root_shape_valid(context, hir, item, body,
+    return cm_mir_root_shape_valid(context, publication, hir, item, body,
         context->pointer_bits, parameter_count, admission, semantic_results,
         semantic_instance);
 }
 
-static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
+static int cm_mir_exact_body_shape_valid_with_publication(
+    const CmMirContext *context, const CmMirPublicationImpl *publication,
     const CmHirContext *hir, const CmMirBody *body, int stored,
     const CmSemanticAdmission *admission,
     const CmSemanticResults *semantic_results)
@@ -1960,10 +2000,19 @@ static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
         if (!cm_mir_semantic_instance_query_init(&query, body)) return 0;
         instance = &query.spec;
     }
-    valid = cm_mir_exact_body_shape_valid_impl(context, hir, body, stored,
-        admission, semantic_results, instance);
+    valid = cm_mir_exact_body_shape_valid_impl(context, publication, hir,
+        body, stored, admission, semantic_results, instance);
     cm_mir_semantic_instance_query_destroy(&query);
     return valid;
+}
+
+static int cm_mir_exact_body_shape_valid(const CmMirContext *context,
+    const CmHirContext *hir, const CmMirBody *body, int stored,
+    const CmSemanticAdmission *admission,
+    const CmSemanticResults *semantic_results)
+{
+    return cm_mir_exact_body_shape_valid_with_publication(context, NULL,
+        hir, body, stored, admission, semantic_results);
 }
 
 static int cm_mir_storage_add(size_t *total, size_t count,
@@ -2002,17 +2051,25 @@ static void *cm_mir_storage_take(unsigned char *storage, size_t *offset,
 static int cm_mir_place_storage_size(size_t *total,
     const CmMirPlace *place)
 {
-    return !cm_mir_place_present(place)
-        || cm_mir_storage_add(total, place->projection_count,
+    if (!cm_mir_place_present(place)) return 1;
+    return place->projection_count <= CM_MIR_MAX_PLACE_PROJECTIONS
+        && (place->projection_count == 0u)
+            == (place->projections == NULL)
+        && cm_mir_storage_add(total, place->projection_count,
             sizeof(CmMirFieldProjection));
 }
 
 static int cm_mir_operand_storage_size(size_t *total,
     const CmMirOperand *operand)
 {
-    return operand->kind != CM_MIR_OPERAND_MOVE_PLACE
-            && operand->kind != CM_MIR_OPERAND_COPY_PLACE
-        ? 1 : cm_mir_place_storage_size(total, &operand->data.place);
+    if (operand->kind == CM_MIR_OPERAND_MOVE_PLACE
+        || operand->kind == CM_MIR_OPERAND_COPY_PLACE) {
+        return cm_mir_place_storage_size(total, &operand->data.place);
+    }
+    return operand->kind == CM_MIR_CONSTANT_I32
+        || operand->kind == CM_MIR_CONSTANT_U32
+        || operand->kind == CM_MIR_CONSTANT_USIZE
+        || operand->kind == CM_MIR_OPERAND_MOVE;
 }
 
 static int cm_mir_rvalue_storage_size(size_t *total,
@@ -2042,6 +2099,9 @@ static int cm_mir_rvalue_storage_size(size_t *total,
                 &rvalue->data.less.right);
     }
     if (rvalue->kind != CM_MIR_RVALUE_AGGREGATE
+        || rvalue->data.aggregate.field_count > CM_MIR_MAX_AGGREGATE_FIELDS
+        || (rvalue->data.aggregate.field_count == 0u)
+            != (rvalue->data.aggregate.fields == NULL)
         || !cm_mir_storage_add(total,
             rvalue->data.aggregate.field_count,
             sizeof(CmMirAggregateField))) {
@@ -2125,6 +2185,13 @@ static int cm_mir_body_storage_size(const CmMirBody *body, size_t *out_size)
     size_t total;
     uint32_t block_index;
 
+    if (body == NULL
+        || (body->instance.substitution_count == 0u)
+            != (body->instance.substitutions == NULL)
+        || body->local_count == 0u || body->locals == NULL
+        || body->basic_block_count == 0u || body->basic_blocks == NULL) {
+        return 0;
+    }
     total = 0u;
     if (!cm_mir_storage_add(&total, body->instance.substitution_count,
             sizeof(CmHirTypeId))
@@ -2145,6 +2212,10 @@ static int cm_mir_body_storage_size(const CmMirBody *body, size_t *out_size)
                 sizeof(CmMirStatement))) {
             return 0;
         }
+        if ((body->basic_blocks[block_index].statement_count == 0u)
+                != (body->basic_blocks[block_index].statements == NULL)) {
+            return 0;
+        }
         for (statement_index = 0u;
              statement_index
                 < body->basic_blocks[block_index].statement_count;
@@ -2153,7 +2224,8 @@ static int cm_mir_body_storage_size(const CmMirBody *body, size_t *out_size)
 
             statement = &body->basic_blocks[block_index]
                 .statements[statement_index];
-            if (!cm_mir_place_storage_size(&total,
+            if (statement->kind != CM_MIR_STATEMENT_ASSIGN
+                || !cm_mir_place_storage_size(&total,
                     &statement->data.assign.destination_place)
                 || !cm_mir_rvalue_storage_size(&total,
                     &statement->data.assign.value)) {
@@ -2161,6 +2233,14 @@ static int cm_mir_body_storage_size(const CmMirBody *body, size_t *out_size)
             }
         }
         terminator = &body->basic_blocks[block_index].terminator;
+        if (terminator->kind == CM_MIR_TERMINATOR_CALL
+            && ((terminator->data.call.argument_count == 0u)
+                    != (terminator->data.call.arguments == NULL)
+                || (terminator->data.call.callee.substitution_count == 0u)
+                    != (terminator->data.call.callee.substitutions
+                        == NULL))) {
+            return 0;
+        }
         if (terminator->kind == CM_MIR_TERMINATOR_CALL
             && (!cm_mir_storage_add(&total,
                     terminator->data.call.argument_count,
@@ -2326,11 +2406,83 @@ static void cm_mir_body_storage_destroy(CmMirBody *body)
     memset(body, 0, sizeof(*body));
 }
 
+static int cm_mir_publication_impl_valid(
+    const CmMirPublicationImpl *publication)
+{
+    return publication != NULL && publication->context != NULL
+        && publication->admission != NULL && publication->hir != NULL
+        && publication->crate_id != CM_HIR_CRATE_NONE
+        && publication->entries.elem_size == sizeof(CmMirPublicationEntry)
+        && publication->entries.len <= publication->entries.cap
+        && (publication->entries.cap == 0u)
+            == (publication->entries.data == NULL);
+}
+
+static int cm_mir_publication_current(
+    const CmMirPublicationImpl *publication)
+{
+    return cm_mir_publication_impl_valid(publication)
+        && cm_mir_context_valid(publication->context)
+        && cm_semantic_admission_is_current(publication->admission)
+        && cm_semantic_admission_hir(publication->admission)
+            == publication->hir
+        && cm_semantic_admission_crate(publication->admission)
+            == publication->crate_id
+        && cm_semantic_admission_capability_id(publication->admission)
+            == publication->admission_capability_id
+        && publication->context->lifetime_id
+            == publication->context_lifetime_id
+        && publication->context->bodies.len
+            == publication->context_body_count
+        && publication->context->pointer_bits == publication->pointer_bits
+        && publication->hir->storage.lifetime_id
+            == publication->storage_lifetime_id
+        && publication->hir->semantic_generation
+            == publication->semantic_generation
+        && publication->hir->rewind_generation
+            == publication->rewind_generation
+        && cm_mir_context_accepts_admission(publication->context,
+            publication->hir, publication->crate_id);
+}
+
+static const CmMirPublicationEntry *cm_mir_publication_entry(
+    const CmMirPublicationImpl *publication, CmMirBodyId id)
+{
+    size_t index;
+
+    if (!cm_mir_publication_impl_valid(publication)
+        || id == CM_MIR_BODY_NONE
+        || (size_t)id <= publication->context_body_count) return NULL;
+    index = (size_t)id - publication->context_body_count - 1u;
+    return (const CmMirPublicationEntry *)cm_vec_at_const(
+        &publication->entries, index);
+}
+
+static CmMirPublicationEntry *cm_mir_publication_entry_mut(
+    CmMirPublicationImpl *publication, CmMirBodyId id)
+{
+    return (CmMirPublicationEntry *)cm_mir_publication_entry(publication,
+        id);
+}
+
+static const CmMirBody *cm_mir_resolve_body(const CmMirContext *context,
+    const CmMirPublicationImpl *publication, CmMirBodyId id)
+{
+    const CmMirPublicationEntry *entry;
+
+    if (publication == NULL || (size_t)id <= context->bodies.len) {
+        return cm_mir_get_body(context, id);
+    }
+    entry = cm_mir_publication_entry(publication, id);
+    return entry != NULL && entry->defined ? &entry->body : NULL;
+}
+
 void cm_mir_context_init(CmMirContext *context)
 {
     if (context == NULL) return;
     memset(context, 0, sizeof(*context));
     cm_vec_init(&context->bodies, sizeof(CmMirBody));
+    context->lifetime_id = cm_mir_new_context_lifetime_id();
 }
 
 void cm_mir_context_destroy(CmMirContext *context)
@@ -2346,6 +2498,316 @@ void cm_mir_context_destroy(CmMirContext *context)
         cm_vec_destroy(&context->bodies);
     }
     memset(context, 0, sizeof(*context));
+}
+
+void cm_mir_publication_init(CmMirPublication *publication)
+{
+    if (publication == NULL) return;
+    publication->implementation = NULL;
+}
+
+void cm_mir_publication_destroy(CmMirPublication *publication)
+{
+    CmMirPublicationImpl *implementation;
+    size_t index;
+
+    if (publication == NULL) return;
+    implementation = (CmMirPublicationImpl *)publication->implementation;
+    if (implementation != NULL
+        && implementation->entries.elem_size
+            == sizeof(CmMirPublicationEntry)) {
+        for (index = 0u; index < implementation->entries.len; ++index) {
+            CmMirPublicationEntry *entry;
+
+            entry = (CmMirPublicationEntry *)cm_vec_at(
+                &implementation->entries, index);
+            if (entry != NULL) {
+                cm_free(entry->instance.substitutions);
+                cm_mir_body_storage_destroy(&entry->body);
+            }
+        }
+        cm_vec_destroy(&implementation->entries);
+    }
+    cm_free(implementation);
+    publication->implementation = NULL;
+}
+
+CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
+    CmMirContext *context, const CmSemanticAdmission *admission)
+{
+    CmMirPublicationImpl *implementation;
+    const CmHirContext *hir;
+    CmHirCrateId crate_id;
+
+    if (publication == NULL || publication->implementation != NULL
+        || context == NULL) return CM_MIR_INVALID_ARGUMENT;
+    if (!cm_mir_admission_identity(admission, &hir, &crate_id)
+        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    implementation = (CmMirPublicationImpl *)cm_alloc_zeroed(1u,
+        sizeof(CmMirPublicationImpl));
+    implementation->context = context;
+    implementation->admission = admission;
+    implementation->hir = hir;
+    implementation->crate_id = crate_id;
+    implementation->context_body_count = context->bodies.len;
+    implementation->context_lifetime_id = context->lifetime_id;
+    implementation->admission_capability_id =
+        cm_semantic_admission_capability_id(admission);
+    implementation->storage_lifetime_id = hir->storage.lifetime_id;
+    implementation->semantic_generation = hir->semantic_generation;
+    implementation->rewind_generation = hir->rewind_generation;
+    implementation->pointer_bits = context->pointer_bits;
+    cm_vec_init(&implementation->entries,
+        sizeof(CmMirPublicationEntry));
+    publication->implementation = implementation;
+    return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_publication_find_instance(
+    const CmMirPublication *publication, CmHirDefId definition,
+    const CmHirTypeId *substitutions, uint32_t substitution_count,
+    CmMirBodyId *out_id)
+{
+    const CmMirPublicationImpl *implementation;
+    CmMirInstance key;
+    CmMirStatus status;
+    size_t index;
+
+    if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
+    implementation = publication == NULL ? NULL
+        : (const CmMirPublicationImpl *)publication->implementation;
+    if (!cm_mir_publication_current(implementation) || out_id == NULL
+        || cm_hir_def_id_is_none(definition)
+        || (substitution_count != 0u && substitutions == NULL)) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    status = cm_mir_find_instance(implementation->context, definition,
+        substitutions, substitution_count, out_id);
+    if (status == CM_MIR_OK) return status;
+    memset(&key, 0, sizeof(key));
+    key.definition = definition;
+    key.substitutions = (CmHirTypeId *)substitutions;
+    key.substitution_count = substitution_count;
+    for (index = 0u; index < implementation->entries.len; ++index) {
+        const CmMirPublicationEntry *entry;
+
+        entry = (const CmMirPublicationEntry *)cm_vec_at_const(
+            &implementation->entries, index);
+        if (entry == NULL) return CM_MIR_INVARIANT_VIOLATION;
+        if (cm_mir_instance_equal(&entry->instance, &key)) {
+            *out_id = (CmMirBodyId)(implementation->context_body_count
+                + index + 1u);
+            return CM_MIR_OK;
+        }
+    }
+    return CM_MIR_INVALID_ID;
+}
+
+CmMirStatus cm_mir_publication_reserve(CmMirPublication *publication,
+    CmHirDefId definition, const CmHirTypeId *substitutions,
+    uint32_t substitution_count, CmHirBodyId source_body,
+    CmMirBodyId *out_id)
+{
+    CmMirPublicationImpl *implementation;
+    CmMirPublicationEntry entry;
+    CmMirBody query_body;
+    CmMirSemanticInstanceQuery query;
+    CmSemanticBodyView semantic_body;
+    const CmHirBody *hir_body;
+    CmMirBodyId existing;
+    size_t future_count;
+    size_t substitution_bytes;
+
+    if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
+    implementation = publication == NULL ? NULL
+        : (CmMirPublicationImpl *)publication->implementation;
+    if (!cm_mir_publication_current(implementation) || out_id == NULL
+        || cm_hir_def_id_is_none(definition)
+        || source_body == CM_HIR_BODY_NONE
+        || (substitution_count != 0u && substitutions == NULL)) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    if (cm_mir_publication_find_instance(publication, definition,
+            substitutions, substitution_count, &existing) == CM_MIR_OK) {
+        return CM_MIR_INVARIANT_VIOLATION;
+    }
+    if (!cm_size_mul((size_t)substitution_count, sizeof(CmHirTypeId),
+            &substitution_bytes)) return CM_MIR_ID_EXHAUSTED;
+    future_count = implementation->context_body_count
+        + implementation->entries.len;
+    if (future_count >= (size_t)UINT32_MAX) return CM_MIR_ID_EXHAUSTED;
+    hir_body = cm_hir_get_body(implementation->hir, source_body);
+    memset(&query_body, 0, sizeof(query_body));
+    query_body.instance.definition = definition;
+    query_body.instance.substitutions = (CmHirTypeId *)substitutions;
+    query_body.instance.substitution_count = substitution_count;
+    memset(&query, 0, sizeof(query));
+    if (hir_body == NULL || hir_body->state != CM_HIR_BODY_TYPED
+        || !cm_hir_def_id_equal(hir_body->owner, definition)
+        || definition.crate_id != implementation->crate_id
+        || !cm_mir_semantic_instance_query_init(&query, &query_body)
+        || cm_semantic_results_instance_body(
+            cm_semantic_admission_results(implementation->admission),
+            implementation->admission, &query.spec, &semantic_body)
+                != CM_SEMANTIC_RESULTS_OK
+        || semantic_body.body != source_body
+        || !cm_hir_def_id_equal(semantic_body.owner, definition)) {
+        cm_mir_semantic_instance_query_destroy(&query);
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    cm_mir_semantic_instance_query_destroy(&query);
+    cm_vec_reserve(&implementation->entries,
+        implementation->entries.len + 1u);
+    memset(&entry, 0, sizeof(entry));
+    entry.instance.definition = definition;
+    entry.instance.substitution_count = substitution_count;
+    if (substitution_count != 0u) {
+        entry.instance.substitutions = (CmHirTypeId *)cm_alloc(
+            substitution_bytes);
+        memcpy(entry.instance.substitutions, substitutions,
+            substitution_bytes);
+    }
+    entry.source_body = source_body;
+    (void)cm_vec_push(&implementation->entries, &entry);
+    *out_id = (CmMirBodyId)(future_count + 1u);
+    return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_publication_get_instance(
+    const CmMirPublication *publication, CmMirBodyId id,
+    CmMirInstance *out_instance, CmHirBodyId *out_source_body)
+{
+    const CmMirPublicationImpl *implementation;
+    const CmMirPublicationEntry *entry;
+    const CmMirBody *body;
+
+    if (out_instance != NULL) memset(out_instance, 0, sizeof(*out_instance));
+    if (out_source_body != NULL) *out_source_body = CM_HIR_BODY_NONE;
+    implementation = publication == NULL ? NULL
+        : (const CmMirPublicationImpl *)publication->implementation;
+    if (!cm_mir_publication_current(implementation)
+        || out_instance == NULL || out_source_body == NULL
+        || id == CM_MIR_BODY_NONE) return CM_MIR_INVALID_ARGUMENT;
+    if ((size_t)id <= implementation->context_body_count) {
+        body = cm_mir_get_body(implementation->context, id);
+        if (body == NULL || cm_mir_instance_is_empty(&body->instance)) {
+            return CM_MIR_INVALID_ID;
+        }
+        *out_instance = body->instance;
+        *out_source_body = body->source_body;
+        return CM_MIR_OK;
+    }
+    entry = cm_mir_publication_entry(implementation, id);
+    if (entry == NULL) return CM_MIR_INVALID_ID;
+    *out_instance = entry->instance;
+    *out_source_body = entry->source_body;
+    return CM_MIR_OK;
+}
+
+const CmMirBody *cm_mir_publication_get_body(
+    const CmMirPublication *publication, CmMirBodyId id)
+{
+    const CmMirPublicationImpl *implementation;
+
+    implementation = publication == NULL ? NULL
+        : (const CmMirPublicationImpl *)publication->implementation;
+    return cm_mir_publication_current(implementation)
+        ? cm_mir_resolve_body(implementation->context, implementation, id)
+        : NULL;
+}
+
+CmMirStatus cm_mir_publication_define(CmMirPublication *publication,
+    CmMirBodyId id, const CmMirBody *body)
+{
+    CmMirPublicationImpl *implementation;
+    CmMirPublicationEntry *entry;
+    CmMirBody copy;
+    CmMirStatus status;
+
+    implementation = publication == NULL ? NULL
+        : (CmMirPublicationImpl *)publication->implementation;
+    if (!cm_mir_publication_current(implementation) || body == NULL) {
+        return CM_MIR_INVALID_ARGUMENT;
+    }
+    entry = cm_mir_publication_entry_mut(implementation, id);
+    if (entry == NULL) return CM_MIR_INVALID_ID;
+    if (entry->defined || body->owned_storage != NULL
+        || !cm_mir_instance_equal(&entry->instance, &body->instance)
+        || body->source_body != entry->source_body
+        || !cm_hir_def_id_equal(body->owner, entry->instance.definition)
+        || body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_MIR_INVARIANT_VIOLATION;
+    }
+    status = cm_mir_copy_body(body, &copy);
+    if (status != CM_MIR_OK) return status;
+    entry->body = copy;
+    entry->defined = 1;
+    return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_publication_validate(
+    const CmMirPublication *publication)
+{
+    const CmMirPublicationImpl *implementation;
+    const CmSemanticResults *results;
+    size_t index;
+
+    implementation = publication == NULL ? NULL
+        : (const CmMirPublicationImpl *)publication->implementation;
+    if (!cm_mir_publication_current(implementation)) {
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    if (implementation->entries.len == 0u) {
+        return CM_MIR_INVARIANT_VIOLATION;
+    }
+    results = cm_semantic_admission_results(implementation->admission);
+    if (results == NULL) return CM_MIR_INVALID_ADMISSION;
+    for (index = 0u; index < implementation->entries.len; ++index) {
+        const CmMirPublicationEntry *entry;
+
+        entry = (const CmMirPublicationEntry *)cm_vec_at_const(
+            &implementation->entries, index);
+        if (entry == NULL || !entry->defined
+            || !cm_mir_exact_body_shape_valid_with_publication(
+                implementation->context, implementation,
+                implementation->hir, &entry->body, 1,
+                implementation->admission, results)) {
+            return CM_MIR_INVARIANT_VIOLATION;
+        }
+    }
+    return CM_MIR_OK;
+}
+
+CmMirStatus cm_mir_publication_commit(CmMirPublication *publication)
+{
+    CmMirPublicationImpl *implementation;
+    CmMirStatus status;
+    size_t index;
+
+    implementation = publication == NULL ? NULL
+        : (CmMirPublicationImpl *)publication->implementation;
+    status = cm_mir_publication_validate(publication);
+    if (status != CM_MIR_OK) return status;
+    cm_vec_reserve(&implementation->context->bodies,
+        implementation->context_body_count + implementation->entries.len);
+    for (index = 0u; index < implementation->entries.len; ++index) {
+        CmMirPublicationEntry *entry;
+
+        entry = (CmMirPublicationEntry *)cm_vec_at(
+            &implementation->entries, index);
+        (void)cm_vec_push(&implementation->context->bodies, &entry->body);
+        memset(&entry->body, 0, sizeof(entry->body));
+        entry->defined = 0;
+    }
+    if (implementation->context->admitted_crate == CM_HIR_CRATE_NONE) {
+        cm_mir_context_latch_admission(implementation->context,
+            implementation->hir, implementation->crate_id);
+    }
+    cm_mir_publication_destroy(publication);
+    return CM_MIR_OK;
 }
 
 CmMirStatus cm_mir_context_set_pointer_bits(CmMirContext *context,

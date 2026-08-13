@@ -152,12 +152,6 @@ static CmHirItemId cm_compile_find_entry(const CmHirContext *hir,
     return found;
 }
 
-typedef enum CmCompileMirVisitState {
-    CM_COMPILE_MIR_UNSEEN = 0,
-    CM_COMPILE_MIR_ACTIVE,
-    CM_COMPILE_MIR_LOWERED
-} CmCompileMirVisitState;
-
 typedef struct CmCompileReachableInstance {
     CmHirCanonicalInstance identity;
     CmHirDefId definition;
@@ -167,7 +161,6 @@ typedef struct CmCompileReachableInstance {
     size_t edge_start;
     size_t edge_count;
     CmMirBodyId mir_body;
-    CmCompileMirVisitState mir_state;
 } CmCompileReachableInstance;
 
 typedef struct CmCompileReachableEdge {
@@ -737,85 +730,85 @@ cleanup:
     return ok;
 }
 
-static int cm_compile_lower_reachable_instance(CmCompileExactState *state,
-    size_t instance_index, CmMirBodyId *out_body,
+static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
     char *message, size_t message_capacity)
 {
-    CmCompileReachableInstance *instance;
-    const CmHirTypeId *substitutions;
-    size_t edge_index;
-    const CmHirBody *body;
-    CmMirLowerResult mir_result;
+    CmMirPublication publication;
+    CmMirStatus status;
+    size_t index;
+    int ok;
 
-    *out_body = CM_MIR_BODY_NONE;
-    instance = (CmCompileReachableInstance *)cm_vec_at(
-        &state->instances, instance_index);
-    if (instance == NULL) {
-        (void)snprintf(message, message_capacity,
-            "unsupported or invalid reachable function instance");
-        return 0;
-    }
-    if (instance->mir_state == CM_COMPILE_MIR_LOWERED) {
-        *out_body = instance->mir_body;
-        return 1;
-    }
-    if (instance->mir_state == CM_COMPILE_MIR_ACTIVE) {
-        (void)snprintf(message, message_capacity,
-            "recursive reachable instances are not yet supported");
-        return 0;
-    }
-    instance->mir_state = CM_COMPILE_MIR_ACTIVE;
-    for (edge_index = 0u; edge_index < instance->edge_count;
-         ++edge_index) {
-        const CmCompileReachableEdge *edge;
-        CmMirBodyId callee_body;
+    cm_mir_publication_init(&publication);
+    ok = 0;
+    status = cm_mir_publication_begin(&publication, state->mir,
+        state->admission);
+    if (status != CM_MIR_OK) goto fail;
+    for (index = 0u; index < state->instances.len; ++index) {
+        CmCompileReachableInstance *instance;
+        const CmHirTypeId *substitutions;
 
-        edge = (const CmCompileReachableEdge *)cm_vec_at_const(
-            &state->edges, instance->edge_start + edge_index);
-        if (edge == NULL
-            || !cm_compile_lower_reachable_instance(state, edge->callee,
-                &callee_body, message, message_capacity)) {
-            goto fail_exact;
+        instance = (CmCompileReachableInstance *)cm_vec_at(
+            &state->instances, index);
+        if (instance == NULL) {
+            status = CM_MIR_INVARIANT_VIOLATION;
+            goto fail;
+        }
+        substitutions = instance->substitution_count == 0u
+            ? NULL : &instance->substitution;
+        status = cm_mir_publication_reserve(&publication,
+            instance->definition, substitutions,
+            instance->substitution_count, instance->body,
+            &instance->mir_body);
+        if (status != CM_MIR_OK) goto fail;
+    }
+    for (index = 0u; index < state->instances.len; ++index) {
+        CmCompileReachableInstance *instance;
+        const CmHirTypeId *substitutions;
+        CmMirLowerResult result;
+
+        instance = (CmCompileReachableInstance *)cm_vec_at(
+            &state->instances, index);
+        if (instance == NULL) {
+            status = CM_MIR_INVARIANT_VIOLATION;
+            goto fail;
+        }
+        substitutions = instance->substitution_count == 0u
+            ? NULL : &instance->substitution;
+        result = cm_mir_lower_admitted_publication_instance(state->mir,
+            &publication, state->admission, instance->mir_body,
+            instance->body, substitutions, instance->substitution_count);
+        if (result.error_count != 0u
+            || result.body != instance->mir_body) {
+            (void)snprintf(message, message_capacity, "%s",
+                result.error_count != 0u
+                    && result.first_error.message[0] != '\0'
+                    ? result.first_error.message
+                    : "reachable MIR lowering failed");
+            goto fail;
         }
     }
-    instance = (CmCompileReachableInstance *)cm_vec_at(
-        &state->instances, instance_index);
-    body = instance == NULL ? NULL
-        : cm_hir_get_body(state->hir, instance->body);
-    if (body == NULL || body->state != CM_HIR_BODY_TYPED) {
+    status = cm_mir_publication_validate(&publication);
+    if (status != CM_MIR_OK) goto fail;
+    status = cm_mir_publication_commit(&publication);
+    if (status != CM_MIR_OK) goto fail;
+    ok = 1;
+fail:
+    if (!ok && message[0] == '\0') {
         (void)snprintf(message, message_capacity,
-            "reachable function body is not fully typed");
-        goto fail_exact;
+            "reachable MIR publication failed: %s",
+            cm_mir_status_name(status));
     }
-    if (body->root_expression == CM_HIR_EXPR_NONE) {
-        (void)snprintf(message, message_capacity,
-            "reachable function has no typed root expression");
-        goto fail_exact;
-    }
-    substitutions = instance->substitution_count == 0u
-        ? NULL : &instance->substitution;
-    mir_result = cm_mir_lower_admitted_instance(state->mir,
-        state->admission, instance->body, substitutions,
-        instance->substitution_count);
-    if (mir_result.error_count != 0u
-        || mir_result.body == CM_MIR_BODY_NONE) {
-        (void)snprintf(message, message_capacity, "%s",
-            mir_result.error_count != 0u
-                && mir_result.first_error.message[0] != '\0'
-                ? mir_result.first_error.message
-                : "reachable MIR lowering failed");
-        goto fail_exact;
-    }
-    instance->mir_body = mir_result.body;
-    instance->mir_state = CM_COMPILE_MIR_LOWERED;
-    *out_body = instance->mir_body;
-    return 1;
+    if (!ok) {
+        for (index = 0u; index < state->instances.len; ++index) {
+            CmCompileReachableInstance *instance;
 
-fail_exact:
-    instance = (CmCompileReachableInstance *)cm_vec_at(
-        &state->instances, instance_index);
-    if (instance != NULL) instance->mir_state = CM_COMPILE_MIR_UNSEEN;
-    return 0;
+            instance = (CmCompileReachableInstance *)cm_vec_at(
+                &state->instances, index);
+            if (instance != NULL) instance->mir_body = CM_MIR_BODY_NONE;
+        }
+    }
+    cm_mir_publication_destroy(&publication);
+    return ok;
 }
 
 CmCompileResult cm_compile_emit_c(const char *input_path,
@@ -1102,24 +1095,35 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             }
         }
         /* Every reachable call obligation is proven before any MIR exists. */
+        {
+            char message[160];
+
+            memset(message, 0, sizeof(message));
+            if (!cm_compile_publish_reachable_mir(&exact_state, message,
+                    sizeof(message))) {
+                result = cm_compile_result(CM_COMPILE_MIR,
+                    message[0] == '\0'
+                        ? "reachable MIR publication failed" : message);
+                goto cleanup;
+            }
+        }
         for (item_index = 0u; item_index < exact_root_instances.len;
              ++item_index) {
             const size_t *root_instance;
             CmMirBodyId root_body;
-            char message[160];
+            const CmCompileReachableInstance *instance;
 
             root_instance = (const size_t *)cm_vec_at_const(
                 &exact_root_instances, item_index);
-            memset(message, 0, sizeof(message));
-            if (root_instance == NULL
-                || !cm_compile_lower_reachable_instance(&exact_state,
-                    *root_instance, &root_body, message,
-                    sizeof(message))) {
+            instance = root_instance == NULL ? NULL
+                : (const CmCompileReachableInstance *)cm_vec_at_const(
+                    &exact_state.instances, *root_instance);
+            if (instance == NULL || instance->mir_body == CM_MIR_BODY_NONE) {
                 result = cm_compile_result(CM_COMPILE_MIR,
-                    message[0] == '\0' ? "reachable root lowering failed"
-                        : message);
+                    "reachable root has no published MIR body");
                 goto cleanup;
             }
+            root_body = instance->mir_body;
             (void)cm_vec_push(&exact_root_bodies, &root_body);
         }
         emit_status = cm_c_emit_reachable_program(&c_output, &hir, &mir,
