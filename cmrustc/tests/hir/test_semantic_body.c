@@ -1053,6 +1053,211 @@ static void test_explicit_qualified_callable_selection(void)
     fixture_destroy(&fixture);
 }
 
+static void test_generic_impl_method_instance_spec(void)
+{
+    TestFixture fixture;
+    CmHirDefId trait_definition;
+    CmHirDefId impl_definition;
+    CmHirDefId declared_definition;
+    CmHirDefId selected_definition;
+    CmHirType self_type_value;
+    CmHirTypeId trait_self_type;
+    CmHirTypeId impl_self_type;
+    CmHirTypeId impl_parameter_type;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId impl_body;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId impl_root;
+    CmHirGenericArg impl_argument;
+    CmHirInstanceSpec spec;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyEvidenceWriteback evidence;
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+    CmTypeckContext *typeck;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    trait_definition = add_trait(&fixture, "ExactEcho");
+    impl_definition = add_blanket_impl(&fixture, trait_definition,
+        &impl_parameter_type);
+    memset(&self_type_value, 0, sizeof(self_type_value));
+    self_type_value.kind = CM_HIR_TYPE_SELF_KIND;
+    self_type_value.span = test_span(20u, 24u);
+    self_type_value.data.self_type.owner = trait_definition;
+    assert(cm_hir_add_type(&fixture.hir, &self_type_value,
+        &trait_self_type) == CM_HIR_OK);
+    self_type_value.data.self_type.owner = impl_definition;
+    assert(cm_hir_add_type(&fixture.hir, &self_type_value,
+        &impl_self_type) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(30u, 45u),
+        &declared_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture.hir, "self");
+    parameter.type = trait_self_type;
+    parameter.span = test_span(34u, 38u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, declared_definition,
+        fixture.root, "echo", &fixture.hir);
+    item.parent_definition = trait_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = trait_self_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(46u, 65u),
+        &selected_definition) == CM_HIR_OK);
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.name;
+    local.type = impl_self_type;
+    local.span = test_span(50u, 54u);
+    local.parameter_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = selected_definition;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.expected_type = impl_self_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(46u, 65u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &impl_body) == CM_HIR_OK);
+    parameter.type = impl_self_type;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, selected_definition,
+        fixture.root, "echo", &fixture.hir);
+    item.parent_definition = impl_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = impl_self_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = impl_body;
+    item.data.function_item.trait_item_definition = declared_definition;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+    assert(add_local_expression(&fixture.hir, impl_body, 0u,
+        impl_self_type, test_span(61u, 62u), &impl_root) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture.hir, impl_body,
+        impl_root) == CM_HIR_OK);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, selected_definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    memset(&evidence, 0, sizeof(evidence));
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = impl_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    probe.require_integer_kind = 1;
+    evidence.context = &probe;
+    evidence.checked_body = probe_writeback;
+    memset(&impl_argument, 0, sizeof(impl_argument));
+    impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    memset(&spec, 0, sizeof(spec));
+    spec.selected_callable = cm_hir_def_id_none();
+    spec.declared_trait_callable = cm_hir_def_id_none();
+    spec.enclosing_impl = cm_hir_def_id_none();
+    spec.implemented_trait = cm_hir_def_id_none();
+    spec.self_owner = cm_hir_def_id_none();
+    spec.selected_callable = selected_definition;
+    spec.declared_trait_callable = declared_definition;
+    spec.enclosing_impl = impl_definition;
+    spec.enclosing_impl_arguments = &impl_argument;
+    spec.enclosing_impl_argument_count = 1u;
+    spec.implemented_trait = trait_definition;
+    spec.self_owner = impl_definition;
+
+    impl_argument.data.type = fixture.u32_type;
+    spec.self_type = fixture.u32_type;
+    probe.expected_integer_kind = CM_HIR_INT_U32;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u);
+
+    impl_argument.data.type = fixture.u8_type;
+    spec.self_type = fixture.u8_type;
+    probe.expected_integer_kind = CM_HIR_INT_U8;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 2u);
+
+    type_count = cm_typeck_type_count(typeck);
+    spec.enclosing_impl_argument_count = 0u;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.invocation_count == 2u
+        && cm_typeck_type_count(typeck) == type_count);
+    spec.enclosing_impl_argument_count = 1u;
+
+    impl_argument.kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    impl_argument.data.lifetime.kind = CM_HIR_REGION_STATIC;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_PENDING_SUBSTITUTION
+        && probe.invocation_count == 2u
+        && cm_typeck_type_count(typeck) == type_count);
+    impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    impl_argument.data.type = fixture.u8_type;
+
+    spec.enclosing_impl = trait_definition;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.invocation_count == 2u
+        && cm_typeck_type_count(typeck) == type_count);
+    spec.enclosing_impl = impl_definition;
+
+    spec.self_owner = trait_definition;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.invocation_count == 2u
+        && cm_typeck_type_count(typeck) == type_count);
+    spec.self_owner = impl_definition;
+
+    spec.self_type = fixture.u32_type;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH
+        && probe.invocation_count == 2u
+        && cm_typeck_type_count(typeck) == type_count);
+
+    spec.self_type = fixture.u8_type;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.invocation_count == 3u
+        && cm_typeck_type_count(typeck) == type_count);
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        impl_body, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 4u);
+
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 typedef struct MethodFixture {
     TestFixture base;
     CmHirDefId trait_definition;
@@ -3038,6 +3243,7 @@ static void test_invalid_api_and_status_names(void)
 int main(void)
 {
     test_explicit_qualified_callable_selection();
+    test_generic_impl_method_instance_spec();
     test_dot_method_callable_selection();
     test_dot_method_ambiguity_is_order_independent();
     test_dot_method_negative_and_no_solution();

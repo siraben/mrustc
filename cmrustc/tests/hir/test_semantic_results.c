@@ -1140,6 +1140,9 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
     const CmSemanticResults *results;
     CmSemanticCallableSelectionView selection;
     CmSemanticTypeView parameter;
+    CmHirCanonicalInstance retained_identity;
+    CmHirCanonicalInstance expected_identity;
+    int identity_equal;
     uint32_t parameter_index;
 
     assert(fixture != NULL && expected != NULL
@@ -1197,6 +1200,18 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
         && cm_semantic_results_instance_callable_selection_for_callee(
             results, &admission, &caller, expression, &wrong_callee,
             &selection) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_hir_canonical_instance_init(&retained_identity);
+    cm_hir_canonical_instance_init(&expected_identity);
+    assert(cm_semantic_results_instance_callable_callee_identity(results,
+            &admission, &caller, expression, &retained_identity)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_canonical_instance_encode(&fixture->hir, 1u, &callee,
+            &expected_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&retained_identity,
+            &expected_identity, &identity_equal) == CM_HIR_INSTANCE_OK
+        && identity_equal);
+    cm_hir_canonical_instance_destroy(&expected_identity);
+    cm_hir_canonical_instance_destroy(&retained_identity);
     assert_no_instance_callable_generic_arguments(results, &admission,
         &caller, expression);
     for (parameter_index = 0u;
@@ -1213,6 +1228,90 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
             results, &admission, &caller, expression, &wrong_callee, 0u,
             &parameter) == CM_SEMANTIC_RESULTS_NOT_FOUND);
     cm_semantic_admission_destroy(&admission);
+}
+
+static void test_canonical_parts_function_pointer_abi_parity(void)
+{
+    Fixture fixture;
+    CmHirLocalBodiesResult lower_result;
+    CmHirItem *owner;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirType function_pointer;
+    CmHirTypeId function_pointer_id;
+    CmHirTypeId u32_type;
+    CmHirTypeId parameters[1];
+    CmHirGenericArg argument;
+    CmHirInstanceSpec spec;
+    CmHirCanonicalArgumentPart part;
+    CmHirCanonicalInstanceParts parts;
+    CmHirCanonicalInstance manual;
+    CmHirCanonicalInstance structural;
+    unsigned char payload[] = {
+        (unsigned char)CM_HIR_TYPE_FN_POINTER_KIND,
+        1u, 0u, 0u, 0u,
+        (unsigned char)CM_HIR_TYPE_INTEGER_KIND,
+        (unsigned char)CM_HIR_INT_U32,
+        (unsigned char)CM_HIR_TYPE_INTEGER_KIND,
+        (unsigned char)CM_HIR_INT_U32,
+        1u, 0u, 0u, 0u, (unsigned char)'C',
+        (unsigned char)CM_HIR_SAFE, 0u
+    };
+    int equal;
+
+    fixture_init(&fixture, "fn callable() -> u32 { 0u32 }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    owner = (CmHirItem *)find_function_item(&fixture, "callable");
+    u32_type = find_integer_type(&fixture, CM_HIR_INT_U32);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK
+        && owner != NULL && u32_type != CM_HIR_TYPE_NONE);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = owner->definition;
+    parameter.name = cm_hir_intern(&fixture.hir, "F");
+    parameter.span = owner->span;
+    assert(cm_hir_add_generic_param(&fixture.hir, &parameter,
+        &parameter_id) == CM_HIR_OK);
+    owner->generic_parameter_start = parameter_id;
+    owner->generic_parameter_count = 1u;
+    parameters[0] = u32_type;
+    memset(&function_pointer, 0, sizeof(function_pointer));
+    function_pointer.kind = CM_HIR_TYPE_FN_POINTER_KIND;
+    function_pointer.span = owner->span;
+    function_pointer.data.fn_pointer_type.parameters = parameters;
+    function_pointer.data.fn_pointer_type.parameter_count = 1u;
+    function_pointer.data.fn_pointer_type.return_type = u32_type;
+    function_pointer.data.fn_pointer_type.abi =
+        cm_hir_intern(&fixture.hir, "C");
+    function_pointer.data.fn_pointer_type.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_type(&fixture.hir, &function_pointer,
+        &function_pointer_id) == CM_HIR_OK);
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = function_pointer_id;
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = owner->definition;
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    memset(&parts, 0, sizeof(parts));
+    parts.selected_callable = owner->definition;
+    part.kind = CM_HIR_GENERIC_ARG_TYPE;
+    part.bytes = payload;
+    part.size = sizeof(payload);
+    parts.item_arguments = &part;
+    parts.item_argument_count = 1u;
+    cm_hir_canonical_instance_init(&manual);
+    cm_hir_canonical_instance_init(&structural);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &manual) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &parts, &structural) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&manual, &structural, &equal)
+            == CM_HIR_INSTANCE_OK && equal);
+    cm_hir_canonical_instance_destroy(&structural);
+    cm_hir_canonical_instance_destroy(&manual);
+    fixture_destroy(&fixture);
 }
 
 static void test_durable_qualified_callable_recipe(void)
@@ -1524,6 +1623,7 @@ static void test_durable_generic_impl_callable_recipes(void)
     CmHirLocalBodiesResult lower_result;
     CmSemanticReachableBody reachable[2];
     CmSemanticAdmission admission;
+    CmSemanticAdmission foreign_admission;
     CmSemanticAdmissionResult result;
     const CmSemanticResults *results;
     const CmHirItem *qualified;
@@ -1538,8 +1638,29 @@ static void test_durable_generic_impl_callable_recipes(void)
     CmHirDefId trait_definition;
     CmSemanticGenericArgumentView u32_argument;
     CmSemanticGenericArgumentView u8_argument;
+    CmSemanticCallableSelectionView qualified_selection;
+    CmSemanticCallableSelectionView method_selection;
+    CmHirCanonicalInstance qualified_identity;
+    CmHirCanonicalInstance method_identity;
+    CmHirCanonicalInstance manual_qualified_identity;
+    CmHirCanonicalInstance manual_method_identity;
+    CmHirCanonicalInstance rejected_identity;
+    CmHirInstanceSpec callee_spec;
+    CmHirGenericArg enclosing_argument;
+    CmHirCanonicalArgumentPart enclosing_part;
+    CmHirCanonicalInstanceParts malformed_parts;
+    CmHirExprId qualified_expression;
+    CmHirExprId method_expression;
+    unsigned char unsupported_parameter[] = {
+        (unsigned char)CM_HIR_TYPE_PARAMETER_KIND
+    };
+    unsigned char unsupported_projection[] = {
+        (unsigned char)CM_HIR_TYPE_PROJECTION_KIND
+    };
     CmHirTypeId u32_type;
     CmHirTypeId u8_type;
+    CmHirType stale_type;
+    CmHirTypeId stale_type_id;
     size_t index;
     int equal;
 
@@ -1642,6 +1763,136 @@ static void test_durable_generic_impl_callable_recipes(void)
         && cm_semantic_type_view_equal(&u32_argument.normalized,
             &u8_argument.normalized, &equal) == CM_SEMANTIC_RESULTS_OK
         && !equal);
+
+    qualified_expression = find_owned_callable(&fixture,
+        qualified->data.function_item.body, CM_HIR_EXPR_QUALIFIED_CALL);
+    method_expression = find_owned_callable(&fixture,
+        method->data.function_item.body, CM_HIR_EXPR_METHOD_CALL);
+    cm_hir_canonical_instance_init(&qualified_identity);
+    cm_hir_canonical_instance_init(&method_identity);
+    cm_hir_canonical_instance_init(&manual_qualified_identity);
+    cm_hir_canonical_instance_init(&manual_method_identity);
+    cm_hir_canonical_instance_init(&rejected_identity);
+    assert(cm_semantic_results_callable_selection(results, &admission,
+            qualified->data.function_item.body, qualified_expression,
+            &qualified_selection) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_callable_selection(results, &admission,
+            method->data.function_item.body, method_expression,
+            &method_selection) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_callable_callee_identity(results, &admission,
+            qualified->data.function_item.body, qualified_expression,
+            &qualified_identity) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_callable_callee_identity(results, &admission,
+            method->data.function_item.body, method_expression,
+            &method_identity) == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_canonical_instance_equal(&qualified_identity,
+            &method_identity, &equal) == CM_HIR_INSTANCE_OK && !equal);
+
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = qualified_selection.selected_callable;
+    callee_spec.declared_trait_callable =
+        qualified_selection.declared_trait_callable;
+    callee_spec.enclosing_impl = qualified_selection.enclosing_impl;
+    callee_spec.implemented_trait = qualified_selection.implemented_trait;
+    callee_spec.self_owner = qualified_selection.self_owner;
+    callee_spec.self_type = u32_type;
+    enclosing_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    enclosing_argument.data.type = u32_type;
+    callee_spec.enclosing_impl_arguments = &enclosing_argument;
+    callee_spec.enclosing_impl_argument_count = 1u;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &callee_spec,
+            &manual_qualified_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&qualified_identity,
+            &manual_qualified_identity, &equal) == CM_HIR_INSTANCE_OK
+        && equal);
+    callee_spec.self_type = u8_type;
+    enclosing_argument.data.type = u8_type;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &callee_spec,
+            &manual_method_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&method_identity,
+            &manual_method_identity, &equal) == CM_HIR_INSTANCE_OK
+        && equal);
+
+    rejected_identity.definition = qualified_identity.definition;
+    assert(cm_semantic_results_callable_callee_identity(results, &admission,
+            qualified->data.function_item.body, qualified_expression,
+            &rejected_identity) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && rejected_identity.body == CM_HIR_BODY_NONE);
+    cm_hir_canonical_instance_init(&rejected_identity);
+    memset(&malformed_parts, 0, sizeof(malformed_parts));
+    malformed_parts.selected_callable =
+        qualified_selection.selected_callable;
+    malformed_parts.declared_trait_callable =
+        qualified_selection.declared_trait_callable;
+    malformed_parts.enclosing_impl = qualified_selection.enclosing_impl;
+    malformed_parts.implemented_trait =
+        qualified_selection.implemented_trait;
+    malformed_parts.self_owner = qualified_selection.self_owner;
+    malformed_parts.self_type = qualified_selection.requested_self_type.bytes;
+    malformed_parts.self_type_size =
+        qualified_selection.requested_self_type.size;
+    enclosing_part.kind = CM_HIR_GENERIC_ARG_TYPE;
+    enclosing_part.bytes = unsupported_parameter;
+    enclosing_part.size = sizeof(unsupported_parameter);
+    malformed_parts.enclosing_impl_arguments = &enclosing_part;
+    malformed_parts.enclosing_impl_argument_count = 1u;
+    assert(cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &malformed_parts, &rejected_identity)
+            == CM_HIR_INSTANCE_UNSUPPORTED_TYPE
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    enclosing_part.bytes = unsupported_projection;
+    enclosing_part.size = sizeof(unsupported_projection);
+    assert(cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &malformed_parts, &rejected_identity)
+            == CM_HIR_INSTANCE_UNSUPPORTED_TYPE
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    malformed_parts.self_owner = cm_hir_def_id_none();
+    enclosing_part.bytes = u32_argument.normalized.bytes;
+    enclosing_part.size = u32_argument.normalized.size;
+    assert(cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &malformed_parts, &rejected_identity)
+            == CM_HIR_INSTANCE_INVALID_RELATION
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    assert(cm_semantic_results_callable_callee_identity(results, &admission,
+            CM_HIR_BODY_NONE, qualified_expression, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition)
+        && cm_semantic_results_callable_callee_identity(results, &admission,
+            qualified->data.function_item.body, CM_HIR_EXPR_NONE,
+            &rejected_identity) == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    memset(&foreign_admission, 0, sizeof(foreign_admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&foreign_admission,
+        &fixture.hir, 1u, reachable, 2u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_results_callable_callee_identity(results,
+            &foreign_admission, qualified->data.function_item.body,
+            qualified_expression, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_FOREIGN
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    cm_semantic_admission_destroy(&foreign_admission);
+    memset(&stale_type, 0, sizeof(stale_type));
+    stale_type.kind = CM_HIR_TYPE_BOOL_KIND;
+    stale_type.span = qualified->span;
+    assert(cm_hir_add_type(&fixture.hir, &stale_type, &stale_type_id)
+            == CM_HIR_OK
+        && cm_semantic_results_callable_callee_identity(results, &admission,
+            qualified->data.function_item.body, qualified_expression,
+            &rejected_identity) == CM_SEMANTIC_RESULTS_STALE
+        && rejected_identity.bytes == NULL && rejected_identity.size == 0u
+        && cm_hir_def_id_is_none(rejected_identity.definition));
+    cm_hir_canonical_instance_destroy(&rejected_identity);
+    cm_hir_canonical_instance_destroy(&manual_method_identity);
+    cm_hir_canonical_instance_destroy(&manual_qualified_identity);
+    cm_hir_canonical_instance_destroy(&method_identity);
+    cm_hir_canonical_instance_destroy(&qualified_identity);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
@@ -1863,6 +2114,7 @@ int main(void)
     test_durable_qualified_callable_recipe();
     test_durable_dot_method_recipe();
     test_durable_generic_impl_callable_recipes();
+    test_canonical_parts_function_pointer_abi_parity();
     test_projection_failure_discards_partial_stage();
     puts("semantic results tests passed");
     return 0;

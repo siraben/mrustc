@@ -1663,8 +1663,22 @@ impl-owned `Self` binding. The supported-owner classifier authenticates every
 nested ADT and implemented-trait target against a bound declaration, exact
 generic arity, declaration-ordered parameter owner/index/kind, and recursive
 argument payload before admitting that frame. Exact callee construction and
-admission, plus all reachability/MIR/codegen consumers, remain the active gate
-before this selection slice can be exposed as executable compiler output.
+semantic admission now cross that boundary without flattening the binders.
+Durable qualified-call and dot-method evidence frames directly into the same
+owned canonical identity as a manual `CmHirInstanceSpec`; the encoder
+authenticates every declaration-ordered domain and the selected
+method/impl/trait/`Self` relations transactionally. Its structural payload
+validator rejects unresolved parameters and projections, and function-pointer
+ABI identity uses spelling bytes rather than process-local intern IDs.
+
+The first generic-impl executable semantic fixture admits the same blanket
+method independently for `u32` and `u8`, installing distinct method and
+enclosing-impl frames plus the impl-owned `Self`. Wrong owners, arities, kinds,
+domains, and `Self` fail without publication, and a valid retry succeeds.
+Strict GCC, TinyCC, and Clang ASan/UBSan/leak semantic-body, admission, and
+semantic-results gates pass. Reachability, `CmMirInstance`, MIR calls/replay,
+and C mangling still use flat identities and are the next vertical gate before
+this selection slice can be exposed as executable compiler output.
 
 ## M6: Build orchestration
 

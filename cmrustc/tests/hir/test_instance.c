@@ -354,6 +354,63 @@ static void test_fail_closed_and_stale(void)
     fixture_destroy(&fixture);
 }
 
+static void test_same_hir_foreign_admission(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission foreign_admission;
+    CmSemanticAdmissionResult admission_result;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec spec;
+    CmHirInstanceKey key;
+    CmHirInstanceKey clone;
+    FILE *stream;
+    int equal;
+    int order;
+
+    fixture_init(&fixture);
+    memset(&foreign_admission, 0, sizeof(foreign_admission));
+    memset(&key, 0, sizeof(key));
+    memset(&clone, 0, sizeof(clone));
+    spec = make_spec(&fixture, arguments);
+    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+        == CM_HIR_INSTANCE_OK);
+    admission_result = cm_semantic_admit_local_crate(&foreign_admission,
+        &fixture.hir, 1u, &fixture.graph, fixture.graph_result.revision,
+        &fixture.imports, &fixture.modules);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_is_current(&fixture.admission)
+        && cm_semantic_admission_is_current(&foreign_admission)
+        && cm_semantic_admission_generation(&fixture.admission)
+            == cm_semantic_admission_generation(&foreign_admission)
+        && cm_semantic_admission_capability_id(&fixture.admission)
+            != cm_semantic_admission_capability_id(&foreign_admission));
+
+    equal = 1;
+    order = 1;
+    stream = tmpfile();
+    assert(stream != NULL
+        && cm_hir_instance_key_validate(&key, &foreign_admission)
+            == CM_HIR_INSTANCE_FOREIGN_ADMISSION
+        && cm_hir_instance_key_clone(&clone, &foreign_admission, &key)
+            == CM_HIR_INSTANCE_FOREIGN_ADMISSION
+        && clone.state == NULL
+        && cm_hir_instance_key_equal(&foreign_admission, &key, &key,
+            &equal) == CM_HIR_INSTANCE_FOREIGN_ADMISSION
+        && equal == 0
+        && cm_hir_instance_key_compare(&foreign_admission, &key, &key,
+            &order) == CM_HIR_INSTANCE_FOREIGN_ADMISSION
+        && order == 0
+        && cm_hir_instance_key_dump(stream, &foreign_admission, &key)
+            == CM_HIR_INSTANCE_FOREIGN_ADMISSION);
+    fclose(stream);
+    assert(cm_hir_instance_key_validate(&key, &fixture.admission)
+        == CM_HIR_INSTANCE_OK);
+
+    cm_hir_instance_key_destroy(&key);
+    cm_semantic_admission_destroy(&foreign_admission);
+    fixture_destroy(&fixture);
+}
+
 static void test_clone_oom_is_transactional(void)
 {
     Fixture fixture;
@@ -388,6 +445,7 @@ int main(void)
     test_structural_key_clone_compare_dump();
     test_authenticated_method_identity();
     test_fail_closed_and_stale();
+    test_same_hir_foreign_admission();
     test_clone_oom_is_transactional();
     puts("hir instance key tests passed");
     return 0;

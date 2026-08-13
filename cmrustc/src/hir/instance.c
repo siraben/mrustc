@@ -18,12 +18,21 @@ typedef struct CmInstanceBuffer {
 typedef struct CmInstanceSubstitution {
     CmHirDefId owner;
     const CmHirGenericArg *arguments;
+    const CmHirCanonicalArgumentPart *parts;
     uint32_t argument_count;
 } CmInstanceSubstitution;
+
+typedef struct CmInstanceReader {
+    const CmHirContext *hir;
+    const unsigned char *data;
+    size_t len;
+    size_t pos;
+} CmInstanceReader;
 
 typedef struct CmHirInstanceKeyState {
     const CmHirContext *hir;
     CmHirCrateId local_crate;
+    uint64_t admission_capability_id;
     uint64_t storage_lifetime_id;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
@@ -82,6 +91,22 @@ static CmHirInstanceStatus cm_instance_u64(CmInstanceBuffer *buffer,
     return cm_instance_write(buffer, bytes, sizeof(bytes));
 }
 
+static CmHirInstanceStatus cm_instance_interned(CmInstanceBuffer *buffer,
+    const CmHirContext *hir, CmInternId id)
+{
+    const CmInternedString *string;
+    CmHirInstanceStatus status;
+
+    string = hir == NULL ? NULL : cm_interner_get(&hir->strings, id);
+    if (string == NULL || string->len > (size_t)UINT32_MAX) {
+        return string == NULL ? CM_HIR_INSTANCE_INVALID_ID
+            : CM_HIR_INSTANCE_OVERFLOW;
+    }
+    status = cm_instance_u32(buffer, (uint32_t)string->len);
+    return status == CM_HIR_INSTANCE_OK
+        ? cm_instance_write(buffer, string->bytes, string->len) : status;
+}
+
 static CmHirInstanceStatus cm_instance_def(CmInstanceBuffer *buffer,
     CmHirDefId definition)
 {
@@ -112,6 +137,26 @@ static CmHirInstanceStatus cm_instance_encode_type(
     CmInstanceBuffer *buffer, const CmHirContext *hir, CmHirTypeId type_id,
     const CmInstanceSubstitution *substitution, size_t depth);
 
+static CmHirInstanceStatus cm_instance_validate_type_payload(
+    CmInstanceReader *reader, size_t depth);
+
+static CmHirInstanceStatus cm_instance_substituted_payload(
+    CmInstanceBuffer *buffer, const CmInstanceSubstitution *substitution,
+    uint32_t index, CmHirGenericArgKind expected)
+{
+    const CmHirCanonicalArgumentPart *part;
+
+    if (substitution == NULL || substitution->parts == NULL
+        || index >= substitution->argument_count) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    part = &substitution->parts[index];
+    if (part->kind != expected || part->bytes == NULL || part->size == 0u) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    return cm_instance_write(buffer, part->bytes, part->size);
+}
+
 static CmHirInstanceStatus cm_instance_encode_region(
     CmInstanceBuffer *buffer, const CmHirContext *hir,
     const CmHirRegion *region,
@@ -134,8 +179,14 @@ static CmHirInstanceStatus cm_instance_encode_region(
             && parameter->kind == CM_HIR_GENERIC_LIFETIME
             && cm_hir_def_id_equal(parameter->owner, substitution->owner)
             && parameter->index < substitution->argument_count) {
-            argument = &substitution->arguments[parameter->index];
-            if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
+            if (substitution->parts != NULL) {
+                return cm_instance_substituted_payload(buffer, substitution,
+                    parameter->index, CM_HIR_GENERIC_ARG_LIFETIME);
+            }
+            argument = substitution->arguments == NULL ? NULL
+                : &substitution->arguments[parameter->index];
+            if (argument == NULL
+                    || argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
                 return CM_HIR_INSTANCE_INVALID_RELATION;
             }
             return cm_instance_encode_region(buffer, hir,
@@ -165,8 +216,14 @@ static CmHirInstanceStatus cm_instance_encode_const(
         if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_CONST
             && cm_hir_def_id_equal(parameter->owner, substitution->owner)
             && parameter->index < substitution->argument_count) {
-            argument = &substitution->arguments[parameter->index];
-            if (argument->kind != CM_HIR_GENERIC_ARG_CONST) {
+            if (substitution->parts != NULL) {
+                return cm_instance_substituted_payload(buffer, substitution,
+                    parameter->index, CM_HIR_GENERIC_ARG_CONST);
+            }
+            argument = substitution->arguments == NULL ? NULL
+                : &substitution->arguments[parameter->index];
+            if (argument == NULL
+                    || argument->kind != CM_HIR_GENERIC_ARG_CONST) {
                 return CM_HIR_INSTANCE_INVALID_RELATION;
             }
             return cm_instance_encode_const(buffer, hir,
@@ -281,8 +338,14 @@ static CmHirInstanceStatus cm_instance_encode_type(
         if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
             && cm_hir_def_id_equal(parameter->owner, substitution->owner)
             && parameter->index < substitution->argument_count) {
-            argument = &substitution->arguments[parameter->index];
-            if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
+            if (substitution->parts != NULL) {
+                return cm_instance_substituted_payload(buffer, substitution,
+                    parameter->index, CM_HIR_GENERIC_ARG_TYPE);
+            }
+            argument = substitution->arguments == NULL ? NULL
+                : &substitution->arguments[parameter->index];
+            if (argument == NULL
+                    || argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
                 return CM_HIR_INSTANCE_INVALID_RELATION;
             }
             return cm_instance_encode_type(buffer, hir,
@@ -385,7 +448,7 @@ static CmHirInstanceStatus cm_instance_encode_type(
                 depth + 1u);
         }
         if (status == CM_HIR_INSTANCE_OK) {
-            status = cm_instance_u32(buffer,
+            status = cm_instance_interned(buffer, hir,
                 type->data.fn_pointer_type.abi);
         }
         if (status == CM_HIR_INSTANCE_OK) {
@@ -411,6 +474,540 @@ static CmHirInstanceStatus cm_instance_encode_type(
     default:
         return CM_HIR_INSTANCE_UNSUPPORTED_TYPE;
     }
+}
+
+static CmHirInstanceStatus cm_instance_read(CmInstanceReader *reader,
+    void *out, size_t count)
+{
+    if (reader == NULL || (count != 0u && out == NULL)
+        || reader->pos > reader->len || count > reader->len - reader->pos) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    if (count != 0u) memcpy(out, reader->data + reader->pos, count);
+    reader->pos += count;
+    return CM_HIR_INSTANCE_OK;
+}
+
+static CmHirInstanceStatus cm_instance_read_u8(CmInstanceReader *reader,
+    unsigned int *out)
+{
+    unsigned char value;
+    CmHirInstanceStatus status;
+
+    if (out == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    status = cm_instance_read(reader, &value, 1u);
+    if (status == CM_HIR_INSTANCE_OK) *out = value;
+    return status;
+}
+
+static CmHirInstanceStatus cm_instance_read_u32(CmInstanceReader *reader,
+    uint32_t *out)
+{
+    unsigned char bytes[4];
+    CmHirInstanceStatus status;
+
+    if (out == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    status = cm_instance_read(reader, bytes, sizeof(bytes));
+    if (status == CM_HIR_INSTANCE_OK) {
+        *out = (uint32_t)bytes[0]
+            | ((uint32_t)bytes[1] << 8u)
+            | ((uint32_t)bytes[2] << 16u)
+            | ((uint32_t)bytes[3] << 24u);
+    }
+    return status;
+}
+
+static CmHirInstanceStatus cm_instance_read_def(CmInstanceReader *reader,
+    CmHirDefId *out)
+{
+    CmHirInstanceStatus status;
+
+    if (out == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    status = cm_instance_read_u32(reader, &out->crate_id);
+    return status == CM_HIR_INSTANCE_OK
+        ? cm_instance_read_u32(reader, &out->index) : status;
+}
+
+static CmHirInstanceStatus cm_instance_validate_region_payload(
+    CmInstanceReader *reader)
+{
+    unsigned int kind;
+    CmHirInstanceStatus status;
+
+    status = cm_instance_read_u8(reader, &kind);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    return kind == (unsigned int)CM_HIR_REGION_STATIC
+            || kind == (unsigned int)CM_HIR_REGION_ERASED
+        ? CM_HIR_INSTANCE_OK : CM_HIR_INSTANCE_UNSUPPORTED_REGION;
+}
+
+static CmHirInstanceStatus cm_instance_validate_const_payload(
+    CmInstanceReader *reader, size_t depth)
+{
+    unsigned char value[16];
+    unsigned int kind;
+    CmHirInstanceStatus status;
+
+    if (depth >= CM_INSTANCE_TYPE_DEPTH) return CM_HIR_INSTANCE_OVERFLOW;
+    status = cm_instance_read_u8(reader, &kind);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    if (kind != (unsigned int)CM_HIR_CONST_VALUE) {
+        return CM_HIR_INSTANCE_UNSUPPORTED_CONST;
+    }
+    status = cm_instance_validate_type_payload(reader, depth + 1u);
+    return status == CM_HIR_INSTANCE_OK
+        ? cm_instance_read(reader, value, sizeof(value)) : status;
+}
+
+static CmHirInstanceStatus cm_instance_validate_argument_payload(
+    CmInstanceReader *reader, CmHirGenericArgKind expected, size_t depth)
+{
+    if (depth >= CM_INSTANCE_TYPE_DEPTH) return CM_HIR_INSTANCE_OVERFLOW;
+    switch (expected) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_instance_validate_region_payload(reader);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return cm_instance_validate_type_payload(reader, depth + 1u);
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_instance_validate_const_payload(reader, depth + 1u);
+    }
+    return CM_HIR_INSTANCE_INVALID_RELATION;
+}
+
+static CmHirInstanceStatus cm_instance_validate_tagged_argument(
+    CmInstanceReader *reader, const CmHirItem *owner, uint32_t index,
+    size_t depth)
+{
+    const CmHirGenericParam *parameter;
+    CmHirGenericArgKind expected;
+    unsigned int kind;
+    CmHirInstanceStatus status;
+
+    if (owner == NULL || index >= owner->generic_parameter_count) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    parameter = cm_hir_get_generic_param(reader->hir,
+        owner->generic_parameter_start + index);
+    if (parameter == NULL || parameter->index != index
+        || !cm_hir_def_id_equal(parameter->owner, owner->definition)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    expected = parameter->kind == CM_HIR_GENERIC_LIFETIME
+        ? CM_HIR_GENERIC_ARG_LIFETIME
+        : parameter->kind == CM_HIR_GENERIC_TYPE
+            ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+    status = cm_instance_read_u8(reader, &kind);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    return kind == (unsigned int)expected
+        ? cm_instance_validate_argument_payload(reader, expected, depth + 1u)
+        : CM_HIR_INSTANCE_INVALID_RELATION;
+}
+
+static CmHirInstanceStatus cm_instance_validate_type_payload(
+    CmInstanceReader *reader, size_t depth)
+{
+    const CmHirItem *item;
+    CmHirDefId definition;
+    uint32_t count;
+    uint32_t index;
+    unsigned int tag;
+    unsigned int scalar;
+    CmHirInstanceStatus status;
+
+    if (reader == NULL || depth >= CM_INSTANCE_TYPE_DEPTH) {
+        return reader == NULL ? CM_HIR_INSTANCE_INVALID_ARGUMENT
+            : CM_HIR_INSTANCE_OVERFLOW;
+    }
+    status = cm_instance_read_u8(reader, &tag);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    switch ((CmHirTypeKind)tag) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return CM_HIR_INSTANCE_OK;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        status = cm_instance_read_u8(reader, &scalar);
+        return status != CM_HIR_INSTANCE_OK ? status
+            : scalar <= (unsigned int)CM_HIR_INT_USIZE
+                ? CM_HIR_INSTANCE_OK : CM_HIR_INSTANCE_INVALID_RELATION;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        status = cm_instance_read_u8(reader, &scalar);
+        return status != CM_HIR_INSTANCE_OK ? status
+            : scalar <= (unsigned int)CM_HIR_FLOAT_F128
+                ? CM_HIR_INSTANCE_OK : CM_HIR_INSTANCE_INVALID_RELATION;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        status = cm_instance_validate_region_payload(reader);
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_u8(reader, &scalar);
+        }
+        if (status == CM_HIR_INSTANCE_OK
+            && scalar > (unsigned int)CM_HIR_MUTABLE) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        return status == CM_HIR_INSTANCE_OK
+            ? cm_instance_validate_type_payload(reader, depth + 1u) : status;
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        status = cm_instance_read_u8(reader, &scalar);
+        if (status == CM_HIR_INSTANCE_OK
+            && scalar > (unsigned int)CM_HIR_MUTABLE) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        return status == CM_HIR_INSTANCE_OK
+            ? cm_instance_validate_type_payload(reader, depth + 1u) : status;
+    case CM_HIR_TYPE_TUPLE_KIND:
+        status = cm_instance_read_u32(reader, &count);
+        for (index = 0u; status == CM_HIR_INSTANCE_OK && index < count;
+             ++index) {
+            status = cm_instance_validate_type_payload(reader, depth + 1u);
+        }
+        return status;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        status = cm_instance_validate_type_payload(reader, depth + 1u);
+        return status == CM_HIR_INSTANCE_OK
+            ? cm_instance_validate_const_payload(reader, depth + 1u) : status;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_instance_validate_type_payload(reader, depth + 1u);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        status = cm_instance_read_u32(reader, &count);
+        for (index = 0u; status == CM_HIR_INSTANCE_OK && index < count;
+             ++index) {
+            status = cm_instance_validate_type_payload(reader, depth + 1u);
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_validate_type_payload(reader, depth + 1u);
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_u32(reader, &count);
+        }
+        if (status == CM_HIR_INSTANCE_OK
+            && (reader->pos > reader->len || count > reader->len - reader->pos)) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        if (status == CM_HIR_INSTANCE_OK) reader->pos += count;
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_u8(reader, &scalar);
+        }
+        if (status == CM_HIR_INSTANCE_OK
+            && scalar > (unsigned int)CM_HIR_UNSAFE) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_u8(reader, &scalar);
+        }
+        return status != CM_HIR_INSTANCE_OK ? status
+            : scalar <= 1u ? CM_HIR_INSTANCE_OK
+                : CM_HIR_INSTANCE_INVALID_RELATION;
+    case CM_HIR_TYPE_ADT_KIND:
+        status = cm_instance_read_def(reader, &definition);
+        item = status == CM_HIR_INSTANCE_OK
+            ? cm_instance_item(reader->hir, definition) : NULL;
+        if (status != CM_HIR_INSTANCE_OK) return status;
+        if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+                && item->kind != CM_HIR_ITEM_UNION
+                && item->kind != CM_HIR_ITEM_ENUM)) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        status = cm_instance_read_u32(reader, &count);
+        if (status != CM_HIR_INSTANCE_OK) return status;
+        if (count != item->generic_parameter_count) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        for (index = 0u; status == CM_HIR_INSTANCE_OK && index < count;
+             ++index) {
+            status = cm_instance_validate_tagged_argument(reader, item,
+                index, depth + 1u);
+        }
+        return status;
+    case CM_HIR_TYPE_PARAMETER_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+        return CM_HIR_INSTANCE_UNSUPPORTED_TYPE;
+    default:
+        return CM_HIR_INSTANCE_UNSUPPORTED_TYPE;
+    }
+}
+
+static CmHirInstanceStatus cm_instance_validate_payload(
+    const CmHirContext *hir, const unsigned char *bytes, size_t size,
+    CmHirGenericArgKind kind)
+{
+    CmInstanceReader reader;
+    CmHirInstanceStatus status;
+
+    if (hir == NULL || bytes == NULL || size == 0u) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&reader, 0, sizeof(reader));
+    reader.hir = hir;
+    reader.data = bytes;
+    reader.len = size;
+    status = cm_instance_validate_argument_payload(&reader, kind, 0u);
+    return status == CM_HIR_INSTANCE_OK && reader.pos != reader.len
+        ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+}
+
+static CmHirInstanceStatus cm_instance_encode_part_arguments(
+    CmInstanceBuffer *buffer, const CmHirContext *hir,
+    const CmHirItem *owner, const CmHirCanonicalArgumentPart *arguments,
+    uint32_t argument_count, unsigned int section)
+{
+    const CmHirGenericParam *parameter;
+    CmHirGenericArgKind expected;
+    CmHirInstanceStatus status;
+    uint32_t index;
+
+    if (owner == NULL || owner->generic_parameter_count != argument_count
+        || (argument_count == 0u) != (arguments == NULL)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    status = cm_instance_u8(buffer, section);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_u32(buffer, argument_count);
+    }
+    for (index = 0u; status == CM_HIR_INSTANCE_OK && index < argument_count;
+         ++index) {
+        parameter = cm_hir_get_generic_param(hir,
+            owner->generic_parameter_start + index);
+        expected = parameter == NULL ? (CmHirGenericArgKind)-1
+            : parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter->kind == CM_HIR_GENERIC_TYPE
+                    ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, owner->definition)
+            || arguments[index].kind != expected) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        status = cm_instance_validate_payload(hir, arguments[index].bytes,
+            arguments[index].size, arguments[index].kind);
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_u8(buffer,
+                (unsigned int)arguments[index].kind);
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_write(buffer, arguments[index].bytes,
+                arguments[index].size);
+        }
+    }
+    return status;
+}
+
+static CmHirInstanceStatus cm_instance_compare_encoded(
+    const CmHirContext *hir, CmHirTypeId type,
+    const CmInstanceSubstitution *substitution,
+    const unsigned char *actual, size_t actual_size)
+{
+    CmInstanceBuffer sizing;
+    CmInstanceBuffer output;
+    unsigned char *bytes;
+    CmHirInstanceStatus status;
+
+    if (actual == NULL || actual_size == 0u) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = cm_instance_encode_type(&sizing, hir, type, substitution, 0u);
+    if (status != CM_HIR_INSTANCE_OK || sizing.len != actual_size) {
+        return status == CM_HIR_INSTANCE_OK
+            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+    }
+    bytes = (unsigned char *)cm_alloc(sizing.len);
+    memset(&output, 0, sizeof(output));
+    output.data = bytes;
+    output.cap = sizing.len;
+    status = cm_instance_encode_type(&output, hir, type, substitution, 0u);
+    if (status == CM_HIR_INSTANCE_OK
+        && (output.len != actual_size
+            || memcmp(bytes, actual, actual_size) != 0)) {
+        status = CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    cm_free(bytes);
+    return status;
+}
+
+static CmHirInstanceStatus cm_instance_encode_parts_value(
+    CmInstanceBuffer *buffer, const CmHirContext *hir,
+    CmHirCrateId local_crate, const CmHirCanonicalInstanceParts *parts)
+{
+    const CmHirItem *selected;
+    const CmHirItem *declared;
+    const CmHirItem *enclosing;
+    const CmHirItem *trait_item;
+    CmInstanceSubstitution impl_substitution;
+    CmInstanceBuffer expected;
+    CmInstanceBuffer actual;
+    unsigned char *workspace;
+    size_t workspace_size;
+    CmHirInstanceStatus status;
+
+    if (buffer == NULL || hir == NULL || parts == NULL) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    selected = cm_instance_item(hir, parts->selected_callable);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || selected->definition.crate_id != local_crate) {
+        return selected == NULL ? CM_HIR_INSTANCE_INVALID_ID
+            : CM_HIR_INSTANCE_FOREIGN_ADMISSION;
+    }
+    status = cm_instance_u8(buffer, CM_INSTANCE_FORMAT_VERSION);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->selected_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->declared_trait_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->enclosing_impl);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->implemented_trait);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->self_owner);
+    }
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    if (cm_hir_def_id_is_none(selected->parent_definition)) {
+        if (!cm_hir_def_id_is_none(parts->declared_trait_callable)
+            || !cm_hir_def_id_is_none(parts->enclosing_impl)
+            || !cm_hir_def_id_is_none(parts->implemented_trait)
+            || !cm_hir_def_id_is_none(parts->self_owner)
+            || parts->self_type != NULL || parts->self_type_size != 0u
+            || parts->method_argument_count != 0u
+            || parts->method_arguments != NULL
+            || parts->enclosing_impl_argument_count != 0u
+            || parts->enclosing_impl_arguments != NULL
+            || parts->implemented_trait_argument_count != 0u
+            || parts->implemented_trait_arguments != NULL) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        return cm_instance_encode_part_arguments(buffer, hir, selected,
+            parts->item_arguments, parts->item_argument_count, 1u);
+    }
+    if (parts->item_argument_count != 0u || parts->item_arguments != NULL) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    enclosing = cm_instance_item(hir, parts->enclosing_impl);
+    declared = cm_instance_item(hir, parts->declared_trait_callable);
+    trait_item = cm_instance_item(hir, parts->implemented_trait);
+    if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(selected->parent_definition,
+            enclosing->definition)
+        || !enclosing->data.impl_item.has_trait
+        || enclosing->data.impl_item.is_negative
+        || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_def_id_equal(
+            selected->data.function_item.trait_item_definition,
+            declared->definition)
+        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || !cm_hir_def_id_equal(declared->parent_definition,
+            trait_item->definition)
+        || !cm_hir_def_id_equal(
+            enclosing->data.impl_item.trait_type.definition,
+            trait_item->definition)
+        || !cm_hir_def_id_equal(parts->self_owner, enclosing->definition)
+        || parts->self_type == NULL || parts->self_type_size == 0u) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    status = cm_instance_encode_part_arguments(buffer, hir, selected,
+        parts->method_arguments, parts->method_argument_count, 2u);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_encode_part_arguments(buffer, hir, enclosing,
+            parts->enclosing_impl_arguments,
+            parts->enclosing_impl_argument_count, 3u);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_encode_part_arguments(buffer, hir, trait_item,
+            parts->implemented_trait_arguments,
+            parts->implemented_trait_argument_count, 4u);
+    }
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    status = cm_instance_validate_payload(hir, parts->self_type,
+        parts->self_type_size, CM_HIR_GENERIC_ARG_TYPE);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    memset(&impl_substitution, 0, sizeof(impl_substitution));
+    impl_substitution.owner = enclosing->definition;
+    impl_substitution.parts = parts->enclosing_impl_arguments;
+    impl_substitution.argument_count = parts->enclosing_impl_argument_count;
+    status = cm_instance_compare_encoded(hir,
+        enclosing->data.impl_item.self_type, &impl_substitution,
+        parts->self_type, parts->self_type_size);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+
+    memset(&expected, 0, sizeof(expected));
+    expected.sizing = 1;
+    status = cm_instance_encode_arguments(&expected, hir,
+        enclosing->data.impl_item.trait_type.arguments,
+        enclosing->data.impl_item.trait_type.argument_count,
+        &impl_substitution, 0u);
+    memset(&actual, 0, sizeof(actual));
+    actual.sizing = 1;
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_u32(&actual,
+            parts->implemented_trait_argument_count);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        uint32_t index;
+
+        for (index = 0u; status == CM_HIR_INSTANCE_OK
+                && index < parts->implemented_trait_argument_count; ++index) {
+            status = cm_instance_u8(&actual,
+                (unsigned int)parts->implemented_trait_arguments[index].kind);
+            if (status == CM_HIR_INSTANCE_OK) {
+                status = cm_instance_write(&actual,
+                    parts->implemented_trait_arguments[index].bytes,
+                    parts->implemented_trait_arguments[index].size);
+            }
+        }
+    }
+    if (status != CM_HIR_INSTANCE_OK || expected.len != actual.len) {
+        return status == CM_HIR_INSTANCE_OK
+            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+    }
+    if (!cm_size_add(expected.len, actual.len, &workspace_size)) {
+        return CM_HIR_INSTANCE_OVERFLOW;
+    }
+    workspace = (unsigned char *)cm_alloc(workspace_size);
+    expected.data = workspace;
+    expected.cap = expected.len;
+    expected.len = 0u;
+    expected.sizing = 0;
+    actual.data = workspace + expected.cap;
+    actual.cap = actual.len;
+    actual.len = 0u;
+    actual.sizing = 0;
+    status = cm_instance_encode_arguments(&expected, hir,
+        enclosing->data.impl_item.trait_type.arguments,
+        enclosing->data.impl_item.trait_type.argument_count,
+        &impl_substitution, 0u);
+    if (status == CM_HIR_INSTANCE_OK) {
+        uint32_t index;
+
+        status = cm_instance_u32(&actual,
+            parts->implemented_trait_argument_count);
+        for (index = 0u; status == CM_HIR_INSTANCE_OK
+                && index < parts->implemented_trait_argument_count; ++index) {
+            status = cm_instance_u8(&actual,
+                (unsigned int)parts->implemented_trait_arguments[index].kind);
+            if (status == CM_HIR_INSTANCE_OK) {
+                status = cm_instance_write(&actual,
+                    parts->implemented_trait_arguments[index].bytes,
+                    parts->implemented_trait_arguments[index].size);
+            }
+        }
+    }
+    if (status == CM_HIR_INSTANCE_OK
+        && (expected.len != actual.len
+            || memcmp(expected.data, actual.data, expected.len) != 0)) {
+        status = CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    cm_free(workspace);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    status = cm_instance_u8(buffer, 5u);
+    return status == CM_HIR_INSTANCE_OK
+        ? cm_instance_write(buffer, parts->self_type,
+            parts->self_type_size) : status;
 }
 
 static CmHirInstanceStatus cm_instance_validate_arguments(
@@ -783,6 +1380,52 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode(
     return CM_HIR_INSTANCE_OK;
 }
 
+CmHirInstanceStatus cm_hir_canonical_instance_encode_parts(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstanceParts *parts,
+    CmHirCanonicalInstance *out_instance)
+{
+    const CmHirItem *selected;
+    CmHirCanonicalInstance encoded;
+    CmInstanceBuffer sizing;
+    CmInstanceBuffer output;
+    CmHirInstanceStatus status;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || parts == NULL
+        || !cm_canonical_instance_is_empty(out_instance)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    selected = cm_instance_item(hir, parts->selected_callable);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION) {
+        return CM_HIR_INSTANCE_INVALID_ID;
+    }
+    if (selected->data.function_item.body == CM_HIR_BODY_NONE) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = cm_instance_encode_parts_value(&sizing, hir, local_crate,
+        parts);
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    cm_hir_canonical_instance_init(&encoded);
+    encoded.bytes = (unsigned char *)cm_alloc(sizing.len);
+    memset(&output, 0, sizeof(output));
+    output.data = encoded.bytes;
+    output.cap = sizing.len;
+    status = cm_instance_encode_parts_value(&output, hir, local_crate,
+        parts);
+    if (status != CM_HIR_INSTANCE_OK || output.len != sizing.len) {
+        cm_hir_canonical_instance_destroy(&encoded);
+        return status == CM_HIR_INSTANCE_OK
+            ? CM_HIR_INSTANCE_INVALID_RELATION : status;
+    }
+    encoded.definition = selected->definition;
+    encoded.body = selected->data.function_item.body;
+    encoded.size = output.len;
+    *out_instance = encoded;
+    return CM_HIR_INSTANCE_OK;
+}
+
 CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirInstanceSpec *caller, const CmHirExpr *call,
@@ -936,6 +1579,7 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     const CmSemanticResults *semantic_results;
     CmSemanticBodyView semantic_body;
     CmSemanticResultsStatus semantic_status;
+    uint64_t admission_capability_id;
     size_t allocation_size;
 
     if (key == NULL || key->state != NULL || admission == NULL
@@ -945,7 +1589,10 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     }
     hir = cm_semantic_admission_hir(admission);
     local_crate = cm_semantic_admission_crate(admission);
-    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE) {
+    admission_capability_id =
+        cm_semantic_admission_capability_id(admission);
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE
+        || admission_capability_id == UINT64_C(0)) {
         return CM_HIR_INSTANCE_STALE_ADMISSION;
     }
     selected = cm_instance_item(hir, spec->selected_callable);
@@ -982,6 +1629,7 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     memcpy(state->encoded, canonical.bytes, canonical.size);
     state->hir = hir;
     state->local_crate = local_crate;
+    state->admission_capability_id = admission_capability_id;
     state->storage_lifetime_id = hir->storage.lifetime_id;
     state->semantic_generation = hir->semantic_generation;
     state->rewind_generation = hir->rewind_generation;
@@ -1006,7 +1654,9 @@ CmHirInstanceStatus cm_hir_instance_key_validate(
     }
     hir = cm_semantic_admission_hir(admission);
     if (hir != state->hir
-        || cm_semantic_admission_crate(admission) != state->local_crate) {
+        || cm_semantic_admission_crate(admission) != state->local_crate
+        || cm_semantic_admission_capability_id(admission)
+            != state->admission_capability_id) {
         return CM_HIR_INSTANCE_FOREIGN_ADMISSION;
     }
     if (hir->storage.lifetime_id != state->storage_lifetime_id

@@ -36,6 +36,16 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     const CmHirCanonicalInstance *instance,
     const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage,
     const CmSemanticCanonicalCallInput *calls, size_t call_count);
+/* Construct an owned exact callee key from authenticated durable evidence. */
+CmSemanticResultsStatus cm_semantic_results_callable_callee_identity(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, CmHirCanonicalInstance *out_identity);
+CmSemanticResultsStatus cm_semantic_results_instance_callable_callee_identity(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *caller, CmHirExprId expression,
+    CmHirCanonicalInstance *out_identity);
 void cm_semantic_results_body_stage_destroy(
     CmSemanticResultsBodyStage *stage);
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results);
