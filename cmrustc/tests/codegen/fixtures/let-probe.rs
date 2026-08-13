@@ -13,7 +13,7 @@ fn private_valid(value: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn probe_let(left: u32, right: u32) -> u32 {
-    let first: u32 = left + 1;
+    let first = left + 1;
     let combined: u32 = add_pair(first, right + 2);
     combined + (left + 3)
 }

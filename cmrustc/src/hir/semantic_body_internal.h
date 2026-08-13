@@ -73,6 +73,22 @@ typedef CmSemanticBodyWritebackStatus (*CmSemanticBodyWritebackFn)(
     void *context, CmSemanticSession *session, CmHirBodyId body,
     const CmSemanticCheckedBodyFacts *facts);
 
+typedef CmSemanticBodyWritebackStatus
+    (*CmSemanticProjectionDecisionWritebackFn)(
+        void *context, CmSemanticSession *session, CmHirBodyId body,
+        CmHirExprId expression,
+        CmSemanticProjectionDecisionKind decision_kind,
+        uint32_t decision_index, CmTypeckTypeId input_type,
+        CmTypeckTypeId normalized_type,
+        const CmProjectionNormalizeTrace *trace);
+
+typedef struct CmSemanticBodyEvidenceWriteback {
+    void *context;
+    CmSemanticBodyWritebackFn checked_body;
+    CmSemanticProjectionDecisionWritebackFn projection_decision;
+    void (*discard)(void *context);
+} CmSemanticBodyEvidenceWriteback;
+
 CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
     CmSemanticSession *session, CmHirBodyId body,
     CmSemanticBodyWritebackFn writeback, void *writeback_context);
@@ -81,5 +97,13 @@ CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
     const CmHirTypeId *owner_type_substitutions,
     uint32_t owner_type_substitution_count,
     CmSemanticBodyWritebackFn writeback, void *writeback_context);
+CmSemanticBodyResult cm_semantic_body_check_definition_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmSemanticBodyEvidenceWriteback *writeback);
+CmSemanticBodyResult cm_semantic_body_check_instance_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirTypeId *owner_type_substitutions,
+    uint32_t owner_type_substitution_count,
+    const CmSemanticBodyEvidenceWriteback *writeback);
 
 #endif

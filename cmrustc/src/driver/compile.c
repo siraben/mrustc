@@ -171,15 +171,51 @@ typedef struct CmCompileReachableEdge {
 
 typedef struct CmCompileExactState {
     CmHirContext *hir;
-    const CmModuleGraph *graph;
-    CmModuleGraphRevision revision;
-    const CmImportResolver *imports;
-    const CmHirModuleMap *module_map;
     CmMirContext *mir;
     CmVec instances;
     CmVec edges;
+    const CmSemanticAdmission *all_local_admission;
+    CmHirCrateId local_crate;
+    uint64_t all_local_generation;
+    uint64_t all_local_capability_id;
     const CmSemanticAdmission *admission;
 } CmCompileExactState;
+
+static int cm_compile_all_local_admission_current(
+    const CmSemanticAdmission *admission, const CmHirContext *hir,
+    CmHirCrateId local_crate, uint64_t generation, uint64_t capability_id)
+{
+    return admission != NULL && hir != NULL
+        && local_crate != CM_HIR_CRATE_NONE && generation != UINT64_C(0)
+        && capability_id != UINT64_C(0)
+        && cm_semantic_admission_is_current(admission)
+        && cm_semantic_admission_hir(admission) == hir
+        && cm_semantic_admission_crate(admission) == local_crate
+        && cm_semantic_admission_generation(admission) == generation
+        && cm_semantic_admission_capability_id(admission) == capability_id;
+}
+
+static int cm_compile_exact_all_local_current(
+    const CmCompileExactState *state)
+{
+    return state != NULL && cm_compile_all_local_admission_current(
+        state->all_local_admission, state->hir, state->local_crate,
+        state->all_local_generation, state->all_local_capability_id);
+}
+
+static int cm_compile_all_local_body_admitted(
+    const CmCompileExactState *state, CmHirBodyId body_id)
+{
+    const CmSemanticResults *results;
+    CmSemanticBodyView view;
+
+    if (!cm_compile_exact_all_local_current(state)) return 0;
+    results = cm_semantic_admission_results(state->all_local_admission);
+    return results != NULL
+        && cm_semantic_results_body(results, state->all_local_admission,
+            body_id, &view) == CM_SEMANTIC_RESULTS_OK
+        && view.body == body_id;
+}
 
 static int cm_compile_item_has_attribute(const CmHirContext *hir,
     const CmHirItem *item, const char *name)
@@ -525,17 +561,22 @@ static int cm_compile_discover_expression_callees(
     return 0;
 }
 
-static int cm_compile_publish_reachable_hir(CmCompileExactState *state,
+static int cm_compile_discover_reachable_hir(CmCompileExactState *state,
     char *message, size_t message_capacity)
 {
     size_t instance_index;
 
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "whole-crate semantic admission became stale "
+            "before reachability");
+        return 0;
+    }
     for (instance_index = 0u; instance_index < state->instances.len;
          ++instance_index) {
         CmCompileReachableInstance *instance;
         const CmHirItem *item;
         const CmHirBody *body;
-        CmHirBodyLowerResult body_result;
         size_t edge_start;
 
         instance = (CmCompileReachableInstance *)cm_vec_at(
@@ -551,21 +592,11 @@ static int cm_compile_publish_reachable_hir(CmCompileExactState *state,
                 "reachable function has no HIR body");
             return 0;
         }
-        if (body->state == CM_HIR_BODY_UNLOWERED) {
-            body_result = cm_hir_lower_body(state->hir, instance->body,
-                state->graph, state->revision, state->imports,
-                state->module_map);
-            if (body_result.status != CM_HIR_BODY_LOWER_OK) {
-                (void)snprintf(message, message_capacity,
-                    "reachable body lowering failed: %s",
-                    cm_hir_body_lower_status_name(body_result.status));
-                return 0;
-            }
-            body = cm_hir_get_body(state->hir, instance->body);
-        }
-        if (body == NULL || body->state != CM_HIR_BODY_TYPED) {
+        if (body == NULL || body->state != CM_HIR_BODY_TYPED
+            || !cm_compile_all_local_body_admitted(state,
+                instance->body)) {
             (void)snprintf(message, message_capacity,
-                "reachable function body is not fully typed");
+                "reachable function body lacks whole-crate semantic evidence");
             return 0;
         }
         if (body->root_expression == CM_HIR_EXPR_NONE) {
@@ -584,6 +615,11 @@ static int cm_compile_publish_reachable_hir(CmCompileExactState *state,
         instance->edge_start = edge_start;
         instance->edge_count = state->edges.len - edge_start;
     }
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "reachability invalidated whole-crate semantic admission");
+        return 0;
+    }
     return 1;
 }
 
@@ -600,6 +636,12 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
     size_t edge_index;
     int ok;
 
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "whole-crate semantic admission became stale "
+            "before exact admission");
+        return 0;
+    }
     if (state->instances.len == 0u
         || state->instances.len > (size_t)-1 / sizeof(*reachable)
         || state->instances.len > (size_t)-1 / sizeof(*specs)
@@ -724,6 +766,12 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
         }
         goto cleanup;
     }
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "exact admission invalidated whole-crate semantic admission");
+        cm_semantic_admission_destroy(admission);
+        goto cleanup;
+    }
     state->admission = admission;
     ok = 1;
 
@@ -743,6 +791,11 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
     size_t index;
     int ok;
 
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "whole-crate semantic admission became stale before MIR");
+        return 0;
+    }
     cm_mir_publication_init(&publication);
     ok = 0;
     status = cm_mir_publication_begin(&publication, state->mir,
@@ -794,6 +847,12 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
     }
     status = cm_mir_publication_validate(&publication);
     if (status != CM_MIR_OK) goto fail;
+    if (!cm_compile_exact_all_local_current(state)) {
+        (void)snprintf(message, message_capacity,
+            "MIR construction invalidated whole-crate semantic admission");
+        status = CM_MIR_INVALID_ADMISSION;
+        goto fail;
+    }
     status = cm_mir_publication_commit(&publication);
     if (status != CM_MIR_OK) goto fail;
     ok = 1;
@@ -1015,6 +1074,19 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             goto cleanup;
         }
     }
+    exact_state.hir = &hir;
+    exact_state.mir = &mir;
+    exact_state.all_local_admission = &all_local_admission;
+    exact_state.local_crate = hir_result.crate_id;
+    exact_state.all_local_generation =
+        cm_semantic_admission_generation(&all_local_admission);
+    exact_state.all_local_capability_id =
+        cm_semantic_admission_capability_id(&all_local_admission);
+    if (!cm_compile_exact_all_local_current(&exact_state)) {
+        result = cm_compile_result(CM_COMPILE_SEMANTIC,
+            "whole-crate semantic admission was not retained");
+        goto cleanup;
+    }
     /* Every cfg-active supported local definition is typed before roots. */
     entry_id = cm_compile_find_entry(&hir, hir_result.root_module);
     use_legacy_entry = hir.items.len == 1u
@@ -1062,6 +1134,11 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
                 goto cleanup;
             }
         }
+        if (!cm_compile_exact_all_local_current(&exact_state)) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                "whole-crate semantic admission became stale before MIR");
+            goto cleanup;
+        }
         /* HIR and semantics are complete before the legacy MIR phase. */
         mir_result = cm_mir_lower_body(&mir, &hir,
             entry->data.function_item.body);
@@ -1096,12 +1173,6 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
                 "crate has no supported exported root");
             goto cleanup;
         }
-        exact_state.hir = &hir;
-        exact_state.graph = &graph;
-        exact_state.revision = graph_result.revision;
-        exact_state.imports = &imports;
-        exact_state.module_map = &module_map;
-        exact_state.mir = &mir;
         for (item_index = 0u; item_index < exact_root_items.len;
              ++item_index) {
             const CmHirItemId *root_item_id;
@@ -1128,15 +1199,15 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             char message[160];
 
             memset(message, 0, sizeof(message));
-            if (!cm_compile_publish_reachable_hir(&exact_state, message,
+            if (!cm_compile_discover_reachable_hir(&exact_state, message,
                     sizeof(message))) {
                 result = cm_compile_result(CM_COMPILE_BODY,
-                    message[0] == '\0' ? "reachable root lowering failed"
+                    message[0] == '\0' ? "reachable discovery failed"
                         : message);
                 goto cleanup;
             }
         }
-        /* Global barrier: the complete reachable HIR closure is now typed. */
+        /* Reachability only reads HIR admitted by the whole-crate barrier. */
         {
             char message[160];
 

@@ -21,9 +21,13 @@ void cm_semantic_results_body_stage_init(CmSemanticResultsBodyStage *stage);
 CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     void *context, CmSemanticSession *session, CmHirBodyId body,
     const CmSemanticCheckedBodyFacts *facts);
-CmSemanticResultsStatus cm_semantic_results_stage_projection_trace(
-    CmSemanticResultsBodyStage *stage, CmSemanticSession *session,
+CmSemanticBodyWritebackStatus cm_semantic_results_stage_projection_decision(
+    void *context, CmSemanticSession *session,
+    CmHirBodyId body, CmHirExprId expression,
+    CmSemanticProjectionDecisionKind decision_kind, uint32_t decision_index,
+    CmTypeckTypeId input_type, CmTypeckTypeId normalized_type,
     const CmProjectionNormalizeTrace *trace);
+void cm_semantic_results_discard_body_stage(void *context);
 CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     CmSemanticResults *results, CmSemanticSession *session,
     const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage);

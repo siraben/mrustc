@@ -1209,9 +1209,9 @@ static CmHirBodyLowerStatus cm_hir_body_inference_path_term(
         : cm_hir_body_typeck_status(status);
 }
 
-static CmHirBodyLowerStatus cm_hir_body_inference_initializer_term(
+static CmHirBodyLowerStatus cm_hir_body_inference_expression_term(
     const CmHirBodyBuildState *state, CmTypeckContext *typeck,
-    CmAstExprId expression_id, CmTypeckTypeId *out_term)
+    CmAstExprId expression_id, size_t depth, CmTypeckTypeId *out_term)
 {
     const CmAstExpr *expression;
     CmHirBodyLowerStatus lower_status;
@@ -1222,10 +1222,41 @@ static CmHirBodyLowerStatus cm_hir_body_inference_initializer_term(
 
     *out_term = CM_TYPECK_TYPE_NONE;
     expression = cm_ast_get_expr(state->ast, expression_id);
-    if (expression == NULL) return CM_HIR_BODY_LOWER_INVALID_BODY;
+    if (expression == NULL || depth >= state->ast->expressions.len) {
+        return CM_HIR_BODY_LOWER_INVALID_BODY;
+    }
     if (expression->kind == CM_AST_EXPR_PATH) {
         return cm_hir_body_inference_path_term(state, typeck,
             expression_id, out_term);
+    }
+    if (expression->kind == CM_AST_EXPR_BINARY) {
+        CmTypeckTypeId left_term;
+        CmTypeckTypeId right_term;
+
+        if (expression->data.binary.left == CM_AST_EXPR_NONE
+            || expression->data.binary.right == CM_AST_EXPR_NONE
+            || expression->data.binary.left >= expression_id
+            || expression->data.binary.right >= expression_id) {
+            return CM_HIR_BODY_LOWER_INVALID_BODY;
+        }
+        if (!cm_hir_body_ast_text_is(state->ast,
+                expression->data.binary.operator_name, "+")
+            && !cm_hir_body_ast_text_is(state->ast,
+                expression->data.binary.operator_name, "-")) {
+            return CM_HIR_BODY_LOWER_UNSUPPORTED_OPERATOR;
+        }
+        lower_status = cm_hir_body_inference_expression_term(state, typeck,
+            expression->data.binary.left, depth + 1u, &left_term);
+        if (lower_status != CM_HIR_BODY_LOWER_OK) return lower_status;
+        lower_status = cm_hir_body_inference_expression_term(state, typeck,
+            expression->data.binary.right, depth + 1u, &right_term);
+        if (lower_status != CM_HIR_BODY_LOWER_OK) return lower_status;
+        typeck_status = cm_typeck_unify(typeck, left_term, right_term);
+        if (typeck_status != CM_TYPECK_OK) {
+            return cm_hir_body_typeck_status(typeck_status);
+        }
+        *out_term = left_term;
+        return CM_HIR_BODY_LOWER_OK;
     }
     if (expression->kind != CM_AST_EXPR_LITERAL) {
         return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
@@ -1322,8 +1353,8 @@ static CmHirBodyLowerStatus cm_hir_body_prepare_let_inference(
             goto fail_typeck;
         }
         state->visible_let_count = index;
-        lower_status = cm_hir_body_inference_initializer_term(state,
-            &typeck, let_plans[index].initializer, &initializer_term);
+        lower_status = cm_hir_body_inference_expression_term(state,
+            &typeck, let_plans[index].initializer, 0u, &initializer_term);
         if (lower_status != CM_HIR_BODY_LOWER_OK) goto fail_typeck;
         typeck_status = cm_typeck_unify(&typeck,
             let_plans[index].inference_term, initializer_term);

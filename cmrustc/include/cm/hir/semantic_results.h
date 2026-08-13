@@ -37,6 +37,7 @@ typedef struct CmSemanticBodyView {
     CmHirBodyId body;
     CmHirDefId owner;
     uint32_t expression_count;
+    uint32_t projection_trace_count;
     uint32_t projection_step_count;
 } CmSemanticBodyView;
 
@@ -122,9 +123,26 @@ typedef struct CmSemanticDirectCallView {
     CmSemanticTypeView return_type;
 } CmSemanticDirectCallView;
 
-/* One durable, authenticated projection reduction. */
+typedef enum CmSemanticProjectionDecisionKind {
+    CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE = 0
+} CmSemanticProjectionDecisionKind;
+
+/* One durable normalization decision made by the production semantic pass. */
+typedef struct CmSemanticProjectionTraceView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    CmSemanticProjectionDecisionKind decision_kind;
+    uint32_t decision_index;
+    uint32_t trace_index;
+    CmSemanticTypeView input_type;
+    CmSemanticTypeView normalized_type;
+    uint32_t step_count;
+} CmSemanticProjectionTraceView;
+
+/* One durable, authenticated projection reduction within a trace. */
 typedef struct CmSemanticProjectionStepView {
     CmHirBodyId body;
+    uint32_t trace_index;
     uint32_t index;
     CmSemanticTypeView projection;
     CmSemanticTypeView target;
@@ -182,10 +200,16 @@ CmSemanticResultsStatus cm_semantic_results_instance_direct_call_parameter(
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     const struct CmHirInstanceSpec *expected_callee, uint32_t parameter,
     CmSemanticTypeView *out_view);
-CmSemanticResultsStatus cm_semantic_results_instance_projection_step(
+CmSemanticResultsStatus cm_semantic_results_instance_projection_trace(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
-    const struct CmHirInstanceSpec *spec, uint32_t step,
+    const struct CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticProjectionDecisionKind decision_kind, uint32_t decision_index,
+    CmSemanticProjectionTraceView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_projection_trace_step(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, uint32_t trace, uint32_t step,
     CmSemanticProjectionStepView *out_view);
 
 /* The returned results object and all views are borrowed from admission. */
@@ -245,10 +269,16 @@ CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view);
-CmSemanticResultsStatus cm_semantic_results_projection_step(
+CmSemanticResultsStatus cm_semantic_results_projection_trace(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
-    uint32_t step, CmSemanticProjectionStepView *out_view);
+    CmHirExprId expression,
+    CmSemanticProjectionDecisionKind decision_kind, uint32_t decision_index,
+    CmSemanticProjectionTraceView *out_view);
+CmSemanticResultsStatus cm_semantic_results_projection_trace_step(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    uint32_t trace, uint32_t step, CmSemanticProjectionStepView *out_view);
 CmSemanticResultsStatus cm_semantic_type_view_equal(
     const CmSemanticTypeView *left, const CmSemanticTypeView *right,
     int *out_equal);

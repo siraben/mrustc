@@ -52,6 +52,22 @@ static CmHirTypeId add_bool_type(CmHirContext *hir, uint32_t start)
     return id;
 }
 
+static CmHirTypeId add_shared_reference_type(CmHirContext *hir,
+    CmHirTypeId pointee, uint32_t start)
+{
+    CmHirType type;
+    CmHirTypeId id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(start, start + 1u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    type.data.reference_type.pointee = pointee;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(hir, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
 static CmHirBodyId add_function_body(CmHirContext *hir,
     CmHirCrateId crate_id, CmHirModuleId root_module, const char *name,
     CmHirTypeId return_type, CmHirBodyState state, uint64_t low_bits,
@@ -3185,6 +3201,103 @@ static void test_aggregate_call_lowering(void)
     cm_hir_context_destroy(&hir);
 }
 
+/*
+ * Explicit reference nodes are valid typed HIR, but they are not yet an
+ * authenticated MIR recipe.  In particular, a shared borrow needs a proven
+ * source place/use and a dereference needs a proven built-in place step.
+ * Keep both boundaries transactional until semantic admission publishes that
+ * evidence and the exact HIR/MIR matcher can replay it.
+ */
+static void test_reference_lowering_stays_fail_closed(void)
+{
+    CmHirContext hir;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirTypeId u32_type;
+    CmHirTypeId shared_u32_type;
+    CmHirDefId borrow_definition;
+    CmHirDefId roundtrip_definition;
+    CmHirBodyId borrow_body;
+    CmHirBodyId roundtrip_body;
+    CmHirExpr expression;
+    CmHirExprId local;
+    CmHirExprId borrow;
+    CmHirExprId dereference;
+    CmMirContext mir;
+    CmMirLowerResult result;
+    size_t count;
+
+    cm_hir_context_init(&hir);
+    assert(cm_hir_create_crate(&hir,
+        cm_hir_intern(&hir, "mir_reference_boundary"),
+        CM_HIR_EDITION_2021, test_span(0u, 200u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    shared_u32_type = add_shared_reference_type(&hir, u32_type, 3u);
+
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(40u, 80u), &borrow_definition)
+        == CM_HIR_OK);
+    add_one_argument_function(&hir, root_module, borrow_definition,
+        "borrow", u32_type, shared_u32_type, CM_HIR_GENERIC_PARAM_NONE,
+        0u, 40u, &borrow_body);
+    local = add_test_local_expression(&hir, borrow_body, u32_type, 0u,
+        60u, 64u);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BORROW_SHARED;
+    expression.owner_body = borrow_body;
+    expression.type = shared_u32_type;
+    expression.span = test_span(59u, 64u);
+    expression.data.borrow_shared.operand = local;
+    assert(cm_hir_add_expr(&hir, &expression, &borrow) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&hir, borrow_body, borrow)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(90u, 130u),
+        &roundtrip_definition) == CM_HIR_OK);
+    add_one_argument_function(&hir, root_module, roundtrip_definition,
+        "borrow_then_dereference", u32_type, u32_type,
+        CM_HIR_GENERIC_PARAM_NONE, 0u, 90u, &roundtrip_body);
+    local = add_test_local_expression(&hir, roundtrip_body, u32_type, 0u,
+        110u, 114u);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BORROW_SHARED;
+    expression.owner_body = roundtrip_body;
+    expression.type = shared_u32_type;
+    expression.span = test_span(109u, 114u);
+    expression.data.borrow_shared.operand = local;
+    assert(cm_hir_add_expr(&hir, &expression, &borrow) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_DEREFERENCE;
+    expression.owner_body = roundtrip_body;
+    expression.type = u32_type;
+    expression.span = test_span(108u, 114u);
+    expression.data.dereference.operand = borrow;
+    assert(cm_hir_add_expr(&hir, &expression, &dereference) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&hir, roundtrip_body,
+        dereference) == CM_HIR_OK);
+
+    cm_mir_context_init(&mir);
+    count = cm_mir_body_count(&mir);
+    result = cm_mir_lower_instance(&mir, &hir, borrow_body, NULL, 0u);
+    assert(result.error_count == 1u && result.lowered_body_count == 0u
+        && result.body == CM_MIR_BODY_NONE
+        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_TYPE
+        && result.first_error.hir_body == borrow_body
+        && cm_mir_body_count(&mir) == count);
+    result = cm_mir_lower_instance(&mir, &hir, roundtrip_body, NULL, 0u);
+    assert(result.error_count == 1u && result.lowered_body_count == 0u
+        && result.body == CM_MIR_BODY_NONE
+        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_EXPRESSION
+        && result.first_error.hir_body == roundtrip_body
+        && result.first_error.hir_expression == dereference
+        && cm_mir_body_count(&mir) == count);
+
+    cm_mir_context_destroy(&mir);
+    cm_hir_context_destroy(&hir);
+}
+
 int main(void)
 {
     CmHirContext hir;
@@ -3331,6 +3444,7 @@ int main(void)
     test_let_flow_lowering(&hir, crate_id, root_module, u32_type);
     test_aggregate_and_field_lowering();
     test_aggregate_call_lowering();
+    test_reference_lowering_stays_fail_closed();
 
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);

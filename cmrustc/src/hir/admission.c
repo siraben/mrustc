@@ -207,10 +207,19 @@ CmSemanticAdmissionResult cm_semantic_admit_local_crate(
             result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
             goto rollback;
         }
-        result.body_result =
-            cm_semantic_body_check_definition_with_writeback(&session,
-                result.body, cm_semantic_results_stage_checked_body,
-                &body_stage);
+        {
+            CmSemanticBodyEvidenceWriteback writeback;
+
+            memset(&writeback, 0, sizeof(writeback));
+            writeback.context = &body_stage;
+            writeback.checked_body = cm_semantic_results_stage_checked_body;
+            writeback.projection_decision =
+                cm_semantic_results_stage_projection_decision;
+            writeback.discard = cm_semantic_results_discard_body_stage;
+            result.body_result =
+                cm_semantic_body_check_definition_with_evidence(&session,
+                    result.body, &writeback);
+        }
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
             goto rollback;
@@ -389,10 +398,19 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_reachable_bodies(
             result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
             goto cleanup;
         }
-        result.body_result =
-            cm_semantic_body_check_definition_with_writeback(&session,
-                bodies[index].body, cm_semantic_results_stage_checked_body,
-                &body_stage);
+        {
+            CmSemanticBodyEvidenceWriteback writeback;
+
+            memset(&writeback, 0, sizeof(writeback));
+            writeback.context = &body_stage;
+            writeback.checked_body = cm_semantic_results_stage_checked_body;
+            writeback.projection_decision =
+                cm_semantic_results_stage_projection_decision;
+            writeback.discard = cm_semantic_results_discard_body_stage;
+            result.body_result =
+                cm_semantic_body_check_definition_with_evidence(&session,
+                    bodies[index].body, &writeback);
+        }
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
             goto cleanup;
@@ -662,10 +680,19 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
             result.status = CM_SEMANTIC_ADMISSION_SESSION_FAILURE;
             goto cleanup_instances;
         }
-        result.body_result = cm_semantic_body_check_instance_with_writeback(
-            &session, instances[index].body, substitutions,
-            substitution_count, cm_semantic_results_stage_checked_body,
-            &stage);
+        {
+            CmSemanticBodyEvidenceWriteback writeback;
+
+            memset(&writeback, 0, sizeof(writeback));
+            writeback.context = &stage;
+            writeback.checked_body = cm_semantic_results_stage_checked_body;
+            writeback.projection_decision =
+                cm_semantic_results_stage_projection_decision;
+            writeback.discard = cm_semantic_results_discard_body_stage;
+            result.body_result = cm_semantic_body_check_instance_with_evidence(
+                &session, instances[index].body, substitutions,
+                substitution_count, &writeback);
+        }
         cm_free((void *)substitutions);
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;

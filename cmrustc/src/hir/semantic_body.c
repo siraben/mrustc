@@ -323,7 +323,8 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmTypeckGenericArg *owner_arguments,
     CmTypeckGenericArg *callee_arguments,
     CmTypeckTypeId *expression_terms, CmVec *deferred_equalities,
-    CmSemanticCheckedBodyFacts *facts)
+    CmSemanticCheckedBodyFacts *facts,
+    const CmSemanticBodyEvidenceWriteback *writeback)
 {
     CmTypeckStatus rollback;
     size_t call_index;
@@ -349,13 +350,16 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
         memset(facts, 0, sizeof(*facts));
     }
     cm_vec_destroy(deferred_equalities);
+    if (writeback != NULL && writeback->discard != NULL) {
+        writeback->discard(writeback->context);
+    }
     return result;
 }
 
 #define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
     cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
         call_expressions, owner_arguments, callee_arguments, expression_terms, \
-        &deferred_equalities, &checked_facts)
+        &deferred_equalities, &checked_facts, writeback)
 
 static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
     uint32_t count, CmTypeckGenericArg **out_arguments)
@@ -396,6 +400,7 @@ typedef struct CmSemanticBodyConstraints {
     CmTypeckTypeId *expression_terms;
     size_t expression_term_count;
     CmSemanticCheckedBodyFacts *checked_facts;
+    const CmSemanticBodyEvidenceWriteback *evidence_writeback;
     CmHirExprId failed_expression;
     CmHirDefId failed_callee;
     uint32_t failed_predicate_index;
@@ -601,6 +606,8 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_expressions(
     for (index = 0u; index < constraints->expression_term_count; ++index) {
         const CmHirExpr *expression;
         CmProjectionNormalizeResult normalization;
+        CmProjectionNormalizeTrace trace;
+        CmTypeckTypeId input_type;
 
         expression = cm_hir_get_expr(constraints->hir,
             (CmHirExprId)(index + 1u));
@@ -617,13 +624,48 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_expressions(
             return CM_SEMANTIC_BODY_INVALID;
         }
         constraints->failed_expression = (CmHirExprId)(index + 1u);
-        normalization = cm_semantic_body_normalize(constraints,
-            constraints->expression_terms[index]);
+        input_type = constraints->expression_terms[index];
+        if (constraints->evidence_writeback != NULL
+            && constraints->evidence_writeback->projection_decision != NULL) {
+            cm_projection_normalize_trace_init(&trace);
+            normalization = cm_semantic_session_normalize_type_traced(
+                constraints->session, constraints->typeck,
+                constraints->substitution, input_type,
+                constraints->normalize_limits, &trace);
+        } else {
+            memset(&trace, 0, sizeof(trace));
+            normalization = cm_semantic_body_normalize(constraints,
+                input_type);
+        }
         if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
+            cm_projection_normalize_trace_destroy(&trace);
             return cm_semantic_body_normalize_status(constraints,
                 &normalization);
         }
         constraints->expression_terms[index] = normalization.type;
+        if (cm_projection_normalize_trace_count(&trace) != 0u) {
+            CmSemanticBodyWritebackStatus writeback_status;
+
+            writeback_status = constraints->evidence_writeback
+                ->projection_decision(
+                    constraints->evidence_writeback->context,
+                    constraints->session, constraints->body_id,
+                    (CmHirExprId)(index + 1u),
+                    CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE, 0u,
+                    input_type, normalization.type, &trace);
+            cm_projection_normalize_trace_destroy(&trace);
+            if (writeback_status != CM_SEMANTIC_BODY_WRITEBACK_OK) {
+                return writeback_status
+                        == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
+                    ? CM_SEMANTIC_BODY_OVERFLOW
+                    : writeback_status
+                            == CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED
+                        ? CM_SEMANTIC_BODY_UNSUPPORTED
+                        : CM_SEMANTIC_BODY_INVALID;
+            }
+        } else {
+            cm_projection_normalize_trace_destroy(&trace);
+        }
     }
     return CM_SEMANTIC_BODY_OK;
 }
@@ -1578,7 +1620,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticSession *session, CmHirBodyId body_id,
     const CmHirTypeId *owner_type_substitutions,
     uint32_t owner_type_substitution_count, int definition_mode,
-    CmSemanticBodyWritebackFn writeback, void *writeback_context)
+    const CmSemanticBodyEvidenceWriteback *writeback)
 {
     CmSemanticBodyResult result;
     const CmHirContext *hir;
@@ -1745,6 +1787,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     constraints.expression_terms = expression_terms;
     constraints.expression_term_count = hir->expressions.len;
     constraints.checked_facts = &checked_facts;
+    constraints.evidence_writeback = writeback;
     constraints.failed_expression = body->root_expression;
     constraints.failed_callee = cm_hir_def_id_none();
     constraints.failed_predicate_index =
@@ -2249,11 +2292,11 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
     }
-    if (writeback != NULL) {
+    if (writeback != NULL && writeback->checked_body != NULL) {
         CmSemanticBodyWritebackStatus writeback_status;
 
-        writeback_status = writeback(writeback_context, session, body_id,
-            &checked_facts);
+        writeback_status = writeback->checked_body(writeback->context,
+            session, body_id, &checked_facts);
         if (writeback_status != CM_SEMANTIC_BODY_WRITEBACK_OK) {
             result.status = writeback_status
                     == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW
@@ -2276,6 +2319,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         result.status = CM_SEMANTIC_BODY_TYPECK_FAILURE;
         result.typeck_status = typeck_status;
         (void)cm_typeck_rollback(typeck, &snapshot);
+        if (writeback != NULL && writeback->discard != NULL) {
+            writeback->discard(writeback->context);
+        }
         cm_free(call_expressions);
         cm_free(owner_arguments);
         cm_free(callee_arguments);
@@ -2315,15 +2361,14 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     uint32_t owner_type_substitution_count)
 {
     return cm_semantic_body_check_calls_mode(session, body,
-        owner_type_substitutions, owner_type_substitution_count, 0,
-        NULL, NULL);
+        owner_type_substitutions, owner_type_substitution_count, 0, NULL);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_definition(
     CmSemanticSession *session, CmHirBodyId body)
 {
     return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
-        NULL, NULL);
+        NULL);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
@@ -2333,8 +2378,15 @@ CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
     if (writeback == NULL) {
         return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
     }
-    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
-        writeback, writeback_context);
+    {
+        CmSemanticBodyEvidenceWriteback evidence;
+
+        memset(&evidence, 0, sizeof(evidence));
+        evidence.context = writeback_context;
+        evidence.checked_body = writeback;
+        return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
+            &evidence);
+    }
 }
 
 CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
@@ -2346,9 +2398,41 @@ CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
     if (writeback == NULL) {
         return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
     }
+    {
+        CmSemanticBodyEvidenceWriteback evidence;
+
+        memset(&evidence, 0, sizeof(evidence));
+        evidence.context = writeback_context;
+        evidence.checked_body = writeback;
+        return cm_semantic_body_check_calls_mode(session, body,
+            owner_type_substitutions, owner_type_substitution_count, 0,
+            &evidence);
+    }
+}
+
+CmSemanticBodyResult cm_semantic_body_check_definition_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmSemanticBodyEvidenceWriteback *writeback)
+{
+    if (writeback == NULL || writeback->checked_body == NULL) {
+        return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
+    }
+    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, 1,
+        writeback);
+}
+
+CmSemanticBodyResult cm_semantic_body_check_instance_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirTypeId *owner_type_substitutions,
+    uint32_t owner_type_substitution_count,
+    const CmSemanticBodyEvidenceWriteback *writeback)
+{
+    if (writeback == NULL || writeback->checked_body == NULL) {
+        return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
+    }
     return cm_semantic_body_check_calls_mode(session, body,
         owner_type_substitutions, owner_type_substitution_count, 0,
-        writeback, writeback_context);
+        writeback);
 }
 
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status)

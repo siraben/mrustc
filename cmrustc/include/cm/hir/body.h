@@ -84,10 +84,14 @@ CmHirStatus cm_hir_body_add_if_expression(CmHirContext *context,
  * exact matching suffix or no suffix when this expected type is already fixed
  * by the surrounding return, explicit let, field, operand, branch, or call
  * position. The first source-inference slice also admits immutable simple
- * unannotated lets whose initializer is a decimal integer literal or a prior
- * local. Each let receives a private scratch term; local and return contexts
- * constrain those terms before remaining integer roots default to i32 and
- * solved terms are frozen into concrete HIR. Mutable/ref bindings, shadowing,
+ * unannotated lets whose initializer is a decimal integer literal, a prior
+ * local, or a primitive addition/subtraction tree constrained to the existing
+ * wrapping u32/usize expression slice when a concrete HIR type is already
+ * available. Each let receives a private scratch term; operands, locals, and
+ * return contexts constrain those terms before
+ * remaining literal/local integer roots default to i32 and solved terms are
+ * frozen into concrete HIR. Signed fallback arithmetic remains closed until
+ * its overflow semantics are modeled. Mutable/ref bindings, shadowing,
  * forward references, and unresolved general terms still reject atomically.
  * Named parameter locals and
  * recursively typed u32 or usize expression trees combine

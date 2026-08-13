@@ -3005,12 +3005,16 @@ static void test_graph_inferred_let_types(void)
         "fn main() -> u32 { let x = 1i32; let y = x; 2u32 }";
     static const char return_context_source[] =
         "fn main() -> u32 { let x = 1; x }";
+    static const char expression_source[] =
+        "fn main(left: u32, right: u32) -> u32 { "
+        "let sum = left + (right - 1); let copy = sum; copy }";
     TestFixture fixture;
     const CmHirBody *body;
     const CmHirExpr *root;
     const CmHirExpr *initializer;
     const CmHirExpr *tail;
     const CmHirType *type;
+    const CmHirType *expression_type;
     CmHirBodyLowerResult result;
     size_t type_count;
 
@@ -3068,6 +3072,34 @@ static void test_graph_inferred_let_types(void)
         && tail->type == body->expected_type
         && tail->data.local.local_index == 0u);
     fixture_destroy(&fixture);
+
+    fixture_init(&fixture, expression_source);
+    type_count = fixture.hir.types.len;
+    result = lower_fixture_body(&fixture);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    root = body == NULL ? NULL : cm_hir_get_expr(&fixture.hir,
+        body->root_expression);
+    initializer = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+            || root->data.block.statement_count != 2u
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            root->data.block.statements[0].data.let_statement.initializer);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir, root->data.block.tail_expression);
+    expression_type = body == NULL || body->local_count != 4u ? NULL
+        : cm_hir_get_type(&fixture.hir, body->locals[2].type);
+    assert(result.status == CM_HIR_BODY_LOWER_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && fixture.hir.types.len == type_count
+        && body->local_count == 4u
+        && body->locals[2].type == body->locals[3].type
+        && expression_type != NULL
+        && expression_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && expression_type->data.integer_type.kind == CM_HIR_INT_U32
+        && initializer != NULL && initializer->kind == CM_HIR_EXPR_BINARY
+        && initializer->data.binary.operator_kind == CM_HIR_BINARY_ADD
+        && tail != NULL && tail->kind == CM_HIR_EXPR_LOCAL
+        && tail->data.local.local_index == 3u);
+    fixture_destroy(&fixture);
 }
 
 static void test_graph_inferred_let_failures_are_transactional(void)
@@ -3079,6 +3111,12 @@ static void test_graph_inferred_let_failures_are_transactional(void)
         "fn identity(value: u32) -> u32 { value } "
         "fn main() -> u32 { let value = identity(1u32); value }",
         CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+    expect_body_failure(
+        "fn main(left: u32) -> u32 { let value = left * 1u32; value }",
+        CM_HIR_BODY_LOWER_UNSUPPORTED_OPERATOR);
+    expect_body_failure(
+        "fn main(left: u32) -> u32 { let value = left + 1i32; value }",
+        CM_HIR_BODY_LOWER_TYPE_MISMATCH);
     expect_body_failure(
         "fn main() -> u32 { let first = later; let later = 1u32; first }",
         CM_HIR_BODY_LOWER_UNRESOLVED_PATH);

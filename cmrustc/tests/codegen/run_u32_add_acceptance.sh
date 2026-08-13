@@ -119,4 +119,21 @@ awk '
     "$fixture_dir/u32-add-harness.c"
 "$unreachable_exe"
 
+# Cfg expansion removes this invalid body before the all-local barrier. It
+# cannot poison the active crate and cannot appear in reachability output.
+cfg_disabled_c="$artifact_dir/cfg-disabled-invalid.c"
+cfg_disabled_exe="$artifact_dir/cfg-disabled-invalid"
+"$CMRUSTC" --edition 2021 --emit-c \
+    "$fixture_dir/u32-add-cfg-disabled-invalid.rs" -o "$cfg_disabled_c"
+test -s "$cfg_disabled_c"
+if grep -q dormant "$cfg_disabled_c"; then
+    echo "cfg-disabled invalid function was emitted" >&2
+    exit 1
+fi
+# CFLAGS is intentionally split into compiler arguments.
+# shellcheck disable=SC2086
+"$CC" $CFLAGS -o "$cfg_disabled_exe" "$cfg_disabled_c" \
+    "$fixture_dir/u32-add-harness.c"
+"$cfg_disabled_exe"
+
 echo "u32 wrapping-add executable acceptance: ok"

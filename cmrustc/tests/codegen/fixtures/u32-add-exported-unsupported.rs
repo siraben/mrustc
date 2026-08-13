@@ -9,6 +9,5 @@ pub extern "C" fn add(left: u32, right: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn dormant(left: u32, right: u32) -> u32 {
-    let y = left + right;
-    y
+    left * right
 }
