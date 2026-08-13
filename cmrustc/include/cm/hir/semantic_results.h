@@ -407,6 +407,10 @@ CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
     const CmSemanticTypeView *view, CmHirTypeId type, int *out_equal);
+CmSemanticResultsStatus cm_semantic_type_view_materialize_existing_hir(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmSemanticTypeView *view, CmHirTypeId *out_type);
 const char *cm_semantic_results_status_name(CmSemanticResultsStatus status);
 
 #endif

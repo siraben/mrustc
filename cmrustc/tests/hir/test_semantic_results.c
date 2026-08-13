@@ -629,6 +629,140 @@ static void test_generic_parameter_type_is_structural(void)
     fixture_destroy(&fixture);
 }
 
+static void test_type_view_materializes_existing_hir_read_only(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmission foreign_admission;
+    CmSemanticAdmissionResult admission_result;
+    const CmSemanticResults *results;
+    const CmHirItem *u32_item;
+    const CmHirItem *u8_item;
+    const CmHirItem *generic_item;
+    CmSemanticFunctionSignatureView u32_signature;
+    CmSemanticFunctionSignatureView u8_signature;
+    CmSemanticFunctionSignatureView generic_signature;
+    CmSemanticTypeView foreign_view;
+    CmSemanticTypeView invalid_view;
+    const CmHirType *source_type;
+    CmHirType duplicate_type;
+    CmHirType stale_type;
+    CmHirTypeId u32_type;
+    CmHirTypeId u8_type;
+    CmHirTypeId duplicate_type_id;
+    CmHirTypeId stale_type_id;
+    CmHirTypeId materialized;
+    unsigned char *foreign_bytes;
+    size_t sealed_type_count;
+
+    fixture_init(&fixture,
+        "fn u32_value(value: u32) -> u32 { value } "
+        "fn u8_value(value: u8) -> u8 { value } "
+        "fn generic<T>(value: T) -> T { value }");
+    u32_type = find_integer_type(&fixture, CM_HIR_INT_U32);
+    u8_type = find_integer_type(&fixture, CM_HIR_INT_U8);
+    source_type = cm_hir_get_type(&fixture.hir, u32_type);
+    assert(u32_type != CM_HIR_TYPE_NONE && u8_type != CM_HIR_TYPE_NONE
+        && source_type != NULL);
+    duplicate_type = *source_type;
+    assert(cm_hir_add_type(&fixture.hir, &duplicate_type,
+            &duplicate_type_id) == CM_HIR_OK
+        && duplicate_type_id > u32_type);
+
+    memset(&admission, 0, sizeof(admission));
+    admission_result = admit(&fixture, &admission);
+    results = cm_semantic_admission_results(&admission);
+    u32_item = find_function_item(&fixture, "u32_value");
+    u8_item = find_function_item(&fixture, "u8_value");
+    generic_item = find_function_item(&fixture, "generic");
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && results != NULL && u32_item != NULL && u8_item != NULL
+        && generic_item != NULL
+        && cm_semantic_results_signature(results, &admission,
+            u32_item->data.function_item.body, &u32_signature)
+                == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_signature(results, &admission,
+            u8_item->data.function_item.body, &u8_signature)
+                == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_signature(results, &admission,
+            generic_item->data.function_item.body, &generic_signature)
+                == CM_SEMANTIC_RESULTS_OK);
+    sealed_type_count = fixture.hir.types.len;
+
+    materialized = CM_HIR_TYPE_NONE;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &u32_signature.return_type, &materialized)
+                == CM_SEMANTIC_RESULTS_OK
+        && materialized == u32_type
+        && fixture.hir.types.len == sealed_type_count);
+    materialized = CM_HIR_TYPE_NONE;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &u8_signature.return_type, &materialized)
+                == CM_SEMANTIC_RESULTS_OK
+        && materialized == u8_type
+        && fixture.hir.types.len == sealed_type_count);
+
+    materialized = duplicate_type_id;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &generic_signature.return_type, &materialized)
+                == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && materialized == CM_HIR_TYPE_NONE
+        && fixture.hir.types.len == sealed_type_count);
+    materialized = duplicate_type_id;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, NULL, &materialized)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
+        && materialized == CM_HIR_TYPE_NONE);
+    memset(&invalid_view, 0, sizeof(invalid_view));
+    materialized = duplicate_type_id;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &invalid_view, &materialized)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
+        && materialized == CM_HIR_TYPE_NONE
+        && cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &u32_signature.return_type, NULL)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
+
+    foreign_bytes = (unsigned char *)cm_alloc(u32_signature.return_type.size);
+    assert(foreign_bytes != NULL);
+    memcpy(foreign_bytes, u32_signature.return_type.bytes,
+        u32_signature.return_type.size);
+    foreign_view.bytes = foreign_bytes;
+    foreign_view.size = u32_signature.return_type.size;
+    materialized = duplicate_type_id;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &foreign_view, &materialized)
+                == CM_SEMANTIC_RESULTS_FOREIGN
+        && materialized == CM_HIR_TYPE_NONE
+        && fixture.hir.types.len == sealed_type_count);
+    cm_free(foreign_bytes);
+
+    memset(&foreign_admission, 0, sizeof(foreign_admission));
+    admission_result = admit(&fixture, &foreign_admission);
+    materialized = duplicate_type_id;
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_type_view_materialize_existing_hir(results,
+            &foreign_admission, &u32_signature.return_type, &materialized)
+                == CM_SEMANTIC_RESULTS_FOREIGN
+        && materialized == CM_HIR_TYPE_NONE
+        && fixture.hir.types.len == sealed_type_count);
+    cm_semantic_admission_destroy(&foreign_admission);
+
+    memset(&stale_type, 0, sizeof(stale_type));
+    stale_type.kind = CM_HIR_TYPE_BOOL_KIND;
+    stale_type.span = u32_item->span;
+    assert(cm_hir_add_type(&fixture.hir, &stale_type, &stale_type_id)
+            == CM_HIR_OK);
+    materialized = duplicate_type_id;
+    assert(cm_semantic_type_view_materialize_existing_hir(results,
+            &admission, &u32_signature.return_type, &materialized)
+                == CM_SEMANTIC_RESULTS_STALE
+        && materialized == CM_HIR_TYPE_NONE);
+
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
 typedef struct MalformedFactsProbe {
     CmHirBodyId body;
     size_t invocation_count;
@@ -2145,6 +2279,7 @@ int main(void)
     test_stale_and_failure_publish_nothing();
     test_same_generation_foreign_admission();
     test_generic_parameter_type_is_structural();
+    test_type_view_materializes_existing_hir_read_only();
     test_malformed_recipe_facts_publish_no_stage();
     test_partial_checked_draft_does_not_seal();
     test_instance_commit_requires_producer_session();

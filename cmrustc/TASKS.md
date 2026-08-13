@@ -1696,11 +1696,15 @@ flat reconstruction remains only for legacy exact-instance compatibility APIs
 whose input is still `DefId + CmHirTypeId[]`.
 
 The next vertical gate is executable generic-impl materialization. A borrowed
-semantic type must be matched deterministically to an already-existing
-monomorphic HIR `TypeId` without mutating `hir.types`; the driver must intern
-the retained canonical callee rather than reconstructing a nongeneric impl
-method, and MIR lowering/replay must treat the materialized `TypeId` only as
-executable storage for the authenticated impl-owned parameter and `Self`.
+semantic type can now be matched deterministically to the lowest
+already-existing structurally equivalent monomorphic HIR `TypeId`, after
+authenticating both the sealed results capability and the borrowed byte arena.
+The operation never adds or rewrites a HIR type; focused tests cover `u32`,
+`u8`, duplicate-equivalent IDs, unsupported symbolic types, foreign views and
+admissions, stale HIR, and invariant `hir.types.len`. The driver must next
+intern the retained canonical callee rather than reconstructing a nongeneric
+impl method, and MIR lowering/replay must treat the materialized `TypeId` only
+as executable storage for the authenticated impl-owned parameter and `Self`.
 Qualified and dot calls through one blanket method must execute independently
 for `u32` and `u8`, retain two canonical MIR bodies and C symbols, and reject a
 wrong owner, domain, arity, or transitional `TypeId` transactionally. After

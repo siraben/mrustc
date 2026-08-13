@@ -7223,31 +7223,17 @@ static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
     }
 }
 
-CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
-    const CmSemanticResults *results,
-    const CmSemanticAdmission *admission,
-    const CmSemanticTypeView *view, CmHirTypeId type, int *out_equal)
+static int cm_results_type_view_owned(const CmSemanticResults *results,
+    const CmSemanticTypeView *view)
 {
-    CmTypeckContext typeck;
-    CmTypeckTypeId imported;
-    CmResultsBuffer sizing;
-    CmResultsBuffer output;
-    unsigned char *bytes;
-    CmSemanticResultsStatus status;
     uintptr_t view_start;
     uintptr_t bytes_start;
     uintptr_t bytes_end;
     size_t instance_index;
     int owned_view;
 
-    if (out_equal == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    *out_equal = 0;
-    status = cm_results_validate(results, admission);
-    if (status != CM_SEMANTIC_RESULTS_OK) return status;
-    if (view == NULL || view->bytes == NULL || view->size == 0u
-        || !cm_results_hir_type_is_monomorphic(results->hir, type, 0u)) {
-        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    }
+    if (results == NULL || view == NULL || view->bytes == NULL
+        || view->size == 0u) return 0;
     view_start = (uintptr_t)view->bytes;
     bytes_start = (uintptr_t)results->type_bytes;
     owned_view = results->type_bytes_len <= UINTPTR_MAX - bytes_start;
@@ -7268,9 +7254,22 @@ CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
             && view_start <= bytes_end
             && view->size <= (size_t)(bytes_end - view_start);
     }
-    if (!owned_view) {
-        return CM_SEMANTIC_RESULTS_FOREIGN;
-    }
+    return owned_view;
+}
+
+static CmSemanticResultsStatus
+cm_results_type_view_matches_monomorphic_hir(
+    const CmSemanticResults *results, const CmSemanticTypeView *view,
+    CmHirTypeId type, int *out_equal)
+{
+    CmTypeckContext typeck;
+    CmTypeckTypeId imported;
+    CmResultsBuffer sizing;
+    CmResultsBuffer output;
+    unsigned char *bytes;
+    CmSemanticResultsStatus status;
+
+    *out_equal = 0;
     memset(&typeck, 0, sizeof(typeck));
     cm_typeck_context_init(&typeck, results->hir);
     cm_typeck_context_track_hir_semantic_generation(&typeck);
@@ -7302,6 +7301,67 @@ CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
     cm_free(bytes);
     cm_typeck_context_destroy(&typeck);
     return status;
+}
+
+CmSemanticResultsStatus cm_semantic_type_view_matches_monomorphic_hir(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission,
+    const CmSemanticTypeView *view, CmHirTypeId type, int *out_equal)
+{
+    CmSemanticResultsStatus status;
+
+    if (out_equal == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    *out_equal = 0;
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (view == NULL || view->bytes == NULL || view->size == 0u
+        || !cm_results_hir_type_is_monomorphic(results->hir, type, 0u)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_results_type_view_owned(results, view)) {
+        return CM_SEMANTIC_RESULTS_FOREIGN;
+    }
+    return cm_results_type_view_matches_monomorphic_hir(results, view,
+        type, out_equal);
+}
+
+CmSemanticResultsStatus cm_semantic_type_view_materialize_existing_hir(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission,
+    const CmSemanticTypeView *view, CmHirTypeId *out_type)
+{
+    CmSemanticResultsStatus status;
+    size_t index;
+
+    if (out_type == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    *out_type = CM_HIR_TYPE_NONE;
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (view == NULL || view->bytes == NULL || view->size == 0u) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_results_type_view_owned(results, view)) {
+        return CM_SEMANTIC_RESULTS_FOREIGN;
+    }
+    if (results->hir->types.len > (size_t)UINT32_MAX) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    for (index = 0u; index < results->hir->types.len; ++index) {
+        CmHirTypeId candidate;
+        int equal;
+
+        candidate = (CmHirTypeId)(index + 1u);
+        if (!cm_results_hir_type_is_monomorphic(results->hir, candidate,
+                0u)) continue;
+        status = cm_results_type_view_matches_monomorphic_hir(results, view,
+            candidate, &equal);
+        if (status != CM_SEMANTIC_RESULTS_OK) return status;
+        if (equal) {
+            *out_type = candidate;
+            return CM_SEMANTIC_RESULTS_OK;
+        }
+    }
+    return CM_SEMANTIC_RESULTS_NOT_FOUND;
 }
 
 const char *cm_semantic_results_status_name(CmSemanticResultsStatus status)
