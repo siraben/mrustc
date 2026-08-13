@@ -40,8 +40,11 @@ typedef struct CmHirTypeAliasResult {
  * projections are preserved while their self type and trait/associated type
  * arguments are normalized structurally; this pass never selects an impl. On
  * failure, all types and arena storage allocated by this call are rewound.
- * Const-generic, dyn-trait, opaque, excessive-recursion, malformed-alias, and
- * active alias-cycle cases are explicit errors.
+ * Target-typed const-parameter arguments on nominal ADTs are preserved when
+ * their source parameter has the same authenticated scalar type. Const
+ * substitution inside an active alias frame, opaque types,
+ * excessive-recursion, malformed-alias, and active alias-cycle cases are
+ * explicit errors.
  */
 CmHirTypeAliasResult cm_hir_normalize_type_aliases(CmHirContext *context,
     CmHirTypeId root);

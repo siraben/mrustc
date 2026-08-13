@@ -2614,6 +2614,64 @@ static int cm_lower_generic_arguments(CmLowerState *state,
     return 1;
 }
 
+static int cm_lower_const_path_argument(CmLowerState *state,
+    const CmAstGenericArg *ast_argument, CmHirDefId owner,
+    const CmHirGenericParam *parameter, CmSpan span,
+    CmHirGenericArg *out_argument)
+{
+    const CmAstType *ast_type;
+    const CmAstPath *path;
+    const CmLowerGenericRecord *generic;
+    const CmHirGenericParam *source_parameter;
+    const CmHirType *source_type;
+    const CmHirType *target_type;
+    int compatible;
+
+    ast_type = cm_ast_get_type(state->ast, ast_argument->type);
+    path = ast_type == NULL || ast_type->kind != CM_AST_TYPE_PATH ? NULL
+        : cm_ast_get_path(state->ast, ast_type->path);
+    if (path == NULL || path->absolute || path->segment_count != 1u
+        || path->segments == NULL
+        || path->segments[0].argument_count != 0u) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+            CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
+            CM_HIR_OK,
+            "const generic argument is not a plain authenticated const "
+            "parameter path");
+        return 0;
+    }
+    generic = cm_lower_find_generic_in_scope(state, owner,
+        path->segments[0].name);
+    source_parameter = generic == NULL ? NULL
+        : cm_hir_get_generic_param(state->hir, generic->hir_id);
+    source_type = source_parameter == NULL ? NULL
+        : cm_hir_get_type(state->hir, source_parameter->declared_type);
+    target_type = cm_hir_get_type(state->hir, parameter->declared_type);
+    compatible = source_type != NULL && target_type != NULL
+        && source_type->kind == target_type->kind
+        && ((source_type->kind == CM_HIR_TYPE_INTEGER_KIND
+                && source_type->data.integer_type.kind
+                    == target_type->data.integer_type.kind)
+            || (source_type->kind == CM_HIR_TYPE_BOOL_KIND
+                || source_type->kind == CM_HIR_TYPE_CHAR_KIND));
+    if (generic == NULL || generic->kind != CM_HIR_GENERIC_CONST
+        || source_parameter == NULL
+        || source_parameter->kind != CM_HIR_GENERIC_CONST
+        || !compatible) {
+        cm_lower_fail(state, CM_HIR_LOWER_WRONG_NAMESPACE, span,
+            CM_AST_ITEM_NONE, ast_argument->type, ast_type->path, CM_HIR_OK,
+            "const generic argument does not name a type-compatible const "
+            "parameter");
+        return 0;
+    }
+    memset(out_argument, 0, sizeof(*out_argument));
+    out_argument->kind = CM_HIR_GENERIC_ARG_CONST;
+    out_argument->data.constant.kind = CM_HIR_CONST_PARAMETER;
+    out_argument->data.constant.type = parameter->declared_type;
+    out_argument->data.constant.data.parameter = generic->hir_id;
+    return 1;
+}
+
 static int cm_lower_alias_signature(const CmLowerState *state,
     CmHirDefId definition, const CmLowerItemRecord *record,
     CmHirGenericParamId *out_start, uint32_t *out_count)
@@ -2861,10 +2919,15 @@ static int cm_lower_adt_arguments(CmLowerState *state,
             CM_HIR_INVALID_ID, "ADT has no bound generic signature");
         return 0;
     }
-    explicit_arguments = NULL;
-    explicit_count = 0u;
-    if (!cm_lower_generic_arguments(state, segment, module, owner, span,
-            &explicit_arguments, &explicit_count)) {
+    explicit_arguments = segment->argument_count == 0u ? NULL
+        : (CmHirGenericArg *)cm_alloc_zeroed(
+            (size_t)segment->argument_count, sizeof(*explicit_arguments));
+    explicit_count = segment->argument_count;
+    if ((segment->argument_count == 0u) != (segment->arguments == NULL)) {
+        cm_free(explicit_arguments);
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "ADT generic argument count and storage disagree");
         return 0;
     }
     if (explicit_count > parameter_count) {
@@ -2878,26 +2941,70 @@ static int cm_lower_adt_arguments(CmLowerState *state,
         : (CmHirGenericArg *)cm_alloc_zeroed(
             (size_t)parameter_count, sizeof(*arguments));
     for (index = 0u; index < explicit_count; ++index) {
+        const CmAstGenericArg *ast_argument;
         const CmHirGenericParam *parameter;
 
+        ast_argument = &segment->arguments[index];
+        if (!cm_lower_validate_generic_constraint(state, CM_AST_ITEM_NONE,
+                CM_AST_PATH_NONE, ast_argument)) {
+            cm_free(arguments);
+            cm_free(explicit_arguments);
+            return 0;
+        }
+        if (ast_argument->kind == CM_AST_GENERIC_BINDING
+            || ast_argument->kind == CM_AST_GENERIC_CONSTRAINT) {
+            cm_free(arguments);
+            cm_free(explicit_arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "associated-type path arguments are not valid ADT "
+                "positional arguments");
+            return 0;
+        }
         parameter = cm_hir_get_generic_param(state->hir,
             parameter_start + index);
         if (parameter == NULL
             || !cm_hir_def_id_equal(parameter->owner, definition)
-            || parameter->index != index
-            || ((parameter->kind == CM_HIR_GENERIC_LIFETIME)
-                != (explicit_arguments[index].kind
-                    == CM_HIR_GENERIC_ARG_LIFETIME))
-            || (parameter->kind == CM_HIR_GENERIC_TYPE
-                && explicit_arguments[index].kind
-                    != CM_HIR_GENERIC_ARG_TYPE)
-            || parameter->kind == CM_HIR_GENERIC_CONST) {
+            || parameter->index != index) {
+            cm_free(arguments);
+            cm_free(explicit_arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "ADT has an invalid authenticated generic signature");
+            return 0;
+        }
+        if (parameter->kind == CM_HIR_GENERIC_TYPE
+            && ast_argument->kind == CM_AST_GENERIC_TYPE) {
+            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+            explicit_arguments[index].data.type = cm_lower_type(state,
+                ast_argument->type, module, owner);
+        } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
+            && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
+            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+            (void)cm_lower_lifetime(state, ast_argument->text, owner, span,
+                &explicit_arguments[index].data.lifetime);
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_TYPE) {
+            if (!cm_lower_const_path_argument(state, ast_argument, owner,
+                    parameter, span, &explicit_arguments[index])) {
+                cm_free(arguments);
+                cm_free(explicit_arguments);
+                return 0;
+            }
+        } else {
             cm_free(arguments);
             cm_free(explicit_arguments);
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
                 CM_HIR_OK,
                 "ADT generic argument kind differs from its parameter");
+            return 0;
+        }
+        if (state->failed) {
+            cm_free(arguments);
+            cm_free(explicit_arguments);
             return 0;
         }
         arguments[index] = explicit_arguments[index];

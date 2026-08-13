@@ -28,14 +28,19 @@ static int cm_alias_normalize_type(CmAliasNormalizeState *state,
 static const CmHirItem *cm_alias_bound_owner(const CmHirContext *context,
     CmHirDefId owner);
 
-static int cm_alias_const_identity_argument_valid(
+static int cm_alias_const_argument_valid(
     const CmAliasNormalizeState *state, const CmHirNamedType *source,
     uint32_t index)
 {
     const CmHirGenericArg *argument;
     const CmHirGenericParam *parameter;
+    const CmHirGenericParam *source_parameter;
     const CmHirItem *owner;
+    const CmHirType *parameter_type;
+    const CmHirType *source_type;
     CmHirGenericParamId parameter_id;
+    int permits_external_parameter;
+    int compatible;
 
     argument = &source->arguments[index];
     if (argument->kind != CM_HIR_GENERIC_ARG_CONST
@@ -51,14 +56,33 @@ static int cm_alias_const_identity_argument_valid(
     }
     parameter_id = owner->generic_parameter_start + index;
     parameter = cm_hir_get_generic_param(state->context, parameter_id);
-    return argument->data.constant.data.parameter == parameter_id
-        && parameter != NULL
+    source_parameter = cm_hir_get_generic_param(state->context,
+        argument->data.constant.data.parameter);
+    parameter_type = parameter == NULL ? NULL
+        : cm_hir_get_type(state->context, parameter->declared_type);
+    source_type = source_parameter == NULL ? NULL
+        : cm_hir_get_type(state->context, source_parameter->declared_type);
+    compatible = parameter_type != NULL && source_type != NULL
+        && parameter_type->kind == source_type->kind
+        && ((parameter_type->kind == CM_HIR_TYPE_INTEGER_KIND
+                && parameter_type->data.integer_type.kind
+                    == source_type->data.integer_type.kind)
+            || parameter_type->kind == CM_HIR_TYPE_BOOL_KIND
+            || parameter_type->kind == CM_HIR_TYPE_CHAR_KIND);
+    permits_external_parameter = owner->kind == CM_HIR_ITEM_STRUCT
+        || owner->kind == CM_HIR_ITEM_UNION
+        || owner->kind == CM_HIR_ITEM_ENUM;
+    return parameter != NULL
         && parameter->kind == CM_HIR_GENERIC_CONST
         && parameter->index == index
         && cm_hir_def_id_equal(parameter->owner, owner->definition)
         && parameter->declared_type != CM_HIR_TYPE_NONE
         && parameter->declared_type == argument->data.constant.type
-        && cm_hir_get_type(state->context, parameter->declared_type) != NULL;
+        && source_parameter != NULL
+        && source_parameter->kind == CM_HIR_GENERIC_CONST
+        && (argument->data.constant.data.parameter == parameter_id
+            || permits_external_parameter)
+        && compatible;
 }
 
 static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
@@ -283,7 +307,7 @@ static int cm_alias_normalize_named_arguments(CmAliasNormalizeState *state,
             break;
         case CM_HIR_GENERIC_ARG_CONST:
             if (state->frame != NULL
-                || !cm_alias_const_identity_argument_valid(state, source,
+                || !cm_alias_const_argument_valid(state, source,
                     index)) {
                 cm_free(arguments);
                 return cm_alias_fail(state,

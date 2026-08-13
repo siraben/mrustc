@@ -2131,7 +2131,89 @@ static void test_symbolic_self_normalization(void)
     cm_hir_context_destroy(&hir);
 }
 
-static void test_projection_const_identity_normalization(void)
+static void test_nominal_const_parameter_normalization(void)
+{
+    static const char source[] =
+        "struct Array<const N: usize>; "
+        "trait Owner<const M: usize> { fn make() -> Array<M>; }";
+    CmSourceSet sources;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmImportResolver imports;
+    CmModuleGraphResult graph_result;
+    CmImportResult import_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerResult lower_result;
+    const CmHirItem *array;
+    const CmHirItem *owner;
+    const CmHirItem *make;
+    const CmHirGenericParam *array_parameter;
+    const CmHirGenericParam *owner_parameter;
+    CmHirGenericParamId owner_parameter_id;
+    CmHirTypeId return_type_id;
+    const CmHirType *return_type;
+    const CmHirGenericArg *argument;
+    CmHirTypeAliasResult result;
+    size_t arena_bytes;
+    size_t interner_length;
+    size_t type_count;
+
+    check(build_memory_graph(source, &sources, &graph, &cfg, &imports,
+            &graph_result, &import_result),
+        "nominal const normalizer could not build its graph");
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    lower_result = lower_graph(&hir, &graph, graph_result.revision,
+        &imports, &map);
+    array = find_item(&hir, "Array");
+    owner = find_item(&hir, "Owner");
+    make = find_item(&hir, "make");
+    array_parameter = array == NULL ? NULL
+        : find_generic(&hir, array->definition, CM_HIR_GENERIC_CONST);
+    owner_parameter = owner == NULL ? NULL
+        : find_generic(&hir, owner->definition, CM_HIR_GENERIC_CONST);
+    owner_parameter_id = find_generic_id(&hir, owner_parameter);
+    return_type_id = make == NULL ? CM_HIR_TYPE_NONE
+        : make->data.function_item.signature.return_type;
+    return_type = cm_hir_get_type(&hir, return_type_id);
+    argument = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_ADT_KIND
+            || return_type->data.named_type.argument_count != 1u
+        ? NULL : &return_type->data.named_type.arguments[0];
+    check(lower_result.error_count == 0u && array != NULL && owner != NULL
+        && make != NULL && array_parameter != NULL
+        && owner_parameter != NULL
+        && owner_parameter_id != CM_HIR_GENERIC_PARAM_NONE
+        && argument != NULL
+        && cm_hir_def_id_equal(return_type->data.named_type.definition,
+            array->definition)
+        && argument->kind == CM_HIR_GENERIC_ARG_CONST
+        && argument->data.constant.kind == CM_HIR_CONST_PARAMETER
+        && argument->data.constant.type == array_parameter->declared_type
+        && argument->data.constant.data.parameter == owner_parameter_id,
+        "nominal ADT lost its compatible foreign const parameter");
+    if (argument == NULL) goto cleanup;
+
+    type_count = hir.types.len;
+    arena_bytes = cm_arena_bytes_used(&hir.storage);
+    interner_length = cm_interner_length(&hir.strings);
+    result = cm_hir_normalize_type_aliases(&hir, return_type_id);
+    check(result.status == CM_HIR_TYPE_ALIAS_OK
+        && result.type == return_type_id
+        && result.allocated_type_count == 0u
+        && hir.types.len == type_count
+        && cm_arena_bytes_used(&hir.storage) == arena_bytes
+        && cm_interner_length(&hir.strings) == interner_length,
+        "nominal ADT rejected or mutated a compatible foreign const parameter");
+
+cleanup:
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    destroy_graph(&sources, &graph, &imports);
+}
+
+static void test_projection_const_parameter_normalization(void)
 {
     static const char source[] =
         "trait Copy {} "
@@ -2147,8 +2229,8 @@ static void test_projection_const_identity_normalization(void)
     CmHirContext hir;
     CmHirModuleMap map;
     CmHirLowerResult lower_result;
-    const CmHirItem *owner;
     const CmHirItem *other;
+    const CmHirItem *owner;
     const CmHirItem *associated;
     const CmHirGenericParam *other_parameter;
     CmHirGenericParamId other_parameter_id;
@@ -2168,8 +2250,8 @@ static void test_projection_const_identity_normalization(void)
     cm_hir_module_map_init(&map);
     lower_result = lower_graph(&hir, &graph, graph_result.revision,
         &imports, &map);
-    owner = find_item(&hir, "Owner");
     other = find_item(&hir, "Other");
+    owner = find_item(&hir, "Owner");
     associated = find_item(&hir, "Assoc");
     other_parameter = other == NULL ? NULL
         : find_generic(&hir, other->definition, CM_HIR_GENERIC_CONST);
@@ -2221,7 +2303,7 @@ static void test_projection_const_identity_normalization(void)
         && hir.types.len == type_count
         && cm_arena_bytes_used(&hir.storage) == arena_bytes
         && cm_interner_length(&hir.strings) == interner_length,
-        "foreign const parameter identity escaped or mutated normalization");
+        "foreign trait const parameter identity escaped normalization");
     const_argument->data.constant = saved_constant;
 
     const_argument->data.constant.type = projection->data.projection_type
@@ -2506,7 +2588,8 @@ int main(void)
     test_normalizer_api_transaction();
     test_type_instantiation_api();
     test_symbolic_self_normalization();
-    test_projection_const_identity_normalization();
+    test_nominal_const_parameter_normalization();
+    test_projection_const_parameter_normalization();
     test_dyn_trait_alias_normalization();
     if (failures != 0) return 1;
     puts("HIR type alias tests: ok");

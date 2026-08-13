@@ -1360,6 +1360,88 @@ static void test_adt_default_declaration_order_entry_points(void)
     cm_ast_destroy(&ast);
 }
 
+static void test_const_parameter_adt_argument(void)
+{
+    static const char source[] =
+        "struct Array<T, const N: usize> { value: [T; N] }"
+        "trait Owner<const N: usize> { fn get() -> Array<u8, N>; }";
+    static const char *const rejected[] = {
+        "struct Array<T, const N: usize>; trait Owner<T> {"
+            "fn get() -> Array<u8, T>; }",
+        "struct Array<T, const N: usize>; trait Owner<const N: u8> {"
+            "fn get() -> Array<u8, N>; }",
+        "struct Array<T, const N: usize>; trait Owner<const N: usize> {"
+            "fn get() -> Array<u8, u8>; }",
+        "struct Array<T, const N: usize>; trait Owner {"
+            "fn get() -> Array<u8, 1>; }"
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *array;
+    const CmHirItem *owner;
+    const CmHirItem *get;
+    const CmHirGenericParam *parameter;
+    const CmHirGenericParam *array_parameter;
+    const CmHirType *return_type;
+    const CmHirType *type_argument;
+    size_t index;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "const-parameter ADT lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    array = find_item(&context, "Array");
+    owner = find_item(&context, "Owner");
+    get = owner == NULL ? NULL
+        : find_child(&context, owner->definition, "get");
+    parameter = owner == NULL ? NULL : cm_hir_get_generic_param(&context,
+        owner->generic_parameter_start);
+    array_parameter = array == NULL ? NULL : cm_hir_get_generic_param(
+        &context, array->generic_parameter_start + 1u);
+    return_type = get == NULL ? NULL : cm_hir_get_type(&context,
+        get->data.function_item.signature.return_type);
+    type_argument = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_ADT_KIND
+            || return_type->data.named_type.argument_count != 2u
+            || return_type->data.named_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            return_type->data.named_type.arguments[0].data.type);
+    assert(result.error_count == 0u
+        && array != NULL && owner != NULL && get != NULL
+        && parameter != NULL && parameter->kind == CM_HIR_GENERIC_CONST
+        && array_parameter != NULL
+        && array_parameter->kind == CM_HIR_GENERIC_CONST
+        && return_type != NULL
+        && cm_hir_def_id_equal(return_type->data.named_type.definition,
+            array->definition)
+        && type_argument != NULL
+        && type_argument->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type_argument->data.integer_type.kind == CM_HIR_INT_U8
+        && return_type->data.named_type.arguments[1].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && return_type->data.named_type.arguments[1].data.constant.kind
+            == CM_HIR_CONST_PARAMETER
+        && return_type->data.named_type.arguments[1].data.constant.type
+            == array_parameter->declared_type
+        && return_type->data.named_type.arguments[1].data.constant
+                .data.parameter
+            == owner->generic_parameter_start);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && (result.first_error.kind == CM_HIR_LOWER_WRONG_NAMESPACE
+                || result.first_error.kind
+                    == CM_HIR_LOWER_UNSUPPORTED_GENERIC));
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void check_discard_parameter_shape(const CmHirContext *context,
     const CmHirItem *function, int expect_body)
 {
@@ -6332,6 +6414,7 @@ int main(void)
     test_unsupported_constructs_are_errors();
     test_const_generic_path_default();
     test_adt_default_declaration_order_entry_points();
+    test_const_parameter_adt_argument();
     test_const_generic_trait_method_declaration();
     test_generic_parameter_shadows_type_path_prefix();
     test_defaulted_alias_entry_points();
