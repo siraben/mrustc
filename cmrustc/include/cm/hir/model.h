@@ -739,12 +739,33 @@ typedef struct CmHirAggregateFieldValue {
     CmSpan span;
 } CmHirAggregateFieldValue;
 
+/*
+ * The incoming value context proven by the pre-region usage pass.  UNKNOWN
+ * is the only state accepted by expression construction; later states are
+ * semantic evidence and are written atomically for a complete body manifest.
+ */
+typedef enum CmHirValueUsage {
+    CM_HIR_USAGE_UNKNOWN = 0,
+    CM_HIR_USAGE_BORROW,
+    CM_HIR_USAGE_MUTATE,
+    CM_HIR_USAGE_MOVE
+} CmHirValueUsage;
+
+typedef enum CmHirStaticBorrowState {
+    CM_HIR_STATIC_BORROW_UNKNOWN = 0,
+    CM_HIR_STATIC_BORROW_NOT_PROMOTED,
+    CM_HIR_STATIC_BORROW_PROMOTED
+} CmHirStaticBorrowState;
+
 typedef struct CmHirExpr {
     CmHirExprKind kind;
     /* None only while a legacy integer/block tree awaits publication. */
     CmHirBodyId owner_body;
     CmHirTypeId type;
     CmSpan span;
+    CmHirValueUsage usage;
+    /* Pre-region static-borrow promotion evidence for this exact node. */
+    CmHirStaticBorrowState static_borrow_state;
     union {
         struct {
             uint64_t low_bits;

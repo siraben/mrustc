@@ -47,6 +47,24 @@ command. Task IDs are stable.
 | M3-04 | ACTIVE | Uncompressed metadata writer/reader | C compiler reads its own dependent crate |
 | M3-05 | TODO | Oracle metadata bridge | Bidirectional minimal-crate read succeeds |
 
+### Semantic barrier checkpoints
+
+- The complete cfg-active body manifest now advances through an atomic
+  pre-region MARKED checkpoint.  Every reachable expression records its
+  original-mrustc value-usage context, and every site records explicit
+  checked-not-promoted static-borrow evidence.  The pass rejects shared-child
+  DAGs, cycles, wrong body ownership, premarked/spoofed evidence, unresolved
+  receiver dispatch, and borrow/dereference forms without place/adjustment
+  evidence before changing HIR.  Positive static promotion remains blocked on
+  constness, layout, and interior-mutability proofs.
+- The next REGIONS checkpoint is deliberately narrower than original mrustc's
+  lifetime solver: first prove the current admitted manifest contains no
+  region inference variables and only structurally authenticated explicit
+  regions.  Do not claim early-bound outlives/equality semantics until an
+  independent constraint checker exists.  Enum discriminants and unevaluated
+  array lengths also remain outside the body manifest until they have stable
+  type-position atom identities.
+
 ### Active front-end evidence
 
 The active states above are intentional: the committed foundations do not yet

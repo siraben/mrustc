@@ -3,6 +3,7 @@
 #include "cm/alloc.h"
 #include "cm/hir/finalization.h"
 #include "cm/hir/module_map.h"
+#include "cm/hir/semantic_mark.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,12 @@ static int cm_semantic_barrier_source_matches(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmModuleGraph *graph, CmModuleGraphRevision revision,
     const CmImportResolver *imports, const CmHirModuleMap *modules);
+static void cm_semantic_barrier_capture_generation(
+    CmSemanticBarrierState *state);
+static int cm_semantic_barrier_state_current(
+    const CmSemanticBarrierState *state);
+static int cm_semantic_barrier_atom_still_matches(
+    const CmSemanticBarrierState *state, size_t index);
 
 static uint64_t cm_semantic_barrier_new_capability_id(void)
 {
@@ -77,6 +84,74 @@ static CmSemanticBarrierResult cm_semantic_barrier_result(
     result.local_bodies.body_result.status =
         CM_HIR_BODY_LOWER_INVALID_ARGUMENT;
     result.hir_status = CM_HIR_OK;
+    result.expression = CM_HIR_EXPR_NONE;
+    return result;
+}
+
+CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
+    CmSemanticBarrier *barrier)
+{
+    CmSemanticBarrierState *state;
+    CmSemanticBarrierResult result;
+    CmHirBodyId *bodies;
+    CmSemanticMarkResult mark_result;
+    size_t body_bytes;
+    size_t index;
+
+    result = cm_semantic_barrier_result(
+        CM_SEMANTIC_BARRIER_INVALID_ARGUMENT,
+        CM_SEMANTIC_BARRIER_NONE);
+    state = barrier == NULL ? NULL
+        : (CmSemanticBarrierState *)barrier->state;
+    if (state == NULL) return result;
+    result.phase = state->phase;
+    if (!cm_semantic_barrier_state_current(state)) {
+        result.status = CM_SEMANTIC_BARRIER_STALE;
+        result.phase = CM_SEMANTIC_BARRIER_NONE;
+        return result;
+    }
+    if (state->phase != CM_SEMANTIC_BARRIER_TYPED) {
+        result.status = CM_SEMANTIC_BARRIER_PHASE_ORDER;
+        return result;
+    }
+    for (index = 0u; index < state->atom_count; ++index) {
+        if (!cm_semantic_barrier_atom_still_matches(state, index)) {
+            result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
+            result.atom_index = index;
+            result.atom = state->atoms[index];
+            return result;
+        }
+    }
+    if (!cm_size_mul(state->atom_count, sizeof(*bodies), &body_bytes)) {
+        result.status = CM_SEMANTIC_BARRIER_HIR_FAILURE;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
+        return result;
+    }
+    bodies = body_bytes == 0u ? NULL
+        : (CmHirBodyId *)cm_alloc(body_bytes);
+    for (index = 0u; index < state->atom_count; ++index)
+        bodies[index] = state->atoms[index].body;
+    mark_result = cm_hir_semantic_mark_bodies(state->hir, bodies,
+        state->atom_count);
+    cm_free(bodies);
+    if (mark_result.status != CM_SEMANTIC_MARK_OK) {
+        result.status = mark_result.status
+                == CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+            ? CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
+            : CM_SEMANTIC_BARRIER_INVALID_HIR;
+        result.expression = mark_result.expression;
+        if (mark_result.body_index < state->atom_count) {
+            result.atom_index = mark_result.body_index;
+            result.atom = state->atoms[mark_result.body_index];
+        }
+        return result;
+    }
+    cm_semantic_barrier_capture_generation(state);
+    /* HIR generation is now current; capability publication cannot fail. */
+    state->capability_id = cm_semantic_barrier_new_capability_id();
+    state->phase = CM_SEMANTIC_BARRIER_MARKED;
+    result.status = CM_SEMANTIC_BARRIER_OK;
+    result.phase = CM_SEMANTIC_BARRIER_MARKED;
     return result;
 }
 

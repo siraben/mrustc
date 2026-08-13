@@ -447,7 +447,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v27\n", stream);
+    fputs("hir-v28\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -895,6 +895,21 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         }
         fputs(" span=", stream);
         cm_hir_dump_span(stream, expression->span);
+        fprintf(stream, " usage=%s static-borrow=%s",
+            expression->usage == CM_HIR_USAGE_UNKNOWN ? "unknown"
+                : expression->usage == CM_HIR_USAGE_BORROW ? "borrow"
+                : expression->usage == CM_HIR_USAGE_MUTATE ? "mutate"
+                : expression->usage == CM_HIR_USAGE_MOVE ? "move"
+                : "invalid",
+            expression->static_borrow_state
+                    == CM_HIR_STATIC_BORROW_UNKNOWN
+                ? "unknown"
+                : expression->static_borrow_state
+                        == CM_HIR_STATIC_BORROW_NOT_PROMOTED
+                    ? "not-promoted"
+                    : expression->static_borrow_state
+                            == CM_HIR_STATIC_BORROW_PROMOTED
+                        ? "promoted" : "invalid");
         fputc('\n', stream);
     }
     for (index = 0u; index < context->bodies.len; ++index) {

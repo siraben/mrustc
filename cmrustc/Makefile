@@ -72,6 +72,7 @@ HIR_SOURCES := \
 	src/hir/projection_normalizer.c \
 	src/hir/semantic.c \
 	src/hir/semantic_barrier.c \
+	src/hir/semantic_mark.c \
 	src/hir/semantic_body.c \
 	src/hir/semantic_item.c \
 	src/hir/semantic_results.c \
@@ -94,6 +95,7 @@ MACRO_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/obj/%.o,$(MACRO_SOURCES))
 HIR_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/obj/%.o,$(HIR_SOURCES))
 HIR_MODEL_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/model.o \
+	$(BUILD_DIR)/obj/hir/semantic_mark.o \
 	$(BUILD_DIR)/obj/hir/dump.o
 HIR_PROJECTION_OBJECTS := \
 	$(BUILD_DIR)/obj/hir/model.o \

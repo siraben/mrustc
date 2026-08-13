@@ -77,6 +77,281 @@ static CmSemanticBarrierResult advance_typed(Fixture *fixture,
         &fixture->modules);
 }
 
+static CmSemanticBarrierResult advance_marked(CmSemanticBarrier *barrier)
+{
+    return cm_semantic_barrier_advance_marked(barrier);
+}
+
+static CmHirExpr *mutable_expr(Fixture *fixture, CmHirExprId expression)
+{
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > fixture->hir.expressions.len) return NULL;
+    return (CmHirExpr *)cm_vec_at(&fixture->hir.expressions,
+        (size_t)expression - 1u);
+}
+
+static void assert_manifest_evidence(const Fixture *fixture,
+    CmHirValueUsage expected_or_unknown)
+{
+    size_t index;
+
+    for (index = 0u; index < fixture->hir.expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = (const CmHirExpr *)cm_vec_at_const(
+            &fixture->hir.expressions, index);
+        assert(expression != NULL && expression->usage != (CmHirValueUsage)99);
+        if (expected_or_unknown == CM_HIR_USAGE_UNKNOWN) {
+            assert(expression->usage == CM_HIR_USAGE_UNKNOWN
+                && expression->static_borrow_state
+                    == CM_HIR_STATIC_BORROW_UNKNOWN);
+        } else {
+            assert(expression->usage != CM_HIR_USAGE_UNKNOWN
+                && expression->static_borrow_state
+                    == CM_HIR_STATIC_BORROW_NOT_PROMOTED);
+        }
+    }
+}
+
+static void test_marked_usage_rules_and_dump(void)
+{
+    static const char source[] =
+        "fn identity(value: u32) -> u32 { value } "
+        "fn marked(left: u32, right: u32) -> u32 { "
+        "if left == right { left + right } else { left - right } } "
+        "fn copied(left: u32) -> u32 { let copy: u32 = left; copy } "
+        "fn called(value: u32) -> u32 { identity(value) }";
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    const CmHirBody *body;
+    const CmHirExpr *root;
+    const CmHirBody *copied_body;
+    const CmHirExpr *copied_root;
+    const CmHirExpr *copy_initializer;
+    const CmHirExpr *if_expression;
+    const CmHirExpr *condition;
+    const CmHirExpr *then_block;
+    const CmHirExpr *then_binary;
+    const CmHirExpr *else_block;
+    const CmHirExpr *else_binary;
+    const CmHirBody *called_body;
+    const CmHirExpr *called_root;
+    const CmHirExpr *called_call;
+    uint64_t generation;
+    uint64_t rewind_generation;
+    uint64_t capability;
+    FILE *stream;
+    char dump[8192];
+    size_t dump_size;
+
+    fixture_init(&fixture, source);
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && cm_semantic_barrier_atom_count(&barrier) == 4u);
+    result = advance_typed(&fixture, &barrier);
+    generation = fixture.hir.semantic_generation;
+    rewind_generation = fixture.hir.rewind_generation;
+    capability = cm_semantic_barrier_capability_id(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && capability != 0u);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_MARKED
+        && cm_semantic_barrier_is_current(&barrier)
+        && fixture.hir.semantic_generation == generation + UINT64_C(1)
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_generation(&barrier)
+            == fixture.hir.semantic_generation
+        && cm_semantic_barrier_capability_id(&barrier) != 0u
+        && cm_semantic_barrier_capability_id(&barrier) != capability);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_MOVE);
+
+    body = cm_hir_get_body(&fixture.hir, 2u);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    copied_body = cm_hir_get_body(&fixture.hir, 3u);
+    copied_root = copied_body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, copied_body->root_expression);
+    copy_initializer = copied_root == NULL
+            || copied_root->kind != CM_HIR_EXPR_BLOCK
+            || copied_root->data.block.statement_count != 1u
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            copied_root->data.block.statements[0]
+                .data.let_statement.initializer);
+    if_expression = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    condition = if_expression == NULL
+            || if_expression->kind != CM_HIR_EXPR_IF
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            if_expression->data.if_expr.condition);
+    then_block = if_expression == NULL
+            || if_expression->kind != CM_HIR_EXPR_IF
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            if_expression->data.if_expr.then_expression);
+    else_block = if_expression == NULL
+            || if_expression->kind != CM_HIR_EXPR_IF
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            if_expression->data.if_expr.else_expression);
+    then_binary = then_block == NULL || then_block->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            then_block->data.block.tail_expression);
+    else_binary = else_block == NULL || else_block->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            else_block->data.block.tail_expression);
+    called_body = cm_hir_get_body(&fixture.hir, 4u);
+    called_root = called_body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, called_body->root_expression);
+    called_call = called_root == NULL
+            || called_root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            called_root->data.block.tail_expression);
+    assert(root != NULL && root->usage == CM_HIR_USAGE_MOVE
+        && copy_initializer != NULL
+        && copy_initializer->usage == CM_HIR_USAGE_BORROW
+        && if_expression != NULL && if_expression->usage == CM_HIR_USAGE_MOVE
+        && condition != NULL && condition->usage == CM_HIR_USAGE_BORROW
+        && then_block != NULL && then_block->usage == CM_HIR_USAGE_MOVE
+        && then_binary != NULL && then_binary->usage == CM_HIR_USAGE_MOVE
+        && else_block != NULL && else_block->usage == CM_HIR_USAGE_MOVE
+        && else_binary != NULL && else_binary->usage == CM_HIR_USAGE_MOVE
+        && called_root != NULL && called_root->usage == CM_HIR_USAGE_MOVE
+        && called_call != NULL && called_call->kind == CM_HIR_EXPR_CALL
+        && called_call->usage == CM_HIR_USAGE_MOVE
+        && called_call->data.call.argument_count == 1u
+        && cm_hir_get_expr(&fixture.hir,
+            called_call->data.call.arguments[0])->usage
+            == CM_HIR_USAGE_MOVE);
+    assert(condition->kind == CM_HIR_EXPR_BINARY
+        && cm_hir_get_expr(&fixture.hir,
+            condition->data.binary.left)->usage == CM_HIR_USAGE_BORROW
+        && cm_hir_get_expr(&fixture.hir,
+            condition->data.binary.right)->usage == CM_HIR_USAGE_BORROW
+        && cm_hir_get_expr(&fixture.hir,
+            then_binary->data.binary.right)->usage == CM_HIR_USAGE_MOVE
+        && cm_hir_get_expr(&fixture.hir,
+            else_binary->data.binary.right)->usage == CM_HIR_USAGE_MOVE);
+
+    stream = tmpfile();
+    assert(stream != NULL && cm_hir_dump(stream, &fixture.hir) == 0
+        && fseek(stream, 0L, SEEK_SET) == 0);
+    dump_size = fread(dump, 1u, sizeof(dump) - 1u, stream);
+    dump[dump_size] = '\0';
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
+        && strstr(dump, "usage=move static-borrow=not-promoted") != NULL
+        && strstr(dump, "usage=borrow static-borrow=not-promoted") != NULL);
+    assert(fclose(stream) == 0);
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_PHASE_ORDER
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
+static void test_marked_preflight_is_atomic(void)
+{
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    CmHirBody *body;
+    CmHirExpr *root;
+    CmHirExpr *tail;
+    CmHirExpr saved_tail;
+    CmHirExprId saved_root_tail;
+    CmHirExprId initializer;
+    uint64_t generation;
+    uint64_t rewind_generation;
+    uint64_t capability;
+
+    fixture_init(&fixture,
+        "fn first() -> u32 { 1u32 } "
+        "fn second() -> u32 { let value: u32 = 2u32; value }");
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_PHASE_ORDER
+        && result.phase == CM_SEMANTIC_BARRIER_STRUCTURAL);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies, 1u);
+    root = body == NULL ? NULL
+        : mutable_expr(&fixture, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : mutable_expr(&fixture, root->data.block.tail_expression);
+    assert(root != NULL && root->data.block.statement_count == 1u
+        && tail != NULL);
+    initializer = root->data.block.statements[0]
+        .data.let_statement.initializer;
+    saved_tail = *tail;
+    saved_root_tail = root->data.block.tail_expression;
+    generation = fixture.hir.semantic_generation;
+    rewind_generation = fixture.hir.rewind_generation;
+    capability = cm_semantic_barrier_capability_id(&barrier);
+
+    tail->kind = CM_HIR_EXPR_BORROW_SHARED;
+    tail->data.borrow_shared.operand = initializer;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && result.atom_index == 1u && result.expression != CM_HIR_EXPR_NONE);
+    *tail = saved_tail;
+    assert(fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability
+        && cm_semantic_barrier_phase(&barrier) == CM_SEMANTIC_BARRIER_TYPED);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+
+    root->data.block.tail_expression = initializer;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.atom_index == 1u);
+    root->data.block.tail_expression = saved_root_tail;
+    assert(fixture.hir.semantic_generation == generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+
+    root->data.block.tail_expression = body->root_expression;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.atom_index == 1u);
+    root->data.block.tail_expression = saved_root_tail;
+    assert(fixture.hir.semantic_generation == generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+
+    tail->owner_body = 1u;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.atom_index == 1u);
+    tail->owner_body = 2u;
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+
+    tail->usage = CM_HIR_USAGE_BORROW;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.atom_index == 1u);
+    tail->usage = CM_HIR_USAGE_UNKNOWN;
+    assert(fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability
+        && cm_semantic_barrier_phase(&barrier) == CM_SEMANTIC_BARRIER_TYPED);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_UNKNOWN);
+
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && fixture.hir.semantic_generation == generation + UINT64_C(1)
+        && cm_semantic_barrier_capability_id(&barrier) != capability);
+    assert_manifest_evidence(&fixture, CM_HIR_USAGE_MOVE);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
 static int atom_equal(const CmSemanticAtomView *left,
     const CmSemanticAtomView *right)
 {
@@ -614,6 +889,8 @@ static void test_invalid_api_and_names(void)
 
 int main(void)
 {
+    test_marked_usage_rules_and_dump();
+    test_marked_preflight_is_atomic();
     test_manifest_is_complete_stable_and_immutable();
     test_typed_success_and_phase_order();
     test_const_and_static_typed();

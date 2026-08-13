@@ -1,4 +1,5 @@
 #include "cm/hir/model.h"
+#include "cm/hir/semantic_mark.h"
 
 #include "cm/alloc.h"
 
@@ -1306,7 +1307,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -2070,7 +2071,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -2314,7 +2315,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v27\n", strlen("hir-v27\n")) == 0
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -3001,7 +3002,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -3483,7 +3484,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -4000,7 +4001,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -4521,6 +4522,22 @@ static void test_reference_expression_model(void)
     assert(cm_hir_set_body_root_expression(&context, body_id,
         nested_dereference) == CM_HIR_OK);
     assert(cm_hir_get_body(&context, body_id)->state == CM_HIR_BODY_TYPED);
+    {
+        CmSemanticMarkResult mark_result;
+        uint64_t generation;
+
+        generation = context.semantic_generation;
+        mark_result = cm_hir_semantic_mark_bodies(&context, &body_id, 1u);
+        assert(mark_result.status
+                == CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+            && mark_result.body_index == 0u && mark_result.body == body_id
+            && mark_result.expression == nested_dereference
+            && context.semantic_generation == generation
+            && cm_hir_get_expr(&context, nested_dereference)->usage
+                == CM_HIR_USAGE_UNKNOWN
+            && cm_hir_get_expr(&context, borrow)->usage
+                == CM_HIR_USAGE_UNKNOWN);
+    }
     first_file = tmpfile();
     second_file = tmpfile();
     assert(first_file != NULL && second_file != NULL
@@ -4686,6 +4703,28 @@ static void test_method_call_expression_model(void)
     expression.data.method_call.in_scope_trait_count = 2u;
     assert(cm_hir_add_expr(&context, &expression, &method_call_id)
         == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&context, body_ids[0],
+            method_call_id) == CM_HIR_OK);
+    {
+        CmSemanticMarkResult mark_result;
+        uint64_t generation;
+
+        generation = context.semantic_generation;
+        mark_result = cm_hir_semantic_mark_bodies(&context,
+            &body_ids[0], 1u);
+        assert(mark_result.status
+                == CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+            && mark_result.body_index == 0u
+            && mark_result.body == body_ids[0]
+            && mark_result.expression == method_call_id
+            && context.semantic_generation == generation
+            && cm_hir_get_expr(&context, method_call_id)->usage
+                == CM_HIR_USAGE_UNKNOWN
+            && cm_hir_get_expr(&context, receiver)->usage
+                == CM_HIR_USAGE_UNKNOWN
+            && cm_hir_get_expr(&context, argument)->usage
+                == CM_HIR_USAGE_UNKNOWN);
+    }
     arguments[0] = other_receiver;
     traits[0] = non_trait_definition;
     stored = cm_hir_get_expr(&context, method_call_id);
@@ -5033,6 +5072,7 @@ static void test_aggregate_expression_model(void)
         && stored->data.aggregate.fields[0].value == u16_value
         && stored->data.aggregate.fields[1].field_index == 0u
         && stored->data.aggregate.fields[1].value == u8_value);
+
     field_values[0].field_index = 0u;
     field_values[0].value = u8_value;
     field_values[0].span = test_span(1u, 1u);
@@ -5102,7 +5142,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -5204,6 +5244,66 @@ static void test_aggregate_expression_model(void)
     assert(stored != NULL
         && stored->data.aggregate.fields == owned_fields
         && stored->data.aggregate.owned_storage == owned_fields);
+
+    ((CmHirBody *)cm_vec_at(&context.bodies,
+        (size_t)body_id - 1u))->expected_type = u8_type;
+    ((CmHirExpr *)cm_vec_at(&context.expressions,
+        (size_t)later_u8_value - 1u))->owner_body = other_body_id;
+    ((CmHirExpr *)cm_vec_at(&context.expressions,
+        (size_t)owned_aggregate_id - 1u))->owner_body = other_body_id;
+    ((CmHirExpr *)cm_vec_at(&context.expressions,
+        (size_t)shared_aggregate_id - 1u))->owner_body = other_body_id;
+    ((CmHirExpr *)cm_vec_at(&context.expressions,
+        (size_t)owned_base_field_id - 1u))->owner_body = other_body_id;
+    assert(cm_hir_set_body_root_expression(&context, body_id,
+            field_block_id) == CM_HIR_OK);
+    {
+        CmSemanticMarkResult mark_result;
+        const CmHirExpr *marked_block;
+        const CmHirExpr *marked_field;
+        const CmHirExpr *marked_aggregate;
+        const CmHirExpr *marked_u8;
+        const CmHirExpr *marked_u16;
+        CmHirExpr *spoofed;
+        CmHirValueUsage saved_usage;
+        uint64_t generation;
+
+        generation = context.semantic_generation;
+        mark_result = cm_hir_semantic_mark_bodies(&context, &body_id, 1u);
+        marked_block = cm_hir_get_expr(&context, field_block_id);
+        marked_field = cm_hir_get_expr(&context, field_expression_id);
+        marked_aggregate = cm_hir_get_expr(&context, aggregate_id);
+        marked_u8 = cm_hir_get_expr(&context, u8_value);
+        marked_u16 = cm_hir_get_expr(&context, u16_value);
+        assert(mark_result.status == CM_SEMANTIC_MARK_OK
+            && context.semantic_generation == generation + UINT64_C(1)
+            && marked_block != NULL
+            && marked_block->usage == CM_HIR_USAGE_MOVE
+            && marked_field != NULL
+            && marked_field->usage == CM_HIR_USAGE_MOVE
+            && marked_aggregate != NULL
+            && marked_aggregate->usage == CM_HIR_USAGE_BORROW
+            && marked_aggregate->static_borrow_state
+                == CM_HIR_STATIC_BORROW_NOT_PROMOTED
+            && marked_u8 != NULL && marked_u8->usage == CM_HIR_USAGE_MOVE
+            && marked_u16 != NULL && marked_u16->usage == CM_HIR_USAGE_MOVE);
+        generation = context.semantic_generation;
+        mark_result = cm_hir_semantic_mark_bodies(&context, &body_id, 1u);
+        assert(mark_result.status == CM_SEMANTIC_MARK_INVALID_HIR
+            && context.semantic_generation == generation);
+        spoofed = (CmHirExpr *)cm_vec_at(&context.expressions,
+            (size_t)u8_value - 1u);
+        assert(spoofed != NULL);
+        saved_usage = spoofed->usage;
+        spoofed->usage = CM_HIR_USAGE_UNKNOWN;
+        spoofed->static_borrow_state = CM_HIR_STATIC_BORROW_UNKNOWN;
+        mark_result = cm_hir_semantic_mark_bodies(&context, &body_id, 1u);
+        assert(mark_result.status == CM_SEMANTIC_MARK_INVALID_HIR
+            && context.semantic_generation == generation);
+        spoofed->usage = saved_usage;
+        spoofed->static_borrow_state =
+            CM_HIR_STATIC_BORROW_NOT_PROMOTED;
+    }
 
     memset(&release_probe, 0, sizeof(release_probe));
     release_probe.kind = CM_HIR_EXPR_AGGREGATE;
@@ -6005,7 +6105,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v27\n", strlen("hir-v27\n")) == 0
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
         && strstr(dump, "trait-header item#2 safety=unsafe auto=1")
             != NULL
         && strstr(dump, "impl-header item#3 safety=safe negative=1")
@@ -6396,7 +6496,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -6944,7 +7044,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,

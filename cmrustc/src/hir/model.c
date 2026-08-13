@@ -5416,6 +5416,8 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
     *out_id = CM_HIR_EXPR_NONE;
     type = cm_hir_get_type(context, expression->type);
     if (type == NULL || !cm_hir_span_is_ordered(expression->span)
+        || expression->usage != CM_HIR_USAGE_UNKNOWN
+        || expression->static_borrow_state != CM_HIR_STATIC_BORROW_UNKNOWN
         || (unsigned int)expression->kind >
             (unsigned int)CM_HIR_EXPR_DEREFERENCE) {
         return CM_HIR_INVALID_ARGUMENT;
@@ -5806,6 +5808,8 @@ CmHirStatus cm_hir_add_owned_call_expr(CmHirContext *context,
     }
     *out_id = CM_HIR_EXPR_NONE;
     if (expression->kind != CM_HIR_EXPR_CALL
+        || expression->usage != CM_HIR_USAGE_UNKNOWN
+        || expression->static_borrow_state != CM_HIR_STATIC_BORROW_UNKNOWN
         || expression->data.call.type_substitutions == NULL
         || expression->data.call.argument_count == 0u
         || expression->data.call.arguments == NULL
@@ -5848,6 +5852,8 @@ CmHirStatus cm_hir_add_owned_qualified_call_expr(CmHirContext *context,
     }
     *out_id = CM_HIR_EXPR_NONE;
     if (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+        || expression->usage != CM_HIR_USAGE_UNKNOWN
+        || expression->static_borrow_state != CM_HIR_STATIC_BORROW_UNKNOWN
         || (expression->data.qualified_call.argument_count == 0u)
             != (expression->data.qualified_call.arguments == NULL)
         || context->expressions.len >= context->expressions.cap
@@ -5880,6 +5886,8 @@ CmHirStatus cm_hir_add_owned_aggregate_expr(CmHirContext *context,
     }
     *out_id = CM_HIR_EXPR_NONE;
     if (expression->kind != CM_HIR_EXPR_AGGREGATE
+        || expression->usage != CM_HIR_USAGE_UNKNOWN
+        || expression->static_borrow_state != CM_HIR_STATIC_BORROW_UNKNOWN
         || (expression->data.aggregate.field_count == 0u
             && (expression->data.aggregate.fields != NULL
                 || expression->data.aggregate.owned_storage != NULL))

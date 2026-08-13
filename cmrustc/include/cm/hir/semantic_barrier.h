@@ -56,6 +56,8 @@ typedef struct CmSemanticBarrierResult {
     CmSemanticAtomView atom;
     CmHirLocalBodiesResult local_bodies;
     CmHirStatus hir_status;
+    /* First expression rejected by a post-typing manifest phase, if any. */
+    CmHirExprId expression;
 } CmSemanticBarrierResult;
 
 #define CM_SEMANTIC_ATOM_INDEX_NONE ((size_t)-1)
@@ -93,6 +95,14 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_typed(
     CmSemanticBarrier *barrier, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
     const CmHirModuleMap *modules);
+
+/*
+ * Atomically annotate value usage and conservative static-borrow evidence for
+ * the complete typed manifest. Failure leaves HIR, generation, phase, and
+ * capability identity unchanged.
+ */
+CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
+    CmSemanticBarrier *barrier);
 
 void cm_semantic_barrier_destroy(CmSemanticBarrier *barrier);
 int cm_semantic_barrier_is_current(const CmSemanticBarrier *barrier);

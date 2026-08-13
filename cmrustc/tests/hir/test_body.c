@@ -2999,7 +2999,7 @@ static void test_graph_u32_add_body(void)
     stream = tmpfile();
     assert(stream != NULL && cm_hir_dump(stream, &fixture.hir) == 0);
     dump = read_dump(stream);
-    assert(strncmp(dump, "hir-v27\n", strlen("hir-v27\n")) == 0);
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
     assert(snprintf(binary_record, sizeof(binary_record),
         "expr#3 binary type=ty#%u operator=add left=expr#1 "
         "right=expr#2 owner=body#1",
@@ -3838,7 +3838,7 @@ static void test_graph_explicit_u32_let_block(void)
     stream = tmpfile();
     assert(stream != NULL && cm_hir_dump(stream, &fixture.hir) == 0);
     dump = read_dump(stream);
-    assert(strncmp(dump, "hir-v27\n", strlen("hir-v27\n")) == 0
+    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
         && strstr(dump,
             "statements=[let(local=2,initializer=expr#3") != NULL
         && strstr(dump,
