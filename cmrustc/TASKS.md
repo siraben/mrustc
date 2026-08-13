@@ -1540,17 +1540,31 @@ reachability, and MIR-facing traversal reject the unresolved node until a
 selection recipe exists. Focused strict GCC, TinyCC, and Clang ASan/UBSan/leak
 model/body tests pass; this is producer evidence, not method selection.
 
-The crate-wide semantic transaction must next jointly constrain the receiver
-and arguments, select inherent or trait candidates, and publish one callable
-recipe containing the declared item, selected impl/callable, canonical
-instance, normalized parameter/return types, and an ordered immutable
-autoderef/autoref/reborrow adjustment sequence. Missing, ambiguous, negative,
-inapplicable, or metadata-incomplete candidates must reject the entire semantic
-transaction. Reachability and MIR will consume only the sealed recipe. Focused
-acceptance requires executable local inherent and trait method calls plus
-atomic ambiguity, adjustment, and incomplete-evidence rejection under strict,
-TinyCC, and sanitizer gates. Operators, indexing, and callable-trait syntax then
-reuse the same selection and adjustment machinery instead of introducing
+The first dot-method semantic-selection slice now jointly constrains the
+receiver and ordered explicit arguments for primitive, by-value receivers at
+autoderef depth zero. It scans every exact in-scope trait containing the named
+method, solves the implemented-trait goal, authenticates one concrete local
+nongeneric positive impl and linked impl method, and counts all viable
+candidates before selection. More than one viable candidate is therefore an
+order-independent ambiguity; stable identity never breaks a semantic tie.
+Missing, negative, unsupported, and unsolved candidates publish no writeback.
+
+Successful selection seals the declared trait item, selected impl/callable,
+receiver-first argument order, requested concrete `Self`, normalized parameter
+and return types, and an empty adjustment sequence. Durable-results validation
+is syntax-aware, authenticates the dot receiver slot against the concrete
+requested `Self`, and keeps explicit arguments tied to the selected signature.
+Focused strict GCC, TinyCC, and Clang ASan/UBSan/leak semantic-body and durable-
+results tests pass. This is deliberately limited to concrete local trait
+methods, primitive by-value receivers, depth zero, and zero adjustments;
+inherent methods, generics, autoderef/autoref/reborrow, metadata-incomplete
+selection, and nonprimitive receiver shapes remain fail-closed.
+
+Reachability, exact admission, MIR lowering/replay, and executable C acceptance
+must next consume only this sealed recipe. After that vertical checkpoint,
+canonical callable substitutions and slot-specific projection decisions must
+precede general adjustments. Operators, indexing, and callable-trait syntax
+then reuse the same selection and adjustment machinery instead of introducing
 parallel lookup paths.
 
 ## M6: Build orchestration

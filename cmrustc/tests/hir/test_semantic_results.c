@@ -1082,6 +1082,125 @@ static void test_durable_qualified_callable_recipe(void)
     fixture_destroy(&fixture);
 }
 
+static void test_durable_dot_method_recipe(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmHirLocalBodiesResult lower_result;
+    CmSemanticReachableBody reachable;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmSemanticBodyView body_view;
+    CmSemanticExpressionView call_view;
+    CmSemanticExpressionView receiver_view;
+    CmSemanticExpressionView argument_view;
+    CmSemanticTypeView parameter_type;
+    CmHirDefId wrapper_definition;
+    const CmHirDefinition *wrapper_record;
+    const CmHirItem *wrapper;
+    const CmHirBody *body;
+    const CmHirExpr *source_call;
+    CmHirExprId call_expression;
+    CmHirExprId argument;
+    size_t index;
+    int equal;
+
+    fixture_init(&fixture,
+        "trait Value { fn value(self, other: u32) -> u32; } "
+        "impl Value for u32 { "
+        "fn value(self, other: u32) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK);
+    wrapper_definition = find_named_item(&fixture, "wrapper",
+        cm_hir_def_id_none());
+    wrapper_record = cm_hir_lookup_definition(&fixture.hir,
+        wrapper_definition);
+    wrapper = wrapper_record == NULL ? NULL : cm_hir_get_item(&fixture.hir,
+        wrapper_record->entity.item_id);
+    body = wrapper == NULL ? NULL : cm_hir_get_body(&fixture.hir,
+        wrapper->data.function_item.body);
+    assert(body != NULL && body->state == CM_HIR_BODY_TYPED);
+    reachable.owner = wrapper_definition;
+    reachable.body = wrapper->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission,
+        &fixture.hir, 1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK);
+    results = cm_semantic_admission_results(&admission);
+    call_expression = CM_HIR_EXPR_NONE;
+    for (index = 0u; index < fixture.hir.expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(&fixture.hir,
+            (CmHirExprId)(index + 1u));
+        if (body != NULL && expression != NULL
+            && expression->owner_body == wrapper->data.function_item.body
+            && expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+            call_expression = (CmHirExprId)(index + 1u);
+        }
+    }
+    source_call = cm_hir_get_expr(&fixture.hir, call_expression);
+    assert(results != NULL && body != NULL && source_call != NULL
+        && call_expression != CM_HIR_EXPR_NONE
+        && cm_semantic_results_body(results, &admission,
+            wrapper->data.function_item.body, &body_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && body_view.callable_count == 1u
+        && cm_semantic_results_expression(results, &admission,
+            wrapper->data.function_item.body, call_expression, &call_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && call_view.adjustment_count == 0u
+        && cm_semantic_results_callable_selection(results, &admission,
+            wrapper->data.function_item.body, call_expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && selection.syntax == CM_HIR_CALLABLE_DOT_METHOD
+        && selection.argument_count == 2u
+        && selection.receiver_argument == 0u
+        && selection.receiver_expression
+            == source_call->data.method_call.receiver
+        && cm_semantic_results_callable_argument(results, &admission,
+            wrapper->data.function_item.body, call_expression, 0u,
+            &argument) == CM_SEMANTIC_RESULTS_OK
+        && argument == source_call->data.method_call.receiver
+        && cm_semantic_results_expression(results, &admission,
+            wrapper->data.function_item.body, argument, &receiver_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&selection.requested_self_type,
+            &receiver_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_callable_parameter(results, &admission,
+            wrapper->data.function_item.body, call_expression, 0u,
+            &parameter_type) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&parameter_type,
+            &receiver_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_callable_argument(results, &admission,
+            wrapper->data.function_item.body, call_expression, 1u,
+            &argument) == CM_SEMANTIC_RESULTS_OK
+        && argument == source_call->data.method_call.arguments[0]
+        && cm_semantic_results_expression(results, &admission,
+            wrapper->data.function_item.body, argument, &argument_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_callable_parameter(results, &admission,
+            wrapper->data.function_item.body, call_expression, 1u,
+            &parameter_type) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&parameter_type,
+            &argument_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_type_view_equal(&selection.return_type,
+            &call_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_callable_argument(results, &admission,
+            wrapper->data.function_item.body, call_expression, 2u,
+            &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
 static void test_projection_failure_discards_partial_stage(void)
 {
     Fixture fixture;
@@ -1279,6 +1398,7 @@ int main(void)
     test_writeback_distinguishes_unsolved_terms();
     test_durable_projection_trace_definition();
     test_durable_qualified_callable_recipe();
+    test_durable_dot_method_recipe();
     test_projection_failure_discards_partial_stage();
     puts("semantic results tests passed");
     return 0;

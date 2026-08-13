@@ -50,6 +50,7 @@ typedef struct WritebackProbe {
     int require_integer_kind;
     CmHirIntType expected_integer_kind;
     int require_qualified_callable;
+    int require_method_callable;
     CmHirDefId expected_trait;
     CmHirDefId expected_declared_callable;
     CmHirDefId expected_impl;
@@ -90,6 +91,31 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
             && facts->callables != NULL);
         callable = &facts->callables[0];
         assert(callable->syntax == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+            && cm_hir_def_id_equal(callable->requested_trait,
+                probe->expected_trait)
+            && cm_hir_def_id_equal(callable->declared_trait_callable,
+                probe->expected_declared_callable)
+            && cm_hir_def_id_equal(callable->selected_impl,
+                probe->expected_impl)
+            && cm_hir_def_id_equal(callable->selected_callable,
+                probe->expected_selected_callable)
+            && callable->receiver_argument == 0u
+            && callable->argument_count == 1u
+            && callable->parameter_count == 1u
+            && callable->argument_expressions != NULL
+            && callable->parameter_types != NULL
+            && callable->receiver_expression
+                == callable->argument_expressions[0]
+            && callable->requested_self_type != CM_TYPECK_TYPE_NONE
+            && callable->return_type != CM_TYPECK_TYPE_NONE);
+    }
+    if (probe->require_method_callable) {
+        const CmSemanticCheckedCallableFacts *callable;
+
+        assert(facts->call_count == 0u && facts->callable_count == 1u
+            && facts->callables != NULL);
+        callable = &facts->callables[0];
+        assert(callable->syntax == CM_HIR_CALLABLE_DOT_METHOD
             && cm_hir_def_id_equal(callable->requested_trait,
                 probe->expected_trait)
             && cm_hir_def_id_equal(callable->declared_trait_callable,
@@ -665,6 +691,387 @@ static void test_explicit_qualified_callable_selection(void)
         && probe.invocation_count == 1u);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
+}
+
+typedef struct MethodFixture {
+    TestFixture base;
+    CmHirDefId trait_definition;
+    CmHirDefId impl_definition;
+    CmHirDefId declared_definition;
+    CmHirDefId selected_definition;
+    CmHirDefId caller_definition;
+    CmHirBodyId caller_body;
+    CmHirExprId receiver;
+} MethodFixture;
+
+static void method_fixture_init(MethodFixture *fixture, const char *trait_name,
+    const char *method_name)
+{
+    CmHirType self_value;
+    CmHirTypeId trait_self;
+    CmHirTypeId impl_self;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId selected_body;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId selected_root;
+
+    fixture_init(&fixture->base);
+    fixture->trait_definition = add_trait(&fixture->base, trait_name);
+    fixture->impl_definition = add_impl(&fixture->base,
+        fixture->trait_definition);
+    memset(&self_value, 0, sizeof(self_value));
+    self_value.kind = CM_HIR_TYPE_SELF_KIND;
+    self_value.span = test_span(20u, 24u);
+    self_value.data.self_type.owner = fixture->trait_definition;
+    assert(cm_hir_add_type(&fixture->base.hir, &self_value, &trait_self)
+        == CM_HIR_OK);
+    self_value.data.self_type.owner = fixture->impl_definition;
+    assert(cm_hir_add_type(&fixture->base.hir, &self_value, &impl_self)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture->base.hir,
+        fixture->base.crate_id, CM_HIR_ITEM_FUNCTION,
+        test_span(30u, 45u), &fixture->declared_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture->base.hir, "self");
+    parameter.type = trait_self;
+    parameter.span = test_span(34u, 38u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, fixture->declared_definition,
+        fixture->base.root, method_name, &fixture->base.hir);
+    item.parent_definition = fixture->trait_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = fixture->base.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->base.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->base.hir, &item, &item_id)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture->base.hir,
+        fixture->base.crate_id, CM_HIR_ITEM_FUNCTION,
+        test_span(46u, 65u), &fixture->selected_definition) == CM_HIR_OK);
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.name;
+    local.type = impl_self;
+    local.span = test_span(50u, 54u);
+    local.parameter_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = fixture->selected_definition;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.expected_type = fixture->base.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(46u, 65u);
+    assert(cm_hir_add_body(&fixture->base.hir, &body, &selected_body)
+        == CM_HIR_OK);
+    parameter.type = impl_self;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, fixture->selected_definition,
+        fixture->base.root, method_name, &fixture->base.hir);
+    item.parent_definition = fixture->impl_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = fixture->base.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->base.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = selected_body;
+    item.data.function_item.trait_item_definition =
+        fixture->declared_definition;
+    assert(cm_hir_add_item(&fixture->base.hir, &item, &item_id)
+        == CM_HIR_OK);
+    assert(add_integer_expression(&fixture->base.hir, selected_body,
+        fixture->base.u32_type, 1u, test_span(56u, 60u), &selected_root)
+        == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture->base.hir,
+            selected_body, selected_root) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture->base.hir,
+        fixture->base.crate_id, CM_HIR_ITEM_FUNCTION,
+        test_span(70u, 100u), &fixture->caller_definition) == CM_HIR_OK);
+    local.name = cm_hir_intern(&fixture->base.hir, "x");
+    local.type = fixture->base.u32_type;
+    local.span = test_span(75u, 76u);
+    memset(&body, 0, sizeof(body));
+    body.owner = fixture->caller_definition;
+    body.source = 1u;
+    body.source_expression_id = 2u;
+    body.expected_type = fixture->base.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(70u, 100u);
+    assert(cm_hir_add_body(&fixture->base.hir, &body, &fixture->caller_body)
+        == CM_HIR_OK);
+    parameter.name = local.name;
+    parameter.type = local.type;
+    parameter.span = local.span;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, fixture->caller_definition,
+        fixture->base.root, "method_caller", &fixture->base.hir);
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = fixture->base.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->base.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = fixture->caller_body;
+    assert(cm_hir_add_item(&fixture->base.hir, &item, &item_id)
+        == CM_HIR_OK);
+    assert(add_local_expression(&fixture->base.hir, fixture->caller_body,
+        0u, fixture->base.u32_type, test_span(82u, 83u),
+        &fixture->receiver) == CM_HIR_OK);
+}
+
+static CmHirExprId method_fixture_add_call(MethodFixture *fixture,
+    const char *method_name, const CmHirDefId *traits,
+    uint32_t trait_count)
+{
+    CmHirExpr expression;
+    CmHirExprId call;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_METHOD_CALL;
+    expression.owner_body = fixture->caller_body;
+    expression.type = fixture->base.u32_type;
+    expression.span = test_span(82u, 95u);
+    expression.data.method_call.syntax = CM_HIR_CALLABLE_DOT_METHOD;
+    expression.data.method_call.method_name = cm_hir_intern(
+        &fixture->base.hir, method_name);
+    expression.data.method_call.receiver = fixture->receiver;
+    expression.data.method_call.in_scope_traits = (CmHirDefId *)traits;
+    expression.data.method_call.in_scope_trait_count = trait_count;
+    assert(cm_hir_add_expr(&fixture->base.hir, &expression, &call)
+        == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture->base.hir,
+            fixture->caller_body, call) == CM_HIR_OK);
+    return call;
+}
+
+static CmSemanticBodyResult method_fixture_check(MethodFixture *fixture,
+    WritebackProbe *probe)
+{
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture->base, fixture->caller_definition);
+    assert(cm_semantic_session_init(&session, &fixture->base.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    result = probe == NULL
+        ? cm_semantic_body_check_definition(&session, fixture->caller_body)
+        : cm_semantic_body_check_definition_with_writeback(&session,
+            fixture->caller_body, probe_writeback, probe);
+    cm_semantic_session_destroy(&session);
+    return result;
+}
+
+static void test_dot_method_callable_selection(void)
+{
+    MethodFixture fixture;
+    CmHirDefId traits[1];
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+
+    method_fixture_init(&fixture, "Value", "value");
+    traits[0] = fixture.trait_definition;
+    (void)method_fixture_add_call(&fixture, "value", traits, 1u);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.base.hir;
+    probe.expected_body = fixture.caller_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    probe.require_method_callable = 1;
+    probe.expected_trait = fixture.trait_definition;
+    probe.expected_declared_callable = fixture.declared_definition;
+    probe.expected_impl = fixture.impl_definition;
+    probe.expected_selected_callable = fixture.selected_definition;
+    result = method_fixture_check(&fixture, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u);
+    fixture_destroy(&fixture.base);
+}
+
+static void test_dot_method_ambiguity_is_order_independent(void)
+{
+    MethodFixture fixture;
+    CmHirDefId second_trait;
+    CmHirDefId second_impl;
+    CmHirDefId traits[2];
+    CmHirType self_value;
+    CmHirTypeId trait_self;
+    CmHirTypeId impl_self;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId selected_body;
+    CmHirDefId declared;
+    CmHirDefId selected;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId selected_root;
+    CmSemanticBodyResult result;
+    unsigned int order;
+
+    for (order = 0u; order < 2u; ++order) {
+        method_fixture_init(&fixture, "First", "value");
+        second_trait = add_trait(&fixture.base, "Second");
+        second_impl = add_impl(&fixture.base, second_trait);
+        memset(&self_value, 0, sizeof(self_value));
+        self_value.kind = CM_HIR_TYPE_SELF_KIND;
+        self_value.span = test_span(101u, 105u);
+        self_value.data.self_type.owner = second_trait;
+        assert(cm_hir_add_type(&fixture.base.hir, &self_value, &trait_self)
+            == CM_HIR_OK);
+        self_value.data.self_type.owner = second_impl;
+        assert(cm_hir_add_type(&fixture.base.hir, &self_value, &impl_self)
+            == CM_HIR_OK);
+        assert(cm_hir_reserve_item_definition_as(&fixture.base.hir,
+            fixture.base.crate_id, CM_HIR_ITEM_FUNCTION,
+            test_span(106u, 115u), &declared) == CM_HIR_OK);
+        memset(&parameter, 0, sizeof(parameter));
+        parameter.name = cm_hir_intern(&fixture.base.hir, "self");
+        parameter.type = trait_self;
+        parameter.span = test_span(108u, 112u);
+        parameter.binding_kind = CM_HIR_BINDING_NAMED;
+        init_item(&item, CM_HIR_ITEM_FUNCTION, declared, fixture.base.root,
+            "value", &fixture.base.hir);
+        item.parent_definition = second_trait;
+        item.data.function_item.signature.parameters = &parameter;
+        item.data.function_item.signature.parameter_count = 1u;
+        item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+        item.data.function_item.signature.return_type = fixture.base.u32_type;
+        item.data.function_item.signature.abi =
+            cm_hir_intern(&fixture.base.hir, "Rust");
+        item.data.function_item.signature.safety = CM_HIR_SAFE;
+        assert(cm_hir_add_item(&fixture.base.hir, &item, &item_id)
+            == CM_HIR_OK);
+        assert(cm_hir_reserve_item_definition_as(&fixture.base.hir,
+            fixture.base.crate_id, CM_HIR_ITEM_FUNCTION,
+            test_span(116u, 135u), &selected) == CM_HIR_OK);
+        memset(&local, 0, sizeof(local));
+        local.name = parameter.name;
+        local.type = impl_self;
+        local.span = test_span(120u, 124u);
+        local.parameter_index = 0u;
+        memset(&body, 0, sizeof(body));
+        body.owner = selected;
+        body.source = 1u;
+        body.source_expression_id = 3u;
+        body.expected_type = fixture.base.u32_type;
+        body.locals = &local;
+        body.local_count = 1u;
+        body.parameter_count = 1u;
+        body.span = test_span(116u, 135u);
+        assert(cm_hir_add_body(&fixture.base.hir, &body, &selected_body)
+            == CM_HIR_OK);
+        parameter.type = impl_self;
+        init_item(&item, CM_HIR_ITEM_FUNCTION, selected, fixture.base.root,
+            "value", &fixture.base.hir);
+        item.parent_definition = second_impl;
+        item.data.function_item.signature.parameters = &parameter;
+        item.data.function_item.signature.parameter_count = 1u;
+        item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+        item.data.function_item.signature.return_type = fixture.base.u32_type;
+        item.data.function_item.signature.abi =
+            cm_hir_intern(&fixture.base.hir, "Rust");
+        item.data.function_item.signature.safety = CM_HIR_SAFE;
+        item.data.function_item.body = selected_body;
+        item.data.function_item.trait_item_definition = declared;
+        assert(cm_hir_add_item(&fixture.base.hir, &item, &item_id)
+            == CM_HIR_OK
+            && add_integer_expression(&fixture.base.hir, selected_body,
+                fixture.base.u32_type, 2u, test_span(126u, 130u),
+                &selected_root) == CM_HIR_OK
+            && cm_hir_set_body_root_expression(&fixture.base.hir,
+                selected_body, selected_root) == CM_HIR_OK);
+        traits[order] = fixture.trait_definition;
+        traits[1u - order] = second_trait;
+        (void)method_fixture_add_call(&fixture, "value", traits, 2u);
+        result = method_fixture_check(&fixture, NULL);
+        assert(result.status == CM_SEMANTIC_BODY_AMBIGUOUS);
+        fixture_destroy(&fixture.base);
+    }
+}
+
+static void test_dot_method_negative_and_no_solution(void)
+{
+    MethodFixture fixture;
+    CmHirDefId traits[1];
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+    size_t item_index;
+
+    method_fixture_init(&fixture, "Value", "value");
+    traits[0] = fixture.trait_definition;
+    (void)method_fixture_add_call(&fixture, "missing", traits, 1u);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.base.hir;
+    probe.expected_body = fixture.caller_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = method_fixture_check(&fixture, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_NO_SOLUTION
+        && probe.invocation_count == 0u);
+    fixture_destroy(&fixture.base);
+
+    method_fixture_init(&fixture, "Value", "value");
+    for (item_index = 0u; item_index < fixture.base.hir.items.len;
+         ++item_index) {
+        CmHirItem *impl_item;
+
+        impl_item = (CmHirItem *)cm_vec_at(&fixture.base.hir.items,
+            item_index);
+        if (impl_item != NULL && cm_hir_def_id_equal(
+                impl_item->definition, fixture.impl_definition)) {
+            /* Exercise negative-candidate propagation directly. */
+            impl_item->data.impl_item.is_negative = 1;
+        }
+    }
+    traits[0] = fixture.trait_definition;
+    (void)method_fixture_add_call(&fixture, "value", traits, 1u);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.base.hir;
+    probe.expected_body = fixture.caller_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = method_fixture_check(&fixture, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_NEGATIVE
+        && probe.invocation_count == 0u);
+    fixture_destroy(&fixture.base);
+}
+
+static void test_dot_method_unsupported_shape_has_no_writeback(void)
+{
+    MethodFixture fixture;
+    CmHirDefId traits[1];
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+    size_t index;
+
+    method_fixture_init(&fixture, "Value", "value");
+    for (index = 0u; index < fixture.base.hir.items.len; ++index) {
+        CmHirItem *item;
+
+        item = (CmHirItem *)cm_vec_at(&fixture.base.hir.items, index);
+        if (item != NULL && cm_hir_def_id_equal(item->definition,
+                fixture.declared_definition)) {
+            item->data.function_item.signature.receiver =
+                CM_HIR_RECEIVER_REF_SHARED;
+        }
+    }
+    traits[0] = fixture.trait_definition;
+    (void)method_fixture_add_call(&fixture, "value", traits, 1u);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.base.hir;
+    probe.expected_body = fixture.caller_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    result = method_fixture_check(&fixture, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
+        && probe.invocation_count == 0u);
+    fixture_destroy(&fixture.base);
 }
 
 static CmHirDefId add_trait_associated(TestFixture *fixture,
@@ -2269,6 +2676,10 @@ static void test_invalid_api_and_status_names(void)
 int main(void)
 {
     test_explicit_qualified_callable_selection();
+    test_dot_method_callable_selection();
+    test_dot_method_ambiguity_is_order_independent();
+    test_dot_method_negative_and_no_solution();
+    test_dot_method_unsupported_shape_has_no_writeback();
     test_positive_impl_and_missing_metadata();
     test_intrinsic_body_projection_normalization();
     test_projected_call_substitution_writeback();

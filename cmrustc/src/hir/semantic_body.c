@@ -934,6 +934,409 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     return CM_SEMANTIC_BODY_OK;
 }
 
+static int cm_semantic_body_method_receiver_supported(
+    const CmHirContext *hir, const CmHirExpr *receiver)
+{
+    const CmHirType *type;
+
+    type = receiver == NULL ? NULL : cm_hir_get_type(hir, receiver->type);
+    return type != NULL && (type->kind == CM_HIR_TYPE_BOOL_KIND
+        || type->kind == CM_HIR_TYPE_CHAR_KIND
+        || type->kind == CM_HIR_TYPE_INTEGER_KIND
+        || type->kind == CM_HIR_TYPE_FLOAT_KIND);
+}
+
+static CmSemanticBodyStatus cm_semantic_body_stronger_method_failure(
+    CmSemanticBodyStatus left, CmSemanticBodyStatus right)
+{
+    static const CmSemanticBodyStatus order[] = {
+        CM_SEMANTIC_BODY_NO_SOLUTION,
+        CM_SEMANTIC_BODY_NEGATIVE,
+        CM_SEMANTIC_BODY_DEFERRED_INFERENCE,
+        CM_SEMANTIC_BODY_DEFERRED_METADATA,
+        CM_SEMANTIC_BODY_UNSUPPORTED,
+        CM_SEMANTIC_BODY_AMBIGUOUS,
+        CM_SEMANTIC_BODY_OVERFLOW,
+        CM_SEMANTIC_BODY_TYPECK_FAILURE,
+        CM_SEMANTIC_BODY_INVALID
+    };
+    size_t left_rank;
+    size_t right_rank;
+
+    left_rank = 0u;
+    right_rank = 0u;
+    while (left_rank + 1u < sizeof(order) / sizeof(order[0])
+        && order[left_rank] != left) {
+        ++left_rank;
+    }
+    while (right_rank + 1u < sizeof(order) / sizeof(order[0])
+        && order[right_rank] != right) {
+        ++right_rank;
+    }
+    return right_rank > left_rank ? right : left;
+}
+
+static void cm_semantic_body_set_method_solver_kind(
+    CmSemanticBodyConstraints *constraints, CmSemanticBodyStatus status)
+{
+    if (constraints == NULL) return;
+    switch (status) {
+    case CM_SEMANTIC_BODY_NEGATIVE:
+        constraints->solver_kind = CM_TRAIT_SOLVER_NEGATIVE;
+        break;
+    case CM_SEMANTIC_BODY_NO_SOLUTION:
+        constraints->solver_kind = CM_TRAIT_SOLVER_NO_SOLUTION;
+        break;
+    case CM_SEMANTIC_BODY_AMBIGUOUS:
+        constraints->solver_kind = CM_TRAIT_SOLVER_AMBIGUOUS;
+        break;
+    case CM_SEMANTIC_BODY_DEFERRED_INFERENCE:
+        constraints->solver_kind = CM_TRAIT_SOLVER_DEFERRED_INFERENCE;
+        break;
+    case CM_SEMANTIC_BODY_DEFERRED_METADATA:
+        constraints->solver_kind = CM_TRAIT_SOLVER_DEFERRED_METADATA;
+        break;
+    case CM_SEMANTIC_BODY_UNSUPPORTED:
+        constraints->solver_kind = CM_TRAIT_SOLVER_UNSUPPORTED;
+        break;
+    case CM_SEMANTIC_BODY_OVERFLOW:
+        constraints->solver_kind = CM_TRAIT_SOLVER_OVERFLOW;
+        break;
+    case CM_SEMANTIC_BODY_TYPECK_FAILURE:
+        constraints->solver_kind = CM_TRAIT_SOLVER_TYPECK_FAILURE;
+        break;
+    case CM_SEMANTIC_BODY_INVALID:
+        constraints->solver_kind = CM_TRAIT_SOLVER_INVALID;
+        break;
+    case CM_SEMANTIC_BODY_OK:
+        constraints->solver_kind = CM_TRAIT_SOLVER_PROVEN;
+        break;
+    default:
+        break;
+    }
+}
+
+static CmSemanticBodyStatus cm_semantic_body_method_impl_callable(
+    CmSemanticBodyConstraints *constraints, const CmHirItem *impl_item,
+    CmHirDefId declared_callable, const CmHirItem **out_callable)
+{
+    const CmHirItem *selected;
+    size_t index;
+    size_t matches;
+
+    if (constraints == NULL || impl_item == NULL || out_callable == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    *out_callable = NULL;
+    selected = NULL;
+    matches = 0u;
+    for (index = 0u; index < constraints->hir->items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(
+            &constraints->hir->items, index);
+        if (candidate != NULL && candidate->kind == CM_HIR_ITEM_FUNCTION
+            && cm_hir_def_id_equal(candidate->parent_definition,
+                impl_item->definition)
+            && cm_hir_def_id_equal(candidate->data.function_item
+                .trait_item_definition, declared_callable)) {
+            selected = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1u || selected == NULL
+        || selected->generic_parameter_count != 0u
+        || selected->predicate_scope_count != 0u
+        || selected->predicate_count != 0u
+        || selected->outlives_predicate_count != 0u
+        || selected->data.function_item.body == CM_HIR_BODY_NONE
+        || selected->data.function_item.signature.receiver
+            != CM_HIR_RECEIVER_VALUE) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    *out_callable = selected;
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
+    CmSemanticBodyConstraints *constraints,
+    const CmParamEnvSubstitution *environment_substitution,
+    CmHirExprId expression_id, const CmHirExpr *expression,
+    CmSemanticCheckedCallableFacts *facts)
+{
+    const CmHirExpr *receiver;
+    const CmHirItem *winner_trait;
+    const CmHirItem *winner_declared;
+    const CmHirItem *winner_impl;
+    const CmHirItem *winner_callable;
+    CmTypeckTypeId receiver_type;
+    CmSemanticBodyStatus failure;
+    CmSemanticBodyStatus blocking_failure;
+    CmSemanticBodyStatus status;
+    size_t trait_index;
+    size_t viable_count;
+
+    if (constraints == NULL || environment_substitution == NULL
+        || expression == NULL || facts == NULL
+        || expression->kind != CM_HIR_EXPR_METHOD_CALL
+        || expression->data.method_call.syntax != CM_HIR_CALLABLE_DOT_METHOD
+        || expression->data.method_call.method_name == CM_INTERN_ID_NONE
+        || (expression->data.method_call.argument_count == 0u)
+            != (expression->data.method_call.arguments == NULL)
+        || (expression->data.method_call.in_scope_trait_count == 0u)
+            != (expression->data.method_call.in_scope_traits == NULL)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    receiver = cm_hir_get_expr(constraints->hir,
+        expression->data.method_call.receiver);
+    if (receiver == NULL || receiver->owner_body != constraints->body_id) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    if (!cm_semantic_body_method_receiver_supported(constraints->hir,
+            receiver)) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    status = cm_semantic_body_expression_term(constraints,
+        expression->data.method_call.receiver, &receiver_type);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+    winner_trait = NULL;
+    winner_declared = NULL;
+    winner_impl = NULL;
+    winner_callable = NULL;
+    viable_count = 0u;
+    failure = CM_SEMANTIC_BODY_NO_SOLUTION;
+    blocking_failure = CM_SEMANTIC_BODY_OK;
+    for (trait_index = 0u;
+         trait_index < expression->data.method_call.in_scope_trait_count;
+         ++trait_index) {
+        const CmHirItem *trait_item;
+        const CmHirItem *declared;
+        size_t item_index;
+        size_t declaration_count;
+
+        trait_item = cm_semantic_body_item(constraints->hir,
+            expression->data.method_call.in_scope_traits[trait_index]);
+        if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        declared = NULL;
+        declaration_count = 0u;
+        for (item_index = 0u; item_index < constraints->hir->items.len;
+             ++item_index) {
+            const CmHirItem *candidate;
+
+            candidate = (const CmHirItem *)cm_vec_at_const(
+                &constraints->hir->items, item_index);
+            if (candidate != NULL
+                && candidate->kind == CM_HIR_ITEM_FUNCTION
+                && candidate->name
+                    == expression->data.method_call.method_name
+                && cm_hir_def_id_equal(candidate->parent_definition,
+                    trait_item->definition)) {
+                declared = candidate;
+                ++declaration_count;
+            }
+        }
+        if (declaration_count == 0u) continue;
+        if (declaration_count != 1u || declared == NULL) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        if (trait_item->definition.crate_id
+                != constraints->body->owner.crate_id
+            || trait_item->generic_parameter_count != 0u
+            || trait_item->predicate_scope_count != 0u
+            || trait_item->predicate_count != 0u
+            || trait_item->outlives_predicate_count != 0u
+            || declared->generic_parameter_count != 0u
+            || declared->predicate_scope_count != 0u
+            || declared->predicate_count != 0u
+            || declared->outlives_predicate_count != 0u
+            || declared->data.function_item.body != CM_HIR_BODY_NONE
+            || declared->data.function_item.signature.receiver
+                != CM_HIR_RECEIVER_VALUE
+            || declared->data.function_item.signature.parameter_count
+                != expression->data.method_call.argument_count + 1u) {
+            blocking_failure = cm_semantic_body_stronger_method_failure(
+                blocking_failure == CM_SEMANTIC_BODY_OK
+                    ? CM_SEMANTIC_BODY_NO_SOLUTION : blocking_failure,
+                CM_SEMANTIC_BODY_UNSUPPORTED);
+            continue;
+        }
+        {
+            CmTraitGoal goal;
+            CmTraitSelectionResult selection;
+            const CmHirItem *impl_item;
+            const CmHirItem *selected_callable;
+
+            memset(&goal, 0, sizeof(goal));
+            goal.kind = CM_TRAIT_GOAL_IMPLEMENTED;
+            goal.data.implemented.owner = constraints->body->owner;
+            goal.data.implemented.self_type = receiver_type;
+            goal.data.implemented.trait_type.definition =
+                trait_item->definition;
+            selection = cm_semantic_session_solve_goal(
+                constraints->session, constraints->typeck,
+                environment_substitution, &goal);
+            constraints->solver_kind = selection.kind;
+            constraints->typeck_status = selection.typeck_status;
+            status = selection.negative_match_count != 0u
+                && selection.supported_match_count == 0u
+                ? CM_SEMANTIC_BODY_NEGATIVE
+                : cm_semantic_solver_status(selection.kind);
+            if (status != CM_SEMANTIC_BODY_OK) {
+                failure = cm_semantic_body_stronger_method_failure(failure,
+                    status);
+                if (status != CM_SEMANTIC_BODY_NO_SOLUTION
+                    && status != CM_SEMANTIC_BODY_NEGATIVE) {
+                    blocking_failure = blocking_failure
+                            == CM_SEMANTIC_BODY_OK
+                        ? status
+                        : cm_semantic_body_stronger_method_failure(
+                            blocking_failure, status);
+                }
+                continue;
+            }
+            impl_item = cm_semantic_body_item(constraints->hir,
+                selection.impl_definition);
+            if (selection.proof_origin != CM_TRAIT_PROOF_IMPL
+                || cm_hir_def_id_is_none(selection.impl_definition)
+                || selection.supported_match_count != 1u
+                || selection.negative_match_count != 0u
+                || selection.blocking_match_count != 0u
+                || impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
+                || impl_item->definition.crate_id
+                    != trait_item->definition.crate_id
+                || impl_item->generic_parameter_count != 0u
+                || impl_item->predicate_scope_count != 0u
+                || impl_item->predicate_count != 0u
+                || impl_item->outlives_predicate_count != 0u
+                || !impl_item->data.impl_item.has_trait
+                || impl_item->data.impl_item.is_negative
+                || impl_item->data.impl_item.trait_type.argument_count != 0u
+                || impl_item->data.impl_item.trait_type.arguments != NULL
+                || !cm_hir_def_id_equal(impl_item->data.impl_item.trait_type
+                    .definition, trait_item->definition)) {
+                return CM_SEMANTIC_BODY_INVALID;
+            }
+            status = cm_semantic_body_method_impl_callable(constraints,
+                impl_item, declared->definition, &selected_callable);
+            if (status != CM_SEMANTIC_BODY_OK) {
+                blocking_failure = blocking_failure
+                        == CM_SEMANTIC_BODY_OK
+                    ? status : cm_semantic_body_stronger_method_failure(
+                        blocking_failure, status);
+                continue;
+            }
+            ++viable_count;
+            if (viable_count == 1u) {
+                winner_trait = trait_item;
+                winner_declared = declared;
+                winner_impl = impl_item;
+                winner_callable = selected_callable;
+            }
+        }
+    }
+    if (viable_count > 1u) {
+        cm_semantic_body_set_method_solver_kind(constraints,
+            CM_SEMANTIC_BODY_AMBIGUOUS);
+        return CM_SEMANTIC_BODY_AMBIGUOUS;
+    }
+    if (blocking_failure != CM_SEMANTIC_BODY_OK) {
+        cm_semantic_body_set_method_solver_kind(constraints,
+            blocking_failure);
+        return blocking_failure;
+    }
+    if (viable_count == 0u) {
+        cm_semantic_body_set_method_solver_kind(constraints, failure);
+        return failure;
+    }
+    if (winner_trait == NULL || winner_declared == NULL
+        || winner_impl == NULL || winner_callable == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    {
+        const CmHirFunctionSignature *signature;
+        CmTypeckInstantiation callable_instantiation;
+        CmTypeckTypeId actual_type;
+        CmTypeckTypeId declared_type;
+        uint32_t parameter_index;
+
+        signature = &winner_callable->data.function_item.signature;
+        if (signature->parameter_count
+                != expression->data.method_call.argument_count + 1u
+            || signature->receiver != CM_HIR_RECEIVER_VALUE) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        facts->argument_count = signature->parameter_count;
+        facts->parameter_count = signature->parameter_count;
+        facts->argument_expressions = (CmHirExprId *)cm_alloc_zeroed(
+            facts->argument_count, sizeof(CmHirExprId));
+        facts->parameter_types = (CmTypeckTypeId *)cm_alloc_zeroed(
+            facts->parameter_count, sizeof(CmTypeckTypeId));
+        cm_typeck_instantiation_init(constraints->typeck,
+            &callable_instantiation);
+        callable_instantiation.parameter_owner =
+            winner_callable->definition;
+        callable_instantiation.self_owner = winner_impl->definition;
+        callable_instantiation.self_type = receiver_type;
+        if (!cm_typeck_instantiation_is_valid(constraints->typeck,
+                &callable_instantiation)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        facts->expression = expression_id;
+        facts->syntax = CM_HIR_CALLABLE_DOT_METHOD;
+        facts->requested_self_type = receiver_type;
+        facts->requested_trait = winner_trait->definition;
+        facts->declared_trait_callable = winner_declared->definition;
+        facts->selected_impl = winner_impl->definition;
+        facts->selected_callable = winner_callable->definition;
+        facts->receiver_expression = expression->data.method_call.receiver;
+        facts->receiver_argument = 0u;
+        ((CmHirExprId *)facts->argument_expressions)[0] =
+            expression->data.method_call.receiver;
+        for (parameter_index = 1u;
+             parameter_index < facts->argument_count; ++parameter_index) {
+            ((CmHirExprId *)facts->argument_expressions)[parameter_index] =
+                expression->data.method_call.arguments[
+                    parameter_index - 1u];
+        }
+        constraints->failed_callee = winner_callable->definition;
+        status = cm_semantic_body_expression_term(constraints,
+            expression_id, &actual_type);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        status = cm_semantic_body_instantiate_type(constraints,
+            signature->return_type, &callable_instantiation,
+            &declared_type);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        facts->return_type = declared_type;
+        status = cm_semantic_body_unify_terms(constraints, actual_type,
+            declared_type);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        for (parameter_index = 0u;
+             parameter_index < signature->parameter_count;
+             ++parameter_index) {
+            constraints->failed_expression =
+                facts->argument_expressions[parameter_index];
+            status = cm_semantic_body_expression_term(constraints,
+                facts->argument_expressions[parameter_index],
+                &actual_type);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            status = cm_semantic_body_instantiate_type(constraints,
+                signature->parameters[parameter_index].type,
+                &callable_instantiation, &declared_type);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+            ((CmTypeckTypeId *)facts->parameter_types)[parameter_index] =
+                declared_type;
+            status = cm_semantic_body_unify_terms(constraints, actual_type,
+                declared_type);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+        }
+    }
+    cm_semantic_body_set_method_solver_kind(constraints,
+        CM_SEMANTIC_BODY_OK);
+    return CM_SEMANTIC_BODY_OK;
+}
+
 static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
     CmSemanticBodyConstraints *constraints,
     CmSemanticCheckedBodyFacts *facts)
@@ -1325,7 +1728,24 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
         }
         return CM_SEMANTIC_BODY_OK;
     case CM_HIR_EXPR_METHOD_CALL:
-        return CM_SEMANTIC_BODY_UNSUPPORTED;
+        if ((expression->data.method_call.argument_count == 0u)
+                != (expression->data.method_call.arguments == NULL)
+            || expression->data.method_call.receiver
+                == CM_HIR_EXPR_NONE) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        status = cm_semantic_body_constrain_expression(constraints,
+            expression->data.method_call.receiver, visible_local_count,
+            depth + 1u);
+        if (status != CM_SEMANTIC_BODY_OK) return status;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            status = cm_semantic_body_constrain_expression(constraints,
+                expression->data.method_call.arguments[index],
+                visible_local_count, depth + 1u);
+            if (status != CM_SEMANTIC_BODY_OK) return status;
+        }
+        return CM_SEMANTIC_BODY_OK;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if ((expression->data.qualified_call.argument_count == 0u)
                 != (expression->data.qualified_call.arguments == NULL)) {
@@ -1800,7 +2220,28 @@ static CmSemanticBodyStatus cm_semantic_body_walk(
         calls[(*count)++] = id;
         break;
     case CM_HIR_EXPR_METHOD_CALL:
-        return CM_SEMANTIC_BODY_UNSUPPORTED;
+        if (e->data.method_call.receiver == CM_HIR_EXPR_NONE
+            || (e->data.method_call.argument_count != 0u
+                && e->data.method_call.arguments == NULL)) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        if (cm_semantic_body_walk(hir, body,
+                e->data.method_call.receiver, seen, calls, count)
+                != CM_SEMANTIC_BODY_OK) {
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        for (i = 0u; i < e->data.method_call.argument_count; ++i) {
+            if (cm_semantic_body_walk(hir, body,
+                    e->data.method_call.arguments[i], seen, calls, count)
+                    != CM_SEMANTIC_BODY_OK) {
+                return CM_SEMANTIC_BODY_INVALID;
+            }
+        }
+        if (*count >= hir->expressions.len) {
+            return CM_SEMANTIC_BODY_OVERFLOW;
+        }
+        calls[(*count)++] = id;
+        break;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if (e->data.qualified_call.argument_count != 0u
             && e->data.qualified_call.arguments == NULL) {
@@ -2218,6 +2659,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         expression = cm_hir_get_expr(hir, expression_id);
         if (expression == NULL || expression->owner_body != body_id
             || (expression->kind != CM_HIR_EXPR_CALL
+                && expression->kind != CM_HIR_EXPR_METHOD_CALL
                 && expression->kind != CM_HIR_EXPR_QUALIFIED_CALL)) {
             result.status = CM_SEMANTIC_BODY_INVALID;
             return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
@@ -2243,6 +2685,29 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 return cm_semantic_body_fail_snapshot(result, typeck,
                     &snapshot, call_expressions);
             }
+            ++checked_facts.callable_count;
+            continue;
+        }
+        if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+            result.expression = expression_id;
+            constraints.failed_expression = expression_id;
+            constraints.failed_callee = cm_hir_def_id_none();
+            constraints.failed_predicate_index =
+                CM_SEMANTIC_BODY_PREDICATE_NONE;
+            result.status = cm_semantic_body_check_method_callable(
+                &constraints, &environment_substitution, expression_id,
+                expression,
+                &checked_callables[checked_facts.callable_count]);
+            if (result.status != CM_SEMANTIC_BODY_OK) {
+                result.expression = constraints.failed_expression;
+                result.callee = constraints.failed_callee;
+                result.typeck_status = constraints.typeck_status;
+                result.solver_kind = constraints.solver_kind;
+                return cm_semantic_body_fail_snapshot(result, typeck,
+                    &snapshot, call_expressions);
+            }
+            result.callee = checked_callables[
+                checked_facts.callable_count].selected_callable;
             ++checked_facts.callable_count;
             continue;
         }

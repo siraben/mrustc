@@ -279,7 +279,8 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
     const CmHirBody *selected_body;
 
     if (hir == NULL || record == NULL
-        || record->syntax != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD) return 0;
+        || (record->syntax != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+            && record->syntax != CM_HIR_CALLABLE_DOT_METHOD)) return 0;
     trait_item = cm_results_item(hir, record->requested_trait);
     declared = cm_results_item(hir, record->declared_trait_callable);
     impl_item = cm_results_item(hir, record->selected_impl);
@@ -313,11 +314,106 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
             record->selected_callable)
         && selected->data.function_item.signature.parameter_count
             == record->argument_count
+        && (record->syntax != CM_HIR_CALLABLE_DOT_METHOD
+            || (declared->data.function_item.signature.receiver
+                    == CM_HIR_RECEIVER_VALUE
+                && selected->data.function_item.signature.receiver
+                    == CM_HIR_RECEIVER_VALUE
+                && record->receiver_argument == 0u
+                && record->argument_count != 0u))
         && cm_hir_def_id_equal(selected->parent_definition,
             record->selected_impl)
         && cm_hir_def_id_equal(
             selected->data.function_item.trait_item_definition,
             record->declared_trait_callable);
+}
+
+static int cm_results_expression_is_callable(const CmHirExpr *expression)
+{
+    return expression != NULL
+        && (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+            || expression->kind == CM_HIR_EXPR_METHOD_CALL);
+}
+
+static int cm_results_method_trait_in_scope(const CmHirExpr *expression,
+    CmHirDefId trait_definition)
+{
+    uint32_t index;
+
+    if (expression == NULL || expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return 0;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count;
+         ++index) {
+        if (cm_hir_def_id_equal(
+                expression->data.method_call.in_scope_traits[index],
+                trait_definition)) return 1;
+    }
+    return 0;
+}
+
+static int cm_results_callable_source_valid(const CmHirContext *hir,
+    const CmHirExpr *expression, const CmSemanticCallableRecord *record)
+{
+    const CmHirItem *declared;
+
+    if (!cm_results_expression_is_callable(expression) || record == NULL) {
+        return 0;
+    }
+    if ((expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+            && record->syntax
+                != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD)
+        || (expression->kind == CM_HIR_EXPR_METHOD_CALL
+            && record->syntax != CM_HIR_CALLABLE_DOT_METHOD)) {
+        return 0;
+    }
+    if (record->syntax == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD) {
+        return expression->data.qualified_call.syntax == record->syntax
+            && cm_hir_def_id_equal(
+                expression->data.qualified_call.requested_trait,
+                record->requested_trait)
+            && cm_hir_def_id_equal(
+                expression->data.qualified_call.declared_trait_callable,
+                record->declared_trait_callable)
+            && expression->data.qualified_call.receiver_argument
+                == record->receiver_argument
+            && expression->data.qualified_call.argument_count
+                == record->argument_count;
+    }
+    declared = cm_results_item(hir, record->declared_trait_callable);
+    return expression->data.method_call.syntax == record->syntax
+        && record->receiver_argument == 0u
+        && record->receiver_expression
+            == expression->data.method_call.receiver
+        && record->argument_count
+            == expression->data.method_call.argument_count + 1u
+        && cm_results_method_trait_in_scope(expression,
+            record->requested_trait)
+        && declared != NULL && declared->kind == CM_HIR_ITEM_FUNCTION
+        && declared->name == expression->data.method_call.method_name
+        && cm_hir_def_id_equal(declared->parent_definition,
+            record->requested_trait)
+        && declared->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_VALUE;
+}
+
+static CmHirExprId cm_results_callable_source_argument(
+    const CmHirExpr *expression, uint32_t argument)
+{
+    if (expression == NULL) return CM_HIR_EXPR_NONE;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        return argument < expression->data.qualified_call.argument_count
+            ? expression->data.qualified_call.arguments[argument]
+            : CM_HIR_EXPR_NONE;
+    }
+    if (expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return CM_HIR_EXPR_NONE;
+    }
+    if (argument == 0u) return expression->data.method_call.receiver;
+    return argument - 1u < expression->data.method_call.argument_count
+        ? expression->data.method_call.arguments[argument - 1u]
+        : CM_HIR_EXPR_NONE;
 }
 
 static int cm_results_record_matches_hir_type(const unsigned char *bytes,
@@ -768,8 +864,20 @@ static CmSemanticResultsStatus cm_results_collect_expression(
         }
         break;
     case CM_HIR_EXPR_METHOD_CALL:
-        /* Not publishable until semantic method selection owns its recipe. */
-        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        status = cm_results_collect_expression(results, hir, body_id,
+            expression->data.method_call.receiver, seen, types,
+            body_expression_count, depth + 1u, publish, typeck,
+            expression_terms, expression_term_count);
+        if (status != CM_SEMANTIC_RESULTS_OK) return status;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            status = cm_results_collect_expression(results, hir, body_id,
+                expression->data.method_call.arguments[index], seen, types,
+                body_expression_count, depth + 1u, publish, typeck,
+                expression_terms, expression_term_count);
+            if (status != CM_SEMANTIC_RESULTS_OK) return status;
+        }
+        break;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         for (index = 0u;
              index < expression->data.qualified_call.argument_count;
@@ -1123,7 +1231,7 @@ static CmSemanticResultsStatus cm_results_validate_membership(
                     != record->has_primitive_operator)
             || ((expression->kind == CM_HIR_EXPR_FIELD)
                     != record->has_field_selection)
-                || ((expression->kind == CM_HIR_EXPR_QUALIFIED_CALL)
+                || (cm_results_expression_is_callable(expression)
                     != record->has_callable_selection))) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
@@ -1553,7 +1661,7 @@ static int cm_results_instance_recipes_valid(
                 != record->has_primitive_operator)
             || ((expression->kind == CM_HIR_EXPR_FIELD)
                 != record->has_field_selection)
-            || ((expression->kind == CM_HIR_EXPR_QUALIFIED_CALL)
+            || (cm_results_expression_is_callable(expression)
                 != record->has_callable_selection)) return 0;
         if (record->has_callable_selection) {
             const CmSemanticCallableRecord *callable;
@@ -1567,24 +1675,13 @@ static int cm_results_instance_recipes_valid(
             if (callable->expression != (CmHirExprId)(expression_index + 1u)
                 || !cm_results_callable_identity_valid(hir, local_crate,
                     callable)
-                || !cm_results_record_matches_hir_type(instance->type_bytes,
-                    instance->type_bytes_len,
-                    &callable->requested_self_type, hir,
-                    expression->data.qualified_call.requested_self_type)
+                || !cm_results_callable_source_valid(hir, expression,
+                    callable)
                 || !cm_results_record_matches_hir_type(instance->type_bytes,
                     instance->type_bytes_len,
                     &callable->requested_self_type, hir,
                     cm_results_item(hir, callable->selected_impl)
                         ->data.impl_item.self_type)
-                || callable->syntax != expression->data.qualified_call.syntax
-                || !cm_hir_def_id_equal(callable->requested_trait,
-                    expression->data.qualified_call.requested_trait)
-                || !cm_hir_def_id_equal(callable->declared_trait_callable,
-                    expression->data.qualified_call.declared_trait_callable)
-                || callable->receiver_argument
-                    != expression->data.qualified_call.receiver_argument
-                || callable->argument_count
-                    != expression->data.qualified_call.argument_count
                 || callable->argument_start
                     > instance->callable_argument_count
                 || callable->argument_count
@@ -1625,8 +1722,8 @@ static int cm_results_instance_recipes_valid(
                     callable->argument_start + argument];
                 if (child == CM_HIR_EXPR_NONE
                     || (size_t)child > instance->expression_count
-                    || child != expression->data.qualified_call.arguments[
-                        argument]) return 0;
+                    || child != cm_results_callable_source_argument(
+                        expression, argument)) return 0;
                 child_record = &instance->expressions[(size_t)child - 1u];
                 if (!child_record->present
                     || !cm_results_instance_type_equal(instance,
@@ -1636,12 +1733,24 @@ static int cm_results_instance_recipes_valid(
                             callable->parameter_start + argument].type_size,
                         instance, child_record->adjusted_type_offset,
                         child_record->adjusted_type_size)
-                    || !cm_results_record_matches_hir_type(
-                        instance->type_bytes, instance->type_bytes_len,
-                        &instance->callable_parameters[
-                            callable->parameter_start + argument], hir,
-                        selected_callable->data.function_item.signature
-                            .parameters[argument].type)) return 0;
+                    || (callable->syntax == CM_HIR_CALLABLE_DOT_METHOD
+                            && argument == callable->receiver_argument
+                        ? !cm_results_instance_type_equal(instance,
+                            instance->callable_parameters[
+                                callable->parameter_start + argument]
+                                .type_offset,
+                            instance->callable_parameters[
+                                callable->parameter_start + argument]
+                                .type_size,
+                            instance,
+                            callable->requested_self_type.type_offset,
+                            callable->requested_self_type.type_size)
+                        : !cm_results_record_matches_hir_type(
+                            instance->type_bytes, instance->type_bytes_len,
+                            &instance->callable_parameters[
+                                callable->parameter_start + argument], hir,
+                            selected_callable->data.function_item.signature
+                                .parameters[argument].type))) return 0;
             }
         }
         if (record->has_primitive_operator) {
@@ -2526,19 +2635,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         fact = &facts->callables[call_index];
         expression = cm_hir_get_expr(hir, fact->expression);
         if (expression == NULL || expression->owner_body != body_id
-            || expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
-            || fact->syntax != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
-            || expression->data.qualified_call.syntax != fact->syntax
-            || expression->data.qualified_call.argument_count
-                != fact->argument_count
-            || expression->data.qualified_call.receiver_argument
-                != fact->receiver_argument
-            || !cm_hir_def_id_equal(
-                expression->data.qualified_call.requested_trait,
-                fact->requested_trait)
-            || !cm_hir_def_id_equal(
-                expression->data.qualified_call.declared_trait_callable,
-                fact->declared_trait_callable)
+            || !cm_results_expression_is_callable(expression)
             || fact->requested_self_type == CM_TYPECK_TYPE_NONE
             || fact->return_type == CM_TYPECK_TYPE_NONE
             || cm_hir_def_id_is_none(fact->selected_impl)
@@ -2565,6 +2662,10 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         record->argument_start = callable_argument_count;
         record->parameter_start = callable_argument_count;
         record->argument_count = fact->argument_count;
+        if (!cm_results_callable_source_valid(hir, expression, record)) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
         status = cm_results_collect_type_record(&output, hir, typeck,
             fact->requested_self_type, 1, &record->requested_self_type);
         if (status == CM_SEMANTIC_RESULTS_OK) {
@@ -2579,8 +2680,8 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             const CmSemanticExpressionRecord *child_record;
 
             child = fact->argument_expressions[parameter_index];
-            if (child != expression->data.qualified_call.arguments[
-                    parameter_index]
+            if (child != cm_results_callable_source_argument(expression,
+                    (uint32_t)parameter_index)
                 || child == CM_HIR_EXPR_NONE
                 || (size_t)child > state->expression_count) {
                 status = CM_SEMANTIC_RESULTS_INVALID_HIR;
@@ -2607,9 +2708,20 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             callable_argument_count += 1u;
         }
         if (status != CM_SEMANTIC_RESULTS_OK) break;
-        if (!cm_results_record_matches_hir_type(combined_type_bytes,
-                sizing.len, &record->requested_self_type, hir,
-                expression->data.qualified_call.requested_self_type)) {
+        if ((record->syntax == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+                && !cm_results_record_matches_hir_type(combined_type_bytes,
+                    sizing.len, &record->requested_self_type, hir,
+                    expression->data.qualified_call.requested_self_type))
+            || (record->syntax == CM_HIR_CALLABLE_DOT_METHOD
+                && (!cm_results_record_matches_hir_type(combined_type_bytes,
+                        sizing.len, &record->requested_self_type, hir,
+                        cm_hir_get_expr(hir,
+                            expression->data.method_call.receiver)->type)
+                    || !cm_results_record_matches_hir_type(
+                        combined_type_bytes, sizing.len,
+                        &record->requested_self_type, hir,
+                        cm_results_item(hir, record->selected_impl)
+                            ->data.impl_item.self_type)))) {
             status = CM_SEMANTIC_RESULTS_INVALID_HIR;
             break;
         }
@@ -2790,7 +2902,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
                 != record->has_primitive_operator)
             || ((expression->kind == CM_HIR_EXPR_FIELD)
                 != record->has_field_selection)
-            || ((expression->kind == CM_HIR_EXPR_QUALIFIED_CALL)
+            || (cm_results_expression_is_callable(expression)
                 != record->has_callable_selection)) {
             status = CM_SEMANTIC_RESULTS_INVALID_HIR;
             continue;
