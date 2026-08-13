@@ -1897,7 +1897,10 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
                     expression_id, CM_MIR_OK);
             }
-            if (semantic_callable.enclosing_impl_argument_count == 1u) {
+            if (semantic_callable.enclosing_impl_argument_count == 1u
+                && !cm_hir_def_id_equal(
+                    semantic_callable.selected_callable,
+                    semantic_callable.declared_trait_callable)) {
                 if (cm_mir_flow_semantic_callable_generic_argument_query(
                         plan, expression_id,
                         CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL,
@@ -2058,7 +2061,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         != CM_SEMANTIC_RESULTS_OK)
                 || !cm_hir_def_id_equal(
                     semantic_callee_signature.definition,
-                    callee_definition)
+                    selected_call ? semantic_callable.body_definition
+                        : callee_definition)
                 || (selected_call
                     ? (semantic_callee_signature.parameter_count
                             != semantic_callable.argument_count

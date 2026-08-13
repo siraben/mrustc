@@ -133,6 +133,70 @@ static const CmHirItem *cm_instance_item(const CmHirContext *hir,
         ? item : NULL;
 }
 
+static int cm_instance_trait_callable_relation_valid(
+    const CmHirContext *hir, const CmHirItem *selected,
+    const CmHirItem *declared, const CmHirItem *enclosing,
+    const CmHirItem *trait_item)
+{
+    const CmHirItem *linked;
+    size_t linked_count;
+    size_t index;
+    int inherited_default;
+
+    if (hir == NULL || selected == NULL || declared == NULL
+        || enclosing == NULL || trait_item == NULL
+        || selected->kind != CM_HIR_ITEM_FUNCTION
+        || declared->kind != CM_HIR_ITEM_FUNCTION
+        || enclosing->kind != CM_HIR_ITEM_IMPL
+        || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || !enclosing->data.impl_item.has_trait
+        || enclosing->data.impl_item.is_negative
+        || !cm_hir_def_id_equal(declared->parent_definition,
+            trait_item->definition)
+        || !cm_hir_def_id_is_none(
+            declared->data.function_item.trait_item_definition)
+        || !cm_hir_def_id_equal(
+            enclosing->data.impl_item.trait_type.definition,
+            trait_item->definition)) {
+        return 0;
+    }
+    inherited_default = cm_hir_def_id_equal(selected->definition,
+        declared->definition);
+    if (inherited_default) {
+        if (!cm_hir_def_id_equal(selected->parent_definition,
+                trait_item->definition)
+            || selected->data.function_item.body == CM_HIR_BODY_NONE) {
+            return 0;
+        }
+    } else if (!cm_hir_def_id_equal(selected->parent_definition,
+            enclosing->definition)
+        || !cm_hir_def_id_equal(
+            selected->data.function_item.trait_item_definition,
+            declared->definition)) {
+        return 0;
+    }
+    linked = NULL;
+    linked_count = 0u;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_hir_def_id_equal(candidate->parent_definition,
+                enclosing->definition)
+            || !cm_hir_def_id_equal(candidate->data.function_item
+                .trait_item_definition, declared->definition)) {
+            continue;
+        }
+        linked = candidate;
+        ++linked_count;
+    }
+    return inherited_default ? linked_count == 0u
+        : linked_count == 1u && linked != NULL
+            && cm_hir_def_id_equal(linked->definition,
+                selected->definition);
+}
+
 static CmHirInstanceStatus cm_instance_encode_type(
     CmInstanceBuffer *buffer, const CmHirContext *hir, CmHirTypeId type_id,
     const CmInstanceSubstitution *substitution, size_t depth);
@@ -850,6 +914,17 @@ static CmHirInstanceStatus cm_instance_compare_encoded(
     return status;
 }
 
+CmHirInstanceStatus cm_hir_canonical_type_matches(
+    const CmHirContext *hir, CmHirTypeId type,
+    const unsigned char *bytes, size_t size)
+{
+    if (hir == NULL || type == CM_HIR_TYPE_NONE
+        || bytes == NULL || size == 0u) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    return cm_instance_compare_encoded(hir, type, NULL, bytes, size);
+}
+
 static CmHirInstanceStatus cm_instance_encode_parts_value(
     CmInstanceBuffer *buffer, const CmHirContext *hir,
     CmHirCrateId local_crate, const CmHirCanonicalInstanceParts *parts)
@@ -921,21 +996,8 @@ static CmHirInstanceStatus cm_instance_encode_parts_value(
     enclosing = cm_instance_item(hir, parts->enclosing_impl);
     declared = cm_instance_item(hir, parts->declared_trait_callable);
     trait_item = cm_instance_item(hir, parts->implemented_trait);
-    if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
-        || !cm_hir_def_id_equal(selected->parent_definition,
-            enclosing->definition)
-        || !enclosing->data.impl_item.has_trait
-        || enclosing->data.impl_item.is_negative
-        || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
-        || !cm_hir_def_id_equal(
-            selected->data.function_item.trait_item_definition,
-            declared->definition)
-        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
-        || !cm_hir_def_id_equal(declared->parent_definition,
-            trait_item->definition)
-        || !cm_hir_def_id_equal(
-            enclosing->data.impl_item.trait_type.definition,
-            trait_item->definition)
+    if (!cm_instance_trait_callable_relation_valid(hir, selected, declared,
+            enclosing, trait_item)
         || !cm_hir_def_id_equal(parts->self_owner, enclosing->definition)
         || parts->self_type == NULL || parts->self_type_size == 0u) {
         return CM_HIR_INSTANCE_INVALID_RELATION;
@@ -1224,21 +1286,8 @@ static CmHirInstanceStatus cm_instance_encode_spec(CmInstanceBuffer *buffer,
     enclosing = cm_instance_item(hir, spec->enclosing_impl);
     declared = cm_instance_item(hir, spec->declared_trait_callable);
     trait_item = cm_instance_item(hir, spec->implemented_trait);
-    if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
-        || !cm_hir_def_id_equal(selected->parent_definition,
-            enclosing->definition)
-        || !enclosing->data.impl_item.has_trait
-        || enclosing->data.impl_item.is_negative
-        || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
-        || !cm_hir_def_id_equal(
-            selected->data.function_item.trait_item_definition,
-            declared->definition)
-        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
-        || !cm_hir_def_id_equal(declared->parent_definition,
-            trait_item->definition)
-        || !cm_hir_def_id_equal(
-            enclosing->data.impl_item.trait_type.definition,
-            trait_item->definition)
+    if (!cm_instance_trait_callable_relation_valid(hir, selected, declared,
+            enclosing, trait_item)
         || !cm_hir_def_id_equal(spec->self_owner, enclosing->definition)
         || spec->self_type == CM_HIR_TYPE_NONE) {
         return CM_HIR_INSTANCE_INVALID_RELATION;
@@ -1994,6 +2043,7 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     const CmSemanticResults *semantic_results;
     CmSemanticBodyView semantic_body;
     CmSemanticResultsStatus semantic_status;
+    int relationful;
     uint64_t admission_capability_id;
     size_t allocation_size;
 
@@ -2012,13 +2062,21 @@ CmHirInstanceStatus cm_hir_instance_key_init(CmHirInstanceKey *key,
     }
     selected = cm_instance_item(hir, spec->selected_callable);
     semantic_results = cm_semantic_admission_results(admission);
+    relationful = !cm_hir_def_id_is_none(spec->declared_trait_callable)
+        || !cm_hir_def_id_is_none(spec->enclosing_impl)
+        || !cm_hir_def_id_is_none(spec->implemented_trait)
+        || !cm_hir_def_id_is_none(spec->self_owner)
+        || spec->self_type != CM_HIR_TYPE_NONE;
     semantic_status = semantic_results == NULL
         ? CM_SEMANTIC_RESULTS_NOT_FOUND
-        : cm_semantic_results_body(semantic_results, admission,
-            selected == NULL ? CM_HIR_BODY_NONE
-                : selected->data.function_item.body, &semantic_body);
-    if (semantic_status == CM_SEMANTIC_RESULTS_NOT_FOUND
-        && semantic_results != NULL && selected != NULL) {
+        : relationful
+            ? cm_semantic_results_instance_body(semantic_results,
+                admission, spec, &semantic_body)
+            : cm_semantic_results_body(semantic_results, admission,
+                selected == NULL ? CM_HIR_BODY_NONE
+                    : selected->data.function_item.body, &semantic_body);
+    if (!relationful && semantic_status == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && semantic_results != NULL) {
         semantic_status = cm_semantic_results_instance_body(
             semantic_results, admission, spec, &semantic_body);
     }

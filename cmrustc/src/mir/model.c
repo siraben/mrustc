@@ -1089,8 +1089,10 @@ static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
 {
     CmHirCanonicalInstance identity;
     CmHirCanonicalInstance encoded;
-    CmMirBody query_body;
-    CmMirSemanticInstanceQuery query;
+    CmHirDecodedCanonicalInstance decoded;
+    const CmHirCanonicalArgumentPart *executable_arguments;
+    uint32_t executable_argument_count;
+    uint32_t index;
     int valid;
 
     if (!cm_mir_instance_is_canonical(instance)) return 0;
@@ -1103,15 +1105,27 @@ static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
     if (cm_hir_canonical_instance_validate(hir,
             instance->definition.crate_id, &identity)
             != CM_HIR_INSTANCE_OK) return 0;
-    memset(&query_body, 0, sizeof(query_body));
-    query_body.instance = *instance;
-    memset(&query, 0, sizeof(query));
+    cm_hir_decoded_canonical_instance_init(&decoded);
     cm_hir_canonical_instance_init(&encoded);
-    if (!cm_mir_semantic_instance_query_init(&query, hir, &query_body)) {
+    if (cm_hir_canonical_instance_decode(hir,
+            instance->definition.crate_id, &identity, &decoded)
+            != CM_HIR_INSTANCE_OK) {
         return 0;
     }
-    valid = cm_hir_canonical_instance_encode(hir,
-            instance->definition.crate_id, &query.spec, &encoded)
+    if (cm_hir_def_id_is_none(decoded.parts.enclosing_impl)) {
+        executable_arguments = decoded.parts.item_arguments;
+        executable_argument_count = decoded.parts.item_argument_count;
+    } else if (cm_hir_def_id_equal(decoded.parts.selected_callable,
+            decoded.parts.declared_trait_callable)) {
+        executable_arguments = decoded.parts.method_arguments;
+        executable_argument_count = decoded.parts.method_argument_count;
+    } else {
+        executable_arguments = decoded.parts.enclosing_impl_arguments;
+        executable_argument_count =
+            decoded.parts.enclosing_impl_argument_count;
+    }
+    valid = cm_hir_canonical_instance_encode_parts(hir,
+            instance->definition.crate_id, &decoded.parts, &encoded)
                 == CM_HIR_INSTANCE_OK
         && cm_hir_def_id_equal(encoded.definition, instance->definition)
         && cm_hir_def_id_equal(encoded.body_definition,
@@ -1119,9 +1133,17 @@ static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
         && encoded.body == instance->body
         && encoded.size == instance->identity_size
         && memcmp(encoded.bytes, instance->identity_bytes,
-            encoded.size) == 0;
+            encoded.size) == 0
+        && instance->substitution_count == executable_argument_count;
+    for (index = 0u; valid && index < executable_argument_count; ++index) {
+        valid = executable_arguments[index].kind == CM_HIR_GENERIC_ARG_TYPE
+            && cm_hir_canonical_type_matches(hir,
+                instance->substitutions[index],
+                executable_arguments[index].bytes,
+                executable_arguments[index].size) == CM_HIR_INSTANCE_OK;
+    }
     cm_hir_canonical_instance_destroy(&encoded);
-    cm_mir_semantic_instance_query_destroy(&query);
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
     return valid;
 }
 
@@ -2406,7 +2428,10 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 || semantic_callable.enclosing_impl_argument_count > 1u) {
                 return 0;
             }
-            if (semantic_callable.enclosing_impl_argument_count == 1u) {
+            if (semantic_callable.enclosing_impl_argument_count == 1u
+                && !cm_hir_def_id_equal(
+                    semantic_callable.selected_callable,
+                    semantic_callable.declared_trait_callable)) {
                 CmHirTypeId callee_substitution;
 
                 if (cm_mir_semantic_callable_generic_argument_query(match,
@@ -2458,7 +2483,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                                 expression))
                         || !cm_hir_def_id_equal(
                             semantic_signature.definition,
-                            semantic_callable.selected_callable)
+                            semantic_callable.body_definition)
                         || semantic_signature.parameter_count
                             != semantic_callable.argument_count
                         || !cm_mir_semantic_view_equal(

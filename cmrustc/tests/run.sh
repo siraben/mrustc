@@ -174,6 +174,8 @@ CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_qualified_ufcs_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
+    tests/codegen/run_qualified_default_acceptance.sh
+CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_dot_method_acceptance.sh
 CMRUSTC="$CMRUSTC" CC="$CC" CFLAGS="$CFLAGS" \
     tests/codegen/run_blanket_echo_acceptance.sh

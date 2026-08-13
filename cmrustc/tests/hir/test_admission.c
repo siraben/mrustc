@@ -2053,6 +2053,183 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
     fixture_destroy(&f);
 }
 
+static void test_exact_instance_closure_executes_inherited_trait_default(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable[2];
+    CmSemanticReachableInstanceCall edge;
+    CmHirInstanceSpec caller_spec;
+    CmHirInstanceSpec callee_spec;
+    const CmHirItem *caller;
+    const CmHirItem *trait_default;
+    const CmHirItem *impl_item;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmHirInstanceKey key;
+    CmHirExprId call_expression;
+    size_t index;
+
+    fixture_init(&f,
+        "trait Convert { fn convert(value: u32) -> u32 { value + 1u32 } } "
+        "impl Convert for u32 {} "
+        "fn caller(value: u32) -> u32 { <u32 as Convert>::convert(value) }");
+    caller = find_free_function(&f.hir, "caller");
+    trait_default = find_trait_default(&f.hir, "convert");
+    impl_item = NULL;
+    for (index = 0u; index < f.hir.items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&f.hir.items,
+            index);
+        if (candidate != NULL && candidate->kind == CM_HIR_ITEM_IMPL
+            && candidate->data.impl_item.has_trait
+            && !candidate->data.impl_item.is_negative
+            && trait_default != NULL
+            && cm_hir_def_id_equal(candidate->data.impl_item.trait_type
+                    .definition, trait_default->parent_definition)) {
+            assert(impl_item == NULL);
+            impl_item = candidate;
+        }
+    }
+    assert(caller != NULL && trait_default != NULL && impl_item != NULL);
+    lower_function(&f, trait_default);
+    lower_function(&f, caller);
+    call_expression = find_body_qualified_call(&f.hir,
+        caller->data.function_item.body);
+    assert(call_expression != CM_HIR_EXPR_NONE);
+    cm_hir_instance_spec_init(&caller_spec);
+    caller_spec.selected_callable = caller->definition;
+    caller_spec.body_definition = caller->definition;
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = trait_default->definition;
+    callee_spec.body_definition = trait_default->definition;
+    callee_spec.declared_trait_callable = trait_default->definition;
+    callee_spec.enclosing_impl = impl_item->definition;
+    callee_spec.implemented_trait = trait_default->parent_definition;
+    callee_spec.self_owner = impl_item->definition;
+    callee_spec.self_type = impl_item->data.impl_item.self_type;
+    reachable[0].body = caller->data.function_item.body;
+    reachable[0].spec = &caller_spec;
+    reachable[1].body = trait_default->data.function_item.body;
+    reachable[1].spec = &callee_spec;
+    edge.caller = &caller_spec;
+    edge.expression = call_expression;
+    edge.callee = &callee_spec;
+    memset(&admission, 0, sizeof(admission));
+    memset(&key, 0, sizeof(key));
+    result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, &edge, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_callable_selection(results,
+            &admission, &caller_spec, call_expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(selection.selected_impl,
+            impl_item->definition)
+        && cm_hir_def_id_equal(selection.selected_callable,
+            trait_default->definition)
+        && cm_hir_def_id_equal(selection.body_definition,
+            trait_default->definition)
+        && cm_hir_instance_key_init(&key, &admission, &callee_spec)
+            == CM_HIR_INSTANCE_OK);
+    cm_hir_instance_key_destroy(&key);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
+static void test_exact_instance_closure_prefers_trait_override(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable[2];
+    CmSemanticReachableInstanceCall edge;
+    CmHirInstanceSpec caller_spec;
+    CmHirInstanceSpec callee_spec;
+    const CmHirItem *caller;
+    const CmHirItem *trait_default;
+    const CmHirItem *impl_item;
+    const CmHirItem *override;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmHirExprId call_expression;
+    size_t index;
+
+    fixture_init(&f,
+        "trait Convert { fn convert(value: u32) -> u32 { value + 1u32 } } "
+        "impl Convert for u32 { "
+        "fn convert(value: u32) -> u32 { value + 2u32 } } "
+        "fn caller(value: u32) -> u32 { <u32 as Convert>::convert(value) }");
+    caller = find_free_function(&f.hir, "caller");
+    trait_default = find_trait_default(&f.hir, "convert");
+    impl_item = NULL;
+    override = NULL;
+    for (index = 0u; index < f.hir.items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&f.hir.items,
+            index);
+        if (candidate != NULL && candidate->kind == CM_HIR_ITEM_IMPL
+            && candidate->data.impl_item.has_trait
+            && trait_default != NULL
+            && cm_hir_def_id_equal(candidate->data.impl_item.trait_type
+                    .definition, trait_default->parent_definition)) {
+            impl_item = candidate;
+        } else if (candidate != NULL
+            && candidate->kind == CM_HIR_ITEM_FUNCTION
+            && trait_default != NULL
+            && cm_hir_def_id_equal(candidate->data.function_item
+                    .trait_item_definition, trait_default->definition)) {
+            override = candidate;
+        }
+    }
+    assert(caller != NULL && trait_default != NULL && impl_item != NULL
+        && override != NULL && override->data.function_item.body
+            != CM_HIR_BODY_NONE);
+    lower_function(&f, trait_default);
+    lower_function(&f, override);
+    lower_function(&f, caller);
+    call_expression = find_body_qualified_call(&f.hir,
+        caller->data.function_item.body);
+    assert(call_expression != CM_HIR_EXPR_NONE);
+    cm_hir_instance_spec_init(&caller_spec);
+    caller_spec.selected_callable = caller->definition;
+    caller_spec.body_definition = caller->definition;
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = override->definition;
+    callee_spec.body_definition = override->definition;
+    callee_spec.declared_trait_callable = trait_default->definition;
+    callee_spec.enclosing_impl = impl_item->definition;
+    callee_spec.implemented_trait = trait_default->parent_definition;
+    callee_spec.self_owner = impl_item->definition;
+    callee_spec.self_type = impl_item->data.impl_item.self_type;
+    reachable[0].body = caller->data.function_item.body;
+    reachable[0].spec = &caller_spec;
+    reachable[1].body = override->data.function_item.body;
+    reachable[1].spec = &callee_spec;
+    edge.caller = &caller_spec;
+    edge.expression = call_expression;
+    edge.callee = &callee_spec;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, &edge, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_callable_selection(results,
+            &admission, &caller_spec, call_expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(selection.selected_impl,
+            impl_item->definition)
+        && cm_hir_def_id_equal(selection.selected_callable,
+            override->definition)
+        && cm_hir_def_id_equal(selection.body_definition,
+            override->definition));
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
 static void test_reachable_admission_scope_is_enforced(void)
 {
     Fixture f;
@@ -2217,6 +2394,8 @@ int main(void)
     test_exact_instance_closure_authenticates_generic_calls();
     test_canonical_instance_closure_is_exact_and_atomic();
     test_exact_instance_closure_authenticates_qualified_call();
+    test_exact_instance_closure_executes_inherited_trait_default();
+    test_exact_instance_closure_prefers_trait_override();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();
     test_invalid_api();

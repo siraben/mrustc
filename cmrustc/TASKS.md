@@ -1034,9 +1034,14 @@ with no reachable `usize`; generic identity substitution remains u32-only.
 Canonical callable instance format v2 and MIR `mir-v9` separately retain the
 selected dispatch/symbol definition and `body_definition`, the definition
 whose signature and HIR body execute. Semantic results, admission, reachable
-MIR, lowering, dumps, and C emission authenticate both identities. This
-checkpoint deliberately preserves `body_definition == selected_callable`;
-inherited trait-default selection is the next behavior-changing slice.
+MIR, lowering, dumps, and C emission authenticate both identities. Qualified
+receiver-free calls can now inherit a nongeneric trait default through a
+concrete local impl. Such an instance deliberately keeps
+`selected_callable == body_definition == declared_trait_callable`: the
+concrete `selected_impl`, `self_owner`, and `self_type` supply dispatch
+identity, and the complete canonical key therefore gives two impls sharing
+one default body distinct MIR and C symbols. No synthetic impl-method DefId is
+created.
 
 Portable C maps Rust `usize` to `uintptr_t`, emits explicit
 `(uintptr_t)UINT32_C(...)` or `(uintptr_t)UINT64_C(...)` constants, and adds
@@ -1548,8 +1553,12 @@ performing lookup during reachability or MIR construction.
 
 This checkpoint remains deliberately bounded to concrete nongeneric local
 positive trait impls and methods with the currently supported scalar call
-shape. Trait defaults, inherent and dot-syntax method lookup, generic
-traits/impls/methods, broader substitutions and projections, coercions,
+shape. Qualified calls may use an explicit override or inherit a receiver-free
+nongeneric trait default whose body has the existing closed scalar shape.
+Bodyless linked overrides block fallback, and multiple linked overrides
+reject. Inherent lookup, dot-syntax inherited defaults, defaults containing
+calls or meaningful `Self`, generic traits, source-level blanket inherited
+defaults, broader substitutions and projections, coercions,
 autoderef/autoref/reborrow adjustments, cross-crate incomplete metadata, and
 general callable traits remain fail-closed. Stored MIR locals carry the
 normalized semantic signature types. MIR now exposes narrow admission-bound
@@ -1824,20 +1833,22 @@ the same atomic TYPED transition as functions and publish canonical
 HIR block roots (wrapping non-block initializers only). Ordinary call typing
 matches original mrustc here; const-operation legality remains a later
 marking/evaluation obligation. Associated/generic value bodies remain present
-but explicitly block TYPED. A first definition-only trait-default slice now
+but explicitly block TYPED. A first bounded trait-default slice now
 joins the atomic transition: the parent must be a local safe non-auto trait
 with no generics, predicates, outlives clauses, or supertraits; the
 receiver-free safe Rust-ABI method must have only closed
 `i32`/`u32`/`usize` parameters and return; and the body syntax is limited to
 literals, locals, wrapping primitive arithmetic, and the existing closed
 `if`/block forms. Both lowering and semantic definition checking authenticate
-that exact typed-HIR shape, so model construction cannot bypass the slice. Calls,
-method/qualified dispatch, fields, aggregates, `Self`, projections, lifetimes,
-generic frames, and opaque returns fail closed before mutation. Semantic
-definition checking and durable results include these defaults, while
-instance-mode checking and direct MIR lowering reject them: inherited-default
-execution still needs a concrete selected impl, trait-owned rigid `Self`, and
-instance-aware MIR substitution. The complete typed manifest now mints MARKED
+that exact typed-HIR shape, so model construction cannot bypass the slice.
+Calls or method/qualified dispatch inside the default body, fields, aggregates,
+`Self`, projections, lifetimes, generic frames, and opaque returns fail closed
+before mutation. Semantic definition checking and durable results include these
+defaults. Exact instance admission and canonical MIR now execute the same body
+for a qualified call through a concrete local impl, retaining the concrete impl
+as dispatch evidence but using the trait-owned substitution domain for the
+body. Explicit overrides still win; a bodyless linked override blocks fallback.
+The complete typed manifest now mints MARKED
 by atomically publishing value-usage and checked-not-promoted static-borrow
 evidence. A separate read-only `MARKED -> REGIONS` validator authenticates
 owner/body links, signature/local/expression/direct-call type roots, bounded

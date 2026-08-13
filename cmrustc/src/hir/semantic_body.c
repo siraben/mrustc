@@ -1452,6 +1452,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     CmSemanticCheckedCallableFacts *facts)
 {
     const CmHirItem *impl_item;
+    const CmHirItem *declared_callable;
     const CmHirItem *selected_callable;
     const CmHirFunctionSignature *signature;
     CmTraitImplSelectionWitness witness;
@@ -1518,6 +1519,17 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         status = CM_SEMANTIC_BODY_INVALID;
         goto cleanup;
     }
+    declared_callable = cm_semantic_body_item(constraints->hir,
+        expression->data.qualified_call.declared_trait_callable);
+    if (declared_callable == NULL
+        || declared_callable->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_def_id_equal(declared_callable->parent_definition,
+            expression->data.qualified_call.requested_trait)
+        || !cm_hir_def_id_is_none(declared_callable->data.function_item
+            .trait_item_definition)) {
+        status = CM_SEMANTIC_BODY_INVALID;
+        goto cleanup;
+    }
     selected_callable = NULL;
     matches = 0u;
     for (index = 0u; index < constraints->hir->items.len; ++index) {
@@ -1535,7 +1547,11 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
             ++matches;
         }
     }
-    if (matches != 1u || selected_callable == NULL
+    if (matches == 0u
+        && declared_callable->data.function_item.body != CM_HIR_BODY_NONE) {
+        selected_callable = declared_callable;
+    }
+    if (matches > 1u || selected_callable == NULL
         || selected_callable->generic_parameter_count != 0u
         || selected_callable->predicate_scope_count != 0u
         || selected_callable->predicate_count != 0u
@@ -1587,7 +1603,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         &callable_instantiation);
     callable_instantiation.frames = frames;
     callable_instantiation.frame_count = 2u;
-    callable_instantiation.self_owner = impl_item->definition;
+    callable_instantiation.self_owner = selected_callable
+            == declared_callable
+        ? expression->data.qualified_call.requested_trait
+        : impl_item->definition;
     callable_instantiation.self_type = goal.data.implemented.self_type;
     if (!cm_typeck_scoped_instantiation_is_valid(constraints->typeck,
             &callable_instantiation)) {
@@ -3522,6 +3541,16 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         ? cm_semantic_body_item(hir, owner_item->parent_definition) : NULL;
     trait_item = owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
         ? cm_semantic_body_item(hir, owner_item->parent_definition) : NULL;
+    if (!definition_mode && owner_kind
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT) {
+        CmHirDefId enclosing_definition;
+
+        enclosing_definition = instance_spec != NULL
+            ? instance_spec->enclosing_impl
+            : instance_parts != NULL ? instance_parts->enclosing_impl
+                : cm_hir_def_id_none();
+        enclosing_item = cm_semantic_body_item(hir, enclosing_definition);
+    }
     if (hir == NULL || body == NULL || owner_item == NULL
         || owner_item->kind != CM_HIR_ITEM_FUNCTION
         || owner_kind == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED
@@ -3548,12 +3577,12 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         || (instance_spec != NULL && instance_parts != NULL)
         || (definition_mode
             && (instance_spec != NULL || instance_parts != NULL))
-        || (!definition_mode
-            && owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT)
         || (!definition_mode && instance_spec == NULL
             && instance_parts == NULL
-            && owner_kind
-                == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD)
+            && (owner_kind
+                    == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD
+                || owner_kind
+                    == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT))
         || (definition_mode
             ? (owner_type_substitution_count != 0u
                 || !cm_semantic_type_only_owner(hir, owner_item,
@@ -3588,7 +3617,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 : !cm_hir_def_id_equal(instance_spec->enclosing_impl,
                     enclosing_item->definition)
             || !cm_hir_def_id_equal(instance_spec->declared_trait_callable,
-                owner_item->data.function_item.trait_item_definition)
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+                    ? owner_item->definition
+                    : owner_item->data.function_item.trait_item_definition)
             || !cm_hir_def_id_equal(instance_spec->implemented_trait,
                 enclosing_item->data.impl_item.trait_type.definition)
             || !cm_hir_def_id_equal(instance_spec->self_owner,
@@ -3638,7 +3669,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                     enclosing_item->definition)
             || !cm_hir_def_id_equal(
                 instance_parts->declared_trait_callable,
-                owner_item->data.function_item.trait_item_definition)
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+                    ? owner_item->definition
+                    : owner_item->data.function_item.trait_item_definition)
             || !cm_hir_def_id_equal(instance_parts->implemented_trait,
                 enclosing_item->data.impl_item.trait_type.definition)
             || !cm_hir_def_id_equal(instance_parts->self_owner,
@@ -3964,13 +3997,22 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                     &snapshot, call_expressions);
             }
         }
-        owner_instantiation.self_owner = enclosing_item->definition;
-        enclosing_instantiation.parameter_owner =
-            enclosing_item->definition;
-        enclosing_instantiation.arguments = enclosing_arguments;
-        enclosing_instantiation.argument_count =
-            enclosing_item->generic_parameter_count;
-        enclosing_instantiation.self_owner = enclosing_item->definition;
+        owner_instantiation.self_owner = owner_kind
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            ? trait_item->definition : enclosing_item->definition;
+        enclosing_instantiation.parameter_owner = owner_kind
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            ? trait_item->definition : enclosing_item->definition;
+        enclosing_instantiation.arguments = owner_kind
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            ? implemented_arguments : enclosing_arguments;
+        enclosing_instantiation.argument_count = owner_kind
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            ? trait_item->generic_parameter_count
+            : enclosing_item->generic_parameter_count;
+        enclosing_instantiation.self_owner = owner_kind
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            ? trait_item->definition : enclosing_item->definition;
         enclosing_instantiation.self_type = owner_instantiation.self_type;
     } else if (trait_item != NULL) {
         /*
@@ -4095,6 +4137,11 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         owner_frames[1].argument_count =
             enclosing_item->generic_parameter_count;
         owner_scoped_instantiation.frame_count = 2u;
+        if (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT) {
+            owner_frames[1].parameter_owner = trait_item->definition;
+            owner_frames[1].arguments = implemented_arguments;
+            owner_frames[1].argument_count = trait_item->generic_parameter_count;
+        }
     } else if (trait_item != NULL) {
         owner_frames[1].parameter_owner = trait_item->definition;
         owner_scoped_instantiation.frame_count = 2u;

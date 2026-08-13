@@ -91,6 +91,9 @@ CmHirInstanceStatus cm_hir_canonical_instance_decode(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirCanonicalInstance *instance,
     CmHirDecodedCanonicalInstance *out_decoded);
+CmHirInstanceStatus cm_hir_canonical_type_matches(
+    const CmHirContext *hir, CmHirTypeId type,
+    const unsigned char *bytes, size_t size);
 void cm_hir_decoded_canonical_instance_destroy(
     CmHirDecodedCanonicalInstance *decoded);
 void cm_hir_canonical_instance_destroy(CmHirCanonicalInstance *instance);

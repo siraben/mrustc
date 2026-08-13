@@ -352,9 +352,21 @@ identities and the complete selected impl and substitution domains. Semantic
 results, admission, MIR reachability/lowering, and C emission use the body
 owner for executable source lookup while retaining dispatch identity in call
 edges and symbols. MIR dumps expose both as `dispatch/body` and use `mir-v9`.
-The current behavior-neutral invariant still requires the identities to be
-equal; the representation is ready for inherited trait defaults, where an
-impl-selected dispatch instance executes a trait-provided body.
+For an explicit override, `selected_callable == body_definition` is the impl
+method and `declared_trait_callable` is the trait declaration. For an inherited
+default, `selected_callable == body_definition == declared_trait_callable` is
+the trait method: `selected_impl`, `self_owner`, `self_type`, and their
+arguments retain the concrete dispatch identity without inventing a synthetic
+method DefId. The executable MIR substitutions instead come from the
+trait-owned body domain. Thus two concrete impls may share one HIR body while
+retaining unequal canonical identities and distinct digest-derived C symbols.
+
+Execution is currently limited to qualified, receiver-free calls of a
+nongeneric default with the closed scalar body subset through concrete local
+impls. An explicit bodyful override wins; a bodyless linked override prevents
+fallback; multiple linked overrides reject. Dot-method inherited defaults,
+calls inside a default body, meaningful `Self`, generic traits, and
+source-level blanket inherited defaults remain unsupported.
 
 ### Named aggregate expression checkpoint
 

@@ -5134,7 +5134,6 @@ static int cm_hir_qualified_call_expression_valid(
         || !cm_hir_def_id_is_none(
             declared->data.function_item.trait_item_definition)
         || declared->generic_parameter_count != 0u
-        || declared->data.function_item.body != CM_HIR_BODY_NONE
         || declared->predicate_scope_count != 0u
         || declared->predicate_count != 0u
         || declared->outlives_predicate_count != 0u

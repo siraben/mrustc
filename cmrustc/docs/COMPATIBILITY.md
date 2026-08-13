@@ -303,10 +303,16 @@ Construction, finalization, deterministic dumps, and typed barrier snapshots
 authenticate those fields. Exact canonical callable instances additionally
 encode separate dispatch and executable-body definitions. Semantic results,
 admission, MIR, reachability, and C emission preserve both, and `mir-v9` dumps
-render `dispatch/body`. The current admitted relation still requires both
-definitions to be equal, so trait-default execution selected through an impl
-remains unsupported. Multiple bodies per owner, type-position bodies, and
-generated closure or promotion bodies also remain unsupported.
+render `dispatch/body`. Qualified receiver-free calls can now execute a
+nongeneric trait default through a concrete local impl. The trait method remains
+both selected callable and executable body, while the selected impl, self
+owner/type, and complete canonical argument domains preserve concrete dispatch;
+two impls sharing one body therefore remain distinct MIR/C instances. Bodyful
+overrides win, bodyless linked overrides block fallback, and ambiguous linked
+overrides reject. Dot-method defaults, calls within default bodies, meaningful
+`Self`, generic traits, source-level blanket inherited defaults, multiple
+bodies per owner, type-position bodies, and generated closure or promotion
+bodies remain unsupported.
 
 The first exact control-flow slice accepts `if left == right { then_u32 }
 else { else_u32 }`. Equality is restricted to exact u32 operands and produces

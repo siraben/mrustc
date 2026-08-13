@@ -26,8 +26,13 @@ typedef struct Fixture {
     CmHirDefId declared_method;
     CmHirDefId impl_definition;
     CmHirDefId selected_method;
+    CmHirDefId default_trait_definition;
+    CmHirDefId default_method_definition;
+    CmHirDefId default_u32_impl_definition;
+    CmHirDefId default_usize_impl_definition;
     CmHirDefId holder_definition;
     CmHirTypeId u32_type;
+    CmHirTypeId usize_type;
     CmHirTypeId holder_u32_type;
     CmHirTypeId static_reference;
     CmHirTypeId duplicate_static_reference;
@@ -63,7 +68,11 @@ static void fixture_init(Fixture *fixture)
         "fn choose<A, B>(left: A, _right: B) -> A { left } "
         "struct Holder<T> { value: T } "
         "trait Value { fn value(value: u32) -> u32; } "
-        "impl Value for u32 { fn value(value: u32) -> u32 { value } }";
+        "impl Value for u32 { fn value(value: u32) -> u32 { value } } "
+        "trait DefaultValue { "
+        "fn default_value(value: u32) -> u32 { value } } "
+        "impl DefaultValue for u32 {} "
+        "impl DefaultValue for usize {}";
     CmModuleGraphOptions graph_options;
     CmImportResult import_result;
     CmHirLowerOptions lower_options;
@@ -72,6 +81,7 @@ static void fixture_init(Fixture *fixture)
     CmHirGenericArg holder_argument;
     CmHirType type_value;
     CmHirTypeId u32_type;
+    CmHirTypeId usize_type;
     CmHirTypeId u128_type;
     size_t index;
 
@@ -102,6 +112,7 @@ static void fixture_init(Fixture *fixture)
         &fixture->imports, &fixture->modules, &lower_options);
     assert(lower_result.error_count == 0u);
     u32_type = CM_HIR_TYPE_NONE;
+    usize_type = CM_HIR_TYPE_NONE;
     u128_type = CM_HIR_TYPE_NONE;
     for (index = 0u; index < fixture->hir.items.len; ++index) {
         const CmHirItem *item;
@@ -114,7 +125,11 @@ static void fixture_init(Fixture *fixture)
         } else if (item != NULL && item->kind == CM_HIR_ITEM_TRAIT
             && intern_is(&fixture->hir, item->name, "Value")) {
             fixture->trait_definition = item->definition;
-        } else if (item != NULL && item->kind == CM_HIR_ITEM_IMPL) {
+        } else if (item != NULL && item->kind == CM_HIR_ITEM_TRAIT
+            && intern_is(&fixture->hir, item->name, "DefaultValue")) {
+            fixture->default_trait_definition = item->definition;
+        } else if (item != NULL && item->kind == CM_HIR_ITEM_IMPL
+            && cm_hir_def_id_is_none(fixture->impl_definition)) {
             fixture->impl_definition = item->definition;
         } else if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT
             && intern_is(&fixture->hir, item->name, "Holder")) {
@@ -126,6 +141,10 @@ static void fixture_init(Fixture *fixture)
             } else {
                 fixture->selected_method = item->definition;
             }
+        } else if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+            && intern_is(&fixture->hir, item->name, "default_value")
+            && item->data.function_item.body != CM_HIR_BODY_NONE) {
+            fixture->default_method_definition = item->definition;
         }
     }
     for (index = 0u; index < fixture->hir.types.len; ++index) {
@@ -137,9 +156,31 @@ static void fixture_init(Fixture *fixture)
         if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND) {
             if (type->data.integer_type.kind == CM_HIR_INT_U32) {
                 u32_type = type_id;
+            } else if (type->data.integer_type.kind == CM_HIR_INT_USIZE) {
+                usize_type = type_id;
             } else if (type->data.integer_type.kind == CM_HIR_INT_U128) {
                 u128_type = type_id;
             }
+        }
+    }
+    for (index = 0u; index < fixture->hir.items.len; ++index) {
+        const CmHirItem *item;
+        const CmHirType *self_type;
+
+        item = (const CmHirItem *)cm_vec_at_const(&fixture->hir.items,
+            index);
+        self_type = item == NULL || item->kind != CM_HIR_ITEM_IMPL
+                || !item->data.impl_item.has_trait
+                || !cm_hir_def_id_equal(item->data.impl_item.trait_type
+                    .definition, fixture->default_trait_definition)
+            ? NULL : cm_hir_get_type(&fixture->hir,
+                item->data.impl_item.self_type);
+        if (self_type == NULL
+            || self_type->kind != CM_HIR_TYPE_INTEGER_KIND) continue;
+        if (self_type->data.integer_type.kind == CM_HIR_INT_U32) {
+            fixture->default_u32_impl_definition = item->definition;
+        } else if (self_type->data.integer_type.kind == CM_HIR_INT_USIZE) {
+            fixture->default_usize_impl_definition = item->definition;
         }
     }
     if (u32_type == CM_HIR_TYPE_NONE) {
@@ -206,13 +247,19 @@ static void fixture_init(Fixture *fixture)
         && !cm_hir_def_id_is_none(fixture->declared_method)
         && !cm_hir_def_id_is_none(fixture->impl_definition)
         && !cm_hir_def_id_is_none(fixture->selected_method)
+        && !cm_hir_def_id_is_none(fixture->default_trait_definition)
+        && !cm_hir_def_id_is_none(fixture->default_method_definition)
+        && !cm_hir_def_id_is_none(fixture->default_u32_impl_definition)
+        && !cm_hir_def_id_is_none(fixture->default_usize_impl_definition)
         && !cm_hir_def_id_is_none(fixture->holder_definition)
         && u32_type != CM_HIR_TYPE_NONE
+        && usize_type != CM_HIR_TYPE_NONE
         && fixture->holder_u32_type != CM_HIR_TYPE_NONE
         && fixture->static_reference != CM_HIR_TYPE_NONE
         && fixture->bound_reference != CM_HIR_TYPE_NONE
         && fixture->array_128 != CM_HIR_TYPE_NONE);
     fixture->u32_type = u32_type;
+    fixture->usize_type = usize_type;
 }
 
 static void fixture_destroy(Fixture *fixture)
@@ -313,10 +360,16 @@ static void test_structural_key_clone_compare_dump(void)
 static void test_authenticated_method_identity(void)
 {
     Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable;
     CmHirInstanceSpec spec;
     CmHirInstanceKey key;
+    const CmHirItem *selected;
+    size_t index;
 
     fixture_init(&fixture);
+    memset(&admission, 0, sizeof(admission));
     memset(&key, 0, sizeof(key));
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = fixture.selected_method;
@@ -326,20 +379,40 @@ static void test_authenticated_method_identity(void)
     spec.implemented_trait = fixture.trait_definition;
     spec.self_owner = fixture.impl_definition;
     spec.self_type = fixture.u32_type;
-    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+    selected = NULL;
+    for (index = 0u; index < fixture.hir.items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&fixture.hir.items,
+            index);
+        if (candidate != NULL && cm_hir_def_id_equal(candidate->definition,
+                fixture.selected_method)) {
+            selected = candidate;
+            break;
+        }
+    }
+    assert(selected != NULL && selected->kind == CM_HIR_ITEM_FUNCTION
+        && selected->data.function_item.body != CM_HIR_BODY_NONE);
+    reachable.body = selected->data.function_item.body;
+    reachable.spec = &spec;
+    result = cm_semantic_admit_typed_leaf_instances(&admission,
+        &fixture.hir, 1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK);
+    assert(cm_hir_instance_key_init(&key, &admission, &spec)
         == CM_HIR_INSTANCE_OK);
     cm_hir_instance_key_destroy(&key);
     spec.body_definition = fixture.callable;
-    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+    assert(cm_hir_instance_key_init(&key, &admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
     spec.body_definition = fixture.selected_method;
     spec.declared_trait_callable = fixture.callable;
-    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+    assert(cm_hir_instance_key_init(&key, &admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
     spec.declared_trait_callable = fixture.declared_method;
     spec.self_owner = fixture.trait_definition;
-    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+    assert(cm_hir_instance_key_init(&key, &admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
+    cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
 
@@ -508,6 +581,110 @@ static void test_canonical_instance_decode_rejects_malformed(void)
 
     cm_hir_decoded_canonical_instance_destroy(&decoded);
     cm_hir_canonical_instance_destroy(&identity);
+    fixture_destroy(&fixture);
+}
+
+static void test_inherited_default_instances_authenticate_dispatch(void)
+{
+    Fixture fixture;
+    CmHirInstanceSpec spec;
+    CmHirCanonicalInstance u32_identity;
+    CmHirCanonicalInstance usize_identity;
+    CmHirCanonicalInstance rejected;
+    CmHirCanonicalInstance forged;
+    CmHirDecodedCanonicalInstance decoded;
+    CmHirInstanceKey key;
+    int equal;
+
+    fixture_init(&fixture);
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = fixture.default_method_definition;
+    spec.body_definition = fixture.default_method_definition;
+    spec.declared_trait_callable = fixture.default_method_definition;
+    spec.enclosing_impl = fixture.default_u32_impl_definition;
+    spec.implemented_trait = fixture.default_trait_definition;
+    spec.self_owner = fixture.default_u32_impl_definition;
+    spec.self_type = fixture.u32_type;
+    cm_hir_canonical_instance_init(&u32_identity);
+    cm_hir_canonical_instance_init(&usize_identity);
+    cm_hir_canonical_instance_init(&rejected);
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    memset(&key, 0, sizeof(key));
+    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+            == CM_HIR_INSTANCE_INVALID_RELATION
+        && key.state == NULL);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &u32_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_decode(&fixture.hir, 1u,
+            &u32_identity, &decoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_def_id_equal(decoded.parts.selected_callable,
+            fixture.default_method_definition)
+        && cm_hir_def_id_equal(decoded.parts.body_definition,
+            fixture.default_method_definition)
+        && cm_hir_def_id_equal(decoded.parts.enclosing_impl,
+            fixture.default_u32_impl_definition)
+        && cm_hir_def_id_equal(decoded.parts.self_owner,
+            fixture.default_u32_impl_definition));
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    forged = u32_identity;
+    forged.definition = fixture.selected_method;
+    assert(cm_hir_canonical_instance_validate(&fixture.hir, 1u, &forged)
+        == CM_HIR_INSTANCE_INVALID_RELATION);
+    forged = u32_identity;
+    forged.body_definition = fixture.callable;
+    assert(cm_hir_canonical_instance_validate(&fixture.hir, 1u, &forged)
+        == CM_HIR_INSTANCE_INVALID_RELATION);
+    forged = u32_identity;
+    forged.body = fixture.hir.bodies.len == 0u
+        ? CM_HIR_BODY_NONE : (CmHirBodyId)fixture.hir.bodies.len;
+    if (forged.body == u32_identity.body) forged.body = CM_HIR_BODY_NONE;
+    assert(cm_hir_canonical_instance_validate(&fixture.hir, 1u, &forged)
+        == CM_HIR_INSTANCE_INVALID_RELATION);
+
+    spec.enclosing_impl = fixture.default_usize_impl_definition;
+    spec.self_owner = fixture.default_usize_impl_definition;
+    spec.self_type = fixture.usize_type;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &usize_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_decode(&fixture.hir, 1u,
+            &usize_identity, &decoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_def_id_equal(decoded.parts.enclosing_impl,
+            fixture.default_usize_impl_definition)
+        && cm_hir_def_id_equal(decoded.parts.self_owner,
+            fixture.default_usize_impl_definition)
+        && u32_identity.body == usize_identity.body
+        && cm_hir_canonical_instance_equal(&u32_identity, &usize_identity,
+            &equal) == CM_HIR_INSTANCE_OK && !equal);
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+
+    spec.self_owner = fixture.default_u32_impl_definition;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+    spec.self_owner = fixture.default_usize_impl_definition;
+    spec.self_type = fixture.u32_type;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+    spec.self_type = fixture.usize_type;
+    spec.implemented_trait = fixture.trait_definition;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+    spec.implemented_trait = fixture.default_trait_definition;
+    spec.declared_trait_callable = fixture.declared_method;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+    spec.declared_trait_callable = fixture.default_method_definition;
+    spec.selected_callable = fixture.selected_method;
+    spec.body_definition = fixture.selected_method;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+    spec.selected_callable = fixture.default_method_definition;
+    spec.body_definition = fixture.callable;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &rejected) == CM_HIR_INSTANCE_INVALID_RELATION);
+
+    cm_hir_canonical_instance_destroy(&rejected);
+    cm_hir_canonical_instance_destroy(&usize_identity);
+    cm_hir_canonical_instance_destroy(&u32_identity);
     fixture_destroy(&fixture);
 }
 
@@ -743,6 +920,7 @@ int main(void)
     test_authenticated_method_identity();
     test_canonical_instance_decode();
     test_canonical_instance_decode_rejects_malformed();
+    test_inherited_default_instances_authenticate_dispatch();
     test_direct_call_parts_parity();
     test_adt_argument_kind_is_authenticated();
     test_fail_closed_and_stale();

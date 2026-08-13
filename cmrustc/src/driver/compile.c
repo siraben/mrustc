@@ -536,6 +536,10 @@ static int cm_compile_callable_executable_substitution(
         || selection->enclosing_impl_argument_count > 1u) {
         goto unsupported;
     }
+    if (cm_hir_def_id_equal(selection->selected_callable,
+            selection->declared_trait_callable)) {
+        return 1;
+    }
     if (selection->enclosing_impl_argument_count == 0u) return 1;
     results = cm_semantic_admission_results(state->all_local_admission);
     memset(&argument, 0, sizeof(argument));
@@ -904,9 +908,8 @@ static int cm_compile_discover_expression_callees(
         }
         callee = cm_compile_definition_item(state->hir,
             selection.selected_callable);
-        impl_item = callee == NULL ? NULL
-            : cm_compile_definition_any_item(state->hir,
-                callee->parent_definition);
+        impl_item = cm_compile_definition_any_item(state->hir,
+            selection.selected_impl);
         if (callee == NULL || impl_item == NULL
             || impl_item->kind != CM_HIR_ITEM_IMPL
             || !cm_hir_def_id_equal(impl_item->definition,
@@ -924,9 +927,17 @@ static int cm_compile_discover_expression_callees(
             || !cm_compile_callable_executable_substitution(state,
                 expression, expression_id, &selection, &executable_type,
                 &executable_type_count, message, message_capacity)
-            || !cm_hir_def_id_equal(
-                callee->data.function_item.trait_item_definition,
-                selection.declared_trait_callable)
+            || (cm_hir_def_id_equal(selection.selected_callable,
+                    selection.declared_trait_callable)
+                ? !cm_hir_def_id_equal(callee->parent_definition,
+                        selection.requested_trait)
+                    || !cm_hir_def_id_is_none(callee->data.function_item
+                        .trait_item_definition)
+                : !cm_hir_def_id_equal(callee->parent_definition,
+                        selection.selected_impl)
+                    || !cm_hir_def_id_equal(callee->data.function_item
+                        .trait_item_definition,
+                        selection.declared_trait_callable))
             || !cm_compile_intern_canonical(state, &selected_identity,
                 executable_type, executable_type_count,
                 &edge.callee, message, message_capacity)) {

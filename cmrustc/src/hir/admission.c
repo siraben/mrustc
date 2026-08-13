@@ -583,6 +583,8 @@ static int cm_admission_canonical_instance_supported(
     const CmHirItem *selected;
     const CmHirItem *body_item;
     const CmHirItem *enclosing;
+    const CmHirItem *trait_item;
+    int inherited_default;
 
     if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || decoded == NULL
         || body == NULL || body->state != CM_HIR_BODY_TYPED
@@ -608,6 +610,9 @@ static int cm_admission_canonical_instance_supported(
                 == selected->generic_parameter_count;
     }
     enclosing = cm_admission_item(hir, decoded->parts.enclosing_impl);
+    trait_item = cm_admission_item(hir, decoded->parts.implemented_trait);
+    inherited_default = cm_hir_def_id_equal(selected->definition,
+        decoded->parts.declared_trait_callable);
     return selected->generic_parameter_count
             == decoded->parts.method_argument_count
         && selected->predicate_count == 0u
@@ -618,8 +623,19 @@ static int cm_admission_canonical_instance_supported(
         && enclosing->outlives_predicate_count == 0u
         && enclosing->data.impl_item.has_trait
         && !enclosing->data.impl_item.is_negative
-        && cm_hir_def_id_equal(selected->parent_definition,
-            enclosing->definition)
+        && trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
+        && cm_hir_def_id_equal(enclosing->data.impl_item.trait_type
+            .definition, trait_item->definition)
+        && (inherited_default
+            ? cm_hir_def_id_equal(selected->parent_definition,
+                trait_item->definition)
+                && cm_hir_def_id_is_none(selected->data.function_item
+                    .trait_item_definition)
+            : cm_hir_def_id_equal(selected->parent_definition,
+                enclosing->definition)
+                && cm_hir_def_id_equal(selected->data.function_item
+                    .trait_item_definition,
+                    decoded->parts.declared_trait_callable))
         && cm_hir_def_id_equal(decoded->parts.self_owner,
             enclosing->definition);
 }

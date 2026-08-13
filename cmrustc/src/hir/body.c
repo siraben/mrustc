@@ -1443,7 +1443,6 @@ static CmHirBodyLowerStatus cm_hir_body_resolve_qualified_call(
         declared = candidate;
     }
     if (declared == NULL || declared->generic_parameter_count != 0u
-        || declared->data.function_item.body != CM_HIR_BODY_NONE
         || declared->predicate_scope_count != 0u
         || declared->predicate_count != 0u
         || declared->outlives_predicate_count != 0u

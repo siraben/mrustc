@@ -448,11 +448,17 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
                     == CM_HIR_RECEIVER_VALUE
                 && record->receiver_argument == 0u
                 && record->argument_count != 0u))
-        && cm_hir_def_id_equal(selected->parent_definition,
-            record->selected_impl)
-        && cm_hir_def_id_equal(
-            selected->data.function_item.trait_item_definition,
-            record->declared_trait_callable);
+        && (cm_hir_def_id_equal(selected->definition,
+                record->declared_trait_callable)
+            ? cm_hir_def_id_equal(selected->parent_definition,
+                    record->requested_trait)
+                && cm_hir_def_id_is_none(selected->data.function_item
+                    .trait_item_definition)
+            : cm_hir_def_id_equal(selected->parent_definition,
+                    record->selected_impl)
+                && cm_hir_def_id_equal(selected->data.function_item
+                    .trait_item_definition,
+                    record->declared_trait_callable));
 }
 
 static int cm_results_expression_is_callable(const CmHirExpr *expression)
@@ -660,7 +666,9 @@ static int cm_results_callable_matches_instantiated_hir(
     cm_typeck_scoped_instantiation_init(typeck, &instantiation);
     instantiation.frames = frames;
     instantiation.frame_count = 2u;
-    instantiation.self_owner = impl_item->definition;
+    instantiation.self_owner = cm_hir_def_id_equal(selected->definition,
+            record->declared_trait_callable)
+        ? record->requested_trait : impl_item->definition;
     instantiation.self_type = fact->requested_self_type;
     if (!cm_typeck_scoped_instantiation_is_valid(typeck, &instantiation)
         || cm_typeck_instantiate_hir_type_scoped(typeck,
