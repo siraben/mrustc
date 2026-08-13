@@ -46,6 +46,8 @@ static uint64_t cm_mir_new_context_lifetime_id(void)
 
 static const CmMirBody *cm_mir_resolve_body(const CmMirContext *context,
     const CmMirPublicationImpl *publication, CmMirBodyId id);
+static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
+    const CmMirInstance *instance);
 
 static int cm_mir_context_valid(const CmMirContext *context)
 {
@@ -271,6 +273,21 @@ static int cm_mir_type_is_u32(const CmHirContext *hir, CmHirTypeId id)
         && type->data.integer_type.kind == CM_HIR_INT_U32;
 }
 
+static int cm_mir_type_is_u8(const CmHirContext *hir, CmHirTypeId id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_U8;
+}
+
+static int cm_mir_type_is_fixed_unsigned(const CmHirContext *hir,
+    CmHirTypeId id)
+{
+    return cm_mir_type_is_u8(hir, id) || cm_mir_type_is_u32(hir, id);
+}
+
 static int cm_mir_type_is_usize(const CmHirContext *hir, CmHirTypeId id)
 {
     const CmHirType *type;
@@ -295,7 +312,7 @@ static int cm_mir_usize_value_valid(unsigned int pointer_bits,
 static int cm_mir_type_is_unsigned_scalar(const CmHirContext *hir,
     CmHirTypeId id, unsigned int pointer_bits)
 {
-    return cm_mir_type_is_u32(hir, id)
+    return cm_mir_type_is_fixed_unsigned(hir, id)
         || (cm_mir_pointer_bits_valid(pointer_bits)
             && cm_mir_type_is_usize(hir, id));
 }
@@ -352,6 +369,9 @@ static int cm_mir_type_equal_inner(const CmHirContext *hir,
     if (cm_mir_type_is_u32(hir, left) && cm_mir_type_is_u32(hir, right)) {
         return 1;
     }
+    if (cm_mir_type_is_u8(hir, left) && cm_mir_type_is_u8(hir, right)) {
+        return 1;
+    }
     if (cm_mir_type_is_usize(hir, left)
         && cm_mir_type_is_usize(hir, right)) {
         return 1;
@@ -397,6 +417,7 @@ static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
     return type != NULL
         && ((type->kind == CM_HIR_TYPE_INTEGER_KIND
                 && (type->data.integer_type.kind == CM_HIR_INT_I32
+                    || type->data.integer_type.kind == CM_HIR_INT_U8
                     || type->data.integer_type.kind == CM_HIR_INT_U32
                     || (type->data.integer_type.kind == CM_HIR_INT_USIZE
                         && cm_mir_pointer_bits_valid(pointer_bits))))
@@ -625,6 +646,10 @@ static int cm_mir_instance_substitutions_valid(const CmHirContext *hir,
 {
     uint32_t index;
 
+    if (cm_mir_instance_is_canonical(instance)) {
+        return cm_mir_canonical_materialization_valid(hir, instance);
+    }
+
     if (item == NULL || instance == NULL
         || instance->substitution_count != item->generic_parameter_count
         || (instance->substitution_count == 0u)
@@ -649,10 +674,12 @@ static int cm_mir_instance_substitutions_valid(const CmHirContext *hir,
     return 1;
 }
 
-static int cm_mir_instantiate_u32_type(const CmHirContext *hir,
+static int cm_mir_instantiate_executable_type(const CmHirContext *hir,
     const CmHirItem *item, const CmMirInstance *instance,
     CmHirTypeId declared, CmHirTypeId *out_type)
 {
+    const CmHirDefinition *definition;
+    const CmHirItem *owner;
     const CmHirType *type;
     const CmHirGenericParam *parameter;
     uint32_t index;
@@ -661,6 +688,7 @@ static int cm_mir_instantiate_u32_type(const CmHirContext *hir,
     if (type == NULL || out_type == NULL) return 0;
     if (type->kind == CM_HIR_TYPE_INTEGER_KIND
         && (type->data.integer_type.kind == CM_HIR_INT_I32
+            || type->data.integer_type.kind == CM_HIR_INT_U8
             || type->data.integer_type.kind == CM_HIR_INT_U32
             || type->data.integer_type.kind == CM_HIR_INT_USIZE)) {
         *out_type = declared;
@@ -682,14 +710,30 @@ static int cm_mir_instantiate_u32_type(const CmHirContext *hir,
     parameter = cm_hir_get_generic_param(hir,
         type->data.parameter_type.parameter);
     if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
-        || !cm_hir_def_id_equal(parameter->owner, item->definition)
         || parameter->index >= instance->substitution_count) {
         return 0;
     }
     index = parameter->index;
-    if (item->generic_parameter_start + index
+    definition = cm_hir_lookup_definition(hir, parameter->owner);
+    owner = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (owner == NULL
+        || owner->generic_parameter_start + index
             != type->data.parameter_type.parameter
-        || !cm_mir_type_is_u32(hir, instance->substitutions[index])) {
+        || owner->generic_parameter_count != instance->substitution_count
+        || (!cm_hir_def_id_equal(owner->definition, item->definition)
+            && (!cm_mir_instance_is_canonical(instance)
+                || item->generic_parameter_count != 0u
+                || !cm_hir_def_id_equal(item->parent_definition,
+                    owner->definition)
+                || owner->kind != CM_HIR_ITEM_IMPL))
+        || (cm_mir_instance_is_canonical(instance)
+            ? !cm_mir_type_is_fixed_unsigned(hir,
+                instance->substitutions[index])
+            : !cm_mir_type_is_u32(hir,
+                instance->substitutions[index]))) {
         return 0;
     }
     *out_type = instance->substitutions[index];
@@ -731,8 +775,10 @@ static int cm_mir_unsigned_operand_valid(const CmHirContext *hir,
         || operand->kind == CM_MIR_OPERAND_COPY_PLACE) {
         return cm_mir_move_operand_valid(hir, body, operand);
     }
-    if (cm_mir_type_is_u32(hir, operand->type)) {
-        return operand->kind == CM_MIR_CONSTANT_U32;
+    if (cm_mir_type_is_fixed_unsigned(hir, operand->type)) {
+        return operand->kind == CM_MIR_CONSTANT_U32
+            && (!cm_mir_type_is_u8(hir, operand->type)
+                || operand->data.u32_value <= (uint32_t)UINT8_MAX);
     }
     return operand->kind == CM_MIR_CONSTANT_USIZE
         && cm_mir_usize_value_valid(pointer_bits,
@@ -748,7 +794,9 @@ static int cm_mir_operand_valid(const CmHirContext *hir,
         return cm_mir_type_is_i32(hir, operand->type);
     }
     if (operand->kind == CM_MIR_CONSTANT_U32) {
-        return cm_mir_type_is_u32(hir, operand->type);
+        return cm_mir_type_is_fixed_unsigned(hir, operand->type)
+            && (!cm_mir_type_is_u8(hir, operand->type)
+                || operand->data.u32_value <= (uint32_t)UINT8_MAX);
     }
     if (operand->kind == CM_MIR_CONSTANT_USIZE) {
         return cm_mir_type_is_usize(hir, operand->type)
@@ -970,9 +1018,11 @@ static int cm_mir_semantic_instance_query_init(
                 || definition->kind != CM_HIR_DEFINITION_ITEM
                 || definition->state != CM_HIR_DEFINITION_BOUND
             ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
-        if (body->instance.substitution_count != 0u
-            || impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
-            || impl_item->generic_parameter_count != 0u
+        if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
+            || item->generic_parameter_count != 0u
+            || impl_item->generic_parameter_count
+                != body->instance.substitution_count
+            || impl_item->generic_parameter_count > 1u
             || !impl_item->data.impl_item.has_trait
             || impl_item->data.impl_item.is_negative
             || cm_hir_def_id_is_none(
@@ -982,8 +1032,13 @@ static int cm_mir_semantic_instance_query_init(
         query->spec.enclosing_impl = impl_item->definition;
         query->spec.implemented_trait =
             impl_item->data.impl_item.trait_type.definition;
+        query->spec.enclosing_impl_arguments = query->arguments;
+        query->spec.enclosing_impl_argument_count =
+            body->instance.substitution_count;
         query->spec.self_owner = impl_item->definition;
-        query->spec.self_type = impl_item->data.impl_item.self_type;
+        query->spec.self_type = body->instance.substitution_count == 0u
+            ? impl_item->data.impl_item.self_type
+            : body->instance.substitutions[0];
     }
     for (index = 0u; index < body->instance.substitution_count; ++index) {
         query->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
@@ -1015,13 +1070,12 @@ static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
     int valid;
 
     if (!cm_mir_instance_is_canonical(instance)) return 0;
-    if (instance->substitution_count == 0u) return 1;
     memset(&query_body, 0, sizeof(query_body));
     query_body.instance = *instance;
     memset(&query, 0, sizeof(query));
     cm_hir_canonical_instance_init(&encoded);
     if (!cm_mir_semantic_instance_query_init(&query, hir, &query_body)) {
-        return 1;
+        return 0;
     }
     valid = cm_hir_canonical_instance_encode(hir,
             instance->definition.crate_id, &query.spec, &encoded)
@@ -1262,6 +1316,37 @@ static CmSemanticResultsStatus cm_mir_semantic_callable_argument_query(
             match->semantic_results, match->admission,
             match->semantic_instance, expression, argument,
             out_expression);
+}
+
+static CmSemanticResultsStatus
+cm_mir_semantic_callable_generic_argument_query(
+    const CmMirTreeMatch *match, CmHirExprId expression,
+    CmSemanticCallableGenericArgumentDomain domain, uint32_t argument,
+    CmSemanticGenericArgumentView *out_view)
+{
+    CmHirCanonicalInstance caller;
+
+    if (match == NULL || out_view == NULL) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (match->body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_generic_argument(
+            match->semantic_results, match->admission,
+            match->body->source_body, expression, domain, argument,
+            out_view);
+    }
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    return cm_mir_canonical_identity(&match->body->instance, &caller)
+        ? cm_semantic_results_canonical_instance_callable_generic_argument(
+            match->semantic_results, match->admission, &caller, expression,
+            domain, argument, out_view)
+        : cm_semantic_results_instance_callable_generic_argument(
+            match->semantic_results, match->admission,
+            match->semantic_instance, expression, domain, argument,
+            out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_callable_parameter_query(
@@ -1640,7 +1725,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
     expression = cm_hir_get_expr(match->hir, expression_id);
     if (expression == NULL
         || expression->owner_body != match->body->source_body
-        || !cm_mir_instantiate_u32_type(match->hir, match->item,
+        || !cm_mir_instantiate_executable_type(match->hir, match->item,
             &match->body->instance, expression->type, &instantiated)) {
         return 0;
     }
@@ -1694,6 +1779,8 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
     }
     if (expression->kind == CM_HIR_EXPR_INTEGER) {
         if (expression->data.integer.high_bits != 0u
+            || (cm_mir_type_is_u8(match->hir, instantiated)
+                && expression->data.integer.low_bits > (uint64_t)UINT8_MAX)
             || (cm_mir_type_is_u32(match->hir, instantiated)
                 && expression->data.integer.low_bits > (uint64_t)UINT32_MAX)
             || (cm_mir_type_is_i32(match->hir, instantiated)
@@ -1701,7 +1788,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             || (cm_mir_type_is_usize(match->hir, instantiated)
                 && !cm_mir_usize_value_valid(match->pointer_bits,
                     expression->data.integer.low_bits))
-            || (!cm_mir_type_is_u32(match->hir, instantiated)
+            || (!cm_mir_type_is_fixed_unsigned(match->hir, instantiated)
                 && !cm_mir_type_is_i32(match->hir, instantiated)
                 && !cm_mir_type_is_usize(match->hir, instantiated))) {
             return 0;
@@ -1710,7 +1797,8 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             out_operand->kind = CM_MIR_CONSTANT_I32;
             out_operand->data.i32_value =
                 (int32_t)expression->data.integer.low_bits;
-        } else if (cm_mir_type_is_u32(match->hir, instantiated)) {
+        } else if (cm_mir_type_is_fixed_unsigned(match->hir,
+                instantiated)) {
             out_operand->kind = CM_MIR_CONSTANT_U32;
             out_operand->data.u32_value =
                 (uint32_t)expression->data.integer.low_bits;
@@ -1797,7 +1885,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         place.type = instantiated;
         place.span = expression->span;
         out_operand->kind = cm_mir_type_is_i32(match->hir, instantiated)
-                || cm_mir_type_is_u32(match->hir, instantiated)
+                || cm_mir_type_is_fixed_unsigned(match->hir, instantiated)
             ? CM_MIR_OPERAND_COPY_PLACE : CM_MIR_OPERAND_MOVE_PLACE;
         out_operand->data.place = place;
         if (!cm_mir_place_valid(match->hir, match->body, &place)) return 0;
@@ -2123,6 +2211,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         CmSemanticCallableSelectionView semantic_callable;
         CmSemanticFunctionSignatureView semantic_signature;
         CmSemanticExpressionView semantic_expression;
+        CmSemanticGenericArgumentView semantic_impl_argument;
         uint32_t call_argument_count;
         uint32_t call_substitution_count;
         int selected_call;
@@ -2145,6 +2234,8 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         memset(&semantic_callable, 0, sizeof(semantic_callable));
         memset(&semantic_signature, 0, sizeof(semantic_signature));
         memset(&semantic_expression, 0, sizeof(semantic_expression));
+        memset(&semantic_impl_argument, 0,
+            sizeof(semantic_impl_argument));
         if (call_argument_count == 0u
             || call_argument_count > 2u
             || call_arguments == NULL
@@ -2189,8 +2280,6 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 >= match->body->basic_block_count
             || !cm_hir_def_id_equal(callee_definition,
                 terminator->data.call.callee.definition)
-            || call_substitution_count
-                != terminator->data.call.callee.substitution_count
             || call_argument_count
                 != terminator->data.call.argument_count
             || !cm_mir_type_equal(match->hir,
@@ -2276,6 +2365,39 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 return 0;
             }
             callee_definition = semantic_callable.selected_callable;
+            if (semantic_callable.item_argument_count != 0u
+                || semantic_callable.method_argument_count != 0u
+                || semantic_callable.implemented_trait_argument_count != 0u
+                || semantic_callable.enclosing_impl_argument_count > 1u) {
+                return 0;
+            }
+            if (semantic_callable.enclosing_impl_argument_count == 1u) {
+                CmHirTypeId callee_substitution;
+
+                if (cm_mir_semantic_callable_generic_argument_query(match,
+                        expression_id,
+                        CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL,
+                        0u, &semantic_impl_argument)
+                            != CM_SEMANTIC_RESULTS_OK
+                    || semantic_impl_argument.kind != CM_HIR_GENERIC_ARG_TYPE
+                    || terminator->data.call.callee.substitution_count != 1u
+                    || terminator->data.call.callee.substitutions == NULL
+                    || cm_semantic_type_view_materialize_existing_hir(
+                        match->semantic_results, match->admission,
+                        &semantic_impl_argument.normalized,
+                        &callee_substitution) != CM_SEMANTIC_RESULTS_OK
+                    || !cm_mir_type_is_fixed_unsigned(match->hir,
+                        callee_substitution)
+                    || !cm_mir_type_equal(match->hir, callee_substitution,
+                        terminator->data.call.callee.substitutions[0])) {
+                    return 0;
+                }
+                call_substitution_count = 1u;
+            }
+        }
+        if (call_substitution_count
+                != terminator->data.call.callee.substitution_count) {
+            return 0;
         }
         if (match->semantic_results != NULL) {
             if (match->admission == NULL
@@ -2334,11 +2456,12 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 return 0;
             }
         }
-        for (index = 0u; index < call_substitution_count; ++index) {
+        for (index = 0u; !selected_call
+             && index < call_substitution_count; ++index) {
             CmHirTypeId substitution;
             CmHirTypeId callee_substitution;
 
-            if (!cm_mir_instantiate_u32_type(match->hir, match->item,
+            if (!cm_mir_instantiate_executable_type(match->hir, match->item,
                     &match->body->instance,
                     expression->data.call.type_substitutions[index],
                     &substitution)) {
@@ -2575,7 +2698,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         return 0;
     }
     if (semantic_results == NULL) {
-        if (!cm_mir_instantiate_u32_type(hir, item, &body->instance,
+        if (!cm_mir_instantiate_executable_type(hir, item, &body->instance,
                 signature->return_type, &instantiated)) return 0;
     } else {
         if (!cm_mir_semantic_view_matches(semantic_results, admission,
@@ -2602,7 +2725,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         if (semantic_results == NULL) {
             if (source_body->locals[index].type
                     != signature->parameters[index].type
-                || !cm_mir_instantiate_u32_type(hir, item,
+                || !cm_mir_instantiate_executable_type(hir, item,
                     &body->instance, source_body->locals[index].type,
                     &instantiated)) return 0;
         } else {
@@ -2629,7 +2752,8 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         if (source_body->locals[index].parameter_index
                 != CM_HIR_PARAMETER_INDEX_NONE
             || source_body->locals[index].mutability != CM_HIR_IMMUTABLE
-            || !cm_mir_instantiate_u32_type(hir, item, &body->instance,
+            || !cm_mir_instantiate_executable_type(hir, item,
+                &body->instance,
                 source_body->locals[index].type, &instantiated)
             || !cm_mir_type_supported(hir, instantiated,
                 context->pointer_bits)

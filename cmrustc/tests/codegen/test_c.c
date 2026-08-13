@@ -48,6 +48,7 @@ typedef struct TestReferenceProgram {
     CmHirContext hir;
     CmHirCrateId crate_id;
     CmHirModuleId root_module;
+    CmHirTypeId u8_type;
     CmHirTypeId u32_type;
     CmHirTypeId pair_type;
     CmHirTypeId shared_u32_type;
@@ -214,6 +215,10 @@ static void reference_program_init(TestReferenceProgram *program)
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_INTEGER_KIND;
     type.span = test_span(10u, 11u);
+    type.data.integer_type.kind = CM_HIR_INT_U8;
+    assert(cm_hir_add_type(&program->hir, &type, &program->u8_type)
+        == CM_HIR_OK);
+    type.span = test_span(12u, 13u);
     type.data.integer_type.kind = CM_HIR_INT_U32;
     assert(cm_hir_add_type(&program->hir, &type, &program->u32_type)
         == CM_HIR_OK);
@@ -842,6 +847,10 @@ static void test_canonical_instance_identity_and_name(void)
     CmMirInstance distinct;
     CmMirInstance flat;
     CmMirBody body;
+    CmMirLocal materialized_local;
+    CmMirLocal scalar_locals[2];
+    CmMirRvalue u8_binary;
+    const CmHirItem *item;
     unsigned char first_bytes[3] = { 1u, 2u, 3u };
     unsigned char same_bytes[3] = { 1u, 2u, 3u };
     unsigned char distinct_bytes[3] = { 1u, 2u, 4u };
@@ -860,7 +869,7 @@ static void test_canonical_instance_identity_and_name(void)
     same = first;
     same.identity_bytes = same_bytes;
     first_substitution = program.u32_type;
-    same_substitution = program.pair_type;
+    same_substitution = program.u8_type;
     first.substitutions = &first_substitution;
     first.substitution_count = 1u;
     same.substitutions = &same_substitution;
@@ -876,9 +885,28 @@ static void test_canonical_instance_identity_and_name(void)
     assert(!cm_c_instance_equal(&first, &distinct));
 
     memset(&body, 0, sizeof(body));
+    memset(&materialized_local, 0, sizeof(materialized_local));
+    materialized_local.kind = CM_MIR_LOCAL_RETURN;
+    materialized_local.type = program.u32_type;
     body.instance = first;
     body.owner = first.definition;
     body.source_body = first.body;
+    body.locals = &materialized_local;
+    body.local_count = 1u;
+    item = cm_c_instance_item(&program.hir, &body);
+    assert(item != NULL
+        && cm_c_instance_materialization_valid(&program.hir, item, &body, 1)
+        && !cm_c_instance_materialization_valid(&program.hir, item, &body, 0));
+    body.instance.substitutions = &same_substitution;
+    assert(!cm_c_instance_materialization_valid(&program.hir, item, &body, 1));
+    materialized_local.type = program.u8_type;
+    assert(cm_c_instance_materialization_valid(&program.hir, item, &body, 1));
+    same_substitution = program.pair_type;
+    assert(!cm_c_instance_materialization_valid(&program.hir, item, &body, 1));
+    same_substitution = program.u8_type;
+    body.instance.identity_bytes = NULL;
+    assert(!cm_c_instance_materialization_valid(&program.hir, item, &body, 1));
+    body.instance = first;
     assert(cm_c_exact_name(&program.hir, &body, 0, first_name,
         sizeof(first_name)));
     body.instance = same;
@@ -892,6 +920,36 @@ static void test_canonical_instance_identity_and_name(void)
         && strncmp(first_name, "cmrustc_h", 9u) == 0
         && strstr(first_name, "_t") == NULL
         && strlen(first_name) < CM_C_EXACT_NAME_CAPACITY);
+    {
+        CmStrBuf type_text;
+
+        cm_str_buf_init(&type_text);
+        cm_c_append_type(&type_text, &program.hir, program.u8_type);
+        assert(strcmp(cm_str_buf_c_str(&type_text), "uint8_t") == 0);
+        cm_str_buf_clear(&type_text);
+        memset(scalar_locals, 0, sizeof(scalar_locals));
+        scalar_locals[0].kind = CM_MIR_LOCAL_RETURN;
+        scalar_locals[0].type = program.u8_type;
+        scalar_locals[1].kind = CM_MIR_LOCAL_ARGUMENT;
+        scalar_locals[1].type = program.u8_type;
+        memset(&body, 0, sizeof(body));
+        body.locals = scalar_locals;
+        body.local_count = 2u;
+        memset(&u8_binary, 0, sizeof(u8_binary));
+        u8_binary.kind = CM_MIR_RVALUE_BINARY;
+        u8_binary.type = program.u8_type;
+        u8_binary.data.binary.operator_kind = CM_MIR_BINARY_ADD;
+        u8_binary.data.binary.left.kind = CM_MIR_OPERAND_MOVE;
+        u8_binary.data.binary.left.type = program.u8_type;
+        u8_binary.data.binary.left.data.local = 1u;
+        u8_binary.data.binary.right = u8_binary.data.binary.left;
+        assert(cm_c_exact_rvalue_shape(&program.hir, &body, &u8_binary,
+                64u));
+        cm_c_append_rvalue(&type_text, &program.hir, &u8_binary, 64u);
+        assert(strcmp(cm_str_buf_c_str(&type_text),
+            "(uint8_t)(_1 + _1)") == 0);
+        cm_str_buf_destroy(&type_text);
+    }
     reference_program_destroy(&program);
 }
 

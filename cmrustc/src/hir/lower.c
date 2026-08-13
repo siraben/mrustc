@@ -13908,9 +13908,30 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
 typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_UNSUPPORTED = 0,
     CM_LOWER_IMPL_SELF_MONOMORPHIC,
+    CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
 } CmLowerImplSelfClass;
+
+static int cm_lower_impl_has_only_methods(const CmLowerState *state,
+    CmHirDefId impl_definition)
+{
+    size_t index;
+    int has_method;
+
+    has_method = 0;
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *child;
+
+        child = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            index);
+        if (child == NULL || !cm_hir_def_id_equal(child->parent_definition,
+                impl_definition)) continue;
+        if (child->kind != CM_HIR_ITEM_FUNCTION) return 0;
+        has_method = 1;
+    }
+    return has_method;
+}
 
 static CmLowerImplSelfClass cm_lower_impl_self_class(
     const CmLowerState *state, const CmHirItem *impl_item,
@@ -13926,6 +13947,24 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     }
     type = cm_hir_get_type(state->hir, impl_item->data.impl_item.self_type);
     if (type == NULL) return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+    if (type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && impl_item->generic_parameter_count == 1u
+        && impl_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        && type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            impl_item->generic_parameter_start);
+        if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+            && !parameter->has_default && parameter->index == 0u
+            && cm_hir_def_id_equal(parameter->owner,
+                impl_item->definition)
+            && cm_lower_impl_has_only_methods(state,
+                impl_item->definition)) {
+            return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER;
+        }
+    }
     if (type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
         && impl_item->generic_parameter_count == 1u) {
         const CmHirGenericParam *parameter;
@@ -14075,9 +14114,9 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                "impl self type is outside the bounded scalar, "
-                "zero-argument local ADT, or full ordered generic local "
-                "ADT subset");
+                "impl self type is outside the bounded scalar, single-type "
+                "parameter, zero-argument local ADT, or full ordered "
+                "generic local ADT subset");
             return 0;
         }
         for (prior_index = 0u; prior_index < index; ++prior_index) {
@@ -14097,7 +14136,10 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             }
             prior_class = cm_lower_impl_self_class(state, prior,
                 &prior_adt_definition);
-            overlaps = prior_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
+            overlaps = prior_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                    || item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                ? 1
+                : prior_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
                     && item_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
                 ? cm_lower_impl_self_equal(state->hir,
                     prior->data.impl_item.self_type,
@@ -14118,7 +14160,11 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
                     CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                     CM_HIR_OK,
-                    item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+                    item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                        || prior_class
+                            == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                        ? "overlapping blanket impl candidates for one trait"
+                    : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
                         ? "overlapping ordered generic impl candidates for "
                           "one trait and local ADT head"
                         : prior->data.impl_item.is_negative

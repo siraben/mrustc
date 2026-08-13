@@ -2992,8 +2992,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         "type U8Assoc = <Wrapper<u8> as Trait>::Assoc;"
         "type BoolAssoc = <Wrapper<bool> as Trait>::Assoc;";
     static const char *const rejected[] = {
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<T> Trait for T { type Assoc = T; }",
         "struct Pair<T, U>; trait Trait { type Assoc; } "
             "impl<T, U> Trait for Pair<T, T> { type Assoc = T; }",
         "struct Pair<T, U>; trait Trait { type Assoc; } "
@@ -3029,14 +3027,12 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
     static const char *const rejected_messages[] = {
-        "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
@@ -3077,6 +3073,19 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
     cm_hir_context_destroy(&context);
     cm_expanded_ast_destroy(&expanded);
     cm_ast_destroy(&ast);
+
+    result = lower_source(
+        "trait Blanket { fn value(self, other: Self) -> Self; } "
+        "impl<T> Blanket for T { "
+        "fn value(self, other: T) -> T { other } }",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "blanket impl lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 
     for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
          ++index) {

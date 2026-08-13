@@ -275,8 +275,19 @@ static int cm_mir_lower_type_is_scalar(const CmHirContext *hir,
     type = cm_hir_get_type(hir, type_id);
     return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
         && (type->data.integer_type.kind == CM_HIR_INT_I32
+            || type->data.integer_type.kind == CM_HIR_INT_U8
             || type->data.integer_type.kind == CM_HIR_INT_U32
             || type->data.integer_type.kind == CM_HIR_INT_USIZE);
+}
+
+static int cm_mir_lower_type_is_i32(const CmHirContext *hir,
+    CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_I32;
 }
 
 static int cm_mir_lower_type_is_u32(const CmHirContext *hir,
@@ -287,6 +298,29 @@ static int cm_mir_lower_type_is_u32(const CmHirContext *hir,
     type = cm_hir_get_type(hir, type_id);
     return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
         && type->data.integer_type.kind == CM_HIR_INT_U32;
+}
+
+static int cm_mir_lower_type_is_executable_substitution(
+    const CmHirContext *hir, CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && (type->data.integer_type.kind == CM_HIR_INT_U8
+            || type->data.integer_type.kind == CM_HIR_INT_U32);
+}
+
+static int cm_mir_lower_type_is_call_scalar(const CmHirContext *hir,
+    CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && (type->data.integer_type.kind == CM_HIR_INT_U8
+            || type->data.integer_type.kind == CM_HIR_INT_U32
+            || type->data.integer_type.kind == CM_HIR_INT_USIZE);
 }
 
 static int cm_mir_lower_type_is_usize(const CmHirContext *hir,
@@ -397,6 +431,7 @@ static int cm_mir_lower_type(const CmHirContext *hir,
     if (type == NULL || out_type == NULL) return 0;
     if (type->kind == CM_HIR_TYPE_INTEGER_KIND
         && (type->data.integer_type.kind == CM_HIR_INT_I32
+            || type->data.integer_type.kind == CM_HIR_INT_U8
             || type->data.integer_type.kind == CM_HIR_INT_U32
             || type->data.integer_type.kind == CM_HIR_INT_USIZE)) {
         *out_type = declared;
@@ -432,18 +467,33 @@ static int cm_mir_lower_type(const CmHirContext *hir,
             substitution_count, impl_item->data.impl_item.self_type,
             out_type);
     }
-    if (type->kind != CM_HIR_TYPE_PARAMETER_KIND) return 0;
+    if (type->kind != CM_HIR_TYPE_PARAMETER_KIND || item == NULL) return 0;
     parameter = cm_hir_get_generic_param(hir,
         type->data.parameter_type.parameter);
-    if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
-        || !cm_hir_def_id_equal(parameter->owner, item->definition)
-        || parameter->index >= substitution_count) {
+    if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE) {
         return 0;
     }
+    if (cm_hir_def_id_equal(parameter->owner, item->definition)) {
+        if (parameter->index >= substitution_count) return 0;
+    } else {
+        self_owner = cm_hir_lookup_definition(hir,
+            item->parent_definition);
+        impl_item = self_owner == NULL
+                || self_owner->kind != CM_HIR_DEFINITION_ITEM
+                || self_owner->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, self_owner->entity.item_id);
+        if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
+            || !cm_hir_def_id_equal(impl_item->definition,
+                parameter->owner)
+            || item->generic_parameter_count != 0u
+            || impl_item->generic_parameter_count != 1u
+            || substitution_count != 1u || parameter->index != 0u) {
+            return 0;
+        }
+    }
     index = parameter->index;
-    type = cm_hir_get_type(hir, substitutions[index]);
-    if (type == NULL || type->kind != CM_HIR_TYPE_INTEGER_KIND
-        || type->data.integer_type.kind != CM_HIR_INT_U32) {
+    if (!cm_mir_lower_type_is_executable_substitution(hir,
+            substitutions[index])) {
         return 0;
     }
     *out_type = substitutions[index];
@@ -609,6 +659,34 @@ static int cm_mir_lower_instance_is_canonical(
 {
     return instance != NULL && instance->body != CM_HIR_BODY_NONE
         && instance->identity_bytes != NULL && instance->identity_size != 0u;
+}
+
+static int cm_mir_lower_transitional_impl_instance(
+    const CmHirContext *hir, const CmHirItem *item,
+    const CmMirInstance *instance, const CmHirTypeId *substitutions,
+    uint32_t substitution_count)
+{
+    const CmHirDefinition *definition;
+    const CmHirItem *impl_item;
+
+    if (hir == NULL || item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+        || item->generic_parameter_count != 0u
+        || cm_hir_def_id_is_none(item->parent_definition)
+        || !cm_mir_lower_instance_is_canonical(instance)
+        || substitution_count != 1u || substitutions == NULL
+        || !cm_mir_lower_type_is_executable_substitution(hir,
+            substitutions[0])) {
+        return 0;
+    }
+    definition = cm_hir_lookup_definition(hir, item->parent_definition);
+    impl_item = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    return impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && cm_hir_def_id_equal(impl_item->definition,
+            item->parent_definition)
+        && impl_item->generic_parameter_count == 1u;
 }
 
 typedef struct CmMirLowerLegacyInstanceQuery {
@@ -1114,6 +1192,45 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_argument_query(
         argument, out_expression);
 }
 
+static CmSemanticResultsStatus
+cm_mir_flow_semantic_callable_generic_argument_query(
+    const CmMirFlowPlan *plan, CmHirExprId expression,
+    CmSemanticCallableGenericArgumentDomain domain, uint32_t argument,
+    CmSemanticGenericArgumentView *out_view)
+{
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_generic_argument(
+            plan->semantic_results, plan->admission,
+            plan->item->data.function_item.body, expression, domain,
+            argument, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_callable_generic_argument(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, domain, argument, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_callable_generic_argument(
+        plan->semantic_results, plan->admission, &caller, expression,
+        domain, argument, out_view);
+}
+
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
     const CmMirFlowPlan *plan, const CmMirBody *callee,
     CmHirExprId expression, uint32_t parameter,
@@ -1311,7 +1428,9 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             || (!cm_mir_lower_type_is_u32(plan->hir, type)
                 && !cm_mir_lower_type_is_usize(plan->hir, type)
                 && expression->data.integer.low_bits > (uint64_t)INT32_MAX)
-            || !cm_mir_lower_type_is_scalar(plan->hir, type)) {
+            || (!cm_mir_lower_type_is_i32(plan->hir, type)
+                && !cm_mir_lower_type_is_u32(plan->hir, type)
+                && !cm_mir_lower_type_is_usize(plan->hir, type))) {
             return cm_mir_flow_fail(plan, CM_MIR_FLOW_CONSTANT_RANGE,
                 expression_id, CM_MIR_OK);
         }
@@ -1617,6 +1736,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         CmSemanticCallableSelectionView semantic_callable;
         CmSemanticFunctionSignatureView semantic_callee_signature;
         CmSemanticExpressionView semantic_expression;
+        CmSemanticGenericArgumentView semantic_impl_argument;
         int has_aggregate_argument;
         CmMirStatus status;
         uint32_t index;
@@ -1637,8 +1757,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         call_substitution_count = expression->kind == CM_HIR_EXPR_CALL
             ? expression->data.call.type_substitution_count : 0u;
 
-        if ((!cm_mir_lower_type_is_u32(plan->hir, type)
-                && !cm_mir_lower_type_is_usize(plan->hir, type))
+        if (!cm_mir_lower_type_is_call_scalar(plan->hir, type)
             || call_argument_count < 1u
             || call_argument_count > 2u
             || call_arguments == NULL
@@ -1660,6 +1779,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         memset(&semantic_callable, 0, sizeof(semantic_callable));
         memset(&semantic_callee_signature, 0,
             sizeof(semantic_callee_signature));
+        memset(&semantic_impl_argument, 0,
+            sizeof(semantic_impl_argument));
         if (selected_call) {
             const CmHirItem *declared;
             const CmHirExpr *receiver;
@@ -1750,6 +1871,32 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                     expression_id, CM_MIR_INVALID_ADMISSION);
             }
             callee_definition = semantic_callable.selected_callable;
+            if (semantic_callable.item_argument_count != 0u
+                || semantic_callable.method_argument_count != 0u
+                || semantic_callable.implemented_trait_argument_count != 0u
+                || semantic_callable.enclosing_impl_argument_count > 1u) {
+                return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
+                    expression_id, CM_MIR_OK);
+            }
+            if (semantic_callable.enclosing_impl_argument_count == 1u) {
+                if (cm_mir_flow_semantic_callable_generic_argument_query(
+                        plan, expression_id,
+                        CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL,
+                        0u, &semantic_impl_argument)
+                            != CM_SEMANTIC_RESULTS_OK
+                    || semantic_impl_argument.kind != CM_HIR_GENERIC_ARG_TYPE
+                    || cm_semantic_type_view_materialize_existing_hir(
+                        plan->semantic_results, plan->admission,
+                        &semantic_impl_argument.normalized,
+                        &callee_substitution) != CM_SEMANTIC_RESULTS_OK
+                    || !cm_mir_lower_type_is_executable_substitution(plan->hir,
+                        callee_substitution)) {
+                    return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
+                        expression_id, CM_MIR_INVALID_ADMISSION);
+                }
+                callee_substitutions = &callee_substitution;
+                call_substitution_count = 1u;
+            }
         } else if (plan->semantic_results != NULL
             && plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
             if (plan->admission == NULL
@@ -1776,7 +1923,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             }
             callee_definition = semantic_call.callee;
         }
-        if (call_substitution_count == 1u) {
+        if (!selected_call && call_substitution_count == 1u) {
             if (!cm_mir_lower_type(plan->hir, plan->item,
                     plan->instance->substitutions,
                     plan->instance->substitution_count,
@@ -1915,8 +2062,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         }
         if (!cm_mir_hir_type_equal(plan->hir, type,
                 callee_body->locals[CM_MIR_RETURN_LOCAL].type)
-            || (!cm_mir_lower_type_is_u32(plan->hir, type)
-                && !cm_mir_lower_type_is_usize(plan->hir, type))) {
+            || !cm_mir_lower_type_is_call_scalar(plan->hir, type)) {
             return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
                 expression_id, CM_MIR_OK);
         }
@@ -1981,9 +2127,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                     &parameter_type)
                 || !cm_mir_hir_type_equal(plan->hir, local_type,
                     parameter_type)
-                || ((!cm_mir_lower_type_is_u32(plan->hir, parameter_type)
-                        && !cm_mir_lower_type_is_usize(plan->hir,
-                            parameter_type))
+                || (!cm_mir_lower_type_is_call_scalar(plan->hir,
+                        parameter_type)
                     && !cm_mir_lower_type_is_aggregate(plan->hir,
                         callee_item, parameter_type))) {
                 return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
@@ -2603,7 +2748,9 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     hir_body = cm_hir_get_body(hir, body_id);
     item = hir_body == NULL ? NULL : cm_mir_lower_function(hir, hir_body);
     if (hir_body == NULL || item == NULL
-        || item->generic_parameter_count != substitution_count) {
+        || (item->generic_parameter_count != substitution_count
+            && !cm_mir_lower_transitional_impl_instance(hir, item,
+                reserved_instance, substitutions, substitution_count))) {
         cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_HIR, body_id,
             CM_HIR_EXPR_NONE, CM_MIR_OK,
             "exact MIR instance does not match a source function");

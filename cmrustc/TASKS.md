@@ -1722,15 +1722,47 @@ ASan/UBSan/leak gates pass for instance/admission/results, MIR model/lowering,
 C codegen, qualified UFCS, dot methods, generic free-function chains, and
 recursive publication.
 
-The next vertical gate removes MIR's assumption that the flat substitution
-array belongs only to the selected function item. Qualified and dot calls
-through one blanket method must execute independently for `u32` and `u8`,
-retain two canonical MIR bodies and two digest-derived private C symbols, and
-reject a wrong owner, domain, arity, kind, or transitional `TypeId`
-transactionally without changing `hir.types.len`. After that bounded bridge,
-the major ordering milestone remains the all-local typed/rewritten/validated
-HIR barrier before broad MIR generation and MIR-driven reachability, matching
-original mrustc's semantic-pass ordering.
+MIR no longer assumes that its optional flat executable substitution belongs
+to the selected function item. The bounded canonical impl-method bridge
+authenticates a zero-method-generic function under an exact single-type-
+parameter impl, resolves both impl-owned `T` and symbolic `Self` through the
+one retained enclosing-impl type, and replays that owner domain from sealed
+callable generic-argument evidence. Canonical re-encoding remains the authority
+for owner, domain, arity, kind, `Self`, body, and identity; the retained
+`CmHirTypeId` is checked only as executable material and cannot rename or merge
+instances. The legacy flat free-function path remains item-owned and u32-only.
+
+The same checkpoint carries the narrow u8 execution path through MIR locals,
+moves, parameters, returns, calls, exact-body replay, and the C backend. C
+emits exact `uint8_t`, preserves wrapping casts for supported u8 arithmetic,
+and still derives private names from the complete canonical-key digest. Source
+HIR now admits only the authenticated `impl<T> Trait for T` subset whose
+children are methods; blanket associated types and overlapping same-trait
+candidates remain rejected. A qualified u32 call and dot-method u8 call through
+one `Echo for T` impl execute independently, retain two canonical MIR bodies,
+emit two distinct digest-derived private C definitions, and call the matching
+body from each public wrapper. Canonical u32 bytes paired with u8 executable
+material and missing material fail without a MIR body; admission's wrong
+owner/domain/arity/kind/`Self` cases remain transactional with unchanged HIR
+types, expressions, and generations. GDB traces at flow lowering and exact
+publication replay localized and closed the two stale item-owned assumptions.
+The complete strict GCC and TinyCC suites pass, as do focused Clang
+ASan/UBSan/leak HIR admission/results, MIR model/lowering, C codegen, and live
+blanket acceptance.
+
+The next architectural gate is the all-local semantic barrier. Original mrustc
+runs outer and expression typecheck, then usage/static-borrow/lifetime/closure/
+vtable/UFCS/reborrow/erased-type rewrites, independent expression validation,
+whole-crate MIR lowering/validation/cleanup/borrowcheck, and only then
+MIR-driven translation enumeration. cmrustc must seal a generation-bound
+`STRUCTURAL -> TYPED -> REWRITTEN -> REGIONS -> VALIDATED` manifest for every
+cfg-active function, const, static, and represented type-position body atom;
+rollback or HIR mutation/ABA must stale the whole capability. Exact closure
+admission must derive from that barrier, MIR publication must pin both
+capabilities, and the production driver's legacy one-body bypass must be
+removed. Rewrites must precede durable final semantic-results allocation, and
+phase names may advance only after a real validator rather than treating an
+unsupported form as completed.
 
 ## M6: Build orchestration
 

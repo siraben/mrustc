@@ -284,6 +284,15 @@ static int cm_c_type_is_u32(const CmHirContext *hir, CmHirTypeId id)
         && type->data.integer_type.kind == CM_HIR_INT_U32;
 }
 
+static int cm_c_type_is_u8(const CmHirContext *hir, CmHirTypeId id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_U8;
+}
+
 static int cm_c_type_is_i32(const CmHirContext *hir, CmHirTypeId id)
 {
     const CmHirType *type;
@@ -305,7 +314,14 @@ static int cm_c_type_is_usize(const CmHirContext *hir, CmHirTypeId id)
 static int cm_c_type_is_codegen_scalar(const CmHirContext *hir,
     CmHirTypeId id)
 {
-    return cm_c_type_is_u32(hir, id) || cm_c_type_is_usize(hir, id);
+    return cm_c_type_is_u8(hir, id) || cm_c_type_is_u32(hir, id)
+        || cm_c_type_is_usize(hir, id);
+}
+
+static int cm_c_type_is_fixed_unsigned_scalar(const CmHirContext *hir,
+    CmHirTypeId id)
+{
+    return cm_c_type_is_u8(hir, id) || cm_c_type_is_u32(hir, id);
 }
 
 static int cm_c_type_is_bool(const CmHirContext *hir, CmHirTypeId id)
@@ -374,8 +390,8 @@ static int cm_c_type_is_supported_inner(const CmHirContext *hir,
 
     if (hir == NULL || depth > hir->types.len) return 0;
     type = cm_hir_get_type(hir, id);
-    return cm_c_type_is_i32(hir, id) || cm_c_type_is_u32(hir, id)
-        || cm_c_type_is_usize(hir, id)
+    return cm_c_type_is_i32(hir, id) || cm_c_type_is_u8(hir, id)
+        || cm_c_type_is_u32(hir, id) || cm_c_type_is_usize(hir, id)
         || cm_c_type_is_aggregate(hir, id, NULL)
         || (type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
             && type->data.reference_type.mutability == CM_HIR_IMMUTABLE
@@ -455,20 +471,22 @@ static int cm_c_place_present(const CmMirPlace *place)
         || place->span.end != 0u);
 }
 
-static int cm_c_instance_type_is_u32(const CmHirContext *hir,
-    const CmHirItem *item, const CmMirBody *body, CmHirTypeId id)
+static int cm_c_instance_type_is_fixed_unsigned(const CmHirContext *hir,
+    const CmHirItem *item, const CmMirBody *body, CmHirTypeId actual,
+    CmHirTypeId declared)
 {
     const CmHirGenericParam *parameter;
     const CmHirType *type;
 
-    if (cm_c_type_is_u32(hir, id)) return 1;
-    type = cm_hir_get_type(hir, id);
+    if (!cm_c_type_is_fixed_unsigned_scalar(hir, actual)) return 0;
+    if (cm_c_type_equal(hir, actual, declared)) return 1;
+    type = cm_hir_get_type(hir, declared);
     if (item == NULL || body == NULL
         || item->generic_parameter_count != 1u
         || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
         || body->instance.substitution_count != 1u
         || body->instance.substitutions == NULL
-        || !cm_c_type_is_u32(hir, body->instance.substitutions[0])
+        || !cm_c_type_equal(hir, body->instance.substitutions[0], actual)
         || type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND) {
         return 0;
     }
@@ -481,12 +499,45 @@ static int cm_c_instance_type_is_u32(const CmHirContext *hir,
         && cm_hir_def_id_equal(parameter->owner, item->definition);
 }
 
+/*
+ * Canonical instance bytes authenticate generic ownership and ordering.
+ * The optional TypeId retained on MIR is executable storage only: it may be
+ * an item, method, enclosing-impl, or implemented-trait argument.  Therefore
+ * admitted bodies validate its representable shape without comparing its
+ * count to the selected function item's own generic parameter count.
+ */
+static int cm_c_instance_materialization_valid(const CmHirContext *hir,
+    const CmHirItem *item, const CmMirBody *body, int admitted)
+{
+    uint32_t count;
+
+    if (hir == NULL || item == NULL || body == NULL) return 0;
+    count = body->instance.substitution_count;
+    if ((count == 0u) != (body->instance.substitutions == NULL)) return 0;
+    if (admitted) {
+        return body->instance.body != CM_HIR_BODY_NONE
+            && body->instance.identity_bytes != NULL
+            && body->instance.identity_size != 0u
+            && body->locals != NULL && body->local_count != 0u
+            && count <= 1u
+            && (count == 0u || cm_c_type_is_fixed_unsigned_scalar(hir,
+                    body->instance.substitutions[0]))
+            && (count == 0u || cm_c_type_equal(hir,
+                body->instance.substitutions[0],
+                body->locals[CM_MIR_RETURN_LOCAL].type));
+    }
+    return count == item->generic_parameter_count && count <= 1u
+        && (count == 0u || cm_c_type_is_fixed_unsigned_scalar(hir,
+            body->instance.substitutions[0]));
+}
+
 static int cm_c_instance_parameter_matches(const CmHirContext *hir,
     const CmHirItem *item, const CmMirBody *body,
     CmHirTypeId actual, CmHirTypeId declared)
 {
-    if (cm_c_type_is_u32(hir, actual)) {
-        return cm_c_instance_type_is_u32(hir, item, body, declared);
+    if (cm_c_type_is_fixed_unsigned_scalar(hir, actual)) {
+        return cm_c_instance_type_is_fixed_unsigned(hir, item, body,
+            actual, declared);
     }
     if (cm_c_type_is_usize(hir, actual)) {
         return item != NULL && body != NULL
@@ -647,6 +698,7 @@ static int cm_c_exact_operand_shape(const CmHirContext *hir,
     }
     return operand->kind == CM_MIR_OPERAND_COPY_PLACE
         ? (cm_c_type_is_i32(hir, operand->type)
+            || cm_c_type_is_u8(hir, operand->type)
             || cm_c_type_is_u32(hir, operand->type)
             || cm_c_type_is_usize(hir, operand->type)
             || cm_c_type_is_reference(hir, operand->type))
@@ -669,8 +721,10 @@ static int cm_c_exact_rvalue_shape(const CmHirContext *hir,
                 &rvalue->data.equal.left)
             && cm_c_exact_operand_shape(hir, body,
                 &rvalue->data.equal.right)
-            && cm_c_type_is_u32(hir, rvalue->data.equal.left.type)
-            && cm_c_type_is_u32(hir, rvalue->data.equal.right.type);
+            && cm_c_type_is_fixed_unsigned_scalar(hir,
+                rvalue->data.equal.left.type)
+            && cm_c_type_equal(hir, rvalue->data.equal.left.type,
+                rvalue->data.equal.right.type);
     }
     if (rvalue->kind == CM_MIR_RVALUE_LESS) {
         return cm_c_type_is_bool(hir, rvalue->type)
@@ -954,19 +1008,11 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
     }
     if (signature == NULL
         || source_body == NULL
-        || body->instance.substitution_count
-            != item->generic_parameter_count
-        || body->instance.substitution_count > 1u
-        || (body->instance.substitution_count == 0u
-            && body->instance.substitutions != NULL)
-        || (body->instance.substitution_count != 0u
-            && (body->instance.substitutions == NULL
-                || !cm_c_type_is_u32(hir,
-                    body->instance.substitutions[0])))
+        || !cm_c_instance_materialization_valid(hir, item, body, admitted)
         || (!admitted && (item->generic_parameter_count == 0u
             ? !cm_c_type_is_codegen_scalar(hir, signature->return_type)
-            : !cm_c_instance_type_is_u32(hir, item, body,
-                signature->return_type)))
+            : !cm_c_instance_type_is_fixed_unsigned(hir, item, body,
+                body->instance.substitutions[0], signature->return_type)))
         || (admitted && !type_matches)
         || parameter_count == 0u
         || parameter_count > 2u
@@ -1334,6 +1380,7 @@ static int cm_c_aggregate_plan_reference_type(CmCAggregatePlan *plan,
     }
     if (!cm_c_type_is_aggregate(plan->hir, type_id, &definition)) {
         return cm_c_type_is_i32(plan->hir, type_id)
+            || cm_c_type_is_u8(plan->hir, type_id)
             || cm_c_type_is_u32(plan->hir, type_id)
             || cm_c_type_is_usize(plan->hir, type_id)
             || cm_c_type_is_bool(plan->hir, type_id);
@@ -1381,6 +1428,7 @@ static int cm_c_aggregate_plan_type(CmCAggregatePlan *plan,
     CmHirDefId definition;
 
     if (cm_c_type_is_i32(plan->hir, type_id)
+        || cm_c_type_is_u8(plan->hir, type_id)
         || cm_c_type_is_u32(plan->hir, type_id)
         || cm_c_type_is_usize(plan->hir, type_id)
         || cm_c_type_is_bool(plan->hir, type_id)) {
@@ -1486,6 +1534,8 @@ static void cm_c_append_type(CmStrBuf *output, const CmHirContext *hir,
     type = cm_hir_get_type(hir, type_id);
     if (cm_c_type_is_i32(hir, type_id)) {
         cm_str_buf_append(output, "int32_t");
+    } else if (cm_c_type_is_u8(hir, type_id)) {
+        cm_str_buf_append(output, "uint8_t");
     } else if (cm_c_type_is_u32(hir, type_id)) {
         cm_str_buf_append(output, "uint32_t");
     } else if (cm_c_type_is_usize(hir, type_id)) {
@@ -1738,7 +1788,8 @@ static void cm_c_append_rvalue(CmStrBuf *output, const CmHirContext *hir,
         return;
     }
     cm_str_buf_append(output, cm_c_type_is_usize(hir, rvalue->type)
-        ? "(uintptr_t)(" : "(uint32_t)(");
+        ? "(uintptr_t)(" : cm_c_type_is_u8(hir, rvalue->type)
+            ? "(uint8_t)(" : "(uint32_t)(");
     cm_c_append_operand(output, hir, &rvalue->data.binary.left,
         pointer_bits);
     cm_str_buf_append(output,
@@ -1774,7 +1825,8 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
     static const char scalar_prefix[] =
         "#include <limits.h>\n"
         "#include <stdint.h>\n\n"
-        "#if CHAR_BIT != 8 || !defined(UINT32_MAX) || "
+        "#if CHAR_BIT != 8 || !defined(UINT8_MAX) || UINT8_MAX != 255U || "
+        "!defined(UINT32_MAX) || "
         "UINT32_MAX != 4294967295U\n"
         "# error \"cmrustc requires an exact 32-bit uint32_t\"\n"
         "#endif\n\n";
@@ -1782,7 +1834,8 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
         "#include <limits.h>\n"
         "#include <stddef.h>\n"
         "#include <stdint.h>\n\n"
-        "#if CHAR_BIT != 8 || !defined(UINT32_MAX) || "
+        "#if CHAR_BIT != 8 || !defined(UINT8_MAX) || UINT8_MAX != 255U || "
+        "!defined(UINT32_MAX) || "
         "UINT32_MAX != 4294967295U\n"
         "# error \"cmrustc requires an exact 32-bit uint32_t\"\n"
         "#endif\n"

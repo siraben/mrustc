@@ -66,6 +66,12 @@ typedef struct TestHir {
     CmHirBodyId aggregate_body;
     CmHirDefId projection_definition;
     CmHirBodyId projection_body;
+    CmHirDefId blanket_trait_definition;
+    CmHirDefId blanket_declared_method_definition;
+    CmHirDefId blanket_impl_definition;
+    CmHirDefId blanket_method_definition;
+    CmHirBodyId blanket_method_body;
+    CmHirTypeId blanket_parameter_type;
 } TestHir;
 
 static CmSpan test_span(uint32_t start, uint32_t end)
@@ -317,6 +323,163 @@ static void add_one_argument_let_function(CmHirContext *hir,
     item.data.function_item.body = *out_body;
     item.data.function_item.trait_item_definition = cm_hir_def_id_none();
     assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
+}
+
+static void add_blanket_impl_method(TestHir *fixture,
+    CmHirCrateId crate_id, CmHirModuleId root_module)
+{
+    CmHirFunctionParameter parameter;
+    CmHirGenericParam generic;
+    CmHirGenericParamId generic_id;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirExpr expression;
+    CmHirExprId root;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirType parameter_type;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_TRAIT, test_span(1100u, 1180u),
+        &fixture->blanket_trait_definition) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_TRAIT;
+    item.definition = fixture->blanket_trait_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&fixture->context, "Blanket");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(1100u, 1180u);
+    item.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->context, &item, &item_id)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(1110u, 1130u),
+        &fixture->blanket_declared_method_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture->context, "value");
+    parameter.type = fixture->u32_type;
+    parameter.span = test_span(1115u, 1116u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = fixture->blanket_declared_method_definition;
+    item.owner_module = root_module;
+    item.parent_definition = fixture->blanket_trait_definition;
+    item.name = cm_hir_intern(&fixture->context, "value");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(1110u, 1130u);
+    item.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_NONE;
+    item.data.function_item.signature.return_type = fixture->u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->context, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = CM_HIR_BODY_NONE;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&fixture->context, &item, &item_id)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_IMPL, test_span(1200u, 1300u),
+        &fixture->blanket_impl_definition) == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = fixture->blanket_impl_definition;
+    generic.index = 0u;
+    generic.name = cm_hir_intern(&fixture->context, "T");
+    generic.span = test_span(1205u, 1206u);
+    assert(cm_hir_add_generic_param(&fixture->context, &generic,
+        &generic_id) == CM_HIR_OK);
+    memset(&parameter_type, 0, sizeof(parameter_type));
+    parameter_type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    parameter_type.span = generic.span;
+    parameter_type.data.parameter_type.parameter = generic_id;
+    assert(cm_hir_add_type(&fixture->context, &parameter_type,
+        &fixture->blanket_parameter_type) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_IMPL;
+    item.definition = fixture->blanket_impl_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = CM_INTERN_ID_NONE;
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(1200u, 1300u);
+    item.generic_parameter_start = generic_id;
+    item.generic_parameter_count = 1u;
+    item.data.impl_item.self_type = fixture->blanket_parameter_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition =
+        fixture->blanket_trait_definition;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->context, &item, &item_id)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(1220u, 1280u),
+        &fixture->blanket_method_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture->context, "value");
+    parameter.type = fixture->blanket_parameter_type;
+    parameter.span = test_span(1230u, 1231u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.name;
+    local.type = parameter.type;
+    local.span = parameter.span;
+    local.parameter_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = fixture->blanket_method_definition;
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = fixture->blanket_parameter_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 1220u;
+    body.span = test_span(1220u, 1280u);
+    assert(cm_hir_add_body(&fixture->context, &body,
+        &fixture->blanket_method_body) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = fixture->blanket_method_definition;
+    item.owner_module = root_module;
+    item.parent_definition = fixture->blanket_impl_definition;
+    item.name = cm_hir_intern(&fixture->context, "value");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = body.span;
+    item.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_NONE;
+    item.data.function_item.signature.return_type =
+        fixture->blanket_parameter_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture->context, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = fixture->blanket_method_body;
+    item.data.function_item.trait_item_definition =
+        fixture->blanket_declared_method_definition;
+    assert(cm_hir_add_item(&fixture->context, &item, &item_id)
+        == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = fixture->blanket_method_body;
+    expression.type = fixture->blanket_parameter_type;
+    expression.span = test_span(1250u, 1251u);
+    expression.data.local.local_index = 0u;
+    assert(cm_hir_add_expr(&fixture->context, &expression, &root)
+        == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture->context,
+        fixture->blanket_method_body, root) == CM_HIR_OK);
 }
 
 static void test_hir_init(TestHir *fixture)
@@ -3528,6 +3691,78 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     cm_semantic_admission_destroy(&admission);
 }
 
+static void test_canonical_blanket_impl_materialization(TestHir *fixture)
+{
+    CmHirCanonicalInstance canonical_u32;
+    CmHirCanonicalInstance canonical_u8;
+    CmHirGenericArg argument;
+    CmHirInstanceSpec spec;
+    CmHirTypeId substitution;
+    CmMirBasicBlock block;
+    CmMirBody body;
+    CmMirBodyId id;
+    CmMirContext mir;
+    CmMirLocal locals[2];
+    CmMirStatement statement;
+
+    add_blanket_impl_method(fixture, fixture->identity_definition.crate_id,
+        1u);
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = fixture->blanket_method_definition;
+    spec.declared_trait_callable =
+        fixture->blanket_declared_method_definition;
+    spec.enclosing_impl = fixture->blanket_impl_definition;
+    spec.enclosing_impl_arguments = &argument;
+    spec.enclosing_impl_argument_count = 1u;
+    spec.implemented_trait = fixture->blanket_trait_definition;
+    spec.self_owner = fixture->blanket_impl_definition;
+    cm_hir_canonical_instance_init(&canonical_u32);
+    cm_hir_canonical_instance_init(&canonical_u8);
+
+    argument.data.type = fixture->u32_type;
+    spec.self_type = fixture->u32_type;
+    assert(cm_hir_canonical_instance_encode(&fixture->context, 1u, &spec,
+        &canonical_u32) == CM_HIR_INSTANCE_OK);
+    argument.data.type = fixture->u8_type;
+    spec.self_type = fixture->u8_type;
+    assert(cm_hir_canonical_instance_encode(&fixture->context, 1u, &spec,
+        &canonical_u8) == CM_HIR_INSTANCE_OK);
+
+    cm_mir_context_init(&mir);
+    substitution = fixture->u8_type;
+    init_identity_mir(&body, locals, &statement, &block, fixture,
+        &substitution, fixture->u8_type);
+    body.instance.definition = fixture->blanket_method_definition;
+    body.instance.body = fixture->blanket_method_body;
+    body.instance.identity_bytes = canonical_u8.bytes;
+    body.instance.identity_size = canonical_u8.size;
+    body.owner = fixture->blanket_method_definition;
+    body.source_body = fixture->blanket_method_body;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context, &body,
+        &id) == CM_MIR_OK && id == 1u);
+    cm_mir_context_destroy(&mir);
+
+    cm_mir_context_init(&mir);
+    body.instance.identity_bytes = canonical_u32.bytes;
+    body.instance.identity_size = canonical_u32.size;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context, &body,
+        &id) == CM_MIR_INVARIANT_VIOLATION
+        && cm_mir_body_count(&mir) == 0u);
+    body.instance.identity_bytes = canonical_u8.bytes;
+    body.instance.identity_size = canonical_u8.size;
+    body.instance.substitutions = NULL;
+    body.instance.substitution_count = 0u;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context, &body,
+        &id) == CM_MIR_INVARIANT_VIOLATION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_context_destroy(&mir);
+
+    cm_hir_canonical_instance_destroy(&canonical_u8);
+    cm_hir_canonical_instance_destroy(&canonical_u32);
+}
+
 int main(void)
 {
     TestHir fixture;
@@ -3583,6 +3818,7 @@ int main(void)
     test_hir_init(&fixture);
     test_publication_atomicity(&fixture);
     test_canonical_publication_ownership(&fixture);
+    test_canonical_blanket_impl_materialization(&fixture);
     assert_legacy_constant(&fixture);
     cm_mir_context_init(&mir);
 
