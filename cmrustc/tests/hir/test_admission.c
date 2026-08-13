@@ -1459,22 +1459,22 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     caller_identity.bytes[caller_identity.size - 1u] ^= 1u;
     assert(cm_semantic_results_canonical_instance_callee_identity(results,
         &admission, &caller_identity, call_expression, &rejected_identity)
-            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+            == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
     caller_identity.bytes[caller_identity.size - 1u] ^= 1u;
     caller_identity.body = callee_identity.body;
     assert(cm_semantic_results_canonical_instance_callee_identity(results,
         &admission, &caller_identity, call_expression, &rejected_identity)
-            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+            == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
     caller_identity.body = reachable[0].body;
     caller_identity.definition = callee_identity.definition;
     assert(cm_semantic_results_canonical_instance_callee_identity(results,
         &admission, &caller_identity, call_expression, &rejected_identity)
-            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+            == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
     caller_identity.definition = caller_spec.selected_callable;
     caller_identity.size -= 1u;
     assert(cm_semantic_results_canonical_instance_callee_identity(results,
         &admission, &caller_identity, call_expression, &rejected_identity)
-            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+            == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
     caller_identity.size += 1u;
     assert(cm_semantic_results_canonical_instance_callee_identity(results,
         &admission, &caller_identity, CM_HIR_EXPR_NONE, &rejected_identity)
@@ -1534,12 +1534,17 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
     CmMirLowerResult lower_result;
     const CmMirBody *callee_body;
     const CmMirBody *caller_body;
+    CmMirBody *mutable_callee_body;
+    CmMirBody *mutable_caller_body;
     CmHirCanonicalInstance caller_identity;
     CmHirCanonicalInstance callee_identity;
     CmMirInstance caller_key;
     CmMirInstance callee_key;
     CmMirBodyId callee_body_id;
     CmMirBodyId caller_body_id;
+    unsigned char *saved_identity_bytes;
+    size_t saved_identity_size;
+    CmHirBodyId saved_identity_body;
     CmHirExprId call_expression;
     CmHirExprId argument;
     int equal;
@@ -1677,6 +1682,37 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
     assert(cm_semantic_type_view_matches_monomorphic_hir(results,
             &admission, &signature_parameter, callee_body->locals[1].type,
             &matches) == CM_SEMANTIC_RESULTS_OK && matches);
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        caller_body_id) == CM_MIR_OK);
+
+    /* Exact replay never flattens away one canonical half of a call. */
+    mutable_callee_body = (CmMirBody *)callee_body;
+    saved_identity_bytes = mutable_callee_body->instance.identity_bytes;
+    saved_identity_size = mutable_callee_body->instance.identity_size;
+    saved_identity_body = mutable_callee_body->instance.body;
+    mutable_callee_body->instance.identity_bytes = NULL;
+    mutable_callee_body->instance.identity_size = 0u;
+    mutable_callee_body->instance.body = CM_HIR_BODY_NONE;
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        caller_body_id) == CM_MIR_INVALID_ADMISSION);
+    mutable_callee_body->instance.identity_bytes = saved_identity_bytes;
+    mutable_callee_body->instance.identity_size = saved_identity_size;
+    mutable_callee_body->instance.body = saved_identity_body;
+
+    mutable_caller_body = (CmMirBody *)caller_body;
+    saved_identity_bytes = mutable_caller_body->instance.identity_bytes;
+    saved_identity_size = mutable_caller_body->instance.identity_size;
+    saved_identity_body = mutable_caller_body->instance.body;
+    mutable_caller_body->instance.identity_bytes = NULL;
+    mutable_caller_body->instance.identity_size = 0u;
+    mutable_caller_body->instance.body = CM_HIR_BODY_NONE;
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        caller_body_id) == CM_MIR_INVALID_ADMISSION);
+    mutable_caller_body->instance.identity_bytes = saved_identity_bytes;
+    mutable_caller_body->instance.identity_size = saved_identity_size;
+    mutable_caller_body->instance.body = saved_identity_body;
+    assert(cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+        caller_body_id) == CM_MIR_OK);
     cm_mir_context_destroy(&mir);
     memset(&foreign, 0, sizeof(foreign));
     assert(cm_semantic_results_instance_callable_selection(results,

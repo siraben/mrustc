@@ -1684,11 +1684,29 @@ canonical identities and derives deterministic private names from a
 domain-separated SHA-256 digest of the full key, while duplicate-name checking
 turns a hypothetical digest collision into transactional emission failure.
 Flat substitutions remain only as transitional executable type materialization.
-The next vertical gate is to add canonical expression, signature, primitive,
-field, and callable semantic-results queries so MIR replay no longer rebuilds
-the narrow flat `CmHirInstanceSpec`; that reconstruction still excludes the
-generic-impl parent domains needed to execute the two-instance blanket-method
-fixture.
+Canonical expression, adjustment, primitive, field, signature, direct-call,
+callable, argument-domain, parameter, and projection-trace queries now replay
+authoritative exact-instance semantics directly from the retained structural
+key. The key decoder validates the complete tagged payload, owner and body
+relations, truncation, and trailing bytes, then requires a byte-for-byte
+canonical re-encoding before lookup. MIR lowering and admitted MIR revalidation
+use those accessors whenever a body owns a canonical key; mixed canonical/flat
+call endpoints fail closed instead of discarding the canonical half. The old
+flat reconstruction remains only for legacy exact-instance compatibility APIs
+whose input is still `DefId + CmHirTypeId[]`.
+
+The next vertical gate is executable generic-impl materialization. A borrowed
+semantic type must be matched deterministically to an already-existing
+monomorphic HIR `TypeId` without mutating `hir.types`; the driver must intern
+the retained canonical callee rather than reconstructing a nongeneric impl
+method, and MIR lowering/replay must treat the materialized `TypeId` only as
+executable storage for the authenticated impl-owned parameter and `Self`.
+Qualified and dot calls through one blanket method must execute independently
+for `u32` and `u8`, retain two canonical MIR bodies and C symbols, and reject a
+wrong owner, domain, arity, or transitional `TypeId` transactionally. After
+that bounded bridge, the major ordering milestone remains the all-local
+typed/rewritten/validated HIR barrier before broad MIR generation and
+MIR-driven reachability, matching original mrustc's semantic-pass ordering.
 
 ## M6: Build orchestration
 

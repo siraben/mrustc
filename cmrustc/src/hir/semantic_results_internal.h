@@ -54,6 +54,108 @@ cm_semantic_results_canonical_instance_callee_identity(
     const struct CmSemanticAdmission *admission,
     const CmHirCanonicalInstance *caller, CmHirExprId expression,
     CmHirCanonicalInstance *out_identity);
+/* Replay one exact instance directly from its authenticated structural key.
+ * These accessors deliberately avoid rebuilding CmHirInstanceSpec values from
+ * generation-local TypeIds at the MIR boundary. */
+CmSemanticResultsStatus cm_semantic_results_canonical_instance_expression(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, CmHirExprId expression,
+    CmSemanticExpressionView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_expression_adjustment(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, CmHirExprId expression,
+    uint32_t adjustment, CmSemanticAdjustmentView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_primitive_binary(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_field_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_canonical_instance_signature(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance,
+    CmSemanticFunctionSignatureView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_signature_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, uint32_t parameter,
+    CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_canonical_instance_direct_call(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    const CmHirCanonicalInstance *expected_callee,
+    CmSemanticDirectCallView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_direct_call_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    const CmHirCanonicalInstance *expected_callee, uint32_t parameter,
+    CmSemanticTypeView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    CmSemanticCallableSelectionView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_selection_for_callee(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    const CmHirCanonicalInstance *expected_callee,
+    CmSemanticCallableSelectionView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    uint32_t argument, CmHirExprId *out_expression);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    uint32_t parameter, CmSemanticTypeView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_generic_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    CmSemanticCallableGenericArgumentDomain domain, uint32_t argument,
+    CmSemanticGenericArgumentView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callable_parameter_for_callee(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    const CmHirCanonicalInstance *expected_callee, uint32_t parameter,
+    CmSemanticTypeView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_projection_trace(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, CmHirExprId expression,
+    CmSemanticProjectionDecisionKind decision_kind, uint32_t decision_index,
+    CmSemanticProjectionTraceView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_projection_trace_step(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *instance, uint32_t trace, uint32_t step,
+    CmSemanticProjectionStepView *out_view);
 void cm_semantic_results_body_stage_destroy(
     CmSemanticResultsBodyStage *stage);
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results);

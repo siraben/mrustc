@@ -62,6 +62,9 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
 CmHirInstanceStatus cm_hir_canonical_instance_clone(
     CmHirCanonicalInstance *out_instance,
     const CmHirCanonicalInstance *source);
+CmHirInstanceStatus cm_hir_canonical_instance_validate(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstance *instance);
 void cm_hir_canonical_instance_destroy(CmHirCanonicalInstance *instance);
 CmHirInstanceStatus cm_hir_canonical_instance_equal(
     const CmHirCanonicalInstance *left,

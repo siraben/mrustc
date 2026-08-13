@@ -1520,6 +1520,219 @@ CmHirInstanceStatus cm_hir_canonical_instance_clone(
     return CM_HIR_INSTANCE_OK;
 }
 
+static CmHirInstanceStatus cm_instance_read_part_arguments(
+    CmInstanceReader *reader, const CmHirItem *owner, unsigned int section,
+    CmHirCanonicalArgumentPart **out_arguments, uint32_t *out_count)
+{
+    CmHirCanonicalArgumentPart *arguments;
+    CmHirInstanceStatus status;
+    uint32_t count;
+    uint32_t index;
+    unsigned int actual_section;
+
+    if (reader == NULL || owner == NULL || out_arguments == NULL
+        || out_count == NULL) return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    *out_arguments = NULL;
+    *out_count = 0u;
+    status = cm_instance_read_u8(reader, &actual_section);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_u32(reader, &count);
+    }
+    if (status != CM_HIR_INSTANCE_OK) return status;
+    if (actual_section != section
+        || count != owner->generic_parameter_count) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    arguments = count == 0u ? NULL
+        : (CmHirCanonicalArgumentPart *)cm_alloc_zeroed(count,
+            sizeof(*arguments));
+    for (index = 0u; index < count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected;
+        size_t start;
+        unsigned int kind;
+
+        parameter = cm_hir_get_generic_param(reader->hir,
+            owner->generic_parameter_start + index);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, owner->definition)) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+            break;
+        }
+        expected = parameter->kind == CM_HIR_GENERIC_LIFETIME
+            ? CM_HIR_GENERIC_ARG_LIFETIME
+            : parameter->kind == CM_HIR_GENERIC_TYPE
+                ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        status = cm_instance_read_u8(reader, &kind);
+        if (status != CM_HIR_INSTANCE_OK
+            || kind != (unsigned int)expected) {
+            if (status == CM_HIR_INSTANCE_OK) {
+                status = CM_HIR_INSTANCE_INVALID_RELATION;
+            }
+            break;
+        }
+        start = reader->pos;
+        status = cm_instance_validate_argument_payload(reader, expected, 0u);
+        if (status != CM_HIR_INSTANCE_OK) break;
+        arguments[index].kind = expected;
+        arguments[index].bytes = reader->data + start;
+        arguments[index].size = reader->pos - start;
+    }
+    if (status != CM_HIR_INSTANCE_OK) {
+        cm_free(arguments);
+        return status;
+    }
+    *out_arguments = arguments;
+    *out_count = count;
+    return CM_HIR_INSTANCE_OK;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_validate(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstance *instance)
+{
+    CmHirCanonicalArgumentPart *item_arguments;
+    CmHirCanonicalArgumentPart *method_arguments;
+    CmHirCanonicalArgumentPart *impl_arguments;
+    CmHirCanonicalArgumentPart *trait_arguments;
+    CmHirCanonicalInstanceParts parts;
+    CmHirCanonicalInstance encoded;
+    CmInstanceReader reader;
+    const CmHirItem *selected;
+    const CmHirItem *enclosing;
+    const CmHirItem *trait_item;
+    CmHirInstanceStatus status;
+    uint32_t item_count;
+    uint32_t method_count;
+    uint32_t impl_count;
+    uint32_t trait_count;
+    unsigned int version;
+    unsigned int section;
+    size_t self_start;
+    int equal;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE
+        || !cm_canonical_instance_is_valid(instance)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    memset(&reader, 0, sizeof(reader));
+    reader.hir = hir;
+    reader.data = instance->bytes;
+    reader.len = instance->size;
+    memset(&parts, 0, sizeof(parts));
+    item_arguments = NULL;
+    method_arguments = NULL;
+    impl_arguments = NULL;
+    trait_arguments = NULL;
+    item_count = 0u;
+    method_count = 0u;
+    impl_count = 0u;
+    trait_count = 0u;
+    status = cm_instance_read_u8(&reader, &version);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader, &parts.selected_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader,
+            &parts.declared_trait_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader, &parts.enclosing_impl);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader, &parts.implemented_trait);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader, &parts.self_owner);
+    }
+    if (status != CM_HIR_INSTANCE_OK) goto done;
+    if (version != CM_INSTANCE_FORMAT_VERSION
+        || !cm_hir_def_id_equal(parts.selected_callable,
+            instance->definition)
+        || instance->definition.crate_id != local_crate) {
+        status = CM_HIR_INSTANCE_INVALID_RELATION;
+        goto done;
+    }
+    selected = cm_instance_item(hir, parts.selected_callable);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || selected->data.function_item.body != instance->body) {
+        status = CM_HIR_INSTANCE_INVALID_RELATION;
+        goto done;
+    }
+    if (cm_hir_def_id_is_none(selected->parent_definition)) {
+        if (!cm_hir_def_id_is_none(parts.declared_trait_callable)
+            || !cm_hir_def_id_is_none(parts.enclosing_impl)
+            || !cm_hir_def_id_is_none(parts.implemented_trait)
+            || !cm_hir_def_id_is_none(parts.self_owner)) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+            goto done;
+        }
+        status = cm_instance_read_part_arguments(&reader, selected, 1u,
+            &item_arguments, &item_count);
+        parts.item_arguments = item_arguments;
+        parts.item_argument_count = item_count;
+    } else {
+        enclosing = cm_instance_item(hir, parts.enclosing_impl);
+        trait_item = cm_instance_item(hir, parts.implemented_trait);
+        if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
+            || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+            goto done;
+        }
+        status = cm_instance_read_part_arguments(&reader, selected, 2u,
+            &method_arguments, &method_count);
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_part_arguments(&reader, enclosing, 3u,
+                &impl_arguments, &impl_count);
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_part_arguments(&reader, trait_item, 4u,
+                &trait_arguments, &trait_count);
+        }
+        if (status == CM_HIR_INSTANCE_OK) {
+            status = cm_instance_read_u8(&reader, &section);
+        }
+        if (status != CM_HIR_INSTANCE_OK) goto done;
+        if (section != 5u) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+            goto done;
+        }
+        self_start = reader.pos;
+        status = cm_instance_validate_type_payload(&reader, 0u);
+        if (status != CM_HIR_INSTANCE_OK) goto done;
+        parts.method_arguments = method_arguments;
+        parts.method_argument_count = method_count;
+        parts.enclosing_impl_arguments = impl_arguments;
+        parts.enclosing_impl_argument_count = impl_count;
+        parts.implemented_trait_arguments = trait_arguments;
+        parts.implemented_trait_argument_count = trait_count;
+        parts.self_type = reader.data + self_start;
+        parts.self_type_size = reader.pos - self_start;
+    }
+    if (reader.pos != reader.len) {
+        status = CM_HIR_INSTANCE_INVALID_RELATION;
+        goto done;
+    }
+    cm_hir_canonical_instance_init(&encoded);
+    status = cm_hir_canonical_instance_encode_parts(hir, local_crate,
+        &parts, &encoded);
+    if (status == CM_HIR_INSTANCE_OK) {
+        equal = 0;
+        status = cm_hir_canonical_instance_equal(instance, &encoded, &equal);
+        if (status == CM_HIR_INSTANCE_OK && !equal) {
+            status = CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+    }
+    cm_hir_canonical_instance_destroy(&encoded);
+
+done:
+    cm_free(trait_arguments);
+    cm_free(impl_arguments);
+    cm_free(method_arguments);
+    cm_free(item_arguments);
+    return status;
+}
+
 void cm_hir_canonical_instance_destroy(CmHirCanonicalInstance *instance)
 {
     if (instance == NULL) return;

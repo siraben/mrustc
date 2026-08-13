@@ -491,80 +491,6 @@ typedef struct CmMirFlowPlan {
     CmMirStatus error_status;
 } CmMirFlowPlan;
 
-typedef struct CmMirLowerSemanticInstanceQuery {
-    CmHirGenericArg *arguments;
-    CmHirInstanceSpec spec;
-} CmMirLowerSemanticInstanceQuery;
-
-static int cm_mir_lower_semantic_instance_query_init(
-    CmMirLowerSemanticInstanceQuery *query, const CmHirContext *hir,
-    const CmMirInstance *instance)
-{
-    const CmHirDefinition *definition;
-    const CmHirItem *item;
-    const CmHirItem *impl_item;
-    uint32_t index;
-
-    memset(query, 0, sizeof(*query));
-    if (instance == NULL
-        || (instance->substitution_count == 0u)
-            != (instance->substitutions == NULL)) return 0;
-    if (instance->substitution_count != 0u) {
-        query->arguments = (CmHirGenericArg *)cm_alloc_zeroed(
-            instance->substitution_count, sizeof(*query->arguments));
-    }
-    cm_hir_instance_spec_init(&query->spec);
-    query->spec.selected_callable = instance->definition;
-    definition = cm_hir_lookup_definition(hir, instance->definition);
-    item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
-            || definition->state != CM_HIR_DEFINITION_BOUND
-        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
-    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION) goto invalid;
-    if (cm_hir_def_id_is_none(item->parent_definition)) {
-        query->spec.item_arguments = query->arguments;
-        query->spec.item_argument_count = instance->substitution_count;
-    } else {
-        definition = cm_hir_lookup_definition(hir,
-            item->parent_definition);
-        impl_item = definition == NULL
-                || definition->kind != CM_HIR_DEFINITION_ITEM
-                || definition->state != CM_HIR_DEFINITION_BOUND
-            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
-        if (instance->substitution_count != 0u
-            || impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
-            || impl_item->generic_parameter_count != 0u
-            || !impl_item->data.impl_item.has_trait
-            || impl_item->data.impl_item.is_negative
-            || cm_hir_def_id_is_none(
-                item->data.function_item.trait_item_definition)) goto invalid;
-        query->spec.declared_trait_callable =
-            item->data.function_item.trait_item_definition;
-        query->spec.enclosing_impl = impl_item->definition;
-        query->spec.implemented_trait =
-            impl_item->data.impl_item.trait_type.definition;
-        query->spec.self_owner = impl_item->definition;
-        query->spec.self_type = impl_item->data.impl_item.self_type;
-    }
-    for (index = 0u; index < instance->substitution_count; ++index) {
-        query->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
-        query->arguments[index].data.type = instance->substitutions[index];
-    }
-    return 1;
-
-invalid:
-    cm_free(query->arguments);
-    memset(query, 0, sizeof(*query));
-    return 0;
-}
-
-static void cm_mir_lower_semantic_instance_query_destroy(
-    CmMirLowerSemanticInstanceQuery *query)
-{
-    if (query == NULL) return;
-    cm_free(query->arguments);
-    memset(query, 0, sizeof(*query));
-}
-
 static int cm_mir_flow_callable_arguments(const CmHirExpr *expression,
     CmHirExprId storage[2], const CmHirExprId **out_arguments,
     uint32_t *out_count)
@@ -678,11 +604,93 @@ static CmMirStatus cm_mir_flow_find_callee(const CmMirFlowPlan *plan,
     return status;
 }
 
+static int cm_mir_lower_instance_is_canonical(
+    const CmMirInstance *instance)
+{
+    return instance != NULL && instance->body != CM_HIR_BODY_NONE
+        && instance->identity_bytes != NULL && instance->identity_size != 0u;
+}
+
+typedef struct CmMirLowerLegacyInstanceQuery {
+    CmHirGenericArg *arguments;
+    CmHirInstanceSpec spec;
+} CmMirLowerLegacyInstanceQuery;
+
+static int cm_mir_lower_legacy_instance_query_init(
+    CmMirLowerLegacyInstanceQuery *query, const CmHirContext *hir,
+    const CmMirInstance *instance)
+{
+    const CmHirDefinition *definition;
+    const CmHirItem *item;
+    const CmHirItem *impl_item;
+    uint32_t index;
+
+    memset(query, 0, sizeof(*query));
+    if (instance == NULL
+        || (instance->substitution_count == 0u)
+            != (instance->substitutions == NULL)) return 0;
+    if (instance->substitution_count != 0u) {
+        query->arguments = (CmHirGenericArg *)cm_alloc_zeroed(
+            instance->substitution_count, sizeof(*query->arguments));
+    }
+    cm_hir_instance_spec_init(&query->spec);
+    query->spec.selected_callable = instance->definition;
+    definition = cm_hir_lookup_definition(hir, instance->definition);
+    item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION) goto invalid;
+    if (cm_hir_def_id_is_none(item->parent_definition)) {
+        query->spec.item_arguments = query->arguments;
+        query->spec.item_argument_count = instance->substitution_count;
+    } else {
+        definition = cm_hir_lookup_definition(hir,
+            item->parent_definition);
+        impl_item = definition == NULL
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+                || definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        if (instance->substitution_count != 0u
+            || impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
+            || impl_item->generic_parameter_count != 0u
+            || !impl_item->data.impl_item.has_trait
+            || impl_item->data.impl_item.is_negative
+            || cm_hir_def_id_is_none(
+                item->data.function_item.trait_item_definition)) goto invalid;
+        query->spec.declared_trait_callable =
+            item->data.function_item.trait_item_definition;
+        query->spec.enclosing_impl = impl_item->definition;
+        query->spec.implemented_trait =
+            impl_item->data.impl_item.trait_type.definition;
+        query->spec.self_owner = impl_item->definition;
+        query->spec.self_type = impl_item->data.impl_item.self_type;
+    }
+    for (index = 0u; index < instance->substitution_count; ++index) {
+        query->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+        query->arguments[index].data.type = instance->substitutions[index];
+    }
+    return 1;
+
+invalid:
+    cm_free(query->arguments);
+    memset(query, 0, sizeof(*query));
+    return 0;
+}
+
+static void cm_mir_lower_legacy_instance_query_destroy(
+    CmMirLowerLegacyInstanceQuery *query)
+{
+    if (query == NULL) return;
+    cm_free(query->arguments);
+    memset(query, 0, sizeof(*query));
+}
+
 static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
     const CmMirFlowPlan *plan, CmHirExprId expression,
     CmSemanticExpressionView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -691,20 +699,34 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
             expression, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_expression(plan->semantic_results,
-        plan->admission, &caller.spec, expression, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_expression(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_expression(
+        plan->semantic_results, plan->admission, &caller, expression,
+        out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_primitive_query(
     const CmMirFlowPlan *plan, CmHirExprId expression,
     CmSemanticPrimitiveBinaryView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -713,21 +735,34 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_primitive_query(
             expression, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_primitive_binary(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_primitive_binary(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_primitive_binary(
+        plan->semantic_results, plan->admission, &caller, expression,
         out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_field_query(
     const CmMirFlowPlan *plan, CmHirExprId expression,
     CmSemanticFieldSelectionView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -736,21 +771,34 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_field_query(
             expression, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_field_selection(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_field_selection(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_field_selection(
+        plan->semantic_results, plan->admission, &caller, expression,
         out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_signature_query(
     const CmMirFlowPlan *plan, const CmMirBody *callee,
     CmSemanticFunctionSignatureView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery query;
+    CmHirCanonicalInstance query;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -758,13 +806,26 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_signature_query(
             plan->admission, callee->source_body, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&query, plan->hir,
-            &callee->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_signature(plan->semantic_results,
-        plan->admission, &query.spec, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&query);
-    return status;
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                &callee->instance)) {
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status = cm_semantic_results_instance_signature(
+            plan->semantic_results, plan->admission, &legacy.spec, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&query);
+    query.definition = callee->instance.definition;
+    query.body = callee->instance.body;
+    query.bytes = callee->instance.identity_bytes;
+    query.size = callee->instance.identity_size;
+    return cm_semantic_results_canonical_instance_signature(
+        plan->semantic_results, plan->admission, &query, out_view);
 }
 
 static CmSemanticResultsStatus
@@ -772,7 +833,8 @@ cm_mir_flow_semantic_signature_parameter_query(
     const CmMirFlowPlan *plan, const CmMirBody *callee, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery query;
+    CmHirCanonicalInstance query;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -781,22 +843,38 @@ cm_mir_flow_semantic_signature_parameter_query(
             parameter, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&query, plan->hir,
-            &callee->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_signature_parameter(
-        plan->semantic_results, plan->admission, &query.spec, parameter,
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                &callee->instance)) {
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status = cm_semantic_results_instance_signature_parameter(
+            plan->semantic_results, plan->admission, &legacy.spec, parameter,
+            out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&query);
+    query.definition = callee->instance.definition;
+    query.body = callee->instance.body;
+    query.bytes = callee->instance.identity_bytes;
+    query.size = callee->instance.identity_size;
+    return cm_semantic_results_canonical_instance_signature_parameter(
+        plan->semantic_results, plan->admission, &query, parameter,
         out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&query);
-    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_call_query(
     const CmMirFlowPlan *plan, const CmMirBody *callee,
     CmHirExprId expression, CmSemanticDirectCallView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
-    CmMirLowerSemanticInstanceQuery target;
+    CmHirCanonicalInstance caller;
+    CmHirCanonicalInstance target;
+    CmMirLowerLegacyInstanceQuery legacy_caller;
+    CmMirLowerLegacyInstanceQuery legacy_target;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -804,24 +882,45 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_query(
             plan->admission, plan->item->data.function_item.body,
             expression, out_view);
     }
-    memset(&caller, 0, sizeof(caller));
-    memset(&target, 0, sizeof(target));
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)
-        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
-            &callee->instance)) {
-        cm_mir_lower_semantic_instance_query_destroy(&caller);
-        cm_mir_lower_semantic_instance_query_destroy(&target);
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    status = cm_semantic_results_instance_direct_call(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
-        &target.spec, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&target);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
+    if (cm_mir_lower_instance_is_canonical(plan->instance)
+        != cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        memset(&legacy_caller, 0, sizeof(legacy_caller));
+        memset(&legacy_target, 0, sizeof(legacy_target));
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy_caller,
+                plan->hir, plan->instance)
+            || !cm_mir_lower_legacy_instance_query_init(&legacy_target,
+                plan->hir, &callee->instance)) {
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status = cm_semantic_results_instance_direct_call(
+            plan->semantic_results, plan->admission, &legacy_caller.spec,
+            expression, &legacy_target.spec, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    cm_hir_canonical_instance_init(&target);
+    target.definition = callee->instance.definition;
+    target.body = callee->instance.body;
+    target.bytes = callee->instance.identity_bytes;
+    target.size = callee->instance.identity_size;
+    return cm_semantic_results_canonical_instance_direct_call(
+        plan->semantic_results, plan->admission, &caller, expression,
+        &target, out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
@@ -829,8 +928,10 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
     CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
-    CmMirLowerSemanticInstanceQuery target;
+    CmHirCanonicalInstance caller;
+    CmHirCanonicalInstance target;
+    CmMirLowerLegacyInstanceQuery legacy_caller;
+    CmMirLowerLegacyInstanceQuery legacy_target;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -839,24 +940,45 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
             plan->item->data.function_item.body, expression, parameter,
             out_view);
     }
-    memset(&caller, 0, sizeof(caller));
-    memset(&target, 0, sizeof(target));
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)
-        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
-            &callee->instance)) {
-        cm_mir_lower_semantic_instance_query_destroy(&caller);
-        cm_mir_lower_semantic_instance_query_destroy(&target);
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    status = cm_semantic_results_instance_direct_call_parameter(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
-        &target.spec, parameter, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&target);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
+    if (cm_mir_lower_instance_is_canonical(plan->instance)
+        != cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        memset(&legacy_caller, 0, sizeof(legacy_caller));
+        memset(&legacy_target, 0, sizeof(legacy_target));
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy_caller,
+                plan->hir, plan->instance)
+            || !cm_mir_lower_legacy_instance_query_init(&legacy_target,
+                plan->hir, &callee->instance)) {
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status = cm_semantic_results_instance_direct_call_parameter(
+            plan->semantic_results, plan->admission, &legacy_caller.spec,
+            expression, &legacy_target.spec, parameter, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    cm_hir_canonical_instance_init(&target);
+    target.definition = callee->instance.definition;
+    target.body = callee->instance.body;
+    target.bytes = callee->instance.identity_bytes;
+    target.size = callee->instance.identity_size;
+    return cm_semantic_results_canonical_instance_direct_call_parameter(
+        plan->semantic_results, plan->admission, &caller, expression,
+        &target, parameter, out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_query(
@@ -864,8 +986,10 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_query(
     CmHirExprId expression,
     CmSemanticCallableSelectionView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
-    CmMirLowerSemanticInstanceQuery target;
+    CmHirCanonicalInstance caller;
+    CmHirCanonicalInstance target;
+    CmMirLowerLegacyInstanceQuery legacy_caller;
+    CmMirLowerLegacyInstanceQuery legacy_target;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -873,24 +997,48 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_query(
             plan->semantic_results, plan->admission,
             plan->item->data.function_item.body, expression, out_view);
     }
-    memset(&caller, 0, sizeof(caller));
-    memset(&target, 0, sizeof(target));
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)
-        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
-            &callee->instance)) {
-        cm_mir_lower_semantic_instance_query_destroy(&caller);
-        cm_mir_lower_semantic_instance_query_destroy(&target);
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    status = cm_semantic_results_instance_callable_selection_for_callee(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
-        &target.spec, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&target);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
+    if (cm_mir_lower_instance_is_canonical(plan->instance)
+        != cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        memset(&legacy_caller, 0, sizeof(legacy_caller));
+        memset(&legacy_target, 0, sizeof(legacy_target));
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy_caller,
+                plan->hir, plan->instance)
+            || !cm_mir_lower_legacy_instance_query_init(&legacy_target,
+                plan->hir, &callee->instance)) {
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status =
+            cm_semantic_results_instance_callable_selection_for_callee(
+                plan->semantic_results, plan->admission,
+                &legacy_caller.spec, expression, &legacy_target.spec,
+                out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    cm_hir_canonical_instance_init(&target);
+    target.definition = callee->instance.definition;
+    target.body = callee->instance.body;
+    target.bytes = callee->instance.identity_bytes;
+    target.size = callee->instance.identity_size;
+    return
+        cm_semantic_results_canonical_instance_callable_selection_for_callee(
+            plan->semantic_results, plan->admission, &caller, expression,
+            &target, out_view);
 }
 
 /* Definition lookup hint; exact-instance authority is checked after resolve. */
@@ -898,7 +1046,8 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_hint_query(
     const CmMirFlowPlan *plan, CmHirExprId expression,
     CmSemanticCallableSelectionView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -907,21 +1056,34 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_hint_query(
             plan->item->data.function_item.body, expression, out_view);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_callable_selection(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_callable_selection(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_callable_selection(
+        plan->semantic_results, plan->admission, &caller, expression,
         out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_argument_query(
     const CmMirFlowPlan *plan, CmHirExprId expression, uint32_t argument,
     CmHirExprId *out_expression)
 {
-    CmMirLowerSemanticInstanceQuery caller;
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -930,14 +1092,26 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_argument_query(
             expression, argument, out_expression);
     }
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_callable_argument(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_callable_argument(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, argument, out_expression);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_callable_argument(
+        plan->semantic_results, plan->admission, &caller, expression,
         argument, out_expression);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
@@ -945,8 +1119,10 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
     CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
-    CmMirLowerSemanticInstanceQuery caller;
-    CmMirLowerSemanticInstanceQuery target;
+    CmHirCanonicalInstance caller;
+    CmHirCanonicalInstance target;
+    CmMirLowerLegacyInstanceQuery legacy_caller;
+    CmMirLowerLegacyInstanceQuery legacy_target;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -954,24 +1130,48 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
             plan->admission, plan->item->data.function_item.body,
             expression, parameter, out_view);
     }
-    memset(&caller, 0, sizeof(caller));
-    memset(&target, 0, sizeof(target));
     if (plan->semantic_evidence
-            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)
-        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
-            &callee->instance)) {
-        cm_mir_lower_semantic_instance_query_destroy(&caller);
-        cm_mir_lower_semantic_instance_query_destroy(&target);
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    status = cm_semantic_results_instance_callable_parameter_for_callee(
-        plan->semantic_results, plan->admission, &caller.spec, expression,
-        &target.spec, parameter, out_view);
-    cm_mir_lower_semantic_instance_query_destroy(&target);
-    cm_mir_lower_semantic_instance_query_destroy(&caller);
-    return status;
+    if (cm_mir_lower_instance_is_canonical(plan->instance)
+        != cm_mir_lower_instance_is_canonical(&callee->instance)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        memset(&legacy_caller, 0, sizeof(legacy_caller));
+        memset(&legacy_target, 0, sizeof(legacy_target));
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy_caller,
+                plan->hir, plan->instance)
+            || !cm_mir_lower_legacy_instance_query_init(&legacy_target,
+                plan->hir, &callee->instance)) {
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+            cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+            return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        }
+        status =
+            cm_semantic_results_instance_callable_parameter_for_callee(
+                plan->semantic_results, plan->admission,
+                &legacy_caller.spec, expression, &legacy_target.spec,
+                parameter, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_target);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy_caller);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    cm_hir_canonical_instance_init(&target);
+    target.definition = callee->instance.definition;
+    target.body = callee->instance.body;
+    target.bytes = callee->instance.identity_bytes;
+    target.size = callee->instance.identity_size;
+    return
+        cm_semantic_results_canonical_instance_callable_parameter_for_callee(
+            plan->semantic_results, plan->admission, &caller, expression,
+            &target, parameter, out_view);
 }
 
 typedef struct CmMirFlowOutput {
