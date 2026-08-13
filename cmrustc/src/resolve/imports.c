@@ -4,6 +4,7 @@
 #include "cm/interner.h"
 #include "cm/vec.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmImportBinding {
@@ -49,6 +50,9 @@ typedef struct CmImportLeaf {
 } CmImportLeaf;
 
 typedef struct CmImportResolverState {
+    uint64_t lifetime_id;
+    uint64_t generation;
+    uint64_t graph_lifetime_id;
     CmInterner strings;
     CmVec modules;
     CmVec enumerations;
@@ -61,6 +65,15 @@ typedef struct CmImportResolverState {
     const CmModuleGraph *graph;
     CmModuleGraphRevision revision;
 } CmImportResolverState;
+
+static uint64_t cm_import_resolver_lifetime_counter;
+
+static uint64_t cm_import_resolver_new_lifetime_id(void)
+{
+    if (cm_import_resolver_lifetime_counter == UINT64_MAX) abort();
+    cm_import_resolver_lifetime_counter += UINT64_C(1);
+    return cm_import_resolver_lifetime_counter;
+}
 
 typedef enum CmImportTokenKind {
     CM_IMPORT_TOKEN_END = 0,
@@ -120,6 +133,11 @@ static void cm_import_state_init(CmImportResolverState *state)
 static void cm_import_state_clear(CmImportResolverState *state)
 {
     size_t index;
+    uint64_t lifetime_id;
+    uint64_t generation;
+
+    lifetime_id = state->lifetime_id;
+    generation = state->generation;
 
     for (index = 0u; index < state->modules.len; ++index) {
         CmImportModuleState *module;
@@ -154,6 +172,8 @@ static void cm_import_state_clear(CmImportResolverState *state)
     cm_vec_destroy(&state->enumerations);
     cm_interner_destroy(&state->strings);
     cm_import_state_init(state);
+    state->lifetime_id = lifetime_id;
+    state->generation = generation;
 }
 
 static void cm_import_state_destroy(CmImportResolverState *state)
@@ -176,6 +196,7 @@ void cm_import_resolver_init(CmImportResolver *resolver)
     if (resolver == NULL) return;
     state = (CmImportResolverState *)cm_alloc_zeroed(1u, sizeof(*state));
     cm_import_state_init(state);
+    state->lifetime_id = cm_import_resolver_new_lifetime_id();
     resolver->state = state;
 }
 
@@ -1619,6 +1640,8 @@ CmImportResult cm_import_resolve(CmImportResolver *resolver,
     memset(&result, 0, sizeof(result));
     state = cm_import_state(resolver);
     if (state == NULL) return result;
+    if (state->generation == UINT64_MAX) abort();
+    state->generation += UINT64_C(1);
     cm_import_state_clear(state);
     if (graph == NULL || expected_revision == CM_MODULE_GRAPH_REVISION_NONE ||
         cm_module_graph_revision(graph) != expected_revision ||
@@ -1685,6 +1708,7 @@ CmImportResult cm_import_resolve(CmImportResolver *resolver,
         return cm_import_invalid_result(state);
     }
     state->graph = graph;
+    state->graph_lifetime_id = cm_module_graph_lifetime_id(graph);
     state->revision = expected_revision;
     cm_stamp_bindings(state, expected_revision);
     result.binding_count = cm_total_bindings(state);
@@ -1702,6 +1726,31 @@ CmModuleGraphRevision cm_import_resolver_revision(
     return state == NULL ? CM_MODULE_GRAPH_REVISION_NONE : state->revision;
 }
 
+uint64_t cm_import_resolver_lifetime_id(const CmImportResolver *resolver)
+{
+    const CmImportResolverState *state;
+
+    state = cm_import_state_const(resolver);
+    return state == NULL ? UINT64_C(0) : state->lifetime_id;
+}
+
+uint64_t cm_import_resolver_generation(const CmImportResolver *resolver)
+{
+    const CmImportResolverState *state;
+
+    state = cm_import_state_const(resolver);
+    return state == NULL ? UINT64_C(0) : state->generation;
+}
+
+uint64_t cm_import_resolver_graph_lifetime_id(
+    const CmImportResolver *resolver)
+{
+    const CmImportResolverState *state;
+
+    state = cm_import_state_const(resolver);
+    return state == NULL ? UINT64_C(0) : state->graph_lifetime_id;
+}
+
 int cm_import_resolver_matches_graph(const CmImportResolver *resolver,
     const CmModuleGraph *graph)
 {
@@ -1709,6 +1758,8 @@ int cm_import_resolver_matches_graph(const CmImportResolver *resolver,
 
     state = cm_import_state_const(resolver);
     return state != NULL && graph != NULL && state->graph == graph &&
+        state->graph_lifetime_id != UINT64_C(0) &&
+        state->graph_lifetime_id == cm_module_graph_lifetime_id(graph) &&
         state->revision != CM_MODULE_GRAPH_REVISION_NONE &&
         cm_module_graph_error_count(graph) == 0u &&
         cm_module_graph_revision(graph) == state->revision;

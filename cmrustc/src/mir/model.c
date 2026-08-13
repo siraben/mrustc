@@ -60,12 +60,16 @@ static int cm_mir_context_valid(const CmMirContext *context)
         && ((context->admitted_crate == CM_HIR_CRATE_NONE
                 && context->admitted_storage_lifetime_id == UINT64_C(0)
                 && context->admitted_semantic_generation == UINT64_C(0)
-                && context->admitted_rewind_generation == UINT64_C(0))
+                && context->admitted_rewind_generation == UINT64_C(0)
+                && context->admitted_admission_capability_id
+                    == UINT64_C(0))
             || (context->admitted_crate != CM_HIR_CRATE_NONE
                 && context->hir_owner != NULL
                 && context->admitted_storage_lifetime_id != UINT64_C(0)
                 && context->admitted_semantic_generation != UINT64_C(0)
-                && context->admitted_rewind_generation != UINT64_C(0)));
+                && context->admitted_rewind_generation != UINT64_C(0)
+                && context->admitted_admission_capability_id
+                    != UINT64_C(0)));
 }
 
 static int cm_mir_admission_identity(const CmSemanticAdmission *admission,
@@ -86,9 +90,14 @@ static int cm_mir_admission_identity(const CmSemanticAdmission *admission,
 }
 
 static int cm_mir_context_accepts_admission(const CmMirContext *context,
-    const CmHirContext *hir, CmHirCrateId crate_id)
+    const CmSemanticAdmission *admission, const CmHirContext *hir,
+    CmHirCrateId crate_id)
 {
+    uint64_t capability_id;
+
     if (!cm_mir_context_valid(context)) return 0;
+    capability_id = cm_semantic_admission_capability_id(admission);
+    if (capability_id == UINT64_C(0)) return 0;
     if (context->admitted_crate == CM_HIR_CRATE_NONE) {
         return context->bodies.len == 0u && context->hir_owner == NULL;
     }
@@ -96,17 +105,21 @@ static int cm_mir_context_accepts_admission(const CmMirContext *context,
         && context->admitted_crate == crate_id
         && context->admitted_storage_lifetime_id == hir->storage.lifetime_id
         && context->admitted_semantic_generation == hir->semantic_generation
-        && context->admitted_rewind_generation == hir->rewind_generation;
+        && context->admitted_rewind_generation == hir->rewind_generation
+        && context->admitted_admission_capability_id == capability_id;
 }
 
 static void cm_mir_context_latch_admission(CmMirContext *context,
-    const CmHirContext *hir, CmHirCrateId crate_id)
+    const CmSemanticAdmission *admission, const CmHirContext *hir,
+    CmHirCrateId crate_id)
 {
     context->hir_owner = hir;
     context->admitted_crate = crate_id;
     context->admitted_storage_lifetime_id = hir->storage.lifetime_id;
     context->admitted_semantic_generation = hir->semantic_generation;
     context->admitted_rewind_generation = hir->rewind_generation;
+    context->admitted_admission_capability_id =
+        cm_semantic_admission_capability_id(admission);
 }
 
 static int cm_mir_instance_is_empty(const CmMirInstance *instance)
@@ -3401,7 +3414,8 @@ static int cm_mir_publication_current(
         && publication->hir->rewind_generation
             == publication->rewind_generation
         && cm_mir_context_accepts_admission(publication->context,
-            publication->hir, publication->crate_id);
+            publication->admission, publication->hir,
+            publication->crate_id);
 }
 
 static const CmMirPublicationEntry *cm_mir_publication_entry(
@@ -3501,7 +3515,8 @@ CmMirStatus cm_mir_publication_begin(CmMirPublication *publication,
     if (publication == NULL || publication->implementation != NULL
         || context == NULL) return CM_MIR_INVALID_ARGUMENT;
     if (!cm_mir_admission_identity(admission, &hir, &crate_id)
-        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        || !cm_mir_context_accepts_admission(context, admission, hir,
+            crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     implementation = (CmMirPublicationImpl *)cm_alloc_zeroed(1u,
@@ -3822,7 +3837,8 @@ CmMirStatus cm_mir_publication_commit(CmMirPublication *publication)
     }
     if (implementation->context->admitted_crate == CM_HIR_CRATE_NONE) {
         cm_mir_context_latch_admission(implementation->context,
-            implementation->hir, implementation->crate_id);
+            implementation->admission, implementation->hir,
+            implementation->crate_id);
     }
     cm_mir_publication_destroy(publication);
     return CM_MIR_OK;
@@ -3954,7 +3970,8 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
         return CM_MIR_INVALID_ARGUMENT;
     }
     if (!cm_mir_admission_identity(admission, &hir, &crate_id)
-        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        || !cm_mir_context_accepts_admission(context, admission, hir,
+            crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     memset(&query, 0, sizeof(query));
@@ -4013,7 +4030,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
     status = cm_mir_add_exact_copy(context, hir, body, out_id);
     if (status == CM_MIR_OK
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
-        cm_mir_context_latch_admission(context, hir, crate_id);
+        cm_mir_context_latch_admission(context, admission, hir, crate_id);
     }
     return status;
 }
@@ -4047,7 +4064,8 @@ CmMirStatus cm_mir_validate_admitted_monomorphized_body(
     if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
     if (!cm_mir_admission_identity(admission, &hir, &crate_id)
         || context->admitted_crate == CM_HIR_CRATE_NONE
-        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        || !cm_mir_context_accepts_admission(context, admission, hir,
+            crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     semantic_results = cm_semantic_admission_results(admission);
@@ -4086,7 +4104,8 @@ CmMirStatus cm_mir_admitted_signature(
     if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
     if (!cm_mir_admission_identity(admission, &hir, &crate_id)
         || context->admitted_crate == CM_HIR_CRATE_NONE
-        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        || !cm_mir_context_accepts_admission(context, admission, hir,
+            crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     semantic_results = cm_semantic_admission_results(admission);
@@ -4122,7 +4141,8 @@ CmMirStatus cm_mir_admitted_signature_parameter(
     if (context == NULL) return CM_MIR_INVALID_ARGUMENT;
     if (!cm_mir_admission_identity(admission, &hir, &crate_id)
         || context->admitted_crate == CM_HIR_CRATE_NONE
-        || !cm_mir_context_accepts_admission(context, hir, crate_id)) {
+        || !cm_mir_context_accepts_admission(context, admission, hir,
+            crate_id)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     semantic_results = cm_semantic_admission_results(admission);

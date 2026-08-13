@@ -2,6 +2,7 @@
 
 #include "cm/alloc.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmHirPreboundAssociatedType {
@@ -31,10 +32,8 @@ static void *cm_hir_get_id_mut(CmVec *arena, uint32_t id)
 void cm_hir_context_record_semantic_mutation(CmHirContext *context)
 {
     if (context == NULL) return;
+    if (context->semantic_generation == UINT64_MAX) abort();
     context->semantic_generation += UINT64_C(1);
-    if (context->semantic_generation == 0u) {
-        context->semantic_generation = UINT64_C(1);
-    }
 }
 
 static CmHirStatus cm_hir_push(CmHirContext *context, CmVec *arena,
@@ -219,6 +218,10 @@ CmHirStatus cm_hir_context_rewind(CmHirContext *context,
     if (!cm_hir_context_mark_is_valid(context, mark)) {
         return CM_HIR_INVALID_ARGUMENT;
     }
+    /* Rewind changes both observer identities.  Exhaustion must stop before
+     * releasing owned payloads or truncating any context storage. */
+    if (context->rewind_generation == UINT64_MAX
+        || context->semantic_generation == UINT64_MAX) abort();
     for (index = mark->expressions; index < context->expressions.len;
          ++index) {
         cm_hir_release_expr_owned_storage(
@@ -239,9 +242,6 @@ CmHirStatus cm_hir_context_rewind(CmHirContext *context,
     cm_arena_rewind(&context->storage, mark->storage);
     cm_arena_discard_mark(&context->storage, mark->storage);
     context->rewind_generation += UINT64_C(1);
-    if (context->rewind_generation == 0u) {
-        context->rewind_generation = UINT64_C(1);
-    }
     cm_hir_context_record_semantic_mutation(context);
     mark->context = NULL;
     mark->active = 0;

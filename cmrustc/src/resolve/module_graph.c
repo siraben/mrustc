@@ -9,6 +9,7 @@
 #include "cm/vec.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -123,6 +124,7 @@ typedef struct CmPendingModule {
 
 typedef struct CmModuleGraphState {
     const CmModuleGraph *owner_graph;
+    uint64_t lifetime_id;
     CmArena storage;
     CmInterner strings;
     CmVec modules;
@@ -141,6 +143,15 @@ typedef struct CmModuleGraphState {
     CmModuleGraphRevision revision;
     int revision_exhausted;
 } CmModuleGraphState;
+
+static uint64_t cm_module_graph_lifetime_counter;
+
+static uint64_t cm_module_graph_new_lifetime_id(void)
+{
+    if (cm_module_graph_lifetime_counter == UINT64_MAX) abort();
+    cm_module_graph_lifetime_counter += UINT64_C(1);
+    return cm_module_graph_lifetime_counter;
+}
 
 #define CM_INCLUDE_MAX_DEPTH 32u
 #define CM_INCLUDE_MAX_FILES 256u
@@ -354,6 +365,7 @@ void cm_module_graph_init(CmModuleGraph *graph)
     state = (CmModuleGraphState *)cm_alloc_zeroed(1u, sizeof(*state));
     cm_graph_state_init(state);
     state->owner_graph = graph;
+    state->lifetime_id = cm_module_graph_new_lifetime_id();
     graph->state = state;
 }
 
@@ -4339,6 +4351,7 @@ CmModuleGraphResult cm_module_graph_build(CmModuleGraph *graph,
     CmResolveStringId root_name;
     CmResolveStringId root_path;
     CmModuleGraphRevision next_revision;
+    uint64_t lifetime_id;
     size_t staging_round;
     int revision_exhausted;
 
@@ -4349,9 +4362,11 @@ CmModuleGraphResult cm_module_graph_build(CmModuleGraph *graph,
     revision_exhausted = state->revision_exhausted
         || state->revision >= UINT64_MAX - 1u;
     next_revision = revision_exhausted ? UINT64_MAX : state->revision + 1u;
+    lifetime_id = state->lifetime_id;
     cm_graph_state_destroy(state);
     cm_graph_state_init(state);
     state->owner_graph = graph;
+    state->lifetime_id = lifetime_id;
     state->revision = next_revision;
     state->revision_exhausted = revision_exhausted;
     result.revision = next_revision;
@@ -4526,6 +4541,14 @@ size_t cm_module_graph_error_count(const CmModuleGraph *graph)
 
     state = cm_graph_state_const(graph);
     return state == NULL ? 0u : state->errors.len;
+}
+
+uint64_t cm_module_graph_lifetime_id(const CmModuleGraph *graph)
+{
+    const CmModuleGraphState *state;
+
+    state = cm_graph_state_const(graph);
+    return state == NULL ? UINT64_C(0) : state->lifetime_id;
 }
 
 CmModuleGraphRevision cm_module_graph_revision(const CmModuleGraph *graph)

@@ -5511,6 +5511,33 @@ static void test_context_transaction_marks(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_context_generation_exhaustion_boundary(void)
+{
+    CmHirContext semantic_context;
+    CmHirContext rewind_context;
+    CmHirContextMark mark;
+
+    cm_hir_context_init(&semantic_context);
+    semantic_context.semantic_generation = UINT64_MAX - UINT64_C(1);
+    cm_hir_context_record_semantic_mutation(&semantic_context);
+    assert(semantic_context.semantic_generation == UINT64_MAX);
+    cm_hir_context_destroy(&semantic_context);
+
+    cm_hir_context_init(&rewind_context);
+    memset(&mark, 0, sizeof(mark));
+    assert(cm_hir_context_mark(&rewind_context, &mark) == CM_HIR_OK);
+    rewind_context.semantic_generation = UINT64_MAX - UINT64_C(1);
+    rewind_context.rewind_generation = UINT64_MAX - UINT64_C(1);
+    assert(cm_hir_context_rewind(&rewind_context, &mark) == CM_HIR_OK);
+    assert(rewind_context.semantic_generation == UINT64_MAX
+        && rewind_context.rewind_generation == UINT64_MAX);
+    cm_hir_context_destroy(&rewind_context);
+
+    /* Crossing UINT64_MAX deliberately aborts before mutation.  This test
+     * binary is portable C99 and has no subprocess death-test harness, so it
+     * exercises the final legal transitions without killing the test run. */
+}
+
 static void test_adt_generic_default_model(void)
 {
     CmHirContext context;
@@ -6963,6 +6990,7 @@ int main(void)
     test_method_call_expression_model();
     test_aggregate_expression_model();
     test_context_transaction_marks();
+    test_context_generation_exhaustion_boundary();
     test_adt_generic_default_model();
     test_const_generic_default_type_invariants();
     test_const_generic_trait_method_model();

@@ -3,14 +3,28 @@
 #include "cm/alloc.h"
 #include "cm/vec.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmHirModuleMapState {
+    uint64_t lifetime_id;
+    uint64_t generation;
     const CmModuleGraph *graph_owner;
+    uint64_t graph_lifetime_id;
     CmModuleGraphRevision graph_revision;
     const CmHirContext *hir_owner;
+    uint64_t hir_lifetime_id;
     CmVec entries;
 } CmHirModuleMapState;
+
+static uint64_t cm_hir_module_map_lifetime_counter;
+
+static uint64_t cm_hir_module_map_new_lifetime_id(void)
+{
+    if (cm_hir_module_map_lifetime_counter == UINT64_MAX) abort();
+    cm_hir_module_map_lifetime_counter += UINT64_C(1);
+    return cm_hir_module_map_lifetime_counter;
+}
 
 static CmHirModuleMapState *cm_module_map_state(CmHirModuleMap *map)
 {
@@ -31,6 +45,7 @@ void cm_hir_module_map_init(CmHirModuleMap *map)
     if (map == NULL) return;
     state = (CmHirModuleMapState *)cm_alloc_zeroed(1u, sizeof(*state));
     cm_vec_init(&state->entries, sizeof(CmHirModuleMapEntry));
+    state->lifetime_id = cm_hir_module_map_new_lifetime_id();
     map->state = state;
 }
 
@@ -51,10 +66,14 @@ void cm_hir_module_map_clear(CmHirModuleMap *map)
 
     state = cm_module_map_state(map);
     if (state == NULL) return;
+    if (state->generation == UINT64_MAX) abort();
+    state->generation += UINT64_C(1);
     cm_vec_clear(&state->entries);
     state->graph_owner = NULL;
+    state->graph_lifetime_id = UINT64_C(0);
     state->graph_revision = CM_MODULE_GRAPH_REVISION_NONE;
     state->hir_owner = NULL;
+    state->hir_lifetime_id = UINT64_C(0);
 }
 
 static CmHirModuleMapStatus cm_module_map_validate_owners(
@@ -71,9 +90,15 @@ static CmHirModuleMapStatus cm_module_map_validate_owners(
         return CM_HIR_MODULE_MAP_STALE_GRAPH;
     if (state->graph_owner != NULL && state->graph_owner != graph)
         return CM_HIR_MODULE_MAP_GRAPH_OWNER_CONFLICT;
+    if (state->graph_owner != NULL
+        && state->graph_lifetime_id != cm_module_graph_lifetime_id(graph))
+        return CM_HIR_MODULE_MAP_STALE_GRAPH;
     if (state->graph_owner != NULL && state->graph_revision != revision)
         return CM_HIR_MODULE_MAP_STALE_GRAPH;
     if (state->hir_owner != NULL && state->hir_owner != hir)
+        return CM_HIR_MODULE_MAP_HIR_OWNER_CONFLICT;
+    if (state->hir_owner != NULL
+        && state->hir_lifetime_id != hir->storage.lifetime_id)
         return CM_HIR_MODULE_MAP_HIR_OWNER_CONFLICT;
     return CM_HIR_MODULE_MAP_OK;
 }
@@ -138,11 +163,17 @@ CmHirModuleMapStatus cm_hir_module_map_bind(CmHirModuleMap *map,
     entry.module = module;
     entry.hir_module = hir_module;
     if (state->graph_owner == NULL) {
+        if (state->generation == UINT64_MAX) abort();
         state->graph_owner = graph;
+        state->graph_lifetime_id = cm_module_graph_lifetime_id(graph);
         state->graph_revision = revision;
         state->hir_owner = hir;
+        state->hir_lifetime_id = hir->storage.lifetime_id;
+    } else if (state->generation == UINT64_MAX) {
+        abort();
     }
     (void)cm_vec_push(&state->entries, &entry);
+    state->generation += UINT64_C(1);
     return CM_HIR_MODULE_MAP_OK;
 }
 
@@ -152,6 +183,38 @@ size_t cm_hir_module_map_count(const CmHirModuleMap *map)
 
     state = cm_module_map_state_const(map);
     return state == NULL ? 0u : state->entries.len;
+}
+
+uint64_t cm_hir_module_map_lifetime_id(const CmHirModuleMap *map)
+{
+    const CmHirModuleMapState *state;
+
+    state = cm_module_map_state_const(map);
+    return state == NULL ? UINT64_C(0) : state->lifetime_id;
+}
+
+uint64_t cm_hir_module_map_generation(const CmHirModuleMap *map)
+{
+    const CmHirModuleMapState *state;
+
+    state = cm_module_map_state_const(map);
+    return state == NULL ? UINT64_C(0) : state->generation;
+}
+
+uint64_t cm_hir_module_map_graph_lifetime_id(const CmHirModuleMap *map)
+{
+    const CmHirModuleMapState *state;
+
+    state = cm_module_map_state_const(map);
+    return state == NULL ? UINT64_C(0) : state->graph_lifetime_id;
+}
+
+uint64_t cm_hir_module_map_hir_lifetime_id(const CmHirModuleMap *map)
+{
+    const CmHirModuleMapState *state;
+
+    state = cm_module_map_state_const(map);
+    return state == NULL ? UINT64_C(0) : state->hir_lifetime_id;
 }
 
 CmHirModuleMapStatus cm_hir_module_map_lookup_hir(

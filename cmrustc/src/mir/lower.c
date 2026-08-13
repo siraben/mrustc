@@ -3139,14 +3139,18 @@ static const CmHirContext *cm_mir_lower_admitted_hir(
         if (context->bodies.len != 0u || context->hir_owner != NULL
             || context->admitted_storage_lifetime_id != UINT64_C(0)
             || context->admitted_semantic_generation != UINT64_C(0)
-            || context->admitted_rewind_generation != UINT64_C(0)) {
+            || context->admitted_rewind_generation != UINT64_C(0)
+            || context->admitted_admission_capability_id
+                != UINT64_C(0)) {
             return NULL;
         }
     } else if (context->hir_owner != hir
         || context->admitted_crate != crate_id
         || context->admitted_storage_lifetime_id != hir->storage.lifetime_id
         || context->admitted_semantic_generation != hir->semantic_generation
-        || context->admitted_rewind_generation != hir->rewind_generation) {
+        || context->admitted_rewind_generation != hir->rewind_generation
+        || context->admitted_admission_capability_id
+            != cm_semantic_admission_capability_id(admission)) {
         return NULL;
     }
     *out_crate = crate_id;
@@ -3154,13 +3158,16 @@ static const CmHirContext *cm_mir_lower_admitted_hir(
 }
 
 static void cm_mir_lower_latch_admission(CmMirContext *context,
-    const CmHirContext *hir, CmHirCrateId crate_id)
+    const CmSemanticAdmission *admission, const CmHirContext *hir,
+    CmHirCrateId crate_id)
 {
     context->hir_owner = hir;
     context->admitted_crate = crate_id;
     context->admitted_storage_lifetime_id = hir->storage.lifetime_id;
     context->admitted_semantic_generation = hir->semantic_generation;
     context->admitted_rewind_generation = hir->rewind_generation;
+    context->admitted_admission_capability_id =
+        cm_semantic_admission_capability_id(admission);
 }
 
 static CmMirLowerResult cm_mir_lower_admission_failure(CmHirBodyId body_id)
@@ -3202,7 +3209,7 @@ CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
         CM_MIR_SEMANTIC_EVIDENCE_BODY);
     if (result.error_count == 0u
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
-        cm_mir_lower_latch_admission(context, hir, crate_id);
+        cm_mir_lower_latch_admission(context, admission, hir, crate_id);
     }
     return result;
 }
@@ -3276,7 +3283,7 @@ CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
         semantic_results, CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE);
     if (result.error_count == 0u
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
-        cm_mir_lower_latch_admission(context, hir, crate_id);
+        cm_mir_lower_latch_admission(context, admission, hir, crate_id);
     }
     return result;
 }

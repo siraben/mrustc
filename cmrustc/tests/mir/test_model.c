@@ -1,4 +1,5 @@
 #include "cm/mir/model.h"
+#include "cm/mir/lower.h"
 
 #include "cm/hir/instance.h"
 
@@ -3305,9 +3306,11 @@ static void test_publication_atomicity(TestHir *fixture)
     CmMirBodyId reserved;
     CmMirBodyId duplicate;
     const CmMirBody *stored;
+    CmMirLowerResult recreated_lower;
     uint64_t context_lifetime;
     uint64_t admission_capability;
     uint64_t admission_generation;
+    uint64_t committed_capability;
 
     memset(&admission, 0, sizeof(admission));
     cm_hir_instance_spec_init(&spec);
@@ -3421,10 +3424,38 @@ static void test_publication_atomicity(TestHir *fixture)
     assert(cm_mir_publication_commit(&publication) == CM_MIR_OK
         && publication.implementation == NULL
         && cm_mir_body_count(&mir) == 1u);
+    committed_capability = cm_semantic_admission_capability_id(&admission);
     stored = cm_mir_get_body(&mir, reserved);
     assert(stored != NULL && stored->locals[1].type == fixture->u32_type
+        && committed_capability != UINT64_C(0)
+        && mir.admitted_admission_capability_id == committed_capability
         && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
             reserved) == CM_MIR_OK);
+
+    cm_semantic_admission_destroy(&admission);
+    admission_result = cm_semantic_admit_typed_leaf_instances(&admission,
+        &fixture->context, fixture->identity_definition.crate_id,
+        &reachable, 1u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK
+        && cm_semantic_admission_generation(&admission)
+            == admission_generation
+        && cm_semantic_admission_capability_id(&admission)
+            != UINT64_C(0)
+        && cm_semantic_admission_capability_id(&admission)
+            != committed_capability
+        && cm_mir_validate_admitted_monomorphized_body(&mir, &admission,
+            reserved) == CM_MIR_INVALID_ADMISSION);
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+            == CM_MIR_INVALID_ADMISSION
+        && publication.implementation == NULL);
+    recreated_lower = cm_mir_lower_admitted_instance(&mir, &admission,
+        fixture->identity_body, &substitution, 1u);
+    assert(recreated_lower.body == CM_MIR_BODY_NONE
+        && recreated_lower.error_count == 1u
+        && recreated_lower.first_error.kind
+            == CM_MIR_LOWER_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 1u);
 
     cm_mir_context_destroy(&mir);
     cm_semantic_admission_destroy(&admission);

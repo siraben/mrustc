@@ -360,10 +360,66 @@ static void test_invalid_map(void)
         "status names differ");
 }
 
+static void test_map_lifetime_and_generation(void)
+{
+    CmSourceSet sources;
+    CmSourceId source_root;
+    CmModuleGraph graph;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleId hir_root;
+    CmHirModuleId hir_beta;
+    CmHirModuleId hir_alpha;
+    CmHirModuleId hir_nested;
+    CmHirModuleMap map;
+    uint64_t first_lifetime;
+
+    check(build_graph(&sources, &graph, &graph_result, &source_root),
+        "could not build map identity graph fixture");
+    check(build_hir(&hir, &hir_root, &hir_beta, &hir_alpha, &hir_nested),
+        "could not build map identity HIR fixture");
+    cm_hir_module_map_init(&map);
+    first_lifetime = cm_hir_module_map_lifetime_id(&map);
+    check(first_lifetime != UINT64_C(0)
+        && cm_hir_module_map_generation(&map) == UINT64_C(0),
+        "new map did not publish its lifetime and zero generation");
+    check(cm_hir_module_map_bind(&map, &graph, graph_result.revision,
+            graph_result.root, &hir, hir_root) == CM_HIR_MODULE_MAP_OK
+        && cm_hir_module_map_generation(&map) == UINT64_C(1)
+        && cm_hir_module_map_graph_lifetime_id(&map)
+            == cm_module_graph_lifetime_id(&graph)
+        && cm_hir_module_map_hir_lifetime_id(&map)
+            == hir.storage.lifetime_id,
+        "successful bind did not advance and latch owner identities");
+    check(cm_hir_module_map_bind(&map, &graph, graph_result.revision,
+            graph_result.root, &hir, hir_root)
+            == CM_HIR_MODULE_MAP_DUPLICATE_BINDING
+        && cm_hir_module_map_generation(&map) == UINT64_C(1),
+        "failed bind advanced the map generation");
+    cm_hir_module_map_clear(&map);
+    check(cm_hir_module_map_generation(&map) == UINT64_C(2)
+        && cm_hir_module_map_graph_lifetime_id(&map) == UINT64_C(0)
+        && cm_hir_module_map_hir_lifetime_id(&map) == UINT64_C(0),
+        "clear did not advance and release owner identities");
+    cm_hir_module_map_destroy(&map);
+    check(cm_hir_module_map_lifetime_id(&map) == UINT64_C(0)
+        && cm_hir_module_map_generation(&map) == UINT64_C(0),
+        "destroyed map retained a public identity");
+    cm_hir_module_map_init(&map);
+    check(cm_hir_module_map_lifetime_id(&map) != UINT64_C(0)
+        && cm_hir_module_map_lifetime_id(&map) != first_lifetime,
+        "reinitialized map reused its process lifetime identity");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
 int main(void)
 {
     test_mapping();
     test_invalid_map();
+    test_map_lifetime_and_generation();
     if (failures == 0) puts("HIR module map tests: ok");
     return failures == 0 ? 0 : 1;
 }

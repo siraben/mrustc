@@ -263,6 +263,8 @@ typedef struct CmMirContext {
     uint64_t admitted_storage_lifetime_id;
     uint64_t admitted_semantic_generation;
     uint64_t admitted_rewind_generation;
+    /* Exact semantic authority which admitted every retained body. */
+    uint64_t admitted_admission_capability_id;
     /* Zero is the legacy target-neutral state; usize requires 32 or 64. */
     unsigned int pointer_bits;
 } CmMirContext;

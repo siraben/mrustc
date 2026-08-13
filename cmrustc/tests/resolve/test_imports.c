@@ -1774,6 +1774,59 @@ static int test_dependency_macro_consumer_import(void)
     return ok;
 }
 
+static int test_resolver_lifetime_and_generation(void)
+{
+    static const unsigned char source_text[] = "fn value() {}\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphResult graph_result;
+    CmImportResolver resolver;
+    CmImportResult import_result;
+    uint64_t first_lifetime;
+    int ok;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_import_resolver_init(&resolver);
+    first_lifetime = cm_import_resolver_lifetime_id(&resolver);
+    ok = check(first_lifetime != UINT64_C(0)
+        && cm_import_resolver_generation(&resolver) == UINT64_C(0)
+        && cm_import_resolver_graph_lifetime_id(&resolver) == UINT64_C(0),
+        "new resolver did not publish its initial identity");
+    ok &= check(cm_source_add_memory(&sources, "resolver-id/lib.rs",
+        source_text, sizeof(source_text) - 1u, &root) == CM_SOURCE_OK,
+        "failed to add resolver identity fixture");
+    graph_result = build_graph_with_empty_cfg(&graph, &sources, root);
+    import_result = cm_import_resolve(&resolver, &graph,
+        graph_result.revision);
+    ok &= check(graph_result.error_count == 0u
+        && import_result.error_count == 0u
+        && cm_import_resolver_generation(&resolver) == UINT64_C(1)
+        && cm_import_resolver_graph_lifetime_id(&resolver)
+            == cm_module_graph_lifetime_id(&graph),
+        "successful resolve did not advance and latch graph identity");
+    import_result = cm_import_resolve(&resolver, &graph,
+        graph_result.revision + UINT64_C(1));
+    ok &= check(import_result.error_count == 1u
+        && cm_import_resolver_generation(&resolver) == UINT64_C(2)
+        && cm_import_resolver_graph_lifetime_id(&resolver) == UINT64_C(0)
+        && !cm_import_resolver_matches_graph(&resolver, &graph),
+        "failed resolve did not advance and invalidate snapshot identity");
+    cm_import_resolver_destroy(&resolver);
+    ok &= check(cm_import_resolver_lifetime_id(&resolver) == UINT64_C(0)
+        && cm_import_resolver_generation(&resolver) == UINT64_C(0),
+        "destroyed resolver retained a public identity");
+    cm_import_resolver_init(&resolver);
+    ok &= check(cm_import_resolver_lifetime_id(&resolver) != UINT64_C(0)
+        && cm_import_resolver_lifetime_id(&resolver) != first_lifetime,
+        "reinitialized resolver reused its process lifetime identity");
+    cm_import_resolver_destroy(&resolver);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+    return ok;
+}
+
 int main(void)
 {
     int ok;
@@ -1807,6 +1860,7 @@ int main(void)
         getenv("RUST190_CORE_ROOT"));
     ok &= test_dependency_macro_artifact();
     ok &= test_dependency_macro_consumer_import();
+    ok &= test_resolver_lifetime_and_generation();
     if (ok) puts("import resolution tests: ok");
     return ok ? 0 : 1;
 }

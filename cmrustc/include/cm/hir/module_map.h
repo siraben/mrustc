@@ -45,6 +45,12 @@ CmHirModuleMapStatus cm_hir_module_map_bind(CmHirModuleMap *map,
     const CmHirContext *hir, CmHirModuleId hir_module);
 
 size_t cm_hir_module_map_count(const CmHirModuleMap *map);
+/* Process-local object lifetime and monotonic successful-mutation generation. */
+uint64_t cm_hir_module_map_lifetime_id(const CmHirModuleMap *map);
+uint64_t cm_hir_module_map_generation(const CmHirModuleMap *map);
+/* Owner lifetimes latched by the first binding; zero while unbound. */
+uint64_t cm_hir_module_map_graph_lifetime_id(const CmHirModuleMap *map);
+uint64_t cm_hir_module_map_hir_lifetime_id(const CmHirModuleMap *map);
 CmHirModuleMapStatus cm_hir_module_map_lookup_hir(
     const CmHirModuleMap *map, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, CmModuleId module,

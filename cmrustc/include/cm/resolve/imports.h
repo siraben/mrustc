@@ -127,6 +127,12 @@ CmImportResult cm_import_resolve(CmImportResolver *resolver,
  */
 CmModuleGraphRevision cm_import_resolver_revision(
     const CmImportResolver *resolver);
+/* Process-local object lifetime and monotonic resolve-attempt generation. */
+uint64_t cm_import_resolver_lifetime_id(const CmImportResolver *resolver);
+uint64_t cm_import_resolver_generation(const CmImportResolver *resolver);
+/* Graph lifetime captured by the latest successful resolve; otherwise zero. */
+uint64_t cm_import_resolver_graph_lifetime_id(
+    const CmImportResolver *resolver);
 int cm_import_resolver_matches_graph(const CmImportResolver *resolver,
     const CmModuleGraph *graph);
 

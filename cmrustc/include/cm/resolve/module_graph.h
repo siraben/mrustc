@@ -284,6 +284,8 @@ CmModuleGraphResult cm_module_graph_build(CmModuleGraph *graph,
 
 size_t cm_module_graph_module_count(const CmModuleGraph *graph);
 size_t cm_module_graph_error_count(const CmModuleGraph *graph);
+/* Process-unique identity of this init/destroy lifetime; zero if not live. */
+uint64_t cm_module_graph_lifetime_id(const CmModuleGraph *graph);
 CmModuleGraphRevision cm_module_graph_revision(const CmModuleGraph *graph);
 /* Deterministic graph-owned module order; index is zero-based. */
 int cm_module_graph_get_module_at(const CmModuleGraph *graph, size_t index,

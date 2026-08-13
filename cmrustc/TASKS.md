@@ -1755,7 +1755,8 @@ runs outer and expression typecheck, then usage/static-borrow/lifetime/closure/
 vtable/UFCS/reborrow/erased-type rewrites, independent expression validation,
 whole-crate MIR lowering/validation/cleanup/borrowcheck, and only then
 MIR-driven translation enumeration. cmrustc must seal a generation-bound
-`STRUCTURAL -> TYPED -> REWRITTEN -> REGIONS -> VALIDATED` manifest for every
+`STRUCTURAL -> TYPED -> MARKED -> REGIONS -> REWRITTEN -> VALIDATED` manifest
+for every
 cfg-active function, const, static, and represented type-position body atom;
 rollback or HIR mutation/ABA must stale the whole capability. Exact closure
 admission must derive from that barrier, MIR publication must pin both
@@ -1763,6 +1764,35 @@ capabilities, and the production driver's legacy one-body bypass must be
 removed. Rewrites must precede durable final semantic-results allocation, and
 phase names may advance only after a real validator rather than treating an
 unsupported form as completed.
+
+The first barrier slice now exists as a separate process-local capability.
+It derives an immutable manifest in stable HIR item order, records each
+cfg-active local function, const, and static body together with its exact
+owner, declared type, and source-expression identity, and authenticates the
+complete HIR storage/generation/length tuple. Appends and rewinds stale every
+query, reconstruction on an unchanged HIR receives a new nonwrapping
+capability identity, and semantic/rewind generations abort before wrap rather
+than returning to an earlier value. The borrowed graph/import/module-map
+snapshot is checked for its exact revision, root, complete module bijection,
+and HIR ownership on every query. Graph, import-resolver, and module-map
+object lifetimes plus import/map snapshot generations prevent both
+destroy/reinitialize address reuse and identical re-resolve/clear-rebind ABA.
+Structural preflight rejects orphaned or
+aliased body ownership without mutation. The only implemented transition is a
+real atomic `STRUCTURAL -> TYPED` pass through local-body lowering: failure
+rolls the entire HIR transaction back and recaptures the new generation so the
+same manifest remains inspectable and retryable at STRUCTURAL. Successful
+transitions and mutating rollbacks mint a fresh exact-generation capability.
+Const/static bodies and trait-default bodies are present in the manifest but
+explicitly block TYPED until their real checkers exist. No API can yet mint
+MARKED, REGIONS, REWRITTEN, or VALIDATED, and normalized array lengths/discriminants
+are not misrepresented as type-position body atoms while HIR lacks stable
+source body identities for them.
+
+Committed MIR now also latches the exact semantic-admission capability which
+authorized its first body. A newly constructed admission for the same HIR
+generation cannot validate or extend that MIR, closing the downstream
+same-generation authorization ABA while barrier-derived admission is built.
 
 ## M6: Build orchestration
 

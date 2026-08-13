@@ -4273,6 +4273,48 @@ static int test_cycle(void)
     return ok;
 }
 
+static int test_graph_lifetime_identity(void)
+{
+    static const unsigned char source_text[] = "fn value() {}\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions options;
+    CmCfgSet cfg;
+    CmModuleGraphResult first;
+    CmModuleGraphResult second;
+    uint64_t first_lifetime;
+    int ok;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    first_lifetime = cm_module_graph_lifetime_id(&graph);
+    ok = check(first_lifetime != UINT64_C(0),
+        "initialized graph has no lifetime identity");
+    ok &= check(cm_source_add_memory(&sources, "lifetime/lib.rs",
+        source_text, sizeof(source_text) - 1u, &root) == CM_SOURCE_OK,
+        "failed to add graph lifetime fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&options);
+    options.cfg = &cfg;
+    first = cm_module_graph_build(&graph, &sources, root, &options);
+    second = cm_module_graph_build(&graph, &sources, root, &options);
+    ok &= check(first.error_count == 0u && second.error_count == 0u
+        && second.revision == first.revision + UINT64_C(1)
+        && cm_module_graph_lifetime_id(&graph) == first_lifetime,
+        "graph rebuild changed lifetime identity or failed revision advance");
+    cm_module_graph_destroy(&graph);
+    ok &= check(cm_module_graph_lifetime_id(&graph) == UINT64_C(0),
+        "destroyed graph retained a public lifetime identity");
+    cm_module_graph_init(&graph);
+    ok &= check(cm_module_graph_lifetime_id(&graph) != UINT64_C(0)
+        && cm_module_graph_lifetime_id(&graph) != first_lifetime,
+        "reinitialized graph reused its process lifetime identity");
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+    return ok;
+}
+
 int main(void)
 {
     int ok;
@@ -4329,6 +4371,7 @@ int main(void)
     ok &= test_alloc_authenticated_frontier(
         getenv("RUST190_CORE_ROOT"), getenv("RUST190_ALLOC_ROOT"));
     ok &= test_cycle();
+    ok &= test_graph_lifetime_identity();
     if (ok) puts("module graph tests: ok");
     return ok ? 0 : 1;
 }
