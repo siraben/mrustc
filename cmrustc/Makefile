@@ -299,6 +299,7 @@ $(HIR_SEMANTIC_ITEM_TEST_PROGRAM): tests/hir/test_semantic_item.c $(HIR_SEMANTIC
 
 $(BUILD_DIR)/obj/hir/instance.o: src/hir/instance_internal.h
 $(BUILD_DIR)/obj/driver/compile.o: src/hir/instance_internal.h
+$(BUILD_DIR)/obj/mir/model.o: src/hir/instance_internal.h
 
 $(HIR_INSTANCE_TEST_PROGRAM): tests/hir/test_instance.c $(LIBRARY_OBJECTS)
 	@mkdir -p $(@D)

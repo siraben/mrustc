@@ -24,7 +24,9 @@ typedef struct Fixture {
     CmHirDefId declared_method;
     CmHirDefId impl_definition;
     CmHirDefId selected_method;
+    CmHirDefId holder_definition;
     CmHirTypeId u32_type;
+    CmHirTypeId holder_u32_type;
     CmHirTypeId static_reference;
     CmHirTypeId duplicate_static_reference;
     CmHirTypeId erased_reference;
@@ -57,6 +59,7 @@ static void fixture_init(Fixture *fixture)
 {
     static const char source[] =
         "fn choose<A, B>(left: A, _right: B) -> A { left } "
+        "struct Holder<T> { value: T } "
         "trait Value { fn value(value: u32) -> u32; } "
         "impl Value for u32 { fn value(value: u32) -> u32 { value } }";
     CmModuleGraphOptions graph_options;
@@ -64,6 +67,7 @@ static void fixture_init(Fixture *fixture)
     CmHirLowerOptions lower_options;
     CmHirLowerResult lower_result;
     CmSemanticAdmissionResult admission_result;
+    CmHirGenericArg holder_argument;
     CmHirType type_value;
     CmHirTypeId u32_type;
     CmHirTypeId u128_type;
@@ -110,6 +114,9 @@ static void fixture_init(Fixture *fixture)
             fixture->trait_definition = item->definition;
         } else if (item != NULL && item->kind == CM_HIR_ITEM_IMPL) {
             fixture->impl_definition = item->definition;
+        } else if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+            && intern_is(&fixture->hir, item->name, "Holder")) {
+            fixture->holder_definition = item->definition;
         } else if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
             && intern_is(&fixture->hir, item->name, "value")) {
             if (item->data.function_item.body == CM_HIR_BODY_NONE) {
@@ -175,6 +182,17 @@ static void fixture_init(Fixture *fixture)
     type_value.data.array_type.length.data.value.high_bits = UINT64_MAX;
     assert(cm_hir_add_type(&fixture->hir, &type_value,
         &fixture->array_128) == CM_HIR_OK);
+    memset(&holder_argument, 0, sizeof(holder_argument));
+    holder_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    holder_argument.data.type = u32_type;
+    memset(&type_value, 0, sizeof(type_value));
+    type_value.kind = CM_HIR_TYPE_ADT_KIND;
+    type_value.span.source = fixture->source;
+    type_value.data.named_type.definition = fixture->holder_definition;
+    type_value.data.named_type.arguments = &holder_argument;
+    type_value.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&fixture->hir, &type_value,
+        &fixture->holder_u32_type) == CM_HIR_OK);
     memset(&fixture->admission, 0, sizeof(fixture->admission));
     admission_result = cm_semantic_admit_local_crate(&fixture->admission,
         &fixture->hir, 1u, &fixture->graph,
@@ -186,7 +204,9 @@ static void fixture_init(Fixture *fixture)
         && !cm_hir_def_id_is_none(fixture->declared_method)
         && !cm_hir_def_id_is_none(fixture->impl_definition)
         && !cm_hir_def_id_is_none(fixture->selected_method)
+        && !cm_hir_def_id_is_none(fixture->holder_definition)
         && u32_type != CM_HIR_TYPE_NONE
+        && fixture->holder_u32_type != CM_HIR_TYPE_NONE
         && fixture->static_reference != CM_HIR_TYPE_NONE
         && fixture->bound_reference != CM_HIR_TYPE_NONE
         && fixture->array_128 != CM_HIR_TYPE_NONE);
@@ -312,6 +332,41 @@ static void test_authenticated_method_identity(void)
     spec.self_owner = fixture.trait_definition;
     assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
+    fixture_destroy(&fixture);
+}
+
+static void test_adt_argument_kind_is_authenticated(void)
+{
+    Fixture fixture;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec spec;
+    CmHirInstanceKey key;
+    CmHirInstanceKey rejected;
+    CmHirType *holder_type;
+
+    fixture_init(&fixture);
+    memset(&key, 0, sizeof(key));
+    memset(&rejected, 0, sizeof(rejected));
+    spec = make_spec(&fixture, arguments);
+    arguments[0].data.type = fixture.holder_u32_type;
+    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+        == CM_HIR_INSTANCE_OK);
+
+    holder_type = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        fixture.holder_u32_type);
+    assert(holder_type != NULL && holder_type->kind == CM_HIR_TYPE_ADT_KIND
+        && holder_type->data.named_type.argument_count == 1u
+        && holder_type->data.named_type.arguments != NULL
+        && holder_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE);
+    holder_type->data.named_type.arguments[0].kind =
+        CM_HIR_GENERIC_ARG_LIFETIME;
+    holder_type->data.named_type.arguments[0].data.lifetime.kind =
+        CM_HIR_REGION_STATIC;
+    assert(cm_hir_instance_key_init(&rejected, &fixture.admission, &spec)
+        == CM_HIR_INSTANCE_INVALID_RELATION && rejected.state == NULL);
+
+    cm_hir_instance_key_destroy(&key);
     fixture_destroy(&fixture);
 }
 
@@ -444,6 +499,7 @@ int main(void)
 {
     test_structural_key_clone_compare_dump();
     test_authenticated_method_identity();
+    test_adt_argument_kind_is_authenticated();
     test_fail_closed_and_stale();
     test_same_hir_foreign_admission();
     test_clone_oom_is_transactional();

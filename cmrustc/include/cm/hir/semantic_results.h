@@ -215,6 +215,13 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
     const struct CmHirInstanceSpec *spec, CmSemanticBodyView *out_view);
+/* Query one exact admitted instance by its complete durable identity. */
+CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    CmHirDefId definition, CmHirBodyId body,
+    const unsigned char *identity_bytes, size_t identity_size,
+    CmSemanticBodyView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_expression(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,

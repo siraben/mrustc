@@ -1,6 +1,7 @@
 #include "cm/hir/admission.h"
 #include "cm/hir/lower.h"
 #include "cm/hir/semantic_results.h"
+#include "cm/alloc.h"
 #include "cm/source.h"
 
 #include "../../src/hir/semantic_results_internal.h"
@@ -996,6 +997,8 @@ static void test_durable_projection_trace_definition(void)
     CmSemanticAdmissionResult instance_result;
     CmSemanticReachableInstance reachable;
     CmHirInstanceSpec spec;
+    CmHirCanonicalInstance identity;
+    unsigned char *tampered_identity;
     int equal;
     const CmHirBody *body;
     CmHirBody *mutable_body;
@@ -1101,11 +1104,29 @@ static void test_durable_projection_trace_definition(void)
         &instance_admission, &fixture.hir, 1u, &reachable, 1u);
     assert(instance_result.status == CM_SEMANTIC_ADMISSION_OK);
     results = cm_semantic_admission_results(&instance_admission);
+    cm_hir_canonical_instance_init(&identity);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_OK && identity.size != 0u);
+    tampered_identity = (unsigned char *)cm_alloc(identity.size);
+    memcpy(tampered_identity, identity.bytes, identity.size);
+    tampered_identity[identity.size - 1u] ^= 1u;
     assert(results != NULL
         && cm_semantic_results_instance_body(results, &instance_admission,
             &spec, &body_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_canonical_instance_body(results,
+            &instance_admission, identity.definition, identity.body,
+            identity.bytes, identity.size, &body_view)
+                == CM_SEMANTIC_RESULTS_OK
         && body_view.projection_trace_count == 1u
         && body_view.projection_step_count == 1u
+        && cm_semantic_results_canonical_instance_body(results,
+            &instance_admission, identity.definition, identity.body,
+            tampered_identity, identity.size, &body_view)
+                == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_canonical_instance_body(results,
+            &instance_admission, identity.definition, identity.body,
+            NULL, identity.size, &body_view)
+                == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_instance_projection_trace(results,
             &instance_admission, &spec, body->root_expression,
             CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE, 0u,
@@ -1119,6 +1140,8 @@ static void test_durable_projection_trace_definition(void)
         && cm_semantic_results_instance_projection_trace_step(results,
             &instance_admission, &spec, 0u, 1u, &step_view)
             == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_free(tampered_identity);
+    cm_hir_canonical_instance_destroy(&identity);
     cm_semantic_admission_destroy(&instance_admission);
     fixture_destroy(&fixture);
 }

@@ -2,6 +2,8 @@
 
 #include "cm/hir/instance.h"
 
+#include "../../src/hir/instance_internal.h"
+
 #include "cm/alloc.h"
 
 #include <assert.h>
@@ -3265,6 +3267,267 @@ static void test_publication_atomicity(TestHir *fixture)
     cm_semantic_admission_destroy(&admission);
 }
 
+static void test_canonical_publication_ownership(TestHir *fixture)
+{
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult admission_result;
+    CmSemanticReachableInstance reachable;
+    CmHirInstanceSpec spec;
+    CmHirInstanceSpec alias_spec;
+    CmHirGenericArg argument;
+    CmHirGenericArg alias_argument;
+    CmHirCanonicalInstance canonical;
+    CmHirCanonicalInstance alias_canonical;
+    CmMirInstance first;
+    CmMirInstance alias;
+    CmMirInstance distinct;
+    CmMirInstance inconsistent;
+    CmMirInstance malformed;
+    CmMirInstance borrowed;
+    CmMirContext mir;
+    CmMirPublication publication;
+    CmMirBody identity;
+    CmMirBody probe;
+    CmMirLocal identity_locals[2];
+    CmMirLocal probe_locals[2];
+    CmMirStatement identity_statement;
+    CmMirBasicBlock identity_block;
+    CmMirBasicBlock probe_blocks[2];
+    CmMirOperand probe_argument;
+    CmHirTypeId substitution;
+    unsigned char *distinct_bytes;
+    unsigned char expected_first;
+    CmMirBodyId first_id;
+    CmMirBodyId probe_id;
+    CmMirBodyId found;
+    CmHirBodyId source_body;
+    const CmMirBody *defined;
+    const CmMirBody *stored;
+
+    memset(&admission, 0, sizeof(admission));
+    cm_hir_instance_spec_init(&spec);
+    cm_hir_instance_spec_init(&alias_spec);
+    memset(&argument, 0, sizeof(argument));
+    memset(&alias_argument, 0, sizeof(alias_argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = fixture->u32_type;
+    alias_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    alias_argument.data.type = fixture->alternate_u32_type;
+    spec.selected_callable = fixture->identity_definition;
+    spec.item_arguments = &argument;
+    spec.item_argument_count = 1u;
+    alias_spec.selected_callable = fixture->identity_definition;
+    alias_spec.item_arguments = &alias_argument;
+    alias_spec.item_argument_count = 1u;
+    reachable.body = fixture->identity_body;
+    reachable.spec = &spec;
+    admission_result = cm_semantic_admit_typed_leaf_instances(&admission,
+        &fixture->context, fixture->identity_definition.crate_id,
+        &reachable, 1u);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+
+    cm_hir_canonical_instance_init(&canonical);
+    cm_hir_canonical_instance_init(&alias_canonical);
+    assert(cm_hir_canonical_instance_encode(&fixture->context,
+        fixture->identity_definition.crate_id, &spec, &canonical)
+            == CM_HIR_INSTANCE_OK);
+    assert(cm_hir_canonical_instance_encode(&fixture->context,
+        fixture->identity_definition.crate_id, &alias_spec,
+        &alias_canonical) == CM_HIR_INSTANCE_OK);
+    assert(canonical.size != 0u && canonical.size == alias_canonical.size
+        && memcmp(canonical.bytes, alias_canonical.bytes,
+            canonical.size) == 0);
+
+    substitution = fixture->u32_type;
+    memset(&first, 0, sizeof(first));
+    first.definition = canonical.definition;
+    first.substitutions = &substitution;
+    first.substitution_count = 1u;
+    first.body = canonical.body;
+    first.identity_bytes = canonical.bytes;
+    first.identity_size = canonical.size;
+    alias = first;
+    alias.substitutions = &alias_argument.data.type;
+    alias.identity_bytes = alias_canonical.bytes;
+    distinct_bytes = (unsigned char *)cm_alloc(canonical.size);
+    memcpy(distinct_bytes, canonical.bytes, canonical.size);
+    distinct_bytes[canonical.size - 1u] ^= 1u;
+    distinct = first;
+    distinct.identity_bytes = distinct_bytes;
+    inconsistent = first;
+    inconsistent.substitutions = &fixture->u8_type;
+    malformed = first;
+    malformed.identity_bytes = NULL;
+    found = 99u;
+    assert(cm_mir_find_canonical(NULL, &first, &found)
+            == CM_MIR_INVALID_ARGUMENT
+        && found == CM_MIR_BODY_NONE);
+
+    init_identity_mir(&identity, identity_locals, &identity_statement,
+        &identity_block, fixture, &substitution, fixture->u32_type);
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    identity.instance = distinct;
+    cm_mir_context_init(&mir);
+    found = 99u;
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_BODY;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.instance = first;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_OK && found == 1u
+        && cm_mir_body_count(&mir) == 1u);
+    cm_mir_context_destroy(&mir);
+
+    cm_mir_context_init(&mir);
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    found = 99u;
+    assert(cm_mir_publication_reserve_canonical(&publication, &malformed,
+        fixture->identity_body, &found) == CM_MIR_INVALID_ARGUMENT
+        && found == CM_MIR_BODY_NONE);
+    found = 99u;
+    assert(cm_mir_publication_reserve_canonical(&publication, &inconsistent,
+        fixture->identity_body, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE);
+    assert(cm_mir_publication_reserve_canonical(&publication, &first,
+        fixture->identity_body, &first_id) == CM_MIR_OK
+        && first_id == 1u);
+    found = 99u;
+    assert(cm_mir_publication_find_instance(&publication,
+        first.definition, first.substitutions, first.substitution_count,
+        &found) == CM_MIR_INVALID_ID && found == CM_MIR_BODY_NONE);
+    assert(cm_mir_publication_find_canonical(&publication, &alias,
+        &found) == CM_MIR_OK && found == first_id);
+    found = 99u;
+    assert(cm_mir_publication_reserve_canonical(&publication, &alias,
+        fixture->identity_body, &found) == CM_MIR_INVARIANT_VIOLATION
+        && found == CM_MIR_BODY_NONE);
+    memset(&borrowed, 0, sizeof(borrowed));
+    source_body = CM_HIR_BODY_NONE;
+    assert(cm_mir_publication_get_instance(&publication, first_id,
+        &borrowed, &source_body) == CM_MIR_OK
+        && source_body == fixture->identity_body
+        && borrowed.identity_bytes != canonical.bytes
+        && borrowed.substitutions != &substitution
+        && borrowed.identity_size == canonical.size);
+    expected_first = canonical.bytes[0];
+    canonical.bytes[0] ^= 1u;
+    assert(borrowed.identity_bytes[0] == expected_first);
+    canonical.bytes[0] = expected_first;
+
+    identity.instance = distinct;
+    assert(cm_mir_publication_define(&publication, first_id, &identity)
+        == CM_MIR_INVARIANT_VIOLATION);
+    identity.instance = first;
+    assert(cm_mir_publication_define(&publication, first_id, &identity)
+        == CM_MIR_OK);
+    defined = cm_mir_publication_get_body(&publication, first_id);
+    assert(defined != NULL && defined->instance.identity_bytes != NULL
+        && defined->instance.identity_bytes != canonical.bytes
+        && defined->instance.identity_bytes != borrowed.identity_bytes
+        && memcmp(defined->instance.identity_bytes, canonical.bytes,
+            canonical.size) == 0);
+    canonical.bytes[0] ^= 1u;
+    substitution = fixture->u8_type;
+    assert(defined->instance.identity_bytes[0] == expected_first
+        && defined->instance.substitutions[0] == fixture->u32_type);
+    canonical.bytes[0] = expected_first;
+    substitution = fixture->u32_type;
+    assert(cm_mir_publication_validate(&publication) == CM_MIR_OK);
+    assert(cm_mir_publication_commit(&publication) == CM_MIR_OK);
+    stored = cm_mir_get_body(&mir, first_id);
+    assert(stored != NULL && stored->instance.identity_bytes != NULL
+        && stored->instance.identity_bytes[0] == expected_first);
+    assert(cm_mir_find_canonical(&mir, &alias, &found) == CM_MIR_OK
+        && found == first_id);
+    found = 99u;
+    assert(cm_mir_find_instance(&mir, first.definition,
+        first.substitutions, first.substitution_count,
+        &found) == CM_MIR_INVALID_ID && found == CM_MIR_BODY_NONE);
+
+    cm_mir_publication_init(&publication);
+    assert(cm_mir_publication_begin(&publication, &mir, &admission)
+        == CM_MIR_OK);
+    found = 99u;
+    assert(cm_mir_publication_reserve_canonical(&publication, &distinct,
+        fixture->identity_body, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 1u);
+    assert(cm_mir_find_canonical(&mir, &first, &found) == CM_MIR_OK
+        && found == first_id);
+    cm_mir_publication_destroy(&publication);
+
+    cm_mir_context_destroy(&mir);
+
+    /* The one-shot admitted path authenticates the same exact identity. */
+    cm_mir_context_init(&mir);
+    init_identity_mir(&identity, identity_locals, &identity_statement,
+        &identity_block, fixture, &substitution, fixture->u32_type);
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    identity.instance = distinct;
+    found = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.instance = inconsistent;
+    found = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.instance = first;
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_BODY;
+    found = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &first_id) == CM_MIR_OK && first_id == 1u);
+    cm_mir_context_destroy(&mir);
+
+    /* Body and call storage own independent copies of the same key. */
+    cm_mir_context_init(&mir);
+    init_identity_mir(&identity, identity_locals, &identity_statement,
+        &identity_block, fixture, &substitution, fixture->u32_type);
+    identity.instance = first;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context,
+        &identity, &first_id) == CM_MIR_OK && first_id == 1u);
+    init_probe_mir(&probe, probe_locals, &probe_argument, &substitution,
+        probe_blocks, fixture, first_id);
+    probe_blocks[0].terminator.data.call.callee = alias;
+    alias_argument.data.type = fixture->u8_type;
+    probe_id = 99u;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context, &probe,
+        &probe_id) == CM_MIR_INVARIANT_VIOLATION
+        && probe_id == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 1u);
+    alias_argument.data.type = fixture->alternate_u32_type;
+    assert(cm_mir_add_monomorphized_body(&mir, &fixture->context, &probe,
+        &probe_id) == CM_MIR_OK && probe_id == 2u);
+    stored = cm_mir_get_body(&mir, probe_id);
+    assert(stored != NULL
+        && stored->basic_blocks[0].terminator.data.call.callee.identity_bytes
+            != alias.identity_bytes
+        && stored->basic_blocks[0].terminator.data.call.callee.identity_bytes
+            != cm_mir_get_body(&mir, first_id)->instance.identity_bytes
+        && memcmp(stored->basic_blocks[0].terminator.data.call.callee
+                .identity_bytes, canonical.bytes, canonical.size) == 0);
+    alias_canonical.bytes[0] ^= 1u;
+    assert(stored->basic_blocks[0].terminator.data.call.callee
+            .identity_bytes[0] == expected_first);
+    alias_canonical.bytes[0] = expected_first;
+    cm_mir_context_destroy(&mir);
+
+    cm_free(distinct_bytes);
+    cm_hir_canonical_instance_destroy(&alias_canonical);
+    cm_hir_canonical_instance_destroy(&canonical);
+    cm_semantic_admission_destroy(&admission);
+}
+
 int main(void)
 {
     TestHir fixture;
@@ -3319,6 +3582,7 @@ int main(void)
     test_context_pointer_bits();
     test_hir_init(&fixture);
     test_publication_atomicity(&fixture);
+    test_canonical_publication_ownership(&fixture);
     assert_legacy_constant(&fixture);
     cm_mir_context_init(&mir);
 

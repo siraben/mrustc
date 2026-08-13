@@ -157,8 +157,21 @@ typedef struct CmMirRvalue {
 
 typedef struct CmMirInstance {
     CmHirDefId definition;
+    /*
+     * Transitional executable materialization for the original narrow
+     * generic lowering path.  These process-local HIR IDs are not part of a
+     * canonical instance's identity.
+     */
     CmHirTypeId *substitutions;
     uint32_t substitution_count;
+    /*
+     * Durable structural identity.  An exact canonical instance has a
+     * nonzero body and a nonempty byte string.  MIR owners deep-copy these
+     * bytes; callers may pass borrowed storage to reserve/find operations.
+     */
+    CmHirBodyId body;
+    unsigned char *identity_bytes;
+    size_t identity_size;
 } CmMirInstance;
 
 typedef enum CmMirSemanticEvidenceKind {
@@ -273,11 +286,19 @@ CmMirStatus cm_mir_publication_reserve(CmMirPublication *publication,
     CmHirDefId definition, const CmHirTypeId *substitutions,
     uint32_t substitution_count, CmHirBodyId source_body,
     CmMirBodyId *out_id);
+/* Reserve by complete structural identity while retaining any borrowed flat
+ * substitutions solely as executable materialization during migration. */
+CmMirStatus cm_mir_publication_reserve_canonical(
+    CmMirPublication *publication, const CmMirInstance *instance,
+    CmHirBodyId source_body, CmMirBodyId *out_id);
 CmMirStatus cm_mir_publication_find_instance(
     const CmMirPublication *publication, CmHirDefId definition,
     const CmHirTypeId *substitutions, uint32_t substitution_count,
     CmMirBodyId *out_id);
-/* The returned instance substitutions are borrowed from the publication. */
+CmMirStatus cm_mir_publication_find_canonical(
+    const CmMirPublication *publication, const CmMirInstance *instance,
+    CmMirBodyId *out_id);
+/* The returned instance storage is borrowed from the publication. */
 CmMirStatus cm_mir_publication_get_instance(
     const CmMirPublication *publication, CmMirBodyId id,
     CmMirInstance *out_instance, CmHirBodyId *out_source_body);
@@ -342,6 +363,8 @@ CmMirStatus cm_mir_admitted_signature_parameter(
 CmMirStatus cm_mir_find_instance(const CmMirContext *context,
     CmHirDefId definition, const CmHirTypeId *substitutions,
     uint32_t substitution_count, CmMirBodyId *out_id);
+CmMirStatus cm_mir_find_canonical(const CmMirContext *context,
+    const CmMirInstance *instance, CmMirBodyId *out_id);
 
 /* Validate a local place, including zero or more flattened field projections,
  * against one exact MIR/HIR body. */

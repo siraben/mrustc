@@ -5024,6 +5024,42 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirDefId definition, CmHirBodyId body,
+    const unsigned char *identity_bytes, size_t identity_size,
+    CmSemanticBodyView *out_view)
+{
+    CmHirCanonicalInstance identity;
+    const CmSemanticInstanceRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    if (cm_hir_def_id_is_none(definition) || body == CM_HIR_BODY_NONE
+        || identity_bytes == NULL || identity_size == 0u) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    cm_hir_canonical_instance_init(&identity);
+    identity.definition = definition;
+    identity.body = body;
+    identity.bytes = (unsigned char *)identity_bytes;
+    identity.size = identity_size;
+    record = cm_results_find_instance(results, &identity);
+    if (record == NULL) return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    out_view->body = record->identity.body;
+    out_view->owner = record->identity.definition;
+    out_view->expression_count = record->body.expression_count;
+    out_view->projection_trace_count =
+        record->body.projection_trace_count;
+    out_view->projection_step_count =
+        record->body.projection_step_count;
+    out_view->callable_count = record->body.callable_count;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
 CmSemanticResultsStatus cm_semantic_results_instance_expression(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
     const CmHirInstanceSpec *spec, CmHirExprId expression,

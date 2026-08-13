@@ -2,7 +2,7 @@
 #define CMRUSTC_HIR_SEMANTIC_BODY_INTERNAL_H
 
 #include "cm/hir/semantic_body.h"
-#include "cm/hir/instance.h"
+#include "instance_internal.h"
 #include "cm/hir/semantic_results.h"
 
 typedef enum CmSemanticBodyWritebackStatus {
@@ -146,6 +146,10 @@ CmSemanticBodyResult cm_semantic_body_check_instance_with_evidence(
 CmSemanticBodyResult cm_semantic_body_check_instance_spec_with_evidence(
     CmSemanticSession *session, CmHirBodyId body,
     const CmHirInstanceSpec *spec,
+    const CmSemanticBodyEvidenceWriteback *writeback);
+CmSemanticBodyResult cm_semantic_body_check_instance_parts_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirCanonicalInstanceParts *parts,
     const CmSemanticBodyEvidenceWriteback *writeback);
 
 #endif

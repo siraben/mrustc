@@ -19,6 +19,15 @@ typedef enum CmSemanticTypeScan {
     CM_SEMANTIC_TYPE_INVALID
 } CmSemanticTypeScan;
 
+typedef struct CmSemanticCanonicalReader {
+    const CmHirContext *hir;
+    CmTypeckContext *typeck;
+    const unsigned char *bytes;
+    size_t size;
+    size_t position;
+    CmSpan span;
+} CmSemanticCanonicalReader;
+
 static CmSemanticBodyResult cm_semantic_body_result(
     CmSemanticBodyStatus status, CmHirBodyId body)
 {
@@ -325,6 +334,7 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     CmTypeckSnapshot *snapshot, CmHirExprId *call_expressions,
     CmTypeckGenericArg *owner_arguments,
     CmTypeckGenericArg *enclosing_arguments,
+    CmTypeckGenericArg *implemented_arguments,
     CmTypeckGenericArg *callee_arguments,
     CmTypeckTypeId *expression_terms, CmVec *deferred_equalities,
     CmSemanticCheckedBodyFacts *facts,
@@ -341,6 +351,7 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
     cm_free(call_expressions);
     cm_free(owner_arguments);
     cm_free(enclosing_arguments);
+    cm_free(implemented_arguments);
     cm_free(callee_arguments);
     cm_free(expression_terms);
     if (facts != NULL) {
@@ -371,7 +382,8 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
 #define cm_semantic_body_fail_snapshot(result, typeck, snapshot, ...) \
     cm_semantic_body_fail_snapshot_impl((result), (typeck), (snapshot), \
         call_expressions, owner_arguments, enclosing_arguments, \
-        callee_arguments, expression_terms, &deferred_equalities, \
+        implemented_arguments, callee_arguments, expression_terms, \
+        &deferred_equalities, \
         &checked_facts, writeback)
 
 static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
@@ -387,6 +399,420 @@ static CmSemanticBodyStatus cm_semantic_body_allocate_arguments(
     }
     *out_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(1u, bytes);
     return CM_SEMANTIC_BODY_OK;
+}
+
+static int cm_semantic_canonical_read(CmSemanticCanonicalReader *reader,
+    void *out, size_t count)
+{
+    if (reader == NULL || (count != 0u && out == NULL)
+        || reader->position > reader->size
+        || count > reader->size - reader->position) {
+        return 0;
+    }
+    if (count != 0u) {
+        memcpy(out, reader->bytes + reader->position, count);
+    }
+    reader->position += count;
+    return 1;
+}
+
+static int cm_semantic_canonical_u8(CmSemanticCanonicalReader *reader,
+    unsigned int *out)
+{
+    unsigned char value;
+
+    if (out == NULL || !cm_semantic_canonical_read(reader, &value, 1u)) {
+        return 0;
+    }
+    *out = value;
+    return 1;
+}
+
+static int cm_semantic_canonical_u32(CmSemanticCanonicalReader *reader,
+    uint32_t *out)
+{
+    unsigned char bytes[4];
+
+    if (out == NULL
+        || !cm_semantic_canonical_read(reader, bytes, sizeof(bytes))) {
+        return 0;
+    }
+    *out = (uint32_t)bytes[0]
+        | ((uint32_t)bytes[1] << 8u)
+        | ((uint32_t)bytes[2] << 16u)
+        | ((uint32_t)bytes[3] << 24u);
+    return 1;
+}
+
+static int cm_semantic_canonical_u64(CmSemanticCanonicalReader *reader,
+    uint64_t *out)
+{
+    unsigned char bytes[8];
+    unsigned int index;
+    uint64_t value;
+
+    if (out == NULL
+        || !cm_semantic_canonical_read(reader, bytes, sizeof(bytes))) {
+        return 0;
+    }
+    value = UINT64_C(0);
+    for (index = 0u; index < 8u; ++index) {
+        value |= (uint64_t)bytes[index] << (index * 8u);
+    }
+    *out = value;
+    return 1;
+}
+
+static int cm_semantic_canonical_def(CmSemanticCanonicalReader *reader,
+    CmHirDefId *out)
+{
+    return out != NULL
+        && cm_semantic_canonical_u32(reader, &out->crate_id)
+        && cm_semantic_canonical_u32(reader, &out->index);
+}
+
+static const CmHirGenericParam *cm_semantic_canonical_parameter(
+    const CmHirContext *hir, const CmHirItem *owner, uint32_t index)
+{
+    const CmHirGenericParam *parameter;
+
+    if (hir == NULL || owner == NULL
+        || index >= owner->generic_parameter_count
+        || (owner->generic_parameter_count != 0u
+            && index > UINT32_MAX - owner->generic_parameter_start)) {
+        return NULL;
+    }
+    parameter = cm_hir_get_generic_param(hir,
+        owner->generic_parameter_start + index);
+    return parameter != NULL && parameter->index == index
+            && cm_hir_def_id_equal(parameter->owner, owner->definition)
+        ? parameter : NULL;
+}
+
+static int cm_semantic_canonical_region(CmSemanticCanonicalReader *reader,
+    CmHirRegion *out)
+{
+    unsigned int kind;
+
+    if (out == NULL || !cm_semantic_canonical_u8(reader, &kind)
+        || (kind != (unsigned int)CM_HIR_REGION_STATIC
+            && kind != (unsigned int)CM_HIR_REGION_ERASED)) {
+        return 0;
+    }
+    memset(out, 0, sizeof(*out));
+    out->kind = (CmHirRegionKind)kind;
+    return 1;
+}
+
+static int cm_semantic_canonical_type(CmSemanticCanonicalReader *reader,
+    size_t depth, CmTypeckTypeId *out_type);
+
+static int cm_semantic_canonical_const(CmSemanticCanonicalReader *reader,
+    size_t depth, CmTypeckConst *out)
+{
+    unsigned int kind;
+
+    if (reader == NULL || out == NULL
+        || depth >= CM_SEMANTIC_BODY_TYPE_DEPTH
+        || !cm_semantic_canonical_u8(reader, &kind)
+        || kind != (unsigned int)CM_HIR_CONST_VALUE) {
+        return 0;
+    }
+    memset(out, 0, sizeof(*out));
+    out->kind = CM_HIR_CONST_VALUE;
+    return cm_semantic_canonical_type(reader, depth + 1u, &out->type)
+        && cm_semantic_canonical_u64(reader, &out->data.value.low_bits)
+        && cm_semantic_canonical_u64(reader, &out->data.value.high_bits);
+}
+
+static int cm_semantic_canonical_argument(
+    CmSemanticCanonicalReader *reader, CmHirGenericArgKind kind,
+    size_t depth, CmTypeckGenericArg *out)
+{
+    if (reader == NULL || out == NULL
+        || depth >= CM_SEMANTIC_BODY_TYPE_DEPTH
+        || (unsigned int)kind > (unsigned int)CM_HIR_GENERIC_ARG_CONST) {
+        return 0;
+    }
+    memset(out, 0, sizeof(*out));
+    out->kind = kind;
+    switch (kind) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_semantic_canonical_region(reader, &out->data.lifetime);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return cm_semantic_canonical_type(reader, depth + 1u,
+            &out->data.type);
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_semantic_canonical_const(reader, depth + 1u,
+            &out->data.constant);
+    }
+    return 0;
+}
+
+static int cm_semantic_canonical_type(CmSemanticCanonicalReader *reader,
+    size_t depth, CmTypeckTypeId *out_type)
+{
+    const CmHirItem *adt;
+    CmTypeckType type;
+    CmTypeckTypeId *children;
+    CmTypeckGenericArg *arguments;
+    CmHirDefId definition;
+    CmInternId abi;
+    uint32_t count;
+    uint32_t parameter_count;
+    uint32_t index;
+    unsigned int tag;
+    unsigned int scalar;
+    size_t bytes;
+    int ok;
+
+    if (reader == NULL || out_type == NULL
+        || depth >= CM_SEMANTIC_BODY_TYPE_DEPTH
+        || !cm_semantic_canonical_u8(reader, &tag)) {
+        return 0;
+    }
+    memset(&type, 0, sizeof(type));
+    type.span = reader->span;
+    children = NULL;
+    arguments = NULL;
+    ok = 0;
+    switch ((CmHirTypeKind)tag) {
+    case CM_HIR_TYPE_NEVER_KIND:
+        type.kind = CM_TYPECK_TYPE_NEVER;
+        break;
+    case CM_HIR_TYPE_UNIT_KIND:
+        type.kind = CM_TYPECK_TYPE_UNIT;
+        break;
+    case CM_HIR_TYPE_BOOL_KIND:
+        type.kind = CM_TYPECK_TYPE_BOOL;
+        break;
+    case CM_HIR_TYPE_CHAR_KIND:
+        type.kind = CM_TYPECK_TYPE_CHAR;
+        break;
+    case CM_HIR_TYPE_STR_KIND:
+        type.kind = CM_TYPECK_TYPE_STR;
+        break;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        if (!cm_semantic_canonical_u8(reader, &scalar)
+            || scalar > (unsigned int)CM_HIR_INT_USIZE) goto done;
+        type.kind = CM_TYPECK_TYPE_INTEGER;
+        type.data.integer_type = (CmHirIntType)scalar;
+        break;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        if (!cm_semantic_canonical_u8(reader, &scalar)
+            || scalar > (unsigned int)CM_HIR_FLOAT_F128) goto done;
+        type.kind = CM_TYPECK_TYPE_FLOAT;
+        type.data.float_type = (CmHirFloatType)scalar;
+        break;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        if (!cm_semantic_canonical_region(reader,
+                &type.data.reference_type.region)
+            || !cm_semantic_canonical_u8(reader, &scalar)
+            || scalar > (unsigned int)CM_HIR_MUTABLE
+            || !cm_semantic_canonical_type(reader, depth + 1u,
+                &type.data.reference_type.pointee)) goto done;
+        type.kind = CM_TYPECK_TYPE_REFERENCE;
+        type.data.reference_type.mutability = (CmHirMutability)scalar;
+        break;
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        if (!cm_semantic_canonical_u8(reader, &scalar)
+            || scalar > (unsigned int)CM_HIR_MUTABLE
+            || !cm_semantic_canonical_type(reader, depth + 1u,
+                &type.data.raw_pointer_type.pointee)) goto done;
+        type.kind = CM_TYPECK_TYPE_RAW_POINTER;
+        type.data.raw_pointer_type.mutability = (CmHirMutability)scalar;
+        break;
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (!cm_semantic_canonical_u32(reader, &count)
+            || (count != 0u && (!cm_size_mul((size_t)count,
+                    sizeof(*children), &bytes)
+                || count > reader->size - reader->position))) goto done;
+        children = count == 0u ? NULL
+            : (CmTypeckTypeId *)cm_alloc_zeroed(1u, bytes);
+        for (index = 0u; index < count; ++index) {
+            if (!cm_semantic_canonical_type(reader, depth + 1u,
+                    &children[index])) goto done;
+        }
+        type.kind = CM_TYPECK_TYPE_TUPLE;
+        type.data.tuple_type.elements = children;
+        type.data.tuple_type.element_count = count;
+        break;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        if (!cm_semantic_canonical_type(reader, depth + 1u,
+                &type.data.array_type.element)
+            || !cm_semantic_canonical_const(reader, depth + 1u,
+                &type.data.array_type.length)) goto done;
+        type.kind = CM_TYPECK_TYPE_ARRAY;
+        break;
+    case CM_HIR_TYPE_SLICE_KIND:
+        if (!cm_semantic_canonical_type(reader, depth + 1u,
+                &type.data.slice_type.element)) goto done;
+        type.kind = CM_TYPECK_TYPE_SLICE;
+        break;
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (!cm_semantic_canonical_u32(reader, &count)
+            || (count != 0u && (!cm_size_mul((size_t)count,
+                    sizeof(*children), &bytes)
+                || count > reader->size - reader->position))) goto done;
+        parameter_count = count;
+        children = parameter_count == 0u ? NULL
+            : (CmTypeckTypeId *)cm_alloc_zeroed(1u, bytes);
+        for (index = 0u; index < parameter_count; ++index) {
+            if (!cm_semantic_canonical_type(reader, depth + 1u,
+                    &children[index])) goto done;
+        }
+        if (!cm_semantic_canonical_type(reader, depth + 1u,
+                &type.data.fn_pointer_type.return_type)
+            || !cm_semantic_canonical_u32(reader, &count)
+            || reader->position > reader->size
+            || count > reader->size - reader->position) goto done;
+        abi = cm_interner_lookup(&reader->hir->strings,
+            reader->bytes + reader->position, count);
+        if (abi == CM_INTERN_ID_NONE) goto done;
+        reader->position += count;
+        if (!cm_semantic_canonical_u8(reader, &scalar)
+            || scalar > (unsigned int)CM_HIR_UNSAFE) goto done;
+        type.data.fn_pointer_type.safety = (CmHirSafety)scalar;
+        if (!cm_semantic_canonical_u8(reader, &scalar) || scalar > 1u) {
+            goto done;
+        }
+        type.kind = CM_TYPECK_TYPE_FN_POINTER;
+        type.data.fn_pointer_type.parameters = children;
+        type.data.fn_pointer_type.parameter_count = parameter_count;
+        type.data.fn_pointer_type.abi = abi;
+        type.data.fn_pointer_type.is_variadic = scalar != 0u;
+        break;
+    case CM_HIR_TYPE_ADT_KIND:
+        if (!cm_semantic_canonical_def(reader, &definition)) goto done;
+        adt = cm_semantic_body_item(reader->hir, definition);
+        if (adt == NULL || (adt->kind != CM_HIR_ITEM_STRUCT
+                && adt->kind != CM_HIR_ITEM_UNION
+                && adt->kind != CM_HIR_ITEM_ENUM)
+            || !cm_semantic_canonical_u32(reader, &count)
+            || count != adt->generic_parameter_count
+            || (count != 0u && (!cm_size_mul((size_t)count,
+                    sizeof(*arguments), &bytes)
+                || count > reader->size - reader->position))) goto done;
+        arguments = count == 0u ? NULL
+            : (CmTypeckGenericArg *)cm_alloc_zeroed(1u, bytes);
+        for (index = 0u; index < count; ++index) {
+            const CmHirGenericParam *parameter;
+            CmHirGenericArgKind expected;
+
+            parameter = cm_semantic_canonical_parameter(reader->hir, adt,
+                index);
+            if (parameter == NULL
+                || !cm_semantic_canonical_u8(reader, &scalar)) goto done;
+            expected = parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter->kind == CM_HIR_GENERIC_TYPE
+                    ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+            if (scalar != (unsigned int)expected
+                || !cm_semantic_canonical_argument(reader, expected,
+                    depth + 1u, &arguments[index])) goto done;
+        }
+        type.kind = CM_TYPECK_TYPE_ADT;
+        type.data.named_type.definition = definition;
+        type.data.named_type.arguments = arguments;
+        type.data.named_type.argument_count = count;
+        if (!cm_typeck_adt_is_valid(reader->typeck,
+                &type.data.named_type)) goto done;
+        break;
+    case CM_HIR_TYPE_PARAMETER_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_SELF_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_CLOSURE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        goto done;
+    default:
+        goto done;
+    }
+    ok = cm_typeck_add_type(reader->typeck, &type, out_type)
+        == CM_TYPECK_OK;
+done:
+    cm_free(children);
+    cm_free(arguments);
+    return ok;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_import_canonical_arguments(
+    const CmHirContext *hir, CmTypeckContext *typeck, const CmHirItem *owner,
+    const CmHirCanonicalArgumentPart *source, uint32_t count, CmSpan span,
+    CmTypeckGenericArg **out_arguments)
+{
+    CmTypeckGenericArg *arguments;
+    uint32_t index;
+
+    if (hir == NULL || typeck == NULL || owner == NULL
+        || out_arguments == NULL
+        || owner->generic_parameter_count != count
+        || (count == 0u) != (source == NULL)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    *out_arguments = NULL;
+    if (cm_semantic_body_allocate_arguments(count, &arguments)
+            != CM_SEMANTIC_BODY_OK) {
+        return CM_SEMANTIC_BODY_OVERFLOW;
+    }
+    for (index = 0u; index < count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected;
+        CmSemanticCanonicalReader reader;
+
+        parameter = cm_semantic_canonical_parameter(hir, owner, index);
+        expected = parameter == NULL ? (CmHirGenericArgKind)-1
+            : parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter->kind == CM_HIR_GENERIC_TYPE
+                    ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || source[index].kind != expected
+            || source[index].bytes == NULL || source[index].size == 0u) {
+            cm_free(arguments);
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+        memset(&reader, 0, sizeof(reader));
+        reader.hir = hir;
+        reader.typeck = typeck;
+        reader.bytes = source[index].bytes;
+        reader.size = source[index].size;
+        reader.span = span;
+        if (!cm_semantic_canonical_argument(&reader, expected, 0u,
+                &arguments[index])
+            || reader.position != reader.size) {
+            cm_free(arguments);
+            return CM_SEMANTIC_BODY_INVALID;
+        }
+    }
+    *out_arguments = arguments;
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_import_canonical_type(
+    const CmHirContext *hir, CmTypeckContext *typeck,
+    const unsigned char *bytes, size_t size, CmSpan span,
+    CmTypeckTypeId *out_type)
+{
+    CmSemanticCanonicalReader reader;
+
+    if (hir == NULL || typeck == NULL || bytes == NULL || size == 0u
+        || out_type == NULL) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    memset(&reader, 0, sizeof(reader));
+    reader.hir = hir;
+    reader.typeck = typeck;
+    reader.bytes = bytes;
+    reader.size = size;
+    reader.span = span;
+    return cm_semantic_canonical_type(&reader, 1u, out_type)
+            && reader.position == reader.size
+        ? CM_SEMANTIC_BODY_OK : CM_SEMANTIC_BODY_INVALID;
 }
 
 static CmSemanticBodyStatus cm_semantic_body_import_generic_arguments(
@@ -556,6 +982,48 @@ static int cm_semantic_body_typeck_arguments_match_hir(
                     &expected[index].data.lifetime,
                     &actual[index].data.lifetime)) return 0;
         } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_semantic_body_typeck_arguments_match(
+    CmSemanticBodyConstraints *constraints,
+    const CmTypeckGenericArg *expected,
+    const CmTypeckGenericArg *actual, uint32_t count)
+{
+    uint32_t index;
+
+    if (constraints == NULL || (count == 0u) != (expected == NULL)
+        || (count == 0u) != (actual == NULL)) return 0;
+    for (index = 0u; index < count; ++index) {
+        if (expected[index].kind != actual[index].kind) return 0;
+        switch (actual[index].kind) {
+        case CM_HIR_GENERIC_ARG_TYPE:
+            if (cm_typeck_unify(constraints->typeck,
+                    expected[index].data.type, actual[index].data.type)
+                    != CM_TYPECK_OK) return 0;
+            break;
+        case CM_HIR_GENERIC_ARG_LIFETIME:
+            if (!cm_semantic_body_region_equal(
+                    &expected[index].data.lifetime,
+                    &actual[index].data.lifetime)) return 0;
+            break;
+        case CM_HIR_GENERIC_ARG_CONST:
+            if (expected[index].data.constant.kind != CM_HIR_CONST_VALUE
+                || actual[index].data.constant.kind != CM_HIR_CONST_VALUE
+                || expected[index].data.constant.data.value.low_bits
+                    != actual[index].data.constant.data.value.low_bits
+                || expected[index].data.constant.data.value.high_bits
+                    != actual[index].data.constant.data.value.high_bits
+                || cm_typeck_unify(constraints->typeck,
+                    expected[index].data.constant.type,
+                    actual[index].data.constant.type) != CM_TYPECK_OK) {
+                return 0;
+            }
+            break;
+        default:
             return 0;
         }
     }
@@ -2777,7 +3245,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticSession *session, CmHirBodyId body_id,
     const CmHirTypeId *owner_type_substitutions,
     uint32_t owner_type_substitution_count,
-    const CmHirInstanceSpec *instance_spec, int definition_mode,
+    const CmHirInstanceSpec *instance_spec,
+    const CmHirCanonicalInstanceParts *instance_parts,
+    int definition_mode,
     const CmSemanticBodyEvidenceWriteback *writeback)
 {
     CmSemanticBodyResult result;
@@ -2791,6 +3261,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmTypeckSnapshot snapshot;
     CmTypeckGenericArg *owner_arguments;
     CmTypeckGenericArg *enclosing_arguments;
+    CmTypeckGenericArg *implemented_arguments;
     CmTypeckGenericArg *callee_arguments;
     CmTypeckInstantiation owner_instantiation;
     CmTypeckInstantiation enclosing_instantiation;
@@ -2854,15 +3325,18 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                     cm_semantic_session_enclosing_owner(session)))
         || (owner_type_substitution_count == 0u)
             != (owner_type_substitutions == NULL)
-        || (definition_mode && instance_spec != NULL)
+        || (instance_spec != NULL && instance_parts != NULL)
+        || (definition_mode
+            && (instance_spec != NULL || instance_parts != NULL))
         || (!definition_mode && instance_spec == NULL
+            && instance_parts == NULL
             && owner_kind
                 == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD)
         || (definition_mode
             ? (owner_type_substitution_count != 0u
                 || !cm_semantic_type_only_owner(hir, owner_item,
                     owner_item->generic_parameter_count))
-            : instance_spec == NULL
+            : instance_spec == NULL && instance_parts == NULL
                 ? !cm_semantic_type_only_owner(hir, owner_item,
                     owner_type_substitution_count)
                 : owner_type_substitution_count != 0u)) {
@@ -2913,6 +3387,56 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 != (instance_spec->implemented_trait_arguments == NULL)))) {
         return result;
     }
+    if (instance_parts != NULL
+        && (instance_parts->selected_callable.crate_id
+                != cm_semantic_session_local_crate(session)
+            || !cm_hir_def_id_equal(instance_parts->selected_callable, owner)
+            || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+                ? !cm_hir_def_id_is_none(
+                        instance_parts->declared_trait_callable)
+                    || !cm_hir_def_id_is_none(instance_parts->enclosing_impl)
+                    || !cm_hir_def_id_is_none(
+                        instance_parts->implemented_trait)
+                    || !cm_hir_def_id_is_none(instance_parts->self_owner)
+                    || instance_parts->self_type != NULL
+                    || instance_parts->self_type_size != 0u
+                    || instance_parts->item_argument_count
+                        != owner_item->generic_parameter_count
+                    || (instance_parts->item_argument_count == 0u)
+                        != (instance_parts->item_arguments == NULL)
+                    || instance_parts->method_argument_count != 0u
+                    || instance_parts->method_arguments != NULL
+                    || instance_parts->enclosing_impl_argument_count != 0u
+                    || instance_parts->enclosing_impl_arguments != NULL
+                    || instance_parts->implemented_trait_argument_count != 0u
+                    || instance_parts->implemented_trait_arguments != NULL
+                : !cm_hir_def_id_equal(instance_parts->enclosing_impl,
+                    enclosing_item->definition)
+            || !cm_hir_def_id_equal(
+                instance_parts->declared_trait_callable,
+                owner_item->data.function_item.trait_item_definition)
+            || !cm_hir_def_id_equal(instance_parts->implemented_trait,
+                enclosing_item->data.impl_item.trait_type.definition)
+            || !cm_hir_def_id_equal(instance_parts->self_owner,
+                enclosing_item->definition)
+            || instance_parts->self_type == NULL
+            || instance_parts->self_type_size == 0u
+            || instance_parts->item_argument_count != 0u
+            || instance_parts->item_arguments != NULL
+            || instance_parts->method_argument_count
+                != owner_item->generic_parameter_count
+            || (instance_parts->method_argument_count == 0u)
+                != (instance_parts->method_arguments == NULL)
+            || instance_parts->enclosing_impl_argument_count
+                != enclosing_item->generic_parameter_count
+            || (instance_parts->enclosing_impl_argument_count == 0u)
+                != (instance_parts->enclosing_impl_arguments == NULL)
+            || instance_parts->implemented_trait_argument_count
+                != enclosing_item->data.impl_item.trait_type.argument_count
+            || (instance_parts->implemented_trait_argument_count == 0u)
+                != (instance_parts->implemented_trait_arguments == NULL)))) {
+        return result;
+    }
     typeck = cm_semantic_session_typeck(session);
     if (typeck == NULL) {
         result.status = CM_SEMANTIC_BODY_STALE;
@@ -2920,6 +3444,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
     owner_arguments = NULL;
     enclosing_arguments = NULL;
+    implemented_arguments = NULL;
     callee_arguments = NULL;
     expression_terms = NULL;
     checked_calls = NULL;
@@ -3043,13 +3568,17 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 &snapshot, call_expressions);
         }
         if (!definition_mode) {
-            result.status = cm_semantic_body_import_generic_arguments(hir,
-                typeck, &result.typeck_status, enclosing_item,
-                instance_spec == NULL ? NULL
-                    : instance_spec->enclosing_impl_arguments,
-                instance_spec == NULL ? 0u
-                    : instance_spec->enclosing_impl_argument_count,
-                &enclosing_arguments);
+            result.status = instance_parts == NULL
+                ? cm_semantic_body_import_generic_arguments(hir, typeck,
+                    &result.typeck_status, enclosing_item,
+                    instance_spec->enclosing_impl_arguments,
+                    instance_spec->enclosing_impl_argument_count,
+                    &enclosing_arguments)
+                : cm_semantic_body_import_canonical_arguments(hir, typeck,
+                    enclosing_item,
+                    instance_parts->enclosing_impl_arguments,
+                    instance_parts->enclosing_impl_argument_count,
+                    body->span, &enclosing_arguments);
             if (result.status != CM_SEMANTIC_BODY_OK) {
                 return cm_semantic_body_fail_snapshot(result, typeck,
                     &snapshot, call_expressions);
@@ -3151,6 +3680,53 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                     &snapshot, call_expressions);
             }
         }
+        if (!definition_mode && instance_parts != NULL) {
+            CmTypeckTypeId requested_self_type;
+            CmTypeckNamedType implemented_trait;
+
+            typeck_status = CM_TYPECK_OK;
+            result.status = cm_semantic_body_import_canonical_type(hir,
+                typeck, instance_parts->self_type,
+                instance_parts->self_type_size, body->span,
+                &requested_self_type);
+            if (result.status == CM_SEMANTIC_BODY_OK) {
+                typeck_status = cm_typeck_unify(typeck,
+                    owner_instantiation.self_type, requested_self_type);
+                result.status = cm_semantic_typeck_status(typeck_status);
+            }
+            if (result.status != CM_SEMANTIC_BODY_OK) {
+                result.typeck_status = typeck_status;
+                return cm_semantic_body_fail_snapshot(result, typeck,
+                    &snapshot, call_expressions);
+            }
+            typeck_status = CM_TYPECK_OK;
+            result.status = cm_semantic_body_import_canonical_arguments(hir,
+                typeck, cm_semantic_body_item(hir,
+                    instance_parts->implemented_trait),
+                instance_parts->implemented_trait_arguments,
+                instance_parts->implemented_trait_argument_count,
+                body->span, &implemented_arguments);
+            memset(&implemented_trait, 0, sizeof(implemented_trait));
+            if (result.status == CM_SEMANTIC_BODY_OK) {
+                typeck_status = cm_typeck_instantiate_hir_named_scoped(
+                    typeck, &enclosing_item->data.impl_item.trait_type,
+                    &enclosing_scoped, &implemented_trait);
+                result.status = cm_semantic_typeck_status(typeck_status);
+            }
+            if (result.status != CM_SEMANTIC_BODY_OK
+                || implemented_trait.argument_count
+                    != instance_parts->implemented_trait_argument_count
+                || !cm_semantic_body_typeck_arguments_match(&constraints,
+                    implemented_trait.arguments, implemented_arguments,
+                    implemented_trait.argument_count)) {
+                if (result.status == CM_SEMANTIC_BODY_OK) {
+                    result.status = CM_SEMANTIC_BODY_INVALID;
+                }
+                result.typeck_status = typeck_status;
+                return cm_semantic_body_fail_snapshot(result, typeck,
+                    &snapshot, call_expressions);
+            }
+        }
         owner_instantiation.self_owner = enclosing_item->definition;
         enclosing_instantiation.parameter_owner =
             enclosing_item->definition;
@@ -3160,18 +3736,28 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         enclosing_instantiation.self_owner = enclosing_item->definition;
         enclosing_instantiation.self_type = owner_instantiation.self_type;
     }
-    result.status = instance_spec == NULL
+    result.status = instance_spec == NULL && instance_parts == NULL
         ? cm_semantic_body_allocate_arguments(
             owner_item->generic_parameter_count, &owner_arguments)
-        : cm_semantic_body_import_generic_arguments(hir, typeck,
-            &result.typeck_status, owner_item,
-            owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
-                ? instance_spec->item_arguments
-                : instance_spec->method_arguments,
-            owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
-                ? instance_spec->item_argument_count
-                : instance_spec->method_argument_count,
-            &owner_arguments);
+        : instance_parts == NULL
+            ? cm_semantic_body_import_generic_arguments(hir, typeck,
+                &result.typeck_status, owner_item,
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+                    ? instance_spec->item_arguments
+                    : instance_spec->method_arguments,
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+                    ? instance_spec->item_argument_count
+                    : instance_spec->method_argument_count,
+                &owner_arguments)
+            : cm_semantic_body_import_canonical_arguments(hir, typeck,
+                owner_item,
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+                    ? instance_parts->item_arguments
+                    : instance_parts->method_arguments,
+                owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
+                    ? instance_parts->item_argument_count
+                    : instance_parts->method_argument_count,
+                body->span, &owner_arguments);
     if (result.status != CM_SEMANTIC_BODY_OK) {
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
@@ -3184,16 +3770,22 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
 
             parameter = cm_hir_get_generic_param(hir,
                 owner_item->generic_parameter_start + owner_argument_index);
-            if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+            if (parameter == NULL
+                || (instance_parts == NULL
+                    && parameter->kind != CM_HIR_GENERIC_TYPE)
                 || parameter->index != owner_argument_index
                 || !cm_hir_def_id_equal(parameter->owner, owner)) {
                 result.status = CM_SEMANTIC_BODY_INVALID;
                 return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
                     call_expressions);
             }
-            owner_arguments[owner_argument_index].kind =
-                CM_HIR_GENERIC_ARG_TYPE;
-            if (instance_spec != NULL) {
+            if (instance_parts != NULL) {
+                typeck_status = CM_TYPECK_OK;
+            } else {
+                owner_arguments[owner_argument_index].kind =
+                    CM_HIR_GENERIC_ARG_TYPE;
+            }
+            if (instance_spec != NULL || instance_parts != NULL) {
                 typeck_status = CM_TYPECK_OK;
             } else if (!definition_mode) {
                 CmSemanticTypeScan scan;
@@ -3737,6 +4329,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         cm_free(call_expressions);
         cm_free(owner_arguments);
         cm_free(enclosing_arguments);
+        cm_free(implemented_arguments);
         cm_free(callee_arguments);
         cm_free(expression_terms);
         for (call_index = 0u; call_index < checked_facts.call_count;
@@ -3759,6 +4352,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     cm_free(call_expressions);
     cm_free(owner_arguments);
     cm_free(enclosing_arguments);
+    cm_free(implemented_arguments);
     cm_free(callee_arguments);
     cm_free(expression_terms);
     for (call_index = 0u; call_index < checked_facts.call_count;
@@ -3787,15 +4381,15 @@ CmSemanticBodyResult cm_semantic_body_check_calls(
     uint32_t owner_type_substitution_count)
 {
     return cm_semantic_body_check_calls_mode(session, body,
-        owner_type_substitutions, owner_type_substitution_count, NULL, 0,
-        NULL);
+        owner_type_substitutions, owner_type_substitution_count, NULL, NULL,
+        0, NULL);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_definition(
     CmSemanticSession *session, CmHirBodyId body)
 {
     return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, NULL,
-        1, NULL);
+        NULL, 1, NULL);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
@@ -3812,7 +4406,7 @@ CmSemanticBodyResult cm_semantic_body_check_definition_with_writeback(
         evidence.context = writeback_context;
         evidence.checked_body = writeback;
         return cm_semantic_body_check_calls_mode(session, body, NULL, 0u,
-            NULL, 1, &evidence);
+            NULL, NULL, 1, &evidence);
     }
 }
 
@@ -3833,7 +4427,7 @@ CmSemanticBodyResult cm_semantic_body_check_instance_with_writeback(
         evidence.checked_body = writeback;
         return cm_semantic_body_check_calls_mode(session, body,
             owner_type_substitutions, owner_type_substitution_count, NULL,
-            0, &evidence);
+            NULL, 0, &evidence);
     }
 }
 
@@ -3845,7 +4439,7 @@ CmSemanticBodyResult cm_semantic_body_check_definition_with_evidence(
         return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
     }
     return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, NULL,
-        1, writeback);
+        NULL, 1, writeback);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_instance_with_evidence(
@@ -3858,8 +4452,8 @@ CmSemanticBodyResult cm_semantic_body_check_instance_with_evidence(
         return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
     }
     return cm_semantic_body_check_calls_mode(session, body,
-        owner_type_substitutions, owner_type_substitution_count, NULL, 0,
-        writeback);
+        owner_type_substitutions, owner_type_substitution_count, NULL, NULL,
+        0, writeback);
 }
 
 CmSemanticBodyResult cm_semantic_body_check_instance_spec_with_evidence(
@@ -3872,7 +4466,20 @@ CmSemanticBodyResult cm_semantic_body_check_instance_spec_with_evidence(
         return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
     }
     return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, spec,
-        0, writeback);
+        NULL, 0, writeback);
+}
+
+CmSemanticBodyResult cm_semantic_body_check_instance_parts_with_evidence(
+    CmSemanticSession *session, CmHirBodyId body,
+    const CmHirCanonicalInstanceParts *parts,
+    const CmSemanticBodyEvidenceWriteback *writeback)
+{
+    if (parts == NULL || writeback == NULL
+        || writeback->checked_body == NULL) {
+        return cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body);
+    }
+    return cm_semantic_body_check_calls_mode(session, body, NULL, 0u, NULL,
+        parts, 0, writeback);
 }
 
 const char *cm_semantic_body_status_name(CmSemanticBodyStatus status)

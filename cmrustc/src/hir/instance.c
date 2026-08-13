@@ -300,7 +300,9 @@ static CmHirInstanceStatus cm_instance_encode_named(
     const CmInstanceSubstitution *substitution, size_t depth)
 {
     const CmHirItem *item;
+    const CmHirGenericParam *parameter;
     CmHirInstanceStatus status;
+    uint32_t index;
 
     if (named == NULL || depth >= CM_INSTANCE_TYPE_DEPTH) {
         return depth >= CM_INSTANCE_TYPE_DEPTH
@@ -308,6 +310,27 @@ static CmHirInstanceStatus cm_instance_encode_named(
     }
     item = cm_instance_item(hir, named->definition);
     if (item == NULL) return CM_HIR_INSTANCE_INVALID_ID;
+    if (item->generic_parameter_count != named->argument_count
+        || (named->argument_count == 0u) != (named->arguments == NULL)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    for (index = 0u; index < named->argument_count; ++index) {
+        CmHirGenericArgKind expected;
+
+        parameter = cm_hir_get_generic_param(hir,
+            item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, item->definition)) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+        expected = parameter->kind == CM_HIR_GENERIC_LIFETIME
+            ? CM_HIR_GENERIC_ARG_LIFETIME
+            : parameter->kind == CM_HIR_GENERIC_TYPE
+                ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (named->arguments[index].kind != expected) {
+            return CM_HIR_INSTANCE_INVALID_RELATION;
+        }
+    }
     status = cm_instance_def(buffer, named->definition);
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_encode_arguments(buffer, hir,
