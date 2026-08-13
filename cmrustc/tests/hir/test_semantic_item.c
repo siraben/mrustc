@@ -254,6 +254,74 @@ static CmHirItem *mutable_item(TestFixture *fixture, CmHirDefId definition)
         (size_t)record->entity.item_id - 1u);
 }
 
+static CmHirBody *mutable_body(TestFixture *fixture, CmHirBodyId body_id)
+{
+    assert(body_id != CM_HIR_BODY_NONE);
+    return (CmHirBody *)cm_vec_at(&fixture->hir.bodies,
+        (size_t)body_id - 1u);
+}
+
+static CmHirGenericParam *mutable_generic_parameter(
+    TestFixture *fixture, CmHirGenericParamId parameter_id)
+{
+    assert(parameter_id != CM_HIR_GENERIC_PARAM_NONE);
+    return (CmHirGenericParam *)cm_vec_at(&fixture->hir.generic_parameters,
+        (size_t)parameter_id - 1u);
+}
+
+static CmHirGenericParamId make_impl_type_generic(TestFixture *fixture,
+    CmHirTypeId *out_parameter_type, CmHirTypeId *out_trait_self_type)
+{
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirType type;
+    CmHirItem *impl_item;
+    CmHirItem *trait_method;
+    CmHirItem *impl_method;
+    CmHirBody *body;
+
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = fixture->impl_definition;
+    parameter.index = 0u;
+    parameter.name = cm_hir_intern(&fixture->hir, "T");
+    parameter.span = test_span(82u, 83u);
+    assert(cm_hir_add_generic_param(&fixture->hir, &parameter,
+        &parameter_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = parameter.span;
+    type.data.parameter_type.parameter = parameter_id;
+    assert(cm_hir_add_type(&fixture->hir, &type, out_parameter_type)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_SELF_KIND;
+    type.span = test_span(38u, 39u);
+    type.data.self_type.owner = fixture->trait_definition;
+    assert(cm_hir_add_type(&fixture->hir, &type, out_trait_self_type)
+        == CM_HIR_OK);
+
+    impl_item = mutable_item(fixture, fixture->impl_definition);
+    impl_item->generic_parameter_start = parameter_id;
+    impl_item->generic_parameter_count = 1u;
+    impl_item->data.impl_item.self_type = *out_parameter_type;
+    trait_method = mutable_item(fixture, fixture->trait_method);
+    trait_method->data.function_item.signature.parameters[0].type =
+        *out_trait_self_type;
+    trait_method->data.function_item.signature.return_type =
+        *out_trait_self_type;
+    impl_method = mutable_item(fixture, fixture->impl_method);
+    impl_method->data.function_item.signature.parameters[0].type =
+        *out_parameter_type;
+    impl_method->data.function_item.signature.return_type =
+        *out_parameter_type;
+    body = mutable_body(fixture, impl_method->data.function_item.body);
+    assert(body != NULL && body->local_count == 1u);
+    body->expected_type = *out_parameter_type;
+    body->locals[0].type = *out_parameter_type;
+    return parameter_id;
+}
+
 static void give_trait_method_default_body(TestFixture *fixture)
 {
     CmHirBody body;
@@ -547,6 +615,134 @@ static void test_trait_argument_and_self_instantiation(void)
     fixture_destroy(&fixture);
 }
 
+static void test_type_generic_impl_method_conformance(void)
+{
+    TestFixture fixture;
+    CmHirGenericParamId impl_parameter;
+    CmHirTypeId parameter_type;
+    CmHirTypeId trait_self_type;
+    CmHirItem *impl_method;
+    CmHirItem *trait_item;
+    CmHirGenericParam *parameter;
+    CmHirGenericParam method_parameter;
+    CmHirGenericParamId method_parameter_id;
+    CmHirGenericParam trait_parameter;
+    CmHirGenericParamId trait_parameter_id;
+    CmHirGenericArg trait_argument;
+    CmHirCrateFinalization finalization;
+    CmProjectionNormalizeLimits limits;
+    CmSemanticItemResult result;
+
+    fixture_init(&fixture, 1, 0);
+    impl_parameter = make_impl_type_generic(&fixture, &parameter_type,
+        &trait_self_type);
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
+
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    limits.max_nodes = 4096u;
+    limits.max_projection_steps = 256u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+
+    impl_method = mutable_item(&fixture, fixture.impl_method);
+    impl_method->data.function_item.signature.parameters[0].type =
+        fixture.u32_type;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_PARAMETER_TYPE_MISMATCH
+        && result.parameter_index == 0u);
+    impl_method->data.function_item.signature.parameters[0].type =
+        parameter_type;
+    impl_method->data.function_item.signature.return_type = fixture.u32_type;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_RETURN_TYPE_MISMATCH);
+    impl_method->data.function_item.signature.return_type = parameter_type;
+    cm_hir_crate_finalization_destroy(&finalization);
+
+    parameter = mutable_generic_parameter(&fixture, impl_parameter);
+    parameter->kind = CM_HIR_GENERIC_LIFETIME;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    parameter->kind = CM_HIR_GENERIC_CONST;
+    parameter->declared_type = fixture.u32_type;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    parameter->kind = CM_HIR_GENERIC_TYPE;
+    parameter->declared_type = CM_HIR_TYPE_NONE;
+    parameter->has_default = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    parameter->has_default = 0;
+    parameter->is_relaxed_sized = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    parameter->is_relaxed_sized = 0;
+
+    memset(&method_parameter, 0, sizeof(method_parameter));
+    method_parameter.kind = CM_HIR_GENERIC_TYPE;
+    method_parameter.owner = fixture.impl_method;
+    method_parameter.index = 0u;
+    method_parameter.name = cm_hir_intern(&fixture.hir, "U");
+    method_parameter.span = test_span(106u, 107u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &method_parameter,
+        &method_parameter_id) == CM_HIR_OK);
+    impl_method->generic_parameter_start = method_parameter_id;
+    impl_method->generic_parameter_count = 1u;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    mutable_generic_parameter(&fixture, method_parameter_id)->has_default = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    mutable_generic_parameter(&fixture, method_parameter_id)->has_default = 0;
+    impl_method->generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+    impl_method->generic_parameter_count = 0u;
+
+    memset(&trait_parameter, 0, sizeof(trait_parameter));
+    trait_parameter.kind = CM_HIR_GENERIC_TYPE;
+    trait_parameter.owner = fixture.trait_definition;
+    trait_parameter.index = 0u;
+    trait_parameter.name = cm_hir_intern(&fixture.hir, "A");
+    trait_parameter.span = test_span(12u, 13u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &trait_parameter,
+        &trait_parameter_id) == CM_HIR_OK);
+    memset(&trait_argument, 0, sizeof(trait_argument));
+    trait_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_argument.data.type = parameter_type;
+    trait_item = mutable_item(&fixture, fixture.trait_definition);
+    trait_item->generic_parameter_start = trait_parameter_id;
+    trait_item->generic_parameter_count = 1u;
+    mutable_item(&fixture, fixture.impl_definition)
+        ->data.impl_item.trait_type.arguments = &trait_argument;
+    mutable_item(&fixture, fixture.impl_definition)
+        ->data.impl_item.trait_type.argument_count = 1u;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture, 1, 1);
+    (void)make_impl_type_generic(&fixture, &parameter_type,
+        &trait_self_type);
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC
+        && cm_hir_def_id_equal(result.trait_member, fixture.trait_type));
+    fixture_destroy(&fixture);
+}
+
 static void test_foreign_parameter_terms_are_pending(void)
 {
     TestFixture fixture;
@@ -818,6 +1014,7 @@ int main(void)
     test_finalized_projection_signature();
     test_default_method_rules();
     test_trait_argument_and_self_instantiation();
+    test_type_generic_impl_method_conformance();
     test_foreign_parameter_terms_are_pending();
     test_missing_required_members();
     test_association_failures();
