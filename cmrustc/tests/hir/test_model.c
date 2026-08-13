@@ -4547,6 +4547,222 @@ static void test_reference_expression_model(void)
     cm_hir_context_destroy(&context);
 }
 
+static void assert_method_call_expression_rejected(CmHirContext *context,
+    const CmHirExpr *expression)
+{
+    CmHirExprId expression_id;
+    size_t expression_count;
+    size_t arena_bytes;
+
+    expression_count = context->expressions.len;
+    arena_bytes = cm_arena_bytes_used(&context->storage);
+    assert(cm_hir_add_expr(context, expression, &expression_id)
+        != CM_HIR_OK);
+    assert(expression_id == CM_HIR_EXPR_NONE
+        && context->expressions.len == expression_count
+        && cm_arena_bytes_used(&context->storage) == arena_bytes);
+}
+
+static void test_method_call_expression_model(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirDefId trait_definitions[2];
+    CmHirDefId non_trait_definition;
+    CmHirDefId body_definitions[2];
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirType type;
+    CmHirTypeId u32_type;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId body_ids[2];
+    CmHirExpr expression;
+    CmHirExprId receiver;
+    CmHirExprId argument;
+    CmHirExprId reordered_argument;
+    CmHirExprId other_receiver;
+    CmHirExprId method_call_id;
+    CmHirExprId arguments[2];
+    CmHirDefId traits[2];
+    const CmHirExpr *stored;
+    FILE *first_file;
+    FILE *second_file;
+    char *first_dump;
+    char *second_dump;
+    char expected[256];
+    uint32_t index;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "method_call_model"),
+        CM_HIR_EDITION_2021, test_span(0u, 200u), &crate_id,
+        &root_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = test_span(1u, 4u);
+    type.data.integer_type.kind = CM_HIR_INT_U32;
+    assert(cm_hir_add_type(&context, &type, &u32_type) == CM_HIR_OK);
+
+    for (index = 0u; index < 2u; ++index) {
+        assert(cm_hir_reserve_item_definition(&context, crate_id,
+            test_span(5u + index * 10u, 14u + index * 10u),
+            &trait_definitions[index]) == CM_HIR_OK);
+        init_test_item(&item, CM_HIR_ITEM_TRAIT,
+            trait_definitions[index], root_id, cm_hir_def_id_none(),
+            cm_hir_intern(&context, index == 0u ? "Value" : "Imported"),
+            test_span(5u + index * 10u, 14u + index * 10u));
+        item.data.trait_item.safety = CM_HIR_SAFE;
+        assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    }
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(25u, 34u), &non_trait_definition) == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_STRUCT, non_trait_definition,
+        root_id, cm_hir_def_id_none(), cm_hir_intern(&context, "NotTrait"),
+        test_span(25u, 34u));
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
+    memset(&local, 0, sizeof(local));
+    local.name = cm_hir_intern(&context, "value");
+    local.type = u32_type;
+    local.span = test_span(35u, 39u);
+    local.parameter_index = 0u;
+    for (index = 0u; index < 2u; ++index) {
+        assert(cm_hir_reserve_item_definition(&context, crate_id,
+            test_span(35u + index * 80u, 100u + index * 80u),
+            &body_definitions[index]) == CM_HIR_OK);
+        memset(&body, 0, sizeof(body));
+        body.owner = body_definitions[index];
+        body.state = CM_HIR_BODY_UNLOWERED;
+        body.expected_type = u32_type;
+        body.locals = &local;
+        body.local_count = 1u;
+        body.parameter_count = 1u;
+        body.source = 1u;
+        body.source_expression_id = index + 1u;
+        body.span = test_span(35u + index * 80u,
+            100u + index * 80u);
+        assert(cm_hir_add_body(&context, &body, &body_ids[index])
+            == CM_HIR_OK);
+    }
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_ids[0];
+    expression.type = u32_type;
+    expression.span = test_span(40u, 41u);
+    assert(cm_hir_add_expr(&context, &expression, &receiver) == CM_HIR_OK);
+    expression.kind = CM_HIR_EXPR_INTEGER;
+    expression.span = test_span(50u, 51u);
+    expression.data.integer.low_bits = 7u;
+    assert(cm_hir_add_expr(&context, &expression, &argument) == CM_HIR_OK);
+    expression.span = test_span(45u, 46u);
+    expression.data.integer.low_bits = 8u;
+    assert(cm_hir_add_expr(&context, &expression, &reordered_argument)
+        == CM_HIR_OK);
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_ids[1];
+    expression.span = test_span(120u, 121u);
+    expression.data.local.local_index = 0u;
+    assert(cm_hir_add_expr(&context, &expression, &other_receiver)
+        == CM_HIR_OK);
+
+    arguments[0] = argument;
+    traits[0] = trait_definitions[0];
+    traits[1] = trait_definitions[1];
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_METHOD_CALL;
+    expression.owner_body = body_ids[0];
+    expression.type = u32_type;
+    expression.span = test_span(40u, 55u);
+    expression.data.method_call.syntax = CM_HIR_CALLABLE_DOT_METHOD;
+    expression.data.method_call.method_name =
+        cm_hir_intern(&context, "value");
+    expression.data.method_call.receiver = receiver;
+    expression.data.method_call.arguments = arguments;
+    expression.data.method_call.argument_count = 1u;
+    expression.data.method_call.in_scope_traits = traits;
+    expression.data.method_call.in_scope_trait_count = 2u;
+    assert(cm_hir_add_expr(&context, &expression, &method_call_id)
+        == CM_HIR_OK);
+    arguments[0] = other_receiver;
+    traits[0] = non_trait_definition;
+    stored = cm_hir_get_expr(&context, method_call_id);
+    assert(stored != NULL && stored->kind == CM_HIR_EXPR_METHOD_CALL
+        && stored->data.method_call.arguments != arguments
+        && stored->data.method_call.arguments[0] == argument
+        && stored->data.method_call.in_scope_traits != traits
+        && cm_hir_def_id_equal(
+            stored->data.method_call.in_scope_traits[0],
+            trait_definitions[0]));
+
+    expression.data.method_call.method_name = cm_hir_intern(&context, "");
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.method_name =
+        cm_hir_intern(&context, "value");
+    expression.data.method_call.syntax =
+        CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.syntax = CM_HIR_CALLABLE_DOT_METHOD;
+    expression.data.method_call.receiver = CM_HIR_EXPR_NONE;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.receiver = receiver;
+    expression.data.method_call.arguments = NULL;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.arguments = arguments;
+    arguments[0] = argument;
+    expression.data.method_call.in_scope_traits = traits;
+    traits[0] = trait_definitions[0];
+    traits[1] = trait_definitions[0];
+    assert_method_call_expression_rejected(&context, &expression);
+    traits[1] = non_trait_definition;
+    assert_method_call_expression_rejected(&context, &expression);
+    traits[1] = trait_definitions[1];
+    expression.data.method_call.in_scope_traits = NULL;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.in_scope_traits = traits;
+    expression.data.method_call.in_scope_trait_count = 0u;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.in_scope_trait_count = 2u;
+    expression.data.method_call.receiver = other_receiver;
+    expression.span = test_span(120u, 130u);
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.receiver = receiver;
+    expression.span = test_span(40u, 55u);
+    arguments[0] = other_receiver;
+    assert_method_call_expression_rejected(&context, &expression);
+    arguments[0] = argument;
+    arguments[1] = reordered_argument;
+    expression.data.method_call.argument_count = 2u;
+    assert_method_call_expression_rejected(&context, &expression);
+    expression.data.method_call.argument_count = 0u;
+    assert_method_call_expression_rejected(&context, &expression);
+
+    first_file = tmpfile();
+    second_file = tmpfile();
+    assert(first_file != NULL && second_file != NULL
+        && cm_hir_dump(first_file, &context) == 0
+        && cm_hir_dump(second_file, &context) == 0);
+    first_dump = read_dump(first_file);
+    second_dump = read_dump(second_file);
+    assert(strcmp(first_dump, second_dump) == 0);
+    assert(snprintf(expected, sizeof(expected),
+        "expr#%u method-call type=ty#%u syntax=dot-method name=\"value\" "
+        "receiver=expr#%u arguments=[expr#%u] traits=[%u:%u,%u:%u]",
+        (unsigned int)method_call_id, (unsigned int)u32_type,
+        (unsigned int)receiver, (unsigned int)argument,
+        (unsigned int)trait_definitions[0].crate_id,
+        (unsigned int)trait_definitions[0].index,
+        (unsigned int)trait_definitions[1].crate_id,
+        (unsigned int)trait_definitions[1].index) > 0
+        && strstr(first_dump, expected) != NULL);
+    free(second_dump);
+    free(first_dump);
+    assert(fclose(second_file) == 0 && fclose(first_file) == 0);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_aggregate_expression_model(void)
 {
     CmHirContext context;
@@ -6744,6 +6960,7 @@ int main(void)
     test_trait_predicate_lifetime_binder_model();
     test_trait_predicate_equality_model_invariants();
     test_reference_expression_model();
+    test_method_call_expression_model();
     test_aggregate_expression_model();
     test_context_transaction_marks();
     test_adt_generic_default_model();

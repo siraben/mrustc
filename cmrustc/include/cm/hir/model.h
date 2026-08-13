@@ -681,6 +681,8 @@ typedef enum CmHirExprKind {
     CM_HIR_EXPR_LOCAL,
     /* A resolved free-function call with explicit type substitution. */
     CM_HIR_EXPR_CALL,
+    /* An unresolved `receiver.method(arguments)` callable site. */
+    CM_HIR_EXPR_METHOD_CALL,
     /* An unresolved, explicitly qualified trait callable site. */
     CM_HIR_EXPR_QUALIFIED_CALL,
     /* One fully typed, body-owned binary operation. */
@@ -698,7 +700,8 @@ typedef enum CmHirExprKind {
 } CmHirExprKind;
 
 typedef enum CmHirCallableSyntax {
-    CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD = 0
+    CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD = 0,
+    CM_HIR_CALLABLE_DOT_METHOD
 } CmHirCallableSyntax;
 
 #define CM_HIR_CALLABLE_RECEIVER_NONE ((uint32_t)UINT32_MAX)
@@ -765,6 +768,16 @@ typedef struct CmHirExpr {
             /* Non-null only when this node owns the transaction allocation. */
             uint32_t *owned_storage;
         } call;
+        struct {
+            CmHirCallableSyntax syntax;
+            CmInternId method_name;
+            CmHirExprId receiver;
+            CmHirExprId *arguments;
+            uint32_t argument_count;
+            /* Exact, deduplicated trait identities visible at this site. */
+            CmHirDefId *in_scope_traits;
+            uint32_t in_scope_trait_count;
+        } method_call;
         struct {
             CmHirCallableSyntax syntax;
             CmHirTypeId requested_self_type;

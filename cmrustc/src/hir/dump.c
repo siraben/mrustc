@@ -699,6 +699,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         case CM_HIR_EXPR_BLOCK: kind_name = "block"; break;
         case CM_HIR_EXPR_LOCAL: kind_name = "local"; break;
         case CM_HIR_EXPR_CALL: kind_name = "call"; break;
+        case CM_HIR_EXPR_METHOD_CALL: kind_name = "method-call"; break;
         case CM_HIR_EXPR_QUALIFIED_CALL:
             kind_name = "qualified-call";
             break;
@@ -768,6 +769,31 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 if (child_index != 0u) fputc(',', stream);
                 fprintf(stream, "expr#%u", (unsigned int)
                     expression->data.call.arguments[child_index]);
+            }
+            fputc(']', stream);
+            break;
+        case CM_HIR_EXPR_METHOD_CALL:
+            fputs("syntax=dot-method name=", stream);
+            cm_hir_dump_string(stream, context,
+                expression->data.method_call.method_name);
+            fprintf(stream, " receiver=expr#%u arguments=[",
+                (unsigned int)expression->data.method_call.receiver);
+            for (child_index = 0u;
+                 child_index < expression->data.method_call.argument_count;
+                 ++child_index) {
+                if (child_index != 0u) fputc(',', stream);
+                fprintf(stream, "expr#%u", (unsigned int)
+                    expression->data.method_call.arguments[child_index]);
+            }
+            fputs("] traits=[", stream);
+            for (child_index = 0u;
+                 child_index
+                    < expression->data.method_call.in_scope_trait_count;
+                 ++child_index) {
+                if (child_index != 0u) fputc(',', stream);
+                cm_hir_dump_def(stream,
+                    expression->data.method_call.in_scope_traits[
+                        child_index]);
             }
             fputc(']', stream);
             break;

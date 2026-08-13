@@ -4653,6 +4653,17 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
             }
         }
         return 1;
+    case CM_HIR_EXPR_METHOD_CALL:
+        if (!cm_hir_expression_locals_visible(context,
+                expression->data.method_call.receiver, body_id,
+                visible_local_count, depth + 1u)) return 0;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            if (!cm_hir_expression_locals_visible(context,
+                    expression->data.method_call.arguments[index], body_id,
+                    visible_local_count, depth + 1u)) return 0;
+        }
+        return 1;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         for (index = 0u;
              index < expression->data.qualified_call.argument_count;
@@ -5136,6 +5147,69 @@ static int cm_hir_qualified_call_expression_valid(
     return 1;
 }
 
+static int cm_hir_method_call_expression_valid(
+    const CmHirContext *context, const CmHirExpr *expression)
+{
+    const CmHirExpr *receiver;
+    uint32_t index;
+    uint32_t prior_end;
+
+    if (expression->data.method_call.syntax != CM_HIR_CALLABLE_DOT_METHOD
+        || !cm_hir_intern_id_nonempty(context,
+            expression->data.method_call.method_name)
+        || (expression->data.method_call.argument_count == 0u)
+            != (expression->data.method_call.arguments == NULL)
+        || (expression->data.method_call.in_scope_trait_count == 0u)
+            != (expression->data.method_call.in_scope_traits == NULL)) {
+        return 0;
+    }
+    receiver = cm_hir_get_expr(context,
+        expression->data.method_call.receiver);
+    if (receiver == NULL
+        || receiver->owner_body != expression->owner_body
+        || receiver->span.source != expression->span.source
+        || receiver->span.start != expression->span.start
+        || receiver->span.end > expression->span.end) {
+        return 0;
+    }
+    prior_end = receiver->span.end;
+    for (index = 0u; index < expression->data.method_call.argument_count;
+         ++index) {
+        const CmHirExpr *argument;
+
+        argument = cm_hir_get_expr(context,
+            expression->data.method_call.arguments[index]);
+        if (argument == NULL
+            || argument->owner_body != expression->owner_body
+            || argument->span.source != expression->span.source
+            || argument->span.start < prior_end
+            || argument->span.end > expression->span.end) {
+            return 0;
+        }
+        prior_end = argument->span.end;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count;
+         ++index) {
+        const CmHirItem *trait_item;
+        uint32_t prior;
+
+        trait_item = cm_hir_bound_definition_item(context,
+            expression->data.method_call.in_scope_traits[index]);
+        if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
+            return 0;
+        }
+        for (prior = 0u; prior < index; ++prior) {
+            if (cm_hir_def_id_equal(
+                    expression->data.method_call.in_scope_traits[prior],
+                    expression->data.method_call.in_scope_traits[index])) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 static int cm_hir_aggregate_expression_valid(const CmHirContext *context,
     const CmHirExpr *expression, const CmHirType *type,
     const CmHirBody *body)
@@ -5278,6 +5352,14 @@ static void cm_hir_claim_expression_tree(CmHirContext *context,
              ++index) {
             cm_hir_claim_expression_tree(context,
                 expression->data.call.arguments[index], body_id);
+        }
+    } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+        cm_hir_claim_expression_tree(context,
+            expression->data.method_call.receiver, body_id);
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            cm_hir_claim_expression_tree(context,
+                expression->data.method_call.arguments[index], body_id);
         }
     } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
         for (index = 0u;
@@ -5476,6 +5558,22 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
             : (CmHirExprId *)(owned_ids
                 + expression->data.call.type_substitution_count);
         copy.data.call.owned_storage = owned_ids;
+        break;
+    case CM_HIR_EXPR_METHOD_CALL:
+        if (body == NULL
+            || !cm_hir_method_call_expression_valid(context, expression)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        copy.data.method_call.arguments =
+            (CmHirExprId *)cm_hir_copy_array(context,
+                expression->data.method_call.arguments,
+                expression->data.method_call.argument_count,
+                sizeof(CmHirExprId));
+        copy.data.method_call.in_scope_traits =
+            (CmHirDefId *)cm_hir_copy_array(context,
+                expression->data.method_call.in_scope_traits,
+                expression->data.method_call.in_scope_trait_count,
+                sizeof(CmHirDefId));
         break;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if (body == NULL

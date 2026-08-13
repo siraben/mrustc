@@ -478,6 +478,9 @@ typedef struct CmHirBodyQualifiedCallPlan {
 typedef struct CmHirBodyExpressionCounts {
     size_t expression_count;
     size_t call_word_count;
+    size_t method_argument_count;
+    size_t method_trait_count;
+    size_t method_call_count;
     size_t aggregate_field_count;
     int needs_bool_type;
 } CmHirBodyExpressionCounts;
@@ -503,6 +506,12 @@ typedef struct CmHirBodyBuildState {
     uint32_t *call_storage;
     size_t call_storage_words;
     size_t call_storage_cursor;
+    CmHirExprId *method_argument_storage;
+    size_t method_argument_storage_count;
+    size_t method_argument_storage_cursor;
+    CmHirDefId *method_trait_storage;
+    size_t method_trait_storage_count;
+    size_t method_trait_storage_cursor;
     CmHirAggregateFieldValue *aggregate_storage;
     size_t aggregate_storage_count;
     size_t aggregate_storage_cursor;
@@ -526,6 +535,182 @@ static const CmHirItem *cm_hir_body_bound_item(
     return item != NULL
             && cm_hir_def_id_equal(item->definition, definition_id)
         ? item : NULL;
+}
+
+static int cm_hir_body_method_scope_contains(const CmHirDefId *traits,
+    size_t count, CmHirDefId definition)
+{
+    size_t index;
+
+    for (index = 0u; index < count; ++index) {
+        if (cm_hir_def_id_equal(traits[index], definition)) return 1;
+    }
+    return 0;
+}
+
+static CmHirBodyLowerStatus cm_hir_body_method_scope_add(
+    const CmHirContext *context, CmHirDefId definition,
+    CmHirDefId *traits, size_t capacity, size_t *count)
+{
+    const CmHirItem *item;
+
+    item = cm_hir_body_bound_item(context, definition);
+    if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT) {
+        return CM_HIR_BODY_LOWER_INVALID_BODY;
+    }
+    if (cm_hir_body_method_scope_contains(traits, *count, definition)) {
+        return CM_HIR_BODY_LOWER_OK;
+    }
+    if (traits != NULL) {
+        if (*count >= capacity) return CM_HIR_BODY_LOWER_HIR_FAILURE;
+        traits[*count] = definition;
+    }
+    ++*count;
+    return CM_HIR_BODY_LOWER_OK;
+}
+
+static int cm_hir_body_method_named_import_is_effective(
+    const CmHirBodyBuildState *state, const CmHirImportBinding *binding)
+{
+    const CmInternedString *name;
+    const CmHirItem *target;
+    const CmAst *target_ast;
+    const CmAstItem *source_trait;
+    CmResolvePathSegmentView segment;
+    CmResolvedBinding resolved;
+    CmHirModuleId hir_module;
+    CmImportLookupStatus lookup;
+
+    name = cm_interner_get(&state->context->strings, binding->name);
+    target = cm_hir_body_bound_item(state->context, binding->target);
+    if (name == NULL || name->len == 0u || target == NULL
+        || target->kind != CM_HIR_ITEM_TRAIT) return 0;
+    segment.bytes = name->bytes;
+    segment.length = name->len;
+    lookup = cm_import_resolve_path_checked(state->imports, state->graph,
+        state->revision, state->graph_module, 0, &segment, 1u,
+        CM_RESOLVE_NAMESPACE_TYPE, &resolved);
+    if (lookup != CM_IMPORT_LOOKUP_OK || resolved.is_ambiguous
+        || resolved.is_anonymous || resolved.item_kind != CM_AST_ITEM_TRAIT
+        || resolved.declaration.source == 0u
+        || resolved.declaration.item == CM_AST_ITEM_NONE
+        || cm_hir_module_map_lookup_hir(state->modules, state->graph,
+            state->revision, resolved.module, state->context,
+            &hir_module) != CM_HIR_MODULE_MAP_OK
+        || hir_module != target->owner_module
+        || !cm_module_graph_borrow_item_ast(state->graph, resolved.module,
+            resolved.declaration, &target_ast)) {
+        return 0;
+    }
+    source_trait = cm_ast_get_item(target_ast, resolved.declaration.item);
+    return source_trait != NULL && source_trait->kind == CM_AST_ITEM_TRAIT
+        && target->span.source == resolved.declaration.source
+        && target->span.start == source_trait->span.start
+        && target->span.end == source_trait->span.end
+        && cm_hir_body_ast_hir_text_equal(target_ast, source_trait->name,
+            state->context, target->name);
+}
+
+static CmHirBodyLowerStatus cm_hir_body_method_trait_scope(
+    const CmHirBodyBuildState *state, CmHirDefId *traits,
+    size_t capacity, size_t *out_count)
+{
+    const CmHirModule *module;
+    const CmHirItem *parent;
+    size_t count;
+    size_t index;
+
+    *out_count = 0u;
+    module = cm_hir_get_module(state->context,
+        state->owner_item->owner_module);
+    if (module == NULL) return CM_HIR_BODY_LOWER_INVALID_BODY;
+    if (traits == NULL) {
+        CmHirDefId *scratch;
+        size_t allocation_bytes;
+        size_t maximum;
+        size_t import_index;
+        CmHirBodyLowerStatus status;
+
+        maximum = state->context->items.len + 1u;
+        for (import_index = 0u; import_index < module->import_count;
+             ++import_index) {
+            if (!cm_size_add(maximum,
+                    (size_t)module->imports[import_index].binding_count,
+                    &maximum)) return CM_HIR_BODY_LOWER_HIR_FAILURE;
+        }
+        if (!cm_size_mul(maximum, sizeof(CmHirDefId),
+                &allocation_bytes)) {
+            return CM_HIR_BODY_LOWER_HIR_FAILURE;
+        }
+        scratch = allocation_bytes == 0u ? NULL
+            : (CmHirDefId *)cm_alloc(allocation_bytes);
+        status = cm_hir_body_method_trait_scope(state, scratch, maximum,
+            out_count);
+        cm_free(scratch);
+        return status;
+    }
+    count = 0u;
+    for (index = 0u; index < state->context->items.len; ++index) {
+        const CmHirItem *item;
+        CmHirBodyLowerStatus status;
+
+        item = (const CmHirItem *)cm_vec_at_const(&state->context->items,
+            index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT
+            || item->owner_module != state->owner_item->owner_module) {
+            continue;
+        }
+        status = cm_hir_body_method_scope_add(state->context,
+            item->definition, traits, capacity, &count);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+    }
+    for (index = 0u; index < module->import_count; ++index) {
+        const CmHirImport *import_value;
+        uint32_t binding_index;
+
+        import_value = &module->imports[index];
+        for (binding_index = 0u;
+             binding_index < import_value->binding_count; ++binding_index) {
+            const CmHirImportBinding *binding;
+            const CmHirItem *target;
+            CmHirBodyLowerStatus status;
+
+            binding = &import_value->bindings[binding_index];
+            if (binding->namespace_kind != CM_HIR_NAMESPACE_TYPE
+                || cm_hir_def_id_is_none(binding->target)) continue;
+            target = cm_hir_body_bound_item(state->context,
+                binding->target);
+            if (target == NULL || target->kind != CM_HIR_ITEM_TRAIT) {
+                continue;
+            }
+            if (!binding->is_anonymous
+                && !cm_hir_body_method_named_import_is_effective(state,
+                    binding)) continue;
+            status = cm_hir_body_method_scope_add(state->context,
+                binding->target, traits, capacity, &count);
+            if (status != CM_HIR_BODY_LOWER_OK) return status;
+        }
+    }
+    parent = cm_hir_def_id_is_none(state->owner_item->parent_definition)
+        ? NULL : cm_hir_body_bound_item(state->context,
+            state->owner_item->parent_definition);
+    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
+        CmHirBodyLowerStatus status;
+
+        status = cm_hir_body_method_scope_add(state->context,
+            parent->definition, traits, capacity, &count);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+    } else if (parent != NULL && parent->kind == CM_HIR_ITEM_IMPL
+        && parent->data.impl_item.has_trait) {
+        CmHirBodyLowerStatus status;
+
+        status = cm_hir_body_method_scope_add(state->context,
+            parent->data.impl_item.trait_type.definition, traits, capacity,
+            &count);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+    }
+    *out_count = count;
+    return CM_HIR_BODY_LOWER_OK;
 }
 
 static int cm_hir_body_module_within(const CmHirContext *context,
@@ -728,6 +913,10 @@ static CmHirBodyLowerStatus cm_hir_body_infer_expression_type(
     const CmHirBodyBuildState *state, CmAstExprId expression_id,
     size_t depth, CmHirTypeId *out_type);
 
+static CmHirBodyLowerStatus cm_hir_body_literal_integer_kind(
+    const CmAst *ast, CmInternId text_id, int *out_has_suffix,
+    CmHirIntType *out_kind);
+
 static CmHirBodyLowerStatus cm_hir_body_resolve_field_expression(
     const CmHirBodyBuildState *state, const CmAstExpr *expression,
     size_t depth, CmHirTypeId *out_base_type, const CmHirItem **out_item,
@@ -887,6 +1076,21 @@ static CmHirBodyLowerStatus cm_hir_body_infer_expression_type(
         if (status != CM_HIR_BODY_LOWER_OK) return status;
         *out_type = item->data.aggregate_item.fields[field_index].type;
         return CM_HIR_BODY_LOWER_OK;
+    }
+    if (expression->kind == CM_AST_EXPR_LITERAL) {
+        CmHirIntType integer_kind;
+        int has_suffix;
+        CmHirBodyLowerStatus status;
+
+        status = cm_hir_body_literal_integer_kind(state->ast,
+            expression->data.literal.text, &has_suffix, &integer_kind);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+        if (!has_suffix) return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+        *out_type = cm_hir_body_find_integer_type(state->context,
+            integer_kind);
+        return *out_type == CM_HIR_TYPE_NONE
+            ? CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE
+            : CM_HIR_BODY_LOWER_OK;
     }
     return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
 }
@@ -1351,6 +1555,12 @@ static int cm_hir_body_counts_add(CmHirBodyExpressionCounts *total,
             &total->expression_count)
         && cm_size_add(total->call_word_count, part->call_word_count,
             &total->call_word_count)
+        && cm_size_add(total->method_trait_count,
+            part->method_trait_count, &total->method_trait_count)
+        && cm_size_add(total->method_argument_count,
+            part->method_argument_count, &total->method_argument_count)
+        && cm_size_add(total->method_call_count, part->method_call_count,
+            &total->method_call_count)
         && cm_size_add(total->aggregate_field_count,
             part->aggregate_field_count, &total->aggregate_field_count);
     if (result && part->needs_bool_type) total->needs_bool_type = 1;
@@ -2266,12 +2476,22 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
     }
     case CM_AST_EXPR_METHOD_CALL:
     {
+        const CmInternedString *method_name;
+        const CmAstExpr *receiver;
+        CmHirTypeId receiver_type;
+        size_t trait_count;
+        uint32_t prior_end;
         uint32_t index;
         int has_generic_arguments;
 
+        method_name = cm_ast_get_string(state->ast,
+            expression->data.method_call.name);
         if ((expression->data.method_call.generic_argument_count == 0u)
                 != (expression->data.method_call.generic_arguments == NULL)
-            || expression->data.method_call.receiver >= expression_id) {
+            || (expression->data.method_call.argument_count == 0u)
+                != (expression->data.method_call.arguments == NULL)
+            || expression->data.method_call.receiver >= expression_id
+            || method_name == NULL || method_name->len == 0u) {
             return CM_HIR_BODY_LOWER_INVALID_BODY;
         }
         has_generic_arguments =
@@ -2303,7 +2523,66 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
             }
             return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
         }
-        return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+        receiver = cm_ast_get_expr(state->ast,
+            expression->data.method_call.receiver);
+        if (receiver == NULL || receiver->span.start != expression->span.start
+            || receiver->span.end >= expression->span.end) {
+            return CM_HIR_BODY_LOWER_INVALID_BODY;
+        }
+        status = cm_hir_body_infer_expression_type(state,
+            expression->data.method_call.receiver, depth + 1u,
+            &receiver_type);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+        status = cm_hir_body_preflight_typed_expression(state,
+            receiver_type, expression->data.method_call.receiver,
+            expression->span, depth + 1u, &child);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+        out_counts->expression_count = 1u;
+        out_counts->method_call_count = 1u;
+        if (!cm_hir_body_counts_add(out_counts, &child)) {
+            return CM_HIR_BODY_LOWER_HIR_FAILURE;
+        }
+        prior_end = receiver->span.end;
+        for (index = 0u;
+             index < expression->data.method_call.argument_count; ++index) {
+            const CmAstExpr *argument;
+            CmHirBodyExpressionCounts argument_counts;
+            CmHirTypeId argument_type;
+
+            if (expression->data.method_call.arguments[index]
+                    >= expression_id) {
+                return CM_HIR_BODY_LOWER_INVALID_BODY;
+            }
+            argument = cm_ast_get_expr(state->ast,
+                expression->data.method_call.arguments[index]);
+            if (argument == NULL || argument->span.start < prior_end
+                || argument->span.end > expression->span.end) {
+                return CM_HIR_BODY_LOWER_INVALID_BODY;
+            }
+            status = cm_hir_body_infer_expression_type(state,
+                expression->data.method_call.arguments[index], depth + 1u,
+                &argument_type);
+            if (status != CM_HIR_BODY_LOWER_OK) return status;
+            status = cm_hir_body_preflight_typed_expression(state,
+                argument_type,
+                expression->data.method_call.arguments[index],
+                expression->span, depth + 1u, &argument_counts);
+            if (status != CM_HIR_BODY_LOWER_OK) return status;
+            if (!cm_hir_body_counts_add(out_counts, &argument_counts)) {
+                return CM_HIR_BODY_LOWER_HIR_FAILURE;
+            }
+            prior_end = argument->span.end;
+        }
+        status = cm_hir_body_method_trait_scope(state, NULL, 0u,
+            &trait_count);
+        if (status != CM_HIR_BODY_LOWER_OK) return status;
+        if (trait_count > (size_t)UINT32_MAX) {
+            return CM_HIR_BODY_LOWER_HIR_FAILURE;
+        }
+        out_counts->method_trait_count = trait_count;
+        out_counts->method_argument_count =
+            expression->data.method_call.argument_count;
+        return CM_HIR_BODY_LOWER_OK;
     }
     case CM_AST_EXPR_MATCH:
     {
@@ -2839,6 +3118,102 @@ static CmHirStatus cm_hir_body_build_typed_expression(
         }
         return status;
     }
+    if (expression->kind == CM_AST_EXPR_METHOD_CALL) {
+        const CmInternedString *method_name;
+        CmHirExpr method_call;
+        CmHirExprId receiver;
+        CmHirBodyLowerStatus lower_status;
+        CmHirTypeId receiver_type;
+        size_t argument_start;
+        size_t argument_next;
+        size_t trait_start;
+        size_t trait_next;
+        size_t trait_count;
+        uint32_t index;
+
+        method_name = cm_ast_get_string(state->ast,
+            expression->data.method_call.name);
+        lower_status = cm_hir_body_infer_expression_type(state,
+            expression->data.method_call.receiver, 1u, &receiver_type);
+        if (method_name == NULL || method_name->len == 0u
+            || lower_status != CM_HIR_BODY_LOWER_OK
+            || !cm_size_add(state->method_argument_storage_cursor,
+                (size_t)expression->data.method_call.argument_count,
+                &argument_next)
+            || argument_next > state->method_argument_storage_count
+            || (expression->data.method_call.argument_count != 0u
+                && state->method_argument_storage == NULL)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        lower_status = cm_hir_body_method_trait_scope(state, NULL, 0u,
+            &trait_count);
+        if (lower_status != CM_HIR_BODY_LOWER_OK
+            || trait_count > (size_t)UINT32_MAX
+            || !cm_size_add(state->method_trait_storage_cursor,
+                trait_count, &trait_next)
+            || trait_next > state->method_trait_storage_count
+            || (trait_count != 0u
+                && state->method_trait_storage == NULL)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        argument_start = state->method_argument_storage_cursor;
+        trait_start = state->method_trait_storage_cursor;
+        state->method_argument_storage_cursor = argument_next;
+        state->method_trait_storage_cursor = trait_next;
+        if (trait_count != 0u) {
+            size_t actual_trait_count;
+
+            lower_status = cm_hir_body_method_trait_scope(state,
+                state->method_trait_storage + trait_start, trait_count,
+                &actual_trait_count);
+            if (lower_status != CM_HIR_BODY_LOWER_OK
+                || actual_trait_count != trait_count) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+        }
+        if (cm_hir_body_build_typed_expression(state, receiver_type,
+                expression->data.method_call.receiver, &receiver)
+                != CM_HIR_OK) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        for (index = 0u; index < expression->data.method_call.argument_count;
+             ++index) {
+            CmHirTypeId argument_type;
+            CmHirStatus status;
+
+            lower_status = cm_hir_body_infer_expression_type(state,
+                expression->data.method_call.arguments[index], 1u,
+                &argument_type);
+            if (lower_status != CM_HIR_BODY_LOWER_OK) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            status = cm_hir_body_build_typed_expression(state,
+                argument_type, expression->data.method_call.arguments[index],
+                &state->method_argument_storage[argument_start + index]);
+            if (status != CM_HIR_OK) return status;
+        }
+        memset(&method_call, 0, sizeof(method_call));
+        method_call.kind = CM_HIR_EXPR_METHOD_CALL;
+        method_call.owner_body = state->body_id;
+        method_call.type = expected_type;
+        method_call.span = cm_hir_body_ast_span(state->source,
+            expression->span);
+        method_call.data.method_call.syntax = CM_HIR_CALLABLE_DOT_METHOD;
+        method_call.data.method_call.method_name = cm_interner_intern(
+            &state->context->strings, method_name->bytes, method_name->len);
+        method_call.data.method_call.receiver = receiver;
+        method_call.data.method_call.arguments =
+            expression->data.method_call.argument_count == 0u ? NULL
+            : state->method_argument_storage + argument_start;
+        method_call.data.method_call.argument_count =
+            expression->data.method_call.argument_count;
+        method_call.data.method_call.in_scope_traits = trait_count == 0u
+            ? NULL : state->method_trait_storage + trait_start;
+        method_call.data.method_call.in_scope_trait_count =
+            (uint32_t)trait_count;
+        return cm_hir_add_expr(state->context, &method_call,
+            out_expression);
+    }
     if (expression->kind == CM_AST_EXPR_STRUCT) {
         const CmHirItem *item;
         CmHirAggregateFieldValue *fields;
@@ -3024,6 +3399,8 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     size_t reserved_expression_count;
     size_t expression_add_count;
     size_t call_storage_bytes;
+    size_t method_argument_storage_bytes;
+    size_t method_trait_storage_bytes;
     size_t aggregate_storage_bytes;
     size_t payload_storage_bytes;
     size_t transaction_storage_bytes;
@@ -3232,6 +3609,10 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
             &reserved_expression_count)
         || !cm_size_mul(expression_counts.call_word_count,
             sizeof(uint32_t), &call_storage_bytes)
+        || !cm_size_mul(expression_counts.method_argument_count,
+            sizeof(CmHirExprId), &method_argument_storage_bytes)
+        || !cm_size_mul(expression_counts.method_trait_count,
+            sizeof(CmHirDefId), &method_trait_storage_bytes)
         || !cm_size_mul(expression_counts.aggregate_field_count,
             sizeof(CmHirAggregateFieldValue), &aggregate_storage_bytes)
         || !cm_size_add(aggregate_storage_bytes, call_storage_bytes,
@@ -3252,8 +3633,20 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
             sizeof(CmHirStatement));
     }
     build_state.call_storage_words = expression_counts.call_word_count;
+    build_state.method_argument_storage_count =
+        expression_counts.method_argument_count;
+    build_state.method_trait_storage_count =
+        expression_counts.method_trait_count;
     build_state.aggregate_storage_count =
         expression_counts.aggregate_field_count;
+    if (method_argument_storage_bytes != 0u) {
+        build_state.method_argument_storage =
+            (CmHirExprId *)cm_alloc(method_argument_storage_bytes);
+    }
+    if (method_trait_storage_bytes != 0u) {
+        build_state.method_trait_storage =
+            (CmHirDefId *)cm_alloc(method_trait_storage_bytes);
+    }
     if (transaction_storage_bytes != 0u) {
         unsigned char *storage;
 
@@ -3284,6 +3677,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         goto fail_body_transaction;
     }
     if (statement_count != 0u || add_bool_type
+        || expression_counts.method_call_count != 0u
         || inferred_type_add_count != 0u) {
         storage_mark = cm_arena_mark(&context->storage);
         strings_mark = cm_interner_mark(&context->strings);
@@ -3397,6 +3791,10 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
                 != build_state.call_storage_words
             || build_state.aggregate_storage_cursor
                 != build_state.aggregate_storage_count
+            || build_state.method_argument_storage_cursor
+                != build_state.method_argument_storage_count
+            || build_state.method_trait_storage_cursor
+                != build_state.method_trait_storage_count
             || (payload_storage_bytes != 0u
                 && !build_state.transaction_storage_adopted))) {
         hir_status = CM_HIR_INVARIANT_VIOLATION;
@@ -3427,6 +3825,8 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     }
     cm_free(hir_statements);
     cm_free(let_plans);
+    cm_free(build_state.method_argument_storage);
+    cm_free(build_state.method_trait_storage);
     result.status = CM_HIR_BODY_LOWER_OK;
     result.root_expression = block_id;
     result.span = block.span;
@@ -3452,6 +3852,8 @@ fail_body_transaction:
     }
     cm_free(hir_statements);
     cm_free(let_plans);
+    cm_free(build_state.method_argument_storage);
+    cm_free(build_state.method_trait_storage);
     result.status = CM_HIR_BODY_LOWER_HIR_FAILURE;
     result.hir_status = hir_status;
     result.root_expression = CM_HIR_EXPR_NONE;

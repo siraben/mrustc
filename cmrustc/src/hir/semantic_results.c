@@ -767,6 +767,9 @@ static CmSemanticResultsStatus cm_results_collect_expression(
             if (status != CM_SEMANTIC_RESULTS_OK) return status;
         }
         break;
+    case CM_HIR_EXPR_METHOD_CALL:
+        /* Not publishable until semantic method selection owns its recipe. */
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         for (index = 0u;
              index < expression->data.qualified_call.argument_count;

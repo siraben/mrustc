@@ -1324,6 +1324,8 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
             if (status != CM_SEMANTIC_BODY_OK) return status;
         }
         return CM_SEMANTIC_BODY_OK;
+    case CM_HIR_EXPR_METHOD_CALL:
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if ((expression->data.qualified_call.argument_count == 0u)
                 != (expression->data.qualified_call.arguments == NULL)) {
@@ -1797,6 +1799,8 @@ static CmSemanticBodyStatus cm_semantic_body_walk(
         if (*count >= hir->expressions.len) return CM_SEMANTIC_BODY_OVERFLOW;
         calls[(*count)++] = id;
         break;
+    case CM_HIR_EXPR_METHOD_CALL:
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if (e->data.qualified_call.argument_count != 0u
             && e->data.qualified_call.arguments == NULL) {

@@ -1525,12 +1525,25 @@ inspection remains only on the legacy evidence-free compatibility path and for
 exact callable identity authentication.
 
 The next callable milestone generalizes body constraints rather than adding a
-new reachability special case. Source HIR will retain unresolved
-`receiver.method(arguments)` syntax and exact in-scope trait identities. The
-crate-wide semantic transaction will jointly constrain the receiver and
-arguments, select inherent or trait candidates, and publish one callable recipe
-containing the declared item, selected impl/callable, canonical instance,
-normalized parameter/return types, and an ordered immutable
+new reachability special case. Source HIR now retains unresolved
+`receiver.method(arguments)` syntax as a separate receiver, ordered explicit
+arguments, the exact method name, and exact deduplicated in-scope trait DefIds.
+The scope includes same-module and enclosing traits plus structural trait-import
+bindings; named bindings are authenticated against the effective checked
+resolver result, while anonymous `use Trait as _` bindings remain present even
+though they intentionally publish no namespace name. Shadowed glob results are
+therefore excluded. Explicit method generic arguments and independently
+uninferable children remain fail-closed. The model deep-copies all slices,
+validates ownership/source order and trait identity, and lowering rewinds arena,
+interner, expressions, types, and locals on failure. Semantic results,
+reachability, and MIR-facing traversal reject the unresolved node until a
+selection recipe exists. Focused strict GCC, TinyCC, and Clang ASan/UBSan/leak
+model/body tests pass; this is producer evidence, not method selection.
+
+The crate-wide semantic transaction must next jointly constrain the receiver
+and arguments, select inherent or trait candidates, and publish one callable
+recipe containing the declared item, selected impl/callable, canonical
+instance, normalized parameter/return types, and an ordered immutable
 autoderef/autoref/reborrow adjustment sequence. Missing, ambiguous, negative,
 inapplicable, or metadata-incomplete candidates must reject the entire semantic
 transaction. Reachability and MIR will consume only the sealed recipe. Focused

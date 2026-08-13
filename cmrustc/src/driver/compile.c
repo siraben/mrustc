@@ -615,6 +615,10 @@ static int cm_compile_discover_expression_callees(
         (void)snprintf(message, message_capacity,
             "reachable reference expressions require semantic evidence");
         return 0;
+    case CM_HIR_EXPR_METHOD_CALL:
+        (void)snprintf(message, message_capacity,
+            "reachable method call requires sealed semantic selection");
+        return 0;
     case CM_HIR_EXPR_QUALIFIED_CALL:
     {
         const CmHirItem *callee;

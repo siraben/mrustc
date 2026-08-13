@@ -79,6 +79,28 @@ static const CmHirItem *find_struct(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_trait(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *item_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT) continue;
+        item_name = cm_interner_get(&hir->strings, item->name);
+        if (item_name != NULL && item_name->len == length
+            && memcmp(item_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static int source_span_is(const char *source, CmSpan span,
     const char *expected)
 {
@@ -965,6 +987,118 @@ static void test_graph_explicit_local_ufcs_call(void)
         && declared->data.function_item.body == CM_HIR_BODY_NONE
         && argument != NULL && argument->kind == CM_HIR_EXPR_LOCAL
         && argument->data.local.local_index == 0u);
+    fixture_destroy(&fixture);
+}
+
+static void test_graph_unresolved_local_method_call(void)
+{
+    static const char source[] =
+        "mod traits { "
+        "pub trait Imported { fn imported(self) -> u32; } "
+        "pub trait Shadowed { fn shadowed(self) -> u32; } } "
+        "use traits::*; "
+        "use traits::Imported as _; "
+        "trait Value { fn value(self, other: u32) -> u32; } "
+        "struct Shadowed; "
+        "fn main(x: u32) -> u32 { x.value(7u32) }";
+    TestFixture fixture;
+    const CmHirBody *body;
+    const CmHirExpr *block;
+    const CmHirExpr *call;
+    const CmHirExpr *receiver;
+    const CmHirExpr *argument;
+    const CmHirItem *value_trait;
+    const CmHirItem *imported_trait;
+    const CmHirItem *shadowed_trait;
+    CmHirBodyLowerResult result;
+    uint32_t index;
+    int saw_value;
+    int saw_imported;
+    int saw_shadowed;
+
+    fixture_init(&fixture, source);
+    result = lower_fixture_body(&fixture);
+    assert(result.status == CM_HIR_BODY_LOWER_OK);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    block = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    call = block == NULL || block->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            block->data.block.tail_expression);
+    assert(call != NULL && call->kind == CM_HIR_EXPR_METHOD_CALL
+        && call->data.method_call.syntax == CM_HIR_CALLABLE_DOT_METHOD
+        && hir_name_is(&fixture.hir,
+            call->data.method_call.method_name, "value")
+        && call->data.method_call.argument_count == 1u
+        && call->data.method_call.arguments != NULL);
+    receiver = cm_hir_get_expr(&fixture.hir,
+        call->data.method_call.receiver);
+    assert(receiver != NULL && receiver->kind == CM_HIR_EXPR_LOCAL
+        && receiver->data.local.local_index == 0u
+        && receiver->owner_body == call->owner_body
+        && receiver->span.start == call->span.start
+        && receiver->span.end < call->span.end);
+    argument = cm_hir_get_expr(&fixture.hir,
+        call->data.method_call.arguments[0]);
+    assert(argument != NULL && argument->kind == CM_HIR_EXPR_INTEGER
+        && argument->data.integer.low_bits == 7u
+        && argument->owner_body == call->owner_body
+        && argument->span.start > receiver->span.end
+        && argument->span.end < call->span.end);
+    value_trait = find_trait(&fixture.hir, "Value");
+    imported_trait = find_trait(&fixture.hir, "Imported");
+    shadowed_trait = find_trait(&fixture.hir, "Shadowed");
+    assert(value_trait != NULL && imported_trait != NULL
+        && shadowed_trait != NULL);
+    saw_value = 0;
+    saw_imported = 0;
+    saw_shadowed = 0;
+    for (index = 0u; index < call->data.method_call.in_scope_trait_count;
+         ++index) {
+        uint32_t prior;
+
+        if (cm_hir_def_id_equal(call->data.method_call.in_scope_traits[index],
+                value_trait->definition)) saw_value = 1;
+        if (cm_hir_def_id_equal(call->data.method_call.in_scope_traits[index],
+                imported_trait->definition)) saw_imported = 1;
+        if (cm_hir_def_id_equal(call->data.method_call.in_scope_traits[index],
+                shadowed_trait->definition)) saw_shadowed = 1;
+        for (prior = 0u; prior < index; ++prior) {
+            assert(!cm_hir_def_id_equal(
+                call->data.method_call.in_scope_traits[prior],
+                call->data.method_call.in_scope_traits[index]));
+        }
+    }
+    assert(saw_value && saw_imported && !saw_shadowed
+        && call->data.method_call.in_scope_trait_count == 2u);
+    fixture_destroy(&fixture);
+
+    expect_body_failure(
+        "trait Value { fn value<T>(self) -> u32; } "
+        "fn main(x: u32) -> u32 { x.value::<u32>() }",
+        CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+}
+
+static void test_graph_method_call_oom_is_transactional(void)
+{
+    TestFixture fixture;
+    TestHirSnapshot snapshot;
+
+    fixture_init(&fixture,
+        "trait Value { fn value(self, other: u32) -> u32; } "
+        "fn main(x: u32) -> u32 { x.value(7u32) }");
+    hir_snapshot_take(&fixture.hir, &snapshot);
+    cm_alloc_set_oom_handler(jump_on_oom, NULL);
+    /* Trait-scope scratch allocation succeeds; argument storage fails. */
+    cm_alloc_fail_after(1u);
+    if (setjmp(oom_jump) == 0) {
+        (void)lower_fixture_body(&fixture);
+        assert(0 && "method argument storage unexpectedly survived OOM");
+    }
+    cm_alloc_fail_never();
+    cm_alloc_set_oom_handler(NULL, NULL);
+    hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+    hir_snapshot_destroy(&snapshot);
     fixture_destroy(&fixture);
 }
 
@@ -3671,6 +3805,8 @@ int main(void)
     test_aggregate_payload_oom_is_transactional();
     test_graph_function_body();
     test_graph_explicit_local_ufcs_call();
+    test_graph_unresolved_local_method_call();
+    test_graph_method_call_oom_is_transactional();
     test_graph_identity_call_bodies();
     test_graph_generic_identity_call_body();
     test_graph_generic_identity_call_rejects_wrong_parameter();
