@@ -122,11 +122,10 @@ static void test_manifest_is_complete_stable_and_immutable(void)
             && atom_equal(&before[index], &after));
     }
     result = advance_typed(&fixture, &barrier);
-    assert(result.status == CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
-        && result.phase == CM_SEMANTIC_BARRIER_STRUCTURAL
-        && result.atom_index < 3u
-        && result.atom.kind == CM_SEMANTIC_ATOM_FUNCTION
-        && atom_equal(&result.atom, &before[result.atom_index])
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_TYPED
         && cm_semantic_barrier_is_current(&barrier));
     for (index = 0u; index < 3u; ++index) {
         assert(cm_semantic_barrier_atom_at(&barrier, index, &after)
@@ -254,6 +253,62 @@ static void test_const_initializer_failure_rolls_back_all_bodies(void)
         && cm_hir_get_body(&fixture.hir, 3u)->state
             == CM_HIR_BODY_UNLOWERED
         && cm_semantic_barrier_is_current(&barrier)
+        && cm_semantic_barrier_capability_id(&barrier) != capability);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
+static void test_trait_default_failure_rolls_back_all_bodies(void)
+{
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    CmSemanticAtomView atom;
+    size_t expressions;
+    size_t types;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+    uint64_t capability;
+
+    fixture_init(&fixture,
+        "fn helper(value: u32) -> u32 { value } "
+        "trait Closed { fn bad(value: u32) -> u32 { helper(value) } } "
+        "fn last() -> u32 { 2u32 }");
+    expressions = fixture.hir.expressions.len;
+    types = fixture.hir.types.len;
+    semantic_generation = fixture.hir.semantic_generation;
+    rewind_generation = fixture.hir.rewind_generation;
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    capability = cm_semantic_barrier_capability_id(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && capability != 0u
+        && cm_semantic_barrier_atom_count(&barrier) == 3u
+        && cm_semantic_barrier_atom_at(&barrier, 1u, &atom)
+            == CM_SEMANTIC_BARRIER_OK
+        && atom.kind == CM_SEMANTIC_ATOM_FUNCTION);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_BODY_FAILURE
+        && result.phase == CM_SEMANTIC_BARRIER_STRUCTURAL
+        && result.atom_index < 3u
+        && result.atom.kind == CM_SEMANTIC_ATOM_FUNCTION
+        && result.atom.body == result.local_bodies.body
+        && result.local_bodies.body_result.status
+            == CM_HIR_BODY_LOWER_UNSUPPORTED_BODY
+        && fixture.hir.expressions.len == expressions
+        && fixture.hir.types.len == types
+        && fixture.hir.semantic_generation > semantic_generation
+        && fixture.hir.rewind_generation > rewind_generation
+        && cm_hir_get_body(&fixture.hir, 1u)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir, 2u)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_hir_get_body(&fixture.hir, 3u)->state
+            == CM_HIR_BODY_UNLOWERED
+        && cm_semantic_barrier_is_current(&barrier)
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_STRUCTURAL
+        && cm_semantic_barrier_capability_id(&barrier) != 0u
         && cm_semantic_barrier_capability_id(&barrier) != capability);
     cm_semantic_barrier_destroy(&barrier);
     fixture_destroy(&fixture);
@@ -563,6 +618,7 @@ int main(void)
     test_typed_success_and_phase_order();
     test_const_and_static_typed();
     test_const_initializer_failure_rolls_back_all_bodies();
+    test_trait_default_failure_rolls_back_all_bodies();
     test_typed_failure_rolls_back_and_remains_structural();
     test_append_rewind_and_capability_aba();
     test_source_snapshots_stale_barrier();

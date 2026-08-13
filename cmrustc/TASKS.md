@@ -1787,11 +1787,31 @@ Free monomorphic const and immutable static initializers now participate in
 the same atomic TYPED transition as functions and publish canonical
 HIR block roots (wrapping non-block initializers only). Ordinary call typing
 matches original mrustc here; const-operation legality remains a later
-marking/evaluation obligation. Associated/generic value bodies and
-trait-default bodies remain present but explicitly block TYPED. No API can yet mint
-MARKED, REGIONS, REWRITTEN, or VALIDATED, and normalized array lengths/discriminants
-are not misrepresented as type-position body atoms while HIR lacks stable
-source body identities for them.
+marking/evaluation obligation. Associated/generic value bodies remain present
+but explicitly block TYPED. A first definition-only trait-default slice now
+joins the atomic transition: the parent must be a local safe non-auto trait
+with no generics, predicates, outlives clauses, or supertraits; the
+receiver-free safe Rust-ABI method must have only closed
+`i32`/`u32`/`usize` parameters and return; and the body syntax is limited to
+literals, locals, wrapping primitive arithmetic, and the existing closed
+`if`/block forms. Both lowering and semantic definition checking authenticate
+that exact typed-HIR shape, so model construction cannot bypass the slice. Calls,
+method/qualified dispatch, fields, aggregates, `Self`, projections, lifetimes,
+generic frames, and opaque returns fail closed before mutation. Semantic
+definition checking and durable results include these defaults, while
+instance-mode checking and direct MIR lowering reject them: inherited-default
+execution still needs a concrete selected impl, trait-owned rigid `Self`, and
+instance-aware MIR substitution. No API can yet mint MARKED, REGIONS,
+REWRITTEN, or VALIDATED, and normalized array lengths/discriminants are not
+misrepresented as type-position body atoms while HIR lacks stable source body
+identities for them.
+
+The remaining non-item body frontier is explicit enum discriminants followed
+by array-length expressions. Discriminants can reuse stable variant DefIds but
+must retain an expression body separately from a later evaluated scalar and
+use the exact enum repr type. Array lengths require stable type-position
+definition identities keyed by their source AST type occurrence; HIR TypeIds
+are not source identities and one item can own several independent lengths.
 
 The dependency-macro provenance follow-on must also pin producer and consumer
 module-graph lifetime IDs through dependency definitions/imports and

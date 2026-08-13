@@ -3201,7 +3201,10 @@ CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
         : cm_semantic_admission_results(admission);
     if (semantic_results == NULL
         || cm_semantic_results_body(semantic_results, admission, body_id,
-            &semantic_body) != CM_SEMANTIC_RESULTS_OK) {
+            &semantic_body) != CM_SEMANTIC_RESULTS_OK
+        || cm_hir_body_function_owner_kind(hir,
+            cm_mir_flow_definition_item(hir, semantic_body.owner))
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT) {
         return cm_mir_lower_admission_failure(body_id);
     }
     result = cm_mir_lower_instance_impl(context, NULL, CM_MIR_BODY_NONE, hir,

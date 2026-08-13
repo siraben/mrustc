@@ -607,6 +607,125 @@ static CmHirDefId add_trait(TestFixture *fixture, const char *name)
     return definition;
 }
 
+static void test_closed_trait_default_definition_mode(void)
+{
+    TestFixture fixture;
+    CmHirDefId trait_definition;
+    CmHirDefId method_definition;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExpr expression;
+    CmHirExpr saved_expression;
+    CmHirExprId leaf;
+    CmHirExprId root;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    trait_definition = add_trait(&fixture, "Closed");
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(30u, 60u),
+        &method_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture.hir, "value");
+    parameter.type = fixture.u32_type;
+    parameter.span = test_span(40u, 45u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.name;
+    local.type = fixture.u32_type;
+    local.span = parameter.span;
+    local.parameter_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = method_definition;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.expected_type = fixture.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(30u, 60u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &body_id) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, method_definition,
+        fixture.root, "value", &fixture.hir);
+    item.parent_definition = trait_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK
+        && add_local_expression(&fixture.hir, body_id, 0u,
+            fixture.u32_type, test_span(50u, 55u), &leaf) == CM_HIR_OK
+        && add_block_expression(&fixture.hir, body_id, NULL, 0u, leaf,
+            fixture.u32_type, test_span(48u, 57u), &root) == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture.hir, body_id, root)
+            == CM_HIR_OK
+        && cm_hir_body_function_owner_kind(&fixture.hir,
+            cm_hir_get_item(&fixture.hir, item_id))
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, method_definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN
+        && cm_hir_def_id_equal(cm_semantic_session_enclosing_owner(&session),
+            trait_definition));
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    type_count = cm_typeck_type_count(typeck);
+
+    expression = *(CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)leaf - 1u);
+    saved_expression = expression;
+    expression.kind = CM_HIR_EXPR_AGGREGATE;
+    expression.data.aggregate.definition = trait_definition;
+    expression.data.aggregate.fields = NULL;
+    expression.data.aggregate.field_count = 0u;
+    expression.data.aggregate.owned_storage = NULL;
+    *(CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)leaf - 1u) = expression;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
+        && cm_typeck_type_count(typeck) == type_count);
+
+    expression = saved_expression;
+    expression.kind = CM_HIR_EXPR_CALL;
+    expression.data.call.callee = method_definition;
+    expression.data.call.type_substitutions = NULL;
+    expression.data.call.type_substitution_count = 0u;
+    expression.data.call.arguments = NULL;
+    expression.data.call.argument_count = 0u;
+    expression.data.call.owned_storage = NULL;
+    *(CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)leaf - 1u) = expression;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
+        && cm_typeck_type_count(typeck) == type_count);
+
+    *(CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+        (size_t)leaf - 1u) = saved_expression;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    result = cm_semantic_body_check_calls(&session, body_id, NULL, 0u);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static CmHirDefId add_impl(TestFixture *fixture, CmHirDefId trait_definition)
 {
     CmHirDefId definition;
@@ -3460,6 +3579,7 @@ static void test_invalid_api_and_status_names(void)
 
 int main(void)
 {
+    test_closed_trait_default_definition_mode();
     test_explicit_qualified_callable_selection();
     test_generic_impl_method_instance_spec();
     test_generic_impl_method_instance_parts();

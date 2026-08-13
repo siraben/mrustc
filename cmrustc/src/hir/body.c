@@ -517,9 +517,62 @@ typedef struct CmHirBodyBuildState {
     size_t aggregate_storage_cursor;
     void *transaction_storage;
     int transaction_storage_adopted;
+    int trait_default_closed_slice;
     CmResolvePathSegmentView *path_segments;
     size_t path_segment_capacity;
 } CmHirBodyBuildState;
+
+static int cm_hir_body_trait_default_expression_supported(
+    const CmAst *ast, CmAstExprId expression_id, size_t depth)
+{
+    const CmAstExpr *expression;
+
+    expression = cm_ast_get_expr(ast, expression_id);
+    if (ast == NULL || expression == NULL || depth >= ast->expressions.len
+        || expression->attribute_count != 0u
+        || expression->attributes != NULL) {
+        return 0;
+    }
+    switch (expression->kind) {
+    case CM_AST_EXPR_LITERAL:
+        return 1;
+    case CM_AST_EXPR_PATH:
+        return cm_hir_body_exact_path_segment(ast,
+            expression->data.path.path) != NULL;
+    case CM_AST_EXPR_BINARY:
+        return expression->data.binary.left < expression_id
+            && expression->data.binary.right < expression_id
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.binary.left, depth + 1u)
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.binary.right, depth + 1u);
+    case CM_AST_EXPR_BLOCK:
+        return !expression->data.block.is_unsafe
+            && !expression->data.block.is_const
+            && expression->data.block.inner_attribute_count == 0u
+            && expression->data.block.inner_attributes == NULL
+            && expression->data.block.statement_count == 0u
+            && expression->data.block.statements == NULL
+            && expression->data.block.tail != CM_AST_EXPR_NONE
+            && expression->data.block.tail < expression_id
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.block.tail, depth + 1u);
+    case CM_AST_EXPR_IF:
+        return expression->data.if_expr.pattern == CM_AST_PATTERN_NONE
+            && expression->data.if_expr.condition < expression_id
+            && expression->data.if_expr.then_expr < expression_id
+            && expression->data.if_expr.else_expr != CM_AST_EXPR_NONE
+            && expression->data.if_expr.else_expr < expression_id
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.if_expr.condition, depth + 1u)
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.if_expr.then_expr, depth + 1u)
+            && cm_hir_body_trait_default_expression_supported(ast,
+                expression->data.if_expr.else_expr, depth + 1u);
+    default:
+        return 0;
+    }
+}
 
 static const CmHirItem *cm_hir_body_bound_item(
     const CmHirContext *context, CmHirDefId definition_id)
@@ -2057,6 +2110,11 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
     if (expression->attribute_count != 0u) {
         return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
     }
+    if (state->trait_default_closed_slice
+        && !cm_hir_body_trait_default_expression_supported(state->ast,
+            expression_id, depth)) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+    }
     switch (expression->kind) {
     case CM_AST_EXPR_RAW_REFERENCE:
     {
@@ -3538,6 +3596,9 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     build_state.body_id = body_id;
     build_state.body = body;
     build_state.owner_item = owner_item;
+    build_state.trait_default_closed_slice =
+        cm_hir_body_function_owner_kind(context, owner_item)
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT;
     build_state.ast = ast;
     build_state.graph = graph;
     build_state.imports = imports;

@@ -3241,6 +3241,216 @@ static CmSemanticBodyStatus cm_semantic_body_collect_calls(
     return status;
 }
 
+static int cm_semantic_body_trait_default_scalar(
+    const CmHirContext *hir, CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && (type->data.integer_type.kind == CM_HIR_INT_I32
+            || type->data.integer_type.kind == CM_HIR_INT_U32
+            || type->data.integer_type.kind == CM_HIR_INT_USIZE);
+}
+
+static CmSemanticBodyStatus cm_semantic_body_trait_default_mark(
+    const CmHirContext *hir, CmHirBodyId body_id,
+    CmHirExprId expression_id, unsigned char *seen, size_t depth,
+    const CmHirExpr **out_expression)
+{
+    const CmHirExpr *expression;
+
+    if (hir == NULL || seen == NULL || out_expression == NULL
+        || expression_id == CM_HIR_EXPR_NONE
+        || (size_t)expression_id > hir->expressions.len
+        || depth >= hir->expressions.len) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    expression = cm_hir_get_expr(hir, expression_id);
+    if (expression == NULL || expression->owner_body != body_id
+        || cm_hir_get_type(hir, expression->type) == NULL
+        || seen[(size_t)expression_id - 1u] != 0u) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    seen[(size_t)expression_id - 1u] = 1u;
+    *out_expression = expression;
+    return CM_SEMANTIC_BODY_OK;
+}
+
+static CmSemanticBodyStatus cm_semantic_body_trait_default_value(
+    const CmHirContext *hir, CmHirBodyId body_id,
+    CmHirExprId expression_id, unsigned char *seen, size_t depth)
+{
+    const CmHirExpr *expression;
+    CmSemanticBodyStatus status;
+
+    status = cm_semantic_body_trait_default_mark(hir, body_id,
+        expression_id, seen, depth, &expression);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+    if (!cm_semantic_body_trait_default_scalar(hir, expression->type)) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    switch (expression->kind) {
+    case CM_HIR_EXPR_INTEGER:
+    case CM_HIR_EXPR_LOCAL:
+        return CM_SEMANTIC_BODY_OK;
+    case CM_HIR_EXPR_BINARY:
+        if ((expression->data.binary.operator_kind != CM_HIR_BINARY_ADD
+                && expression->data.binary.operator_kind
+                    != CM_HIR_BINARY_SUBTRACT)
+            || (!cm_semantic_body_integer_kind(hir, expression->type,
+                    CM_HIR_INT_U32)
+                && !cm_semantic_body_integer_kind(hir, expression->type,
+                    CM_HIR_INT_USIZE))
+            || expression->data.binary.left >= expression_id
+            || expression->data.binary.right >= expression_id) {
+            return CM_SEMANTIC_BODY_UNSUPPORTED;
+        }
+        status = cm_semantic_body_trait_default_value(hir, body_id,
+            expression->data.binary.left, seen, depth + 1u);
+        return status != CM_SEMANTIC_BODY_OK ? status
+            : cm_semantic_body_trait_default_value(hir, body_id,
+                expression->data.binary.right, seen, depth + 1u);
+    default:
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+}
+
+static CmSemanticBodyStatus cm_semantic_body_trait_default_branch(
+    const CmHirContext *hir, CmHirBodyId body_id,
+    CmHirExprId expression_id, unsigned char *seen, size_t depth)
+{
+    const CmHirExpr *expression;
+    CmSemanticBodyStatus status;
+
+    status = cm_semantic_body_trait_default_mark(hir, body_id,
+        expression_id, seen, depth, &expression);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+    if (expression->kind != CM_HIR_EXPR_BLOCK
+        || !cm_semantic_body_trait_default_scalar(hir, expression->type)
+        || expression->data.block.statement_count != 0u
+        || expression->data.block.statements != NULL
+        || expression->data.block.tail_expression == CM_HIR_EXPR_NONE
+        || expression->data.block.tail_expression >= expression_id) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    return cm_semantic_body_trait_default_value(hir, body_id,
+        expression->data.block.tail_expression, seen, depth + 1u);
+}
+
+static CmSemanticBodyStatus cm_semantic_body_trait_default_if(
+    const CmHirContext *hir, CmHirBodyId body_id,
+    CmHirExprId expression_id, unsigned char *seen, size_t depth)
+{
+    const CmHirExpr *expression;
+    const CmHirExpr *condition;
+    const CmHirType *result_type;
+    CmSemanticBodyStatus status;
+
+    status = cm_semantic_body_trait_default_mark(hir, body_id,
+        expression_id, seen, depth, &expression);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+    result_type = cm_hir_get_type(hir, expression->type);
+    if (expression->kind != CM_HIR_EXPR_IF || result_type == NULL
+        || result_type->kind != CM_HIR_TYPE_INTEGER_KIND
+        || (result_type->data.integer_type.kind != CM_HIR_INT_U32
+            && result_type->data.integer_type.kind != CM_HIR_INT_USIZE)
+        || expression->data.if_expr.condition >= expression_id
+        || expression->data.if_expr.then_expression >= expression_id
+        || expression->data.if_expr.else_expression >= expression_id) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    status = cm_semantic_body_trait_default_mark(hir, body_id,
+        expression->data.if_expr.condition, seen, depth + 1u, &condition);
+    if (status != CM_SEMANTIC_BODY_OK) return status;
+    if (condition->kind != CM_HIR_EXPR_BINARY
+        || !cm_semantic_body_bool_type(hir, condition->type)
+        || condition->data.binary.operator_kind
+            != (result_type->data.integer_type.kind == CM_HIR_INT_U32
+                ? CM_HIR_BINARY_EQUAL : CM_HIR_BINARY_LESS)
+        || condition->data.binary.left
+            >= expression->data.if_expr.condition
+        || condition->data.binary.right
+            >= expression->data.if_expr.condition) {
+        return CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    status = cm_semantic_body_trait_default_value(hir, body_id,
+        condition->data.binary.left, seen, depth + 2u);
+    if (status == CM_SEMANTIC_BODY_OK) {
+        status = cm_semantic_body_trait_default_value(hir, body_id,
+            condition->data.binary.right, seen, depth + 2u);
+    }
+    if (status == CM_SEMANTIC_BODY_OK) {
+        status = cm_semantic_body_trait_default_branch(hir, body_id,
+            expression->data.if_expr.then_expression, seen, depth + 1u);
+    }
+    return status != CM_SEMANTIC_BODY_OK ? status
+        : cm_semantic_body_trait_default_branch(hir, body_id,
+            expression->data.if_expr.else_expression, seen, depth + 1u);
+}
+
+/*
+ * Reauthenticate the source-lowering capability at the typed-HIR boundary.
+ * Body lowering admits only one outer block, scalar let initializers, and an
+ * optional outer-tail if.  Rejecting every other already-typed graph here
+ * prevents callers from bypassing the deliberately closed trait-default
+ * slice through model construction APIs.
+ */
+static CmSemanticBodyStatus cm_semantic_body_trait_default_shape(
+    const CmHirContext *hir, CmHirBodyId body_id, const CmHirBody *body)
+{
+    const CmHirExpr *root;
+    const CmHirExpr *tail;
+    unsigned char *seen;
+    CmSemanticBodyStatus status;
+    uint32_t index;
+
+    if (hir == NULL || body == NULL || hir->expressions.len == 0u) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    seen = (unsigned char *)cm_alloc_zeroed(hir->expressions.len,
+        sizeof(*seen));
+    status = cm_semantic_body_trait_default_mark(hir, body_id,
+        body->root_expression, seen, 0u, &root);
+    if (status == CM_SEMANTIC_BODY_OK
+        && (root->kind != CM_HIR_EXPR_BLOCK
+            || !cm_semantic_body_trait_default_scalar(hir, root->type)
+            || root->data.block.tail_expression == CM_HIR_EXPR_NONE
+            || root->data.block.tail_expression >= body->root_expression
+            || (root->data.block.statement_count == 0u)
+                != (root->data.block.statements == NULL))) {
+        status = CM_SEMANTIC_BODY_UNSUPPORTED;
+    }
+    for (index = 0u; status == CM_SEMANTIC_BODY_OK
+            && index < root->data.block.statement_count; ++index) {
+        const CmHirStatement *statement;
+
+        statement = &root->data.block.statements[index];
+        if (statement->kind != CM_HIR_STATEMENT_LET
+            || statement->data.let_statement.initializer
+                >= body->root_expression) {
+            status = CM_SEMANTIC_BODY_UNSUPPORTED;
+        } else {
+            status = cm_semantic_body_trait_default_value(hir, body_id,
+                statement->data.let_statement.initializer, seen, 1u);
+        }
+    }
+    tail = status == CM_SEMANTIC_BODY_OK ? cm_hir_get_expr(hir,
+        root->data.block.tail_expression) : NULL;
+    if (status == CM_SEMANTIC_BODY_OK && tail == NULL) {
+        status = CM_SEMANTIC_BODY_INVALID;
+    } else if (status == CM_SEMANTIC_BODY_OK
+        && tail->kind == CM_HIR_EXPR_IF) {
+        status = cm_semantic_body_trait_default_if(hir, body_id,
+            root->data.block.tail_expression, seen, 1u);
+    } else if (status == CM_SEMANTIC_BODY_OK) {
+        status = cm_semantic_body_trait_default_value(hir, body_id,
+            root->data.block.tail_expression, seen, 1u);
+    }
+    cm_free(seen);
+    return status;
+}
+
 static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticSession *session, CmHirBodyId body_id,
     const CmHirTypeId *owner_type_substitutions,
@@ -3255,6 +3465,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     const CmHirBody *body;
     const CmHirItem *owner_item;
     const CmHirItem *enclosing_item;
+    const CmHirItem *trait_item;
     CmHirDefId owner;
     CmHirBodyFunctionOwnerKind owner_kind;
     CmTypeckContext *typeck;
@@ -3289,8 +3500,6 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     size_t checked_field_selection_bytes;
     size_t signature_parameter_bytes;
 
-    (void)definition_mode;
-
     result = cm_semantic_body_result(CM_SEMANTIC_BODY_INVALID, body_id);
     memset(&checked_facts, 0, sizeof(checked_facts));
     if (session == NULL || !cm_semantic_session_is_current(session)) {
@@ -3309,6 +3518,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             || owner_kind
                 == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD
         ? cm_semantic_body_item(hir, owner_item->parent_definition) : NULL;
+    trait_item = owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+        ? cm_semantic_body_item(hir, owner_item->parent_definition) : NULL;
     if (hir == NULL || body == NULL || owner_item == NULL
         || owner_item->kind != CM_HIR_ITEM_FUNCTION
         || owner_kind == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED
@@ -3319,15 +3530,24 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
             ? !cm_hir_def_id_is_none(
                 cm_semantic_session_enclosing_owner(session))
-            : enclosing_item == NULL
-                || enclosing_item->kind != CM_HIR_ITEM_IMPL
-                || !cm_hir_def_id_equal(owner_item->parent_definition,
-                    cm_semantic_session_enclosing_owner(session)))
+            : owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+                ? trait_item == NULL
+                    || trait_item->kind != CM_HIR_ITEM_TRAIT
+                    || !cm_hir_def_id_equal(
+                        owner_item->parent_definition,
+                        cm_semantic_session_enclosing_owner(session))
+                : enclosing_item == NULL
+                    || enclosing_item->kind != CM_HIR_ITEM_IMPL
+                    || !cm_hir_def_id_equal(
+                        owner_item->parent_definition,
+                        cm_semantic_session_enclosing_owner(session)))
         || (owner_type_substitution_count == 0u)
             != (owner_type_substitutions == NULL)
         || (instance_spec != NULL && instance_parts != NULL)
         || (definition_mode
             && (instance_spec != NULL || instance_parts != NULL))
+        || (!definition_mode
+            && owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT)
         || (!definition_mode && instance_spec == NULL
             && instance_parts == NULL
             && owner_kind
@@ -3455,6 +3675,19 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     result.status = cm_semantic_body_collect_calls(hir, body_id,
         body->root_expression, &call_expressions, &call_expression_count);
     if (result.status != CM_SEMANTIC_BODY_OK) return result;
+    if (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT) {
+        result.status = cm_semantic_body_trait_default_shape(hir, body_id,
+            body);
+    }
+    if (result.status != CM_SEMANTIC_BODY_OK
+        || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            && call_expression_count != 0u)) {
+        cm_free(call_expressions);
+        if (result.status == CM_SEMANTIC_BODY_OK) {
+            result.status = CM_SEMANTIC_BODY_UNSUPPORTED;
+        }
+        return result;
+    }
     if (!cm_size_mul(hir->expressions.len, sizeof(*expression_terms),
             &expression_term_bytes)) {
         result.status = CM_SEMANTIC_BODY_OVERFLOW;
@@ -3735,6 +3968,16 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             enclosing_item->generic_parameter_count;
         enclosing_instantiation.self_owner = enclosing_item->definition;
         enclosing_instantiation.self_type = owner_instantiation.self_type;
+    } else if (trait_item != NULL) {
+        /*
+         * A trait default's parameter environment has two authenticated
+         * owners even in the closed zero-generic slice: the method is exact
+         * and the trait is enclosing.  Keep the trait frame explicit so
+         * normalization validates the same environment that the session
+         * published.  There is intentionally no Self substitution here;
+         * signatures requiring one are rejected by body-owner admission.
+         */
+        enclosing_instantiation.parameter_owner = trait_item->definition;
     }
     result.status = instance_spec == NULL && instance_parts == NULL
         ? cm_semantic_body_allocate_arguments(
@@ -3828,7 +4071,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         return cm_semantic_body_fail_snapshot(result, typeck, &snapshot,
             call_expressions);
     }
-    if (enclosing_item != NULL
+    if ((enclosing_item != NULL || trait_item != NULL)
         && !cm_typeck_instantiation_is_valid(typeck,
             &enclosing_instantiation)) {
         result.status = CM_SEMANTIC_BODY_PENDING_SUBSTITUTION;
@@ -3848,6 +4091,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         owner_frames[1].argument_count =
             enclosing_item->generic_parameter_count;
         owner_scoped_instantiation.frame_count = 2u;
+    } else if (trait_item != NULL) {
+        owner_frames[1].parameter_owner = trait_item->definition;
+        owner_scoped_instantiation.frame_count = 2u;
     }
     if (!cm_typeck_scoped_instantiation_is_valid(typeck,
             &owner_scoped_instantiation)) {
@@ -3858,7 +4104,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     memset(&environment_substitution, 0,
         sizeof(environment_substitution));
     environment_substitution.exact = &owner_instantiation;
-    if (enclosing_item != NULL) {
+    if (enclosing_item != NULL || trait_item != NULL) {
         environment_substitution.enclosing = &enclosing_instantiation;
     }
     constraints.owner_instantiation = &owner_scoped_instantiation;

@@ -124,6 +124,42 @@ static const CmHirItem *find_free_function(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_trait_default(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmHirDefinition *parent_record;
+        const CmHirItem *parent;
+        const CmInternedString *stored_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        parent_record = item == NULL
+                || item->kind != CM_HIR_ITEM_FUNCTION
+                || cm_hir_def_id_is_none(item->parent_definition)
+            ? NULL : cm_hir_lookup_definition(hir,
+                item->parent_definition);
+        parent = parent_record == NULL
+                || parent_record->kind != CM_HIR_DEFINITION_ITEM
+                || parent_record->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir,
+                parent_record->entity.item_id);
+        stored_name = item == NULL ? NULL
+            : cm_interner_get(&hir->strings, item->name);
+        if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT
+            && item->data.function_item.body != CM_HIR_BODY_NONE
+            && stored_name != NULL && stored_name->len == length
+            && memcmp(stored_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static void lower_function(Fixture *f, const CmHirItem *function)
 {
     CmHirBodyLowerResult result;
@@ -249,6 +285,54 @@ static void test_semantic_failure_rolls_back(void)
         && f.hir.types.len == types
         && cm_hir_get_body(&f.hir, 1u)->state == CM_HIR_BODY_UNLOWERED
         && cm_hir_get_body(&f.hir, 2u)->state == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&f);
+}
+
+static void test_closed_trait_default_is_admitted_but_not_executable(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticBodyView body_view;
+    const CmSemanticResults *results;
+    const CmHirItem *method;
+    const CmHirBody *body;
+    CmMirContext mir;
+    CmMirLowerResult lower_result;
+
+    fixture_init(&f,
+        "fn first() -> u32 { 0u32 } "
+        "trait Closed { fn bump(value: u32) -> u32 { value + 1u32 } } "
+        "const VALUE: u32 = 2u32;");
+    method = find_trait_default(&f.hir, "bump");
+    assert(method != NULL
+        && cm_hir_body_function_owner_kind(&f.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT);
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    results = cm_semantic_admission_results(&admission);
+    body = cm_hir_get_body(&f.hir,
+        method->data.function_item.body);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && result.local_bodies.status == CM_HIR_LOCAL_BODIES_OK
+        && result.body_result.status == CM_SEMANTIC_BODY_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && results != NULL
+        && cm_semantic_results_body_count(results, &admission) == 2u
+        && cm_semantic_results_body(results, &admission,
+            method->data.function_item.body, &body_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(body_view.owner, method->definition));
+    cm_mir_context_init(&mir);
+    lower_result = cm_mir_lower_admitted_body(&mir, &admission,
+        method->data.function_item.body);
+    assert(lower_result.error_count == 1u
+        && lower_result.first_error.kind
+            == CM_MIR_LOWER_INVALID_ADMISSION
+        && lower_result.first_error.mir_status == CM_MIR_INVALID_ADMISSION
+        && cm_mir_body_count(&mir) == 0u);
+    cm_mir_context_destroy(&mir);
+    cm_semantic_admission_destroy(&admission);
     fixture_destroy(&f);
 }
 
@@ -2101,6 +2185,7 @@ int main(void)
     test_success_and_stale();
     test_body_failure_rolls_back();
     test_semantic_failure_rolls_back();
+    test_closed_trait_default_is_admitted_but_not_executable();
     test_concrete_impl_method_is_admitted();
     test_generic_impl_method_definition_is_admitted();
     test_impl_method_body_failure_is_atomic();

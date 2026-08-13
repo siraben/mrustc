@@ -1,5 +1,7 @@
 #include "cm/hir/body.h"
 
+#include <string.h>
+
 #define CM_HIR_BODY_OWNER_TYPE_DEPTH ((size_t)128u)
 
 static const CmHirItem *cm_hir_body_owner_item(
@@ -64,6 +66,114 @@ static int cm_hir_body_owner_constraints_empty(const CmHirItem *item)
         && item->predicates == NULL
         && item->outlives_predicate_count == 0u
         && item->outlives_predicates == NULL;
+}
+
+static int cm_hir_body_trait_default_scalar_type(
+    const CmHirContext *context, CmHirTypeId type_id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(context, type_id);
+    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && (type->data.integer_type.kind == CM_HIR_INT_I32
+            || type->data.integer_type.kind == CM_HIR_INT_U32
+            || type->data.integer_type.kind == CM_HIR_INT_USIZE);
+}
+
+static int cm_hir_body_trait_default_rust_abi(
+    const CmHirContext *context, CmInternId abi)
+{
+    const CmInternedString *name;
+
+    name = context == NULL ? NULL : cm_interner_get(&context->strings, abi);
+    return name != NULL && name->len == 4u
+        && memcmp(name->bytes, "Rust", 4u) == 0;
+}
+
+/*
+ * Until typeck has a rigid trait-owned Self term, admit only defaults whose
+ * signature is observationally independent of the enclosing trait.  Keep
+ * this deliberately narrower than the concrete-impl type predicate below:
+ * body.c pairs it with a syntax capability check that rejects all lookup and
+ * dispatch forms requiring a current-trait environment.
+ */
+static int cm_hir_body_trait_default_signature_supported(
+    const CmHirContext *context, const CmHirItem *trait_item,
+    const CmHirItem *method, const CmHirBody *body)
+{
+    const CmHirFunctionSignature *signature;
+    uint32_t index;
+    uint32_t local_index;
+
+    if (context == NULL || trait_item == NULL || method == NULL
+        || body == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || method->kind != CM_HIR_ITEM_FUNCTION
+        || trait_item->definition.crate_id != method->definition.crate_id
+        || trait_item->owner_module != method->owner_module
+        || trait_item->data.trait_item.safety != CM_HIR_SAFE
+        || trait_item->data.trait_item.is_auto
+        || trait_item->data.trait_item.supertrait_count != 0u
+        || trait_item->data.trait_item.supertraits != NULL
+        || !cm_hir_def_id_equal(method->parent_definition,
+            trait_item->definition)
+        || method->data.function_item.body == CM_HIR_BODY_NONE
+        || cm_hir_def_id_is_none(method->definition)
+        || !cm_hir_def_id_is_none(
+            method->data.function_item.trait_item_definition)
+        || !cm_hir_def_id_equal(body->owner, method->definition)
+        || body->source == 0u || body->source_expression_id == 0u
+        || body->span.source != body->source
+        || body->span.start > body->span.end
+        || (body->state == CM_HIR_BODY_UNLOWERED
+                ? body->root_expression != CM_HIR_EXPR_NONE
+            : body->state == CM_HIR_BODY_TYPED
+                ? body->root_expression == CM_HIR_EXPR_NONE
+                : 1)
+        || body->error_reason != CM_INTERN_ID_NONE) {
+        return 0;
+    }
+    signature = &method->data.function_item.signature;
+    if (signature->receiver != CM_HIR_RECEIVER_NONE
+        || signature->safety != CM_HIR_SAFE || signature->is_const
+        || signature->is_async || signature->is_variadic
+        || !cm_hir_body_trait_default_rust_abi(context, signature->abi)
+        || body->expected_type != signature->return_type
+        || body->parameter_count != signature->parameter_count
+        || !cm_hir_body_trait_default_scalar_type(context,
+            signature->return_type)
+        || (signature->parameter_count == 0u)
+            != (signature->parameters == NULL)
+        || (body->local_count == 0u) != (body->locals == NULL)) {
+        return 0;
+    }
+    local_index = 0u;
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        const CmHirFunctionParameter *parameter;
+
+        parameter = &signature->parameters[index];
+        if (!cm_hir_body_trait_default_scalar_type(context,
+                parameter->type)) {
+            return 0;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
+        if (parameter->binding_kind != CM_HIR_BINDING_NAMED
+            || local_index >= body->local_count
+            || body->locals[local_index].parameter_index != index
+            || body->locals[local_index].name != parameter->name
+            || body->locals[local_index].type != parameter->type) {
+            return 0;
+        }
+        ++local_index;
+    }
+    for (; local_index < body->local_count; ++local_index) {
+        if (body->locals[local_index].parameter_index
+                != CM_HIR_PARAMETER_INDEX_NONE
+            || !cm_hir_body_trait_default_scalar_type(context,
+                body->locals[local_index].type)) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int cm_hir_body_owner_impl_type_parameter(
@@ -247,6 +357,7 @@ static int cm_hir_body_owner_type_supported(const CmHirContext *context,
 CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
     const CmHirContext *context, const CmHirItem *item)
 {
+    const CmHirBody *body;
     const CmHirItem *parent;
     const CmHirItem *trait_method;
 
@@ -261,6 +372,22 @@ CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
             : CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED;
     }
     parent = cm_hir_body_owner_item(context, item->parent_definition);
+    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
+        body = cm_hir_get_body(context,
+            item->data.function_item.body);
+        return cm_hir_body_owner_constraints_empty(parent)
+                && cm_hir_body_owner_constraints_empty(item)
+                && parent->generic_parameter_count == 0u
+                && parent->generic_parameter_start
+                    == CM_HIR_GENERIC_PARAM_NONE
+                && item->generic_parameter_count == 0u
+                && item->generic_parameter_start
+                    == CM_HIR_GENERIC_PARAM_NONE
+                && cm_hir_body_trait_default_signature_supported(context,
+                    parent, item, body)
+            ? CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT
+            : CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED;
+    }
     if (parent == NULL || parent->kind != CM_HIR_ITEM_IMPL
         || !cm_hir_body_owner_type_parameters_supported(context, parent)
         || !cm_hir_body_owner_constraints_empty(parent)

@@ -113,6 +113,40 @@ static const CmHirItem *find_impl_function(const CmHirContext *hir,
     return NULL;
 }
 
+static const CmHirItem *find_trait_function(const CmHirContext *hir,
+    const char *name)
+{
+    size_t index;
+    size_t length;
+
+    length = strlen(name);
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmHirItem *parent;
+        const CmHirDefinition *parent_definition;
+        const CmInternedString *item_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        parent_definition = item == NULL
+                || item->kind != CM_HIR_ITEM_FUNCTION
+                || cm_hir_def_id_is_none(item->parent_definition)
+            ? NULL : cm_hir_lookup_definition(hir,
+                item->parent_definition);
+        parent = parent_definition == NULL
+                || parent_definition->kind != CM_HIR_DEFINITION_ITEM
+                || parent_definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir,
+                parent_definition->entity.item_id);
+        if (parent == NULL || parent->kind != CM_HIR_ITEM_TRAIT) continue;
+        item_name = cm_interner_get(&hir->strings, item->name);
+        if (item_name != NULL && item_name->len == length
+            && memcmp(item_name->bytes, name, length) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
 static const CmHirItem *find_struct(const CmHirContext *hir,
     const char *name)
 {
@@ -597,6 +631,177 @@ static void test_value_block_rejections_are_transactional(void)
         hir_snapshot_destroy(&snapshot);
         fixture_destroy(&fixture);
     }
+}
+
+static void test_closed_trait_default_bodies(void)
+{
+    static const char *unsupported_owners[] = {
+        "trait T { fn value(self) -> u32 { 1u32 } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn value() -> Self { loop {} } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T<X> { fn value(x: u32) -> u32 { x } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn value<X>(x: u32) -> u32 { x } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait Base {} trait T: Base { "
+            "fn value(x: u32) -> u32 { x } } "
+            "fn main() -> u32 { 0u32 }",
+        "struct Wrap { value: u32 } trait T { "
+            "fn value(x: Wrap) -> Wrap { x } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn value(x: &'static u32) -> &'static u32 { x } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { unsafe fn value(x: u32) -> u32 { x } } "
+            "fn main() -> u32 { 0u32 }"
+    };
+    static const char *unsupported_expressions[] = {
+        "fn helper(x: u32) -> u32 { x } "
+            "trait T { fn value(x: u32) -> u32 { helper(x) } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn required(x: u32) -> u32; "
+            "fn value(x: u32) -> u32 { T::required(x) } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn required(x: u32) -> u32; "
+            "fn value(x: u32) -> u32 { <u32 as T>::required(x) } } "
+            "fn main() -> u32 { 0u32 }",
+        "struct Wrap { value: u32 } "
+            "trait T { fn value(x: u32) -> u32 { Wrap { value: x }.value } } "
+            "fn main() -> u32 { 0u32 }",
+        "trait T { fn required(&self) -> u32; "
+            "fn value(x: u32) -> u32 { x.required() } } "
+            "fn main() -> u32 { 0u32 }"
+    };
+    TestFixture fixture;
+    CmHirLocalBodiesResult result;
+    const CmHirItem *method;
+    const CmHirItem *trait_item;
+    const CmHirBody *body;
+    const CmHirExpr *root;
+    const CmHirExpr *tail;
+    CmHirTraitPredicate predicate;
+    CmHirPredicateScope predicate_scope;
+    CmHirOutlivesPredicate outlives;
+    CmInternId rust_abi;
+    TestHirSnapshot snapshot;
+    size_t index;
+
+    fixture_init(&fixture,
+        "trait Closed { fn bump(value: u32) -> u32 { value + 1u32 } "
+        "fn choose(value: u32) -> u32 { "
+        "if value == 0u32 { 1u32 } else { value } } } "
+        "fn main() -> u32 { 0u32 }");
+    method = find_trait_function(&fixture.hir, "bump");
+    assert(method != NULL
+        && cm_hir_body_function_owner_kind(&fixture.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT);
+    result = lower_fixture_local_bodies(&fixture);
+    body = cm_hir_get_body(&fixture.hir,
+        method->data.function_item.body);
+    root = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir,
+            root->data.block.tail_expression);
+    assert(result.status == CM_HIR_LOCAL_BODIES_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && body->parameter_count == 1u && body->local_count == 1u
+        && root != NULL && root->kind == CM_HIR_EXPR_BLOCK
+        && tail != NULL && tail->kind == CM_HIR_EXPR_BINARY
+        && cm_hir_body_function_owner_kind(&fixture.hir, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT);
+    fixture_destroy(&fixture);
+
+    for (index = 0u;
+         index < sizeof(unsupported_owners) / sizeof(unsupported_owners[0]);
+         ++index) {
+        fixture_init(&fixture, unsupported_owners[index]);
+        method = find_trait_function(&fixture.hir, "value");
+        assert(method != NULL
+            && cm_hir_body_function_owner_kind(&fixture.hir, method)
+                == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+        result = lower_fixture_local_bodies(&fixture);
+        assert(result.status == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
+            && result.body == method->data.function_item.body);
+        fixture_destroy(&fixture);
+    }
+
+    for (index = 0u; index < sizeof(unsupported_expressions)
+            / sizeof(unsupported_expressions[0]); ++index) {
+        fixture_init(&fixture, unsupported_expressions[index]);
+        method = find_trait_function(&fixture.hir, "value");
+        assert(method != NULL
+            && cm_hir_body_function_owner_kind(&fixture.hir, method)
+                == CM_HIR_BODY_FUNCTION_OWNER_TRAIT_DEFAULT);
+        hir_snapshot_take(&fixture.hir, &snapshot);
+        result = lower_fixture_local_bodies(&fixture);
+        assert(result.status == CM_HIR_LOCAL_BODIES_BODY_FAILURE
+            && result.body == method->data.function_item.body
+            && result.body_result.status
+                == CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+        hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+        hir_snapshot_destroy(&snapshot);
+        fixture_destroy(&fixture);
+    }
+
+    fixture_init(&fixture,
+        "trait T { fn value(x: u32) -> u32 { x } } "
+        "fn main() -> u32 { 0u32 }");
+    method = find_trait_function(&fixture.hir, "value");
+    trait_item = find_trait(&fixture.hir, "T");
+    assert(method != NULL && trait_item != NULL);
+    ((CmHirItem *)trait_item)->data.trait_item.is_auto = 1;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)trait_item)->data.trait_item.is_auto = 0;
+    memset(&predicate, 0, sizeof(predicate));
+    ((CmHirItem *)method)->predicates = &predicate;
+    ((CmHirItem *)method)->predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->predicates = NULL;
+    ((CmHirItem *)method)->predicate_count = 0u;
+    ((CmHirItem *)trait_item)->predicates = &predicate;
+    ((CmHirItem *)trait_item)->predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)trait_item)->predicates = NULL;
+    ((CmHirItem *)trait_item)->predicate_count = 0u;
+    memset(&predicate_scope, 0, sizeof(predicate_scope));
+    ((CmHirItem *)method)->predicate_scopes = &predicate_scope;
+    ((CmHirItem *)method)->predicate_scope_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->predicate_scopes = NULL;
+    ((CmHirItem *)method)->predicate_scope_count = 0u;
+    memset(&outlives, 0, sizeof(outlives));
+    ((CmHirItem *)trait_item)->outlives_predicates = &outlives;
+    ((CmHirItem *)trait_item)->outlives_predicate_count = 1u;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)trait_item)->outlives_predicates = NULL;
+    ((CmHirItem *)trait_item)->outlives_predicate_count = 0u;
+    ((CmHirItem *)method)->data.function_item.signature.receiver =
+        CM_HIR_RECEIVER_VALUE;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->data.function_item.signature.receiver =
+        CM_HIR_RECEIVER_NONE;
+    ((CmHirItem *)method)->data.function_item.signature.is_const = 1;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->data.function_item.signature.is_const = 0;
+    ((CmHirItem *)method)->data.function_item.signature.is_async = 1;
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->data.function_item.signature.is_async = 0;
+    rust_abi = method->data.function_item.signature.abi;
+    ((CmHirItem *)method)->data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "C");
+    assert(cm_hir_body_function_owner_kind(&fixture.hir, method)
+        == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    ((CmHirItem *)method)->data.function_item.signature.abi = rust_abi;
+    fixture_destroy(&fixture);
 }
 
 static void test_generic_impl_method_body_owner(void)
@@ -4254,6 +4459,7 @@ int main(void)
     test_free_value_body_owners();
     test_value_body_atomic_rollback_and_owner_rejection();
     test_value_block_rejections_are_transactional();
+    test_closed_trait_default_bodies();
     test_generic_impl_method_body_owner();
     test_exact_i32_body();
     test_source_backed_named_aggregate_body();
