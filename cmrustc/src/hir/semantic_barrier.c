@@ -125,6 +125,51 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
 
         item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
         if (item == NULL) return 0;
+        if (!cm_semantic_barrier_hash_array(&hash,
+                item->predicate_scopes,
+                (size_t)item->predicate_scope_count,
+                sizeof(*item->predicate_scopes))
+            || !cm_semantic_barrier_hash_array(&hash,
+                item->predicates, (size_t)item->predicate_count,
+                sizeof(*item->predicates))
+            || !cm_semantic_barrier_hash_array(&hash,
+                item->outlives_predicates,
+                (size_t)item->outlives_predicate_count,
+                sizeof(*item->outlives_predicates))) return 0;
+        {
+            uint32_t predicate_index;
+            uint32_t scope_index;
+
+            for (scope_index = 0u;
+                 scope_index < item->predicate_scope_count; ++scope_index) {
+                if (!cm_semantic_barrier_hash_array(&hash,
+                        item->predicate_scopes[scope_index]
+                            .binder.lifetimes,
+                        (size_t)item->predicate_scopes[scope_index]
+                            .binder.lifetime_count,
+                        sizeof(*item->predicate_scopes[scope_index]
+                            .binder.lifetimes))) return 0;
+            }
+            for (predicate_index = 0u;
+                 predicate_index < item->predicate_count;
+                 ++predicate_index) {
+                if (!cm_semantic_barrier_hash_named(&hash,
+                        &item->predicates[predicate_index].trait_type)
+                    || !cm_semantic_barrier_hash_array(&hash,
+                        item->predicates[predicate_index].equalities,
+                        (size_t)item->predicates[predicate_index]
+                            .equality_count,
+                        sizeof(*item->predicates[predicate_index]
+                            .equalities))
+                    || !cm_semantic_barrier_hash_array(&hash,
+                        item->predicates[predicate_index]
+                            .binder.lifetimes,
+                        (size_t)item->predicates[predicate_index]
+                            .binder.lifetime_count,
+                        sizeof(*item->predicates[predicate_index]
+                            .binder.lifetimes))) return 0;
+            }
+        }
         if (item->kind == CM_HIR_ITEM_FUNCTION) {
             if (!cm_semantic_barrier_hash_array(&hash,
                     item->data.function_item.signature.parameters,
@@ -139,6 +184,97 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
                     item->data.aggregate_item.fields,
                     (size_t)item->data.aggregate_item.field_count,
                     sizeof(*item->data.aggregate_item.fields))) return 0;
+        } else if (item->kind == CM_HIR_ITEM_ENUM) {
+            uint32_t variant_index;
+
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.enum_item.variants,
+                    (size_t)item->data.enum_item.variant_count,
+                    sizeof(*item->data.enum_item.variants))) return 0;
+            for (variant_index = 0u;
+                 variant_index < item->data.enum_item.variant_count;
+                 ++variant_index) {
+                if (!cm_semantic_barrier_hash_array(&hash,
+                        item->data.enum_item.variants[variant_index].fields,
+                        (size_t)item->data.enum_item
+                            .variants[variant_index].field_count,
+                        sizeof(*item->data.enum_item
+                            .variants[variant_index].fields))) return 0;
+            }
+        } else if (item->kind == CM_HIR_ITEM_TYPE_ALIAS) {
+            uint32_t bound_index;
+
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.type_alias_item.bounds,
+                    (size_t)item->data.type_alias_item.bound_count,
+                    sizeof(*item->data.type_alias_item.bounds))) return 0;
+            for (bound_index = 0u;
+                 bound_index < item->data.type_alias_item.bound_count;
+                 ++bound_index) {
+                if (!cm_semantic_barrier_hash_named(&hash,
+                        &item->data.type_alias_item.bounds[bound_index]
+                            .trait_type)
+                    || !cm_semantic_barrier_hash_array(&hash,
+                        item->data.type_alias_item.bounds[bound_index]
+                            .equalities,
+                        (size_t)item->data.type_alias_item
+                            .bounds[bound_index].equality_count,
+                        sizeof(*item->data.type_alias_item
+                            .bounds[bound_index].equalities))) return 0;
+            }
+        } else if (item->kind == CM_HIR_ITEM_TRAIT) {
+            uint32_t supertrait_index;
+
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.trait_item.supertraits,
+                    (size_t)item->data.trait_item.supertrait_count,
+                    sizeof(*item->data.trait_item.supertraits))) return 0;
+            for (supertrait_index = 0u;
+                 supertrait_index < item->data.trait_item.supertrait_count;
+                 ++supertrait_index) {
+                if (!cm_semantic_barrier_hash_named(&hash,
+                        &item->data.trait_item
+                            .supertraits[supertrait_index].trait_type)
+                    || !cm_semantic_barrier_hash_array(&hash,
+                        item->data.trait_item
+                            .supertraits[supertrait_index].equalities,
+                        (size_t)item->data.trait_item
+                            .supertraits[supertrait_index].equality_count,
+                        sizeof(*item->data.trait_item
+                            .supertraits[supertrait_index].equalities))) {
+                    return 0;
+                }
+            }
+        } else if (item->kind == CM_HIR_ITEM_IMPL
+            && item->data.impl_item.has_trait
+            && !cm_semantic_barrier_hash_named(&hash,
+                &item->data.impl_item.trait_type)) {
+            return 0;
+        } else if (item->kind == CM_HIR_ITEM_TRAIT_ALIAS) {
+            uint32_t bound_index;
+
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    item->data.trait_alias_item.bounds,
+                    (size_t)item->data.trait_alias_item.bound_count,
+                    sizeof(*item->data.trait_alias_item.bounds))) return 0;
+            for (bound_index = 0u;
+                 bound_index < item->data.trait_alias_item.bound_count;
+                 ++bound_index) {
+                if (item->data.trait_alias_item.bounds[bound_index].kind
+                        == CM_HIR_TRAIT_ALIAS_BOUND_TRAIT
+                    && (!cm_semantic_barrier_hash_named(&hash,
+                        &item->data.trait_alias_item.bounds[bound_index]
+                            .data.trait_bound.trait_type)
+                        || !cm_semantic_barrier_hash_array(&hash,
+                        item->data.trait_alias_item.bounds[bound_index]
+                            .data.trait_bound.equalities,
+                        (size_t)item->data.trait_alias_item
+                            .bounds[bound_index].data.trait_bound
+                            .equality_count,
+                        sizeof(*item->data.trait_alias_item
+                            .bounds[bound_index].data.trait_bound
+                            .equalities)))) return 0;
+            }
         }
     }
     for (index = 0u; index < hir->bodies.len; ++index) {
@@ -365,6 +501,9 @@ static CmSemanticBarrierResult cm_semantic_barrier_result(
         CM_HIR_BODY_LOWER_INVALID_ARGUMENT;
     result.hir_status = CM_HIR_OK;
     result.expression = CM_HIR_EXPR_NONE;
+    result.type = CM_HIR_TYPE_NONE;
+    result.has_region = 0;
+    result.generic_parameter = CM_HIR_GENERIC_PARAM_NONE;
     return result;
 }
 
@@ -442,6 +581,80 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
     state->phase = CM_SEMANTIC_BARRIER_MARKED;
     result.status = CM_SEMANTIC_BARRIER_OK;
     result.phase = CM_SEMANTIC_BARRIER_MARKED;
+    return result;
+}
+
+CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
+    CmSemanticBarrier *barrier)
+{
+    CmSemanticBarrierState *state;
+    CmSemanticBarrierResult result;
+    CmSemanticRegionsResult regions_result;
+    CmHirBodyId *bodies;
+    size_t body_bytes;
+    size_t index;
+
+    result = cm_semantic_barrier_result(
+        CM_SEMANTIC_BARRIER_INVALID_ARGUMENT,
+        CM_SEMANTIC_BARRIER_NONE);
+    state = barrier == NULL ? NULL
+        : (CmSemanticBarrierState *)barrier->state;
+    if (state == NULL) return result;
+    result.phase = state->phase;
+    if (!cm_semantic_barrier_state_current(state)) {
+        result.status = CM_SEMANTIC_BARRIER_STALE;
+        result.phase = CM_SEMANTIC_BARRIER_NONE;
+        return result;
+    }
+    if (state->phase != CM_SEMANTIC_BARRIER_MARKED) {
+        result.status = CM_SEMANTIC_BARRIER_PHASE_ORDER;
+        return result;
+    }
+    if (!cm_semantic_barrier_typed_snapshot_matches(state)) {
+        result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
+        return result;
+    }
+    for (index = 0u; index < state->atom_count; ++index) {
+        if (!cm_semantic_barrier_atom_still_matches(state, index)) {
+            result.status = CM_SEMANTIC_BARRIER_INVALID_HIR;
+            result.atom_index = index;
+            result.atom = state->atoms[index];
+            return result;
+        }
+    }
+    if (!cm_size_mul(state->atom_count, sizeof(*bodies), &body_bytes)) {
+        result.status = CM_SEMANTIC_BARRIER_HIR_FAILURE;
+        result.hir_status = CM_HIR_ID_EXHAUSTED;
+        return result;
+    }
+    bodies = body_bytes == 0u ? NULL
+        : (CmHirBodyId *)cm_alloc(body_bytes);
+    for (index = 0u; index < state->atom_count; ++index)
+        bodies[index] = state->atoms[index].body;
+    regions_result = cm_hir_semantic_check_regions(state->hir, bodies,
+        state->atom_count);
+    cm_free(bodies);
+    if (regions_result.status != CM_SEMANTIC_REGIONS_OK) {
+        result.status = regions_result.status
+                == CM_SEMANTIC_REGIONS_UNSUPPORTED_EXPRESSION
+            ? CM_SEMANTIC_BARRIER_UNSUPPORTED_ATOM
+            : CM_SEMANTIC_BARRIER_INVALID_HIR;
+        result.expression = regions_result.expression;
+        result.type = regions_result.type;
+        result.has_region = regions_result.has_region;
+        result.region_kind = regions_result.region_kind;
+        result.generic_parameter = regions_result.generic_parameter;
+        if (regions_result.body_index < state->atom_count) {
+            result.atom_index = regions_result.body_index;
+            result.atom = state->atoms[regions_result.body_index];
+        }
+        return result;
+    }
+    cm_semantic_barrier_capture_generation(state);
+    state->capability_id = cm_semantic_barrier_new_capability_id();
+    state->phase = CM_SEMANTIC_BARRIER_REGIONS;
+    result.status = CM_SEMANTIC_BARRIER_OK;
+    result.phase = CM_SEMANTIC_BARRIER_REGIONS;
     return result;
 }
 

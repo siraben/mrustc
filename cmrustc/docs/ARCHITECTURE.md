@@ -317,6 +317,25 @@ use canonical HIR schema `hir-v28`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond advance the current canonical schema to `mir-v7`.
 
+The generation-bound whole-local-body barrier now reaches a read-only REGIONS
+checkpoint after TYPED and MARKED. MARKED atomically records builtin-Copy
+value usage for the bounded C expression slice and a NOT_PROMOTED sentinel.
+REGIONS recomputes that bounded usage while replaying the complete represented
+expression forest, authenticates owner/body,
+signature, local, expression-type, and direct-call-substitution roots, and
+recursively checks nested type, generic, and const arguments. It admits
+`static`, erased, and exact item/enclosing-frame early-bound regions while
+rejecting inference/error/late-bound regions, inference/error types or consts,
+malformed arrays, type cycles, expression DAGs/cycles/orphans, and unresolved
+method/qualified/borrow/dereference forms. Success rotates the process-local
+capability without changing either HIR generation. This is structural
+zero-inference closure for represented bodies, not lifetime equality,
+outlives, promotion eligibility, place, or borrow checking. Item predicates,
+supertraits, associated bounds, ADT declaration fields, enum discriminants,
+and type-position expression bodies are deliberately not REGIONS roots yet;
+manifest body owners and enclosing trait/impl items with any predicate or
+outlives constraint are therefore rejected fail-closed.
+
 ### Named aggregate expression checkpoint
 
 The parser constructs named struct expressions for explicit fields, shorthand

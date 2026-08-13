@@ -49,21 +49,31 @@ command. Task IDs are stable.
 
 ### Semantic barrier checkpoints
 
-- The complete cfg-active body manifest now advances through an atomic
-  pre-region MARKED checkpoint.  Every reachable expression records its
-  original-mrustc value-usage context, and every site records explicit
-  checked-not-promoted static-borrow evidence.  The pass rejects shared-child
-  DAGs, cycles, wrong body ownership, premarked/spoofed evidence, unresolved
-  receiver dispatch, and borrow/dereference forms without place/adjustment
-  evidence before changing HIR.  Positive static promotion remains blocked on
-  constness, layout, and interior-mutability proofs.
-- The next REGIONS checkpoint is deliberately narrower than original mrustc's
-  lifetime solver: first prove the current admitted manifest contains no
-  region inference variables and only structurally authenticated explicit
-  regions.  Do not claim early-bound outlives/equality semantics until an
-  independent constraint checker exists.  Enum discriminants and unevaluated
-  array lengths also remain outside the body manifest until they have stable
-  type-position atom identities.
+- The complete cfg-active body manifest now advances atomically through
+  `STRUCTURAL -> TYPED -> MARKED -> REGIONS`. MARKED computes the bounded C
+  expression slice's value usage with its builtin-Copy subset and writes a
+  NOT_PROMOTED sentinel because that slice admits no promotion-ready borrow
+  form. REGIONS is a read-only structural closure proof over represented
+  parameter/result/value types, body locals, expression types, direct-call
+  substitutions, generic arguments/defaults, const-argument types, and their
+  conservatively bounded nested type forms. It accepts static/erased regions
+  and exact early-bound lifetime parameters owned by the body item or its
+  authenticated enclosing trait/impl, while rejecting inference/error/
+  late-bound regions, inference/error types and consts, wrong parameter
+  ownership, cycles, shared DAGs, wrong body ownership, and inconsistent
+  MARKED evidence. Success changes no HIR generation and mints a fresh REGIONS
+  capability; every failure preserves phase, generation, and capability.
+- This first REGIONS checkpoint is deliberately narrower than original
+  mrustc's lifetime solver. It does not traverse item predicates, supertraits,
+  associated bounds, ADT field declarations, enum discriminants, or
+  type-position expressions; represented body owners and their enclosing
+  trait/impl are rejected if any predicate or outlives constraint is present.
+  It does not claim lifetime inference,
+  early-bound outlives/equality, promotion eligibility, or borrow semantics.
+  Enum discriminants and unevaluated array lengths remain outside the body
+  manifest until they have stable type-position atom identities. The next
+  checkpoint begins the ordered closure/static-promotion/vtable/UFCS/reborrow/
+  erased-type rewrites before independent rewritten-HIR validation.
 
 ### Active front-end evidence
 
@@ -1796,8 +1806,9 @@ and HIR ownership on every query. Graph, import-resolver, and module-map
 object lifetimes plus import/map snapshot generations prevent both
 destroy/reinitialize address reuse and identical re-resolve/clear-rebind ABA.
 Structural preflight rejects orphaned or
-aliased body ownership without mutation. The only implemented transition is a
-real atomic `STRUCTURAL -> TYPED` pass through local-body lowering: failure
+aliased body ownership without mutation. The implemented transitions begin
+with a real atomic `STRUCTURAL -> TYPED` pass through local-body lowering:
+failure
 rolls the entire HIR transaction back and recaptures the new generation so the
 same manifest remains inspectable and retryable at STRUCTURAL. Successful
 transitions and mutating rollbacks mint a fresh exact-generation capability.
@@ -1819,8 +1830,18 @@ generic frames, and opaque returns fail closed before mutation. Semantic
 definition checking and durable results include these defaults, while
 instance-mode checking and direct MIR lowering reject them: inherited-default
 execution still needs a concrete selected impl, trait-owned rigid `Self`, and
-instance-aware MIR substitution. No API can yet mint MARKED, REGIONS,
-REWRITTEN, or VALIDATED, and normalized array lengths/discriminants are not
+instance-aware MIR substitution. The complete typed manifest now mints MARKED
+by atomically publishing value-usage and checked-not-promoted static-borrow
+evidence. A separate read-only `MARKED -> REGIONS` validator authenticates
+owner/body links, signature/local/expression/direct-call type roots, bounded
+MARKED evidence, nested type/const/generic structure, scoped early-bound
+regions, and graph integrity. Success preserves both HIR generations and
+rotates only the process-local capability. This proves zero inference
+variables in the represented body roots, not lifetime inference/equality,
+outlives, promotion eligibility, or borrow validity. Constrained body owners,
+declaration bounds/fields, discriminants, and type-position expression bodies
+remain outside this checkpoint. No API can yet mint REWRITTEN or VALIDATED, and normalized
+array lengths/discriminants are not
 misrepresented as type-position body atoms while HIR lacks stable source body
 identities for them.
 

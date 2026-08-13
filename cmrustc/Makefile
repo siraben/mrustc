@@ -73,6 +73,7 @@ HIR_SOURCES := \
 	src/hir/semantic.c \
 	src/hir/semantic_barrier.c \
 	src/hir/semantic_mark.c \
+	src/hir/semantic_regions.c \
 	src/hir/semantic_body.c \
 	src/hir/semantic_item.c \
 	src/hir/semantic_results.c \

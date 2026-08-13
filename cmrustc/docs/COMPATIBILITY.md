@@ -281,6 +281,21 @@ on a reachable root. A private unsupported body outside root reachability
 remains omitted rather than guessed. Canonical dumps are `hir-v28` and
 `mir-v7`.
 
+The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
+expression slice. The proof is read-only and covers bounded MARKED evidence,
+owner signatures/value declarations, body expected/local types, every
+reachable expression type, direct-call substitutions, and recursively nested
+type/const/generic arguments. Static, erased, and correctly scoped early-bound
+regions are accepted; unresolved regions/types/consts and malformed or
+aliased graphs fail without changing phase, generation, or capability. This
+does not implement original mrustc's lifetime inference, region equality/
+outlives inference, promotion eligibility, or borrow checking. Item
+predicates, declaration bounds/fields, type-position unevaluated array
+expressions, and explicit enum discriminants remain outside this rooted proof.
+Manifest body owners and enclosing trait/impl items with predicates or
+outlives constraints reject instead of silently escaping that proof;
+the latter two still lack manifest atom identities.
+
 The first exact control-flow slice accepts `if left == right { then_u32 }
 else { else_u32 }`. Equality is restricted to exact u32 operands and produces
 an internal bool; the two blocks must assign one u32 destination and converge

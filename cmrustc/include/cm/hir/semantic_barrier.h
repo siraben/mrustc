@@ -2,6 +2,7 @@
 #define CMRUSTC_CM_HIR_SEMANTIC_BARRIER_H
 
 #include "cm/hir/body.h"
+#include "cm/hir/semantic_regions.h"
 
 typedef enum CmSemanticBarrierPhase {
     CM_SEMANTIC_BARRIER_NONE = 0,
@@ -58,6 +59,11 @@ typedef struct CmSemanticBarrierResult {
     CmHirStatus hir_status;
     /* First expression rejected by a post-typing manifest phase, if any. */
     CmHirExprId expression;
+    /* First type/region rejected by a post-typing manifest phase, if any. */
+    CmHirTypeId type;
+    int has_region;
+    CmHirRegionKind region_kind;
+    CmHirGenericParamId generic_parameter;
 } CmSemanticBarrierResult;
 
 #define CM_SEMANTIC_ATOM_INDEX_NONE ((size_t)-1)
@@ -102,6 +108,15 @@ CmSemanticBarrierResult cm_semantic_barrier_advance_typed(
  * capability identity unchanged.
  */
 CmSemanticBarrierResult cm_semantic_barrier_advance_marked(
+    CmSemanticBarrier *barrier);
+
+/*
+ * Prove bounded structural region closure for the represented roots of the
+ * complete marked body manifest. Success is read-only: HIR semantic/rewind
+ * generations are unchanged while a fresh REGIONS capability is minted.
+ * Failure preserves phase, generation, and capability exactly.
+ */
+CmSemanticBarrierResult cm_semantic_barrier_advance_regions(
     CmSemanticBarrier *barrier);
 
 void cm_semantic_barrier_destroy(CmSemanticBarrier *barrier);

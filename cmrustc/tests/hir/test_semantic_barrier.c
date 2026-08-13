@@ -82,6 +82,11 @@ static CmSemanticBarrierResult advance_marked(CmSemanticBarrier *barrier)
     return cm_semantic_barrier_advance_marked(barrier);
 }
 
+static CmSemanticBarrierResult advance_regions(CmSemanticBarrier *barrier)
+{
+    return cm_semantic_barrier_advance_regions(barrier);
+}
+
 static CmHirExpr *mutable_expr(Fixture *fixture, CmHirExprId expression)
 {
     if (expression == CM_HIR_EXPR_NONE
@@ -260,8 +265,8 @@ static void test_marked_preflight_is_atomic(void)
     CmSemanticBarrier barrier;
     CmSemanticBarrierResult result;
     CmHirBody *body;
-    CmHirExpr *root;
-    CmHirExpr *tail;
+    CmHirExpr *root = NULL;
+    CmHirExpr *tail = NULL;
     CmHirExpr saved_tail;
     CmHirExprId saved_root_tail;
     CmHirExprId initializer;
@@ -361,6 +366,290 @@ static void test_marked_preflight_is_atomic(void)
         && fixture.hir.semantic_generation == generation + UINT64_C(1)
         && cm_semantic_barrier_capability_id(&barrier) != capability);
     assert_manifest_evidence(&fixture, CM_HIR_USAGE_MOVE);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
+static void test_regions_closure_and_atomicity(void)
+{
+    static const char source[] =
+        "fn scoped<'a>(value: u32) -> u32 { value } "
+        "fn identity(value: u32) -> u32 { value } "
+        "fn called(value: u32) -> u32 { identity(value) } "
+        "const VALUE: u32 = 2; static SLOT: u32 = 3;";
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    CmSemanticRegionsResult regions;
+    CmHirBodyId bodies[5];
+    const CmHirItem *scoped;
+    const CmHirBody *body;
+    CmHirType *reference;
+    CmHirType reference_value;
+    CmHirTypeId reference_type;
+    CmHirTypeId equivalent_reference_type;
+    CmHirExpr *root;
+    CmHirExpr *tail;
+    CmHirStatement statement;
+    CmHirRegion saved_region;
+    CmHirPredicateScope predicate_scope;
+    CmHirTraitPredicate predicate;
+    CmHirOutlivesPredicate outlives;
+    CmHirGenericParamId saved_region_parameter;
+    CmHirTypeId saved_pointee;
+    CmHirTypeId saved_parameter_type;
+    CmHirTypeId saved_return_type;
+    CmHirTypeId saved_expected_type;
+    CmHirTypeId saved_local_type;
+    CmHirTypeId saved_root_type;
+    CmHirTypeId saved_tail_type;
+    CmHirValueUsage saved_usage;
+    uint64_t generation;
+    uint64_t rewind_generation;
+    uint64_t capability;
+    size_t index;
+
+    fixture_init(&fixture, source);
+    scoped = cm_hir_get_item(&fixture.hir, 1u);
+    assert(scoped != NULL && scoped->generic_parameter_count == 1u
+        && scoped->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE);
+    memset(&reference_value, 0, sizeof(reference_value));
+    reference_value.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    reference_value.data.reference_type.region.kind =
+        CM_HIR_REGION_EARLY_BOUND;
+    reference_value.data.reference_type.region.data.parameter =
+        scoped->generic_parameter_start;
+    reference_value.data.reference_type.pointee =
+        scoped->data.function_item.signature.return_type;
+    reference_value.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&fixture.hir, &reference_value,
+        &reference_type) == CM_HIR_OK);
+    assert(cm_hir_add_type(&fixture.hir, &reference_value,
+        &equivalent_reference_type) == CM_HIR_OK
+        && equivalent_reference_type != reference_type);
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && cm_semantic_barrier_atom_count(&barrier) == 5u);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_PHASE_ORDER
+        && result.phase == CM_SEMANTIC_BARRIER_STRUCTURAL);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_PHASE_ORDER
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED);
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    generation = fixture.hir.semantic_generation;
+    rewind_generation = fixture.hir.rewind_generation;
+    capability = cm_semantic_barrier_capability_id(&barrier);
+
+    for (index = 0u; index < 5u; ++index) {
+        CmSemanticAtomView atom;
+
+        assert(cm_semantic_barrier_atom_at(&barrier, index, &atom)
+            == CM_SEMANTIC_BARRIER_OK);
+        bodies[index] = atom.body;
+    }
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+
+    scoped = cm_hir_get_item(&fixture.hir, 1u);
+    assert(scoped != NULL && scoped->predicate_scope_count == 0u
+        && scoped->predicate_scopes == NULL
+        && scoped->predicate_count == 0u && scoped->predicates == NULL
+        && scoped->outlives_predicate_count == 0u
+        && scoped->outlives_predicates == NULL);
+    memset(&predicate_scope, 0, sizeof(predicate_scope));
+    ((CmHirItem *)scoped)->predicate_scopes = &predicate_scope;
+    ((CmHirItem *)scoped)->predicate_scope_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.body_index == 0u);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED
+        && fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    ((CmHirItem *)scoped)->predicate_scope_count = 0u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->predicate_scopes = NULL;
+    ((CmHirItem *)scoped)->predicate_scope_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->predicate_scope_count = 0u;
+
+    memset(&predicate, 0, sizeof(predicate));
+    ((CmHirItem *)scoped)->predicates = &predicate;
+    ((CmHirItem *)scoped)->predicate_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.body_index == 0u);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED
+        && fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    ((CmHirItem *)scoped)->predicate_count = 0u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->predicates = NULL;
+    ((CmHirItem *)scoped)->predicate_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->predicate_count = 0u;
+
+    memset(&outlives, 0, sizeof(outlives));
+    ((CmHirItem *)scoped)->outlives_predicates = &outlives;
+    ((CmHirItem *)scoped)->outlives_predicate_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.body_index == 0u);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED
+        && fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    ((CmHirItem *)scoped)->outlives_predicate_count = 0u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->outlives_predicates = NULL;
+    ((CmHirItem *)scoped)->outlives_predicate_count = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    ((CmHirItem *)scoped)->outlives_predicate_count = 0u;
+
+    body = cm_hir_get_body(&fixture.hir, 1u);
+    root = body == NULL ? NULL
+        : mutable_expr(&fixture, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : mutable_expr(&fixture, root->data.block.tail_expression);
+    reference = (CmHirType *)cm_vec_at(&fixture.hir.types,
+        (size_t)reference_type - 1u);
+    assert(reference != NULL
+        && reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && reference->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && scoped != NULL && body != NULL && body->local_count == 1u
+        && root != NULL && tail != NULL
+        && tail->kind == CM_HIR_EXPR_LOCAL);
+    assert(root->data.block.statement_count == 0u
+        && root->data.block.statements == NULL);
+    memset(&statement, 0, sizeof(statement));
+    root->data.block.statements = &statement;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.body_index == 0u
+        && regions.expression == body->root_expression);
+    root->data.block.statements = NULL;
+    saved_parameter_type = scoped->data.function_item.signature
+        .parameters[0].type;
+    saved_return_type = scoped->data.function_item.signature.return_type;
+    saved_expected_type = body->expected_type;
+    saved_local_type = body->locals[0].type;
+    saved_root_type = root->type;
+    saved_tail_type = tail->type;
+    ((CmHirItem *)scoped)->data.function_item.signature.parameters[0].type =
+        reference_type;
+    ((CmHirItem *)scoped)->data.function_item.signature.return_type =
+        reference_type;
+    ((CmHirBody *)body)->expected_type = reference_type;
+    ((CmHirBody *)body)->locals[0].type = reference_type;
+    root->type = reference_type;
+    tail->type = reference_type;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+    root->type = equivalent_reference_type;
+    tail->type = equivalent_reference_type;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+    root->type = reference_type;
+    tail->type = reference_type;
+
+    saved_region = reference->data.reference_type.region;
+    reference->data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    reference->data.reference_type.region.data.inference_variable = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_UNRESOLVED_REGION
+        && regions.has_region
+        && regions.region_kind == CM_HIR_REGION_INFER
+        && regions.type == reference_type);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED
+        && fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_capability_id(&barrier) == capability);
+    reference->data.reference_type.region = saved_region;
+
+    saved_region_parameter = reference->data.reference_type.region
+        .data.parameter;
+    reference->data.reference_type.region.data.parameter =
+        CM_HIR_GENERIC_PARAM_NONE;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.has_region
+        && regions.region_kind == CM_HIR_REGION_EARLY_BOUND
+        && regions.generic_parameter == CM_HIR_GENERIC_PARAM_NONE);
+    reference->data.reference_type.region.data.parameter =
+        saved_region_parameter;
+
+    reference->data.reference_type.region.kind = CM_HIR_REGION_LATE_BOUND;
+    reference->data.reference_type.region.data.binder_index = 0u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_UNRESOLVED_REGION
+        && regions.has_region
+        && regions.region_kind == CM_HIR_REGION_LATE_BOUND);
+    reference->data.reference_type.region = saved_region;
+
+    saved_pointee = reference->data.reference_type.pointee;
+    reference->data.reference_type.pointee = reference_type;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.type == reference_type);
+    reference->data.reference_type.pointee = saved_pointee;
+
+    ((CmHirItem *)scoped)->data.function_item.signature.parameters[0].type =
+        saved_parameter_type;
+    ((CmHirItem *)scoped)->data.function_item.signature.return_type =
+        saved_return_type;
+    ((CmHirBody *)body)->expected_type = saved_expected_type;
+    ((CmHirBody *)body)->locals[0].type = saved_local_type;
+    root->type = saved_root_type;
+    tail->type = saved_tail_type;
+
+    body = cm_hir_get_body(&fixture.hir, 3u);
+    root = body == NULL ? NULL
+        : mutable_expr(&fixture, body->root_expression);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : mutable_expr(&fixture, root->data.block.tail_expression);
+    assert(tail != NULL && tail->usage == CM_HIR_USAGE_MOVE);
+    saved_usage = tail->usage;
+    tail->usage = CM_HIR_USAGE_BORROW;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, bodies, 5u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+        && regions.body_index == 2u
+        && regions.expression == root->data.block.tail_expression);
+    tail->usage = saved_usage;
+
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_REGIONS
+        && cm_semantic_barrier_phase(&barrier)
+            == CM_SEMANTIC_BARRIER_REGIONS
+        && fixture.hir.semantic_generation == generation
+        && fixture.hir.rewind_generation == rewind_generation
+        && cm_semantic_barrier_generation(&barrier) == generation
+        && cm_semantic_barrier_capability_id(&barrier) != 0u
+        && cm_semantic_barrier_capability_id(&barrier) != capability);
+    result = advance_regions(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_PHASE_ORDER
+        && result.phase == CM_SEMANTIC_BARRIER_REGIONS);
     cm_semantic_barrier_destroy(&barrier);
     fixture_destroy(&fixture);
 }
@@ -878,6 +1167,9 @@ static void test_invalid_api_and_names(void)
 {
     CmSemanticBarrier barrier;
     CmSemanticBarrierResult result;
+    CmSemanticRegionsResult regions;
+    CmHirContext hir;
+    CmHirBodyId body;
     unsigned int status;
     unsigned int phase;
 
@@ -886,6 +1178,20 @@ static void test_invalid_api_and_names(void)
         CM_MODULE_GRAPH_REVISION_NONE, NULL, NULL);
     assert(result.status == CM_SEMANTIC_BARRIER_INVALID_ARGUMENT
         && barrier.state == NULL);
+    body = CM_HIR_BODY_NONE;
+    regions = cm_hir_semantic_check_regions(NULL, NULL, 0u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_ARGUMENT
+        && regions.body_index == CM_SEMANTIC_REGIONS_BODY_INDEX_NONE);
+    cm_hir_context_init(&hir);
+    regions = cm_hir_semantic_check_regions(&hir, &body, 0u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_ARGUMENT);
+    regions = cm_hir_semantic_check_regions(&hir, NULL, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_ARGUMENT);
+    regions = cm_hir_semantic_check_regions(&hir, &body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_ARGUMENT);
+    regions = cm_hir_semantic_check_regions(&hir, NULL, 0u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+    cm_hir_context_destroy(&hir);
     for (status = 0u;
          status <= (unsigned int)CM_SEMANTIC_BARRIER_PHASE_ORDER; ++status) {
         assert(strcmp(cm_semantic_barrier_status_name(
@@ -898,12 +1204,21 @@ static void test_invalid_api_and_names(void)
     }
     assert(strcmp(cm_semantic_barrier_phase_name(CM_SEMANTIC_BARRIER_MARKED),
         "marked") == 0);
+    assert(strcmp(cm_semantic_barrier_phase_name(CM_SEMANTIC_BARRIER_REGIONS),
+        "regions") == 0);
+    for (status = 0u;
+         status <= (unsigned int)CM_SEMANTIC_REGIONS_UNSUPPORTED_EXPRESSION;
+         ++status) {
+        assert(strcmp(cm_semantic_regions_status_name(
+            (CmSemanticRegionsStatus)status), "unknown") != 0);
+    }
 }
 
 int main(void)
 {
     test_marked_usage_rules_and_dump();
     test_marked_preflight_is_atomic();
+    test_regions_closure_and_atomicity();
     test_manifest_is_complete_stable_and_immutable();
     test_typed_success_and_phase_order();
     test_const_and_static_typed();
