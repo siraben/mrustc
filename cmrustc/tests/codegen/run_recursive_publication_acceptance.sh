@@ -40,9 +40,9 @@ awk '
 
 "$CMRUSTC" --edition 2021 --emit-c \
     "$fixture_dir/mutual-recursive-probe.rs" -o "$mutual_c"
-grep -Eq '^static uint32_t[[:space:]]+cmrustc_first.*;[[:space:]]*$' \
+grep -Eq '^static uint32_t[[:space:]]+cmrustc_h[0-9a-f]{64}_first\(uint32_t _1\);[[:space:]]*$' \
     "$mutual_c"
-grep -Eq '^static uint32_t[[:space:]]+cmrustc_second.*;[[:space:]]*$' \
+grep -Eq '^static uint32_t[[:space:]]+cmrustc_h[0-9a-f]{64}_second\(uint32_t _1\);[[:space:]]*$' \
     "$mutual_c"
 "$CC" $CFLAGS -std=c99 -Wall -Wextra -Werror \
     -Wno-infinite-recursion -c "$mutual_c" -o "$mutual_o"

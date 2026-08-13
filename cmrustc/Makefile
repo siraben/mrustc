@@ -24,6 +24,7 @@ BASE_SOURCES := \
 	src/base/buf.c \
 	src/base/interner.c \
 	src/base/map.c \
+	src/base/sha256.c \
 	src/base/vec.c
 DRIVER_SOURCES := \
 	src/driver/cfg.c \

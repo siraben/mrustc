@@ -2,7 +2,9 @@
 
 #include "cm/alloc.h"
 #include "cm/hir/layout.h"
+#include "cm/sha256.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -822,9 +824,24 @@ static int cm_c_instance_equal(const CmMirInstance *left,
     const CmMirInstance *right)
 {
     uint32_t index;
+    int left_canonical;
+    int right_canonical;
 
-    if (!cm_hir_def_id_equal(left->definition, right->definition)
-        || left->substitution_count != right->substitution_count
+    left_canonical = left->body != CM_HIR_BODY_NONE
+        && left->identity_bytes != NULL && left->identity_size != 0u;
+    right_canonical = right->body != CM_HIR_BODY_NONE
+        && right->identity_bytes != NULL && right->identity_size != 0u;
+    if (!cm_hir_def_id_equal(left->definition, right->definition)) {
+        return 0;
+    }
+    if (left_canonical || right_canonical) {
+        return left_canonical && right_canonical
+            && left->body == right->body
+            && left->identity_size == right->identity_size
+            && memcmp(left->identity_bytes, right->identity_bytes,
+                left->identity_size) == 0;
+    }
+    if (left->substitution_count != right->substitution_count
         || (left->substitution_count == 0u
             && (left->substitutions != NULL
                 || right->substitutions != NULL))
@@ -839,6 +856,45 @@ static int cm_c_instance_equal(const CmMirInstance *left,
         }
     }
     return 1;
+}
+
+static void cm_c_sha256_u32(CmSha256 *context, uint32_t value)
+{
+    unsigned char bytes[4];
+
+    bytes[0] = (unsigned char)value;
+    bytes[1] = (unsigned char)(value >> 8u);
+    bytes[2] = (unsigned char)(value >> 16u);
+    bytes[3] = (unsigned char)(value >> 24u);
+    cm_sha256_update(context, bytes, sizeof(bytes));
+}
+
+static void cm_c_sha256_u64(CmSha256 *context, uint64_t value)
+{
+    unsigned char bytes[8];
+    unsigned int index;
+
+    for (index = 0u; index < 8u; ++index) {
+        bytes[index] = (unsigned char)(value >> (index * 8u));
+    }
+    cm_sha256_update(context, bytes, sizeof(bytes));
+}
+
+static void cm_c_instance_digest(const CmMirInstance *instance,
+    unsigned char digest[CM_SHA256_DIGEST_SIZE])
+{
+    static const unsigned char domain[] = "cmrustc-c-symbol-v1";
+    CmSha256 context;
+
+    cm_sha256_init(&context);
+    cm_sha256_update(&context, domain, sizeof(domain));
+    cm_c_sha256_u32(&context, instance->definition.crate_id);
+    cm_c_sha256_u32(&context, instance->definition.index);
+    cm_c_sha256_u32(&context, instance->body);
+    cm_c_sha256_u64(&context, (uint64_t)instance->identity_size);
+    cm_sha256_update(&context, instance->identity_bytes,
+        instance->identity_size);
+    cm_sha256_final(&context, digest);
 }
 
 static int cm_c_exact_body_shape(const CmHirContext *hir,
@@ -1170,8 +1226,12 @@ static int cm_c_exact_export(const CmHirContext *hir,
 static int cm_c_exact_name(const CmHirContext *hir, const CmMirBody *body,
     int exported, char *output, size_t capacity)
 {
+    static const char hex[] = "0123456789abcdef";
     const CmHirItem *item;
     const CmInternedString *name;
+    unsigned char digest[CM_SHA256_DIGEST_SIZE];
+    size_t prefix_size;
+    size_t index;
     int length;
 
     item = cm_c_instance_item(hir, body);
@@ -1181,6 +1241,29 @@ static int cm_c_exact_name(const CmHirContext *hir, const CmMirBody *body,
     if (exported) {
         length = snprintf(output, capacity, "%.*s", (int)name->len,
             name->bytes);
+    } else if (body->instance.body != CM_HIR_BODY_NONE
+        && body->instance.identity_bytes != NULL
+        && body->instance.identity_size != 0u) {
+        cm_c_instance_digest(&body->instance, digest);
+        length = snprintf(output, capacity, "cmrustc_h");
+        if (length <= 0 || (size_t)length >= capacity) return 0;
+        prefix_size = (size_t)length;
+        if (capacity - prefix_size <= CM_SHA256_DIGEST_SIZE * 2u + 1u) {
+            return 0;
+        }
+        for (index = 0u; index < CM_SHA256_DIGEST_SIZE; ++index) {
+            output[prefix_size + index * 2u] = hex[digest[index] >> 4u];
+            output[prefix_size + index * 2u + 1u] = hex[digest[index] & 15u];
+        }
+        prefix_size += CM_SHA256_DIGEST_SIZE * 2u;
+        output[prefix_size] = '\0';
+        length = snprintf(output + prefix_size, capacity - prefix_size,
+            "_%.*s", (int)(name->len < 24u ? name->len : 24u),
+            name->bytes);
+        if (length <= 0 || (size_t)length >= capacity - prefix_size) {
+            return 0;
+        }
+        length += (int)prefix_size;
     } else if (body->instance.substitution_count == 1u
         && body->instance.substitutions != NULL) {
         length = snprintf(output, capacity,

@@ -5003,6 +5003,43 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_callee_identity(
         instance->callable_generic_argument_count, record, out_identity);
 }
 
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callee_identity(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    CmHirCanonicalInstance *out_identity)
+{
+    const CmSemanticInstanceRecord *instance;
+    const CmSemanticExpressionRecord *expression_record;
+    CmSemanticResultsStatus status;
+
+    if (!cm_results_canonical_instance_empty(out_identity)
+        || caller == NULL || cm_hir_def_id_is_none(caller->definition)
+        || caller->body == CM_HIR_BODY_NONE || caller->bytes == NULL
+        || caller->size == 0u) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    instance = cm_results_find_instance(results, caller);
+    if (instance == NULL || expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > instance->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    expression_record = &instance->expressions[(size_t)expression - 1u];
+    if (!expression_record->present
+        || expression_record->body != instance->identity.body
+        || (expression_record->has_direct_callable
+            == expression_record->has_callable_selection)
+        || expression_record->canonical_callee_index
+            >= instance->callee_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_instance_status(cm_hir_canonical_instance_clone(
+        out_identity,
+        &instance->callees[expression_record->canonical_callee_index]));
+}
+
 CmSemanticResultsStatus cm_semantic_results_instance_body(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
     const CmHirInstanceSpec *spec, CmSemanticBodyView *out_view)

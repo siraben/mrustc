@@ -27,7 +27,7 @@ cmp "$generated_c" "$second_c"
 
 # The internal function must have one checked nominal parameter followed by
 # a scalar parameter, while the only exported declaration stays scalar-only.
-grep -Eq '^static uint32_t cmrustc_select_c[0-9]+_d[0-9]+\(struct cmrustc_struct_c[0-9]+_d[0-9]+ _1, uint32_t _2\)$' \
+grep -Eq '^static uint32_t cmrustc_h[0-9a-f]{64}_select\(struct cmrustc_struct_c[0-9]+_d[0-9]+ _1, uint32_t _2\)$' \
     "$generated_c"
 grep -Eq '^uint32_t probe_aggregate_call\(uint32_t _1\);$' "$generated_c"
 if grep -Eq '^uint32_t probe_aggregate_call\(struct ' "$generated_c"; then
@@ -38,13 +38,13 @@ fi
 # A fresh aggregate argument is first assigned to a local and only then moved
 # by value into the call. The callee reads the nested field from its parameter.
 awk '
-    /^static uint32_t cmrustc_select_/ { in_select = 1; next }
+    /^static uint32_t cmrustc_h[0-9a-f]+_select/ { in_select = 1; next }
     in_select && /^}/ { in_select = 0 }
     in_select && /_1\._f0\._f1/ { selected_field = 1 }
     / = \(struct cmrustc_struct_/ && /\._f0 = _[0-9]+/ &&
             /\._f1 = _[0-9]+/ { outer_assignment = NR }
     / = UINT32_C\(3\);/ { bias_assignment = NR }
-    / = cmrustc_select_/ && /_[0-9]+, _[0-9]+/ {
+    / = cmrustc_h[0-9a-f]+_select/ && /_[0-9]+, _[0-9]+/ {
         call_assignment = NR
     }
     END {

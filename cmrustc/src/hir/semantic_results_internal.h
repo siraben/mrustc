@@ -46,6 +46,14 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_callee_identity(
     const struct CmSemanticAdmission *admission,
     const CmHirInstanceSpec *caller, CmHirExprId expression,
     CmHirCanonicalInstance *out_identity);
+/* Clone the retained callee key for one exact caller without reconstructing
+ * either side through generation-local HIR type identifiers. */
+CmSemanticResultsStatus
+cm_semantic_results_canonical_instance_callee_identity(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const CmHirCanonicalInstance *caller, CmHirExprId expression,
+    CmHirCanonicalInstance *out_identity);
 void cm_semantic_results_body_stage_destroy(
     CmSemanticResultsBodyStage *stage);
 CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results);

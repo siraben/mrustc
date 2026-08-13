@@ -834,11 +834,73 @@ static void test_reference_formatter_shapes(void)
     reference_program_destroy(&program);
 }
 
+static void test_canonical_instance_identity_and_name(void)
+{
+    TestReferenceProgram program;
+    CmMirInstance first;
+    CmMirInstance same;
+    CmMirInstance distinct;
+    CmMirInstance flat;
+    CmMirBody body;
+    unsigned char first_bytes[3] = { 1u, 2u, 3u };
+    unsigned char same_bytes[3] = { 1u, 2u, 3u };
+    unsigned char distinct_bytes[3] = { 1u, 2u, 4u };
+    CmHirTypeId first_substitution;
+    CmHirTypeId same_substitution;
+    char first_name[CM_C_EXACT_NAME_CAPACITY];
+    char same_name[CM_C_EXACT_NAME_CAPACITY];
+    char distinct_name[CM_C_EXACT_NAME_CAPACITY];
+
+    reference_program_init(&program);
+    memset(&first, 0, sizeof(first));
+    first.definition = program.field_definition;
+    first.body = program.field_body;
+    first.identity_bytes = first_bytes;
+    first.identity_size = sizeof(first_bytes);
+    same = first;
+    same.identity_bytes = same_bytes;
+    first_substitution = program.u32_type;
+    same_substitution = program.pair_type;
+    first.substitutions = &first_substitution;
+    first.substitution_count = 1u;
+    same.substitutions = &same_substitution;
+    same.substitution_count = 1u;
+    distinct = first;
+    distinct.identity_bytes = distinct_bytes;
+    flat.definition = first.definition;
+    assert(cm_c_instance_equal(&first, &same)
+        && !cm_c_instance_equal(&first, &distinct)
+        && !cm_c_instance_equal(&first, &flat));
+    distinct = first;
+    distinct.body += 1u;
+    assert(!cm_c_instance_equal(&first, &distinct));
+
+    memset(&body, 0, sizeof(body));
+    body.instance = first;
+    body.owner = first.definition;
+    body.source_body = first.body;
+    assert(cm_c_exact_name(&program.hir, &body, 0, first_name,
+        sizeof(first_name)));
+    body.instance = same;
+    assert(cm_c_exact_name(&program.hir, &body, 0, same_name,
+        sizeof(same_name)));
+    body.instance.identity_bytes = distinct_bytes;
+    assert(cm_c_exact_name(&program.hir, &body, 0, distinct_name,
+        sizeof(distinct_name))
+        && strcmp(first_name, same_name) == 0
+        && strcmp(first_name, distinct_name) != 0
+        && strncmp(first_name, "cmrustc_h", 9u) == 0
+        && strstr(first_name, "_t") == NULL
+        && strlen(first_name) < CM_C_EXACT_NAME_CAPACITY);
+    reference_program_destroy(&program);
+}
+
 int main(void)
 {
     test_exact_output_and_determinism();
     test_rejection_and_rollback();
     test_reference_export_and_rejection();
     test_reference_formatter_shapes();
+    test_canonical_instance_identity_and_name();
     return 0;
 }

@@ -1676,9 +1676,19 @@ method independently for `u32` and `u8`, installing distinct method and
 enclosing-impl frames plus the impl-owned `Self`. Wrong owners, arities, kinds,
 domains, and `Self` fail without publication, and a valid retry succeeds.
 Strict GCC, TinyCC, and Clang ASan/UBSan/leak semantic-body, admission, and
-semantic-results gates pass. Reachability, `CmMirInstance`, MIR calls/replay,
-and C mangling still use flat identities and are the next vertical gate before
-this selection slice can be exposed as executable compiler output.
+semantic-results gates pass. Reachability now reserves each complete canonical
+identity in MIR, lowering retains that reservation as the body identity, exact
+call edges resolve through the durable semantic callee key, and call
+terminators carry the complete callee identity. The C backend compares those
+canonical identities and derives deterministic private names from a
+domain-separated SHA-256 digest of the full key, while duplicate-name checking
+turns a hypothetical digest collision into transactional emission failure.
+Flat substitutions remain only as transitional executable type materialization.
+The next vertical gate is to add canonical expression, signature, primitive,
+field, and callable semantic-results queries so MIR replay no longer rebuilds
+the narrow flat `CmHirInstanceSpec`; that reconstruction still excludes the
+generic-impl parent domains needed to execute the two-instance blanket-method
+fixture.
 
 ## M6: Build orchestration
 

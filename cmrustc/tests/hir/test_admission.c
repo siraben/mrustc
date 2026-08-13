@@ -5,6 +5,9 @@
 #include "cm/mir/lower.h"
 #include "cm/source.h"
 
+#include "../../src/hir/instance_internal.h"
+#include "../../src/hir/semantic_results_internal.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -1360,6 +1363,10 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     const CmSemanticResults *results;
     CmSemanticDirectCallView call;
     CmSemanticTypeView parameter;
+    CmHirCanonicalInstance caller_identity;
+    CmHirCanonicalInstance callee_identity;
+    CmHirCanonicalInstance retained_identity;
+    CmHirCanonicalInstance rejected_identity;
     CmHirExprId call_expression;
     CmHirTypeId u32_type;
     CmHirTypeId bool_type;
@@ -1418,6 +1425,10 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
         1u, reachable, 2u, &edge, 1u);
     results = cm_semantic_admission_results(&admission);
+    cm_hir_canonical_instance_init(&caller_identity);
+    cm_hir_canonical_instance_init(&callee_identity);
+    cm_hir_canonical_instance_init(&retained_identity);
+    cm_hir_canonical_instance_init(&rejected_identity);
     assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
         && cm_semantic_results_instance_direct_call(results, &admission,
             &caller_spec, call_expression, &callee_spec, &call)
@@ -1430,7 +1441,48 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
             &parameter) == CM_SEMANTIC_RESULTS_OK
         && cm_semantic_results_instance_direct_call(results, &admission,
             &caller_spec, call_expression, &wrong_callee_spec, &call)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_hir_canonical_instance_encode(&f.hir, 1u, &caller_spec,
+            &caller_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode(&f.hir, 1u, &callee_spec,
+            &callee_identity) == CM_HIR_INSTANCE_OK
+        && cm_semantic_results_canonical_instance_callee_identity(results,
+            &admission, &caller_identity, call_expression,
+            &retained_identity) == CM_SEMANTIC_RESULTS_OK);
+    {
+        int equal;
+
+        equal = 0;
+        assert(cm_hir_canonical_instance_equal(&retained_identity,
+            &callee_identity, &equal) == CM_HIR_INSTANCE_OK && equal);
+    }
+    caller_identity.bytes[caller_identity.size - 1u] ^= 1u;
+    assert(cm_semantic_results_canonical_instance_callee_identity(results,
+        &admission, &caller_identity, call_expression, &rejected_identity)
             == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    caller_identity.bytes[caller_identity.size - 1u] ^= 1u;
+    caller_identity.body = callee_identity.body;
+    assert(cm_semantic_results_canonical_instance_callee_identity(results,
+        &admission, &caller_identity, call_expression, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    caller_identity.body = reachable[0].body;
+    caller_identity.definition = callee_identity.definition;
+    assert(cm_semantic_results_canonical_instance_callee_identity(results,
+        &admission, &caller_identity, call_expression, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    caller_identity.definition = caller_spec.selected_callable;
+    caller_identity.size -= 1u;
+    assert(cm_semantic_results_canonical_instance_callee_identity(results,
+        &admission, &caller_identity, call_expression, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    caller_identity.size += 1u;
+    assert(cm_semantic_results_canonical_instance_callee_identity(results,
+        &admission, &caller_identity, CM_HIR_EXPR_NONE, &rejected_identity)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_hir_canonical_instance_destroy(&rejected_identity);
+    cm_hir_canonical_instance_destroy(&retained_identity);
+    cm_hir_canonical_instance_destroy(&callee_identity);
+    cm_hir_canonical_instance_destroy(&caller_identity);
     cm_semantic_admission_destroy(&admission);
 
     assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
@@ -1481,6 +1533,11 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
     CmMirPublication publication;
     CmMirLowerResult lower_result;
     const CmMirBody *callee_body;
+    const CmMirBody *caller_body;
+    CmHirCanonicalInstance caller_identity;
+    CmHirCanonicalInstance callee_identity;
+    CmMirInstance caller_key;
+    CmMirInstance callee_key;
     CmMirBodyId callee_body_id;
     CmMirBodyId caller_body_id;
     CmHirExprId call_expression;
@@ -1550,32 +1607,62 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
             == CM_SEMANTIC_RESULTS_NOT_FOUND);
     cm_mir_context_init(&mir);
     cm_mir_publication_init(&publication);
+    cm_hir_canonical_instance_init(&caller_identity);
+    cm_hir_canonical_instance_init(&callee_identity);
+    memset(&caller_key, 0, sizeof(caller_key));
+    memset(&callee_key, 0, sizeof(callee_key));
+    assert(cm_hir_canonical_instance_encode(&f.hir, 1u, &caller_spec,
+            &caller_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode(&f.hir, 1u, &callee_spec,
+            &callee_identity) == CM_HIR_INSTANCE_OK);
+    caller_key.definition = caller_identity.definition;
+    caller_key.body = caller_identity.body;
+    caller_key.identity_bytes = caller_identity.bytes;
+    caller_key.identity_size = caller_identity.size;
+    callee_key.definition = callee_identity.definition;
+    callee_key.body = callee_identity.body;
+    callee_key.identity_bytes = callee_identity.bytes;
+    callee_key.identity_size = callee_identity.size;
     assert(cm_mir_publication_begin(&publication, &mir, &admission)
             == CM_MIR_OK
-        && cm_mir_publication_reserve(&publication, callee->definition,
-            NULL, 0u, callee->data.function_item.body, &callee_body_id)
+        && cm_mir_publication_reserve_canonical(&publication, &callee_key,
+            callee->data.function_item.body, &callee_body_id)
             == CM_MIR_OK
-        && cm_mir_publication_reserve(&publication, caller->definition,
-            NULL, 0u, caller->data.function_item.body, &caller_body_id)
+        && cm_mir_publication_reserve_canonical(&publication, &caller_key,
+            caller->data.function_item.body, &caller_body_id)
             == CM_MIR_OK);
-    lower_result = cm_mir_lower_admitted_publication_instance(&mir,
-        &publication, &admission, callee_body_id,
-        callee->data.function_item.body, NULL, 0u);
+    cm_hir_canonical_instance_destroy(&callee_identity);
+    cm_hir_canonical_instance_destroy(&caller_identity);
+    lower_result = cm_mir_lower_admitted_publication_canonical(&mir,
+        &publication, &admission, callee_body_id);
     assert(lower_result.error_count == 0u
         && lower_result.body == callee_body_id);
-    lower_result = cm_mir_lower_admitted_publication_instance(&mir,
-        &publication, &admission, caller_body_id,
-        caller->data.function_item.body, NULL, 0u);
+    lower_result = cm_mir_lower_admitted_publication_canonical(&mir,
+        &publication, &admission, caller_body_id);
     assert(lower_result.error_count == 0u
         && lower_result.body == caller_body_id
         && cm_mir_publication_validate(&publication) == CM_MIR_OK
         && cm_mir_publication_commit(&publication) == CM_MIR_OK);
     cm_mir_publication_destroy(&publication);
     callee_body = cm_mir_get_body(&mir, callee_body_id);
+    caller_body = cm_mir_get_body(&mir, caller_body_id);
     memset(&signature, 0, sizeof(signature));
     memset(&signature_parameter, 0, sizeof(signature_parameter));
     matches = 0;
-    assert(callee_body != NULL && callee_body->local_count == 2u
+    assert(callee_body != NULL && caller_body != NULL
+        && caller_body->basic_block_count != 0u
+        && caller_body->basic_blocks[0].terminator.kind
+            == CM_MIR_TERMINATOR_CALL
+        && caller_body->basic_blocks[0].terminator.data.call.callee_instance
+            == callee_body_id
+        && caller_body->basic_blocks[0].terminator.data.call.callee.body
+            == callee_body->instance.body
+        && caller_body->basic_blocks[0].terminator.data.call.callee
+            .identity_size == callee_body->instance.identity_size
+        && memcmp(caller_body->basic_blocks[0].terminator.data.call.callee
+                .identity_bytes, callee_body->instance.identity_bytes,
+            callee_body->instance.identity_size) == 0
+        && callee_body->local_count == 2u
         && cm_mir_admitted_signature(&mir, &admission, callee_body_id,
             &signature) == CM_MIR_OK
         && cm_hir_def_id_equal(signature.definition, callee->definition)

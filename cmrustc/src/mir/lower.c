@@ -3,6 +3,9 @@
 #include "cm/hir/instance.h"
 #include "cm/hir/semantic_results.h"
 
+#include "../hir/instance_internal.h"
+#include "../hir/semantic_results_internal.h"
+
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -459,9 +462,6 @@ typedef enum CmMirFlowError {
 typedef struct CmMirFlowCall {
     CmHirExprId expression;
     CmMirBodyId callee;
-    CmHirDefId definition;
-    CmHirTypeId substitution;
-    uint32_t substitution_count;
 } CmMirFlowCall;
 
 typedef struct CmMirFlowPlan {
@@ -625,6 +625,57 @@ static int cm_mir_flow_method_trait_in_scope(const CmHirExpr *expression,
                 trait_definition)) return 1;
     }
     return 0;
+}
+
+static CmMirStatus cm_mir_flow_find_callee(const CmMirFlowPlan *plan,
+    CmHirExprId expression, CmHirDefId definition,
+    const CmHirTypeId *substitutions, uint32_t substitution_count,
+    CmMirBodyId *out_id)
+{
+    CmHirCanonicalInstance caller;
+    CmHirCanonicalInstance callee;
+    CmMirInstance key;
+    CmSemanticResultsStatus semantic_status;
+    CmMirStatus status;
+
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || plan->instance->identity_bytes == NULL
+        || plan->instance->identity_size == 0u) {
+        return plan->publication == NULL
+            ? cm_mir_find_instance(plan->context, definition, substitutions,
+                substitution_count, out_id)
+            : cm_mir_publication_find_instance(plan->publication,
+                definition, substitutions, substitution_count, out_id);
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    cm_hir_canonical_instance_init(&callee);
+    semantic_status =
+        cm_semantic_results_canonical_instance_callee_identity(
+            plan->semantic_results, plan->admission, &caller, expression,
+            &callee);
+    if (semantic_status != CM_SEMANTIC_RESULTS_OK
+        || !cm_hir_def_id_equal(callee.definition, definition)) {
+        cm_hir_canonical_instance_destroy(&callee);
+        if (out_id != NULL) *out_id = CM_MIR_BODY_NONE;
+        return CM_MIR_INVALID_ADMISSION;
+    }
+    memset(&key, 0, sizeof(key));
+    key.definition = callee.definition;
+    key.substitutions = (CmHirTypeId *)substitutions;
+    key.substitution_count = substitution_count;
+    key.body = callee.body;
+    key.identity_bytes = callee.bytes;
+    key.identity_size = callee.size;
+    status = plan->publication == NULL
+        ? cm_mir_find_canonical(plan->context, &key, out_id)
+        : cm_mir_publication_find_canonical(plan->publication, &key, out_id);
+    cm_hir_canonical_instance_destroy(&callee);
+    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
@@ -1536,13 +1587,9 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             }
             callee_substitutions = &callee_substitution;
         }
-        status = plan->publication == NULL
-            ? cm_mir_find_instance(plan->context, callee_definition,
-                callee_substitutions,
-                call_substitution_count, &callee_id)
-            : cm_mir_publication_find_instance(plan->publication,
-                callee_definition, callee_substitutions,
-                call_substitution_count, &callee_id);
+        status = cm_mir_flow_find_callee(plan, expression_id,
+            callee_definition, callee_substitutions,
+            call_substitution_count, &callee_id);
         if (status != CM_MIR_OK) {
             return cm_mir_flow_fail(plan,
                 plan->publication != NULL
@@ -1769,12 +1816,6 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
 
             call.expression = expression_id;
             call.callee = callee_id;
-            call.definition = callee_body->instance.definition;
-            call.substitution_count =
-                callee_body->instance.substitution_count;
-            call.substitution = call.substitution_count == 0u
-                ? CM_HIR_TYPE_NONE
-                : callee_body->instance.substitutions[0];
             (void)cm_vec_push(&plan->calls, &call);
         }
         plan->call_count += 1u;
@@ -2214,7 +2255,9 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
         || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
         const CmMirFlowCall *planned_call;
+        const CmMirBody *planned_callee_body;
         CmMirInstance callee_instance;
+        CmHirBodyId planned_source_body;
         CmMirOperand call_arguments[2];
         const CmHirExprId *argument_expressions;
         CmHirExprId argument_storage[2];
@@ -2263,11 +2306,19 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         }
         if (has_destination) destination = requested_destination;
         memset(&callee_instance, 0, sizeof(callee_instance));
-        callee_instance.definition = planned_call->definition;
-        callee_instance.substitution_count =
-            planned_call->substitution_count;
-        callee_instance.substitutions = planned_call->substitution_count
-                == 0u ? NULL : (CmHirTypeId *)&planned_call->substitution;
+        planned_source_body = CM_HIR_BODY_NONE;
+        planned_callee_body = output->plan->publication == NULL
+            ? cm_mir_get_body(output->plan->context, planned_call->callee)
+            : cm_mir_publication_get_body(output->plan->publication,
+                planned_call->callee);
+        if (planned_callee_body != NULL) {
+            callee_instance = planned_callee_body->instance;
+        } else if (output->plan->publication == NULL
+            || cm_mir_publication_get_instance(output->plan->publication,
+                planned_call->callee, &callee_instance,
+                &planned_source_body) != CM_MIR_OK) {
+            return 0;
+        }
         block = (CmMirBasicBlock *)cm_vec_at(output->blocks,
             output->current_block);
         if (block == NULL
@@ -2301,6 +2352,7 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
 static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     CmMirPublication *publication, CmMirBodyId reserved_body,
     const CmHirContext *hir, CmHirBodyId body_id,
+    const CmMirInstance *reserved_instance,
     const CmHirTypeId *substitutions, uint32_t substitution_count,
     const CmSemanticAdmission *admission,
     const CmSemanticResults *semantic_results,
@@ -2339,7 +2391,10 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
 
     memset(&result, 0, sizeof(result));
     if (context == NULL || hir == NULL || body_id == CM_HIR_BODY_NONE
-        || (substitution_count == 0u) != (substitutions == NULL)) {
+        || (substitution_count == 0u) != (substitutions == NULL)
+        || (reserved_instance != NULL
+            && (reserved_instance->body != CM_HIR_BODY_NONE
+                && reserved_instance->body != body_id))) {
         cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT, body_id,
             CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
             "invalid exact HIR-to-MIR lowering arguments");
@@ -2447,9 +2502,13 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     }
 
     memset(&body, 0, sizeof(body));
-    body.instance.definition = item->definition;
-    body.instance.substitutions = (CmHirTypeId *)substitutions;
-    body.instance.substitution_count = substitution_count;
+    if (reserved_instance != NULL) {
+        body.instance = *reserved_instance;
+    } else {
+        body.instance.definition = item->definition;
+        body.instance.substitutions = (CmHirTypeId *)substitutions;
+        body.instance.substitution_count = substitution_count;
+    }
     body.owner = item->definition;
     body.source_body = body_id;
     body.semantic_evidence = semantic_evidence;
@@ -2709,7 +2768,7 @@ CmMirLowerResult cm_mir_lower_instance(CmMirContext *context,
     const CmHirTypeId *substitutions, uint32_t substitution_count)
 {
     return cm_mir_lower_instance_impl(context, NULL, CM_MIR_BODY_NONE, hir,
-        body_id, substitutions, substitution_count, NULL, NULL,
+        body_id, NULL, substitutions, substitution_count, NULL, NULL,
         CM_MIR_SEMANTIC_EVIDENCE_NONE);
 }
 
@@ -2792,7 +2851,7 @@ CmMirLowerResult cm_mir_lower_admitted_body(CmMirContext *context,
         return cm_mir_lower_admission_failure(body_id);
     }
     result = cm_mir_lower_instance_impl(context, NULL, CM_MIR_BODY_NONE, hir,
-        body_id, NULL, 0u, admission, semantic_results,
+        body_id, NULL, NULL, 0u, admission, semantic_results,
         CM_MIR_SEMANTIC_EVIDENCE_BODY);
     if (result.error_count == 0u
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
@@ -2866,7 +2925,7 @@ CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
     }
     cm_free(arguments);
     result = cm_mir_lower_instance_impl(context, NULL, CM_MIR_BODY_NONE, hir,
-        body_id, substitutions, substitution_count, admission,
+        body_id, NULL, substitutions, substitution_count, admission,
         semantic_results, CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE);
     if (result.error_count == 0u
         && context->admitted_crate == CM_HIR_CRATE_NONE) {
@@ -2918,8 +2977,53 @@ CmMirLowerResult cm_mir_lower_admitted_publication_instance(
         return cm_mir_lower_admission_failure(body_id);
     }
     return cm_mir_lower_instance_impl(context, publication, reserved_body,
-        hir, body_id, substitutions, substitution_count, admission,
+        hir, body_id, &reserved_instance, substitutions, substitution_count,
+        admission,
         semantic_results, CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE);
+}
+
+CmMirLowerResult cm_mir_lower_admitted_publication_canonical(
+    CmMirContext *context, CmMirPublication *publication,
+    const CmSemanticAdmission *admission, CmMirBodyId reserved_body)
+{
+    const CmHirContext *hir;
+    const CmSemanticResults *semantic_results;
+    const CmHirBody *reserved_hir_body;
+    CmMirInstance reserved_instance;
+    CmHirBodyId source_body;
+    CmMirLowerResult result;
+    CmHirCrateId crate_id;
+
+    memset(&result, 0, sizeof(result));
+    memset(&reserved_instance, 0, sizeof(reserved_instance));
+    source_body = CM_HIR_BODY_NONE;
+    if (context == NULL || publication == NULL
+        || cm_mir_publication_get_instance(publication, reserved_body,
+            &reserved_instance, &source_body) != CM_MIR_OK
+        || reserved_instance.body != source_body
+        || reserved_instance.identity_bytes == NULL
+        || reserved_instance.identity_size == 0u) {
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_ARGUMENT,
+            source_body, CM_HIR_EXPR_NONE, CM_MIR_INVALID_ARGUMENT,
+            "invalid reserved canonical MIR instance");
+        return result;
+    }
+    hir = cm_mir_lower_admitted_hir(context, admission, source_body,
+        &crate_id);
+    semantic_results = admission == NULL ? NULL
+        : cm_semantic_admission_results(admission);
+    reserved_hir_body = hir == NULL ? NULL
+        : cm_hir_get_body(hir, source_body);
+    if (hir == NULL || semantic_results == NULL
+        || reserved_hir_body == NULL
+        || !cm_hir_def_id_equal(reserved_hir_body->owner,
+            reserved_instance.definition)) {
+        return cm_mir_lower_admission_failure(source_body);
+    }
+    return cm_mir_lower_instance_impl(context, publication, reserved_body,
+        hir, source_body, &reserved_instance, reserved_instance.substitutions,
+        reserved_instance.substitution_count, admission, semantic_results,
+        CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE);
 }
 
 const char *cm_mir_lower_error_kind_name(CmMirLowerErrorKind kind)

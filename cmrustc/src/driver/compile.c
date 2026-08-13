@@ -1148,6 +1148,7 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
     if (status != CM_MIR_OK) goto fail;
     for (index = 0u; index < state->instances.len; ++index) {
         CmCompileReachableInstance *instance;
+        CmMirInstance canonical;
         const CmHirTypeId *substitutions;
 
         instance = (CmCompileReachableInstance *)cm_vec_at(
@@ -1158,15 +1159,19 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
         }
         substitutions = instance->substitution_count == 0u
             ? NULL : &instance->substitution;
-        status = cm_mir_publication_reserve(&publication,
-            instance->definition, substitutions,
-            instance->substitution_count, instance->body,
-            &instance->mir_body);
+        memset(&canonical, 0, sizeof(canonical));
+        canonical.definition = instance->identity.definition;
+        canonical.substitutions = (CmHirTypeId *)substitutions;
+        canonical.substitution_count = instance->substitution_count;
+        canonical.body = instance->identity.body;
+        canonical.identity_bytes = instance->identity.bytes;
+        canonical.identity_size = instance->identity.size;
+        status = cm_mir_publication_reserve_canonical(&publication,
+            &canonical, instance->body, &instance->mir_body);
         if (status != CM_MIR_OK) goto fail;
     }
     for (index = 0u; index < state->instances.len; ++index) {
         CmCompileReachableInstance *instance;
-        const CmHirTypeId *substitutions;
         CmMirLowerResult result;
 
         instance = (CmCompileReachableInstance *)cm_vec_at(
@@ -1175,11 +1180,8 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
             status = CM_MIR_INVARIANT_VIOLATION;
             goto fail;
         }
-        substitutions = instance->substitution_count == 0u
-            ? NULL : &instance->substitution;
-        result = cm_mir_lower_admitted_publication_instance(state->mir,
-            &publication, state->admission, instance->mir_body,
-            instance->body, substitutions, instance->substitution_count);
+        result = cm_mir_lower_admitted_publication_canonical(state->mir,
+            &publication, state->admission, instance->mir_body);
         if (result.error_count != 0u
             || result.body != instance->mir_body) {
             (void)snprintf(message, message_capacity, "%s",

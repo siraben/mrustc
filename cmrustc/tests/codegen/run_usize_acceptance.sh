@@ -28,8 +28,8 @@ grep -q 'sizeof(uintptr_t) == 8u' "$generated_c"
 grep -q '(uintptr_t)UINT64_C(4294967301)' "$generated_c"
 grep -Eq '^uintptr_t probe_usize\(uintptr_t _1, uintptr_t _2\);$' \
     "$generated_c"
-grep -Eq '^static uintptr_t cmrustc_const_min_' "$generated_c"
-grep -Eq '^static uintptr_t cmrustc_wrap_and_limit_' "$generated_c"
+grep -Eq '^static uintptr_t cmrustc_h[0-9a-f]{64}_const_min' "$generated_c"
+grep -Eq '^static uintptr_t cmrustc_h[0-9a-f]{64}_wrap_and_limit' "$generated_c"
 grep -Eq '[[:space:]]< ' "$generated_c"
 grep -Eq '=[[:space:]]*\(uintptr_t\)\(' "$generated_c"
 if grep -q 'UINTPTR_C' "$generated_c"; then

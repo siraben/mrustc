@@ -67,6 +67,12 @@ CmMirLowerResult cm_mir_lower_admitted_publication_instance(
     CmHirBodyId body, const CmHirTypeId *substitutions,
     uint32_t substitution_count);
 
+/* Lower from the complete authenticated identity retained by a canonical
+ * publication reservation. */
+CmMirLowerResult cm_mir_lower_admitted_publication_canonical(
+    CmMirContext *context, CmMirPublication *publication,
+    const CmSemanticAdmission *admission, CmMirBodyId reserved_body);
+
 const char *cm_mir_lower_error_kind_name(CmMirLowerErrorKind kind);
 
 #endif
