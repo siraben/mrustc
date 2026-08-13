@@ -70,16 +70,25 @@ typedef struct CmSemanticProjectionTraceRecord {
 typedef struct CmSemanticCallableRecord {
     CmHirExprId expression;
     CmHirCallableSyntax syntax;
+    CmSemanticTypeRecord requested_self_input_type;
     CmSemanticTypeRecord requested_self_type;
     CmHirDefId requested_trait;
     CmHirDefId declared_trait_callable;
     CmHirDefId selected_impl;
     CmHirDefId selected_callable;
+    CmHirDefId enclosing_impl;
+    CmHirDefId implemented_trait;
+    CmHirDefId self_owner;
+    uint32_t item_argument_count;
+    uint32_t method_argument_count;
+    uint32_t enclosing_impl_argument_count;
+    uint32_t implemented_trait_argument_count;
     CmHirExprId receiver_expression;
     uint32_t receiver_argument;
     size_t argument_start;
     size_t parameter_start;
     uint32_t argument_count;
+    CmSemanticTypeRecord return_input_type;
     CmSemanticTypeRecord return_type;
 } CmSemanticCallableRecord;
 
@@ -137,6 +146,7 @@ typedef struct CmSemanticInstanceRecord {
     size_t callable_count;
     CmHirExprId *callable_arguments;
     size_t callable_argument_count;
+    CmSemanticTypeRecord *callable_parameter_inputs;
     CmSemanticTypeRecord *callable_parameters;
     size_t callable_parameter_count;
     CmHirCanonicalInstance *callees;
@@ -169,6 +179,7 @@ struct CmSemanticResults {
     size_t callable_count;
     CmHirExprId *callable_arguments;
     size_t callable_argument_count;
+    CmSemanticTypeRecord *callable_parameter_inputs;
     CmSemanticTypeRecord *callable_parameters;
     size_t callable_parameter_count;
     size_t admitted_body_count;
@@ -207,6 +218,7 @@ typedef struct CmSemanticResultsBodyStageState {
     size_t callable_count;
     CmHirExprId *callable_arguments;
     size_t callable_argument_count;
+    CmSemanticTypeRecord *callable_parameter_inputs;
     CmSemanticTypeRecord *callable_parameters;
     size_t callable_parameter_count;
     size_t call_count;
@@ -314,6 +326,16 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
             record->selected_callable)
         && selected->data.function_item.signature.parameter_count
             == record->argument_count
+        && cm_hir_def_id_equal(record->enclosing_impl,
+            record->selected_impl)
+        && cm_hir_def_id_equal(record->implemented_trait,
+            record->requested_trait)
+        && cm_hir_def_id_equal(record->self_owner,
+            record->selected_impl)
+        && record->item_argument_count == 0u
+        && record->method_argument_count == 0u
+        && record->enclosing_impl_argument_count == 0u
+        && record->implemented_trait_argument_count == 0u
         && (record->syntax != CM_HIR_CALLABLE_DOT_METHOD
             || (declared->data.function_item.signature.receiver
                     == CM_HIR_RECEIVER_VALUE
@@ -1103,17 +1125,99 @@ static int cm_results_projection_trace_types_valid(
             <= bytes_len - trace->normalized_type.type_offset;
 }
 
+static int cm_results_projection_decision_kind_valid(
+    CmSemanticProjectionDecisionKind kind, uint32_t index)
+{
+    switch (kind) {
+    case CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE:
+        return index == 0u;
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_PARAMETER_TYPE:
+        return 1;
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ITEM_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_METHOD_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ENCLOSING_IMPL_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_IMPLEMENTED_TRAIT_ARGUMENT_TYPE:
+        /* Reserved until their durable slot arrays are implemented. */
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_results_projection_slot_record(
+    const CmSemanticExpressionRecord *expression,
+    const CmSemanticCallableRecord *callables, size_t callable_count,
+    const CmSemanticTypeRecord *parameter_inputs,
+    const CmSemanticTypeRecord *parameters, size_t parameter_count,
+    const CmSemanticProjectionTraceRecord *trace,
+    CmSemanticTypeRecord *out_input, CmSemanticTypeRecord *out_normalized)
+{
+    const CmSemanticCallableRecord *callable;
+    size_t index;
+
+    if (expression == NULL || trace == NULL || out_input == NULL
+        || out_normalized == NULL) return 0;
+    memset(out_input, 0, sizeof(*out_input));
+    memset(out_normalized, 0, sizeof(*out_normalized));
+    if (trace->decision_kind
+            == CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE) {
+        /* Expression records retain the normalized term only. */
+        *out_input = trace->input_type;
+        out_normalized->type_offset = expression->type_offset;
+        out_normalized->type_size = expression->type_size;
+        return 1;
+    }
+    callable = expression->has_callable_selection
+            && expression->callable_index < callable_count
+        ? &callables[expression->callable_index] : NULL;
+    if (callable == NULL || callable->expression != trace->expression) {
+        return 0;
+    }
+    switch (trace->decision_kind) {
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE:
+        *out_input = callable->requested_self_input_type;
+        *out_normalized = callable->requested_self_type;
+        return 1;
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE:
+        *out_input = callable->return_input_type;
+        *out_normalized = callable->return_type;
+        return 1;
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_PARAMETER_TYPE:
+        if (trace->decision_index >= callable->argument_count
+            || !cm_size_add(callable->parameter_start,
+                trace->decision_index, &index)
+            || index >= parameter_count || parameter_inputs == NULL
+            || parameters == NULL) return 0;
+        *out_input = parameter_inputs[index];
+        *out_normalized = parameters[index];
+        return 1;
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ITEM_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_METHOD_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ENCLOSING_IMPL_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_IMPLEMENTED_TRAIT_ARGUMENT_TYPE:
+    case CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE:
+        return 0;
+    }
+    return 0;
+}
+
 static int cm_results_projection_body_valid(
     const unsigned char *bytes, size_t bytes_len,
     const CmSemanticProjectionTraceRecord *traces, size_t trace_count,
     const CmSemanticProjectionStepRecord *steps, size_t step_count,
     const CmSemanticExpressionRecord *expressions, size_t expression_count,
+    const CmSemanticCallableRecord *callables, size_t callable_count,
+    const CmSemanticTypeRecord *callable_parameter_inputs,
+    const CmSemanticTypeRecord *callable_parameters,
+    size_t callable_parameter_count,
     const CmHirContext *hir, CmHirBodyId body_id,
     size_t body_trace_start, uint32_t body_trace_count,
     size_t body_step_start, uint32_t body_step_count)
 {
     size_t local_trace;
     size_t covered_steps;
+    size_t local_callable;
 
     if (hir == NULL || body_id == CM_HIR_BODY_NONE
         || ((trace_count == 0u) != (traces == NULL))
@@ -1127,6 +1231,8 @@ static int cm_results_projection_body_valid(
     for (local_trace = 0u; local_trace < body_trace_count; ++local_trace) {
         const CmSemanticProjectionTraceRecord *trace;
         const CmSemanticExpressionRecord *expression_record;
+        CmSemanticTypeRecord slot_input;
+        CmSemanticTypeRecord slot_normalized;
         const CmHirExpr *expression;
         size_t trace_index;
         size_t prior_trace;
@@ -1138,13 +1244,21 @@ static int cm_results_projection_body_valid(
             ? NULL : cm_hir_get_expr(hir, trace->expression);
         expression_record = expression == NULL ? NULL
             : &expressions[(size_t)trace->expression - 1u];
+        memset(&slot_input, 0, sizeof(slot_input));
+        memset(&slot_normalized, 0, sizeof(slot_normalized));
+        if (!cm_results_projection_slot_record(expression_record,
+            callables, callable_count, callable_parameter_inputs,
+            callable_parameters, callable_parameter_count, trace,
+            &slot_input, &slot_normalized)) {
+            return 0;
+        }
         if (!cm_results_projection_trace_types_valid(bytes, bytes_len, trace)
             || expression == NULL || expression->owner_body != body_id
             || expression_record == NULL || !expression_record->present
             || expression_record->body != body_id
-            || trace->decision_kind
-                != CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE
-            || trace->decision_index != 0u || trace->step_count == 0u
+            || !cm_results_projection_decision_kind_valid(
+                trace->decision_kind, trace->decision_index)
+            || trace->step_count == 0u
             || trace->step_start < body_step_start
             || trace->step_start > step_count
             || trace->step_count > step_count - trace->step_start
@@ -1152,9 +1266,9 @@ static int cm_results_projection_body_valid(
             || trace->step_start - body_step_start
                 > body_step_count - trace->step_count
             || !cm_results_type_records_equal(bytes, bytes_len,
-                &trace->normalized_type,
-                &(CmSemanticTypeRecord){ expression_record->type_offset,
-                    expression_record->type_size })
+                &trace->input_type, &slot_input)
+            || !cm_results_type_records_equal(bytes, bytes_len,
+                &trace->normalized_type, &slot_normalized)
             || !cm_size_add(covered_steps, trace->step_count,
                 &covered_steps)) return 0;
         for (prior_trace = 0u; prior_trace < local_trace; ++prior_trace) {
@@ -1170,7 +1284,84 @@ static int cm_results_projection_body_valid(
                         < trace->step_start + trace->step_count)) return 0;
         }
     }
-    return covered_steps == body_step_count;
+    if (covered_steps != body_step_count) return 0;
+    for (local_callable = 0u; local_callable < callable_count;
+         ++local_callable) {
+        const CmSemanticCallableRecord *callable;
+        const CmSemanticExpressionRecord *owner;
+        size_t local_parameter;
+        size_t parameter;
+        size_t self_traces;
+        size_t return_traces;
+
+        callable = &callables[local_callable];
+        owner = callable->expression == CM_HIR_EXPR_NONE
+                || (size_t)callable->expression > expression_count
+            ? NULL : &expressions[(size_t)callable->expression - 1u];
+        if (owner == NULL || !owner->present || owner->body != body_id) {
+            continue;
+        }
+        if (!cm_results_projection_trace_types_valid(bytes, bytes_len,
+                &(CmSemanticProjectionTraceRecord){
+                    .input_type = callable->requested_self_input_type,
+                    .normalized_type = callable->requested_self_type })
+            || !cm_results_projection_trace_types_valid(bytes, bytes_len,
+                &(CmSemanticProjectionTraceRecord){
+                    .input_type = callable->return_input_type,
+                    .normalized_type = callable->return_type })) return 0;
+        self_traces = 0u;
+        return_traces = 0u;
+        for (local_trace = 0u; local_trace < body_trace_count;
+             ++local_trace) {
+            const CmSemanticProjectionTraceRecord *trace;
+
+            trace = &traces[body_trace_start + local_trace];
+            if (trace->expression != callable->expression) continue;
+            if (trace->decision_kind
+                    == CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE
+                && trace->decision_index == 0u) self_traces += 1u;
+            if (trace->decision_kind
+                    == CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE
+                && trace->decision_index == 0u) return_traces += 1u;
+        }
+        if ((self_traces == 1u)
+                != !cm_results_type_records_equal(bytes, bytes_len,
+                    &callable->requested_self_input_type,
+                    &callable->requested_self_type)
+            || (return_traces == 1u)
+                != !cm_results_type_records_equal(bytes, bytes_len,
+                    &callable->return_input_type,
+                    &callable->return_type)) return 0;
+        for (local_parameter = 0u;
+             local_parameter < callable->argument_count;
+             ++local_parameter) {
+            size_t parameter_traces;
+
+            if (!cm_size_add(callable->parameter_start, local_parameter,
+                    &parameter)
+                || parameter >= callable_parameter_count
+                || callable_parameter_inputs == NULL
+                || callable_parameters == NULL) return 0;
+            parameter_traces = 0u;
+            for (local_trace = 0u; local_trace < body_trace_count;
+                 ++local_trace) {
+                const CmSemanticProjectionTraceRecord *trace;
+
+                trace = &traces[body_trace_start + local_trace];
+                if (trace->expression == callable->expression
+                    && trace->decision_kind
+                        == CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_PARAMETER_TYPE
+                    && trace->decision_index == local_parameter) {
+                    parameter_traces += 1u;
+                }
+            }
+            if ((parameter_traces == 1u)
+                    != !cm_results_type_records_equal(bytes, bytes_len,
+                        &callable_parameter_inputs[parameter],
+                        &callable_parameters[parameter])) return 0;
+        }
+    }
+    return 1;
 }
 
 static CmSemanticResultsStatus cm_results_validate_membership(
@@ -1190,6 +1381,8 @@ static CmSemanticResultsStatus cm_results_validate_membership(
             != (results->callables == NULL))
         || ((results->callable_argument_count == 0u)
             != (results->callable_arguments == NULL))
+        || ((results->callable_parameter_count == 0u)
+            != (results->callable_parameter_inputs == NULL))
         || ((results->callable_parameter_count == 0u)
             != (results->callable_parameters == NULL))
         || results->callable_argument_count
@@ -1389,7 +1582,11 @@ static CmSemanticResultsStatus cm_results_validate_membership(
                 results->type_bytes_len, results->projection_traces,
                 results->projection_trace_count, results->projection_steps,
                 results->projection_step_count, results->expressions,
-                results->expression_count, hir,
+                results->expression_count, results->callables,
+                results->callable_count,
+                results->callable_parameter_inputs,
+                results->callable_parameters,
+                results->callable_parameter_count, hir,
                 (CmHirBodyId)(expression_index + 1u),
                 body->projection_trace_start, body->projection_trace_count,
                 body->projection_step_start, body->projection_step_count)) {
@@ -1623,7 +1820,12 @@ static int cm_results_instance_projections_valid(
             instance->type_bytes_len, instance->projection_traces,
             instance->projection_trace_count, instance->projection_steps,
             instance->projection_step_count, instance->expressions,
-            instance->expression_count, hir, instance->identity.body,
+            instance->expression_count, instance->callables,
+            instance->callable_count,
+            instance->callable_parameter_inputs,
+            instance->callable_parameters,
+            instance->callable_parameter_count, hir,
+            instance->identity.body,
             0u, instance->body.projection_trace_count, 0u,
             instance->body.projection_step_count);
 }
@@ -1641,6 +1843,8 @@ static int cm_results_instance_recipes_valid(
             != (instance->callables == NULL))
         || ((instance->callable_argument_count == 0u)
             != (instance->callable_arguments == NULL))
+        || ((instance->callable_parameter_count == 0u)
+            != (instance->callable_parameter_inputs == NULL))
         || ((instance->callable_parameter_count == 0u)
             != (instance->callable_parameters == NULL))
         || instance->callable_argument_count
@@ -1851,6 +2055,7 @@ static int cm_results_body_recipes_valid(const CmSemanticResults *results,
     view.callable_count = results->callable_count;
     view.callable_arguments = results->callable_arguments;
     view.callable_argument_count = results->callable_argument_count;
+    view.callable_parameter_inputs = results->callable_parameter_inputs;
     view.callable_parameters = results->callable_parameters;
     view.callable_parameter_count = results->callable_parameter_count;
     return cm_results_instance_recipes_valid(&view, hir,
@@ -1954,6 +2159,7 @@ void cm_semantic_results_body_stage_destroy(
         cm_free(state->projection_steps);
         cm_free(state->callables);
         cm_free(state->callable_arguments);
+        cm_free(state->callable_parameter_inputs);
         cm_free(state->callable_parameters);
         cm_free(state->adjustments);
         cm_free(state->call_parameters);
@@ -2025,9 +2231,13 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_projection_decision(
     count = cm_projection_normalize_trace_count(trace);
     if (stage == NULL || session == NULL || trace == NULL || count == 0u
         || expression == CM_HIR_EXPR_NONE
-        || decision_kind != CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE
-        || decision_index != 0u || input_type == CM_TYPECK_TYPE_NONE
+        || !cm_results_projection_decision_kind_valid(decision_kind,
+            decision_index)
+        || input_type == CM_TYPECK_TYPE_NONE
         || normalized_type == CM_TYPECK_TYPE_NONE
+        || cm_projection_normalize_trace_input_type(trace) != input_type
+        || cm_projection_normalize_trace_normalized_type(trace)
+            != normalized_type
         || !cm_semantic_session_is_current(session)
         || cm_projection_normalize_trace_term_lifetime(trace) == 0u
         || cm_projection_normalize_trace_term_revision(trace) == 0u) {
@@ -2328,15 +2538,18 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         const CmSemanticCheckedCallableFacts *callable;
 
         callable = &facts->callables[call_index];
-        if (callable->argument_count != callable->parameter_count
+        if (callable->requested_self_input_type == CM_TYPECK_TYPE_NONE
+            || callable->return_input_type == CM_TYPECK_TYPE_NONE
+            || callable->argument_count != callable->parameter_count
             || (callable->argument_count != 0u
                 && (callable->argument_expressions == NULL
-                    || callable->parameter_types == NULL))
-            || !cm_size_add(callable_argument_count,
+                    || callable->parameter_input_types == NULL
+                    || callable->parameter_types == NULL))) {
+            return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+        }
+        if (!cm_size_add(callable_argument_count,
                 callable->argument_count, &callable_argument_count)) {
-            return callable->argument_count != callable->parameter_count
-                ? CM_SEMANTIC_BODY_WRITEBACK_INVALID
-                : CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
+            return CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
         }
     }
     if (facts->callable_count > (size_t)UINT32_MAX
@@ -2391,6 +2604,9 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     state->callable_arguments = callable_argument_bytes == 0u ? NULL
         : (CmHirExprId *)cm_alloc(callable_argument_bytes);
     state->callable_parameter_count = callable_argument_count;
+    state->callable_parameter_inputs = callable_parameter_bytes == 0u ? NULL
+        : (CmSemanticTypeRecord *)cm_alloc_zeroed(1u,
+            callable_parameter_bytes);
     state->callable_parameters = callable_parameter_bytes == 0u ? NULL
         : (CmSemanticTypeRecord *)cm_alloc_zeroed(1u,
             callable_parameter_bytes);
@@ -2438,8 +2654,16 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         const CmSemanticCheckedCallableFacts *callable;
 
         callable = &facts->callables[call_index];
-        status = cm_results_collect_type_record(&sizing, hir, typeck,
+        status = cm_results_collect_projection_type_record(&sizing, hir,
+            typeck, callable->requested_self_input_type, 0, NULL);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&sizing, hir, typeck,
             callable->requested_self_type, 0, NULL);
+        }
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_projection_type_record(&sizing, hir,
+                typeck, callable->return_input_type, 0, NULL);
+        }
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_type_record(&sizing, hir, typeck,
                 callable->return_type, 0, NULL);
@@ -2448,6 +2672,10 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
              status == CM_SEMANTIC_RESULTS_OK
                 && parameter_index < callable->parameter_count;
              ++parameter_index) {
+            status = cm_results_collect_projection_type_record(&sizing, hir,
+                typeck, callable->parameter_input_types[parameter_index],
+                0, NULL);
+            if (status != CM_SEMANTIC_RESULTS_OK) break;
             status = cm_results_collect_type_record(&sizing, hir, typeck,
                 callable->parameter_types[parameter_index], 0, NULL);
         }
@@ -2502,6 +2730,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         cm_free(seen);
         cm_free(state->callables);
         cm_free(state->callable_arguments);
+        cm_free(state->callable_parameter_inputs);
         cm_free(state->callable_parameters);
         cm_free(state->adjustments);
         cm_free(state->call_parameters);
@@ -2510,6 +2739,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         state->adjustments = NULL;
         state->callables = NULL;
         state->callable_arguments = NULL;
+        state->callable_parameter_inputs = NULL;
         state->callable_parameters = NULL;
         state->call_parameters = NULL;
         state->signature_parameters = NULL;
@@ -2535,6 +2765,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             cm_free(seen);
             cm_free(state->callables);
             cm_free(state->callable_arguments);
+            cm_free(state->callable_parameter_inputs);
             cm_free(state->callable_parameters);
             cm_free(state->adjustments);
             cm_free(state->call_parameters);
@@ -2543,6 +2774,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             state->adjustments = NULL;
             state->callables = NULL;
             state->callable_arguments = NULL;
+            state->callable_parameter_inputs = NULL;
             state->callable_parameters = NULL;
             state->call_parameters = NULL;
             state->signature_parameters = NULL;
@@ -2657,6 +2889,15 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         record->declared_trait_callable = fact->declared_trait_callable;
         record->selected_impl = fact->selected_impl;
         record->selected_callable = fact->selected_callable;
+        record->enclosing_impl = fact->enclosing_impl;
+        record->implemented_trait = fact->implemented_trait;
+        record->self_owner = fact->self_owner;
+        record->item_argument_count = fact->item_argument_count;
+        record->method_argument_count = fact->method_argument_count;
+        record->enclosing_impl_argument_count =
+            fact->enclosing_impl_argument_count;
+        record->implemented_trait_argument_count =
+            fact->implemented_trait_argument_count;
         record->receiver_expression = fact->receiver_expression;
         record->receiver_argument = fact->receiver_argument;
         record->argument_start = callable_argument_count;
@@ -2666,8 +2907,19 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             status = CM_SEMANTIC_RESULTS_INVALID_HIR;
             break;
         }
-        status = cm_results_collect_type_record(&output, hir, typeck,
-            fact->requested_self_type, 1, &record->requested_self_type);
+        status = cm_results_collect_projection_type_record(&output, hir,
+            typeck, fact->requested_self_input_type, 1,
+            &record->requested_self_input_type);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&output, hir, typeck,
+                fact->requested_self_type, 1,
+                &record->requested_self_type);
+        }
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_projection_type_record(&output, hir,
+                typeck, fact->return_input_type, 1,
+                &record->return_input_type);
+        }
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_collect_type_record(&output, hir, typeck,
                 fact->return_type, 1, &record->return_type);
@@ -2693,9 +2945,16 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
                 break;
             }
             state->callable_arguments[callable_argument_count] = child;
-            status = cm_results_collect_type_record(&output, hir, typeck,
-                fact->parameter_types[parameter_index], 1,
-                &state->callable_parameters[callable_argument_count]);
+            status = cm_results_collect_projection_type_record(&output, hir,
+                typeck, fact->parameter_input_types[parameter_index], 1,
+                &state->callable_parameter_inputs[
+                    callable_argument_count]);
+            if (status == CM_SEMANTIC_RESULTS_OK) {
+                status = cm_results_collect_type_record(&output, hir,
+                    typeck, fact->parameter_types[parameter_index], 1,
+                    &state->callable_parameters[
+                        callable_argument_count]);
+            }
             if (status == CM_SEMANTIC_RESULTS_OK
                 && !cm_results_type_records_equal(combined_type_bytes,
                     sizing.len,
@@ -2954,6 +3213,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         cm_free(combined_type_bytes);
         cm_free(state->callables);
         cm_free(state->callable_arguments);
+        cm_free(state->callable_parameter_inputs);
         cm_free(state->callable_parameters);
         cm_free(state->adjustments);
         cm_free(state->call_parameters);
@@ -2962,6 +3222,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         state->adjustments = NULL;
         state->callables = NULL;
         state->callable_arguments = NULL;
+        state->callable_parameter_inputs = NULL;
         state->callable_parameters = NULL;
         state->call_parameters = NULL;
         state->signature_parameters = NULL;
@@ -2974,10 +3235,25 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         cm_free(combined_type_bytes);
         cm_free(state->callables);
         cm_free(state->callable_arguments);
+        cm_free(state->callable_parameter_inputs);
         cm_free(state->callable_parameters);
         state->callables = NULL;
         state->callable_arguments = NULL;
+        state->callable_parameter_inputs = NULL;
         state->callable_parameters = NULL;
+        cm_semantic_results_body_stage_destroy(stage);
+        return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
+    }
+    if (!cm_results_projection_body_valid(combined_type_bytes, sizing.len,
+            state->projection_traces, state->projection_trace_count,
+            state->projection_steps, state->projection_step_count,
+            state->expressions, state->expression_count, state->callables,
+            state->callable_count, state->callable_parameter_inputs,
+            state->callable_parameters,
+            state->callable_parameter_count, hir, body_id, 0u,
+            (uint32_t)state->projection_trace_count, 0u,
+            (uint32_t)state->projection_step_count)) {
+        cm_free(combined_type_bytes);
         cm_semantic_results_body_stage_destroy(stage);
         return CM_SEMANTIC_BODY_WRITEBACK_INVALID;
     }
@@ -3026,6 +3302,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     CmSemanticProjectionStepRecord *combined_projection_steps;
     CmSemanticCallableRecord *combined_callables;
     CmHirExprId *combined_callable_arguments;
+    CmSemanticTypeRecord *combined_callable_parameter_inputs;
     CmSemanticTypeRecord *combined_callable_parameters;
     size_t new_type_bytes_len;
     size_t new_signature_parameter_count;
@@ -3134,6 +3411,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         : (CmSemanticCallableRecord *)cm_alloc(callable_bytes);
     combined_callable_arguments = callable_argument_bytes == 0u ? NULL
         : (CmHirExprId *)cm_alloc(callable_argument_bytes);
+    combined_callable_parameter_inputs = callable_parameter_bytes == 0u
+        ? NULL : (CmSemanticTypeRecord *)cm_alloc(callable_parameter_bytes);
     combined_callable_parameters = callable_parameter_bytes == 0u ? NULL
         : (CmSemanticTypeRecord *)cm_alloc(callable_parameter_bytes);
     if (!cm_size_mul(new_projection_trace_count,
@@ -3144,6 +3423,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         cm_free(combined_adjustments);
         cm_free(combined_callables);
         cm_free(combined_callable_arguments);
+        cm_free(combined_callable_parameter_inputs);
         cm_free(combined_callable_parameters);
         return CM_SEMANTIC_RESULTS_OVERFLOW;
     }
@@ -3158,6 +3438,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         cm_free(combined_projection_traces);
         cm_free(combined_callables);
         cm_free(combined_callable_arguments);
+        cm_free(combined_callable_parameter_inputs);
         cm_free(combined_callable_parameters);
         return CM_SEMANTIC_RESULTS_OVERFLOW;
     }
@@ -3174,7 +3455,10 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         callable = &combined_callables[
             results->callable_count + parameter_index];
         *callable = state->callables[parameter_index];
+        callable->requested_self_input_type.type_offset +=
+            results->type_bytes_len;
         callable->requested_self_type.type_offset += results->type_bytes_len;
+        callable->return_input_type.type_offset += results->type_bytes_len;
         callable->return_type.type_offset += results->type_bytes_len;
         callable->argument_start += results->callable_argument_count;
         callable->parameter_start += results->callable_parameter_count;
@@ -3183,6 +3467,10 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         memcpy(combined_callable_arguments, results->callable_arguments,
             results->callable_argument_count
                 * sizeof(*combined_callable_arguments));
+        memcpy(combined_callable_parameter_inputs,
+            results->callable_parameter_inputs,
+            results->callable_parameter_count
+                * sizeof(*combined_callable_parameter_inputs));
         memcpy(combined_callable_parameters, results->callable_parameters,
             results->callable_parameter_count
                 * sizeof(*combined_callable_parameters));
@@ -3193,6 +3481,12 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         combined_callable_arguments[
             results->callable_argument_count + parameter_index] =
             state->callable_arguments[parameter_index];
+        combined_callable_parameter_inputs[
+            results->callable_parameter_count + parameter_index] =
+            state->callable_parameter_inputs[parameter_index];
+        combined_callable_parameter_inputs[
+            results->callable_parameter_count + parameter_index]
+                .type_offset += results->type_bytes_len;
         combined_callable_parameters[
             results->callable_parameter_count + parameter_index] =
             state->callable_parameters[parameter_index];
@@ -3331,6 +3625,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     cm_free(results->projection_steps);
     cm_free(results->callables);
     cm_free(results->callable_arguments);
+    cm_free(results->callable_parameter_inputs);
     cm_free(results->callable_parameters);
     results->type_bytes = combined_type_bytes;
     results->type_bytes_len = new_type_bytes_len;
@@ -3348,6 +3643,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     results->callable_count = new_callable_count;
     results->callable_arguments = combined_callable_arguments;
     results->callable_argument_count = new_callable_argument_count;
+    results->callable_parameter_inputs =
+        combined_callable_parameter_inputs;
     results->callable_parameters = combined_callable_parameters;
     results->callable_parameter_count = new_callable_argument_count;
     record->present = 1;
@@ -3514,6 +3811,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     record->callable_count = state->callable_count;
     record->callable_arguments = state->callable_arguments;
     record->callable_argument_count = state->callable_argument_count;
+    record->callable_parameter_inputs = state->callable_parameter_inputs;
     record->callable_parameters = state->callable_parameters;
     record->callable_parameter_count = state->callable_parameter_count;
     record->body.callable_count = (uint32_t)state->callable_count;
@@ -3553,6 +3851,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     state->projection_steps = NULL;
     state->callables = NULL;
     state->callable_arguments = NULL;
+    state->callable_parameter_inputs = NULL;
     state->callable_parameters = NULL;
     cm_free(results->instances);
     results->instances = combined;
@@ -3967,6 +4266,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
         cm_free(record->projection_steps);
         cm_free(record->callables);
         cm_free(record->callable_arguments);
+        cm_free(record->callable_parameter_inputs);
         cm_free(record->callable_parameters);
         cm_free(record->signature_parameters);
         cm_free(record->type_bytes);
@@ -3980,6 +4280,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
     cm_free(results->projection_steps);
     cm_free(results->callables);
     cm_free(results->callable_arguments);
+    cm_free(results->callable_parameter_inputs);
     cm_free(results->callable_parameters);
     cm_free(results->signature_parameters);
     cm_free(results->type_bytes);
@@ -4365,6 +4666,58 @@ static CmSemanticResultsStatus cm_results_query_instance_call(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+static CmSemanticResultsStatus cm_results_query_instance_selected_call(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *caller, CmHirExprId expression,
+    const CmHirInstanceSpec *expected_callee,
+    const CmSemanticInstanceRecord **out_caller,
+    const CmSemanticExpressionRecord **out_expression)
+{
+    const CmSemanticInstanceRecord *caller_record;
+    const CmSemanticExpressionRecord *expression_record;
+    CmHirCanonicalInstance callee_identity;
+    CmSemanticResultsStatus status;
+    int equal;
+
+    if (expected_callee == NULL || out_caller == NULL
+        || out_expression == NULL) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_results_query_instance(results, admission, caller,
+        &caller_record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > caller_record->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    expression_record = &caller_record->expressions[(size_t)expression - 1u];
+    if (!expression_record->present
+        || expression_record->body != caller_record->identity.body
+        || !expression_record->has_callable_selection
+        || expression_record->canonical_callee_index
+            >= caller_record->callee_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    cm_hir_canonical_instance_init(&callee_identity);
+    if (cm_hir_canonical_instance_encode(results->hir,
+            results->local_crate, expected_callee, &callee_identity)
+            != CM_HIR_INSTANCE_OK) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    equal = 0;
+    if (cm_hir_canonical_instance_equal(&callee_identity,
+            &caller_record->callees[
+                expression_record->canonical_callee_index], &equal)
+            != CM_HIR_INSTANCE_OK || !equal) {
+        cm_hir_canonical_instance_destroy(&callee_identity);
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    cm_hir_canonical_instance_destroy(&callee_identity);
+    *out_caller = caller_record;
+    *out_expression = expression_record;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
 CmSemanticResultsStatus cm_semantic_results_instance_direct_call(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
     const CmHirInstanceSpec *caller, CmHirExprId expression,
@@ -4444,6 +4797,29 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_selection(
         instance->identity.body, expression, out_view);
 }
 
+CmSemanticResultsStatus
+cm_semantic_results_instance_callable_selection_for_callee(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *caller, CmHirExprId expression,
+    const CmHirInstanceSpec *expected_callee,
+    CmSemanticCallableSelectionView *out_view)
+{
+    const CmSemanticInstanceRecord *caller_record;
+    const CmSemanticExpressionRecord *expression_record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_query_instance_selected_call(results, admission,
+        caller, expression, expected_callee, &caller_record,
+        &expression_record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    return cm_results_callable_selection_view(caller_record->type_bytes,
+        caller_record->type_bytes_len, caller_record->callables,
+        caller_record->callable_count, expression_record,
+        caller_record->identity.body, expression, out_view);
+}
+
 CmSemanticResultsStatus cm_semantic_results_instance_callable_argument(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
     const CmHirInstanceSpec *caller, CmHirExprId expression,
@@ -4516,6 +4892,46 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_parameter(
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
     out_view->bytes = instance->type_bytes + type->type_offset;
+    out_view->size = type->type_size;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus
+cm_semantic_results_instance_callable_parameter_for_callee(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *caller, CmHirExprId expression,
+    const CmHirInstanceSpec *expected_callee, uint32_t parameter,
+    CmSemanticTypeView *out_view)
+{
+    const CmSemanticInstanceRecord *caller_record;
+    const CmSemanticExpressionRecord *expression_record;
+    const CmSemanticCallableRecord *record;
+    const CmSemanticTypeRecord *type;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_query_instance_selected_call(results, admission,
+        caller, expression, expected_callee, &caller_record,
+        &expression_record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression_record->callable_index >= caller_record->callable_count) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    record = &caller_record->callables[expression_record->callable_index];
+    if (parameter >= record->argument_count
+        || record->parameter_start > caller_record->callable_parameter_count
+        || parameter >= caller_record->callable_parameter_count
+            - record->parameter_start) return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    type = &caller_record->callable_parameters[
+        record->parameter_start + parameter];
+    if (type->type_size == 0u
+        || type->type_offset > caller_record->type_bytes_len
+        || type->type_size
+            > caller_record->type_bytes_len - type->type_offset) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    out_view->bytes = caller_record->type_bytes + type->type_offset;
     out_view->size = type->type_size;
     return CM_SEMANTIC_RESULTS_OK;
 }
@@ -4820,6 +5236,15 @@ static CmSemanticResultsStatus cm_results_callable_selection_view(
     out_view->declared_trait_callable = record->declared_trait_callable;
     out_view->selected_impl = record->selected_impl;
     out_view->selected_callable = record->selected_callable;
+    out_view->enclosing_impl = record->enclosing_impl;
+    out_view->implemented_trait = record->implemented_trait;
+    out_view->self_owner = record->self_owner;
+    out_view->item_argument_count = record->item_argument_count;
+    out_view->method_argument_count = record->method_argument_count;
+    out_view->enclosing_impl_argument_count =
+        record->enclosing_impl_argument_count;
+    out_view->implemented_trait_argument_count =
+        record->implemented_trait_argument_count;
     out_view->receiver_expression = record->receiver_expression;
     out_view->receiver_argument = record->receiver_argument;
     out_view->argument_count = record->argument_count;

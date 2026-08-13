@@ -320,6 +320,10 @@ static void test_root_environment_and_impl(void)
         &projection_type) == CM_TYPECK_OK);
     cm_projection_normalize_trace_init(&trace);
     assert(cm_projection_normalize_trace_term_owner(&trace) == NULL
+        && cm_projection_normalize_trace_input_type(&trace)
+            == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_normalized_type(&trace)
+            == CM_TYPECK_TYPE_NONE
         && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
         && cm_projection_normalize_trace_term_revision(&trace) == 0u);
     {
@@ -344,6 +348,10 @@ static void test_root_environment_and_impl(void)
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 1u);
     assert(cm_projection_normalize_trace_count(&trace) == 1u
+        && cm_projection_normalize_trace_input_type(&trace)
+            == projection_type
+        && cm_projection_normalize_trace_normalized_type(&trace)
+            == result.type
         && cm_projection_normalize_trace_step(&trace, 1u) == NULL
         && cm_projection_normalize_trace_term_owner(&trace)
             == &runtime.typeck
@@ -370,7 +378,11 @@ static void test_root_environment_and_impl(void)
         && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
         && cm_projection_normalize_trace_term_revision(&trace) == 0u);
     cm_projection_normalize_trace_clear(&trace);
-    assert(cm_projection_normalize_trace_count(&trace) == 0u);
+    assert(cm_projection_normalize_trace_count(&trace) == 0u
+        && cm_projection_normalize_trace_input_type(&trace)
+            == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_normalized_type(&trace)
+            == CM_TYPECK_TYPE_NONE);
     cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);

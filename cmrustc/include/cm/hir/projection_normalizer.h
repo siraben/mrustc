@@ -52,6 +52,11 @@ size_t cm_projection_normalize_trace_count(
     const CmProjectionNormalizeTrace *trace);
 const CmProjectionNormalizeStep *cm_projection_normalize_trace_step(
     const CmProjectionNormalizeTrace *trace, size_t index);
+/* Exact input/result IDs committed with this trace; NONE when empty. */
+CmTypeckTypeId cm_projection_normalize_trace_input_type(
+    const CmProjectionNormalizeTrace *trace);
+CmTypeckTypeId cm_projection_normalize_trace_normalized_type(
+    const CmProjectionNormalizeTrace *trace);
 /* Exact scratch owner for published step IDs; NULL for an empty trace. */
 const CmTypeckContext *cm_projection_normalize_trace_term_owner(
     const CmProjectionNormalizeTrace *trace);

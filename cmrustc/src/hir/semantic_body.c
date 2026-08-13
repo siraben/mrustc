@@ -346,6 +346,8 @@ static CmSemanticBodyResult cm_semantic_body_fail_snapshot_impl(
              ++call_index) {
             cm_free((void *)facts->callables[call_index]
                 .argument_expressions);
+            cm_free((void *)facts->callables[call_index]
+                .parameter_input_types);
             cm_free((void *)facts->callables[call_index].parameter_types);
         }
         cm_free((void *)facts->calls);
@@ -875,6 +877,8 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     if (facts->argument_count != 0u) {
         facts->argument_expressions = (CmHirExprId *)cm_alloc_zeroed(
             facts->argument_count, sizeof(CmHirExprId));
+        facts->parameter_input_types = (CmTypeckTypeId *)cm_alloc_zeroed(
+            facts->parameter_count, sizeof(CmTypeckTypeId));
         facts->parameter_types = (CmTypeckTypeId *)cm_alloc_zeroed(
             facts->parameter_count, sizeof(CmTypeckTypeId));
     }
@@ -890,11 +894,15 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     facts->expression = expression_id;
     facts->syntax = expression->data.qualified_call.syntax;
     facts->requested_self_type = goal.data.implemented.self_type;
+    facts->requested_self_input_type = facts->requested_self_type;
     facts->requested_trait = expression->data.qualified_call.requested_trait;
     facts->declared_trait_callable =
         expression->data.qualified_call.declared_trait_callable;
     facts->selected_impl = impl_item->definition;
     facts->selected_callable = selected_callable->definition;
+    facts->enclosing_impl = impl_item->definition;
+    facts->implemented_trait = expression->data.qualified_call.requested_trait;
+    facts->self_owner = impl_item->definition;
     facts->receiver_argument =
         expression->data.qualified_call.receiver_argument;
     facts->receiver_expression = facts->receiver_argument
@@ -910,6 +918,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         signature->return_type, &callable_instantiation, &declared_type);
     if (status != CM_SEMANTIC_BODY_OK) return status;
     facts->return_type = declared_type;
+    facts->return_input_type = declared_type;
     status = cm_semantic_body_unify_terms(constraints, actual_type,
         declared_type);
     if (status != CM_SEMANTIC_BODY_OK) return status;
@@ -926,6 +935,8 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
             signature->parameters[index].type, &callable_instantiation,
             &declared_type);
         if (status != CM_SEMANTIC_BODY_OK) return status;
+        ((CmTypeckTypeId *)facts->parameter_input_types)[index] =
+            declared_type;
         ((CmTypeckTypeId *)facts->parameter_types)[index] = declared_type;
         status = cm_semantic_body_unify_terms(constraints, actual_type,
             declared_type);
@@ -1271,6 +1282,8 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         facts->parameter_count = signature->parameter_count;
         facts->argument_expressions = (CmHirExprId *)cm_alloc_zeroed(
             facts->argument_count, sizeof(CmHirExprId));
+        facts->parameter_input_types = (CmTypeckTypeId *)cm_alloc_zeroed(
+            facts->parameter_count, sizeof(CmTypeckTypeId));
         facts->parameter_types = (CmTypeckTypeId *)cm_alloc_zeroed(
             facts->parameter_count, sizeof(CmTypeckTypeId));
         cm_typeck_instantiation_init(constraints->typeck,
@@ -1286,10 +1299,14 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         facts->expression = expression_id;
         facts->syntax = CM_HIR_CALLABLE_DOT_METHOD;
         facts->requested_self_type = receiver_type;
+        facts->requested_self_input_type = receiver_type;
         facts->requested_trait = winner_trait->definition;
         facts->declared_trait_callable = winner_declared->definition;
         facts->selected_impl = winner_impl->definition;
         facts->selected_callable = winner_callable->definition;
+        facts->enclosing_impl = winner_impl->definition;
+        facts->implemented_trait = winner_trait->definition;
+        facts->self_owner = winner_impl->definition;
         facts->receiver_expression = expression->data.method_call.receiver;
         facts->receiver_argument = 0u;
         ((CmHirExprId *)facts->argument_expressions)[0] =
@@ -1309,6 +1326,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             &declared_type);
         if (status != CM_SEMANTIC_BODY_OK) return status;
         facts->return_type = declared_type;
+        facts->return_input_type = declared_type;
         status = cm_semantic_body_unify_terms(constraints, actual_type,
             declared_type);
         if (status != CM_SEMANTIC_BODY_OK) return status;
@@ -1325,6 +1343,8 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 signature->parameters[parameter_index].type,
                 &callable_instantiation, &declared_type);
             if (status != CM_SEMANTIC_BODY_OK) return status;
+            ((CmTypeckTypeId *)facts->parameter_input_types)[
+                parameter_index] = declared_type;
             ((CmTypeckTypeId *)facts->parameter_types)[parameter_index] =
                 declared_type;
             status = cm_semantic_body_unify_terms(constraints, actual_type,
@@ -1345,6 +1365,57 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
     size_t call_index;
     size_t fact_index;
     uint32_t parameter_index;
+
+#define CM_NORMALIZE_CALLABLE_SLOT(callable_, input_lvalue_, type_lvalue_, \
+        kind_, index_) do { \
+    CmTypeckTypeId cm_slot_input; \
+    CmProjectionNormalizeTrace cm_slot_trace; \
+    CmSemanticBodyWritebackStatus cm_slot_writeback; \
+    int cm_slot_traced; \
+    cm_slot_input = (type_lvalue_); \
+    (input_lvalue_) = cm_slot_input; \
+    cm_slot_traced = constraints->evidence_writeback != NULL \
+        && constraints->evidence_writeback->projection_decision != NULL; \
+    if (cm_slot_traced) { \
+        cm_projection_normalize_trace_init(&cm_slot_trace); \
+        normalization = cm_semantic_session_normalize_type_traced( \
+            constraints->session, constraints->typeck, \
+            constraints->substitution, cm_slot_input, \
+            constraints->normalize_limits, &cm_slot_trace); \
+    } else { \
+        memset(&cm_slot_trace, 0, sizeof(cm_slot_trace)); \
+        normalization = cm_semantic_body_normalize(constraints, \
+            cm_slot_input); \
+    } \
+    if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) { \
+        if (cm_slot_traced) { \
+            cm_projection_normalize_trace_destroy(&cm_slot_trace); \
+        } \
+        return cm_semantic_body_normalize_status(constraints, \
+            &normalization); \
+    } \
+    (type_lvalue_) = normalization.type; \
+    if (cm_slot_traced \
+        && cm_projection_normalize_trace_count(&cm_slot_trace) != 0u) { \
+        cm_slot_writeback = constraints->evidence_writeback \
+            ->projection_decision( \
+                constraints->evidence_writeback->context, \
+                constraints->session, constraints->body_id, \
+                (callable_)->expression, (kind_), (index_), \
+                cm_slot_input, normalization.type, &cm_slot_trace); \
+        cm_projection_normalize_trace_destroy(&cm_slot_trace); \
+        if (cm_slot_writeback != CM_SEMANTIC_BODY_WRITEBACK_OK) { \
+            return cm_slot_writeback == CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW \
+                ? CM_SEMANTIC_BODY_OVERFLOW \
+                : cm_slot_writeback \
+                        == CM_SEMANTIC_BODY_WRITEBACK_UNSUPPORTED \
+                    ? CM_SEMANTIC_BODY_UNSUPPORTED \
+                    : CM_SEMANTIC_BODY_INVALID; \
+        } \
+    } else if (cm_slot_traced) { \
+        cm_projection_normalize_trace_destroy(&cm_slot_trace); \
+    } \
+} while (0)
 
     if (constraints == NULL || facts == NULL
         || facts->signature_return_type == CM_TYPECK_TYPE_NONE
@@ -1425,29 +1496,26 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
             || cm_hir_def_id_is_none(callable->selected_impl)
             || cm_hir_def_id_is_none(callable->selected_callable)
             || callable->requested_self_type == CM_TYPECK_TYPE_NONE
+            || callable->requested_self_input_type == CM_TYPECK_TYPE_NONE
             || callable->return_type == CM_TYPECK_TYPE_NONE
+            || callable->return_input_type == CM_TYPECK_TYPE_NONE
             || callable->argument_count != callable->parameter_count
             || (callable->argument_count != 0u
                 && (callable->argument_expressions == NULL
+                    || callable->parameter_input_types == NULL
                     || callable->parameter_types == NULL))) {
             return CM_SEMANTIC_BODY_INVALID;
         }
         constraints->failed_expression = callable->expression;
         constraints->failed_callee = callable->selected_callable;
-        normalization = cm_semantic_body_normalize(constraints,
-            callable->requested_self_type);
-        if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
-            return cm_semantic_body_normalize_status(constraints,
-                &normalization);
-        }
-        callable->requested_self_type = normalization.type;
-        normalization = cm_semantic_body_normalize(constraints,
-            callable->return_type);
-        if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
-            return cm_semantic_body_normalize_status(constraints,
-                &normalization);
-        }
-        callable->return_type = normalization.type;
+        CM_NORMALIZE_CALLABLE_SLOT(callable,
+            callable->requested_self_input_type,
+            callable->requested_self_type,
+            CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE,
+            0u);
+        CM_NORMALIZE_CALLABLE_SLOT(callable, callable->return_input_type,
+            callable->return_type,
+            CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE, 0u);
         for (parameter_index = 0u;
              parameter_index < callable->parameter_count;
              ++parameter_index) {
@@ -1455,12 +1523,11 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
 
             type = &((CmTypeckTypeId *)callable->parameter_types)[
                 parameter_index];
-            normalization = cm_semantic_body_normalize(constraints, *type);
-            if (normalization.kind != CM_TRAIT_SOLVER_PROVEN) {
-                return cm_semantic_body_normalize_status(constraints,
-                    &normalization);
-            }
-            *type = normalization.type;
+            CM_NORMALIZE_CALLABLE_SLOT(callable,
+                ((CmTypeckTypeId *)callable->parameter_input_types)[
+                    parameter_index], *type,
+                CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_PARAMETER_TYPE,
+                parameter_index);
         }
     }
     for (fact_index = 0u; fact_index < facts->adjustment_count;
@@ -1528,6 +1595,7 @@ static CmSemanticBodyStatus cm_semantic_body_normalize_checked_facts(
         }
     }
     return CM_SEMANTIC_BODY_OK;
+#undef CM_NORMALIZE_CALLABLE_SLOT
 }
 
 static CmSemanticBodyStatus cm_semantic_body_unify_types(
@@ -3090,6 +3158,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
             cm_free((void *)checked_facts.callables[call_index]
                 .argument_expressions);
             cm_free((void *)checked_facts.callables[call_index]
+                .parameter_input_types);
+            cm_free((void *)checked_facts.callables[call_index]
                 .parameter_types);
         }
         cm_free(checked_calls);
@@ -3112,6 +3182,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
          ++call_index) {
         cm_free((void *)checked_facts.callables[call_index]
             .argument_expressions);
+        cm_free((void *)checked_facts.callables[call_index]
+            .parameter_input_types);
         cm_free((void *)checked_facts.callables[call_index]
             .parameter_types);
     }

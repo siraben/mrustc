@@ -139,6 +139,14 @@ typedef struct CmSemanticCallableSelectionView {
     CmHirDefId declared_trait_callable;
     CmHirDefId selected_impl;
     CmHirDefId selected_callable;
+    /* Exact CmHirInstanceSpec binder/owner domains for this selection. */
+    CmHirDefId enclosing_impl;
+    CmHirDefId implemented_trait;
+    CmHirDefId self_owner;
+    uint32_t item_argument_count;
+    uint32_t method_argument_count;
+    uint32_t enclosing_impl_argument_count;
+    uint32_t implemented_trait_argument_count;
     CmHirExprId receiver_expression;
     uint32_t receiver_argument;
     uint32_t argument_count;
@@ -146,7 +154,14 @@ typedef struct CmSemanticCallableSelectionView {
 } CmSemanticCallableSelectionView;
 
 typedef enum CmSemanticProjectionDecisionKind {
-    CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE = 0
+    CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE = 0,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_PARAMETER_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ITEM_ARGUMENT_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_METHOD_ARGUMENT_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_ENCLOSING_IMPL_ARGUMENT_TYPE,
+    CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_IMPLEMENTED_TRAIT_ARGUMENT_TYPE
 } CmSemanticProjectionDecisionKind;
 
 /* One durable normalization decision made by the production semantic pass. */
@@ -227,6 +242,14 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_selection(
     const struct CmSemanticAdmission *admission,
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     CmSemanticCallableSelectionView *out_view);
+/* Authenticate the selected call against its exact retained callee key. */
+CmSemanticResultsStatus
+cm_semantic_results_instance_callable_selection_for_callee(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    const struct CmHirInstanceSpec *expected_callee,
+    CmSemanticCallableSelectionView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_callable_argument(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
@@ -237,6 +260,13 @@ CmSemanticResultsStatus cm_semantic_results_instance_callable_parameter(
     const struct CmSemanticAdmission *admission,
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     uint32_t parameter, CmSemanticTypeView *out_view);
+CmSemanticResultsStatus
+cm_semantic_results_instance_callable_parameter_for_callee(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    const struct CmHirInstanceSpec *expected_callee, uint32_t parameter,
+    CmSemanticTypeView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_projection_trace(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,

@@ -565,50 +565,6 @@ static void cm_mir_lower_semantic_instance_query_destroy(
     memset(query, 0, sizeof(*query));
 }
 
-static int cm_mir_flow_selected_callee_matches_selection(
-    const CmMirFlowPlan *plan, const CmMirBody *callee,
-    const CmSemanticCallableSelectionView *selection,
-    const CmHirExpr *expression)
-{
-    CmMirLowerSemanticInstanceQuery query;
-    int self_matches;
-    int valid;
-
-    if (plan == NULL || callee == NULL || selection == NULL
-        || expression == NULL
-        || (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
-            && expression->kind != CM_HIR_EXPR_METHOD_CALL)) return 0;
-    memset(&query, 0, sizeof(query));
-    self_matches = 0;
-    if (!cm_mir_lower_semantic_instance_query_init(&query, plan->hir,
-            &callee->instance)
-        || cm_semantic_type_view_matches_monomorphic_hir(
-            plan->semantic_results, plan->admission,
-            &selection->requested_self_type, query.spec.self_type,
-            &self_matches) != CM_SEMANTIC_RESULTS_OK) return 0;
-    valid = cm_hir_def_id_equal(query.spec.selected_callable,
-            selection->selected_callable)
-        && cm_hir_def_id_equal(query.spec.declared_trait_callable,
-            selection->declared_trait_callable)
-        && cm_hir_def_id_equal(query.spec.enclosing_impl,
-            selection->selected_impl)
-        && cm_hir_def_id_equal(query.spec.implemented_trait,
-            selection->requested_trait)
-        && cm_hir_def_id_equal(query.spec.self_owner,
-            selection->selected_impl)
-        && self_matches
-        && query.spec.item_argument_count == 0u
-        && query.spec.item_arguments == NULL
-        && query.spec.method_argument_count == 0u
-        && query.spec.method_arguments == NULL
-        && query.spec.enclosing_impl_argument_count == 0u
-        && query.spec.enclosing_impl_arguments == NULL
-        && query.spec.implemented_trait_argument_count == 0u
-        && query.spec.implemented_trait_arguments == NULL;
-    cm_mir_lower_semantic_instance_query_destroy(&query);
-    return valid;
-}
-
 static int cm_mir_flow_callable_arguments(const CmHirExpr *expression,
     CmHirExprId storage[2], const CmHirExprId **out_arguments,
     uint32_t *out_count)
@@ -853,6 +809,41 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_query(
+    const CmMirFlowPlan *plan, const CmMirBody *callee,
+    CmHirExprId expression,
+    CmSemanticCallableSelectionView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmMirLowerSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_selection(
+            plan->semantic_results, plan->admission,
+            plan->item->data.function_item.body, expression, out_view);
+    }
+    memset(&caller, 0, sizeof(caller));
+    memset(&target, 0, sizeof(target));
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
+            plan->instance)
+        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
+            &callee->instance)) {
+        cm_mir_lower_semantic_instance_query_destroy(&caller);
+        cm_mir_lower_semantic_instance_query_destroy(&target);
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_callable_selection_for_callee(
+        plan->semantic_results, plan->admission, &caller.spec, expression,
+        &target.spec, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&target);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
+
+/* Definition lookup hint; exact-instance authority is checked after resolve. */
+static CmSemanticResultsStatus cm_mir_flow_semantic_callable_hint_query(
     const CmMirFlowPlan *plan, CmHirExprId expression,
     CmSemanticCallableSelectionView *out_view)
 {
@@ -899,10 +890,12 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_argument_query(
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
-    const CmMirFlowPlan *plan, CmHirExprId expression, uint32_t parameter,
+    const CmMirFlowPlan *plan, const CmMirBody *callee,
+    CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
     CmMirLowerSemanticInstanceQuery caller;
+    CmMirLowerSemanticInstanceQuery target;
     CmSemanticResultsStatus status;
 
     if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
@@ -910,13 +903,22 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
             plan->admission, plan->item->data.function_item.body,
             expression, parameter, out_view);
     }
+    memset(&caller, 0, sizeof(caller));
+    memset(&target, 0, sizeof(target));
     if (plan->semantic_evidence
             != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
         || !cm_mir_lower_semantic_instance_query_init(&caller, plan->hir,
-            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
-    status = cm_semantic_results_instance_callable_parameter(
+            plan->instance)
+        || !cm_mir_lower_semantic_instance_query_init(&target, plan->hir,
+            &callee->instance)) {
+        cm_mir_lower_semantic_instance_query_destroy(&caller);
+        cm_mir_lower_semantic_instance_query_destroy(&target);
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_callable_parameter_for_callee(
         plan->semantic_results, plan->admission, &caller.spec, expression,
-        parameter, out_view);
+        &target.spec, parameter, out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&target);
     cm_mir_lower_semantic_instance_query_destroy(&caller);
     return status;
 }
@@ -1416,7 +1418,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             receiver = NULL;
             self_matches = 0;
             if (plan->semantic_results == NULL || plan->admission == NULL
-                || cm_mir_flow_semantic_callable_query(plan, expression_id,
+                || cm_mir_flow_semantic_callable_hint_query(plan,
+                    expression_id,
                     &semantic_callable) != CM_SEMANTIC_RESULTS_OK
                 || semantic_callable.body != expression->owner_body
                 || semantic_callable.expression != expression_id
@@ -1636,13 +1639,15 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 || cm_mir_flow_semantic_signature_query(plan, callee_body,
                     &semantic_callee_signature)
                     != CM_SEMANTIC_RESULTS_OK
+                || (selected_call
+                    && cm_mir_flow_semantic_callable_query(plan, callee_body,
+                        expression_id, &semantic_callable)
+                        != CM_SEMANTIC_RESULTS_OK)
                 || !cm_hir_def_id_equal(
                     semantic_callee_signature.definition,
                     callee_definition)
                 || (selected_call
-                    ? (!cm_mir_flow_selected_callee_matches_selection(plan,
-                            callee_body, &semantic_callable, expression)
-                        || semantic_callee_signature.parameter_count
+                    ? (semantic_callee_signature.parameter_count
                             != semantic_callable.argument_count
                         || !cm_mir_semantic_types_equal(
                             &semantic_callable.return_type,
@@ -1690,7 +1695,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         callee_body, expression_id, index,
                         &semantic_parameter)
                         : cm_mir_flow_semantic_callable_parameter_query(plan,
-                            expression_id, index, &semantic_parameter))
+                            callee_body, expression_id, index,
+                            &semantic_parameter))
                         != CM_SEMANTIC_RESULTS_OK
                     || (selected_call
                         && (cm_mir_flow_semantic_callable_argument_query(plan,

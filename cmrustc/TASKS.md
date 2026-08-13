@@ -1581,8 +1581,26 @@ TinyCC, Clang ASan/UBSan/leak, MIR/admission/results tests, and executable
 acceptance pass. Inherent methods, generics, nonzero adjustments, borrowed
 receivers, and broader argument/result shapes remain fail-closed.
 
-The next checkpoint is canonical callable substitutions and slot-specific
-projection decisions; these must precede general adjustments. Operators,
+Callable evidence now also seals the exact nongeneric instance shape needed by
+later consumers. Each selection retains the enclosing impl, implemented trait,
+and `Self` owner as separate domains, with authenticated zero counts for item,
+method, enclosing-impl, and implemented-trait arguments. Exact-instance MIR
+lowering and authoritative MIR replay resolve the emitted callee and query the
+selection and parameter types against its canonical instance key; caller-only
+selection queries remain definition-lookup hints, not final call authority.
+
+Projection normalization is durable per callable slot. Requested `Self`, every
+parameter, and the return type retain both their pre-normalization and
+normalized terms. Nonempty traces authenticate the scratch input/result IDs,
+are bound to the exact expression, slot kind, and slot index, and must cover
+exactly every changed callable slot once while leaving unchanged slots
+trace-free. Duplicate, relabeled, orphaned, incomplete, and overlapping traces
+fail final checked-body validation. Generic-argument trace kinds are reserved
+but rejected until their corresponding durable argument arrays exist.
+
+The next checkpoint is the solver-owned winning impl-substitution witness,
+followed by scoped multi-owner instantiation and durable payloads for all four
+callable argument domains. Those must precede general adjustments. Operators,
 indexing, and callable-trait syntax then reuse the same selection and
 adjustment machinery instead of introducing parallel lookup paths.
 

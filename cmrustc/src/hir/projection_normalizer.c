@@ -23,6 +23,8 @@ typedef struct CmProjectionNormalizeState {
 
 typedef struct CmProjectionNormalizeTraceState {
     CmVec steps;
+    CmTypeckTypeId input_type;
+    CmTypeckTypeId normalized_type;
     const CmTypeckContext *term_owner;
     uint64_t term_lifetime;
     uint64_t term_revision;
@@ -82,6 +84,8 @@ void cm_projection_normalize_trace_clear(CmProjectionNormalizeTrace *trace)
 
     state = cm_normalize_trace_state(trace);
     if (state != NULL) cm_vec_clear(&state->steps);
+    if (state != NULL) state->input_type = CM_TYPECK_TYPE_NONE;
+    if (state != NULL) state->normalized_type = CM_TYPECK_TYPE_NONE;
     if (state != NULL) state->term_owner = NULL;
     if (state != NULL) state->term_lifetime = 0u;
     if (state != NULL) state->term_revision = 0u;
@@ -135,6 +139,26 @@ const CmProjectionNormalizeStep *cm_projection_normalize_trace_step(
     return state == NULL ? NULL
         : (const CmProjectionNormalizeStep *)cm_vec_at_const(
             &state->steps, index);
+}
+
+CmTypeckTypeId cm_projection_normalize_trace_input_type(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL || state->steps.len == 0u
+        ? CM_TYPECK_TYPE_NONE : state->input_type;
+}
+
+CmTypeckTypeId cm_projection_normalize_trace_normalized_type(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL || state->steps.len == 0u
+        ? CM_TYPECK_TYPE_NONE : state->normalized_type;
 }
 
 static CmProjectionNormalizeResult cm_normalize_result(
@@ -795,6 +819,8 @@ static CmProjectionNormalizeResult cm_projection_normalize_type_impl(
     if (trace != NULL && trace_state == NULL) return result;
     if (trace_state != NULL) {
         cm_vec_clear(&trace_state->steps);
+        trace_state->input_type = CM_TYPECK_TYPE_NONE;
+        trace_state->normalized_type = CM_TYPECK_TYPE_NONE;
         trace_state->term_owner = NULL;
         trace_state->term_lifetime = 0u;
         trace_state->term_revision = 0u;
@@ -837,6 +863,10 @@ static CmProjectionNormalizeResult cm_projection_normalize_type_impl(
         && trace_state != NULL) {
         cm_vec_append(&trace_state->steps, state.trace_steps.data,
             state.trace_steps.len);
+        trace_state->input_type = state.trace_steps.len == 0u
+            ? CM_TYPECK_TYPE_NONE : type;
+        trace_state->normalized_type = state.trace_steps.len == 0u
+            ? CM_TYPECK_TYPE_NONE : result.type;
         trace_state->term_owner = state.trace_steps.len == 0u
             ? NULL : typeck;
         trace_state->term_lifetime = state.trace_steps.len == 0u

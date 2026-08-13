@@ -1032,18 +1032,32 @@ static CmSemanticResultsStatus cm_mir_semantic_field_selection_query(
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_callable_query(
-    const CmMirTreeMatch *match, CmHirExprId expression,
+    const CmMirTreeMatch *match, const CmMirBody *callee,
+    CmHirExprId expression,
     CmSemanticCallableSelectionView *out_view)
 {
-    return match->body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY
-        ? cm_semantic_results_callable_selection(match->semantic_results,
-            match->admission, match->body->source_body, expression, out_view)
-        : match->body->semantic_evidence
-                == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-            ? cm_semantic_results_instance_callable_selection(
-                match->semantic_results, match->admission,
-                match->semantic_instance, expression, out_view)
-            : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    CmMirSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_selection(
+            match->semantic_results,
+            match->admission, match->body->source_body, expression,
+            out_view);
+    }
+    memset(&target, 0, sizeof(target));
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_semantic_instance_query_init(&target, match->hir,
+            callee)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_callable_selection_for_callee(
+        match->semantic_results, match->admission,
+        match->semantic_instance, expression, &target.spec, out_view);
+    cm_mir_semantic_instance_query_destroy(&target);
+    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_callable_argument_query(
@@ -1064,19 +1078,33 @@ static CmSemanticResultsStatus cm_mir_semantic_callable_argument_query(
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_callable_parameter_query(
-    const CmMirTreeMatch *match, CmHirExprId expression, uint32_t parameter,
+    const CmMirTreeMatch *match, const CmMirBody *callee,
+    CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view)
 {
-    return match->body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY
-        ? cm_semantic_results_callable_parameter(match->semantic_results,
+    CmMirSemanticInstanceQuery target;
+    CmSemanticResultsStatus status;
+
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_parameter(
+            match->semantic_results,
             match->admission, match->body->source_body, expression,
-            parameter, out_view)
-        : match->body->semantic_evidence
-                == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
-            ? cm_semantic_results_instance_callable_parameter(
-                match->semantic_results, match->admission,
-                match->semantic_instance, expression, parameter, out_view)
-            : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+            parameter, out_view);
+    }
+    memset(&target, 0, sizeof(target));
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_semantic_instance_query_init(&target, match->hir,
+            callee)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    status = cm_semantic_results_instance_callable_parameter_for_callee(
+        match->semantic_results, match->admission,
+        match->semantic_instance, expression, &target.spec, parameter,
+        out_view);
+    cm_mir_semantic_instance_query_destroy(&target);
+    return status;
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_direct_call_query(
@@ -1900,6 +1928,50 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 && expression->data.call.type_substitutions == NULL)) {
             return 0;
         }
+        memset(arguments, 0, sizeof(arguments));
+        for (index = 0u; index < call_argument_count; ++index) {
+            if (!cm_mir_expression_matches(match,
+                    call_arguments[index], 0,
+                    CM_MIR_RETURN_LOCAL,
+                    depth + 1u, &arguments[index])
+                || !cm_mir_operand_valid(match->hir, match->body,
+                    &arguments[index], match->pointer_bits)) {
+                return 0;
+            }
+        }
+        if (match->basic_block_index >= match->body->basic_block_count) {
+            return 0;
+        }
+        block = &match->body->basic_blocks[match->basic_block_index];
+        terminator = &block->terminator;
+        callee_body = terminator->kind == CM_MIR_TERMINATOR_CALL
+            ? cm_mir_resolve_body(match->context, match->publication,
+                terminator->data.call.callee_instance) : NULL;
+        if (selected_call && terminator->kind == CM_MIR_TERMINATOR_CALL) {
+            callee_definition = terminator->data.call.callee.definition;
+        }
+        destination = has_destination ? requested_destination
+                                      : match->next_temporary;
+        if (match->statement_index != block->statement_count
+            || terminator->kind != CM_MIR_TERMINATOR_CALL
+            || !cm_mir_local_id_valid(match->body, destination)
+            || terminator->data.call.destination != destination
+            || cm_mir_place_present(
+                &terminator->data.call.destination_place)
+            || terminator->data.call.target
+                != match->basic_block_index + 1u
+            || terminator->data.call.target
+                >= match->body->basic_block_count
+            || !cm_hir_def_id_equal(callee_definition,
+                terminator->data.call.callee.definition)
+            || call_substitution_count
+                != terminator->data.call.callee.substitution_count
+            || call_argument_count
+                != terminator->data.call.argument_count
+            || !cm_mir_type_equal(match->hir,
+                match->body->locals[destination].type, instantiated)) {
+            return 0;
+        }
         if (selected_call) {
             const CmHirItem *declared;
             const CmHirExpr *receiver;
@@ -1907,13 +1979,18 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             declared = NULL;
             receiver = NULL;
             if (match->semantic_results == NULL || match->admission == NULL
-                || cm_mir_semantic_callable_query(match, expression_id,
-                    &semantic_callable) != CM_SEMANTIC_RESULTS_OK
+                || callee_body == NULL
+                || cm_mir_semantic_callable_query(match, callee_body,
+                    expression_id, &semantic_callable)
+                        != CM_SEMANTIC_RESULTS_OK
                 || semantic_callable.body != match->body->source_body
                 || semantic_callable.expression != expression_id
                 || cm_hir_def_id_is_none(semantic_callable.selected_impl)
                 || cm_hir_def_id_is_none(
                     semantic_callable.selected_callable)
+                || !cm_hir_def_id_equal(
+                    semantic_callable.selected_callable,
+                    terminator->data.call.callee.definition)
                 || semantic_callable.argument_count != call_argument_count
                 || (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
                     && (semantic_callable.syntax
@@ -1975,47 +2052,6 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             }
             callee_definition = semantic_callable.selected_callable;
         }
-        memset(arguments, 0, sizeof(arguments));
-        for (index = 0u; index < call_argument_count; ++index) {
-            if (!cm_mir_expression_matches(match,
-                    call_arguments[index], 0,
-                    CM_MIR_RETURN_LOCAL,
-                    depth + 1u, &arguments[index])
-                || !cm_mir_operand_valid(match->hir, match->body,
-                    &arguments[index], match->pointer_bits)) {
-                return 0;
-            }
-        }
-        if (match->basic_block_index >= match->body->basic_block_count) {
-            return 0;
-        }
-        block = &match->body->basic_blocks[match->basic_block_index];
-        terminator = &block->terminator;
-        callee_body = terminator->kind == CM_MIR_TERMINATOR_CALL
-            ? cm_mir_resolve_body(match->context, match->publication,
-                terminator->data.call.callee_instance) : NULL;
-        destination = has_destination ? requested_destination
-                                      : match->next_temporary;
-        if (match->statement_index != block->statement_count
-            || terminator->kind != CM_MIR_TERMINATOR_CALL
-            || !cm_mir_local_id_valid(match->body, destination)
-            || terminator->data.call.destination != destination
-            || cm_mir_place_present(
-                &terminator->data.call.destination_place)
-            || terminator->data.call.target
-                != match->basic_block_index + 1u
-            || terminator->data.call.target
-                >= match->body->basic_block_count
-            || !cm_hir_def_id_equal(callee_definition,
-                terminator->data.call.callee.definition)
-            || call_substitution_count
-                != terminator->data.call.callee.substitution_count
-            || call_argument_count
-                != terminator->data.call.argument_count
-            || !cm_mir_type_equal(match->hir,
-                match->body->locals[destination].type, instantiated)) {
-            return 0;
-        }
         if (match->semantic_results != NULL) {
             if (match->admission == NULL
                 || callee_body == NULL
@@ -2033,8 +2069,11 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                     match->semantic_instance, expression_id,
                     &semantic_expression) != CM_SEMANTIC_RESULTS_OK
                 || (selected_call
-                    ? (!cm_mir_selected_callee_matches_selection(match,
-                            callee_body, &semantic_callable, expression)
+                    ? ((match->body->semantic_evidence
+                                == CM_MIR_SEMANTIC_EVIDENCE_BODY
+                            && !cm_mir_selected_callee_matches_selection(
+                                match, callee_body, &semantic_callable,
+                                expression))
                         || !cm_hir_def_id_equal(
                             semantic_signature.definition,
                             semantic_callable.selected_callable)
@@ -2091,7 +2130,8 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
 
                 if ((selected_call
                         ? cm_mir_semantic_callable_parameter_query(match,
-                            expression_id, index, &call_parameter)
+                            callee_body, expression_id, index,
+                            &call_parameter)
                         : cm_mir_semantic_direct_call_parameter_query(match,
                             callee_body, expression_id, index,
                             &call_parameter)) != CM_SEMANTIC_RESULTS_OK

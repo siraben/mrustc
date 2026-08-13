@@ -23,6 +23,9 @@ typedef struct Fixture {
 typedef struct ProjectionFailureProbe {
     CmSemanticResultsBodyStage stage;
     int duplicate_projection;
+    int duplicate_callable_projection;
+    int tamper_projection_index;
+    int tamper_projection_input;
     int reject_checked_body;
 } ProjectionFailureProbe;
 
@@ -52,6 +55,11 @@ static CmSemanticBodyWritebackStatus projection_failure_decision(
     CmSemanticBodyWritebackStatus status;
 
     probe = (ProjectionFailureProbe *)context;
+    if (probe->tamper_projection_input) {
+        return cm_semantic_results_stage_projection_decision(&probe->stage,
+            session, body, expression, decision_kind, decision_index,
+            normalized_type, normalized_type, trace);
+    }
     status = cm_semantic_results_stage_projection_decision(&probe->stage,
         session, body, expression, decision_kind, decision_index,
         input_type, normalized_type, trace);
@@ -60,6 +68,26 @@ static CmSemanticBodyWritebackStatus projection_failure_decision(
         status = cm_semantic_results_stage_projection_decision(&probe->stage,
             session, body, expression, decision_kind, decision_index,
             input_type, normalized_type, trace);
+    }
+    if (status == CM_SEMANTIC_BODY_WRITEBACK_OK
+        && probe->tamper_projection_index) {
+        status = cm_semantic_results_stage_projection_decision(&probe->stage,
+            session, body, expression,
+            CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_REQUESTED_SELF_TYPE,
+            1u, input_type, normalized_type, trace);
+    }
+    if (status == CM_SEMANTIC_BODY_WRITEBACK_OK
+        && probe->duplicate_callable_projection) {
+        status = cm_semantic_results_stage_projection_decision(&probe->stage,
+            session, body, expression,
+            CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE, 0u,
+            input_type, normalized_type, trace);
+        if (status == CM_SEMANTIC_BODY_WRITEBACK_OK) {
+            status = cm_semantic_results_stage_projection_decision(
+                &probe->stage, session, body, expression,
+                CM_SEMANTIC_PROJECTION_DECISION_CALLABLE_RETURN_TYPE, 0u,
+                input_type, normalized_type, trace);
+        }
     }
     return status;
 }
@@ -1000,6 +1028,96 @@ static void test_durable_projection_trace_definition(void)
     fixture_destroy(&fixture);
 }
 
+static void assert_exact_callable_instance_recipe(Fixture *fixture,
+    CmHirDefId caller_definition, CmHirBodyId caller_body,
+    CmHirExprId expression, CmHirTypeId self_type,
+    const CmSemanticCallableSelectionView *expected)
+{
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable[2];
+    CmSemanticReachableInstanceCall edge;
+    CmHirInstanceSpec caller;
+    CmHirInstanceSpec callee;
+    CmHirInstanceSpec wrong_callee;
+    const CmHirDefinition *callee_record;
+    const CmHirItem *callee_item;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmSemanticTypeView parameter;
+    uint32_t parameter_index;
+
+    assert(fixture != NULL && expected != NULL
+        && expression != CM_HIR_EXPR_NONE
+        && self_type != CM_HIR_TYPE_NONE);
+    callee_record = cm_hir_lookup_definition(&fixture->hir,
+        expected->selected_callable);
+    callee_item = callee_record == NULL ? NULL : cm_hir_get_item(
+        &fixture->hir, callee_record->entity.item_id);
+    assert(callee_item != NULL && callee_item->kind == CM_HIR_ITEM_FUNCTION
+        && callee_item->data.function_item.body != CM_HIR_BODY_NONE);
+
+    cm_hir_instance_spec_init(&caller);
+    caller.selected_callable = caller_definition;
+    cm_hir_instance_spec_init(&callee);
+    callee.selected_callable = expected->selected_callable;
+    callee.declared_trait_callable = expected->declared_trait_callable;
+    callee.enclosing_impl = expected->enclosing_impl;
+    callee.implemented_trait = expected->implemented_trait;
+    callee.self_owner = expected->self_owner;
+    callee.self_type = self_type;
+    cm_hir_instance_spec_init(&wrong_callee);
+    wrong_callee.selected_callable = caller_definition;
+    reachable[0].body = caller_body;
+    reachable[0].spec = &caller;
+    reachable[1].body = callee_item->data.function_item.body;
+    reachable[1].spec = &callee;
+    edge.caller = &caller;
+    edge.expression = expression;
+    edge.callee = &callee;
+
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_instance_closure(&admission,
+        &fixture->hir, 1u, reachable, 2u, &edge, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_callable_selection_for_callee(
+            results, &admission, &caller, expression, &callee, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && selection.syntax == expected->syntax
+        && cm_hir_def_id_equal(selection.selected_callable,
+            expected->selected_callable)
+        && cm_hir_def_id_equal(selection.declared_trait_callable,
+            expected->declared_trait_callable)
+        && cm_hir_def_id_equal(selection.enclosing_impl,
+            expected->enclosing_impl)
+        && cm_hir_def_id_equal(selection.implemented_trait,
+            expected->implemented_trait)
+        && cm_hir_def_id_equal(selection.self_owner,
+            expected->self_owner)
+        && selection.item_argument_count == 0u
+        && selection.method_argument_count == 0u
+        && selection.enclosing_impl_argument_count == 0u
+        && selection.implemented_trait_argument_count == 0u
+        && cm_semantic_results_instance_callable_selection_for_callee(
+            results, &admission, &caller, expression, &wrong_callee,
+            &selection) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    for (parameter_index = 0u;
+         parameter_index < expected->argument_count; ++parameter_index) {
+        assert(cm_semantic_results_instance_callable_parameter_for_callee(
+            results, &admission, &caller, expression, &callee,
+            parameter_index, &parameter) == CM_SEMANTIC_RESULTS_OK);
+    }
+    assert(cm_semantic_results_instance_callable_parameter_for_callee(
+        results, &admission, &caller, expression, &callee,
+        expected->argument_count, &parameter)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_instance_callable_parameter_for_callee(
+            results, &admission, &caller, expression, &wrong_callee, 0u,
+            &parameter) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_semantic_admission_destroy(&admission);
+}
+
 static void test_durable_qualified_callable_recipe(void)
 {
     Fixture fixture;
@@ -1014,6 +1132,7 @@ static void test_durable_qualified_callable_recipe(void)
     const CmHirDefinition *wrapper_record;
     const CmHirItem *wrapper;
     const CmHirBody *body;
+    const CmHirExpr *source_call;
     CmHirExprId call_expression;
     CmHirExprId argument;
     size_t index;
@@ -1047,7 +1166,9 @@ static void test_durable_qualified_callable_recipe(void)
             call_expression = (CmHirExprId)(index + 1u);
         }
     }
+    source_call = cm_hir_get_expr(&fixture.hir, call_expression);
     assert(results != NULL && body != NULL
+        && source_call != NULL
         && call_expression != CM_HIR_EXPR_NONE
         && cm_semantic_results_body(results, &admission,
             wrapper->data.function_item.body, &body_view)
@@ -1060,6 +1181,16 @@ static void test_durable_qualified_callable_recipe(void)
         && selection.argument_count == 1u
         && selection.receiver_argument == CM_HIR_CALLABLE_RECEIVER_NONE
         && selection.receiver_expression == CM_HIR_EXPR_NONE
+        && cm_hir_def_id_equal(selection.enclosing_impl,
+            selection.selected_impl)
+        && cm_hir_def_id_equal(selection.implemented_trait,
+            selection.requested_trait)
+        && cm_hir_def_id_equal(selection.self_owner,
+            selection.selected_impl)
+        && selection.item_argument_count == 0u
+        && selection.method_argument_count == 0u
+        && selection.enclosing_impl_argument_count == 0u
+        && selection.implemented_trait_argument_count == 0u
         && cm_semantic_results_callable_argument(results, &admission,
             wrapper->data.function_item.body, call_expression, 0u,
             &argument) == CM_SEMANTIC_RESULTS_OK
@@ -1078,6 +1209,9 @@ static void test_durable_qualified_callable_recipe(void)
         && cm_semantic_results_callable_parameter(results, &admission,
             wrapper->data.function_item.body, call_expression, 1u,
             &parameter_type) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    assert_exact_callable_instance_recipe(&fixture, wrapper_definition,
+        wrapper->data.function_item.body, call_expression,
+        source_call->data.qualified_call.requested_self_type, &selection);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
@@ -1162,6 +1296,16 @@ static void test_durable_dot_method_recipe(void)
         && selection.receiver_argument == 0u
         && selection.receiver_expression
             == source_call->data.method_call.receiver
+        && cm_hir_def_id_equal(selection.enclosing_impl,
+            selection.selected_impl)
+        && cm_hir_def_id_equal(selection.implemented_trait,
+            selection.requested_trait)
+        && cm_hir_def_id_equal(selection.self_owner,
+            selection.selected_impl)
+        && selection.item_argument_count == 0u
+        && selection.method_argument_count == 0u
+        && selection.enclosing_impl_argument_count == 0u
+        && selection.implemented_trait_argument_count == 0u
         && cm_semantic_results_callable_argument(results, &admission,
             wrapper->data.function_item.body, call_expression, 0u,
             &argument) == CM_SEMANTIC_RESULTS_OK
@@ -1197,6 +1341,10 @@ static void test_durable_dot_method_recipe(void)
         && cm_semantic_results_callable_argument(results, &admission,
             wrapper->data.function_item.body, call_expression, 2u,
             &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    assert_exact_callable_instance_recipe(&fixture, wrapper_definition,
+        wrapper->data.function_item.body, call_expression,
+        cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->type, &selection);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
@@ -1373,6 +1521,24 @@ static void test_projection_failure_discards_partial_stage(void)
     assert(result.status == CM_SEMANTIC_BODY_INVALID
         && probe.stage.state == NULL);
     probe.duplicate_projection = 0;
+    probe.duplicate_callable_projection = 1;
+    result = cm_semantic_body_check_definition_with_evidence(&session,
+        owner->data.function_item.body, &writeback);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.stage.state == NULL);
+    probe.duplicate_callable_projection = 0;
+    probe.tamper_projection_index = 1;
+    result = cm_semantic_body_check_definition_with_evidence(&session,
+        owner->data.function_item.body, &writeback);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.stage.state == NULL);
+    probe.tamper_projection_index = 0;
+    probe.tamper_projection_input = 1;
+    result = cm_semantic_body_check_definition_with_evidence(&session,
+        owner->data.function_item.body, &writeback);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID
+        && probe.stage.state == NULL);
+    probe.tamper_projection_input = 0;
     probe.reject_checked_body = 1;
     result = cm_semantic_body_check_definition_with_evidence(&session,
         owner->data.function_item.body, &writeback);
