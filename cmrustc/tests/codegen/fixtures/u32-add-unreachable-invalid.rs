@@ -3,8 +3,7 @@
 #![no_main]
 
 fn dormant(left: u32, right: u32) -> u32 {
-    let y = left + right;
-    y
+    left * right
 }
 
 #[no_mangle]

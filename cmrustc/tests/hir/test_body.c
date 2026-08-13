@@ -26,6 +26,8 @@ typedef struct TestFixture {
 
 static jmp_buf oom_jump;
 
+static char *read_dump(FILE *stream);
+
 static void jump_on_oom(size_t requested_size, void *context)
 {
     (void)requested_size;
@@ -204,29 +206,144 @@ static CmHirLocalBodiesResult lower_fixture_local_bodies(
         fixture->graph_result.revision, &fixture->imports, &fixture->map);
 }
 
+typedef struct TestHirSnapshot {
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+    size_t crate_count;
+    size_t module_count;
+    size_t item_count;
+    size_t body_count;
+    size_t expression_count;
+    size_t type_count;
+    size_t generic_parameter_count;
+    size_t definition_count;
+    size_t prebound_associated_type_count;
+    size_t storage_block_count;
+    size_t storage_bytes_used;
+    size_t storage_capacity;
+    size_t string_count;
+    size_t string_block_count;
+    size_t string_bytes_used;
+    size_t string_capacity;
+    size_t string_map_count;
+    CmHirBody *bodies;
+    char *dump;
+} TestHirSnapshot;
+
+static void hir_snapshot_take(const CmHirContext *hir,
+    TestHirSnapshot *snapshot)
+{
+    FILE *stream;
+    size_t body_bytes;
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->semantic_generation = hir->semantic_generation;
+    snapshot->rewind_generation = hir->rewind_generation;
+    snapshot->crate_count = hir->crates.len;
+    snapshot->module_count = hir->modules.len;
+    snapshot->item_count = hir->items.len;
+    snapshot->body_count = hir->bodies.len;
+    snapshot->expression_count = hir->expressions.len;
+    snapshot->type_count = hir->types.len;
+    snapshot->generic_parameter_count = hir->generic_parameters.len;
+    snapshot->definition_count = hir->definitions.len;
+    snapshot->prebound_associated_type_count =
+        hir->prebound_associated_types.len;
+    snapshot->storage_block_count = cm_arena_block_count(&hir->storage);
+    snapshot->storage_bytes_used = cm_arena_bytes_used(&hir->storage);
+    snapshot->storage_capacity = cm_arena_capacity(&hir->storage);
+    snapshot->string_count = cm_interner_length(&hir->strings);
+    snapshot->string_block_count = cm_arena_block_count(&hir->strings.strings);
+    snapshot->string_bytes_used = cm_arena_bytes_used(&hir->strings.strings);
+    snapshot->string_capacity = cm_arena_capacity(&hir->strings.strings);
+    snapshot->string_map_count = cm_map_length(&hir->strings.by_text);
+    body_bytes = snapshot->body_count * sizeof(*snapshot->bodies);
+    if (body_bytes != 0u) {
+        snapshot->bodies = (CmHirBody *)malloc(body_bytes);
+        assert(snapshot->bodies != NULL);
+        memcpy(snapshot->bodies, hir->bodies.data, body_bytes);
+    }
+    stream = tmpfile();
+    assert(stream != NULL && cm_hir_dump(stream, hir) == 0);
+    snapshot->dump = read_dump(stream);
+    assert(fclose(stream) == 0);
+}
+
+static void hir_snapshot_assert_unchanged(const CmHirContext *hir,
+    const TestHirSnapshot *snapshot)
+{
+    FILE *stream;
+    char *dump;
+    size_t body_bytes;
+
+    assert(hir->crates.len == snapshot->crate_count
+        && hir->modules.len == snapshot->module_count
+        && hir->items.len == snapshot->item_count
+        && hir->bodies.len == snapshot->body_count
+        && hir->expressions.len == snapshot->expression_count
+        && hir->types.len == snapshot->type_count
+        && hir->generic_parameters.len == snapshot->generic_parameter_count
+        && hir->definitions.len == snapshot->definition_count
+        && hir->prebound_associated_types.len
+            == snapshot->prebound_associated_type_count
+        && cm_arena_block_count(&hir->storage)
+            == snapshot->storage_block_count
+        && cm_arena_bytes_used(&hir->storage)
+            == snapshot->storage_bytes_used
+        && cm_arena_capacity(&hir->storage) == snapshot->storage_capacity
+        && cm_interner_length(&hir->strings) == snapshot->string_count
+        && cm_arena_block_count(&hir->strings.strings)
+            == snapshot->string_block_count
+        && cm_arena_bytes_used(&hir->strings.strings)
+            == snapshot->string_bytes_used
+        && cm_arena_capacity(&hir->strings.strings)
+            == snapshot->string_capacity
+        && cm_map_length(&hir->strings.by_text) == snapshot->string_map_count
+        && hir->storage.active_marks.len == 0u
+        && hir->strings.strings.active_marks.len == 0u);
+    body_bytes = snapshot->body_count * sizeof(*snapshot->bodies);
+    assert(body_bytes == 0u
+        || memcmp(hir->bodies.data, snapshot->bodies, body_bytes) == 0);
+    stream = tmpfile();
+    assert(stream != NULL && cm_hir_dump(stream, hir) == 0);
+    dump = read_dump(stream);
+    assert(strcmp(dump, snapshot->dump) == 0);
+    free(dump);
+    assert(fclose(stream) == 0);
+}
+
+static void hir_snapshot_destroy(TestHirSnapshot *snapshot)
+{
+    free(snapshot->dump);
+    free(snapshot->bodies);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
 static void test_all_local_bodies_transaction(void)
 {
     TestFixture fixture;
     CmHirLocalBodiesResult result;
     const CmHirItem *first;
     const CmHirItem *second;
-    size_t expression_count;
+    TestHirSnapshot snapshot;
 
     fixture_init_named(&fixture,
-        "fn first() -> i32 { 7 } fn second() -> i32 { true }", "first");
+        "fn first() -> u32 { let inferred = 7; inferred } "
+        "fn second() -> u32 { let mismatch = 9i32; mismatch }", "first");
     first = find_function(&fixture.hir, "first");
     second = find_function(&fixture.hir, "second");
     assert(first != NULL && second != NULL);
-    expression_count = fixture.hir.expressions.len;
+    hir_snapshot_take(&fixture.hir, &snapshot);
     result = lower_fixture_local_bodies(&fixture);
     assert(result.status == CM_HIR_LOCAL_BODIES_BODY_FAILURE
         && result.body == second->data.function_item.body
-        && result.body_result.status != CM_HIR_BODY_LOWER_OK
-        && fixture.hir.expressions.len == expression_count
+        && result.body_result.status == CM_HIR_BODY_LOWER_TYPE_MISMATCH
         && cm_hir_get_body(&fixture.hir,
             first->data.function_item.body)->state == CM_HIR_BODY_UNLOWERED
         && cm_hir_get_body(&fixture.hir,
             second->data.function_item.body)->state == CM_HIR_BODY_UNLOWERED);
+    hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+    hir_snapshot_destroy(&snapshot);
     fixture_destroy(&fixture);
 
     fixture_init_named(&fixture,
@@ -636,6 +753,7 @@ static void expect_body_failure(const char *source,
     CmHirBodyLowerStatus expected)
 {
     TestFixture fixture;
+    TestHirSnapshot snapshot;
     CmHirBodyLowerResult result;
     const CmHirBody *body;
     size_t expression_count;
@@ -656,9 +774,13 @@ static void expect_body_failure(const char *source,
     locals = body->locals;
     local_count = body->local_count;
     source_expression = body->source_expression_id;
+    hir_snapshot_take(&fixture.hir, &snapshot);
     result = lower_fixture_body(&fixture);
     body = cm_hir_get_body(&fixture.hir, fixture.body);
     assert(result.status == expected
+        && fixture.hir.semantic_generation
+            == snapshot.semantic_generation
+        && fixture.hir.rewind_generation == snapshot.rewind_generation
         && result.root_expression == CM_HIR_EXPR_NONE
         && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
         && body->root_expression == CM_HIR_EXPR_NONE
@@ -671,6 +793,8 @@ static void expect_body_failure(const char *source,
         && cm_interner_length(&fixture.hir.strings) == string_count
         && fixture.hir.storage.active_marks.len == 0u
         && fixture.hir.strings.strings.active_marks.len == 0u);
+    hir_snapshot_assert_unchanged(&fixture.hir, &snapshot);
+    hir_snapshot_destroy(&snapshot);
     fixture_destroy(&fixture);
 }
 
@@ -2873,14 +2997,101 @@ static void test_graph_explicit_u32_let_block(void)
     fixture_destroy(&fixture);
 }
 
-static void test_graph_explicit_u32_let_rejections(void)
+static void test_graph_inferred_let_types(void)
+{
+    static const char default_source[] =
+        "fn main() -> u32 { let unused = 0; 1u32 }";
+    static const char propagation_source[] =
+        "fn main() -> u32 { let x = 1i32; let y = x; 2u32 }";
+    static const char return_context_source[] =
+        "fn main() -> u32 { let x = 1; x }";
+    TestFixture fixture;
+    const CmHirBody *body;
+    const CmHirExpr *root;
+    const CmHirExpr *initializer;
+    const CmHirExpr *tail;
+    const CmHirType *type;
+    CmHirBodyLowerResult result;
+    size_t type_count;
+
+    fixture_init(&fixture, default_source);
+    type_count = fixture.hir.types.len;
+    result = lower_fixture_body(&fixture);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    type = body == NULL || body->local_count != 1u ? NULL
+        : cm_hir_get_type(&fixture.hir, body->locals[0].type);
+    assert(result.status == CM_HIR_BODY_LOWER_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && fixture.hir.types.len == type_count + 1u
+        && type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_I32);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture, propagation_source);
+    type_count = fixture.hir.types.len;
+    result = lower_fixture_body(&fixture);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    assert(result.status == CM_HIR_BODY_LOWER_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && fixture.hir.types.len == type_count + 1u
+        && body->local_count == 2u
+        && body->locals[0].type == body->locals[1].type);
+    type = cm_hir_get_type(&fixture.hir, body->locals[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_I32);
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture, return_context_source);
+    type_count = fixture.hir.types.len;
+    result = lower_fixture_body(&fixture);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    root = body == NULL ? NULL : cm_hir_get_expr(&fixture.hir,
+        body->root_expression);
+    initializer = root == NULL || root->kind != CM_HIR_EXPR_BLOCK
+            || root->data.block.statement_count != 1u
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            root->data.block.statements[0].data.let_statement.initializer);
+    tail = root == NULL || root->kind != CM_HIR_EXPR_BLOCK ? NULL
+        : cm_hir_get_expr(&fixture.hir, root->data.block.tail_expression);
+    type = body == NULL || body->local_count != 1u ? NULL
+        : cm_hir_get_type(&fixture.hir, body->locals[0].type);
+    assert(result.status == CM_HIR_BODY_LOWER_OK
+        && body != NULL && body->state == CM_HIR_BODY_TYPED
+        && fixture.hir.types.len == type_count
+        && body->local_count == 1u
+        && body->locals[0].type == body->expected_type
+        && type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_U32
+        && initializer != NULL && initializer->kind == CM_HIR_EXPR_INTEGER
+        && initializer->type == body->expected_type
+        && tail != NULL && tail->kind == CM_HIR_EXPR_LOCAL
+        && tail->type == body->expected_type
+        && tail->data.local.local_index == 0u);
+    fixture_destroy(&fixture);
+}
+
+static void test_graph_inferred_let_failures_are_transactional(void)
 {
     expect_body_failure(
-        "fn main(left: u32) -> u32 { let value = left; value }",
-        CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE);
+        "fn main() -> u32 { let value = 1i32; value }",
+        CM_HIR_BODY_LOWER_TYPE_MISMATCH);
     expect_body_failure(
-        "fn main() -> u32 { let value = 1; value }",
-        CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE);
+        "fn identity(value: u32) -> u32 { value } "
+        "fn main() -> u32 { let value = identity(1u32); value }",
+        CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+    expect_body_failure(
+        "fn main() -> u32 { let first = later; let later = 1u32; first }",
+        CM_HIR_BODY_LOWER_UNRESOLVED_PATH);
+    expect_body_failure(
+        "fn main(value: u32) -> u32 { let value = 1u32; value }",
+        CM_HIR_BODY_LOWER_UNRESOLVED_PATH);
+    expect_body_failure(
+        "fn main() -> u32 { let value = 1u32; let value = 2u32; value }",
+        CM_HIR_BODY_LOWER_UNRESOLVED_PATH);
+}
+
+static void test_graph_explicit_u32_let_rejections(void)
+{
     expect_body_failure(
         "fn main(left: u32) -> u32 { let value: i32 = 1i32; left }",
         CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE);
@@ -3395,6 +3606,8 @@ int main(void)
     test_graph_usize_less_if_oom_is_transactional();
     test_graph_u32_add_rejections();
     test_graph_explicit_u32_let_block();
+    test_graph_inferred_let_types();
+    test_graph_inferred_let_failures_are_transactional();
     test_graph_explicit_u32_let_rejections();
     test_binary_model_ownership_and_copy();
     test_graph_u32_add_oom_is_transactional();

@@ -6,8 +6,8 @@ fn add_pair(left: u32, right: u32) -> u32 {
     left + right
 }
 
-fn private_unsupported(value: u32) -> u32 {
-    let ignored: u32 = value * 1u32;
+fn private_valid(value: u32) -> u32 {
+    let ignored: u32 = value + 1u32;
     ignored
 }
 

@@ -88,21 +88,8 @@ expect_rejected unsupported-generic-substitution \
 expect_rejected reserved-export-name \
     "$fixture_dir/identity-probe-reserved-export.rs"
 
-# Unsupported private bodies outside the root closure are neither lowered nor
-# emitted. Their mere presence must not poison a supported exported program.
-unreachable_c="$artifact_dir/unreachable-unsupported-body.c"
-unreachable_exe="$artifact_dir/unreachable-unsupported-body"
-"$CMRUSTC" --edition 2021 --emit-c \
-    "$fixture_dir/identity-probe-unreachable-unsupported.rs" \
-    -o "$unreachable_c"
-test -s "$unreachable_c"
-if grep -q dormant "$unreachable_c"; then
-    echo "unreachable private function was emitted" >&2
-    exit 1
-fi
-"$CC" $CFLAGS -o "$unreachable_exe" "$unreachable_c" \
-    "$fixture_dir/identity-probe-harness.c"
-"$unreachable_exe"
+expect_rejected unreachable-unsupported-body \
+    "$fixture_dir/identity-probe-unreachable-unsupported.rs"
 
 expect_rejected exported-unsupported-body \
     "$fixture_dir/identity-probe-exported-unsupported.rs"

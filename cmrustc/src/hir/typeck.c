@@ -2,6 +2,7 @@
 
 #include "cm/alloc.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define CM_TYPECK_MAX_RECURSION 256u
@@ -49,6 +50,7 @@ typedef struct CmTypeckState {
     CmVec imports;
     CmVec snapshots;
     uint64_t lifetime_id;
+    uint64_t state_revision;
     uint64_t next_snapshot_id;
     uint64_t hir_storage_lifetime_id;
     uint64_t hir_semantic_generation;
@@ -57,7 +59,23 @@ typedef struct CmTypeckState {
     size_t import_depth;
 } CmTypeckState;
 
-static uint64_t cm_typeck_next_lifetime_id = UINT64_C(1);
+static uint64_t cm_typeck_lifetime_counter;
+static uint64_t cm_typeck_state_revision_counter;
+
+static uint64_t cm_typeck_new_lifetime_id(void)
+{
+    if (cm_typeck_lifetime_counter == UINT64_MAX) abort();
+    cm_typeck_lifetime_counter += UINT64_C(1);
+    return cm_typeck_lifetime_counter;
+}
+
+static void cm_typeck_record_state_mutation(CmTypeckState *state)
+{
+    if (state == NULL) return;
+    if (cm_typeck_state_revision_counter == UINT64_MAX) abort();
+    cm_typeck_state_revision_counter += UINT64_C(1);
+    state->state_revision = cm_typeck_state_revision_counter;
+}
 
 static CmTypeckState *cm_typeck_state(CmTypeckContext *context)
 {
@@ -380,9 +398,8 @@ void cm_typeck_context_init(CmTypeckContext *context,
     cm_vec_init(&state->trail, sizeof(CmTypeckTrailEntry));
     cm_vec_init(&state->imports, sizeof(CmTypeckImportEntry));
     cm_vec_init(&state->snapshots, sizeof(CmTypeckSnapshotRecord));
-    state->lifetime_id = cm_typeck_next_lifetime_id++;
-    if (state->lifetime_id == 0u) state->lifetime_id =
-        cm_typeck_next_lifetime_id++;
+    state->lifetime_id = cm_typeck_new_lifetime_id();
+    cm_typeck_record_state_mutation(state);
     state->next_snapshot_id = UINT64_C(1);
     state->hir_storage_lifetime_id = hir->storage.lifetime_id;
     state->hir_semantic_generation = hir->semantic_generation;
@@ -514,6 +531,7 @@ CmTypeckStatus cm_typeck_rollback(CmTypeckContext *context,
     cm_vec_resize(&state->snapshots, state->snapshots.len - 1u);
     snapshot->active = 0;
     snapshot->owner = NULL;
+    cm_typeck_record_state_mutation(state);
     return CM_TYPECK_OK;
 }
 
@@ -666,6 +684,22 @@ size_t cm_typeck_type_count(const CmTypeckContext *context)
 
     state = cm_typeck_state_const(context);
     return !cm_typeck_state_is_current(state) ? 0u : state->types.len;
+}
+
+uint64_t cm_typeck_lifetime_id(const CmTypeckContext *context)
+{
+    const CmTypeckState *state;
+
+    state = cm_typeck_state_const(context);
+    return !cm_typeck_state_is_current(state) ? 0u : state->lifetime_id;
+}
+
+uint64_t cm_typeck_state_revision(const CmTypeckContext *context)
+{
+    const CmTypeckState *state;
+
+    state = cm_typeck_state_const(context);
+    return !cm_typeck_state_is_current(state) ? 0u : state->state_revision;
 }
 
 const CmHirContext *cm_typeck_hir_context(const CmTypeckContext *context)
@@ -1605,6 +1639,7 @@ static void cm_typeck_write_variable(CmTypeckState *state, uint32_t id,
     (void)cm_vec_push(&state->trail, &trail);
     *variable = *new_value;
     term->type.data.variable.class_kind = new_value->class_kind;
+    cm_typeck_record_state_mutation(state);
 }
 
 static int cm_typeck_class_merge(CmHirInferenceKind left,

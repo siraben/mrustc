@@ -1248,8 +1248,8 @@ never become success. Only an explicitly modeled coinductive auto-trait cycle
 may use coinduction, and negative candidates are considered before structural
 auto-trait recursion.
 
-The next semantic-pass foundation is now explicit without advancing an M4
-state. Type checking can transactionally bind every still-unresolved canonical
+The semantic-pass foundation now reaches its first source-facing inference
+slice without advancing an M4 state. Type checking can transactionally bind every still-unresolved canonical
 integer variable to an exact HIR default such as `i32`, while leaving already
 constrained roots and general variables untouched. Projection normalization
 can publish an ordered, all-or-nothing trace containing the normalized input
@@ -1257,18 +1257,34 @@ projection, the proof-selected raw target, the recursively normalized target,
 and the exact parameter-environment or impl/associated-item proof locator. The
 semantic-session wrapper authenticates the same session and substitution
 before exposing that trace; failed, stale, cyclic, or fuel-limited attempts
-expose no partial evidence. Durable semantic-result publication and consumer
-replay remain required before this closes projection proof obligations.
+expose no partial evidence. Successful nonempty traces retain their exact
+scratch-term owner, a process-unique owner lifetime, and the scratch-state
+revision at publication. Rollback, variable rebinding, or destroy/reinitialize
+therefore prevents coincident numeric IDs from becoming evidence for unrelated
+terms. Semantic results can durably deep-copy, rebase, seal, and query those
+ordered records for ordinary bodies and exact instances, including their three
+canonical type endpoints and origin-specific locator. This storage is not yet
+causal evidence: it accepts one detached flat trace per body, has no expression
+or decision locator, loses boundaries between independent normalization calls,
+and is not replayed by MIR. Production must group multiple traces and attach
+each one synchronously to the exact semantic decision that required it.
 
 MIR now has fail-closed schema support for tagged field/dereference place
 projections and shared-borrow rvalues over validated places. Dereference steps
 require a reference input and a canonical empty payload; shared borrows require
 an erased immutable reference target whose pointee exactly matches the source
 place. Storage sizing, deep copy, equality, replay scratch, and dumps preserve
-the tags. Source HIR borrow/dereference nodes, semantic recipe production, MIR
-lowering/replay of nonzero adjustments, reference layout, and C emission are
-still pending, so this is representation groundwork rather than executable
-borrow support.
+the tags. HIR now has explicit body-owned shared-borrow and built-in-dereference
+expressions with place, type, region, span, and ownership validation. Semantic
+admission, reachable discovery, and semantic-results publication reject both
+nodes explicitly until exact adjustment/place-use recipes exist; source body
+lowering also remains closed. The C backend is ready for immutable erased
+references: it emits const-pointer declarators, parenthesized tagged
+dereference places, and shared-address rvalues while rejecting mutable, raw,
+non-erased, and trait-deref forms. Authenticated HIR-to-MIR matching still has
+no borrow/dereference cases, and aggregate reference layout remains open, so
+this is representation/backend readiness rather than executable source borrow
+support.
 
 M4-01 now has a session-owned scratch type DAG for primitives, references,
 pointers, tuples, arrays, slices, function pointers, ADTs, rigid parameters,
@@ -1284,11 +1300,19 @@ complete strict GCC, TinyCC, and GCC ASan/UBSan/leak matrices pass. Exact-owner
 instantiation substitutes lifetime, type, and const arguments plus a separately
 authenticated trait/impl `Self`; foreign parameters remain rigid, const values
 are checked against their declared parameter types, shared HIR DAGs retain
-sharing, and every mismatch or overflow rolls back atomically. This is the
-inference kernel only: body constraint
-generation, coercions/defaulting, const inference variables, trait
-obligations, associated-type normalization, method lookup, and diagnostics are
-still required, so M4-01 remains `ACTIVE`.
+sharing, and every mismatch or overflow rolls back atomically. The first
+production body constraint slice assigns private general terms to immutable
+unannotated simple lets, assigns integer terms to unsuffixed decimal literals,
+imports exact suffixed and local types, propagates equality through prior-local
+references and an exact tail-return context, defaults remaining integer roots
+to `i32`, then stages only solved integer kinds before concrete HIR publication.
+Scratch IDs never escape. Rejection performs no HIR rewind or semantic
+mutation, preserving both HIR generations as well as every body, local, type,
+expression, interner, and arena snapshot; the crate-wide outer mark remains
+authoritative across multiple bodies. Calls, operators, branches,
+aggregates, general unresolved variables, coercions, const inference, trait
+obligations, associated-type normalization, method lookup, and diagnostics
+still need full draft-based constraint generation, so M4-01 remains `ACTIVE`.
 
 M4-02 now has an immutable deterministic impl-head index and a transactional
 selector for positive ordinary impls. Type-only impl generics are instantiated
@@ -1362,8 +1386,9 @@ source-expression use. Callee predicate checking already constructs and
 dispatches projection-equality goals through the semantic session; it no
 longer rejects them or treats them as implemented-trait facts.
 
-The next body-typing milestone is not another reachable-expression special
-case. It is an all-local, cfg-active transactional typed-HIR barrier that runs
+The next body-typing milestone generalizes this bounded inferred-let draft
+instead of adding another reachable-expression special case. It is an
+all-local, cfg-active transactional typed-HIR barrier that runs
 before reachability and MIR. Its dependency sequence is general constraint
 generation/finalization; path, trait, and projection lookup; coercions and
 immutable adjustments; methods/operators/callables; patterns and binding
@@ -1371,6 +1396,23 @@ modes; closures/coroutines; post-typecheck rewrites; region/outlives and
 conservative borrowing; then CTFE and broad validated MIR. No later pass may
 consume partially typed local HIR or reinterpret an unsupported semantic state
 as proof.
+
+Production now has the first bounded whole-crate ordering barrier. The C
+driver invokes transactional `cm_semantic_admit_local_crate` immediately after
+module-graph HIR lowering and before legacy entry or exported-root discovery.
+Every cfg-active supported free-function or concrete trait-impl method body is
+therefore lowered and definition-checked, and an invalid unreachable body
+rejects atomically before MIR or output publication. Original mrustc completes
+outer and expression type checking, usage
+annotation, lifetime/reborrow, and validation passes before translation
+enumeration and monomorphization. The next production barrier must invoke the
+remaining semantic passes in that same causal position, retain and consume the
+definition-level capability downstream, then derive the existing
+exact-instance closure admission without a latent HIR-lowering branch during
+reachability. The current semantic
+metadata artifact contains declarations plus trait/impl universe, not typed
+bodies or semantic recipes; it must not be described as this barrier until a
+versioned durable body/results schema and completeness manifest exist.
 
 Semantic results now publish immutable, canonical per-expression adjustment
 sequences plus exact primitive-binary and named-field selection recipes.

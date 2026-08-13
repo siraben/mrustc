@@ -52,6 +52,15 @@ size_t cm_projection_normalize_trace_count(
     const CmProjectionNormalizeTrace *trace);
 const CmProjectionNormalizeStep *cm_projection_normalize_trace_step(
     const CmProjectionNormalizeTrace *trace, size_t index);
+/* Exact scratch owner for published step IDs; NULL for an empty trace. */
+const CmTypeckContext *cm_projection_normalize_trace_term_owner(
+    const CmProjectionNormalizeTrace *trace);
+/* Exact non-reusable owner lifetime; zero for an empty trace. */
+uint64_t cm_projection_normalize_trace_term_lifetime(
+    const CmProjectionNormalizeTrace *trace);
+/* Exact owner revision at successful publication; zero for an empty trace. */
+uint64_t cm_projection_normalize_trace_term_revision(
+    const CmProjectionNormalizeTrace *trace);
 
 /*
  * Recursively normalize one typeck term using bounds-first projection target

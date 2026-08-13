@@ -4318,6 +4318,235 @@ static void assert_field_expression_rejected(CmHirContext *context,
     assert(cm_arena_bytes_used(&context->storage) == arena_bytes);
 }
 
+static void assert_reference_expression_rejected(CmHirContext *context,
+    const CmHirExpr *expression)
+{
+    CmHirExprId expression_id;
+    size_t expression_count;
+    size_t arena_bytes;
+
+    expression_count = context->expressions.len;
+    arena_bytes = cm_arena_bytes_used(&context->storage);
+    assert(cm_hir_add_expr(context, expression, &expression_id)
+        != CM_HIR_OK);
+    assert(expression_id == CM_HIR_EXPR_NONE
+        && context->expressions.len == expression_count
+        && cm_arena_bytes_used(&context->storage) == arena_bytes);
+}
+
+static void test_reference_expression_model(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirDefId body_definition;
+    CmHirDefId other_body_definition;
+    CmHirType type;
+    CmHirTypeId u32_type;
+    CmHirTypeId shared_u32_type;
+    CmHirTypeId mutable_u32_type;
+    CmHirTypeId static_u32_type;
+    CmHirTypeId raw_u32_type;
+    CmHirLocal locals[2];
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirBodyId other_body_id;
+    CmHirExpr expression;
+    CmHirExprId value_local;
+    CmHirExprId reference_local;
+    CmHirExprId other_local;
+    CmHirExprId integer;
+    CmHirExprId borrow;
+    CmHirExprId dereference;
+    CmHirExprId nested_dereference;
+    const CmHirExpr *stored;
+    FILE *first_file;
+    FILE *second_file;
+    char *first_dump;
+    char *second_dump;
+    char expected[256];
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "reference_expression_model"),
+        CM_HIR_EDITION_2021, test_span(0u, 200u), &crate_id,
+        &root_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = test_span(1u, 2u);
+    type.data.integer_type.kind = CM_HIR_INT_U32;
+    assert(cm_hir_add_type(&context, &type, &u32_type) == CM_HIR_OK);
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(3u, 4u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    type.data.reference_type.pointee = u32_type;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&context, &type, &shared_u32_type)
+        == CM_HIR_OK);
+    type.span = test_span(5u, 6u);
+    type.data.reference_type.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_type(&context, &type, &mutable_u32_type)
+        == CM_HIR_OK);
+    type.span = test_span(7u, 8u);
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    type.data.reference_type.region.kind = CM_HIR_REGION_STATIC;
+    assert(cm_hir_add_type(&context, &type, &static_u32_type)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_RAW_POINTER_KIND;
+    type.span = test_span(9u, 10u);
+    type.data.raw_pointer_type.pointee = u32_type;
+    type.data.raw_pointer_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&context, &type, &raw_u32_type) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(20u, 100u), &body_definition) == CM_HIR_OK);
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = cm_hir_intern(&context, "value");
+    locals[0].type = u32_type;
+    locals[0].span = test_span(25u, 30u);
+    locals[0].parameter_index = 0u;
+    locals[1].name = cm_hir_intern(&context, "reference");
+    locals[1].type = shared_u32_type;
+    locals[1].span = test_span(31u, 37u);
+    locals[1].parameter_index = 1u;
+    memset(&body, 0, sizeof(body));
+    body.owner = body_definition;
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = u32_type;
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 2u;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.span = test_span(20u, 100u);
+    assert(cm_hir_add_body(&context, &body, &body_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(101u, 180u), &other_body_definition) == CM_HIR_OK);
+    body.owner = other_body_definition;
+    body.locals = locals;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source_expression_id = 2u;
+    body.span = test_span(101u, 180u);
+    assert(cm_hir_add_body(&context, &body, &other_body_id) == CM_HIR_OK);
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_id;
+    expression.type = u32_type;
+    expression.span = test_span(40u, 41u);
+    assert(cm_hir_add_expr(&context, &expression, &value_local)
+        == CM_HIR_OK);
+    expression.type = shared_u32_type;
+    expression.span = test_span(50u, 51u);
+    expression.data.local.local_index = 1u;
+    assert(cm_hir_add_expr(&context, &expression, &reference_local)
+        == CM_HIR_OK);
+    expression.owner_body = other_body_id;
+    expression.type = u32_type;
+    expression.span = test_span(120u, 121u);
+    expression.data.local.local_index = 0u;
+    assert(cm_hir_add_expr(&context, &expression, &other_local)
+        == CM_HIR_OK);
+    integer = add_test_integer_expression(&context, body_id, u32_type,
+        test_span(60u, 61u));
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BORROW_SHARED;
+    expression.owner_body = body_id;
+    expression.type = shared_u32_type;
+    expression.span = test_span(39u, 41u);
+    expression.data.borrow_shared.operand = value_local;
+    assert(cm_hir_add_expr(&context, &expression, &borrow) == CM_HIR_OK);
+    stored = cm_hir_get_expr(&context, borrow);
+    expression.data.borrow_shared.operand = CM_HIR_EXPR_NONE;
+    assert(stored != NULL && stored->kind == CM_HIR_EXPR_BORROW_SHARED
+        && stored->data.borrow_shared.operand == value_local);
+
+    expression.data.borrow_shared.operand = integer;
+    expression.span = test_span(59u, 61u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.data.borrow_shared.operand = other_local;
+    expression.span = test_span(119u, 121u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.data.borrow_shared.operand = value_local;
+    expression.span = test_span(39u, 41u);
+    expression.type = mutable_u32_type;
+    assert_reference_expression_rejected(&context, &expression);
+    expression.type = static_u32_type;
+    assert_reference_expression_rejected(&context, &expression);
+    expression.type = raw_u32_type;
+    assert_reference_expression_rejected(&context, &expression);
+    expression.type = shared_u32_type;
+    expression.span = test_span(40u, 41u);
+    assert_reference_expression_rejected(&context, &expression);
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_DEREFERENCE;
+    expression.owner_body = body_id;
+    expression.type = u32_type;
+    expression.span = test_span(49u, 51u);
+    expression.data.dereference.operand = reference_local;
+    assert(cm_hir_add_expr(&context, &expression, &dereference)
+        == CM_HIR_OK);
+    expression.span = test_span(38u, 41u);
+    expression.data.dereference.operand = borrow;
+    assert(cm_hir_add_expr(&context, &expression, &nested_dereference)
+        == CM_HIR_OK);
+    stored = cm_hir_get_expr(&context, nested_dereference);
+    expression.data.dereference.operand = CM_HIR_EXPR_NONE;
+    assert(stored != NULL && stored->kind == CM_HIR_EXPR_DEREFERENCE
+        && stored->data.dereference.operand == borrow);
+
+    expression.data.dereference.operand = value_local;
+    expression.span = test_span(39u, 41u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.data.dereference.operand = other_local;
+    expression.span = test_span(119u, 121u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.data.dereference.operand = reference_local;
+    expression.span = test_span(50u, 51u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.type = shared_u32_type;
+    expression.span = test_span(49u, 51u);
+    assert_reference_expression_rejected(&context, &expression);
+    expression.type = u32_type;
+    expression.kind = (CmHirExprKind)99;
+    assert_reference_expression_rejected(&context, &expression);
+
+    assert(cm_hir_set_body_root_expression(&context, body_id,
+        nested_dereference) == CM_HIR_OK);
+    assert(cm_hir_get_body(&context, body_id)->state == CM_HIR_BODY_TYPED);
+    first_file = tmpfile();
+    second_file = tmpfile();
+    assert(first_file != NULL && second_file != NULL
+        && cm_hir_dump(first_file, &context) == 0
+        && cm_hir_dump(second_file, &context) == 0);
+    first_dump = read_dump(first_file);
+    second_dump = read_dump(second_file);
+    assert(strcmp(first_dump, second_dump) == 0);
+    assert(snprintf(expected, sizeof(expected),
+        "expr#%u borrow-shared type=ty#%u operand=expr#%u "
+        "owner=body#%u span=1:39..41",
+        (unsigned int)borrow, (unsigned int)shared_u32_type,
+        (unsigned int)value_local, (unsigned int)body_id) > 0
+        && strstr(first_dump, expected) != NULL);
+    assert(snprintf(expected, sizeof(expected),
+        "expr#%u dereference type=ty#%u operand=expr#%u "
+        "owner=body#%u span=1:38..41",
+        (unsigned int)nested_dereference, (unsigned int)u32_type,
+        (unsigned int)borrow, (unsigned int)body_id) > 0
+        && strstr(first_dump, expected) != NULL);
+    free(second_dump);
+    free(first_dump);
+    assert(fclose(second_file) == 0 && fclose(first_file) == 0);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_aggregate_expression_model(void)
 {
     CmHirContext context;
@@ -6514,6 +6743,7 @@ int main(void)
     test_item_trait_predicate_model_invariants();
     test_trait_predicate_lifetime_binder_model();
     test_trait_predicate_equality_model_invariants();
+    test_reference_expression_model();
     test_aggregate_expression_model();
     test_context_transaction_marks();
     test_adt_generic_default_model();

@@ -21,8 +21,8 @@ printf '%s\n' sentinel >"$generated_c"
 test -s "$generated_c"
 test "$(cat "$generated_c")" != sentinel
 
-if grep -q 'private_unsupported' "$generated_c"; then
-    echo "private unreachable unsupported body was emitted" >&2
+if grep -q 'private_valid' "$generated_c"; then
+    echo "private unreachable valid body was emitted" >&2
     exit 1
 fi
 

@@ -457,6 +457,11 @@ static int cm_compile_discover_expression_callees(
         return cm_compile_discover_expression_callees(state, caller_index,
             expression->data.field.base, depth + 1u, message,
             message_capacity);
+    case CM_HIR_EXPR_BORROW_SHARED:
+    case CM_HIR_EXPR_DEREFERENCE:
+        (void)snprintf(message, message_capacity,
+            "reachable reference expressions require semantic evidence");
+        return 0;
     case CM_HIR_EXPR_CALL:
     {
         const CmHirItem *callee;
@@ -811,6 +816,53 @@ fail:
     return ok;
 }
 
+static CmCompileResult cm_compile_local_admission_failure(
+    const CmSemanticAdmissionResult *admission)
+{
+    CmCompileResult result;
+
+    if (admission == NULL) {
+        return cm_compile_result(CM_COMPILE_SEMANTIC,
+            "whole-crate semantic admission failed");
+    }
+    if (admission->status == CM_SEMANTIC_ADMISSION_LOCAL_BODIES_FAILURE) {
+        result = cm_compile_result(CM_COMPILE_BODY,
+            "whole-crate body lowering failed");
+        (void)snprintf(result.message, sizeof(result.message),
+            "whole-crate body lowering failed: %s",
+            cm_hir_local_bodies_status_name(admission->local_bodies.status));
+        if (admission->local_bodies.status
+                == CM_HIR_LOCAL_BODIES_BODY_FAILURE) {
+            (void)snprintf(result.message, sizeof(result.message),
+                "whole-crate body lowering failed: %s",
+                cm_hir_body_lower_status_name(
+                    admission->local_bodies.body_result.status));
+        }
+        return result;
+    }
+    result = cm_compile_result(CM_COMPILE_SEMANTIC,
+        "whole-crate semantic admission failed");
+    if (admission->status == CM_SEMANTIC_ADMISSION_ITEM_FAILURE) {
+        (void)snprintf(result.message, sizeof(result.message),
+            "whole-crate semantic item checking failed: %s",
+            cm_semantic_item_status_name(admission->item_result.status));
+    } else if (admission->status == CM_SEMANTIC_ADMISSION_BODY_FAILURE) {
+        (void)snprintf(result.message, sizeof(result.message),
+            "whole-crate semantic body checking failed: %s",
+            cm_semantic_body_status_name(admission->body_result.status));
+    } else if (admission->status
+            == CM_SEMANTIC_ADMISSION_SESSION_FAILURE) {
+        (void)snprintf(result.message, sizeof(result.message),
+            "whole-crate semantic session failed: %s",
+            cm_trait_solver_result_name(admission->session_status));
+    } else {
+        (void)snprintf(result.message, sizeof(result.message),
+            "whole-crate semantic admission failed: %s",
+            cm_semantic_admission_status_name(admission->status));
+    }
+    return result;
+}
+
 CmCompileResult cm_compile_emit_c(const char *input_path,
     const char *output_path, enum cm_edition edition,
     const CmTargetDesc *target)
@@ -830,7 +882,6 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmHirLowerResult hir_result;
     CmHirItemId entry_id;
     const CmHirItem *entry;
-    CmHirBodyLowerResult body_result;
     CmMirContext mir;
     CmMirLowerResult mir_result;
     const CmMirBody *mir_body;
@@ -850,6 +901,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmVec exact_root_bodies;
     CmCompileExactState exact_state;
     CmSemanticSession legacy_semantic;
+    CmSemanticAdmission all_local_admission;
     CmSemanticAdmission reachable_admission;
     int use_legacy_entry;
 
@@ -878,6 +930,7 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     cm_vec_init(&exact_root_bodies, sizeof(CmMirBodyId));
     memset(&exact_state, 0, sizeof(exact_state));
     memset(&legacy_semantic, 0, sizeof(legacy_semantic));
+    memset(&all_local_admission, 0, sizeof(all_local_admission));
     memset(&reachable_admission, 0, sizeof(reachable_admission));
     cm_vec_init(&exact_state.instances,
         sizeof(CmCompileReachableInstance));
@@ -951,6 +1004,18 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
                 : hir_result.first_error.message);
         goto cleanup;
     }
+    {
+        CmSemanticAdmissionResult admission_result;
+
+        admission_result = cm_semantic_admit_local_crate(
+            &all_local_admission, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup;
+        }
+    }
+    /* Every cfg-active supported local definition is typed before roots. */
     entry_id = cm_compile_find_entry(&hir, hir_result.root_module);
     use_legacy_entry = hir.items.len == 1u
         && entry_id != CM_HIR_ITEM_NONE;
@@ -960,14 +1025,6 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             || entry->data.function_item.body == CM_HIR_BODY_NONE) {
             result = cm_compile_result(CM_COMPILE_HIR,
                 "crate has no source-backed root main entry");
-            goto cleanup;
-        }
-        body_result = cm_hir_lower_body(&hir,
-            entry->data.function_item.body, &graph, graph_result.revision,
-            &imports, &module_map);
-        if (body_result.status != CM_HIR_BODY_LOWER_OK) {
-            result = cm_compile_result(CM_COMPILE_BODY,
-                cm_hir_body_lower_status_name(body_result.status));
             goto cleanup;
         }
         {
@@ -1206,6 +1263,7 @@ cleanup:
     cm_vec_destroy(&exact_root_items);
     cm_mir_context_destroy(&mir);
     cm_semantic_admission_destroy(&reachable_admission);
+    cm_semantic_admission_destroy(&all_local_admission);
     cm_hir_module_map_destroy(&module_map);
     cm_hir_context_destroy(&hir);
     cm_import_resolver_destroy(&imports);

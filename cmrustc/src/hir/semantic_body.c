@@ -1350,6 +1350,14 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
         }
         return status;
     }
+    case CM_HIR_EXPR_BORROW_SHARED:
+    case CM_HIR_EXPR_DEREFERENCE:
+        /*
+         * The HIR model can represent these nodes, but body admission must
+         * not accept them until it also publishes the exact adjustment and
+         * place-use evidence that MIR lowering can replay.
+         */
+        return CM_SEMANTIC_BODY_INVALID;
     }
     return CM_SEMANTIC_BODY_INVALID;
 }
@@ -1537,6 +1545,9 @@ static CmSemanticBodyStatus cm_semantic_body_walk(
             || cm_semantic_body_walk(hir, body, e->data.if_expr.else_expression, seen, calls, count)
                 != CM_SEMANTIC_BODY_OK) return CM_SEMANTIC_BODY_INVALID;
         break;
+    case CM_HIR_EXPR_BORROW_SHARED:
+    case CM_HIR_EXPR_DEREFERENCE:
+        return CM_SEMANTIC_BODY_INVALID;
     default: return CM_SEMANTIC_BODY_INVALID;
     }
     seen[(size_t)id - 1u] = 2u;

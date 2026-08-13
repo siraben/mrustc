@@ -4602,6 +4602,15 @@ static int cm_hir_body_type_equal(const CmHirContext *context,
     case CM_HIR_TYPE_PARAMETER_KIND:
         return left->data.parameter_type.parameter
             == right->data.parameter_type.parameter;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && right->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && left->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+            && right->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED
+            && cm_hir_body_type_equal(context,
+                left->data.reference_type.pointee,
+                right->data.reference_type.pointee);
     case CM_HIR_TYPE_ADT_KIND:
         return left->data.named_type.argument_count == 0u
             && left->data.named_type.arguments == NULL
@@ -4660,6 +4669,14 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
         return cm_hir_expression_locals_visible(context,
             expression->data.field.base, body_id, visible_local_count,
             depth + 1u);
+    case CM_HIR_EXPR_BORROW_SHARED:
+        return cm_hir_expression_locals_visible(context,
+            expression->data.borrow_shared.operand, body_id,
+            visible_local_count, depth + 1u);
+    case CM_HIR_EXPR_DEREFERENCE:
+        return cm_hir_expression_locals_visible(context,
+            expression->data.dereference.operand, body_id,
+            visible_local_count, depth + 1u);
     case CM_HIR_EXPR_IF:
         return cm_hir_expression_locals_visible(context,
                 expression->data.if_expr.condition, body_id,
@@ -5091,6 +5108,12 @@ static void cm_hir_claim_expression_tree(CmHirContext *context,
     } else if (expression->kind == CM_HIR_EXPR_FIELD) {
         cm_hir_claim_expression_tree(context, expression->data.field.base,
             body_id);
+    } else if (expression->kind == CM_HIR_EXPR_BORROW_SHARED) {
+        cm_hir_claim_expression_tree(context,
+            expression->data.borrow_shared.operand, body_id);
+    } else if (expression->kind == CM_HIR_EXPR_DEREFERENCE) {
+        cm_hir_claim_expression_tree(context,
+            expression->data.dereference.operand, body_id);
     } else if (expression->kind == CM_HIR_EXPR_IF) {
         cm_hir_claim_expression_tree(context,
             expression->data.if_expr.condition, body_id);
@@ -5120,7 +5143,7 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
     type = cm_hir_get_type(context, expression->type);
     if (type == NULL || !cm_hir_span_is_ordered(expression->span)
         || (unsigned int)expression->kind >
-            (unsigned int)CM_HIR_EXPR_IF) {
+            (unsigned int)CM_HIR_EXPR_DEREFERENCE) {
         return CM_HIR_INVALID_ARGUMENT;
     }
     body = expression->owner_body == CM_HIR_BODY_NONE ? NULL
@@ -5402,6 +5425,56 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
             return CM_HIR_INVARIANT_VIOLATION;
         }
         break;
+    case CM_HIR_EXPR_BORROW_SHARED:
+    {
+        const CmHirExpr *operand;
+
+        operand = cm_hir_get_expr(context,
+            expression->data.borrow_shared.operand);
+        if (body == NULL || operand == NULL
+            || operand->owner_body != expression->owner_body
+            || (operand->kind != CM_HIR_EXPR_LOCAL
+                && operand->kind != CM_HIR_EXPR_FIELD
+                && operand->kind != CM_HIR_EXPR_DEREFERENCE)
+            || type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            || type->data.reference_type.mutability != CM_HIR_IMMUTABLE
+            || type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+            || !cm_hir_body_type_equal(context,
+                type->data.reference_type.pointee, operand->type)
+            || operand->span.source != expression->span.source
+            || operand->span.start <= expression->span.start
+            || operand->span.end != expression->span.end) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        break;
+    }
+    case CM_HIR_EXPR_DEREFERENCE:
+    {
+        const CmHirExpr *operand;
+        const CmHirType *operand_type;
+
+        operand = cm_hir_get_expr(context,
+            expression->data.dereference.operand);
+        operand_type = operand == NULL ? NULL
+            : cm_hir_get_type(context, operand->type);
+        if (body == NULL || operand == NULL
+            || operand->owner_body != expression->owner_body
+            || operand_type == NULL
+            || operand_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            || operand_type->data.reference_type.mutability
+                != CM_HIR_IMMUTABLE
+            || operand_type->data.reference_type.region.kind
+                != CM_HIR_REGION_ERASED
+            || !cm_hir_body_type_equal(context,
+                operand_type->data.reference_type.pointee,
+                expression->type)
+            || operand->span.source != expression->span.source
+            || operand->span.start <= expression->span.start
+            || operand->span.end != expression->span.end) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        break;
+    }
     }
     return cm_hir_push(context, &context->expressions, &copy, out_id);
 }

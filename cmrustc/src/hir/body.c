@@ -1,6 +1,7 @@
 #include "cm/hir/body.h"
 
 #include "cm/alloc.h"
+#include "cm/hir/typeck.h"
 
 #include <string.h>
 
@@ -127,6 +128,10 @@ typedef struct CmHirBodyLetPlan {
     CmAstExprId initializer;
     CmAstSpan statement_span;
     CmAstSpan binding_span;
+    CmTypeckTypeId inference_term;
+    CmHirTypeId resolved_type;
+    CmHirIntType resolved_integer_kind;
+    int has_resolved_integer_kind;
 } CmHirBodyLetPlan;
 
 static const CmAstPathSegment *cm_hir_body_exact_path_segment(
@@ -264,6 +269,35 @@ static CmHirTypeId cm_hir_body_find_bool_type(
         }
     }
     return CM_HIR_TYPE_NONE;
+}
+
+static CmHirTypeId cm_hir_body_find_integer_type(
+    const CmHirContext *context, CmHirIntType kind)
+{
+    size_t index;
+
+    for (index = 0u; index < context->types.len; ++index) {
+        const CmHirType *type;
+
+        type = (const CmHirType *)cm_vec_at_const(&context->types, index);
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == kind) {
+            return (CmHirTypeId)(index + 1u);
+        }
+    }
+    return CM_HIR_TYPE_NONE;
+}
+
+static CmHirStatus cm_hir_body_add_integer_type(CmHirContext *context,
+    CmHirIntType kind, CmSpan span, CmHirTypeId *out_type)
+{
+    CmHirType type;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = span;
+    type.data.integer_type.kind = kind;
+    return cm_hir_add_type(context, &type, out_type);
 }
 
 static int cm_hir_body_type_equal(const CmHirContext *context,
@@ -1083,6 +1117,303 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
     CmAstExprId expression_id, CmAstSpan parent_span, size_t depth,
     CmHirBodyExpressionCounts *out_counts);
 
+static CmHirBodyLowerStatus cm_hir_body_literal_integer_kind(
+    const CmAst *ast, CmInternId text_id, int *out_has_suffix,
+    CmHirIntType *out_kind)
+{
+    const CmInternedString *text;
+    size_t digit_count;
+    size_t suffix_length;
+
+    *out_has_suffix = 0;
+    *out_kind = CM_HIR_INT_I32;
+    text = cm_ast_get_string(ast, text_id);
+    if (text == NULL || text->len == 0u) {
+        return CM_HIR_BODY_LOWER_INVALID_LITERAL;
+    }
+    digit_count = 0u;
+    while (digit_count < text->len
+        && text->bytes[digit_count] >= (unsigned char)'0'
+        && text->bytes[digit_count] <= (unsigned char)'9') {
+        ++digit_count;
+    }
+    if (digit_count == 0u) return CM_HIR_BODY_LOWER_INVALID_LITERAL;
+    if (digit_count == text->len) return CM_HIR_BODY_LOWER_OK;
+    suffix_length = text->len - digit_count;
+    *out_has_suffix = 1;
+    if (suffix_length == 3u
+        && memcmp(text->bytes + digit_count, "i32", 3u) == 0) {
+        *out_kind = CM_HIR_INT_I32;
+    } else if (suffix_length == 3u
+        && memcmp(text->bytes + digit_count, "u32", 3u) == 0) {
+        *out_kind = CM_HIR_INT_U32;
+    } else if (suffix_length == 5u
+        && memcmp(text->bytes + digit_count, "usize", 5u) == 0) {
+        *out_kind = CM_HIR_INT_USIZE;
+    } else {
+        return CM_HIR_BODY_LOWER_INVALID_LITERAL;
+    }
+    return CM_HIR_BODY_LOWER_OK;
+}
+
+static CmHirBodyLowerStatus cm_hir_body_typeck_status(
+    CmTypeckStatus status)
+{
+    if (status == CM_TYPECK_TYPE_MISMATCH
+        || status == CM_TYPECK_KIND_CONFLICT) {
+        return CM_HIR_BODY_LOWER_TYPE_MISMATCH;
+    }
+    if (status == CM_TYPECK_UNRESOLVED
+        || status == CM_TYPECK_UNSUPPORTED_HIR_TYPE
+        || status == CM_TYPECK_UNSUPPORTED_CONSTANT) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+    }
+    return CM_HIR_BODY_LOWER_HIR_FAILURE;
+}
+
+static CmHirBodyLowerStatus cm_hir_body_inference_path_term(
+    const CmHirBodyBuildState *state, CmTypeckContext *typeck,
+    CmAstExprId expression_id, CmTypeckTypeId *out_term)
+{
+    const CmAstExpr *expression;
+    const CmAstPathSegment *segment;
+    uint32_t local_index;
+    CmHirTypeId local_type;
+    CmTypeckStatus status;
+
+    *out_term = CM_TYPECK_TYPE_NONE;
+    expression = cm_ast_get_expr(state->ast, expression_id);
+    segment = expression == NULL || expression->kind != CM_AST_EXPR_PATH
+        ? NULL : cm_hir_body_exact_path_segment(state->ast,
+            expression->data.path.path);
+    if (segment == NULL || segment->argument_count != 0u
+        || !cm_hir_body_find_local(state->context, state->body,
+            state->ast, state->let_plans, state->visible_let_count,
+            state->base_local_count, segment->name, &local_index)) {
+        return CM_HIR_BODY_LOWER_UNRESOLVED_PATH;
+    }
+    if (local_index < state->base_local_count) {
+        local_type = state->body->locals[local_index].type;
+    } else {
+        const CmHirBodyLetPlan *plan;
+
+        plan = &state->let_plans[local_index - state->base_local_count];
+        if (plan->inference_term != CM_TYPECK_TYPE_NONE) {
+            *out_term = plan->inference_term;
+            return CM_HIR_BODY_LOWER_OK;
+        }
+        local_type = plan->resolved_type;
+    }
+    status = cm_typeck_import_hir_type(typeck, local_type, out_term);
+    return status == CM_TYPECK_OK ? CM_HIR_BODY_LOWER_OK
+        : cm_hir_body_typeck_status(status);
+}
+
+static CmHirBodyLowerStatus cm_hir_body_inference_initializer_term(
+    const CmHirBodyBuildState *state, CmTypeckContext *typeck,
+    CmAstExprId expression_id, CmTypeckTypeId *out_term)
+{
+    const CmAstExpr *expression;
+    CmHirBodyLowerStatus lower_status;
+    CmTypeckStatus typeck_status;
+    CmHirIntType integer_kind;
+    CmTypeckType scratch_type;
+    int has_suffix;
+
+    *out_term = CM_TYPECK_TYPE_NONE;
+    expression = cm_ast_get_expr(state->ast, expression_id);
+    if (expression == NULL) return CM_HIR_BODY_LOWER_INVALID_BODY;
+    if (expression->kind == CM_AST_EXPR_PATH) {
+        return cm_hir_body_inference_path_term(state, typeck,
+            expression_id, out_term);
+    }
+    if (expression->kind != CM_AST_EXPR_LITERAL) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+    }
+    lower_status = cm_hir_body_literal_integer_kind(state->ast,
+        expression->data.literal.text, &has_suffix, &integer_kind);
+    if (lower_status != CM_HIR_BODY_LOWER_OK) return lower_status;
+    if (!has_suffix) {
+        typeck_status = cm_typeck_new_variable(typeck,
+            CM_HIR_INFER_INTEGER,
+            cm_hir_body_ast_span(state->source, expression->span),
+            out_term);
+    } else {
+        memset(&scratch_type, 0, sizeof(scratch_type));
+        scratch_type.kind = CM_TYPECK_TYPE_INTEGER;
+        scratch_type.span = cm_hir_body_ast_span(state->source,
+            expression->span);
+        scratch_type.data.integer_type = integer_kind;
+        typeck_status = cm_typeck_add_type(typeck, &scratch_type, out_term);
+    }
+    return typeck_status == CM_TYPECK_OK ? CM_HIR_BODY_LOWER_OK
+        : cm_hir_body_typeck_status(typeck_status);
+}
+
+static CmHirBodyLowerStatus cm_hir_body_prepare_let_inference(
+    CmHirBodyBuildState *state, const CmAstExpr *block,
+    CmHirBodyLetPlan *let_plans)
+{
+    CmTypeckContext typeck;
+    CmTypeckTypeId expected_return;
+    CmTypeckTypeId default_i32;
+    CmTypeckType scratch_i32;
+    CmHirBodyLowerStatus lower_status;
+    CmTypeckStatus typeck_status;
+    uint32_t index;
+    int needs_inference;
+
+    needs_inference = 0;
+    for (index = 0u; index < block->data.block.statement_count; ++index) {
+        const CmAstStmt *statement;
+
+        statement = cm_ast_get_stmt(state->ast,
+            block->data.block.statements[index]);
+        if (statement != NULL && statement->kind == CM_AST_STMT_LET
+            && statement->data.let_stmt.type == CM_AST_TYPE_NONE) {
+            needs_inference = 1;
+            break;
+        }
+    }
+    if (!needs_inference) return CM_HIR_BODY_LOWER_OK;
+    cm_typeck_context_init(&typeck, state->context);
+    typeck_status = cm_typeck_import_hir_type(&typeck,
+        state->body->expected_type, &expected_return);
+    if (typeck_status != CM_TYPECK_OK) {
+        lower_status = cm_hir_body_typeck_status(typeck_status);
+        goto fail_typeck;
+    }
+    for (index = 0u; index < block->data.block.statement_count; ++index) {
+        const CmAstStmt *statement;
+        const CmAstPattern *pattern;
+        CmTypeckTypeId initializer_term;
+
+        statement = cm_ast_get_stmt(state->ast,
+            block->data.block.statements[index]);
+        pattern = statement == NULL || statement->kind != CM_AST_STMT_LET
+            ? NULL : cm_ast_get_pattern(state->ast,
+                statement->data.let_stmt.pattern);
+        if (statement == NULL || pattern == NULL
+            || statement->data.let_stmt.initializer == CM_AST_EXPR_NONE) {
+            lower_status = CM_HIR_BODY_LOWER_INVALID_BODY;
+            goto fail_typeck;
+        }
+        let_plans[index].ast_name = pattern->kind == CM_AST_PATTERN_BINDING
+            ? pattern->data.binding.name : CM_INTERN_ID_NONE;
+        let_plans[index].initializer = statement->data.let_stmt.initializer;
+        let_plans[index].statement_span = statement->span;
+        let_plans[index].binding_span = pattern->span;
+        if (statement->data.let_stmt.type != CM_AST_TYPE_NONE) {
+            if (!cm_hir_body_ast_type_matches(state->context, state->ast,
+                    statement->data.let_stmt.type,
+                    state->body->expected_type)) {
+                lower_status = CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+                goto fail_typeck;
+            }
+            let_plans[index].resolved_type = state->body->expected_type;
+            continue;
+        }
+        typeck_status = cm_typeck_new_variable(&typeck,
+            CM_HIR_INFER_GENERAL,
+            cm_hir_body_ast_span(state->source, pattern->span),
+            &let_plans[index].inference_term);
+        if (typeck_status != CM_TYPECK_OK) {
+            lower_status = cm_hir_body_typeck_status(typeck_status);
+            goto fail_typeck;
+        }
+        state->visible_let_count = index;
+        lower_status = cm_hir_body_inference_initializer_term(state,
+            &typeck, let_plans[index].initializer, &initializer_term);
+        if (lower_status != CM_HIR_BODY_LOWER_OK) goto fail_typeck;
+        typeck_status = cm_typeck_unify(&typeck,
+            let_plans[index].inference_term, initializer_term);
+        if (typeck_status != CM_TYPECK_OK) {
+            lower_status = cm_hir_body_typeck_status(typeck_status);
+            goto fail_typeck;
+        }
+    }
+    /* A tail-local use is an exact return context and must beat fallback. */
+    state->visible_let_count = block->data.block.statement_count;
+    if (cm_ast_get_expr(state->ast, block->data.block.tail) != NULL
+        && cm_ast_get_expr(state->ast, block->data.block.tail)->kind
+            == CM_AST_EXPR_PATH) {
+        CmTypeckTypeId tail_term;
+
+        lower_status = cm_hir_body_inference_path_term(state, &typeck,
+            block->data.block.tail, &tail_term);
+        if (lower_status != CM_HIR_BODY_LOWER_OK) goto fail_typeck;
+        typeck_status = cm_typeck_unify(&typeck, tail_term,
+            expected_return);
+        if (typeck_status != CM_TYPECK_OK) {
+            lower_status = cm_hir_body_typeck_status(typeck_status);
+            goto fail_typeck;
+        }
+    }
+    memset(&scratch_i32, 0, sizeof(scratch_i32));
+    scratch_i32.kind = CM_TYPECK_TYPE_INTEGER;
+    scratch_i32.span = state->body->span;
+    scratch_i32.data.integer_type = CM_HIR_INT_I32;
+    typeck_status = cm_typeck_add_type(&typeck, &scratch_i32, &default_i32);
+    if (typeck_status != CM_TYPECK_OK) {
+        lower_status = cm_hir_body_typeck_status(typeck_status);
+        goto fail_typeck;
+    }
+    for (index = 0u; index < block->data.block.statement_count; ++index) {
+        CmTypeckTypeId resolved;
+        const CmTypeckType *resolved_type;
+
+        if (let_plans[index].inference_term == CM_TYPECK_TYPE_NONE) continue;
+        typeck_status = cm_typeck_resolve(&typeck,
+            let_plans[index].inference_term, &resolved);
+        resolved_type = typeck_status == CM_TYPECK_OK
+            ? cm_typeck_get_type(&typeck, resolved) : NULL;
+        if (typeck_status != CM_TYPECK_OK || resolved_type == NULL) {
+            lower_status = cm_hir_body_typeck_status(typeck_status);
+            goto fail_typeck;
+        }
+        if (resolved_type->kind == CM_TYPECK_TYPE_VARIABLE
+            && resolved_type->data.variable.class_kind
+                == CM_HIR_INFER_INTEGER) {
+            typeck_status = cm_typeck_unify(&typeck, resolved, default_i32);
+            if (typeck_status != CM_TYPECK_OK) {
+                lower_status = cm_hir_body_typeck_status(typeck_status);
+                goto fail_typeck;
+            }
+        } else if (resolved_type->kind == CM_TYPECK_TYPE_VARIABLE) {
+            lower_status = CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+            goto fail_typeck;
+        }
+    }
+    for (index = 0u; index < block->data.block.statement_count; ++index) {
+        CmTypeckTypeId resolved;
+        const CmTypeckType *resolved_type;
+
+        if (let_plans[index].inference_term == CM_TYPECK_TYPE_NONE) continue;
+        typeck_status = cm_typeck_resolve(&typeck,
+            let_plans[index].inference_term, &resolved);
+        resolved_type = typeck_status == CM_TYPECK_OK
+            ? cm_typeck_get_type(&typeck, resolved) : NULL;
+        if (typeck_status != CM_TYPECK_OK || resolved_type == NULL
+            || resolved_type->kind != CM_TYPECK_TYPE_INTEGER) {
+            lower_status = typeck_status == CM_TYPECK_OK
+                ? CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE
+                : cm_hir_body_typeck_status(typeck_status);
+            goto fail_typeck;
+        }
+        let_plans[index].resolved_integer_kind =
+            resolved_type->data.integer_type;
+        let_plans[index].has_resolved_integer_kind = 1;
+        let_plans[index].resolved_type = cm_hir_body_find_integer_type(
+            state->context, resolved_type->data.integer_type);
+    }
+    cm_typeck_context_destroy(&typeck);
+    return CM_HIR_BODY_LOWER_OK;
+
+fail_typeck:
+    cm_typeck_context_destroy(&typeck);
+    return lower_status;
+}
+
 /*
  * Keep this first control-flow slice free of calls, nested control flow, and
  * aggregate construction.  MIR can therefore replay every admitted child as
@@ -1299,7 +1630,9 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
                     state->body->locals[local_index].type,
                     expected_type))
             || (local_index >= state->base_local_count
-                && !cm_hir_body_is_wrapping_unsigned(state->context,
+                && !cm_hir_body_type_equal(state->context,
+                    state->let_plans[local_index
+                        - state->base_local_count].resolved_type,
                     expected_type))) {
             return CM_HIR_BODY_LOWER_TYPE_MISMATCH;
         }
@@ -1775,10 +2108,6 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_let_block(
             }
             return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
         }
-        if (!cm_hir_body_is_wrapping_unsigned(state->context,
-                state->body->expected_type)) {
-            return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
-        }
         pattern = cm_ast_get_pattern(state->ast,
             statement->data.let_stmt.pattern);
         if (pattern == NULL || pattern->span.start > pattern->span.end
@@ -1794,9 +2123,13 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_let_block(
             || statement->data.let_stmt.initializer == CM_AST_EXPR_NONE) {
             return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
         }
-        if (statement->data.let_stmt.type == CM_AST_TYPE_NONE
-            || !cm_hir_body_ast_type_matches(state->context, state->ast,
-                statement->data.let_stmt.type,
+        if (statement->data.let_stmt.type == CM_AST_TYPE_NONE) {
+            if (let_plans[index].resolved_type == CM_HIR_TYPE_NONE
+                && !let_plans[index].has_resolved_integer_kind) {
+                return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+            }
+        } else if (!cm_hir_body_ast_type_matches(state->context,
+                state->ast, statement->data.let_stmt.type,
                 state->body->expected_type)) {
             return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
         }
@@ -1819,10 +2152,89 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_let_block(
             statement->data.let_stmt.initializer;
         let_plans[index].statement_span = statement->span;
         let_plans[index].binding_span = pattern->span;
+        if (statement->data.let_stmt.type != CM_AST_TYPE_NONE) {
+            let_plans[index].resolved_type = state->body->expected_type;
+        }
         state->visible_let_count = index;
-        status = cm_hir_body_preflight_typed_expression(state,
-            state->body->expected_type, let_plans[index].initializer,
-            statement->span, 0u, &child);
+        if (let_plans[index].resolved_type != CM_HIR_TYPE_NONE) {
+            status = cm_hir_body_preflight_typed_expression(state,
+                let_plans[index].resolved_type,
+                let_plans[index].initializer, statement->span, 0u, &child);
+        } else {
+            const CmAstExpr *initializer;
+            uint64_t ignored_value;
+
+            memset(&child, 0, sizeof(child));
+            initializer = cm_ast_get_expr(state->ast,
+                let_plans[index].initializer);
+            if (initializer == NULL
+                || initializer->span.start > initializer->span.end
+                || initializer->span.start < statement->span.start
+                || initializer->span.end > statement->span.end) {
+                status = CM_HIR_BODY_LOWER_INVALID_BODY;
+            } else if (initializer->attribute_count != 0u
+                || initializer->attributes != NULL) {
+                status = CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+            } else if (initializer->kind == CM_AST_EXPR_LITERAL) {
+                status = cm_hir_parse_integer_literal(state->ast,
+                    initializer->data.literal.text,
+                    let_plans[index].resolved_integer_kind,
+                    &ignored_value);
+                child.expression_count = status == CM_HIR_BODY_LOWER_OK
+                    ? 1u : 0u;
+            } else if (initializer->kind == CM_AST_EXPR_PATH) {
+                const CmAstPathSegment *segment;
+                uint32_t local_index;
+                CmHirIntType local_kind;
+                int matches;
+
+                segment = cm_hir_body_exact_path_segment(state->ast,
+                    initializer->data.path.path);
+                matches = segment != NULL && segment->argument_count == 0u
+                    && cm_hir_body_find_local(state->context, state->body,
+                        state->ast, state->let_plans,
+                        state->visible_let_count, state->base_local_count,
+                        segment->name, &local_index);
+                if (matches && local_index < state->base_local_count) {
+                    const CmHirType *local_type;
+
+                    local_type = cm_hir_get_type(state->context,
+                        state->body->locals[local_index].type);
+                    matches = local_type != NULL
+                        && local_type->kind == CM_HIR_TYPE_INTEGER_KIND;
+                    local_kind = matches
+                        ? local_type->data.integer_type.kind
+                        : CM_HIR_INT_I32;
+                } else if (matches) {
+                    const CmHirBodyLetPlan *local_plan;
+                    const CmHirType *local_type;
+
+                    local_plan = &let_plans[local_index
+                        - state->base_local_count];
+                    local_type = cm_hir_get_type(state->context,
+                        local_plan->resolved_type);
+                    matches = local_plan->has_resolved_integer_kind
+                        || (local_type != NULL
+                            && local_type->kind
+                                == CM_HIR_TYPE_INTEGER_KIND);
+                    local_kind = local_plan->has_resolved_integer_kind
+                        ? local_plan->resolved_integer_kind
+                        : (matches ? local_type->data.integer_type.kind
+                            : CM_HIR_INT_I32);
+                }
+                if (!matches) {
+                    status = CM_HIR_BODY_LOWER_UNRESOLVED_PATH;
+                } else if (local_kind
+                        != let_plans[index].resolved_integer_kind) {
+                    status = CM_HIR_BODY_LOWER_TYPE_MISMATCH;
+                } else {
+                    status = CM_HIR_BODY_LOWER_OK;
+                    child.expression_count = 1u;
+                }
+            } else {
+                status = CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+            }
+        }
         if (status != CM_HIR_BODY_LOWER_OK) return status;
         if (!cm_hir_body_counts_add(out_counts, &child)) {
             return CM_HIR_BODY_LOWER_HIR_FAILURE;
@@ -2246,6 +2658,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     CmSourceId source;
     uint32_t statement_count;
     uint32_t statement_index;
+    size_t inferred_type_add_count;
     int transaction_marked;
     int add_bool_type;
 
@@ -2370,8 +2783,12 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         let_plans = (CmHirBodyLetPlan *)cm_alloc_zeroed(statement_count,
             sizeof(CmHirBodyLetPlan));
         build_state.let_plans = let_plans;
-        literal_status = cm_hir_body_preflight_let_block(&build_state,
-            block_ast, let_plans, &expression_counts);
+        literal_status = cm_hir_body_prepare_let_inference(&build_state,
+            block_ast, let_plans);
+        if (literal_status == CM_HIR_BODY_LOWER_OK) {
+            literal_status = cm_hir_body_preflight_let_block(&build_state,
+                block_ast, let_plans, &expression_counts);
+        }
     } else {
         literal_status = cm_hir_body_preflight_typed_expression(&build_state,
             body->expected_type, block_ast->data.block.tail,
@@ -2396,16 +2813,41 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     build_state.bool_type = cm_hir_body_find_bool_type(context);
     add_bool_type = expression_counts.needs_bool_type
         && build_state.bool_type == CM_HIR_TYPE_NONE;
+    inferred_type_add_count = 0u;
+    for (statement_index = 0u; statement_index < statement_count;
+         ++statement_index) {
+        uint32_t prior;
+        int already_needed;
+
+        if (!let_plans[statement_index].has_resolved_integer_kind
+            || let_plans[statement_index].resolved_type
+                != CM_HIR_TYPE_NONE) {
+            continue;
+        }
+        already_needed = 0;
+        for (prior = 0u; prior < statement_index; ++prior) {
+            if (let_plans[prior].has_resolved_integer_kind
+                && let_plans[prior].resolved_type == CM_HIR_TYPE_NONE
+                && let_plans[prior].resolved_integer_kind
+                    == let_plans[statement_index].resolved_integer_kind) {
+                already_needed = 1;
+                break;
+            }
+        }
+        if (!already_needed) ++inferred_type_add_count;
+    }
     reserved_type_count = context->types.len;
-    if (add_bool_type
-        && (!cm_size_add(context->types.len, 1u, &reserved_type_count)
-            || reserved_type_count > (size_t)UINT32_MAX)) {
+    if (!cm_size_add(context->types.len, inferred_type_add_count,
+                &reserved_type_count)
+        || (add_bool_type && !cm_size_add(reserved_type_count, 1u,
+                &reserved_type_count))
+        || reserved_type_count > (size_t)UINT32_MAX) {
         cm_free(let_plans);
         result.status = CM_HIR_BODY_LOWER_HIR_FAILURE;
         result.hir_status = CM_HIR_ID_EXHAUSTED;
         return result;
     }
-    if (add_bool_type) {
+    if (reserved_type_count != context->types.len) {
         /* Reserve before any semantic mutation; the later append cannot OOM. */
         cm_vec_reserve(&context->types, reserved_type_count);
     }
@@ -2466,7 +2908,8 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         hir_status = CM_HIR_INVALID_ID;
         goto fail_body_transaction;
     }
-    if (statement_count != 0u || add_bool_type) {
+    if (statement_count != 0u || add_bool_type
+        || inferred_type_add_count != 0u) {
         storage_mark = cm_arena_mark(&context->storage);
         strings_mark = cm_interner_mark(&context->strings);
         transaction_marked = 1;
@@ -2480,6 +2923,35 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
         hir_status = cm_hir_add_type(context, &bool_type,
             &build_state.bool_type);
         if (hir_status != CM_HIR_OK) goto fail_body_transaction;
+    }
+    for (statement_index = 0u; statement_index < statement_count;
+         ++statement_index) {
+        CmHirTypeId concrete_type;
+        uint32_t update_index;
+
+        if (!let_plans[statement_index].has_resolved_integer_kind
+            || let_plans[statement_index].resolved_type
+                != CM_HIR_TYPE_NONE) {
+            continue;
+        }
+        concrete_type = cm_hir_body_find_integer_type(context,
+            let_plans[statement_index].resolved_integer_kind);
+        if (concrete_type == CM_HIR_TYPE_NONE) {
+            hir_status = cm_hir_body_add_integer_type(context,
+                let_plans[statement_index].resolved_integer_kind,
+                cm_hir_body_ast_span(source,
+                    let_plans[statement_index].binding_span),
+                &concrete_type);
+            if (hir_status != CM_HIR_OK) goto fail_body_transaction;
+        }
+        for (update_index = statement_index;
+             update_index < statement_count; ++update_index) {
+            if (let_plans[update_index].has_resolved_integer_kind
+                && let_plans[update_index].resolved_integer_kind
+                    == let_plans[statement_index].resolved_integer_kind) {
+                let_plans[update_index].resolved_type = concrete_type;
+            }
+        }
     }
     if (expression_counts.needs_bool_type
         && !cm_hir_body_is_bool(context, build_state.bool_type)) {
@@ -2514,7 +2986,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
             local = &expanded_locals[old_local_count + statement_index];
             local->name = cm_interner_intern(&context->strings,
                 name->bytes, name->len);
-            local->type = body->expected_type;
+            local->type = let_plans[statement_index].resolved_type;
             local->mutability = CM_HIR_IMMUTABLE;
             local->span = cm_hir_body_ast_span(source,
                 let_plans[statement_index].binding_span);
@@ -2527,7 +2999,8 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
              ++statement_index) {
             build_state.visible_let_count = statement_index;
             hir_status = cm_hir_body_build_typed_expression(&build_state,
-                body->expected_type, let_plans[statement_index].initializer,
+                let_plans[statement_index].resolved_type,
+                let_plans[statement_index].initializer,
                 &hir_statements[statement_index].data.let_statement
                     .initializer);
             if (hir_status != CM_HIR_OK) goto fail_body_transaction;
@@ -2571,6 +3044,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     if (transaction_marked) {
         cm_interner_discard_mark(&context->strings, strings_mark);
         cm_arena_discard_mark(&context->storage, storage_mark);
+        transaction_marked = 0;
     }
     if (!build_state.transaction_storage_adopted) {
         cm_free(build_state.transaction_storage);
@@ -2588,10 +3062,6 @@ fail_body_transaction:
         cm_free(build_state.transaction_storage);
         build_state.transaction_storage = NULL;
     }
-    cm_hir_body_rollback_expressions(context, expression_count);
-    if (context->types.len > type_count) {
-        cm_vec_resize(&context->types, type_count);
-    }
     if (transaction_marked) {
         mutable_body->locals = old_locals;
         mutable_body->local_count = old_local_count;
@@ -2599,6 +3069,11 @@ fail_body_transaction:
         cm_interner_discard_mark(&context->strings, strings_mark);
         cm_arena_rewind(&context->storage, storage_mark);
         cm_arena_discard_mark(&context->storage, storage_mark);
+        transaction_marked = 0;
+    }
+    cm_hir_body_rollback_expressions(context, expression_count);
+    if (context->types.len > type_count) {
+        cm_vec_resize(&context->types, type_count);
     }
     cm_free(hir_statements);
     cm_free(let_plans);

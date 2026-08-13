@@ -23,6 +23,8 @@ typedef struct CmSemanticBodyRecord {
     size_t signature_return_size;
     size_t signature_parameter_start;
     uint32_t signature_parameter_count;
+    size_t projection_step_start;
+    uint32_t projection_step_count;
 } CmSemanticBodyRecord;
 
 typedef struct CmSemanticTypeRecord {
@@ -39,6 +41,17 @@ typedef struct CmSemanticAdjustmentRecord {
     CmHirDefId selected_method;
     CmHirDefId selected_impl;
 } CmSemanticAdjustmentRecord;
+
+typedef struct CmSemanticProjectionStepRecord {
+    CmSemanticTypeRecord projection;
+    CmSemanticTypeRecord target;
+    CmSemanticTypeRecord normalized_target;
+    CmTraitProofOrigin proof_origin;
+    size_t param_env_fact_index;
+    uint32_t param_env_equality_index;
+    CmHirDefId impl_definition;
+    CmHirDefId impl_associated_definition;
+} CmSemanticProjectionStepRecord;
 
 typedef struct CmSemanticExpressionRecord {
     int present;
@@ -84,6 +97,8 @@ typedef struct CmSemanticInstanceRecord {
     size_t call_parameter_count;
     CmSemanticAdjustmentRecord *adjustments;
     size_t adjustment_count;
+    CmSemanticProjectionStepRecord *projection_steps;
+    size_t projection_step_count;
     CmHirCanonicalInstance *callees;
     size_t callee_count;
 } CmSemanticInstanceRecord;
@@ -106,6 +121,8 @@ struct CmSemanticResults {
     size_t call_parameter_count;
     CmSemanticAdjustmentRecord *adjustments;
     size_t adjustment_count;
+    CmSemanticProjectionStepRecord *projection_steps;
+    size_t projection_step_count;
     size_t admitted_body_count;
     CmSemanticInstanceRecord *instances;
     size_t instance_count;
@@ -134,6 +151,8 @@ typedef struct CmSemanticResultsBodyStageState {
     size_t call_parameter_count;
     CmSemanticAdjustmentRecord *adjustments;
     size_t adjustment_count;
+    CmSemanticProjectionStepRecord *projection_steps;
+    size_t projection_step_count;
     size_t call_count;
     uint32_t body_expression_count;
 } CmSemanticResultsBodyStageState;
@@ -260,9 +279,10 @@ static CmSemanticResultsStatus cm_results_interned(
         ? cm_results_write(buffer, string->bytes, string->len) : status;
 }
 
-static CmSemanticResultsStatus cm_results_typeck_type(
+static CmSemanticResultsStatus cm_results_typeck_type_mode(
     CmResultsBuffer *buffer, const CmHirContext *hir,
-    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth);
+    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth,
+    int allow_projection);
 
 static CmSemanticResultsStatus cm_results_typeck_region(
     CmResultsBuffer *buffer, const CmHirRegion *region)
@@ -281,7 +301,7 @@ static CmSemanticResultsStatus cm_results_typeck_region(
 static CmSemanticResultsStatus cm_results_typeck_const(
     CmResultsBuffer *buffer, const CmHirContext *hir,
     const CmTypeckContext *typeck, const CmTypeckConst *constant,
-    size_t depth)
+    size_t depth, int allow_projection)
 {
     const CmHirGenericParam *parameter;
     CmSemanticResultsStatus status;
@@ -296,8 +316,8 @@ static CmSemanticResultsStatus cm_results_typeck_const(
     }
     status = cm_results_u8(buffer, (unsigned int)constant->kind);
     if (status == CM_SEMANTIC_RESULTS_OK) {
-        status = cm_results_typeck_type(buffer, hir, typeck,
-            constant->type, depth + 1u);
+        status = cm_results_typeck_type_mode(buffer, hir, typeck,
+            constant->type, depth + 1u, allow_projection);
     }
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     if (constant->kind == CM_HIR_CONST_VALUE) {
@@ -318,7 +338,7 @@ static CmSemanticResultsStatus cm_results_typeck_const(
 static CmSemanticResultsStatus cm_results_typeck_argument(
     CmResultsBuffer *buffer, const CmHirContext *hir,
     const CmTypeckContext *typeck, const CmTypeckGenericArg *argument,
-    size_t depth)
+    size_t depth, int allow_projection)
 {
     CmSemanticResultsStatus status;
 
@@ -329,11 +349,11 @@ static CmSemanticResultsStatus cm_results_typeck_argument(
     case CM_HIR_GENERIC_ARG_LIFETIME:
         return cm_results_typeck_region(buffer, &argument->data.lifetime);
     case CM_HIR_GENERIC_ARG_TYPE:
-        return cm_results_typeck_type(buffer, hir, typeck,
-            argument->data.type, depth + 1u);
+        return cm_results_typeck_type_mode(buffer, hir, typeck,
+            argument->data.type, depth + 1u, allow_projection);
     case CM_HIR_GENERIC_ARG_CONST:
         return cm_results_typeck_const(buffer, hir, typeck,
-            &argument->data.constant, depth + 1u);
+            &argument->data.constant, depth + 1u, allow_projection);
     }
     return CM_SEMANTIC_RESULTS_INVALID_HIR;
 }
@@ -341,7 +361,7 @@ static CmSemanticResultsStatus cm_results_typeck_argument(
 static CmSemanticResultsStatus cm_results_typeck_named(
     CmResultsBuffer *buffer, const CmHirContext *hir,
     const CmTypeckContext *typeck, const CmTypeckNamedType *named,
-    size_t depth)
+    size_t depth, int allow_projection)
 {
     CmSemanticResultsStatus status;
     uint32_t index;
@@ -358,14 +378,15 @@ static CmSemanticResultsStatus cm_results_typeck_named(
     for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
             && index < named->argument_count; ++index) {
         status = cm_results_typeck_argument(buffer, hir, typeck,
-            &named->arguments[index], depth + 1u);
+            &named->arguments[index], depth + 1u, allow_projection);
     }
     return status;
 }
 
-static CmSemanticResultsStatus cm_results_typeck_type(
+static CmSemanticResultsStatus cm_results_typeck_type_mode(
     CmResultsBuffer *buffer, const CmHirContext *hir,
-    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth)
+    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth,
+    int allow_projection)
 {
     const CmTypeckType *type;
     const CmHirGenericParam *parameter;
@@ -399,7 +420,9 @@ static CmSemanticResultsStatus cm_results_typeck_type(
     case CM_TYPECK_TYPE_VARIABLE:
         return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
     case CM_TYPECK_TYPE_PROJECTION:
-        return CM_SEMANTIC_RESULTS_PENDING_PROJECTION;
+        if (!allow_projection) return CM_SEMANTIC_RESULTS_PENDING_PROJECTION;
+        tag = CM_HIR_TYPE_PROJECTION_KIND;
+        break;
     default:
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
@@ -424,14 +447,16 @@ static CmSemanticResultsStatus cm_results_typeck_type(
                 (unsigned int)type->data.reference_type.mutability);
         }
         return status == CM_SEMANTIC_RESULTS_OK
-            ? cm_results_typeck_type(buffer, hir, typeck,
-                type->data.reference_type.pointee, depth + 1u) : status;
+            ? cm_results_typeck_type_mode(buffer, hir, typeck,
+                type->data.reference_type.pointee, depth + 1u,
+                allow_projection) : status;
     case CM_TYPECK_TYPE_RAW_POINTER:
         status = cm_results_u8(buffer,
             (unsigned int)type->data.raw_pointer_type.mutability);
         return status == CM_SEMANTIC_RESULTS_OK
-            ? cm_results_typeck_type(buffer, hir, typeck,
-                type->data.raw_pointer_type.pointee, depth + 1u) : status;
+            ? cm_results_typeck_type_mode(buffer, hir, typeck,
+                type->data.raw_pointer_type.pointee, depth + 1u,
+                allow_projection) : status;
     case CM_TYPECK_TYPE_TUPLE:
         if ((type->data.tuple_type.element_count == 0u)
                 != (type->data.tuple_type.elements == NULL)) {
@@ -440,19 +465,21 @@ static CmSemanticResultsStatus cm_results_typeck_type(
         status = cm_results_u32(buffer, type->data.tuple_type.element_count);
         for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
                 && index < type->data.tuple_type.element_count; ++index) {
-            status = cm_results_typeck_type(buffer, hir, typeck,
-                type->data.tuple_type.elements[index], depth + 1u);
+            status = cm_results_typeck_type_mode(buffer, hir, typeck,
+                type->data.tuple_type.elements[index], depth + 1u,
+                allow_projection);
         }
         return status;
     case CM_TYPECK_TYPE_ARRAY:
-        status = cm_results_typeck_type(buffer, hir, typeck,
-            type->data.array_type.element, depth + 1u);
+        status = cm_results_typeck_type_mode(buffer, hir, typeck,
+            type->data.array_type.element, depth + 1u, allow_projection);
         return status == CM_SEMANTIC_RESULTS_OK
             ? cm_results_typeck_const(buffer, hir, typeck,
-                &type->data.array_type.length, depth + 1u) : status;
+                &type->data.array_type.length, depth + 1u,
+                allow_projection) : status;
     case CM_TYPECK_TYPE_SLICE:
-        return cm_results_typeck_type(buffer, hir, typeck,
-            type->data.slice_type.element, depth + 1u);
+        return cm_results_typeck_type_mode(buffer, hir, typeck,
+            type->data.slice_type.element, depth + 1u, allow_projection);
     case CM_TYPECK_TYPE_FN_POINTER:
         if ((type->data.fn_pointer_type.parameter_count == 0u)
                 != (type->data.fn_pointer_type.parameters == NULL)) {
@@ -463,12 +490,14 @@ static CmSemanticResultsStatus cm_results_typeck_type(
         for (index = 0u; status == CM_SEMANTIC_RESULTS_OK
                 && index < type->data.fn_pointer_type.parameter_count;
              ++index) {
-            status = cm_results_typeck_type(buffer, hir, typeck,
-                type->data.fn_pointer_type.parameters[index], depth + 1u);
+            status = cm_results_typeck_type_mode(buffer, hir, typeck,
+                type->data.fn_pointer_type.parameters[index], depth + 1u,
+                allow_projection);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
-            status = cm_results_typeck_type(buffer, hir, typeck,
-                type->data.fn_pointer_type.return_type, depth + 1u);
+            status = cm_results_typeck_type_mode(buffer, hir, typeck,
+                type->data.fn_pointer_type.return_type, depth + 1u,
+                allow_projection);
         }
         if (status == CM_SEMANTIC_RESULTS_OK) {
             status = cm_results_interned(buffer, hir,
@@ -483,7 +512,7 @@ static CmSemanticResultsStatus cm_results_typeck_type(
                 type->data.fn_pointer_type.is_variadic ? 1u : 0u) : status;
     case CM_TYPECK_TYPE_ADT:
         return cm_results_typeck_named(buffer, hir, typeck,
-            &type->data.named_type, depth + 1u);
+            &type->data.named_type, depth + 1u, allow_projection);
     case CM_TYPECK_TYPE_PARAMETER:
         parameter = cm_hir_get_generic_param(hir,
             type->data.parameter_type.parameter);
@@ -497,9 +526,28 @@ static CmSemanticResultsStatus cm_results_typeck_type(
     case CM_TYPECK_TYPE_VARIABLE:
         return CM_SEMANTIC_RESULTS_DEFERRED_INFERENCE;
     case CM_TYPECK_TYPE_PROJECTION:
-        return CM_SEMANTIC_RESULTS_PENDING_PROJECTION;
+        status = cm_results_typeck_type_mode(buffer, hir, typeck,
+            type->data.projection_type.self_type, depth + 1u,
+            allow_projection);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_typeck_named(buffer, hir, typeck,
+                &type->data.projection_type.trait_type, depth + 1u,
+                allow_projection);
+        }
+        return status == CM_SEMANTIC_RESULTS_OK
+            ? cm_results_typeck_named(buffer, hir, typeck,
+                &type->data.projection_type.associated_type, depth + 1u,
+                allow_projection) : status;
     }
     return CM_SEMANTIC_RESULTS_INVALID_HIR;
+}
+
+static CmSemanticResultsStatus cm_results_typeck_type(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, CmTypeckTypeId type_id, size_t depth)
+{
+    return cm_results_typeck_type_mode(buffer, hir, typeck, type_id,
+        depth, 0);
 }
 
 static CmSemanticResultsStatus cm_results_collect_expression(
@@ -611,6 +659,10 @@ static CmSemanticResultsStatus cm_results_collect_expression(
     case CM_HIR_EXPR_INTEGER:
     case CM_HIR_EXPR_LOCAL:
         break;
+    case CM_HIR_EXPR_BORROW_SHARED:
+    case CM_HIR_EXPR_DEREFERENCE:
+        /* Not publishable until semantic admission owns their recipes. */
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
     default:
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
@@ -662,6 +714,28 @@ static CmSemanticResultsStatus cm_results_collect_type_record(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+static CmSemanticResultsStatus cm_results_collect_projection_type_record(
+    CmResultsBuffer *buffer, const CmHirContext *hir,
+    const CmTypeckContext *typeck, CmTypeckTypeId type, int publish,
+    CmSemanticTypeRecord *record)
+{
+    CmSemanticResultsStatus status;
+    size_t start;
+
+    if (buffer == NULL || hir == NULL || typeck == NULL
+        || type == CM_TYPECK_TYPE_NONE || (publish && record == NULL)) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    start = buffer->len;
+    status = cm_results_typeck_type_mode(buffer, hir, typeck, type, 0u, 1);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (publish) {
+        record->type_offset = start;
+        record->type_size = buffer->len - start;
+    }
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
 static int cm_results_type_records_equal(const unsigned char *bytes,
     size_t bytes_len, const CmSemanticTypeRecord *left,
     const CmSemanticTypeRecord *right)
@@ -684,6 +758,54 @@ static int cm_results_adjustment_kind_valid(CmSemanticAdjustmentKind kind)
         && kind <= CM_SEMANTIC_ADJUSTMENT_NEVER_TO_ANY;
 }
 
+static int cm_results_projection_record_valid(
+    const unsigned char *bytes, size_t bytes_len,
+    const CmSemanticProjectionStepRecord *record)
+{
+    const CmSemanticTypeRecord *types[3];
+    size_t index;
+
+    if (record == NULL || (bytes_len != 0u && bytes == NULL)) return 0;
+    types[0] = &record->projection;
+    types[1] = &record->target;
+    types[2] = &record->normalized_target;
+    for (index = 0u; index < 3u; ++index) {
+        if (types[index]->type_size == 0u
+            || types[index]->type_offset > bytes_len
+            || types[index]->type_size
+                > bytes_len - types[index]->type_offset) return 0;
+    }
+    if (record->proof_origin == CM_TRAIT_PROOF_PARAM_ENV) {
+        return record->param_env_fact_index != CM_TRAIT_PROOF_FACT_NONE
+            && record->param_env_equality_index
+                != CM_TRAIT_PROOF_EQUALITY_NONE
+            && cm_hir_def_id_is_none(record->impl_definition)
+            && cm_hir_def_id_is_none(record->impl_associated_definition);
+    }
+    if (record->proof_origin == CM_TRAIT_PROOF_IMPL) {
+        return record->param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+            && record->param_env_equality_index
+                == CM_TRAIT_PROOF_EQUALITY_NONE
+            && !cm_hir_def_id_is_none(record->impl_definition)
+            && !cm_hir_def_id_is_none(record->impl_associated_definition);
+    }
+    return 0;
+}
+
+static int cm_results_projection_records_valid(
+    const unsigned char *bytes, size_t bytes_len,
+    const CmSemanticProjectionStepRecord *records, size_t count)
+{
+    size_t index;
+
+    if ((count == 0u) != (records == NULL)) return 0;
+    for (index = 0u; index < count; ++index) {
+        if (!cm_results_projection_record_valid(bytes, bytes_len,
+                &records[index])) return 0;
+    }
+    return 1;
+}
+
 static CmSemanticResultsStatus cm_results_validate_membership(
     const CmSemanticResults *results, const CmHirContext *hir)
 {
@@ -694,7 +816,10 @@ static CmSemanticResultsStatus cm_results_validate_membership(
         || (results->expression_count != 0u && results->expressions == NULL)
         || (results->type_bytes_len != 0u && results->type_bytes == NULL)
         || (results->adjustment_count != 0u
-            && results->adjustments == NULL)) {
+            && results->adjustments == NULL)
+        || !cm_results_projection_records_valid(results->type_bytes,
+            results->type_bytes_len, results->projection_steps,
+            results->projection_step_count)) {
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
     seen_adjustments = 0u;
@@ -868,6 +993,43 @@ static CmSemanticResultsStatus cm_results_validate_membership(
         }
         if (owner_count != 1u) return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
+    for (expression_index = 0u;
+         expression_index < results->body_count; ++expression_index) {
+        const CmSemanticBodyRecord *body;
+
+        body = &results->bodies[expression_index];
+        if (!body->present) {
+            if (body->projection_step_count != 0u) {
+                return CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+            continue;
+        }
+        if (body->projection_step_start > results->projection_step_count
+            || body->projection_step_count
+                > results->projection_step_count
+                    - body->projection_step_start) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    }
+    for (expression_index = 0u;
+         expression_index < results->projection_step_count;
+         ++expression_index) {
+        size_t owner_count;
+        size_t body_index;
+
+        owner_count = 0u;
+        for (body_index = 0u; body_index < results->body_count;
+             ++body_index) {
+            const CmSemanticBodyRecord *body;
+
+            body = &results->bodies[body_index];
+            if (body->present && expression_index
+                    >= body->projection_step_start
+                && expression_index - body->projection_step_start
+                    < body->projection_step_count) owner_count += 1u;
+        }
+        if (owner_count != 1u) return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
     return CM_SEMANTIC_RESULTS_OK;
 }
 
@@ -990,6 +1152,18 @@ static int cm_results_instance_adjustments_valid(
         }
     }
     return counted == instance->adjustment_count;
+}
+
+static int cm_results_instance_projections_valid(
+    const CmSemanticInstanceRecord *instance)
+{
+    return instance != NULL && instance->body.present
+        && instance->body.projection_step_start == 0u
+        && instance->body.projection_step_count
+            == instance->projection_step_count
+        && cm_results_projection_records_valid(instance->type_bytes,
+            instance->type_bytes_len, instance->projection_steps,
+            instance->projection_step_count);
 }
 
 static int cm_results_instance_recipes_valid(
@@ -1186,6 +1360,7 @@ void cm_semantic_results_body_stage_destroy(
     state = (CmSemanticResultsBodyStageState *)stage->state;
     if (state != NULL) {
         cm_free(state->type_bytes);
+        cm_free(state->projection_steps);
         cm_free(state->adjustments);
         cm_free(state->call_parameters);
         cm_free(state->signature_parameters);
@@ -1194,6 +1369,161 @@ void cm_semantic_results_body_stage_destroy(
         cm_free(state);
     }
     stage->state = NULL;
+}
+
+static int cm_results_projection_origin_valid(
+    const CmProjectionNormalizeStep *step)
+{
+    if (step == NULL || step->projection == CM_TYPECK_TYPE_NONE
+        || step->target == CM_TYPECK_TYPE_NONE
+        || step->normalized_target == CM_TYPECK_TYPE_NONE) return 0;
+    if (step->proof_origin == CM_TRAIT_PROOF_PARAM_ENV) {
+        return step->param_env_fact_index != CM_TRAIT_PROOF_FACT_NONE
+            && step->param_env_equality_index
+                != CM_TRAIT_PROOF_EQUALITY_NONE
+            && cm_hir_def_id_is_none(step->impl_definition)
+            && cm_hir_def_id_is_none(step->impl_associated_definition);
+    }
+    if (step->proof_origin == CM_TRAIT_PROOF_IMPL) {
+        return step->param_env_fact_index == CM_TRAIT_PROOF_FACT_NONE
+            && step->param_env_equality_index
+                == CM_TRAIT_PROOF_EQUALITY_NONE
+            && !cm_hir_def_id_is_none(step->impl_definition)
+            && !cm_hir_def_id_is_none(step->impl_associated_definition);
+    }
+    return 0;
+}
+
+CmSemanticResultsStatus cm_semantic_results_stage_projection_trace(
+    CmSemanticResultsBodyStage *stage, CmSemanticSession *session,
+    const CmProjectionNormalizeTrace *trace)
+{
+    CmSemanticResultsBodyStageState *state;
+    CmSemanticProjectionStepRecord *records;
+    unsigned char *combined_type_bytes;
+    CmResultsBuffer sizing;
+    CmResultsBuffer output;
+    const CmHirContext *hir;
+    CmTypeckContext *typeck;
+    CmSemanticResultsStatus status;
+    size_t count;
+    size_t bytes;
+    size_t index;
+
+    state = stage == NULL ? NULL
+        : (CmSemanticResultsBodyStageState *)stage->state;
+    count = cm_projection_normalize_trace_count(trace);
+    if (state == NULL || session == NULL || trace == NULL || count == 0u
+        || state->projection_step_count != 0u
+        || state->projection_steps != NULL
+        || !cm_semantic_session_is_current(session)
+        || session != state->producer_session
+        || cm_semantic_session_typeck(session) != state->producer_typeck
+        || cm_projection_normalize_trace_term_owner(trace)
+            != state->producer_typeck
+        || cm_projection_normalize_trace_term_lifetime(trace) == 0u
+        || cm_projection_normalize_trace_term_lifetime(trace)
+            != cm_typeck_lifetime_id(state->producer_typeck)
+        || cm_projection_normalize_trace_term_revision(trace) == 0u
+        || cm_projection_normalize_trace_term_revision(trace)
+            != cm_typeck_state_revision(state->producer_typeck)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    hir = cm_semantic_session_hir(session);
+    typeck = cm_semantic_session_typeck(session);
+    if (hir == NULL || typeck == NULL || hir != state->hir
+        || state->storage_lifetime_id != hir->storage.lifetime_id
+        || state->semantic_generation != hir->semantic_generation
+        || state->rewind_generation != hir->rewind_generation
+        || count > (size_t)UINT32_MAX
+        || !cm_size_mul(count, sizeof(*records), &bytes)) {
+        return count > (size_t)UINT32_MAX
+            ? CM_SEMANTIC_RESULTS_OVERFLOW : CM_SEMANTIC_RESULTS_STALE;
+    }
+    memset(&sizing, 0, sizeof(sizing));
+    sizing.sizing = 1;
+    status = CM_SEMANTIC_RESULTS_OK;
+    for (index = 0u; status == CM_SEMANTIC_RESULTS_OK && index < count;
+         ++index) {
+        const CmProjectionNormalizeStep *step;
+
+        step = cm_projection_normalize_trace_step(trace, index);
+        if (!cm_results_projection_origin_valid(step)) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        status = cm_results_collect_projection_type_record(&sizing, hir,
+            typeck,
+            step->projection, 0, NULL);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_projection_type_record(&sizing, hir,
+                typeck,
+                step->target, 0, NULL);
+        }
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_projection_type_record(&sizing, hir,
+                typeck,
+                step->normalized_target, 0, NULL);
+        }
+    }
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    records = (CmSemanticProjectionStepRecord *)cm_alloc_zeroed(1u, bytes);
+    if (sizing.len != 0u) {
+        size_t new_length;
+
+        if (!cm_size_add(state->type_bytes_len, sizing.len, &new_length)) {
+            cm_free(records);
+            return CM_SEMANTIC_RESULTS_OVERFLOW;
+        }
+        combined_type_bytes = (unsigned char *)cm_alloc(new_length);
+        if (state->type_bytes_len != 0u) {
+            memcpy(combined_type_bytes, state->type_bytes,
+                state->type_bytes_len);
+        }
+        memset(&output, 0, sizeof(output));
+        output.data = combined_type_bytes;
+        output.len = state->type_bytes_len;
+        output.cap = new_length;
+        for (index = 0u; index < count; ++index) {
+            const CmProjectionNormalizeStep *step;
+
+            step = cm_projection_normalize_trace_step(trace, index);
+            records[index].proof_origin = step->proof_origin;
+            records[index].param_env_fact_index =
+                step->param_env_fact_index;
+            records[index].param_env_equality_index =
+                step->param_env_equality_index;
+            records[index].impl_definition = step->impl_definition;
+            records[index].impl_associated_definition =
+                step->impl_associated_definition;
+            status = cm_results_collect_projection_type_record(&output, hir,
+                typeck,
+                step->projection, 1, &records[index].projection);
+            if (status == CM_SEMANTIC_RESULTS_OK) {
+                status = cm_results_collect_projection_type_record(&output,
+                    hir, typeck,
+                    step->target, 1, &records[index].target);
+            }
+            if (status == CM_SEMANTIC_RESULTS_OK) {
+                status = cm_results_collect_projection_type_record(&output,
+                    hir, typeck,
+                    step->normalized_target, 1,
+                    &records[index].normalized_target);
+            }
+        }
+        if (status != CM_SEMANTIC_RESULTS_OK || output.len != new_length) {
+            cm_free(combined_type_bytes);
+            cm_free(records);
+            return status == CM_SEMANTIC_RESULTS_OK
+                ? CM_SEMANTIC_RESULTS_INVALID_HIR : status;
+        }
+        cm_free(state->type_bytes);
+        state->type_bytes = combined_type_bytes;
+        state->type_bytes_len = new_length;
+    }
+    state->projection_steps = records;
+    state->projection_step_count = count;
+    return CM_SEMANTIC_RESULTS_OK;
 }
 
 static CmSemanticBodyWritebackStatus cm_results_writeback_status(
@@ -1749,13 +2079,16 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     CmSemanticTypeRecord *combined_signature_parameters;
     CmSemanticTypeRecord *combined_call_parameters;
     CmSemanticAdjustmentRecord *combined_adjustments;
+    CmSemanticProjectionStepRecord *combined_projection_steps;
     size_t new_type_bytes_len;
     size_t new_signature_parameter_count;
     size_t new_call_parameter_count;
     size_t new_adjustment_count;
+    size_t new_projection_step_count;
     size_t signature_parameter_bytes;
     size_t call_parameter_bytes;
     size_t adjustment_bytes;
+    size_t projection_step_bytes;
     size_t expression_index;
     size_t parameter_index;
 
@@ -1811,6 +2144,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
             state->call_parameter_count, &new_call_parameter_count)
         || !cm_size_add(results->adjustment_count,
             state->adjustment_count, &new_adjustment_count)
+        || !cm_size_add(results->projection_step_count,
+            state->projection_step_count, &new_projection_step_count)
         || !cm_size_mul(new_signature_parameter_count,
             sizeof(*combined_signature_parameters),
             &signature_parameter_bytes)
@@ -1828,6 +2163,16 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         : (CmSemanticTypeRecord *)cm_alloc(call_parameter_bytes);
     combined_adjustments = adjustment_bytes == 0u ? NULL
         : (CmSemanticAdjustmentRecord *)cm_alloc(adjustment_bytes);
+    if (!cm_size_mul(new_projection_step_count,
+            sizeof(*combined_projection_steps), &projection_step_bytes)) {
+        cm_free(combined_type_bytes);
+        cm_free(combined_signature_parameters);
+        cm_free(combined_call_parameters);
+        cm_free(combined_adjustments);
+        return CM_SEMANTIC_RESULTS_OVERFLOW;
+    }
+    combined_projection_steps = projection_step_bytes == 0u ? NULL
+        : (CmSemanticProjectionStepRecord *)cm_alloc(projection_step_bytes);
     if (results->type_bytes_len != 0u) {
         memcpy(combined_type_bytes, results->type_bytes,
             results->type_bytes_len);
@@ -1863,6 +2208,22 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
             .source_type.type_offset += results->type_bytes_len;
         combined_adjustments[results->adjustment_count + parameter_index]
             .target_type.type_offset += results->type_bytes_len;
+    }
+    if (results->projection_step_count != 0u) {
+        memcpy(combined_projection_steps, results->projection_steps,
+            results->projection_step_count
+                * sizeof(*combined_projection_steps));
+    }
+    for (parameter_index = 0u;
+         parameter_index < state->projection_step_count; ++parameter_index) {
+        CmSemanticProjectionStepRecord *step;
+
+        step = &combined_projection_steps[
+            results->projection_step_count + parameter_index];
+        *step = state->projection_steps[parameter_index];
+        step->projection.type_offset += results->type_bytes_len;
+        step->target.type_offset += results->type_bytes_len;
+        step->normalized_target.type_offset += results->type_bytes_len;
     }
     if (results->call_parameter_count != 0u) {
         memcpy(combined_call_parameters, results->call_parameters,
@@ -1918,6 +2279,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     cm_free(results->signature_parameters);
     cm_free(results->call_parameters);
     cm_free(results->adjustments);
+    cm_free(results->projection_steps);
     results->type_bytes = combined_type_bytes;
     results->type_bytes_len = new_type_bytes_len;
     results->signature_parameters = combined_signature_parameters;
@@ -1926,6 +2288,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     results->call_parameter_count = new_call_parameter_count;
     results->adjustments = combined_adjustments;
     results->adjustment_count = new_adjustment_count;
+    results->projection_steps = combined_projection_steps;
+    results->projection_step_count = new_projection_step_count;
     record->present = 1;
     record->owner = body->owner;
     record->expression_count = state->body_expression_count;
@@ -1936,6 +2300,9 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         - state->signature_parameter_count;
     record->signature_parameter_count =
         (uint32_t)state->signature_parameter_count;
+    record->projection_step_start = new_projection_step_count
+        - state->projection_step_count;
+    record->projection_step_count = (uint32_t)state->projection_step_count;
     results->admitted_body_count += 1u;
     cm_semantic_results_body_stage_destroy(stage);
     return CM_SEMANTIC_RESULTS_OK;
@@ -2049,6 +2416,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     record->body.signature_return_size = state->signature_return.type_size;
     record->body.signature_parameter_count =
         (uint32_t)state->signature_parameter_count;
+    record->body.projection_step_count =
+        (uint32_t)state->projection_step_count;
     record->expressions = state->expressions;
     record->expression_count = state->expression_count;
     record->type_bytes = state->type_bytes;
@@ -2059,6 +2428,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     record->call_parameter_count = state->call_parameter_count;
     record->adjustments = state->adjustments;
     record->adjustment_count = state->adjustment_count;
+    record->projection_steps = state->projection_steps;
+    record->projection_step_count = state->projection_step_count;
     record->callees = call_count == 0u ? NULL
         : (CmHirCanonicalInstance *)cm_alloc_zeroed(call_count,
             sizeof(*record->callees));
@@ -2091,6 +2462,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     state->signature_parameters = NULL;
     state->call_parameters = NULL;
     state->adjustments = NULL;
+    state->projection_steps = NULL;
     cm_free(results->instances);
     results->instances = combined;
     results->instance_count += 1u;
@@ -2300,6 +2672,7 @@ CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
         if (!cm_results_instance_membership_valid(instance, hir)
             || instance->callee_count != 0u
             || !cm_results_instance_adjustments_valid(instance)
+            || !cm_results_instance_projections_valid(instance)
             || !cm_results_instance_recipes_valid(
                 instance, hir)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
@@ -2360,6 +2733,7 @@ CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
         caller = &results->instances[instance_index];
         if (!cm_results_instance_membership_valid(caller, hir)
             || !cm_results_instance_adjustments_valid(caller)
+            || !cm_results_instance_projections_valid(caller)
             || !cm_results_instance_recipes_valid(caller, hir)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
@@ -2469,6 +2843,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
         cm_free(record->callees);
         cm_free(record->call_parameters);
         cm_free(record->adjustments);
+        cm_free(record->projection_steps);
         cm_free(record->signature_parameters);
         cm_free(record->type_bytes);
         cm_free(record->expressions);
@@ -2477,6 +2852,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
     cm_free(results->instances);
     cm_free(results->call_parameters);
     cm_free(results->adjustments);
+    cm_free(results->projection_steps);
     cm_free(results->signature_parameters);
     cm_free(results->type_bytes);
     cm_free(results->expressions);
@@ -2525,6 +2901,7 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
     out_view->body = record->identity.body;
     out_view->owner = record->identity.definition;
     out_view->expression_count = record->body.expression_count;
+    out_view->projection_step_count = record->body.projection_step_count;
     return CM_SEMANTIC_RESULTS_OK;
 }
 
@@ -2913,6 +3290,67 @@ cm_semantic_results_instance_direct_call_parameter(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+static CmSemanticResultsStatus cm_results_projection_step_view(
+    const unsigned char *bytes, size_t bytes_len,
+    const CmSemanticProjectionStepRecord *records, size_t count,
+    CmHirBodyId body, uint32_t step,
+    CmSemanticProjectionStepView *out_view)
+{
+    const CmSemanticProjectionStepRecord *record;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
+    out_view->param_env_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
+    out_view->impl_definition = cm_hir_def_id_none();
+    out_view->impl_associated_definition = cm_hir_def_id_none();
+    if ((size_t)step >= count || records == NULL || bytes == NULL) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &records[step];
+    if (!cm_results_projection_record_valid(bytes, bytes_len, record)) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    out_view->body = body;
+    out_view->index = step;
+    out_view->projection.bytes = bytes + record->projection.type_offset;
+    out_view->projection.size = record->projection.type_size;
+    out_view->target.bytes = bytes + record->target.type_offset;
+    out_view->target.size = record->target.type_size;
+    out_view->normalized_target.bytes = bytes
+        + record->normalized_target.type_offset;
+    out_view->normalized_target.size = record->normalized_target.type_size;
+    out_view->proof_origin = record->proof_origin;
+    out_view->param_env_fact_index = record->param_env_fact_index;
+    out_view->param_env_equality_index = record->param_env_equality_index;
+    out_view->impl_definition = record->impl_definition;
+    out_view->impl_associated_definition =
+        record->impl_associated_definition;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_projection_step(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, uint32_t step,
+    CmSemanticProjectionStepView *out_view)
+{
+    const CmSemanticInstanceRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
+    out_view->param_env_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
+    out_view->impl_definition = cm_hir_def_id_none();
+    out_view->impl_associated_definition = cm_hir_def_id_none();
+    status = cm_results_query_instance(results, admission, spec, &record);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    return cm_results_projection_step_view(record->type_bytes,
+        record->type_bytes_len, record->projection_steps,
+        record->projection_step_count, record->identity.body, step,
+        out_view);
+}
+
 CmSemanticResultsStatus cm_semantic_results_signature(
     const CmSemanticResults *results,
     const CmSemanticAdmission *admission, CmHirBodyId body,
@@ -3030,6 +3468,39 @@ CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+CmSemanticResultsStatus cm_semantic_results_projection_step(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirBodyId body, uint32_t step,
+    CmSemanticProjectionStepView *out_view)
+{
+    const CmSemanticBodyRecord *record;
+    CmSemanticResultsStatus status;
+    size_t index;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->param_env_fact_index = CM_TRAIT_PROOF_FACT_NONE;
+    out_view->param_env_equality_index = CM_TRAIT_PROOF_EQUALITY_NONE;
+    out_view->impl_definition = cm_hir_def_id_none();
+    out_view->impl_associated_definition = cm_hir_def_id_none();
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (body == CM_HIR_BODY_NONE || (size_t)body > results->body_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &results->bodies[(size_t)body - 1u];
+    if (!record->present || step >= record->projection_step_count
+        || !cm_size_add(record->projection_step_start, (size_t)step,
+            &index) || index >= results->projection_step_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_projection_step_view(results->type_bytes,
+        results->type_bytes_len, &results->projection_steps[index], 1u,
+        body, 0u, out_view) == CM_SEMANTIC_RESULTS_OK
+        ? (out_view->index = step, CM_SEMANTIC_RESULTS_OK)
+        : CM_SEMANTIC_RESULTS_INVALID_HIR;
+}
+
 static CmSemanticResultsStatus cm_results_validate(
     const CmSemanticResults *results,
     const CmSemanticAdmission *admission)
@@ -3143,6 +3614,7 @@ CmSemanticResultsStatus cm_semantic_results_body(
     out_view->body = body;
     out_view->owner = record->owner;
     out_view->expression_count = record->expression_count;
+    out_view->projection_step_count = record->projection_step_count;
     return CM_SEMANTIC_RESULTS_OK;
 }
 

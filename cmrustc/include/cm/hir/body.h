@@ -83,7 +83,13 @@ CmHirStatus cm_hir_body_add_if_expression(CmHirContext *context,
  * slice. Accepted tails are decimal i32/u32/usize literals with either the
  * exact matching suffix or no suffix when this expected type is already fixed
  * by the surrounding return, explicit let, field, operand, branch, or call
- * position; no default literal type is inferred. Named parameter locals and
+ * position. The first source-inference slice also admits immutable simple
+ * unannotated lets whose initializer is a decimal integer literal or a prior
+ * local. Each let receives a private scratch term; local and return contexts
+ * constrain those terms before remaining integer roots default to i32 and
+ * solved terms are frozen into concrete HIR. Mutable/ref bindings, shadowing,
+ * forward references, and unresolved general terms still reject atomically.
+ * Named parameter locals and
  * recursively typed u32 or usize expression trees combine
  * wrapping addition and subtraction with exact free-function calls,
  * value-producing `if u32 == u32 { u32 } else { u32 }` or
@@ -106,8 +112,8 @@ CmHirStatus cm_hir_body_add_if_expression(CmHirContext *context,
  * Aggregate expressions retain the same authenticated construction checks.
  * The exact one-type substitution identity callee remains u32-only. Grouping
  * parentheses are already erased by the AST. Aggregate
- * returns, exported aggregate ABI, inference, and fallback resolution remain
- * unsupported.
+ * returns, exported aggregate ABI, broader expression inference, and float
+ * fallback remain unsupported.
  *
  * The import resolver and module map are the exact snapshots used for graph
  * lowering. Together they authenticate the graph revision, path-resolution

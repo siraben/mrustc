@@ -319,6 +319,9 @@ static void test_root_environment_and_impl(void)
     assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
         &projection_type) == CM_TYPECK_OK);
     cm_projection_normalize_trace_init(&trace);
+    assert(cm_projection_normalize_trace_term_owner(&trace) == NULL
+        && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
+        && cm_projection_normalize_trace_term_revision(&trace) == 0u);
     {
         size_t type_count;
 
@@ -331,6 +334,9 @@ static void test_root_environment_and_impl(void)
             && result.type == CM_TYPECK_TYPE_NONE
             && result.projection_step_count == 0u
             && cm_projection_normalize_trace_count(&trace) == 0u
+            && cm_projection_normalize_trace_term_owner(&trace) == NULL
+            && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
+            && cm_projection_normalize_trace_term_revision(&trace) == 0u
             && cm_typeck_type_count(&runtime.typeck) == type_count);
     }
     result = normalize_traced(&fixture, &runtime, projection_type, 1u,
@@ -338,7 +344,13 @@ static void test_root_environment_and_impl(void)
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
         && result.projection_step_count == 1u);
     assert(cm_projection_normalize_trace_count(&trace) == 1u
-        && cm_projection_normalize_trace_step(&trace, 1u) == NULL);
+        && cm_projection_normalize_trace_step(&trace, 1u) == NULL
+        && cm_projection_normalize_trace_term_owner(&trace)
+            == &runtime.typeck
+        && cm_projection_normalize_trace_term_lifetime(&trace)
+            == cm_typeck_lifetime_id(&runtime.typeck)
+        && cm_projection_normalize_trace_term_revision(&trace)
+            == cm_typeck_state_revision(&runtime.typeck));
     step = cm_projection_normalize_trace_step(&trace, 0u);
     assert(step != NULL && step->projection == projection_type
         && step->target == result.type
@@ -354,6 +366,9 @@ static void test_root_environment_and_impl(void)
         fixture.owner, projection_type, NULL, limits(0u, 1u), &trace);
     assert(result.kind == CM_TRAIT_SOLVER_INVALID
         && cm_projection_normalize_trace_count(&trace) == 0u);
+    assert(cm_projection_normalize_trace_term_owner(&trace) == NULL
+        && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
+        && cm_projection_normalize_trace_term_revision(&trace) == 0u);
     cm_projection_normalize_trace_clear(&trace);
     assert(cm_projection_normalize_trace_count(&trace) == 0u);
     cm_projection_normalize_trace_destroy(&trace);
@@ -932,6 +947,51 @@ static void test_inference_projection_defers_without_binding(void)
     cm_hir_context_destroy(&fixture.hir);
 }
 
+static void test_trace_owner_lifetime_survives_address_reuse(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmHirDefId trait_definition;
+    CmHirDefId associated_definition;
+    CmHirDefId impl_definition;
+    CmHirTypeId projection_hir;
+    CmTypeckTypeId projection_type;
+    CmProjectionNormalizeTrace trace;
+    CmProjectionNormalizeResult result;
+    uint64_t trace_lifetime;
+
+    fixture_init(&fixture);
+    trait_definition = add_trait(&fixture, "Lifetime");
+    associated_definition = add_trait_associated(&fixture,
+        trait_definition, "LifetimeAssoc");
+    projection_hir = add_projection(&fixture, trait_definition,
+        associated_definition);
+    impl_definition = add_bool_impl(&fixture, trait_definition);
+    add_impl_associated(&fixture, impl_definition, associated_definition,
+        "LifetimeAssoc", fixture.u8_hir);
+    fixture.owner = add_trait(&fixture, "Owner");
+    runtime_init(&runtime, &fixture);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&trace);
+    result = normalize_traced(&fixture, &runtime, projection_type, 1u,
+        &trace);
+    trace_lifetime = cm_projection_normalize_trace_term_lifetime(&trace);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && trace_lifetime != 0u
+        && cm_projection_normalize_trace_term_owner(&trace)
+            == &runtime.typeck);
+    cm_typeck_context_destroy(&runtime.typeck);
+    cm_typeck_context_init(&runtime.typeck, &fixture.hir);
+    assert(cm_projection_normalize_trace_term_owner(&trace)
+            == &runtime.typeck
+        && cm_typeck_lifetime_id(&runtime.typeck) != 0u
+        && cm_typeck_lifetime_id(&runtime.typeck) != trace_lifetime);
+    cm_projection_normalize_trace_destroy(&trace);
+    runtime_destroy(&runtime);
+    cm_hir_context_destroy(&fixture.hir);
+}
+
 int main(void)
 {
     test_root_environment_and_impl();
@@ -941,6 +1001,7 @@ int main(void)
     test_adt_array_const_traversal();
     test_mutual_cycle_and_late_child_rollback();
     test_inference_projection_defers_without_binding();
+    test_trace_owner_lifetime_survives_address_reuse();
     puts("hir projection normalizer tests passed");
     return 0;
 }

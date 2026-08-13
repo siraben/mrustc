@@ -23,6 +23,9 @@ typedef struct CmProjectionNormalizeState {
 
 typedef struct CmProjectionNormalizeTraceState {
     CmVec steps;
+    const CmTypeckContext *term_owner;
+    uint64_t term_lifetime;
+    uint64_t term_revision;
 } CmProjectionNormalizeTraceState;
 
 typedef struct CmNormalizeTypePair {
@@ -79,6 +82,39 @@ void cm_projection_normalize_trace_clear(CmProjectionNormalizeTrace *trace)
 
     state = cm_normalize_trace_state(trace);
     if (state != NULL) cm_vec_clear(&state->steps);
+    if (state != NULL) state->term_owner = NULL;
+    if (state != NULL) state->term_lifetime = 0u;
+    if (state != NULL) state->term_revision = 0u;
+}
+
+const CmTypeckContext *cm_projection_normalize_trace_term_owner(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL || state->steps.len == 0u
+        ? NULL : state->term_owner;
+}
+
+uint64_t cm_projection_normalize_trace_term_lifetime(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL || state->steps.len == 0u
+        ? 0u : state->term_lifetime;
+}
+
+uint64_t cm_projection_normalize_trace_term_revision(
+    const CmProjectionNormalizeTrace *trace)
+{
+    const CmProjectionNormalizeTraceState *state;
+
+    state = cm_normalize_trace_state_const(trace);
+    return state == NULL || state->steps.len == 0u
+        ? 0u : state->term_revision;
 }
 
 size_t cm_projection_normalize_trace_count(
@@ -757,7 +793,12 @@ static CmProjectionNormalizeResult cm_projection_normalize_type_impl(
     result = cm_normalize_result(CM_TRAIT_SOLVER_INVALID);
     trace_state = cm_normalize_trace_state(trace);
     if (trace != NULL && trace_state == NULL) return result;
-    if (trace_state != NULL) cm_vec_clear(&trace_state->steps);
+    if (trace_state != NULL) {
+        cm_vec_clear(&trace_state->steps);
+        trace_state->term_owner = NULL;
+        trace_state->term_lifetime = 0u;
+        trace_state->term_revision = 0u;
+    }
     if (limits.max_nodes == 0u || type == CM_TYPECK_TYPE_NONE
         || cm_trait_solver_validate_session(index, environment, typeck,
             substitution, owner) != CM_TRAIT_SOLVER_PROVEN
@@ -796,6 +837,12 @@ static CmProjectionNormalizeResult cm_projection_normalize_type_impl(
         && trace_state != NULL) {
         cm_vec_append(&trace_state->steps, state.trace_steps.data,
             state.trace_steps.len);
+        trace_state->term_owner = state.trace_steps.len == 0u
+            ? NULL : typeck;
+        trace_state->term_lifetime = state.trace_steps.len == 0u
+            ? 0u : cm_typeck_lifetime_id(typeck);
+        trace_state->term_revision = state.trace_steps.len == 0u
+            ? 0u : cm_typeck_state_revision(typeck);
     }
     cm_vec_destroy(&state.active_projections);
     cm_vec_destroy(&state.trace_steps);

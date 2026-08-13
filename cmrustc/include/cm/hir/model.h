@@ -688,7 +688,11 @@ typedef enum CmHirExprKind {
     /* Direct projection of one authenticated aggregate declaration field. */
     CM_HIR_EXPR_FIELD,
     /* Exact boolean selection between two value-producing branch blocks. */
-    CM_HIR_EXPR_IF
+    CM_HIR_EXPR_IF,
+    /* Explicit shared borrow of one body-owned place expression. */
+    CM_HIR_EXPR_BORROW_SHARED,
+    /* Explicit built-in dereference of one immutable erased reference. */
+    CM_HIR_EXPR_DEREFERENCE
 } CmHirExprKind;
 
 /* Extend only when the model and source lowerer implement exact semantics. */
@@ -777,6 +781,12 @@ typedef struct CmHirExpr {
             CmHirExprId then_expression;
             CmHirExprId else_expression;
         } if_expr;
+        struct {
+            CmHirExprId operand;
+        } borrow_shared;
+        struct {
+            CmHirExprId operand;
+        } dereference;
     } data;
 } CmHirExpr;
 

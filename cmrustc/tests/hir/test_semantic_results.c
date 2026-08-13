@@ -20,6 +20,54 @@ typedef struct Fixture {
     CmHirModuleMap modules;
 } Fixture;
 
+typedef struct TestAdmissionState {
+    const CmHirContext *hir;
+    CmHirCrateId local_crate;
+    uint64_t storage_lifetime_id;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+    uint64_t capability_id;
+    CmSemanticResults *results;
+} TestAdmissionState;
+
+static void test_admission_init(CmSemanticAdmission *admission,
+    TestAdmissionState *state, CmSemanticResults *results,
+    const CmHirContext *hir, CmHirCrateId local_crate)
+{
+    memset(state, 0, sizeof(*state));
+    state->hir = hir;
+    state->local_crate = local_crate;
+    state->storage_lifetime_id = hir->storage.lifetime_id;
+    state->semantic_generation = hir->semantic_generation;
+    state->rewind_generation = hir->rewind_generation;
+    state->capability_id = UINT64_C(1);
+    state->results = results;
+    admission->state = state;
+}
+
+static CmHirDefId find_named_item(const Fixture *fixture,
+    const char *name, CmHirDefId parent)
+{
+    size_t index;
+
+    for (index = 0u; index < fixture->hir.items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *interned;
+
+        item = (const CmHirItem *)cm_vec_at_const(&fixture->hir.items,
+            index);
+        interned = item == NULL ? NULL
+            : cm_interner_get(&fixture->hir.strings, item->name);
+        if (item != NULL && interned != NULL
+            && interned->len == strlen(name)
+            && memcmp(interned->bytes, name, interned->len) == 0
+            && cm_hir_def_id_equal(item->parent_definition, parent)) {
+            return item->definition;
+        }
+    }
+    return cm_hir_def_id_none();
+}
+
 static void fixture_init(Fixture *fixture, const char *source)
 {
     CmModuleGraphOptions graph_options;
@@ -766,6 +814,259 @@ static void test_writeback_distinguishes_unsolved_terms(void)
     fixture_destroy(&fixture);
 }
 
+static void test_durable_projection_trace_definition(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult admission_result;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticSession foreign_session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult body_result;
+    CmSemanticResultsBodyStage stage;
+    CmSemanticResults *draft;
+    CmProjectionNormalizeTrace trace;
+    CmProjectionNormalizeTrace stale_trace;
+    CmProjectionNormalizeTrace foreign_trace;
+    CmProjectionNormalizeResult normalize;
+    CmTypeckContext *typeck;
+    CmTypeckContext *foreign_typeck;
+    CmTypeckInstantiation exact;
+    CmTypeckInstantiation foreign_exact;
+    CmParamEnvSubstitution substitution;
+    CmParamEnvSubstitution foreign_substitution;
+    CmTypeckType projection;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId stale_projection_type;
+    CmTypeckTypeId reused_type;
+    CmTypeckTypeId foreign_bool_type;
+    CmTypeckTypeId foreign_projection_type;
+    CmTypeckSnapshot scratch_snapshot;
+    CmHirDefId trait_definition;
+    CmHirDefId associated_definition;
+    const CmHirBody *body;
+    TestAdmissionState admission_state;
+    CmSemanticBodyView body_view;
+    CmSemanticProjectionStepView step_view;
+    CmHirInstanceSpec spec;
+    CmHirCanonicalInstance identity;
+    int equal;
+
+    fixture_init(&fixture,
+        "trait Bound { type Output; } "
+        "impl Bound for bool { type Output = u32; } "
+        "fn value() -> u32 { 1u32 }");
+    memset(&admission, 0, sizeof(admission));
+    admission_result = admit(&fixture, &admission);
+    assert(admission_result.status == CM_SEMANTIC_ADMISSION_OK);
+    cm_semantic_admission_destroy(&admission);
+    body = cm_hir_get_body(&fixture.hir, 1u);
+    trait_definition = find_named_item(&fixture, "Bound",
+        cm_hir_def_id_none());
+    associated_definition = find_named_item(&fixture, "Output",
+        trait_definition);
+    assert(body != NULL && !cm_hir_def_id_is_none(trait_definition)
+        && !cm_hir_def_id_is_none(associated_definition));
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir, 1u)
+        == CM_HIR_OK);
+    memset(&session, 0, sizeof(session));
+    cm_semantic_session_options_init(&options);
+    options.local_crate = 1u;
+    options.exact_owner = body->owner;
+    options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    memset(&foreign_session, 0, sizeof(foreign_session));
+    assert(cm_semantic_session_init(&foreign_session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_semantic_results_body_stage_init(&stage);
+    body_result = cm_semantic_body_check_definition_with_writeback(&session,
+        1u, cm_semantic_results_stage_checked_body, &stage);
+    assert(body_result.status == CM_SEMANTIC_BODY_OK && stage.state != NULL);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL);
+    {
+        size_t type_index;
+        const CmHirType *hir_type;
+
+        bool_type = CM_TYPECK_TYPE_NONE;
+        for (type_index = 0u; type_index < fixture.hir.types.len;
+             ++type_index) {
+            hir_type = cm_hir_get_type(&fixture.hir,
+                (CmHirTypeId)(type_index + 1u));
+            if (hir_type != NULL && hir_type->kind == CM_HIR_TYPE_BOOL_KIND) {
+                assert(cm_typeck_import_hir_type(typeck,
+                    (CmHirTypeId)(type_index + 1u), &bool_type)
+                    == CM_TYPECK_OK);
+                break;
+            }
+        }
+        assert(bool_type != CM_TYPECK_TYPE_NONE);
+    }
+    cm_typeck_instantiation_init(typeck, &exact);
+    exact.parameter_owner = body->owner;
+    exact.self_owner = body->owner;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = body->span;
+    projection.data.projection_type.self_type = bool_type;
+    projection.data.projection_type.trait_type.definition = trait_definition;
+    projection.data.projection_type.associated_type.definition =
+        associated_definition;
+    assert(cm_typeck_snapshot(typeck, &scratch_snapshot) == CM_TYPECK_OK);
+    assert(cm_typeck_add_type(typeck, &projection, &stale_projection_type)
+        == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&stale_trace);
+    normalize = cm_semantic_session_normalize_type_traced(&session, typeck,
+        &substitution, stale_projection_type,
+        (CmProjectionNormalizeLimits){64u, 2u}, &stale_trace);
+    assert(normalize.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_projection_normalize_trace_count(&stale_trace) == 1u
+        && cm_projection_normalize_trace_term_lifetime(&stale_trace)
+            == cm_typeck_lifetime_id(typeck)
+        && cm_projection_normalize_trace_term_revision(&stale_trace)
+            == cm_typeck_state_revision(typeck));
+    assert(cm_typeck_rollback(typeck, &scratch_snapshot) == CM_TYPECK_OK
+        && cm_projection_normalize_trace_term_revision(&stale_trace)
+            != cm_typeck_state_revision(typeck));
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_INTEGER;
+    projection.span = body->span;
+    projection.data.integer_type = CM_HIR_INT_I32;
+    assert(cm_typeck_add_type(typeck, &projection, &reused_type)
+            == CM_TYPECK_OK
+        && reused_type == stale_projection_type
+        && cm_semantic_results_stage_projection_trace(&stage, &session,
+            &stale_trace) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
+    cm_projection_normalize_trace_destroy(&stale_trace);
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = body->span;
+    projection.data.projection_type.self_type = bool_type;
+    projection.data.projection_type.trait_type.definition = trait_definition;
+    projection.data.projection_type.associated_type.definition =
+        associated_definition;
+    assert(cm_typeck_add_type(typeck, &projection, &projection_type)
+        == CM_TYPECK_OK);
+    foreign_typeck = cm_semantic_session_typeck(&foreign_session);
+    assert(foreign_typeck != NULL);
+    {
+        size_t type_index;
+
+        foreign_bool_type = CM_TYPECK_TYPE_NONE;
+        for (type_index = 0u; type_index < fixture.hir.types.len;
+             ++type_index) {
+            const CmHirType *hir_type;
+
+            hir_type = cm_hir_get_type(&fixture.hir,
+                (CmHirTypeId)(type_index + 1u));
+            if (hir_type != NULL && hir_type->kind == CM_HIR_TYPE_BOOL_KIND) {
+                assert(cm_typeck_import_hir_type(foreign_typeck,
+                    (CmHirTypeId)(type_index + 1u), &foreign_bool_type)
+                    == CM_TYPECK_OK);
+                break;
+            }
+        }
+        assert(foreign_bool_type != CM_TYPECK_TYPE_NONE);
+    }
+    cm_typeck_instantiation_init(foreign_typeck, &foreign_exact);
+    foreign_exact.parameter_owner = body->owner;
+    foreign_exact.self_owner = body->owner;
+    foreign_exact.self_type = foreign_bool_type;
+    memset(&foreign_substitution, 0, sizeof(foreign_substitution));
+    foreign_substitution.exact = &foreign_exact;
+    projection.data.projection_type.self_type = foreign_bool_type;
+    assert(cm_typeck_add_type(foreign_typeck, &projection,
+        &foreign_projection_type) == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&foreign_trace);
+    normalize = cm_semantic_session_normalize_type_traced(&foreign_session,
+        foreign_typeck, &foreign_substitution, foreign_projection_type,
+        (CmProjectionNormalizeLimits){64u, 2u}, &foreign_trace);
+    assert(normalize.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_projection_normalize_trace_count(&foreign_trace) == 1u
+        && cm_semantic_results_stage_projection_trace(&stage, &session,
+            &foreign_trace) == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT);
+    cm_projection_normalize_trace_destroy(&foreign_trace);
+    projection.data.projection_type.self_type = bool_type;
+    cm_projection_normalize_trace_init(&trace);
+    normalize = cm_semantic_session_normalize_type_traced(&session, typeck,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 2u}, &trace);
+    assert(normalize.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_projection_normalize_trace_count(&trace) == 1u
+        && cm_semantic_results_stage_projection_trace(&stage, &session,
+            &trace) == CM_SEMANTIC_RESULTS_OK);
+    draft = NULL;
+    assert(cm_semantic_results_begin(&fixture.hir, 1u, &draft)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_commit_checked_body(draft, &session,
+            &body_result, &stage) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_seal(draft) == CM_SEMANTIC_RESULTS_OK);
+    memset(&admission, 0, sizeof(admission));
+    test_admission_init(&admission, &admission_state, draft, &fixture.hir,
+        1u);
+    assert(cm_semantic_results_body(draft, &admission, 1u, &body_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && body_view.projection_step_count == 1u
+        && cm_semantic_results_projection_step(draft, &admission, 1u, 0u,
+            &step_view) == CM_SEMANTIC_RESULTS_OK
+        && step_view.proof_origin == CM_TRAIT_PROOF_IMPL
+        && cm_semantic_type_view_equal(&step_view.target,
+            &step_view.normalized_target, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_results_projection_step(draft, &admission, 1u, 1u,
+            &step_view) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    admission.state = NULL;
+    cm_semantic_results_destroy(draft);
+    draft = NULL;
+    cm_semantic_results_body_stage_init(&stage);
+    body_result = cm_semantic_body_check_definition_with_writeback(&session,
+        1u, cm_semantic_results_stage_checked_body, &stage);
+    normalize = cm_semantic_session_normalize_type_traced(&session, typeck,
+        &substitution, projection_type,
+        (CmProjectionNormalizeLimits){64u, 2u}, &trace);
+    assert(body_result.status == CM_SEMANTIC_BODY_OK
+        && normalize.kind == CM_TRAIT_SOLVER_PROVEN
+        && cm_semantic_results_stage_projection_trace(&stage, &session,
+            &trace) == CM_SEMANTIC_RESULTS_OK);
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = body->owner;
+    cm_hir_canonical_instance_init(&identity);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_OK
+        && cm_semantic_results_begin(&fixture.hir, 1u, &draft)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_commit_checked_instance(draft, &session,
+            &identity, &body_result, &stage, NULL, 0u)
+            == CM_SEMANTIC_RESULTS_OK);
+    cm_projection_normalize_trace_destroy(&trace);
+    assert(cm_semantic_results_seal_leaf_instances(draft, 1u)
+        == CM_SEMANTIC_RESULTS_OK);
+    test_admission_init(&admission, &admission_state, draft, &fixture.hir,
+        1u);
+    assert(cm_semantic_results_instance_body(draft, &admission, &spec,
+            &body_view) == CM_SEMANTIC_RESULTS_OK
+        && body_view.projection_step_count == 1u
+        && cm_semantic_results_instance_projection_step(draft, &admission,
+            &spec, 0u, &step_view) == CM_SEMANTIC_RESULTS_OK
+        && step_view.proof_origin == CM_TRAIT_PROOF_IMPL);
+    admission.state = NULL;
+    cm_hir_canonical_instance_destroy(&identity);
+    cm_semantic_results_body_stage_destroy(&stage);
+    cm_semantic_results_destroy(draft);
+    cm_semantic_session_destroy(&session);
+    cm_semantic_session_destroy(&foreign_session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_successful_results();
@@ -776,6 +1077,7 @@ int main(void)
     test_partial_checked_draft_does_not_seal();
     test_instance_commit_requires_producer_session();
     test_writeback_distinguishes_unsolved_terms();
+    test_durable_projection_trace_definition();
     puts("semantic results tests passed");
     return 0;
 }

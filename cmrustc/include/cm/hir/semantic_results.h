@@ -1,7 +1,7 @@
 #ifndef CMRUSTC_CM_HIR_SEMANTIC_RESULTS_H
 #define CMRUSTC_CM_HIR_SEMANTIC_RESULTS_H
 
-#include "cm/hir/model.h"
+#include "cm/hir/projection_normalizer.h"
 
 struct CmSemanticAdmission;
 struct CmHirInstanceSpec;
@@ -37,6 +37,7 @@ typedef struct CmSemanticBodyView {
     CmHirBodyId body;
     CmHirDefId owner;
     uint32_t expression_count;
+    uint32_t projection_step_count;
 } CmSemanticBodyView;
 
 typedef struct CmSemanticExpressionView {
@@ -121,6 +122,20 @@ typedef struct CmSemanticDirectCallView {
     CmSemanticTypeView return_type;
 } CmSemanticDirectCallView;
 
+/* One durable, authenticated projection reduction. */
+typedef struct CmSemanticProjectionStepView {
+    CmHirBodyId body;
+    uint32_t index;
+    CmSemanticTypeView projection;
+    CmSemanticTypeView target;
+    CmSemanticTypeView normalized_target;
+    CmTraitProofOrigin proof_origin;
+    size_t param_env_fact_index;
+    uint32_t param_env_equality_index;
+    CmHirDefId impl_definition;
+    CmHirDefId impl_associated_definition;
+} CmSemanticProjectionStepView;
+
 CmSemanticResultsStatus cm_semantic_results_instance_body(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
@@ -167,6 +182,11 @@ CmSemanticResultsStatus cm_semantic_results_instance_direct_call_parameter(
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     const struct CmHirInstanceSpec *expected_callee, uint32_t parameter,
     CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_projection_step(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, uint32_t step,
+    CmSemanticProjectionStepView *out_view);
 
 /* The returned results object and all views are borrowed from admission. */
 const CmSemanticResults *cm_semantic_admission_results(
@@ -225,6 +245,10 @@ CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression, uint32_t parameter,
     CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_projection_step(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    uint32_t step, CmSemanticProjectionStepView *out_view);
 CmSemanticResultsStatus cm_semantic_type_view_equal(
     const CmSemanticTypeView *left, const CmSemanticTypeView *right,
     int *out_equal);

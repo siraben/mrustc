@@ -222,6 +222,13 @@ CmTypeckStatus cm_typeck_resolve(const CmTypeckContext *context,
 const CmTypeckType *cm_typeck_get_type(const CmTypeckContext *context,
     CmTypeckTypeId type);
 size_t cm_typeck_type_count(const CmTypeckContext *context);
+/* Nonzero process-unique identity of this initialized scratch session. */
+uint64_t cm_typeck_lifetime_id(const CmTypeckContext *context);
+/*
+ * Nonzero process-unique revision of the current scratch meanings. It changes
+ * after rollback and whenever an existing term can resolve differently.
+ */
+uint64_t cm_typeck_state_revision(const CmTypeckContext *context);
 /* Source identity for clients that combine scratch terms with HIR indexes. */
 const CmHirContext *cm_typeck_hir_context(const CmTypeckContext *context);
 /* Authenticate a nominal ADT definition, arity, and ordered argument kinds. */

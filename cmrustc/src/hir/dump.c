@@ -703,6 +703,10 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         case CM_HIR_EXPR_AGGREGATE: kind_name = "aggregate"; break;
         case CM_HIR_EXPR_FIELD: kind_name = "field"; break;
         case CM_HIR_EXPR_IF: kind_name = "if"; break;
+        case CM_HIR_EXPR_BORROW_SHARED:
+            kind_name = "borrow-shared";
+            break;
+        case CM_HIR_EXPR_DEREFERENCE: kind_name = "dereference"; break;
         default: kind_name = "unknown"; break;
         }
         fprintf(stream, "expr#%u %s type=ty#%u ",
@@ -812,6 +816,14 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 (unsigned int)expression->data.if_expr.condition,
                 (unsigned int)expression->data.if_expr.then_expression,
                 (unsigned int)expression->data.if_expr.else_expression);
+            break;
+        case CM_HIR_EXPR_BORROW_SHARED:
+            fprintf(stream, "operand=expr#%u",
+                (unsigned int)expression->data.borrow_shared.operand);
+            break;
+        case CM_HIR_EXPR_DEREFERENCE:
+            fprintf(stream, "operand=expr#%u",
+                (unsigned int)expression->data.dereference.operand);
             break;
         default:
             fputs("invalid", stream);

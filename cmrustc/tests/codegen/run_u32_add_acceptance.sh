@@ -85,13 +85,15 @@ expect_rejected u32-add-type-mismatch \
     "$fixture_dir/u32-add-type-mismatch.rs"
 expect_rejected unsupported-exported-root \
     "$fixture_dir/u32-add-exported-unsupported.rs"
+expect_rejected unsupported-unreachable-body \
+    "$fixture_dir/u32-add-unreachable-invalid.rs"
 
-# A private unsupported body outside the exported-root reachability closure is
-# neither lowered nor emitted and must not poison the supported program.
-unreachable_c="$artifact_dir/unreachable-unsupported.c"
-unreachable_exe="$artifact_dir/unreachable-unsupported"
+# Whole-crate admission checks this valid private body before root discovery,
+# while reachability still excludes it from the generated translation unit.
+unreachable_c="$artifact_dir/unreachable-valid.c"
+unreachable_exe="$artifact_dir/unreachable-valid"
 "$CMRUSTC" --edition 2021 --emit-c \
-    "$fixture_dir/u32-add-unreachable-unsupported.rs" -o "$unreachable_c"
+    "$fixture_dir/u32-add-unreachable-valid.rs" -o "$unreachable_c"
 test -s "$unreachable_c"
 if grep -q dormant "$unreachable_c"; then
     echo "unreachable private function was emitted" >&2
