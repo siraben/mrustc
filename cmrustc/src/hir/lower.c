@@ -14497,6 +14497,7 @@ CmHirLowerResult cm_hir_lower_module_graph(CmHirContext *context,
 
     memset(&state, 0, sizeof(state));
     memset(&hir_mark, 0, sizeof(hir_mark));
+    memset(&crate_span, 0, sizeof(crate_span));
     hir_marked = 0;
     if (context == NULL || graph == NULL || imports == NULL
         || revision == CM_MODULE_GRAPH_REVISION_NONE || modules == NULL
@@ -14587,7 +14588,6 @@ CmHirLowerResult cm_hir_lower_module_graph(CmHirContext *context,
     hir_marked = 1;
 
     graph_root = CM_MODULE_NONE;
-    memset(&crate_span, 0, sizeof(crate_span));
     if (!cm_lower_graph_preflight(&state, graph, modules, &graph_root,
             &crate_span, &traversal)) {
         goto finish;

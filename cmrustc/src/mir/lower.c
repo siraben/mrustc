@@ -530,6 +530,52 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
     return status;
 }
 
+static CmSemanticResultsStatus cm_mir_flow_semantic_primitive_query(
+    const CmMirFlowPlan *plan, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_primitive_binary(plan->semantic_results,
+            plan->admission, plan->item->data.function_item.body,
+            expression, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller,
+            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    status = cm_semantic_results_instance_primitive_binary(
+        plan->semantic_results, plan->admission, &caller.spec, expression,
+        out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_field_query(
+    const CmMirFlowPlan *plan, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view)
+{
+    CmMirLowerSemanticInstanceQuery caller;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_field_selection(plan->semantic_results,
+            plan->admission, plan->item->data.function_item.body,
+            expression, out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        || !cm_mir_lower_semantic_instance_query_init(&caller,
+            plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    status = cm_semantic_results_instance_field_selection(
+        plan->semantic_results, plan->admission, &caller.spec, expression,
+        out_view);
+    cm_mir_lower_semantic_instance_query_destroy(&caller);
+    return status;
+}
+
 static CmSemanticResultsStatus cm_mir_flow_semantic_signature_query(
     const CmMirFlowPlan *plan, const CmMirBody *callee,
     CmSemanticFunctionSignatureView *out_view)
@@ -800,6 +846,9 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         CmHirTypeId field_type;
         uint32_t base_projection_count;
         uint32_t projection_count;
+        CmSemanticFieldSelectionView semantic_field;
+        CmSemanticExpressionView semantic_base;
+        CmSemanticExpressionView semantic_result;
 
         if (!cm_mir_flow_preflight(plan, expression->data.field.base,
                 visible_local_count, 0, depth + 1u,
@@ -807,6 +856,28 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             || !cm_mir_flow_expression_type(plan,
                 expression->data.field.base, &base_expression, &base_type)) {
             return 0;
+        }
+        if (plan->semantic_results != NULL
+            && (plan->admission == NULL
+            || cm_mir_flow_semantic_field_query(plan, expression_id,
+                &semantic_field) != CM_SEMANTIC_RESULTS_OK
+            || semantic_field.base_expression != expression->data.field.base
+            || !cm_hir_def_id_equal(semantic_field.aggregate_definition,
+                expression->data.field.definition)
+            || semantic_field.field_index != expression->data.field.field_index
+            || cm_mir_flow_semantic_expression_query(plan,
+                expression->data.field.base, &semantic_base)
+                != CM_SEMANTIC_RESULTS_OK
+            || cm_mir_flow_semantic_expression_query(plan, expression_id,
+                &semantic_result) != CM_SEMANTIC_RESULTS_OK
+            || semantic_base.adjustment_count != 0u
+            || semantic_result.adjustment_count != 0u
+            || !cm_mir_semantic_types_equal(&semantic_field.base_type,
+                &semantic_base.adjusted_type)
+            || !cm_mir_semantic_types_equal(&semantic_field.field_type,
+                &semantic_result.adjusted_type))) {
+            return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
+                expression_id, CM_MIR_INVALID_ADMISSION);
         }
         base_hir_type = cm_hir_get_type(plan->hir, base_type);
         aggregate = base_hir_type == NULL
@@ -920,7 +991,41 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
     } else if (expression->kind == CM_HIR_EXPR_BINARY) {
         CmHirTypeId left_type;
         CmHirTypeId right_type;
+        CmSemanticPrimitiveBinaryView semantic_binary;
+        CmSemanticExpressionView semantic_left;
+        CmSemanticExpressionView semantic_right;
+        CmSemanticExpressionView semantic_result;
 
+        if (plan->semantic_results != NULL
+            && (plan->admission == NULL
+            || cm_mir_flow_semantic_primitive_query(plan, expression_id,
+                &semantic_binary) != CM_SEMANTIC_RESULTS_OK
+            || semantic_binary.operator_kind
+                != expression->data.binary.operator_kind
+            || semantic_binary.left_expression
+                != expression->data.binary.left
+            || semantic_binary.right_expression
+                != expression->data.binary.right
+            || cm_mir_flow_semantic_expression_query(plan,
+                semantic_binary.left_expression, &semantic_left)
+                != CM_SEMANTIC_RESULTS_OK
+            || cm_mir_flow_semantic_expression_query(plan,
+                semantic_binary.right_expression, &semantic_right)
+                != CM_SEMANTIC_RESULTS_OK
+            || cm_mir_flow_semantic_expression_query(plan, expression_id,
+                &semantic_result) != CM_SEMANTIC_RESULTS_OK
+            || semantic_left.adjustment_count != 0u
+            || semantic_right.adjustment_count != 0u
+            || semantic_result.adjustment_count != 0u
+            || !cm_mir_semantic_types_equal(&semantic_binary.left_type,
+                &semantic_left.adjusted_type)
+            || !cm_mir_semantic_types_equal(&semantic_binary.right_type,
+                &semantic_right.adjusted_type)
+            || !cm_mir_semantic_types_equal(&semantic_binary.result_type,
+                &semantic_result.adjusted_type))) {
+            return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
+                expression_id, CM_MIR_INVALID_ADMISSION);
+        }
         if ((expression->data.binary.operator_kind != CM_HIR_BINARY_ADD
                 && expression->data.binary.operator_kind
                     != CM_HIR_BINARY_SUBTRACT
@@ -1304,7 +1409,8 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
 }
 
 static int cm_mir_flow_append_binary(CmMirFlowOutput *output,
-    const CmHirExpr *expression, CmMirLocalId destination,
+    const CmHirExpr *expression, CmHirBinaryOperator operator_kind,
+    CmMirLocalId destination,
     const CmMirOperand *left, const CmMirOperand *right)
 {
     CmMirStatement statement;
@@ -1330,19 +1436,18 @@ static int cm_mir_flow_append_binary(CmMirFlowOutput *output,
     statement.data.assign.destination = destination;
     statement.data.assign.value.type = type;
     statement.data.assign.value.span = expression->span;
-    if (expression->data.binary.operator_kind == CM_HIR_BINARY_EQUAL) {
+    if (operator_kind == CM_HIR_BINARY_EQUAL) {
         statement.data.assign.value.kind = CM_MIR_RVALUE_EQUAL;
         statement.data.assign.value.data.equal.left = *left;
         statement.data.assign.value.data.equal.right = *right;
-    } else if (expression->data.binary.operator_kind
-            == CM_HIR_BINARY_LESS) {
+    } else if (operator_kind == CM_HIR_BINARY_LESS) {
         statement.data.assign.value.kind = CM_MIR_RVALUE_LESS;
         statement.data.assign.value.data.less.left = *left;
         statement.data.assign.value.data.less.right = *right;
     } else {
         statement.data.assign.value.kind = CM_MIR_RVALUE_BINARY;
         statement.data.assign.value.data.binary.operator_kind =
-            expression->data.binary.operator_kind == CM_HIR_BINARY_ADD
+            operator_kind == CM_HIR_BINARY_ADD
                 ? CM_MIR_BINARY_ADD : CM_MIR_BINARY_SUBTRACT;
         statement.data.assign.value.data.binary.left = *left;
         statement.data.assign.value.data.binary.right = *right;
@@ -1487,8 +1592,21 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         CmMirPlace place;
         size_t projection_start;
         uint32_t base_projection_count;
+        CmSemanticFieldSelectionView semantic_field;
 
-        if (!cm_mir_flow_expression(output, expression->data.field.base,
+        memset(&semantic_field, 0, sizeof(semantic_field));
+        semantic_field.base_expression = expression->data.field.base;
+        semantic_field.aggregate_definition = expression->data.field.definition;
+        semantic_field.field_index = expression->data.field.field_index;
+        if ((output->plan->semantic_results != NULL
+                && cm_mir_flow_semantic_field_query(output->plan,
+                    expression_id, &semantic_field)
+                    != CM_SEMANTIC_RESULTS_OK)
+            || semantic_field.base_expression != expression->data.field.base
+            || !cm_hir_def_id_equal(semantic_field.aggregate_definition,
+                expression->data.field.definition)
+            || semantic_field.field_index != expression->data.field.field_index
+            || !cm_mir_flow_expression(output, semantic_field.base_expression,
                 0, CM_MIR_RETURN_LOCAL, &base)) {
             return 0;
         }
@@ -1510,9 +1628,9 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         }
         if (base_projection_count >= CM_MIR_MAX_PLACE_PROJECTIONS) return 0;
         projection_buffer[base_projection_count].definition =
-            expression->data.field.definition;
+            semantic_field.aggregate_definition;
         projection_buffer[base_projection_count].field_index =
-            expression->data.field.field_index;
+            semantic_field.field_index;
         place.projection_count = base_projection_count + 1u;
         projection_start = output->projections->len;
         cm_vec_append(output->projections, projection_buffer,
@@ -1600,11 +1718,27 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         CmMirOperand left;
         CmMirOperand right;
         CmMirLocalId destination;
+        CmSemanticPrimitiveBinaryView semantic_binary;
 
-        if (!cm_mir_flow_expression(output, expression->data.binary.left,
+        memset(&semantic_binary, 0, sizeof(semantic_binary));
+        semantic_binary.operator_kind =
+            expression->data.binary.operator_kind;
+        semantic_binary.left_expression = expression->data.binary.left;
+        semantic_binary.right_expression = expression->data.binary.right;
+        if ((output->plan->semantic_results != NULL
+                && cm_mir_flow_semantic_primitive_query(output->plan,
+                    expression_id, &semantic_binary)
+                    != CM_SEMANTIC_RESULTS_OK)
+            || semantic_binary.operator_kind
+                != expression->data.binary.operator_kind
+            || semantic_binary.left_expression
+                != expression->data.binary.left
+            || semantic_binary.right_expression
+                != expression->data.binary.right
+            || !cm_mir_flow_expression(output, semantic_binary.left_expression,
                 0, CM_MIR_RETURN_LOCAL, &left)
             || !cm_mir_flow_expression(output,
-                expression->data.binary.right, 0,
+                semantic_binary.right_expression, 0,
                 CM_MIR_RETURN_LOCAL, &right)
             || (!has_destination
                 && !cm_mir_flow_temporary(output,
@@ -1613,8 +1747,8 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
             return 0;
         }
         if (has_destination) destination = requested_destination;
-        if (!cm_mir_flow_append_binary(output, expression, destination,
-                &left, &right)) {
+        if (!cm_mir_flow_append_binary(output, expression,
+                semantic_binary.operator_kind, destination, &left, &right)) {
             return 0;
         }
         out_operand->kind = CM_MIR_OPERAND_MOVE;

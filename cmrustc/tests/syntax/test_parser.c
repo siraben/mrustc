@@ -1370,8 +1370,8 @@ static int test_nested_projection_paths(void)
         "type Argument<T> = Wrapper<<T as Trait>::Assoc>;",
         "type DeepArgument<T> = Outer<Inner<<T as Trait>::Assoc>>;",
         "type SplitEnd<T, U> = <T as Trait<U>>::Assoc;",
-        "type ConstArgument<T> = <T as Trait>::Assoc<"
-            "{ if 1 < 2 { (3) } else { [4][0] } }>;"
+        ("type ConstArgument<T> = <T as Trait>::Assoc<"
+            "{ if 1 < 2 { (3) } else { [4][0] } }>;")
     };
     size_t index;
     int ok;

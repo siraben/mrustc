@@ -34,8 +34,8 @@ awk '
     }
 ' "$generated_c"
 
-"$CC" $CFLAGS -Wno-infinite-recursion \
-    -std=c99 -Wall -Wextra -Werror -c "$generated_c" \
+"$CC" $CFLAGS -std=c99 -Wall -Wextra -Werror \
+    -Wno-infinite-recursion -c "$generated_c" \
     -o "$generated_o"
 
 "$CMRUSTC" --edition 2021 --emit-c \
@@ -44,7 +44,7 @@ grep -Eq '^static uint32_t[[:space:]]+cmrustc_first.*;[[:space:]]*$' \
     "$mutual_c"
 grep -Eq '^static uint32_t[[:space:]]+cmrustc_second.*;[[:space:]]*$' \
     "$mutual_c"
-"$CC" $CFLAGS -Wno-infinite-recursion \
-    -std=c99 -Wall -Wextra -Werror -c "$mutual_c" -o "$mutual_o"
+"$CC" $CFLAGS -std=c99 -Wall -Wextra -Werror \
+    -Wno-infinite-recursion -c "$mutual_c" -o "$mutual_o"
 
 echo "recursive publication acceptance: ok"

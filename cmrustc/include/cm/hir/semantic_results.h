@@ -51,6 +51,61 @@ typedef struct CmSemanticExpressionView {
     CmHirBinaryOperator primitive_operator;
 } CmSemanticExpressionView;
 
+/*
+ * One ordered, already-proven conversion applied to an expression.  A
+ * published adjustment sequence is contiguous: the first source type is the
+ * expression's unadjusted type, every target is the next source, and the last
+ * target is the expression's adjusted type.  MIR must replay this sequence;
+ * it must not rediscover coercions from the endpoint types.
+ */
+typedef enum CmSemanticAdjustmentKind {
+    CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_BUILTIN = 0,
+    CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_TRAIT,
+    CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED,
+    CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE,
+    CM_SEMANTIC_ADJUSTMENT_UNSIZE,
+    CM_SEMANTIC_ADJUSTMENT_REIFY_FUNCTION,
+    CM_SEMANTIC_ADJUSTMENT_MUTABLE_POINTER_TO_CONST,
+    CM_SEMANTIC_ADJUSTMENT_NEVER_TO_ANY
+} CmSemanticAdjustmentKind;
+
+typedef struct CmSemanticAdjustmentView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    uint32_t index;
+    CmSemanticAdjustmentKind kind;
+    CmSemanticTypeView source_type;
+    CmSemanticTypeView target_type;
+    /* Set only for CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_TRAIT. */
+    int has_selected_trait;
+    CmHirDefId selected_trait;
+    CmHirDefId selected_method;
+    CmHirDefId selected_impl;
+} CmSemanticAdjustmentView;
+
+/* An exact primitive operation recipe, separate from overloaded dispatch. */
+typedef struct CmSemanticPrimitiveBinaryView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    CmHirBinaryOperator operator_kind;
+    CmHirExprId left_expression;
+    CmHirExprId right_expression;
+    CmSemanticTypeView left_type;
+    CmSemanticTypeView right_type;
+    CmSemanticTypeView result_type;
+} CmSemanticPrimitiveBinaryView;
+
+/* An authenticated direct field projection; no field lookup is repeated. */
+typedef struct CmSemanticFieldSelectionView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    CmHirExprId base_expression;
+    CmHirDefId aggregate_definition;
+    uint32_t field_index;
+    CmSemanticTypeView base_type;
+    CmSemanticTypeView field_type;
+} CmSemanticFieldSelectionView;
+
 typedef struct CmSemanticFunctionSignatureView {
     CmHirDefId definition;
     CmHirBodyId body;
@@ -75,6 +130,21 @@ CmSemanticResultsStatus cm_semantic_results_instance_expression(
     const struct CmSemanticAdmission *admission,
     const struct CmHirInstanceSpec *spec, CmHirExprId expression,
     CmSemanticExpressionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_expression_adjustment(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, CmHirExprId expression,
+    uint32_t adjustment, CmSemanticAdjustmentView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_primitive_binary(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_field_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_signature(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
@@ -125,6 +195,19 @@ CmSemanticResultsStatus cm_semantic_results_expression(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression,
     CmSemanticExpressionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_expression_adjustment(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, uint32_t adjustment,
+    CmSemanticAdjustmentView *out_view);
+CmSemanticResultsStatus cm_semantic_results_primitive_binary(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, CmSemanticPrimitiveBinaryView *out_view);
+CmSemanticResultsStatus cm_semantic_results_field_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, CmSemanticFieldSelectionView *out_view);
 CmSemanticResultsStatus cm_semantic_results_signature(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission, CmHirBodyId body,

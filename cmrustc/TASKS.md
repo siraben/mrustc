@@ -1335,8 +1335,10 @@ back scratch state and evidence, overlap remains ambiguous even when only one
 target matches, and a unique target mismatch is `NO_SOLUTION`. GATs, nested
 structural projections, associated defaults, specialization, and incomplete
 foreign metadata remain distinct fail-closed outcomes. The next body-semantic
-integration must dispatch these equality goals from callee predicates rather
-than rejecting them or treating them as implemented-trait facts.
+integration must retain durable projection-proof recipes and broaden their
+source-expression use. Callee predicate checking already constructs and
+dispatches projection-equality goals through the semantic session; it no
+longer rejects them or treats them as implemented-trait facts.
 
 The next body-typing milestone is not another reachable-expression special
 case. It is an all-local, cfg-active transactional typed-HIR barrier that runs
@@ -1347,6 +1349,21 @@ modes; closures/coroutines; post-typecheck rewrites; region/outlives and
 conservative borrowing; then CTFE and broad validated MIR. No later pass may
 consume partially typed local HIR or reinterpret an unsupported semantic state
 as proof.
+
+Semantic results now publish immutable, canonical per-expression adjustment
+sequences plus exact primitive-binary and named-field selection recipes.
+Ordinary-body and exact-instance MIR lowering consume those recipes, and MIR
+replay authenticates the same expression identities, operator or aggregate
+selection, field ordinal, and operand/result types. Adjustments are represented
+and queried in order, but current HIR and MIR have no executable borrow,
+deref, unsize, reification, or other adjustment forms; every nonzero sequence
+therefore remains fail-closed instead of being rediscovered from endpoint
+types. Focused tests cover ordinary and exact-instance recipe queries,
+malformed or duplicate primitive and field facts, malformed and noncontiguous
+adjustment facts, wrong instance identities, and publication of no stage state
+after every rejected writeback. This establishes the authenticated evidence
+boundary only; coercion generation and executable adjustment lowering remain
+open under M4-03 and the all-local typed-HIR sequence above.
 
 Exact free-function closures, including recursive strongly connected
 components, now cross the admitted HIR-to-MIR

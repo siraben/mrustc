@@ -30,11 +30,25 @@ typedef struct CmSemanticTypeRecord {
     size_t type_size;
 } CmSemanticTypeRecord;
 
+typedef struct CmSemanticAdjustmentRecord {
+    CmSemanticAdjustmentKind kind;
+    CmSemanticTypeRecord source_type;
+    CmSemanticTypeRecord target_type;
+    int has_selected_trait;
+    CmHirDefId selected_trait;
+    CmHirDefId selected_method;
+    CmHirDefId selected_impl;
+} CmSemanticAdjustmentRecord;
+
 typedef struct CmSemanticExpressionRecord {
     int present;
     CmHirBodyId body;
     size_t type_offset;
     size_t type_size;
+    size_t adjusted_type_offset;
+    size_t adjusted_type_size;
+    size_t adjustment_start;
+    uint32_t adjustment_count;
     int has_direct_callable;
     CmHirDefId direct_callable;
     size_t call_return_offset;
@@ -44,6 +58,17 @@ typedef struct CmSemanticExpressionRecord {
     size_t canonical_callee_index;
     int has_primitive_operator;
     CmHirBinaryOperator primitive_operator;
+    CmHirExprId primitive_left_expression;
+    CmHirExprId primitive_right_expression;
+    CmSemanticTypeRecord primitive_left_type;
+    CmSemanticTypeRecord primitive_right_type;
+    CmSemanticTypeRecord primitive_result_type;
+    int has_field_selection;
+    CmHirExprId field_base_expression;
+    CmHirDefId field_aggregate_definition;
+    uint32_t field_index;
+    CmSemanticTypeRecord field_base_type;
+    CmSemanticTypeRecord field_type;
 } CmSemanticExpressionRecord;
 
 typedef struct CmSemanticInstanceRecord {
@@ -57,6 +82,8 @@ typedef struct CmSemanticInstanceRecord {
     size_t signature_parameter_count;
     CmSemanticTypeRecord *call_parameters;
     size_t call_parameter_count;
+    CmSemanticAdjustmentRecord *adjustments;
+    size_t adjustment_count;
     CmHirCanonicalInstance *callees;
     size_t callee_count;
 } CmSemanticInstanceRecord;
@@ -77,6 +104,8 @@ struct CmSemanticResults {
     size_t signature_parameter_count;
     CmSemanticTypeRecord *call_parameters;
     size_t call_parameter_count;
+    CmSemanticAdjustmentRecord *adjustments;
+    size_t adjustment_count;
     size_t admitted_body_count;
     CmSemanticInstanceRecord *instances;
     size_t instance_count;
@@ -103,6 +132,8 @@ typedef struct CmSemanticResultsBodyStageState {
     size_t signature_parameter_count;
     CmSemanticTypeRecord *call_parameters;
     size_t call_parameter_count;
+    CmSemanticAdjustmentRecord *adjustments;
+    size_t adjustment_count;
     size_t call_count;
     uint32_t body_expression_count;
 } CmSemanticResultsBodyStageState;
@@ -110,6 +141,13 @@ typedef struct CmSemanticResultsBodyStageState {
 static CmSemanticResultsStatus cm_results_validate(
     const CmSemanticResults *results,
     const CmSemanticAdmission *admission);
+static int cm_results_instance_type_equal(
+    const CmSemanticInstanceRecord *left, size_t left_offset,
+    size_t left_size, const CmSemanticInstanceRecord *right,
+    size_t right_offset, size_t right_size);
+static int cm_results_type_bytes_equal(const CmSemanticResults *results,
+    size_t left_offset, size_t left_size, size_t right_offset,
+    size_t right_size);
 
 static const CmSemanticInstanceRecord *cm_results_find_instance(
     const CmSemanticResults *results,
@@ -589,12 +627,10 @@ static CmSemanticResultsStatus cm_results_collect_expression(
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     if (publish) {
         record->type_size = types->len - record->type_offset;
+        record->adjusted_type_offset = record->type_offset;
+        record->adjusted_type_size = record->type_size;
         record->present = 1;
         record->body = body_id;
-        if (expression->kind == CM_HIR_EXPR_BINARY) {
-            record->has_primitive_operator = 1;
-            record->primitive_operator = expression->data.binary.operator_kind;
-        }
     }
     if (*body_expression_count == UINT32_MAX) {
         return CM_SEMANTIC_RESULTS_OVERFLOW;
@@ -626,10 +662,42 @@ static CmSemanticResultsStatus cm_results_collect_type_record(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
+static int cm_results_type_records_equal(const unsigned char *bytes,
+    size_t bytes_len, const CmSemanticTypeRecord *left,
+    const CmSemanticTypeRecord *right)
+{
+    if (bytes == NULL || left == NULL || right == NULL
+        || left->type_size == 0u || left->type_size != right->type_size
+        || left->type_offset > bytes_len
+        || left->type_size > bytes_len - left->type_offset
+        || right->type_offset > bytes_len
+        || right->type_size > bytes_len - right->type_offset) {
+        return 0;
+    }
+    return memcmp(bytes + left->type_offset, bytes + right->type_offset,
+        left->type_size) == 0;
+}
+
+static int cm_results_adjustment_kind_valid(CmSemanticAdjustmentKind kind)
+{
+    return kind >= CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_BUILTIN
+        && kind <= CM_SEMANTIC_ADJUSTMENT_NEVER_TO_ANY;
+}
+
 static CmSemanticResultsStatus cm_results_validate_membership(
     const CmSemanticResults *results, const CmHirContext *hir)
 {
     size_t expression_index;
+    size_t seen_adjustments;
+
+    if (results == NULL || hir == NULL
+        || (results->expression_count != 0u && results->expressions == NULL)
+        || (results->type_bytes_len != 0u && results->type_bytes == NULL)
+        || (results->adjustment_count != 0u
+            && results->adjustments == NULL)) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    seen_adjustments = 0u;
 
     for (expression_index = 0u;
             expression_index < results->expression_count;
@@ -656,6 +724,149 @@ static CmSemanticResultsStatus cm_results_validate_membership(
                 != record->has_direct_callable)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
+        if (record->present
+            && (((expression->kind == CM_HIR_EXPR_BINARY)
+                    != record->has_primitive_operator)
+                || ((expression->kind == CM_HIR_EXPR_FIELD)
+                    != record->has_field_selection))) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        if (record->present) {
+            size_t adjustment_index;
+
+            if ((record->type_size == 0u)
+                || (record->adjusted_type_size == 0u)
+                || record->type_offset > results->type_bytes_len
+                || record->type_size
+                    > results->type_bytes_len - record->type_offset
+                || record->adjusted_type_offset > results->type_bytes_len
+                || record->adjusted_type_size > results->type_bytes_len
+                    - record->adjusted_type_offset
+                || !cm_size_add(seen_adjustments,
+                    record->adjustment_count, &adjustment_index)
+                || adjustment_index > results->adjustment_count
+                || (record->adjustment_count != 0u
+                    && (record->adjustment_start
+                            > results->adjustment_count
+                        || record->adjustment_count
+                            > results->adjustment_count
+                                - record->adjustment_start))) {
+                return CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+            if (record->adjustment_count != 0u) {
+                size_t prior_expression;
+
+                for (prior_expression = 0u;
+                     prior_expression < expression_index;
+                     ++prior_expression) {
+                    const CmSemanticExpressionRecord *prior;
+                    size_t record_end;
+                    size_t prior_end;
+
+                    prior = &results->expressions[prior_expression];
+                    if (!prior->present || prior->adjustment_count == 0u) {
+                        continue;
+                    }
+                    record_end = record->adjustment_start
+                        + record->adjustment_count;
+                    prior_end = prior->adjustment_start
+                        + prior->adjustment_count;
+                    if (record->adjustment_start < prior_end
+                        && prior->adjustment_start < record_end) {
+                        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                    }
+                }
+            }
+            if (record->adjustment_count == 0u) {
+                if (!cm_results_type_bytes_equal(results,
+                        record->type_offset, record->type_size,
+                        record->adjusted_type_offset,
+                        record->adjusted_type_size)) {
+                    return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                }
+            } else {
+                size_t local;
+
+                for (local = 0u; local < record->adjustment_count; ++local) {
+                    const CmSemanticAdjustmentRecord *adjustment;
+
+                    adjustment = &results->adjustments[
+                        record->adjustment_start + local];
+                    if (!cm_results_adjustment_kind_valid(adjustment->kind)
+                        || (adjustment->kind
+                                == CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_TRAIT)
+                            != adjustment->has_selected_trait
+                        || (adjustment->has_selected_trait
+                            && (cm_hir_def_id_is_none(
+                                    adjustment->selected_trait)
+                                || cm_hir_def_id_is_none(
+                                    adjustment->selected_method)
+                                || cm_hir_def_id_is_none(
+                                    adjustment->selected_impl)))
+                        || (!adjustment->has_selected_trait
+                            && (!cm_hir_def_id_is_none(
+                                    adjustment->selected_trait)
+                                || !cm_hir_def_id_is_none(
+                                    adjustment->selected_method)
+                                || !cm_hir_def_id_is_none(
+                                    adjustment->selected_impl)))) {
+                        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                    }
+                    if (local == 0u) {
+                        if (!cm_results_type_bytes_equal(results,
+                                record->type_offset, record->type_size,
+                                adjustment->source_type.type_offset,
+                                adjustment->source_type.type_size)) {
+                            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                        }
+                    } else {
+                        const CmSemanticAdjustmentRecord *previous;
+
+                        previous = adjustment - 1;
+                        if (!cm_results_type_bytes_equal(results,
+                                previous->target_type.type_offset,
+                                previous->target_type.type_size,
+                                adjustment->source_type.type_offset,
+                                adjustment->source_type.type_size)) {
+                            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                        }
+                    }
+                    if (local + 1u == record->adjustment_count
+                        && !cm_results_type_bytes_equal(results,
+                            adjustment->target_type.type_offset,
+                            adjustment->target_type.type_size,
+                            record->adjusted_type_offset,
+                            record->adjusted_type_size)) {
+                        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+                    }
+                }
+            }
+            seen_adjustments = adjustment_index;
+        }
+    }
+    if (seen_adjustments != results->adjustment_count) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    for (expression_index = 0u;
+         expression_index < results->adjustment_count;
+         ++expression_index) {
+        size_t owner_count;
+        size_t record_index;
+
+        owner_count = 0u;
+        for (record_index = 0u; record_index < results->expression_count;
+             ++record_index) {
+            const CmSemanticExpressionRecord *record;
+
+            record = &results->expressions[record_index];
+            if (record->present && record->adjustment_count != 0u
+                && expression_index >= record->adjustment_start
+                && expression_index - record->adjustment_start
+                    < record->adjustment_count) {
+                owner_count += 1u;
+            }
+        }
+        if (owner_count != 1u) return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
     return CM_SEMANTIC_RESULTS_OK;
 }
@@ -671,6 +882,259 @@ static int cm_results_type_bytes_equal(const CmSemanticResults *results,
         || right_size > results->type_bytes_len - right_offset) return 0;
     return left_size == 0u || memcmp(results->type_bytes + left_offset,
         results->type_bytes + right_offset, left_size) == 0;
+}
+
+static int cm_results_instance_adjustments_valid(
+    const CmSemanticInstanceRecord *instance)
+{
+    size_t expression_index;
+    size_t counted;
+
+    if (instance == NULL
+        || (instance->expression_count != 0u && instance->expressions == NULL)
+        || (instance->type_bytes_len != 0u && instance->type_bytes == NULL)
+        || (instance->adjustment_count != 0u
+            && instance->adjustments == NULL)) return 0;
+    counted = 0u;
+    for (expression_index = 0u;
+         expression_index < instance->expression_count; ++expression_index) {
+        const CmSemanticExpressionRecord *record;
+        size_t local;
+
+        record = &instance->expressions[expression_index];
+        if (!record->present) continue;
+        if (record->type_size == 0u
+            || record->type_offset > instance->type_bytes_len
+            || record->type_size > instance->type_bytes_len
+                - record->type_offset
+            || record->adjusted_type_size == 0u
+            || record->adjusted_type_offset > instance->type_bytes_len
+            || record->adjusted_type_size > instance->type_bytes_len
+                - record->adjusted_type_offset
+            || record->adjustment_start > instance->adjustment_count
+            || record->adjustment_count > instance->adjustment_count
+                - record->adjustment_start) {
+            return 0;
+        }
+        if (record->adjustment_count == 0u) {
+            if (!cm_results_instance_type_equal(instance,
+                    record->type_offset, record->type_size, instance,
+                    record->adjusted_type_offset,
+                    record->adjusted_type_size)) return 0;
+            continue;
+        }
+        {
+            size_t prior_expression;
+
+            for (prior_expression = 0u;
+                 prior_expression < expression_index; ++prior_expression) {
+                const CmSemanticExpressionRecord *prior;
+                size_t record_end;
+                size_t prior_end;
+
+                prior = &instance->expressions[prior_expression];
+                if (!prior->present || prior->adjustment_count == 0u) {
+                    continue;
+                }
+                record_end = record->adjustment_start
+                    + record->adjustment_count;
+                prior_end = prior->adjustment_start
+                    + prior->adjustment_count;
+                if (record->adjustment_start < prior_end
+                    && prior->adjustment_start < record_end) return 0;
+            }
+        }
+        if (!cm_size_add(counted, record->adjustment_count, &counted)) {
+            return 0;
+        }
+        for (local = 0u; local < record->adjustment_count; ++local) {
+            const CmSemanticAdjustmentRecord *adjustment;
+            const CmSemanticTypeRecord *expected_source;
+
+            adjustment = &instance->adjustments[
+                record->adjustment_start + local];
+            expected_source = local == 0u
+                ? &(CmSemanticTypeRecord){ record->type_offset,
+                    record->type_size }
+                : &instance->adjustments[
+                    record->adjustment_start + local - 1u].target_type;
+            if (!cm_results_adjustment_kind_valid(adjustment->kind)
+                || ((adjustment->kind
+                        == CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_TRAIT)
+                    != adjustment->has_selected_trait)
+                || (adjustment->has_selected_trait
+                    && (cm_hir_def_id_is_none(adjustment->selected_trait)
+                        || cm_hir_def_id_is_none(adjustment->selected_method)
+                        || cm_hir_def_id_is_none(adjustment->selected_impl)))
+                || (!adjustment->has_selected_trait
+                    && (!cm_hir_def_id_is_none(adjustment->selected_trait)
+                        || !cm_hir_def_id_is_none(
+                            adjustment->selected_method)
+                        || !cm_hir_def_id_is_none(
+                            adjustment->selected_impl)))
+                || !cm_results_instance_type_equal(instance,
+                    expected_source->type_offset, expected_source->type_size,
+                    instance, adjustment->source_type.type_offset,
+                    adjustment->source_type.type_size)) {
+                return 0;
+            }
+        }
+        if (!cm_results_instance_type_equal(instance,
+                instance->adjustments[record->adjustment_start
+                    + record->adjustment_count - 1u].target_type.type_offset,
+                instance->adjustments[record->adjustment_start
+                    + record->adjustment_count - 1u].target_type.type_size,
+                instance, record->adjusted_type_offset,
+                record->adjusted_type_size)) {
+            return 0;
+        }
+    }
+    return counted == instance->adjustment_count;
+}
+
+static int cm_results_instance_recipes_valid(
+    const CmSemanticInstanceRecord *instance, const CmHirContext *hir)
+{
+    size_t expression_index;
+
+    if (instance == NULL || hir == NULL
+        || (instance->expression_count != 0u && instance->expressions == NULL)
+        || (instance->type_bytes_len != 0u && instance->type_bytes == NULL)) {
+        return 0;
+    }
+    for (expression_index = 0u;
+         expression_index < instance->expression_count; ++expression_index) {
+        const CmSemanticExpressionRecord *record;
+        const CmHirExpr *expression;
+
+        record = &instance->expressions[expression_index];
+        if (!record->present) continue;
+        expression = cm_hir_get_expr(hir,
+            (CmHirExprId)(expression_index + 1u));
+        if (expression == NULL || expression->owner_body != record->body
+            || ((expression->kind == CM_HIR_EXPR_BINARY)
+                != record->has_primitive_operator)
+            || ((expression->kind == CM_HIR_EXPR_FIELD)
+                != record->has_field_selection)) return 0;
+        if (record->has_primitive_operator) {
+            const CmSemanticExpressionRecord *left;
+            const CmSemanticExpressionRecord *right;
+
+            if (record->primitive_left_expression == CM_HIR_EXPR_NONE
+                || record->primitive_right_expression == CM_HIR_EXPR_NONE
+                || (size_t)record->primitive_left_expression
+                    > instance->expression_count
+                || (size_t)record->primitive_right_expression
+                    > instance->expression_count
+                || expression->data.binary.operator_kind
+                    != record->primitive_operator
+                || expression->data.binary.left
+                    != record->primitive_left_expression
+                || expression->data.binary.right
+                    != record->primitive_right_expression) return 0;
+            left = &instance->expressions[
+                (size_t)record->primitive_left_expression - 1u];
+            right = &instance->expressions[
+                (size_t)record->primitive_right_expression - 1u];
+            if (!left->present || !right->present
+                || !cm_results_instance_type_equal(instance,
+                    record->primitive_left_type.type_offset,
+                    record->primitive_left_type.type_size, instance,
+                    left->adjusted_type_offset, left->adjusted_type_size)
+                || !cm_results_instance_type_equal(instance,
+                    record->primitive_right_type.type_offset,
+                    record->primitive_right_type.type_size, instance,
+                    right->adjusted_type_offset, right->adjusted_type_size)
+                || !cm_results_instance_type_equal(instance,
+                    record->primitive_result_type.type_offset,
+                    record->primitive_result_type.type_size, instance,
+                    record->adjusted_type_offset,
+                    record->adjusted_type_size)) return 0;
+        }
+        if (record->has_field_selection) {
+            const CmSemanticExpressionRecord *base;
+
+            if (record->field_base_expression == CM_HIR_EXPR_NONE
+                || (size_t)record->field_base_expression
+                    > instance->expression_count
+                || expression->data.field.base
+                    != record->field_base_expression
+                || !cm_hir_def_id_equal(expression->data.field.definition,
+                    record->field_aggregate_definition)
+                || expression->data.field.field_index != record->field_index) {
+                return 0;
+            }
+            base = &instance->expressions[
+                (size_t)record->field_base_expression - 1u];
+            if (!base->present
+                || !cm_results_instance_type_equal(instance,
+                    record->field_base_type.type_offset,
+                    record->field_base_type.type_size, instance,
+                    base->adjusted_type_offset, base->adjusted_type_size)
+                || !cm_results_instance_type_equal(instance,
+                    record->field_type.type_offset,
+                    record->field_type.type_size, instance,
+                    record->adjusted_type_offset,
+                    record->adjusted_type_size)) return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_results_body_recipes_valid(const CmSemanticResults *results,
+    const CmHirContext *hir)
+{
+    CmSemanticInstanceRecord view;
+
+    if (results == NULL) return 0;
+    memset(&view, 0, sizeof(view));
+    view.expressions = results->expressions;
+    view.expression_count = results->expression_count;
+    view.type_bytes = results->type_bytes;
+    view.type_bytes_len = results->type_bytes_len;
+    return cm_results_instance_recipes_valid(&view, hir);
+}
+
+static int cm_results_instance_membership_valid(
+    const CmSemanticInstanceRecord *instance, const CmHirContext *hir)
+{
+    const CmHirBody *body;
+    size_t expression_index;
+    uint32_t present_count;
+
+    if (instance == NULL || hir == NULL || !instance->body.present
+        || instance->identity.body == CM_HIR_BODY_NONE
+        || !cm_hir_def_id_equal(instance->identity.definition,
+            instance->body.owner)
+        || instance->expression_count != hir->expressions.len
+        || (instance->expression_count != 0u
+            && instance->expressions == NULL)) return 0;
+    body = cm_hir_get_body(hir, instance->identity.body);
+    if (body == NULL || body->state != CM_HIR_BODY_TYPED
+        || !cm_hir_def_id_equal(body->owner, instance->identity.definition)) {
+        return 0;
+    }
+    present_count = 0u;
+    for (expression_index = 0u;
+         expression_index < instance->expression_count; ++expression_index) {
+        const CmHirExpr *expression;
+        const CmSemanticExpressionRecord *record;
+        int owned;
+
+        expression = cm_hir_get_expr(hir,
+            (CmHirExprId)(expression_index + 1u));
+        record = &instance->expressions[expression_index];
+        if (expression == NULL) return 0;
+        owned = expression->owner_body == instance->identity.body;
+        if (owned != record->present
+            || (record->present
+                && record->body != instance->identity.body)) return 0;
+        if (record->present) {
+            if (present_count == UINT32_MAX) return 0;
+            present_count += 1u;
+        }
+    }
+    return present_count == instance->body.expression_count;
 }
 
 CmSemanticResultsStatus cm_semantic_results_begin(
@@ -722,6 +1186,7 @@ void cm_semantic_results_body_stage_destroy(
     state = (CmSemanticResultsBodyStageState *)stage->state;
     if (state != NULL) {
         cm_free(state->type_bytes);
+        cm_free(state->adjustments);
         cm_free(state->call_parameters);
         cm_free(state->signature_parameters);
         cm_free(state->expressions);
@@ -774,6 +1239,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     size_t call_parameter_count;
     size_t signature_parameter_bytes;
     size_t call_parameter_bytes;
+    size_t adjustment_bytes;
     uint32_t expression_count;
 
     stage = (CmSemanticResultsBodyStage *)context;
@@ -784,6 +1250,11 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         || (facts->signature_parameter_count != 0u
             && facts->signature_parameter_types == NULL)
         || (facts->call_count != 0u && facts->calls == NULL)
+        || (facts->adjustment_count != 0u && facts->adjustments == NULL)
+        || (facts->primitive_binary_count != 0u
+            && facts->primitive_binaries == NULL)
+        || (facts->field_selection_count != 0u
+            && facts->field_selections == NULL)
         || !cm_semantic_session_is_current(session)
         || cm_semantic_session_universe(session)
             != CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE) {
@@ -829,7 +1300,9 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     if (!cm_size_mul(facts->signature_parameter_count,
             sizeof(CmSemanticTypeRecord), &signature_parameter_bytes)
         || !cm_size_mul(call_parameter_count,
-            sizeof(CmSemanticTypeRecord), &call_parameter_bytes)) {
+            sizeof(CmSemanticTypeRecord), &call_parameter_bytes)
+        || !cm_size_mul(facts->adjustment_count,
+            sizeof(CmSemanticAdjustmentRecord), &adjustment_bytes)) {
         return CM_SEMANTIC_BODY_WRITEBACK_OVERFLOW;
     }
     state = (CmSemanticResultsBodyStageState *)cm_alloc_zeroed(1u,
@@ -846,6 +1319,10 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
     state->call_parameters = call_parameter_bytes == 0u ? NULL
         : (CmSemanticTypeRecord *)cm_alloc_zeroed(1u,
             call_parameter_bytes);
+    state->adjustment_count = facts->adjustment_count;
+    state->adjustments = adjustment_bytes == 0u ? NULL
+        : (CmSemanticAdjustmentRecord *)cm_alloc_zeroed(1u,
+            adjustment_bytes);
     seen = facts->expression_term_count == 0u ? NULL
         : (unsigned char *)cm_alloc_zeroed(facts->expression_term_count, 1u);
     memset(&body_results, 0, sizeof(body_results));
@@ -882,8 +1359,55 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
                 0, NULL);
         }
     }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->adjustment_count;
+         ++expression_index) {
+        const CmSemanticCheckedAdjustmentFacts *adjustment;
+
+        adjustment = &facts->adjustments[expression_index];
+        status = cm_results_collect_type_record(&sizing, hir, typeck,
+            adjustment->source_type, 0, NULL);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&sizing, hir, typeck,
+                adjustment->target_type, 0, NULL);
+        }
+    }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->primitive_binary_count;
+         ++expression_index) {
+        const CmSemanticCheckedPrimitiveBinaryFacts *binary;
+
+        binary = &facts->primitive_binaries[expression_index];
+        status = cm_results_collect_type_record(&sizing, hir, typeck,
+            binary->left_type, 0, NULL);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&sizing, hir, typeck,
+                binary->right_type, 0, NULL);
+        }
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&sizing, hir, typeck,
+                binary->result_type, 0, NULL);
+        }
+    }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->field_selection_count;
+         ++expression_index) {
+        const CmSemanticCheckedFieldSelectionFacts *field;
+
+        field = &facts->field_selections[expression_index];
+        status = cm_results_collect_type_record(&sizing, hir, typeck,
+            field->base_type, 0, NULL);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&sizing, hir, typeck,
+                field->field_type, 0, NULL);
+        }
+    }
     if (status != CM_SEMANTIC_RESULTS_OK) {
         cm_free(seen);
+        cm_free(state->adjustments);
         cm_free(state->call_parameters);
         cm_free(state->signature_parameters);
         cm_free(state->expressions);
@@ -906,6 +1430,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             || (!owned && facts->expression_terms[expression_index]
                 != CM_TYPECK_TYPE_NONE)) {
             cm_free(seen);
+            cm_free(state->adjustments);
             cm_free(state->call_parameters);
             cm_free(state->signature_parameters);
             cm_free(state->expressions);
@@ -980,9 +1505,214 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             call_parameter_count += 1u;
         }
     }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->adjustment_count;
+         ++expression_index) {
+        const CmSemanticCheckedAdjustmentFacts *fact;
+        CmSemanticAdjustmentRecord *record;
+        CmSemanticExpressionRecord *expression_record;
+        size_t previous;
+
+        fact = &facts->adjustments[expression_index];
+        if (fact->expression == CM_HIR_EXPR_NONE
+            || (size_t)fact->expression > state->expression_count
+            || !cm_results_adjustment_kind_valid(fact->kind)
+            || (fact->kind == CM_SEMANTIC_ADJUSTMENT_DEREFERENCE_TRAIT)
+                != fact->has_selected_trait
+            || (fact->has_selected_trait
+                && (cm_hir_def_id_is_none(fact->selected_trait)
+                    || cm_hir_def_id_is_none(fact->selected_method)
+                    || cm_hir_def_id_is_none(fact->selected_impl)))) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        expression_record = &state->expressions[
+            (size_t)fact->expression - 1u];
+        if (!expression_record->present
+            || expression_record->body != body_id
+            || expression_record->adjustment_count == UINT32_MAX) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        previous = expression_record->adjustment_count;
+        if (previous == 0u) {
+            expression_record->adjustment_start = expression_index;
+        } else if (expression_record->adjustment_start
+                != expression_index - previous) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        record = &state->adjustments[expression_index];
+        record->kind = fact->kind;
+        record->has_selected_trait = fact->has_selected_trait;
+        record->selected_trait = fact->selected_trait;
+        record->selected_method = fact->selected_method;
+        record->selected_impl = fact->selected_impl;
+        status = cm_results_collect_type_record(&output, hir, typeck,
+            fact->source_type, 1, &record->source_type);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&output, hir, typeck,
+                fact->target_type, 1, &record->target_type);
+        }
+        if (status != CM_SEMANTIC_RESULTS_OK) break;
+        if ((previous == 0u
+                && !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &(CmSemanticTypeRecord){
+                        expression_record->type_offset,
+                        expression_record->type_size },
+                    &record->source_type))
+            || (previous != 0u
+                && !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len,
+                    &state->adjustments[expression_index - 1u].target_type,
+                    &record->source_type))) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        expression_record->adjusted_type_offset =
+            record->target_type.type_offset;
+        expression_record->adjusted_type_size =
+            record->target_type.type_size;
+        expression_record->adjustment_count += 1u;
+    }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->primitive_binary_count;
+         ++expression_index) {
+        const CmSemanticCheckedPrimitiveBinaryFacts *fact;
+        const CmHirExpr *expression;
+        CmSemanticExpressionRecord *record;
+
+        fact = &facts->primitive_binaries[expression_index];
+        expression = cm_hir_get_expr(hir, fact->expression);
+        if (expression == NULL || expression->owner_body != body_id
+            || expression->kind != CM_HIR_EXPR_BINARY
+            || expression->data.binary.operator_kind != fact->operator_kind
+            || expression->data.binary.left != fact->left_expression
+            || expression->data.binary.right != fact->right_expression) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        record = &state->expressions[(size_t)fact->expression - 1u];
+        if (!record->present || record->has_primitive_operator) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        record->has_primitive_operator = 1;
+        record->primitive_operator = fact->operator_kind;
+        record->primitive_left_expression = fact->left_expression;
+        record->primitive_right_expression = fact->right_expression;
+        status = cm_results_collect_type_record(&output, hir, typeck,
+            fact->left_type, 1, &record->primitive_left_type);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&output, hir, typeck,
+                fact->right_type, 1, &record->primitive_right_type);
+        }
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&output, hir, typeck,
+                fact->result_type, 1, &record->primitive_result_type);
+        }
+    }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < facts->field_selection_count;
+         ++expression_index) {
+        const CmSemanticCheckedFieldSelectionFacts *fact;
+        const CmHirExpr *expression;
+        CmSemanticExpressionRecord *record;
+
+        fact = &facts->field_selections[expression_index];
+        expression = cm_hir_get_expr(hir, fact->expression);
+        if (expression == NULL || expression->owner_body != body_id
+            || expression->kind != CM_HIR_EXPR_FIELD
+            || expression->data.field.base != fact->base_expression
+            || !cm_hir_def_id_equal(expression->data.field.definition,
+                fact->aggregate_definition)
+            || expression->data.field.field_index != fact->field_index) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        record = &state->expressions[(size_t)fact->expression - 1u];
+        if (!record->present || record->has_field_selection) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            break;
+        }
+        record->has_field_selection = 1;
+        record->field_base_expression = fact->base_expression;
+        record->field_aggregate_definition = fact->aggregate_definition;
+        record->field_index = fact->field_index;
+        status = cm_results_collect_type_record(&output, hir, typeck,
+            fact->base_type, 1, &record->field_base_type);
+        if (status == CM_SEMANTIC_RESULTS_OK) {
+            status = cm_results_collect_type_record(&output, hir, typeck,
+                fact->field_type, 1, &record->field_type);
+        }
+    }
+    for (expression_index = 0u;
+         status == CM_SEMANTIC_RESULTS_OK
+            && expression_index < state->expression_count;
+         ++expression_index) {
+        const CmHirExpr *expression;
+        const CmSemanticExpressionRecord *record;
+
+        expression = cm_hir_get_expr(hir,
+            (CmHirExprId)(expression_index + 1u));
+        record = &state->expressions[expression_index];
+        if (!record->present) continue;
+        if (((expression->kind == CM_HIR_EXPR_BINARY)
+                != record->has_primitive_operator)
+            || ((expression->kind == CM_HIR_EXPR_FIELD)
+                != record->has_field_selection)) {
+            status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            continue;
+        }
+        if (record->has_primitive_operator) {
+            const CmSemanticExpressionRecord *left;
+            const CmSemanticExpressionRecord *right;
+
+            left = &state->expressions[
+                (size_t)record->primitive_left_expression - 1u];
+            right = &state->expressions[
+                (size_t)record->primitive_right_expression - 1u];
+            if (!left->present || !right->present
+                || !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &record->primitive_left_type,
+                    &(CmSemanticTypeRecord){ left->adjusted_type_offset,
+                        left->adjusted_type_size })
+                || !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &record->primitive_right_type,
+                    &(CmSemanticTypeRecord){ right->adjusted_type_offset,
+                        right->adjusted_type_size })
+                || !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &record->primitive_result_type,
+                    &(CmSemanticTypeRecord){ record->adjusted_type_offset,
+                        record->adjusted_type_size })) {
+                status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+        }
+        if (record->has_field_selection) {
+            const CmSemanticExpressionRecord *base;
+
+            base = &state->expressions[
+                (size_t)record->field_base_expression - 1u];
+            if (!base->present
+                || !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &record->field_base_type,
+                    &(CmSemanticTypeRecord){ base->adjusted_type_offset,
+                        base->adjusted_type_size })
+                || !cm_results_type_records_equal(state->type_bytes,
+                    sizing.len, &record->field_type,
+                    &(CmSemanticTypeRecord){ record->adjusted_type_offset,
+                        record->adjusted_type_size })) {
+                status = CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+        }
+    }
     cm_free(seen);
     if (status != CM_SEMANTIC_RESULTS_OK || output.len != sizing.len) {
         cm_free(state->type_bytes);
+        cm_free(state->adjustments);
         cm_free(state->call_parameters);
         cm_free(state->signature_parameters);
         cm_free(state->expressions);
@@ -1018,11 +1748,14 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     unsigned char *combined_type_bytes;
     CmSemanticTypeRecord *combined_signature_parameters;
     CmSemanticTypeRecord *combined_call_parameters;
+    CmSemanticAdjustmentRecord *combined_adjustments;
     size_t new_type_bytes_len;
     size_t new_signature_parameter_count;
     size_t new_call_parameter_count;
+    size_t new_adjustment_count;
     size_t signature_parameter_bytes;
     size_t call_parameter_bytes;
+    size_t adjustment_bytes;
     size_t expression_index;
     size_t parameter_index;
 
@@ -1076,11 +1809,15 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
             &new_signature_parameter_count)
         || !cm_size_add(results->call_parameter_count,
             state->call_parameter_count, &new_call_parameter_count)
+        || !cm_size_add(results->adjustment_count,
+            state->adjustment_count, &new_adjustment_count)
         || !cm_size_mul(new_signature_parameter_count,
             sizeof(*combined_signature_parameters),
             &signature_parameter_bytes)
         || !cm_size_mul(new_call_parameter_count,
-            sizeof(*combined_call_parameters), &call_parameter_bytes)) {
+            sizeof(*combined_call_parameters), &call_parameter_bytes)
+        || !cm_size_mul(new_adjustment_count,
+            sizeof(*combined_adjustments), &adjustment_bytes)) {
         return CM_SEMANTIC_RESULTS_OVERFLOW;
     }
     combined_type_bytes = new_type_bytes_len == 0u ? NULL
@@ -1089,6 +1826,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         : (CmSemanticTypeRecord *)cm_alloc(signature_parameter_bytes);
     combined_call_parameters = call_parameter_bytes == 0u ? NULL
         : (CmSemanticTypeRecord *)cm_alloc(call_parameter_bytes);
+    combined_adjustments = adjustment_bytes == 0u ? NULL
+        : (CmSemanticAdjustmentRecord *)cm_alloc(adjustment_bytes);
     if (results->type_bytes_len != 0u) {
         memcpy(combined_type_bytes, results->type_bytes,
             results->type_bytes_len);
@@ -1112,6 +1851,19 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
             results->signature_parameter_count + parameter_index]
                 .type_offset += results->type_bytes_len;
     }
+    if (results->adjustment_count != 0u) {
+        memcpy(combined_adjustments, results->adjustments,
+            results->adjustment_count * sizeof(*combined_adjustments));
+    }
+    for (parameter_index = 0u;
+         parameter_index < state->adjustment_count; ++parameter_index) {
+        combined_adjustments[results->adjustment_count + parameter_index] =
+            state->adjustments[parameter_index];
+        combined_adjustments[results->adjustment_count + parameter_index]
+            .source_type.type_offset += results->type_bytes_len;
+        combined_adjustments[results->adjustment_count + parameter_index]
+            .target_type.type_offset += results->type_bytes_len;
+    }
     if (results->call_parameter_count != 0u) {
         memcpy(combined_call_parameters, results->call_parameters,
             results->call_parameter_count
@@ -1133,11 +1885,31 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
         if (!state->expressions[expression_index].present) continue;
         state->expressions[expression_index].type_offset +=
             results->type_bytes_len;
+        state->expressions[expression_index].adjusted_type_offset +=
+            results->type_bytes_len;
+        if (state->expressions[expression_index].adjustment_count != 0u) {
+            state->expressions[expression_index].adjustment_start +=
+                results->adjustment_count;
+        }
         if (state->expressions[expression_index].has_direct_callable) {
             state->expressions[expression_index].call_return_offset +=
                 results->type_bytes_len;
             state->expressions[expression_index].call_parameter_start +=
                 results->call_parameter_count;
+        }
+        if (state->expressions[expression_index].has_primitive_operator) {
+            state->expressions[expression_index].primitive_left_type
+                .type_offset += results->type_bytes_len;
+            state->expressions[expression_index].primitive_right_type
+                .type_offset += results->type_bytes_len;
+            state->expressions[expression_index].primitive_result_type
+                .type_offset += results->type_bytes_len;
+        }
+        if (state->expressions[expression_index].has_field_selection) {
+            state->expressions[expression_index].field_base_type.type_offset +=
+                results->type_bytes_len;
+            state->expressions[expression_index].field_type.type_offset +=
+                results->type_bytes_len;
         }
         results->expressions[expression_index] =
             state->expressions[expression_index];
@@ -1145,12 +1917,15 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_body(
     cm_free(results->type_bytes);
     cm_free(results->signature_parameters);
     cm_free(results->call_parameters);
+    cm_free(results->adjustments);
     results->type_bytes = combined_type_bytes;
     results->type_bytes_len = new_type_bytes_len;
     results->signature_parameters = combined_signature_parameters;
     results->signature_parameter_count = new_signature_parameter_count;
     results->call_parameters = combined_call_parameters;
     results->call_parameter_count = new_call_parameter_count;
+    results->adjustments = combined_adjustments;
+    results->adjustment_count = new_adjustment_count;
     record->present = 1;
     record->owner = body->owner;
     record->expression_count = state->body_expression_count;
@@ -1175,6 +1950,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     CmSemanticResultsBodyStageState *state;
     CmSemanticInstanceRecord *combined;
     CmSemanticInstanceRecord *record;
+    const CmHirContext *hir;
     size_t *expression_indices;
     size_t bytes;
     size_t call_index;
@@ -1189,9 +1965,24 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
         || !cm_semantic_session_is_current(session)) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
-    if (cm_semantic_session_hir(session) != results->hir
-        || state->hir != results->hir || state->body != instance->body
+    hir = cm_semantic_session_hir(session);
+    if (hir == NULL || session != state->producer_session
+        || cm_semantic_session_typeck(session) != state->producer_typeck
+        || cm_semantic_session_universe(session) != state->universe
+        || hir != results->hir || hir != state->hir
+        || state->local_crate != results->local_crate
+        || cm_semantic_session_local_crate(session) != results->local_crate
+        || state->storage_lifetime_id != results->storage_lifetime_id
+        || state->semantic_generation != results->semantic_generation
+        || state->rewind_generation != results->rewind_generation
+        || hir->storage.lifetime_id != results->storage_lifetime_id
+        || hir->semantic_generation != results->semantic_generation
+        || hir->rewind_generation != results->rewind_generation) {
+        return CM_SEMANTIC_RESULTS_STALE;
+    }
+    if (state->body != instance->body
         || check->body != instance->body
+        || state->expression_count != results->expression_count
         || !cm_hir_def_id_equal(state->owner, instance->definition)
         || !cm_hir_def_id_equal(cm_semantic_session_exact_owner(session),
             instance->definition)
@@ -1266,6 +2057,8 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     record->signature_parameter_count = state->signature_parameter_count;
     record->call_parameters = state->call_parameters;
     record->call_parameter_count = state->call_parameter_count;
+    record->adjustments = state->adjustments;
+    record->adjustment_count = state->adjustment_count;
     record->callees = call_count == 0u ? NULL
         : (CmHirCanonicalInstance *)cm_alloc_zeroed(call_count,
             sizeof(*record->callees));
@@ -1297,6 +2090,7 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     state->type_bytes = NULL;
     state->signature_parameters = NULL;
     state->call_parameters = NULL;
+    state->adjustments = NULL;
     cm_free(results->instances);
     results->instances = combined;
     results->instance_count += 1u;
@@ -1341,6 +2135,9 @@ CmSemanticResultsStatus cm_semantic_results_seal(CmSemanticResults *results)
     }
     status = cm_results_validate_membership(results, hir);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (!cm_results_body_recipes_valid(results, hir)) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
     results->sealed = 1;
     return CM_SEMANTIC_RESULTS_OK;
 
@@ -1390,6 +2187,10 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
         cm_free(selected);
         return status;
     }
+    if (!cm_results_body_recipes_valid(results, hir)) {
+        cm_free(selected);
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
     for (index = 0u; index < results->expression_count; ++index) {
         const CmSemanticExpressionRecord *expression;
         const CmHirDefinition *definition;
@@ -1428,7 +2229,8 @@ CmSemanticResultsStatus cm_semantic_results_seal_reachable(
             || expression->call_parameter_count
                 != callee_record->signature_parameter_count
             || !cm_results_type_bytes_equal(results,
-                expression->type_offset, expression->type_size,
+                expression->adjusted_type_offset,
+                expression->adjusted_type_size,
                 expression->call_return_offset,
                 expression->call_return_size)
             || !cm_results_type_bytes_equal(results,
@@ -1489,6 +2291,29 @@ CmSemanticResultsStatus cm_semantic_results_seal_leaf_instances(
         || hir->rewind_generation != results->rewind_generation) {
         return CM_SEMANTIC_RESULTS_STALE;
     }
+    for (instance_count = 0u; instance_count < results->instance_count;
+         ++instance_count) {
+        const CmSemanticInstanceRecord *instance;
+        size_t expression_index;
+
+        instance = &results->instances[instance_count];
+        if (!cm_results_instance_membership_valid(instance, hir)
+            || instance->callee_count != 0u
+            || !cm_results_instance_adjustments_valid(instance)
+            || !cm_results_instance_recipes_valid(
+                instance, hir)) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        for (expression_index = 0u;
+             expression_index < instance->expression_count;
+             ++expression_index) {
+            if (instance->expressions[expression_index].present
+                && instance->expressions[expression_index]
+                    .has_direct_callable) {
+                return CM_SEMANTIC_RESULTS_INVALID_HIR;
+            }
+        }
+    }
     results->sealed = 1;
     return CM_SEMANTIC_RESULTS_OK;
 }
@@ -1533,6 +2358,11 @@ CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
         size_t seen_calls;
 
         caller = &results->instances[instance_index];
+        if (!cm_results_instance_membership_valid(caller, hir)
+            || !cm_results_instance_adjustments_valid(caller)
+            || !cm_results_instance_recipes_valid(caller, hir)) {
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
         seen_calls = 0u;
         for (expression_index = 0u;
              expression_index < caller->expression_count;
@@ -1569,7 +2399,8 @@ CmSemanticResultsStatus cm_semantic_results_seal_instance_closure(
                 || expression->call_parameter_count
                     != callee->body.signature_parameter_count
                 || !cm_results_instance_type_equal(caller,
-                    expression->type_offset, expression->type_size,
+                    expression->adjusted_type_offset,
+                    expression->adjusted_type_size,
                     caller, expression->call_return_offset,
                     expression->call_return_size)
                 || !cm_results_instance_type_equal(caller,
@@ -1637,6 +2468,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
         }
         cm_free(record->callees);
         cm_free(record->call_parameters);
+        cm_free(record->adjustments);
         cm_free(record->signature_parameters);
         cm_free(record->type_bytes);
         cm_free(record->expressions);
@@ -1644,6 +2476,7 @@ void cm_semantic_results_destroy(CmSemanticResults *results)
     }
     cm_free(results->instances);
     cm_free(results->call_parameters);
+    cm_free(results->adjustments);
     cm_free(results->signature_parameters);
     cm_free(results->type_bytes);
     cm_free(results->expressions);
@@ -1722,10 +2555,209 @@ CmSemanticResultsStatus cm_semantic_results_instance_expression(
     out_view->unadjusted_type.bytes = instance->type_bytes
         + record->type_offset;
     out_view->unadjusted_type.size = record->type_size;
-    out_view->adjusted_type = out_view->unadjusted_type;
+    out_view->adjusted_type.bytes = instance->type_bytes
+        + record->adjusted_type_offset;
+    out_view->adjusted_type.size = record->adjusted_type_size;
+    out_view->adjustment_count = record->adjustment_count;
+    out_view->has_direct_callable = record->has_direct_callable;
+    out_view->direct_callable = record->direct_callable;
     out_view->has_primitive_operator = record->has_primitive_operator;
     out_view->primitive_operator = record->primitive_operator;
     return CM_SEMANTIC_RESULTS_OK;
+}
+
+static CmSemanticResultsStatus cm_results_adjustment_view(
+    const unsigned char *type_bytes, size_t type_bytes_len,
+    const CmSemanticAdjustmentRecord *adjustments, size_t adjustment_count,
+    const CmSemanticExpressionRecord *expression_record,
+    CmHirExprId expression, uint32_t adjustment,
+    CmSemanticAdjustmentView *out_view)
+{
+    const CmSemanticAdjustmentRecord *record;
+    size_t index;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->selected_trait = cm_hir_def_id_none();
+    out_view->selected_method = cm_hir_def_id_none();
+    out_view->selected_impl = cm_hir_def_id_none();
+    if (type_bytes == NULL || expression_record == NULL
+        || adjustment >= expression_record->adjustment_count
+        || !cm_size_add(expression_record->adjustment_start,
+            (size_t)adjustment, &index)
+        || index >= adjustment_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &adjustments[index];
+    if (record->source_type.type_offset > type_bytes_len
+        || record->source_type.type_size
+            > type_bytes_len - record->source_type.type_offset
+        || record->target_type.type_offset > type_bytes_len
+        || record->target_type.type_size
+            > type_bytes_len - record->target_type.type_offset) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    out_view->body = expression_record->body;
+    out_view->expression = expression;
+    out_view->index = adjustment;
+    out_view->kind = record->kind;
+    out_view->source_type.bytes = type_bytes
+        + record->source_type.type_offset;
+    out_view->source_type.size = record->source_type.type_size;
+    out_view->target_type.bytes = type_bytes
+        + record->target_type.type_offset;
+    out_view->target_type.size = record->target_type.type_size;
+    out_view->has_selected_trait = record->has_selected_trait;
+    out_view->selected_trait = record->selected_trait;
+    out_view->selected_method = record->selected_method;
+    out_view->selected_impl = record->selected_impl;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_expression_adjustment(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, CmHirExprId expression,
+    uint32_t adjustment, CmSemanticAdjustmentView *out_view)
+{
+    const CmSemanticInstanceRecord *instance;
+    const CmSemanticExpressionRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->selected_trait = cm_hir_def_id_none();
+    out_view->selected_method = cm_hir_def_id_none();
+    out_view->selected_impl = cm_hir_def_id_none();
+    status = cm_results_query_instance(results, admission, spec, &instance);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > instance->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &instance->expressions[(size_t)expression - 1u];
+    if (!record->present || record->body != instance->identity.body) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_adjustment_view(instance->type_bytes,
+        instance->type_bytes_len, instance->adjustments,
+        instance->adjustment_count, record, expression, adjustment, out_view);
+}
+
+static CmSemanticResultsStatus cm_results_primitive_binary_view(
+    const unsigned char *type_bytes, size_t type_bytes_len,
+    const CmSemanticExpressionRecord *record, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view)
+{
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    if (type_bytes == NULL || record == NULL || !record->present
+        || !record->has_primitive_operator) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    if (record->primitive_left_type.type_offset > type_bytes_len
+        || record->primitive_left_type.type_size > type_bytes_len
+            - record->primitive_left_type.type_offset
+        || record->primitive_right_type.type_offset > type_bytes_len
+        || record->primitive_right_type.type_size > type_bytes_len
+            - record->primitive_right_type.type_offset
+        || record->primitive_result_type.type_offset > type_bytes_len
+        || record->primitive_result_type.type_size > type_bytes_len
+            - record->primitive_result_type.type_offset) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    out_view->body = record->body;
+    out_view->expression = expression;
+    out_view->operator_kind = record->primitive_operator;
+    out_view->left_expression = record->primitive_left_expression;
+    out_view->right_expression = record->primitive_right_expression;
+    out_view->left_type.bytes = type_bytes
+        + record->primitive_left_type.type_offset;
+    out_view->left_type.size = record->primitive_left_type.type_size;
+    out_view->right_type.bytes = type_bytes
+        + record->primitive_right_type.type_offset;
+    out_view->right_type.size = record->primitive_right_type.type_size;
+    out_view->result_type.bytes = type_bytes
+        + record->primitive_result_type.type_offset;
+    out_view->result_type.size = record->primitive_result_type.type_size;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+static CmSemanticResultsStatus cm_results_field_selection_view(
+    const unsigned char *type_bytes, size_t type_bytes_len,
+    const CmSemanticExpressionRecord *record, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view)
+{
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->aggregate_definition = cm_hir_def_id_none();
+    if (type_bytes == NULL || record == NULL || !record->present
+        || !record->has_field_selection) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    if (record->field_base_type.type_offset > type_bytes_len
+        || record->field_base_type.type_size > type_bytes_len
+            - record->field_base_type.type_offset
+        || record->field_type.type_offset > type_bytes_len
+        || record->field_type.type_size > type_bytes_len
+            - record->field_type.type_offset) {
+        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+    }
+    out_view->body = record->body;
+    out_view->expression = expression;
+    out_view->base_expression = record->field_base_expression;
+    out_view->aggregate_definition = record->field_aggregate_definition;
+    out_view->field_index = record->field_index;
+    out_view->base_type.bytes = type_bytes
+        + record->field_base_type.type_offset;
+    out_view->base_type.size = record->field_base_type.type_size;
+    out_view->field_type.bytes = type_bytes + record->field_type.type_offset;
+    out_view->field_type.size = record->field_type.type_size;
+    return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_primitive_binary(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view)
+{
+    const CmSemanticInstanceRecord *instance;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_query_instance(results, admission, spec, &instance);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > instance->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_primitive_binary_view(instance->type_bytes,
+        instance->type_bytes_len,
+        &instance->expressions[(size_t)expression - 1u], expression,
+        out_view);
+}
+
+CmSemanticResultsStatus cm_semantic_results_instance_field_selection(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    const CmHirInstanceSpec *spec, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view)
+{
+    const CmSemanticInstanceRecord *instance;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->aggregate_definition = cm_hir_def_id_none();
+    status = cm_results_query_instance(results, admission, spec, &instance);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > instance->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_field_selection_view(instance->type_bytes,
+        instance->type_bytes_len,
+        &instance->expressions[(size_t)expression - 1u], expression,
+        out_view);
 }
 
 CmSemanticResultsStatus cm_semantic_results_instance_signature(
@@ -2141,13 +3173,92 @@ CmSemanticResultsStatus cm_semantic_results_expression(
     out_view->unadjusted_type.bytes = results->type_bytes
         + record->type_offset;
     out_view->unadjusted_type.size = record->type_size;
-    out_view->adjusted_type = out_view->unadjusted_type;
-    out_view->adjustment_count = 0u;
+    out_view->adjusted_type.bytes = results->type_bytes
+        + record->adjusted_type_offset;
+    out_view->adjusted_type.size = record->adjusted_type_size;
+    out_view->adjustment_count = record->adjustment_count;
     out_view->has_direct_callable = record->has_direct_callable;
     out_view->direct_callable = record->direct_callable;
     out_view->has_primitive_operator = record->has_primitive_operator;
     out_view->primitive_operator = record->primitive_operator;
     return CM_SEMANTIC_RESULTS_OK;
+}
+
+CmSemanticResultsStatus cm_semantic_results_expression_adjustment(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirBodyId body, CmHirExprId expression, uint32_t adjustment,
+    CmSemanticAdjustmentView *out_view)
+{
+    const CmSemanticExpressionRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->selected_trait = cm_hir_def_id_none();
+    out_view->selected_method = cm_hir_def_id_none();
+    out_view->selected_impl = cm_hir_def_id_none();
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > results->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &results->expressions[(size_t)expression - 1u];
+    if (!record->present || record->body != body) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_adjustment_view(results->type_bytes,
+        results->type_bytes_len, results->adjustments,
+        results->adjustment_count, record, expression, adjustment, out_view);
+}
+
+CmSemanticResultsStatus cm_semantic_results_primitive_binary(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirBodyId body, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view)
+{
+    const CmSemanticExpressionRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > results->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &results->expressions[(size_t)expression - 1u];
+    if (!record->present || record->body != body) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_primitive_binary_view(results->type_bytes,
+        results->type_bytes_len, record, expression, out_view);
+}
+
+CmSemanticResultsStatus cm_semantic_results_field_selection(
+    const CmSemanticResults *results, const CmSemanticAdmission *admission,
+    CmHirBodyId body, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view)
+{
+    const CmSemanticExpressionRecord *record;
+    CmSemanticResultsStatus status;
+
+    if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    memset(out_view, 0, sizeof(*out_view));
+    out_view->aggregate_definition = cm_hir_def_id_none();
+    status = cm_results_validate(results, admission);
+    if (status != CM_SEMANTIC_RESULTS_OK) return status;
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > results->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    record = &results->expressions[(size_t)expression - 1u];
+    if (!record->present || record->body != body) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    return cm_results_field_selection_view(results->type_bytes,
+        results->type_bytes_len, record, expression, out_view);
 }
 
 CmSemanticResultsStatus cm_semantic_type_view_equal(

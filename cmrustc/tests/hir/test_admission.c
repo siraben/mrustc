@@ -779,6 +779,143 @@ static void test_leaf_instance_admission_is_exact(void)
     fixture_destroy(&f);
 }
 
+static void test_leaf_instance_recipes_are_exact(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticReachableInstance reachable;
+    CmHirInstanceSpec spec;
+    CmHirInstanceSpec wrong_spec;
+    CmSemanticAdmissionResult result;
+    const CmSemanticResults *results;
+    const CmHirItem *recipe;
+    const CmHirItem *other;
+    const CmHirBody *body;
+    const CmHirExpr *binary_expression;
+    const CmHirExpr *field_expression;
+    CmHirExprId binary;
+    CmHirExprId field;
+    CmSemanticPrimitiveBinaryView binary_view;
+    CmSemanticFieldSelectionView field_view;
+    CmSemanticExpressionView expression_view;
+    CmSemanticExpressionView left_view;
+    CmSemanticExpressionView right_view;
+    CmSemanticExpressionView base_view;
+    CmSemanticAdjustmentView adjustment_view;
+    size_t index;
+    int equal;
+
+    fixture_init(&f,
+        "struct Pair { left: u32, right: u32 } "
+        "fn recipe(value: Pair) -> u32 { value.left + value.right } "
+        "fn other(value: u32) -> u32 { value }");
+    recipe = find_free_function(&f.hir, "recipe");
+    other = find_free_function(&f.hir, "other");
+    assert(recipe != NULL && other != NULL);
+    lower_function(&f, recipe);
+    body = cm_hir_get_body(&f.hir, recipe->data.function_item.body);
+    assert(body != NULL);
+    binary = CM_HIR_EXPR_NONE;
+    field = CM_HIR_EXPR_NONE;
+    for (index = 0u; index < f.hir.expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(&f.hir,
+            (CmHirExprId)(index + 1u));
+        if (expression == NULL || expression->owner_body
+                != recipe->data.function_item.body) {
+            continue;
+        }
+        if (expression->kind == CM_HIR_EXPR_BINARY) {
+            assert(binary == CM_HIR_EXPR_NONE);
+            binary = (CmHirExprId)(index + 1u);
+        } else if (expression->kind == CM_HIR_EXPR_FIELD
+            && field == CM_HIR_EXPR_NONE) {
+            field = (CmHirExprId)(index + 1u);
+        }
+    }
+    binary_expression = cm_hir_get_expr(&f.hir, binary);
+    field_expression = cm_hir_get_expr(&f.hir, field);
+    assert(binary_expression != NULL && field_expression != NULL
+        && binary_expression->kind == CM_HIR_EXPR_BINARY
+        && field_expression->kind == CM_HIR_EXPR_FIELD);
+
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = recipe->definition;
+    cm_hir_instance_spec_init(&wrong_spec);
+    wrong_spec.selected_callable = other->definition;
+    reachable.body = recipe->data.function_item.body;
+    reachable.spec = &spec;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_leaf_instances(&admission, &f.hir,
+        1u, &reachable, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_primitive_binary(results,
+            &admission, &spec, binary, &binary_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && binary_view.body == recipe->data.function_item.body
+        && binary_view.expression == binary
+        && binary_view.operator_kind
+            == binary_expression->data.binary.operator_kind
+        && binary_view.left_expression
+            == binary_expression->data.binary.left
+        && binary_view.right_expression
+            == binary_expression->data.binary.right
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, binary, &expression_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, binary_view.left_expression, &left_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, binary_view.right_expression, &right_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&binary_view.left_type,
+            &left_view.adjusted_type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_type_view_equal(&binary_view.right_type,
+            &right_view.adjusted_type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_type_view_equal(&binary_view.result_type,
+            &expression_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_instance_expression_adjustment(results,
+            &admission, &spec, binary, 0u, &adjustment_view)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_instance_primitive_binary(results,
+            &admission, &wrong_spec, binary, &binary_view)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+
+    assert(cm_semantic_results_instance_field_selection(results,
+            &admission, &spec, field, &field_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && field_view.body == recipe->data.function_item.body
+        && field_view.expression == field
+        && field_view.base_expression == field_expression->data.field.base
+        && cm_hir_def_id_equal(field_view.aggregate_definition,
+            field_expression->data.field.definition)
+        && field_view.field_index == field_expression->data.field.field_index
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, field, &expression_view) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_expression(results, &admission,
+            &spec, field_view.base_expression, &base_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&field_view.base_type,
+            &base_view.adjusted_type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_type_view_equal(&field_view.field_type,
+            &expression_view.adjusted_type, &equal)
+            == CM_SEMANTIC_RESULTS_OK && equal
+        && cm_semantic_results_instance_expression_adjustment(results,
+            &admission, &spec, field, 0u, &adjustment_view)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_instance_field_selection(results,
+            &admission, &wrong_spec, field, &field_view)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
 static void test_leaf_instance_admitted_mir_is_exact(void)
 {
     Fixture f;
@@ -1219,6 +1356,7 @@ int main(void)
     test_reachable_admission_requires_closed_unique_set();
     test_reachable_admission_rejects_untyped_and_generic();
     test_leaf_instance_admission_is_exact();
+    test_leaf_instance_recipes_are_exact();
     test_leaf_instance_admitted_mir_is_exact();
     test_leaf_instance_admission_rejects_calls_and_bounds();
     test_exact_instance_closure_authenticates_generic_calls();

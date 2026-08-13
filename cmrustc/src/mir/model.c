@@ -851,6 +851,42 @@ static CmSemanticResultsStatus cm_mir_semantic_expression_query(
         : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
 }
 
+static CmSemanticResultsStatus cm_mir_semantic_primitive_binary_query(
+    const CmMirTreeMatch *match, CmHirExprId expression,
+    CmSemanticPrimitiveBinaryView *out_view)
+{
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_primitive_binary(match->semantic_results,
+            match->admission, match->body->source_body, expression,
+            out_view);
+    }
+    return match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        ? cm_semantic_results_instance_primitive_binary(
+            match->semantic_results, match->admission,
+            match->semantic_instance, expression, out_view)
+        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
+
+static CmSemanticResultsStatus cm_mir_semantic_field_selection_query(
+    const CmMirTreeMatch *match, CmHirExprId expression,
+    CmSemanticFieldSelectionView *out_view)
+{
+    if (match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_field_selection(match->semantic_results,
+            match->admission, match->body->source_body, expression,
+            out_view);
+    }
+    return match->body->semantic_evidence
+            == CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+        ? cm_semantic_results_instance_field_selection(
+            match->semantic_results, match->admission,
+            match->semantic_instance, expression, out_view)
+        : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+}
+
 static CmSemanticResultsStatus cm_mir_semantic_direct_call_query(
     const CmMirTreeMatch *match, const CmMirBody *callee,
     CmHirExprId expression, CmSemanticDirectCallView *out_view)
@@ -1055,6 +1091,10 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 match->admission, match->body, match->semantic_instance,
                 expression_id, &authenticated_expression)
                     != CM_SEMANTIC_RESULTS_OK
+            || authenticated_expression.adjustment_count != 0u
+            || !cm_mir_semantic_view_equal(
+                &authenticated_expression.unadjusted_type,
+                &authenticated_expression.adjusted_type)
             || !cm_mir_semantic_view_matches_hir(match,
                 &authenticated_expression.adjusted_type, instantiated))) {
         return 0;
@@ -1131,11 +1171,34 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         return 1;
     }
     if (expression->kind == CM_HIR_EXPR_FIELD) {
+        CmSemanticFieldSelectionView selection;
+        CmSemanticExpressionView authenticated_base;
         CmMirOperand base;
         CmMirPlace place;
         size_t projection_start;
         uint32_t base_projection_count;
 
+        if (match->semantic_results != NULL
+            && (cm_mir_semantic_field_selection_query(match,
+                    expression_id, &selection) != CM_SEMANTIC_RESULTS_OK
+                || selection.body != match->body->source_body
+                || selection.expression != expression_id
+                || selection.base_expression != expression->data.field.base
+                || !cm_hir_def_id_equal(selection.aggregate_definition,
+                    expression->data.field.definition)
+                || selection.field_index
+                    != expression->data.field.field_index
+                || cm_mir_semantic_expression_query(match->semantic_results,
+                    match->admission, match->body,
+                    match->semantic_instance, expression->data.field.base,
+                    &authenticated_base) != CM_SEMANTIC_RESULTS_OK
+                || authenticated_base.adjustment_count != 0u
+                || !cm_mir_semantic_view_equal(&selection.base_type,
+                    &authenticated_base.adjusted_type)
+                || !cm_mir_semantic_view_equal(&selection.field_type,
+                    &authenticated_expression.adjusted_type))) {
+            return 0;
+        }
         if (!cm_mir_expression_matches(match, expression->data.field.base,
                 0, CM_MIR_RETURN_LOCAL, depth + 1u, &base)) {
             return 0;
@@ -1268,6 +1331,9 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         return 1;
     }
     if (expression->kind == CM_HIR_EXPR_BINARY) {
+        CmSemanticPrimitiveBinaryView selection;
+        CmSemanticExpressionView authenticated_left;
+        CmSemanticExpressionView authenticated_right;
         const CmMirBasicBlock *block;
         const CmMirStatement *statement;
         const CmMirRvalue *rvalue;
@@ -1275,6 +1341,35 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         CmMirOperand right;
         CmMirLocalId destination;
 
+        if (match->semantic_results != NULL
+            && (cm_mir_semantic_primitive_binary_query(match,
+                    expression_id, &selection) != CM_SEMANTIC_RESULTS_OK
+                || selection.body != match->body->source_body
+                || selection.expression != expression_id
+                || selection.operator_kind
+                    != expression->data.binary.operator_kind
+                || selection.left_expression
+                    != expression->data.binary.left
+                || selection.right_expression
+                    != expression->data.binary.right
+                || cm_mir_semantic_expression_query(match->semantic_results,
+                    match->admission, match->body,
+                    match->semantic_instance, expression->data.binary.left,
+                    &authenticated_left) != CM_SEMANTIC_RESULTS_OK
+                || cm_mir_semantic_expression_query(match->semantic_results,
+                    match->admission, match->body,
+                    match->semantic_instance, expression->data.binary.right,
+                    &authenticated_right) != CM_SEMANTIC_RESULTS_OK
+                || authenticated_left.adjustment_count != 0u
+                || authenticated_right.adjustment_count != 0u
+                || !cm_mir_semantic_view_equal(&selection.left_type,
+                    &authenticated_left.adjusted_type)
+                || !cm_mir_semantic_view_equal(&selection.right_type,
+                    &authenticated_right.adjusted_type)
+                || !cm_mir_semantic_view_equal(&selection.result_type,
+                    &authenticated_expression.adjusted_type))) {
+            return 0;
+        }
         if ((expression->data.binary.operator_kind != CM_HIR_BINARY_ADD
                 && expression->data.binary.operator_kind
                     != CM_HIR_BINARY_SUBTRACT

@@ -1223,15 +1223,15 @@ static void test_generic_parameter_shadows_type_path_prefix(void)
 {
     static const char *const rejected[] = {
         "mod T { type Assoc=u8; } type P<T> = T::Assoc;",
-        "mod T { pub trait Trait { type Assoc; } } "
-            "type P<T, U> = <U as T::Trait>::Assoc;",
+        ("mod T { pub trait Trait { type Assoc; } } "
+            "type P<T, U> = <U as T::Trait>::Assoc;"),
         "trait T { type Assoc; } type P<T, U> = <U as T>::Assoc;"
     };
     static const char *const accepted[] = {
         "mod T { pub type Assoc = u8; } type P<U> = T::Assoc;",
         "mod T { pub type Assoc = u8; } type P<'T> = T::Assoc;",
-        "mod T { pub trait Trait { type Assoc; } } "
-            "type P<U> = <U as T::Trait>::Assoc;"
+        ("mod T { pub trait Trait { type Assoc; } } "
+            "type P<U> = <U as T::Trait>::Assoc;")
     };
     static const char nested[] =
         "trait Trait { type Assoc; } trait Other { type Output; } "
@@ -5309,8 +5309,8 @@ static void test_unsupported_method_forms_are_errors(void)
         "trait T { fn f(); } impl T for u8 { const fn f() {} }",
         "trait T { fn f(); } impl T for u8 { async fn f() {} }",
         "trait T { fn f((left, right): (u8, u8)); }",
-        "trait T { fn f(value: (u8, u8)); } impl T for u8 {"
-            " fn f((left, right): (u8, u8)) {} }"
+        ("trait T { fn f(value: (u8, u8)); } impl T for u8 {"
+            " fn f((left, right): (u8, u8)) {} }")
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_INVALID_IMPL,

@@ -1117,10 +1117,10 @@ static void test_cross_file_graph(void)
     CmHirLowerOptions options;
     CmHirLowerResult result_a;
     CmHirLowerResult result_b;
-    CmHirModuleId root_hir;
-    CmHirModuleId a_hir;
-    CmHirModuleId b_hir;
-    CmHirModuleId inline_hir;
+    CmHirModuleId root_hir = CM_HIR_MODULE_NONE;
+    CmHirModuleId a_hir = CM_HIR_MODULE_NONE;
+    CmHirModuleId b_hir = CM_HIR_MODULE_NONE;
+    CmHirModuleId inline_hir = CM_HIR_MODULE_NONE;
     const CmHirItem *root_item;
     const CmHirItem *a_item;
     const CmHirItem *b_item;
@@ -7232,8 +7232,8 @@ static void test_imported_trait_projection(void)
     CmHirLowerOptions options;
     CmHirLowerResult result;
     CmModuleId defs_graph;
-    CmHirModuleId root_hir;
-    CmHirModuleId defs_hir;
+    CmHirModuleId root_hir = CM_HIR_MODULE_NONE;
+    CmHirModuleId defs_hir = CM_HIR_MODULE_NONE;
     const CmHirItem *trait_item;
     const CmHirItem *associated_item;
     const CmHirItem *project_item;
@@ -8540,8 +8540,8 @@ static void test_adt_generic_type_defaults_fail_closed(void)
         "struct Bad<T = u8, U>(T, U);",
         "struct Bad<T = T>(T);",
         "enum Bad<T = U, U = u8> { Value(T, U) }",
-        "enum ControlFlow<B, C = ()> { Continue(C), Break(B) } "
-        "struct Bad(ControlFlow);"
+        ("enum ControlFlow<B, C = ()> { Continue(C), Break(B) } "
+        "struct Bad(ControlFlow);")
     };
     static const char *const messages[] = {
         "a required generic parameter follows a defaulted one",
@@ -9768,10 +9768,10 @@ static void test_dependency_generated_declarations(void)
     CmSourceSet consumer_sources;
     CmSourceSet rejected_consumer_sources;
     CmSourceSet included_consumer_sources;
-    CmSourceId dependency_root;
-    CmSourceId consumer_root;
-    CmSourceId rejected_consumer_root;
-    CmSourceId included_consumer_root;
+    CmSourceId dependency_root = 0u;
+    CmSourceId consumer_root = 0u;
+    CmSourceId rejected_consumer_root = 0u;
+    CmSourceId included_consumer_root = 0u;
     CmModuleGraph dependency_graph;
     CmModuleGraph consumer_graph;
     CmModuleGraph rejected_consumer_graph;
@@ -10874,8 +10874,8 @@ static void test_import_graph_identity(void)
     static const unsigned char source[] = "struct Item;\n";
     CmSourceSet first_sources;
     CmSourceSet second_sources;
-    CmSourceId first_root;
-    CmSourceId second_root;
+    CmSourceId first_root = 0u;
+    CmSourceId second_root = 0u;
     CmModuleGraph first_graph;
     CmModuleGraph second_graph;
     CmModuleGraphOptions graph_options;
