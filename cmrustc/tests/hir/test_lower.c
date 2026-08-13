@@ -2924,7 +2924,7 @@ static void test_same_trait_generic_self_projection(void)
     cm_hir_context_destroy(&context);
 }
 
-static void test_transitive_generic_self_projection_record_rollback(void)
+static void test_transitive_generic_self_projection(void)
 {
     static const char source[] =
         "trait Future { type Output; }"
@@ -2933,47 +2933,52 @@ static void test_transitive_generic_self_projection_record_rollback(void)
         "}"
         "trait Mid<U>: Base<U> {}"
         "trait Base<T> { type Output; }";
-    CmHirContext first_context;
-    CmHirContext second_context;
-    CmHirLowerResult first_result;
-    CmHirLowerResult second_result;
-    const CmHirItem *first_leaf;
-    const CmHirItem *second_leaf;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *leaf;
+    const CmHirItem *base;
+    const CmHirItem *output;
+    const CmHirItem *gat;
+    const CmHirAssociatedTypeBound *bound;
+    const CmHirType *projection;
+    const CmHirType *argument;
 
-    first_result = lower_source(source, &first_context, NULL);
-    second_result = lower_source(source, &second_context, NULL);
-    first_leaf = find_item(&first_context, "Leaf");
-    second_leaf = find_item(&second_context, "Leaf");
-    assert(first_result.error_count == 1u
-        && second_result.error_count == 1u
-        && first_result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && second_result.first_error.kind
-            == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && strstr(first_result.first_error.message,
-            "transitive generic supertraits requires structural substitution")
-            != NULL
-        && strstr(second_result.first_error.message,
-            "transitive generic supertraits requires structural substitution")
-            != NULL
-        && first_leaf != NULL && second_leaf != NULL
-        && find_child(&first_context, first_leaf->definition, "Gat") == NULL
-        && find_child(&second_context, second_leaf->definition, "Gat") == NULL
-        && first_context.types.len == second_context.types.len
-        && first_context.types.len == 2u
-        && first_context.generic_parameters.len
-            == second_context.generic_parameters.len
-        && first_context.items.len == second_context.items.len
-        && first_context.definitions.len == second_context.definitions.len
-        && first_context.prebound_associated_types.len
-            == second_context.prebound_associated_types.len
-        && cm_arena_bytes_used(&first_context.storage)
-            == cm_arena_bytes_used(&second_context.storage)
-        && cm_interner_length(&first_context.strings)
-            == cm_interner_length(&second_context.strings)
-        && cm_arena_bytes_used(&first_context.strings.strings)
-            == cm_arena_bytes_used(&second_context.strings.strings));
-    cm_hir_context_destroy(&second_context);
-    cm_hir_context_destroy(&first_context);
+    result = lower_source(source, &context, NULL);
+    leaf = find_item(&context, "Leaf");
+    base = find_item(&context, "Base");
+    output = base == NULL ? NULL
+        : find_child(&context, base->definition, "Output");
+    gat = leaf == NULL ? NULL
+        : find_child(&context, leaf->definition, "Gat");
+    bound = gat == NULL || gat->data.type_alias_item.bound_count != 1u
+        ? NULL : &gat->data.type_alias_item.bounds[0];
+    projection = bound == NULL || bound->equality_count != 1u
+        ? NULL : cm_hir_get_type(&context, bound->equalities[0].value);
+    argument = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || projection->data.projection_type.trait_type.argument_count
+                != 1u
+            || projection->data.projection_type.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.trait_type.arguments[0]
+                .data.type);
+    assert(result.error_count == 0u
+        && leaf != NULL && base != NULL && output != NULL
+        && gat != NULL && bound != NULL && projection != NULL
+        && cm_hir_def_id_equal(bound->equalities[0].associated_type,
+            find_child(&context, find_item(&context, "Future")->definition,
+                "Output")->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            base->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            output->definition)
+        && argument != NULL && argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && argument->data.parameter_type.parameter
+            == leaf->generic_parameter_start);
+    cm_hir_context_destroy(&context);
 }
 
 static void check_ordered_nominal_generic_impl_result(
@@ -6336,7 +6341,7 @@ int main(void)
     test_generic_associated_type_entry_points();
     test_self_gat_projection_arguments();
     test_same_trait_generic_self_projection();
-    test_transitive_generic_self_projection_record_rollback();
+    test_transitive_generic_self_projection();
     test_ordered_nominal_generic_impl_entry_points();
     test_method_bearing_trait_impl_entry_points();
     test_lifetime_qualified_receiver();

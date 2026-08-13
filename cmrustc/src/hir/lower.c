@@ -148,6 +148,10 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
 static int cm_lower_trait_identity_arguments(CmLowerState *state,
     CmAstItemId ast_item_id, const CmHirItem *trait_item, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count);
+static int cm_lower_find_instantiated_supertrait(CmLowerState *state,
+    const CmHirNamedType *root, CmHirDefId target_definition,
+    CmHirTypeId self_type, CmSpan span, CmHirGenericArg **out_arguments,
+    uint32_t *out_argument_count, uint32_t *out_matches);
 static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
     CmAstTypeId ast_type_id, const CmAstType *ast_type,
     CmHirModuleId module, CmHirDefId owner);
@@ -3406,20 +3410,53 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
             immediate_matches += 1u;
         }
         if (immediate_matches == 0u) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "Self associated-type projection through transitive generic "
-                "supertraits requires structural substitution");
-            return CM_HIR_TYPE_NONE;
+            for (index = 0u;
+                 index < self_trait->data.trait_item.supertrait_count;
+                 ++index) {
+                CmHirGenericArg *transitive_arguments;
+                uint32_t transitive_argument_count;
+                uint32_t transitive_matches;
+
+                transitive_arguments = NULL;
+                transitive_argument_count = 0u;
+                transitive_matches = 0u;
+                if (!cm_lower_find_instantiated_supertrait(state,
+                        &self_trait->data.trait_item.supertraits[index]
+                            .trait_type,
+                        associated_trait_definition, self_type, span,
+                        &transitive_arguments, &transitive_argument_count,
+                        &transitive_matches)) {
+                    cm_free(owned_trait_arguments);
+                    return CM_HIR_TYPE_NONE;
+                }
+                if (transitive_matches != 0u) {
+                    if (immediate_matches == 0u) {
+                        owned_trait_arguments = transitive_arguments;
+                        projection.data.projection_type.trait_type.arguments =
+                            owned_trait_arguments;
+                        projection.data.projection_type.trait_type
+                            .argument_count = transitive_argument_count;
+                    } else {
+                        cm_free(transitive_arguments);
+                    }
+                    if (immediate_matches
+                            > UINT32_MAX - transitive_matches) {
+                        immediate_matches = UINT32_MAX;
+                    } else {
+                        immediate_matches += transitive_matches;
+                    }
+                }
+            }
         }
         if (immediate_matches != 1u
             || projection.data.projection_type.trait_type.argument_count
                 != defining_trait->generic_parameter_count) {
+            cm_free(owned_trait_arguments);
             cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
                 CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
                 CM_HIR_INVARIANT_VIOLATION,
                 "Self associated-type projection has an ambiguous or "
-                "invalid immediate generic supertrait");
+                "invalid generic supertrait path");
             return CM_HIR_TYPE_NONE;
         }
     }
@@ -7404,6 +7441,165 @@ static int cm_lower_trait_default_argument(CmLowerState *state,
     cm_free(substitution.results);
     cm_free(substitution.marks);
     return 1;
+}
+
+static int cm_lower_find_instantiated_supertrait_inner(CmLowerState *state,
+    const CmHirNamedType *root, CmHirDefId target_definition,
+    CmHirTypeId self_type, CmSpan span, size_t depth,
+    CmHirGenericArg **out_arguments, uint32_t *out_argument_count,
+    uint32_t *out_matches)
+{
+    const CmHirItem *root_trait;
+    uint32_t index;
+
+    if (depth > state->hir->items.len) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "transitive supertrait substitution exceeded the trait graph "
+            "depth");
+        return 0;
+    }
+    root_trait = cm_lower_bound_item(state, root->definition);
+    if (root_trait == NULL || root_trait->kind != CM_HIR_ITEM_TRAIT
+        || root->argument_count != root_trait->generic_parameter_count
+        || (root->argument_count == 0u) != (root->arguments == NULL)) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "transitive supertrait substitution has an invalid root trait "
+            "reference");
+        return 0;
+    }
+    if (root->argument_count != 0u
+        && (root_trait->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+            || root_trait->generic_parameter_start
+                > UINT32_MAX - (root->argument_count - 1u))) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "transitive supertrait substitution has an invalid generic "
+            "signature range");
+        return 0;
+    }
+    for (index = 0u; index < root->argument_count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected_kind;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            root_trait->generic_parameter_start + index);
+        expected_kind = parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_LIFETIME
+            ? CM_HIR_GENERIC_ARG_LIFETIME
+            : parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+                ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                root_trait->definition)
+            || root->arguments[index].kind != expected_kind) {
+            cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "transitive supertrait substitution argument does not "
+                "match its authenticated parameter");
+            return 0;
+        }
+    }
+    if (cm_hir_def_id_equal(root->definition, target_definition)) {
+        CmHirGenericArg *arguments;
+
+        arguments = root->argument_count == 0u ? NULL
+            : (CmHirGenericArg *)cm_alloc_zeroed(
+                (size_t)root->argument_count, sizeof(*arguments));
+        if (root->argument_count != 0u) {
+            memcpy(arguments, root->arguments,
+                (size_t)root->argument_count * sizeof(*arguments));
+        }
+        *out_arguments = arguments;
+        *out_argument_count = root->argument_count;
+        *out_matches = 1u;
+        return 1;
+    }
+    for (index = 0u;
+         index < root_trait->data.trait_item.supertrait_count; ++index) {
+        CmLowerTraitDefaultSubstitution substitution;
+        CmHirNamedType instantiated;
+        CmHirGenericArg *child_arguments;
+        uint32_t child_argument_count;
+        uint32_t child_matches;
+        int changed;
+
+        memset(&substitution, 0, sizeof(substitution));
+        substitution.state = state;
+        substitution.ast_item_id = CM_AST_ITEM_NONE;
+        substitution.source_owner = root_trait->definition;
+        substitution.replacement_owner = root_trait->definition;
+        substitution.parameter_index = root->argument_count;
+        substitution.prior_arguments = root->arguments;
+        substitution.default_self = self_type;
+        substitution.use_span = span;
+        substitution.source_type_count = state->hir->types.len;
+        substitution.marks = (unsigned char *)cm_alloc_zeroed(
+            substitution.source_type_count + 1u, sizeof(unsigned char));
+        substitution.results = (CmHirTypeId *)cm_alloc_zeroed(
+            substitution.source_type_count + 1u, sizeof(CmHirTypeId));
+        memset(&instantiated, 0, sizeof(instantiated));
+        changed = 0;
+        if (!cm_lower_trait_default_substitute_named(&substitution,
+                &root_trait->data.trait_item.supertraits[index].trait_type,
+                0u, &instantiated, &changed)) {
+            cm_free(substitution.results);
+            cm_free(substitution.marks);
+            cm_free(*out_arguments);
+            *out_arguments = NULL;
+            *out_argument_count = 0u;
+            *out_matches = 0u;
+            return 0;
+        }
+        cm_free(substitution.results);
+        cm_free(substitution.marks);
+        child_arguments = NULL;
+        child_argument_count = 0u;
+        child_matches = 0u;
+        if (!cm_lower_find_instantiated_supertrait_inner(state,
+                &instantiated, target_definition, self_type, span,
+                depth + 1u, &child_arguments, &child_argument_count,
+                &child_matches)) {
+            cm_free(instantiated.arguments);
+            cm_free(*out_arguments);
+            *out_arguments = NULL;
+            *out_argument_count = 0u;
+            *out_matches = 0u;
+            return 0;
+        }
+        cm_free(instantiated.arguments);
+        if (child_matches == 0u) continue;
+        if (*out_matches == 0u) {
+            *out_arguments = child_arguments;
+            *out_argument_count = child_argument_count;
+        } else {
+            cm_free(child_arguments);
+        }
+        if (*out_matches > UINT32_MAX - child_matches) {
+            *out_matches = UINT32_MAX;
+        } else {
+            *out_matches += child_matches;
+        }
+    }
+    return 1;
+}
+
+static int cm_lower_find_instantiated_supertrait(CmLowerState *state,
+    const CmHirNamedType *root, CmHirDefId target_definition,
+    CmHirTypeId self_type, CmSpan span, CmHirGenericArg **out_arguments,
+    uint32_t *out_argument_count, uint32_t *out_matches)
+{
+    *out_arguments = NULL;
+    *out_argument_count = 0u;
+    *out_matches = 0u;
+    return cm_lower_find_instantiated_supertrait_inner(state, root,
+        target_definition, self_type, span, 0u, out_arguments,
+        out_argument_count, out_matches);
 }
 
 static int cm_lower_trait_positional_arguments(CmLowerState *state,
