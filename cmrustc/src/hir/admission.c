@@ -581,19 +581,24 @@ static int cm_admission_canonical_instance_supported(
     int leaf_only)
 {
     const CmHirItem *selected;
+    const CmHirItem *body_item;
     const CmHirItem *enclosing;
 
     if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || decoded == NULL
         || body == NULL || body->state != CM_HIR_BODY_TYPED
         || body->root_expression == CM_HIR_EXPR_NONE) return 0;
     selected = cm_admission_item(hir, decoded->parts.selected_callable);
+    body_item = cm_admission_item(hir, decoded->parts.body_definition);
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
         || selected->definition.crate_id != local_crate
         || selected->predicate_scope_count != 0u
         || (leaf_only && selected->predicate_count != 0u)
         || selected->outlives_predicate_count != 0u
-        || selected->data.function_item.body == CM_HIR_BODY_NONE
-        || !cm_hir_def_id_equal(body->owner, selected->definition)) {
+        || body_item == NULL || body_item->kind != CM_HIR_ITEM_FUNCTION
+        || body_item->data.function_item.body == CM_HIR_BODY_NONE
+        || body_item->data.function_item.body
+            != selected->data.function_item.body
+        || !cm_hir_def_id_equal(body->owner, body_item->definition)) {
         return 0;
     }
     if (cm_hir_def_id_is_none(selected->parent_definition)) {
@@ -669,7 +674,7 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
                 &identities[index], &decoded[index]) != CM_HIR_INSTANCE_OK) {
             goto cleanup_instances;
         }
-        result.owner = identities[index].definition;
+        result.owner = identities[index].body_definition;
         result.body = identities[index].body;
         body = cm_hir_get_body(hir, identities[index].body);
         if (!cm_admission_canonical_instance_supported(hir, local_crate,
@@ -768,11 +773,11 @@ static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
         size_t instance_call_count;
         size_t call_index;
 
-        result.owner = identities[index].definition;
+        result.owner = identities[index].body_definition;
         result.body = identities[index].body;
         cm_semantic_session_options_init(&options);
         options.local_crate = local_crate;
-        options.exact_owner = identities[index].definition;
+        options.exact_owner = identities[index].body_definition;
         options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
         options.finalization = &finalization;
         result.session_status = cm_semantic_session_init(&session, hir,

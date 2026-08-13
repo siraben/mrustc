@@ -626,6 +626,7 @@ static CmMirStatus cm_mir_flow_find_callee(const CmMirFlowPlan *plan,
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -642,6 +643,7 @@ static CmMirStatus cm_mir_flow_find_callee(const CmMirFlowPlan *plan,
     }
     memset(&key, 0, sizeof(key));
     key.definition = callee.definition;
+    key.body_definition = callee.body_definition;
     key.substitutions = (CmHirTypeId *)substitutions;
     key.substitution_count = substitution_count;
     key.body = callee.body;
@@ -713,6 +715,7 @@ static int cm_mir_lower_legacy_instance_query_init(
     }
     cm_hir_instance_spec_init(&query->spec);
     query->spec.selected_callable = instance->definition;
+    query->spec.body_definition = instance->body_definition;
     definition = cm_hir_lookup_definition(hir, instance->definition);
     item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
             || definition->state != CM_HIR_DEFINITION_BOUND
@@ -791,6 +794,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -827,6 +831,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_primitive_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -863,6 +868,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_field_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -899,6 +905,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_signature_query(
     }
     cm_hir_canonical_instance_init(&query);
     query.definition = callee->instance.definition;
+    query.body_definition = callee->instance.body_definition;
     query.body = callee->instance.body;
     query.bytes = callee->instance.identity_bytes;
     query.size = callee->instance.identity_size;
@@ -937,6 +944,7 @@ cm_mir_flow_semantic_signature_parameter_query(
     }
     cm_hir_canonical_instance_init(&query);
     query.definition = callee->instance.definition;
+    query.body_definition = callee->instance.body_definition;
     query.body = callee->instance.body;
     query.bytes = callee->instance.identity_bytes;
     query.size = callee->instance.identity_size;
@@ -988,11 +996,13 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
     cm_hir_canonical_instance_init(&target);
     target.definition = callee->instance.definition;
+    target.body_definition = callee->instance.body_definition;
     target.body = callee->instance.body;
     target.bytes = callee->instance.identity_bytes;
     target.size = callee->instance.identity_size;
@@ -1046,11 +1056,13 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_call_parameter_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
     cm_hir_canonical_instance_init(&target);
     target.definition = callee->instance.definition;
+    target.body_definition = callee->instance.body_definition;
     target.body = callee->instance.body;
     target.bytes = callee->instance.identity_bytes;
     target.size = callee->instance.identity_size;
@@ -1105,11 +1117,13 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
     cm_hir_canonical_instance_init(&target);
     target.definition = callee->instance.definition;
+    target.body_definition = callee->instance.body_definition;
     target.body = callee->instance.body;
     target.bytes = callee->instance.identity_bytes;
     target.size = callee->instance.identity_size;
@@ -1148,6 +1162,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_hint_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -1184,6 +1199,7 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_argument_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -1223,6 +1239,7 @@ cm_mir_flow_semantic_callable_generic_argument_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
@@ -1277,11 +1294,13 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_callable_parameter_query(
     }
     cm_hir_canonical_instance_init(&caller);
     caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
     caller.body = plan->instance->body;
     caller.bytes = plan->instance->identity_bytes;
     caller.size = plan->instance->identity_size;
     cm_hir_canonical_instance_init(&target);
     target.definition = callee->instance.definition;
+    target.body_definition = callee->instance.body_definition;
     target.body = callee->instance.body;
     target.bytes = callee->instance.identity_bytes;
     target.size = callee->instance.identity_size;
@@ -1957,7 +1976,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 callee_id, &reserved_instance, &reserved_source_body)
                 == CM_MIR_OK) {
             reserved_callee.instance = reserved_instance;
-            reserved_callee.owner = reserved_instance.definition;
+            reserved_callee.owner = reserved_instance.body_definition;
             reserved_callee.source_body = reserved_source_body;
             reserved_callee.semantic_evidence =
                 CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE;
@@ -2853,10 +2872,11 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
         body.instance = *reserved_instance;
     } else {
         body.instance.definition = item->definition;
+        body.instance.body_definition = item->definition;
         body.instance.substitutions = (CmHirTypeId *)substitutions;
         body.instance.substitution_count = substitution_count;
     }
-    body.owner = item->definition;
+    body.owner = body.instance.body_definition;
     body.source_body = body_id;
     body.semantic_evidence = semantic_evidence;
 
@@ -3272,6 +3292,7 @@ CmMirLowerResult cm_mir_lower_admitted_instance(CmMirContext *context,
             return cm_mir_lower_admission_failure(body_id);
         }
         spec.selected_callable = body->owner;
+        spec.body_definition = body->owner;
         if (cm_semantic_results_instance_body(semantic_results, admission,
                 &spec, &semantic_body) != CM_SEMANTIC_RESULTS_OK
             || semantic_body.body != body_id
@@ -3316,7 +3337,7 @@ CmMirLowerResult cm_mir_lower_admitted_publication_instance(
             &reserved_instance, &reserved_source_body) != CM_MIR_OK
         || reserved_source_body != body_id
         || reserved_hir_body == NULL
-        || !cm_hir_def_id_equal(reserved_instance.definition,
+        || !cm_hir_def_id_equal(reserved_instance.body_definition,
             reserved_hir_body->owner)
         || reserved_instance.substitution_count != substitution_count
         || (substitution_count != 0u
@@ -3374,7 +3395,7 @@ CmMirLowerResult cm_mir_lower_admitted_publication_canonical(
     if (hir == NULL || semantic_results == NULL
         || reserved_hir_body == NULL
         || !cm_hir_def_id_equal(reserved_hir_body->owner,
-            reserved_instance.definition)) {
+            reserved_instance.body_definition)) {
         return cm_mir_lower_admission_failure(source_body);
     }
     return cm_mir_lower_instance_impl(context, publication, reserved_body,

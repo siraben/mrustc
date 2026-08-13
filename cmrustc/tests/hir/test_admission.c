@@ -876,6 +876,7 @@ static void test_leaf_instance_admission_is_exact(void)
     argument.data.type = u32_type;
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = generic->definition;
+    spec.body_definition = generic->definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     reachable.body = generic->data.function_item.body;
@@ -1026,6 +1027,7 @@ static void test_generic_impl_method_instances_are_exact(void)
     for (index = 0u; index < 2u; ++index) {
         cm_hir_instance_spec_init(&specs[index]);
         specs[index].selected_callable = method->definition;
+        specs[index].body_definition = method->definition;
         specs[index].declared_trait_callable =
             method->data.function_item.trait_item_definition;
         specs[index].enclosing_impl = impl_item->definition;
@@ -1187,8 +1189,10 @@ static void test_leaf_instance_recipes_are_exact(void)
 
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = recipe->definition;
+    spec.body_definition = recipe->definition;
     cm_hir_instance_spec_init(&wrong_spec);
     wrong_spec.selected_callable = other->definition;
+    wrong_spec.body_definition = other->definition;
     reachable.body = recipe->data.function_item.body;
     reachable.spec = &spec;
     memset(&admission, 0, sizeof(admission));
@@ -1306,6 +1310,7 @@ static void test_leaf_instance_admitted_mir_is_exact(void)
     argument.data.type = u32_type;
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = generic->definition;
+    spec.body_definition = generic->definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     reachable.body = generic->data.function_item.body;
@@ -1413,6 +1418,7 @@ static void test_leaf_instance_admission_rejects_calls_and_bounds(void)
     memset(&admission, 0, sizeof(admission));
 
     spec.selected_callable = calls->definition;
+    spec.body_definition = calls->definition;
     spec.item_arguments = NULL;
     spec.item_argument_count = 0u;
     reachable.body = calls->data.function_item.body;
@@ -1421,6 +1427,7 @@ static void test_leaf_instance_admission_rejects_calls_and_bounds(void)
         && admission.state == NULL);
 
     spec.selected_callable = bounded->definition;
+    spec.body_definition = bounded->definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     reachable.body = bounded->data.function_item.body;
@@ -1494,8 +1501,10 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     wrong_argument.data.type = bool_type;
     cm_hir_instance_spec_init(&caller_spec);
     caller_spec.selected_callable = caller->definition;
+    caller_spec.body_definition = caller->definition;
     cm_hir_instance_spec_init(&callee_spec);
     callee_spec.selected_callable = phantom->definition;
+    callee_spec.body_definition = phantom->definition;
     callee_spec.item_arguments = &callee_argument;
     callee_spec.item_argument_count = 1u;
     wrong_callee_spec = callee_spec;
@@ -1705,8 +1714,10 @@ static void test_canonical_instance_closure_is_exact_and_atomic(void)
     wrong_argument.data.type = i32_type;
     cm_hir_instance_spec_init(&caller_spec);
     caller_spec.selected_callable = caller->definition;
+    caller_spec.body_definition = caller->definition;
     cm_hir_instance_spec_init(&callee_spec);
     callee_spec.selected_callable = phantom->definition;
+    callee_spec.body_definition = phantom->definition;
     callee_spec.item_arguments = &callee_argument;
     callee_spec.item_argument_count = 1u;
     wrong_callee_spec = callee_spec;
@@ -1872,8 +1883,10 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
         && impl_item->kind == CM_HIR_ITEM_IMPL);
     cm_hir_instance_spec_init(&caller_spec);
     caller_spec.selected_callable = caller->definition;
+    caller_spec.body_definition = caller->definition;
     cm_hir_instance_spec_init(&callee_spec);
     callee_spec.selected_callable = callee->definition;
+    callee_spec.body_definition = callee->definition;
     callee_spec.declared_trait_callable =
         callee->data.function_item.trait_item_definition;
     callee_spec.enclosing_impl = impl_item->definition;
@@ -1925,10 +1938,12 @@ static void test_exact_instance_closure_authenticates_qualified_call(void)
         && cm_hir_canonical_instance_encode(&f.hir, 1u, &callee_spec,
             &callee_identity) == CM_HIR_INSTANCE_OK);
     caller_key.definition = caller_identity.definition;
+    caller_key.body_definition = caller_identity.body_definition;
     caller_key.body = caller_identity.body;
     caller_key.identity_bytes = caller_identity.bytes;
     caller_key.identity_size = caller_identity.size;
     callee_key.definition = callee_identity.definition;
+    callee_key.body_definition = callee_identity.body_definition;
     callee_key.body = callee_identity.body;
     callee_key.identity_bytes = callee_identity.bytes;
     callee_key.identity_size = callee_identity.size;
@@ -2094,6 +2109,7 @@ static void test_reachable_admission_scope_is_enforced(void)
     memset(&key, 0, sizeof(key));
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = unselected->definition;
+    spec.body_definition = unselected->definition;
     assert(cm_hir_instance_key_init(&key, &admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
 

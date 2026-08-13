@@ -655,6 +655,7 @@ static void init_reference_export_mir(const TestReferenceProgram *program,
     block->terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(body, 0, sizeof(*body));
     body->instance.definition = program->export_definition;
+    body->instance.body_definition = program->export_definition;
     body->owner = program->export_definition;
     body->source_body = program->export_body;
     body->locals = locals;
@@ -771,6 +772,7 @@ static void test_reference_formatter_shapes(void)
     locals[1].type = program.shared_pair_type;
     memset(&body, 0, sizeof(body));
     body.instance.definition = program.field_definition;
+    body.instance.body_definition = program.field_definition;
     body.owner = program.field_definition;
     body.source_body = program.field_body;
     body.locals = locals;
@@ -865,6 +867,7 @@ static void test_canonical_instance_identity_and_name(void)
     reference_program_init(&program);
     memset(&first, 0, sizeof(first));
     first.definition = program.field_definition;
+    first.body_definition = program.field_definition;
     first.body = program.field_body;
     first.identity_bytes = first_bytes;
     first.identity_size = sizeof(first_bytes);

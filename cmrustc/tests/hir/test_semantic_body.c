@@ -110,6 +110,8 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
                 probe->expected_impl)
             && cm_hir_def_id_equal(callable->selected_callable,
                 probe->expected_selected_callable)
+            && cm_hir_def_id_equal(callable->body_definition,
+                probe->expected_selected_callable)
             && callable->receiver_argument == 0u
             && callable->argument_count
                 == probe->expected_callable_argument_count
@@ -180,6 +182,8 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
             && cm_hir_def_id_equal(callable->selected_impl,
                 probe->expected_impl)
             && cm_hir_def_id_equal(callable->selected_callable,
+                probe->expected_selected_callable)
+            && cm_hir_def_id_equal(callable->body_definition,
                 probe->expected_selected_callable)
             && callable->receiver_argument == 0u
             && callable->argument_count
@@ -1300,6 +1304,7 @@ static void test_generic_impl_method_instance_spec(void)
     spec.implemented_trait = cm_hir_def_id_none();
     spec.self_owner = cm_hir_def_id_none();
     spec.selected_callable = selected_definition;
+    spec.body_definition = selected_definition;
     spec.declared_trait_callable = declared_definition;
     spec.enclosing_impl = impl_definition;
     spec.enclosing_impl_arguments = &impl_argument;
@@ -1520,6 +1525,7 @@ static void test_generic_impl_method_instance_parts(void)
     impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     memset(&parts, 0, sizeof(parts));
     parts.selected_callable = selected_definition;
+    parts.body_definition = selected_definition;
     parts.declared_trait_callable = declared_definition;
     parts.enclosing_impl = impl_definition;
     parts.enclosing_impl_arguments = &impl_argument;

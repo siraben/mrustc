@@ -134,7 +134,7 @@ static CmHirBodyId add_function_body(CmHirContext *hir,
 static void assert_dump(const CmMirContext *mir)
 {
     static const char expected[] =
-        "mir-v8 pointer-bits=0\n"
+        "mir-v9 pointer-bits=0\n"
         "body#1 owner=1:2 source-body#1 locals=1 blocks=1\n"
         "local body#1 _0 kind=return type=ty#1\n"
         "block body#1 bb0 statements=1\n"
@@ -1197,8 +1197,8 @@ static void assert_nested_failure(CmMirContext *mir,
 static void assert_nested_dump(const CmMirContext *mir)
 {
     static const char expected[] =
-        "mir-v8 pointer-bits=0\n"
-        "body#1 instance=1:7 source-body#6 locals=5 blocks=1\n"
+        "mir-v9 pointer-bits=0\n"
+        "body#1 instance=1:7/body=1:7 source-body#6 locals=5 blocks=1\n"
         "local body#1 _0 kind=return type=ty#2\n"
         "local body#1 _1 kind=argument type=ty#2\n"
         "local body#1 _2 kind=argument type=ty#2\n"
@@ -1298,7 +1298,7 @@ static void test_let_flow_lowering(CmHirContext *hir,
     length = fread(buffer, 1u, sizeof(buffer) - 1u, stream);
     assert(!ferror(stream));
     buffer[length] = '\0';
-    assert(strstr(buffer, "mir-v8 pointer-bits=0\n") == buffer
+    assert(strstr(buffer, "mir-v9 pointer-bits=0\n") == buffer
         && strstr(buffer, "local body#2 _3 kind=user type=ty#2\n") != NULL
         && strstr(buffer, "local body#2 _4 kind=user type=ty#2\n") != NULL
         && strstr(buffer,
@@ -1953,7 +1953,7 @@ static void test_usize_less_if_lowering(CmHirContext *hir,
     length = fread(buffer, 1u, sizeof(buffer) - 1u, stream);
     assert(!ferror(stream));
     buffer[length] = '\0';
-    assert(strstr(buffer, "mir-v8 pointer-bits=64\n") == buffer
+    assert(strstr(buffer, "mir-v9 pointer-bits=64\n") == buffer
         && strstr(buffer, "less(move _1:ty#") != NULL
         && strstr(buffer,
             "const-usize(18446744073709551615):ty#") != NULL);

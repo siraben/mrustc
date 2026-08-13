@@ -15,8 +15,11 @@ static int cm_mir_dump_instance(FILE *stream, const CmMirInstance *instance)
 {
     uint32_t index;
 
-    if (fprintf(stream, "%u:%u", (unsigned int)instance->definition.crate_id,
-            (unsigned int)instance->definition.index) < 0) {
+    if (fprintf(stream, "%u:%u/body=%u:%u",
+            (unsigned int)instance->definition.crate_id,
+            (unsigned int)instance->definition.index,
+            (unsigned int)instance->body_definition.crate_id,
+            (unsigned int)instance->body_definition.index) < 0) {
         return -1;
     }
     if (instance->substitution_count == 0u) return 0;
@@ -224,7 +227,7 @@ int cm_mir_dump(FILE *stream, const CmMirContext *context)
     size_t body_index;
 
     if (stream == NULL || context == NULL) return -1;
-    if (fprintf(stream, "mir-v8 pointer-bits=%u\n",
+    if (fprintf(stream, "mir-v9 pointer-bits=%u\n",
             cm_mir_context_pointer_bits(context)) < 0) {
         return -1;
     }

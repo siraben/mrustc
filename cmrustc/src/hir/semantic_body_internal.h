@@ -30,6 +30,7 @@ typedef struct CmSemanticCheckedCallableFacts {
     CmHirDefId declared_trait_callable;
     CmHirDefId selected_impl;
     CmHirDefId selected_callable;
+    CmHirDefId body_definition;
     CmHirDefId enclosing_impl;
     CmHirDefId implemented_trait;
     CmHirDefId self_owner;

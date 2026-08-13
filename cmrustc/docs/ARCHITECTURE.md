@@ -315,7 +315,8 @@ rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
 use canonical HIR schema `hir-v29`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
-conditional diamond advance the current canonical schema to `mir-v7`.
+conditional diamond, target-width `usize`, and explicit dispatch/body-owner
+identity advance the current canonical schema to `mir-v9`.
 
 The generation-bound whole-local-body barrier now reaches a read-only REGIONS
 checkpoint after TYPED and MARKED. MARKED atomically records builtin-Copy
@@ -342,8 +343,18 @@ first additive `hir-v29` checkpoint, the only admitted origin is
 and transitional lexical owner must all be the same function, const, or static
 definition. This preserves one body per item and current execution behavior
 while removing `owner` as an implicit source of body identity. Type-position
-and generated origins, followed by the split between dispatch identity and the
-definition whose body executes, remain later atomic migrations.
+and generated origins remain later atomic migrations.
+
+Exact callable instances now keep two authenticated definitions. The selected
+callable is the dispatch and symbol identity, while `body_definition` owns the
+signature and HIR body that execute. Canonical instance format v2 encodes both
+identities and the complete selected impl and substitution domains. Semantic
+results, admission, MIR reachability/lowering, and C emission use the body
+owner for executable source lookup while retaining dispatch identity in call
+edges and symbols. MIR dumps expose both as `dispatch/body` and use `mir-v9`.
+The current behavior-neutral invariant still requires the identities to be
+equal; the representation is ready for inherited trait defaults, where an
+impl-selected dispatch instance executes a trait-provided body.
 
 ### Named aggregate expression checkpoint
 

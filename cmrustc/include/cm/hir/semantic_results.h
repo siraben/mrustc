@@ -139,6 +139,7 @@ typedef struct CmSemanticCallableSelectionView {
     CmHirDefId declared_trait_callable;
     CmHirDefId selected_impl;
     CmHirDefId selected_callable;
+    CmHirDefId body_definition;
     /* Exact CmHirInstanceSpec binder/owner domains for this selection. */
     CmHirDefId enclosing_impl;
     CmHirDefId implemented_trait;
@@ -219,7 +220,7 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
 CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
-    CmHirDefId definition, CmHirBodyId body,
+    CmHirDefId definition, CmHirDefId body_definition, CmHirBodyId body,
     const unsigned char *identity_bytes, size_t identity_size,
     CmSemanticBodyView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_expression(

@@ -1366,6 +1366,7 @@ static void init_identity_mir(CmMirBody *body, CmMirLocal locals[2],
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->identity_definition;
+    body->instance.body_definition = fixture->identity_definition;
     body->instance.substitutions = substitution;
     body->instance.substitution_count = 1u;
     body->owner = fixture->identity_definition;
@@ -1400,6 +1401,8 @@ static void init_probe_mir(CmMirBody *body, CmMirLocal locals[2],
     blocks[0].terminator.data.call.callee_instance = callee_id;
     blocks[0].terminator.data.call.callee.definition =
         fixture->identity_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->identity_definition;
     blocks[0].terminator.data.call.callee.substitutions =
         callee_substitution;
     blocks[0].terminator.data.call.callee.substitution_count = 1u;
@@ -1408,6 +1411,7 @@ static void init_probe_mir(CmMirBody *body, CmMirLocal locals[2],
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->probe_definition;
+    body->instance.body_definition = fixture->probe_definition;
     body->owner = fixture->probe_definition;
     body->source_body = fixture->probe_body;
     body->locals = locals;
@@ -1449,6 +1453,7 @@ static void init_add_mir(CmMirBody *body, CmMirLocal locals[3],
     block->terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->add_definition;
+    body->instance.body_definition = fixture->add_definition;
     body->owner = fixture->add_definition;
     body->source_body = fixture->add_body;
     body->locals = locals;
@@ -1521,6 +1526,8 @@ static void init_let_mir(CmMirBody *body, CmMirLocal locals[4],
     blocks[0].terminator.data.call.argument_count = 2u;
     blocks[0].terminator.data.call.callee_instance = add_id;
     blocks[0].terminator.data.call.callee.definition = fixture->add_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->add_definition;
     blocks[0].terminator.data.call.target = 1u;
     blocks[1].statements = &statements[1];
     blocks[1].statement_count = 1u;
@@ -1528,6 +1535,7 @@ static void init_let_mir(CmMirBody *body, CmMirLocal locals[4],
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->let_definition;
+    body->instance.body_definition = fixture->let_definition;
     body->owner = fixture->let_definition;
     body->source_body = fixture->let_body;
     body->locals = locals;
@@ -1566,6 +1574,7 @@ static void init_add_max_mir(CmMirBody *body, CmMirLocal locals[2],
     block->terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->add_max_definition;
+    body->instance.body_definition = fixture->add_max_definition;
     body->owner = fixture->add_max_definition;
     body->source_body = fixture->add_max_body;
     body->locals = locals;
@@ -1631,6 +1640,7 @@ static void init_add_nested_mir(CmMirBody *body, CmMirLocal locals[4],
     block->terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->add_nested_definition;
+    body->instance.body_definition = fixture->add_nested_definition;
     body->owner = fixture->add_nested_definition;
     body->source_body = fixture->add_nested_body;
     body->locals = locals;
@@ -1708,6 +1718,8 @@ static void init_call_nested_mir(CmMirBody *body, CmMirLocal locals[5],
     blocks[0].terminator.data.call.callee_instance = callee_id;
     blocks[0].terminator.data.call.callee.definition =
         fixture->identity_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->identity_definition;
     blocks[0].terminator.data.call.callee.substitutions =
         callee_substitution;
     blocks[0].terminator.data.call.callee.substitution_count = 1u;
@@ -1716,6 +1728,7 @@ static void init_call_nested_mir(CmMirBody *body, CmMirLocal locals[5],
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->call_nested_definition;
+    body->instance.body_definition = fixture->call_nested_definition;
     body->owner = fixture->call_nested_definition;
     body->source_body = fixture->call_nested_body;
     body->locals = locals;
@@ -1745,10 +1758,13 @@ static void init_call_mono_mir(CmMirBody *body, CmMirLocal locals[2],
     blocks[0].terminator.data.call.callee_instance = callee_id;
     blocks[0].terminator.data.call.callee.definition =
         fixture->add_max_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->add_max_definition;
     blocks[0].terminator.data.call.target = 1u;
     blocks[1].terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->call_mono_definition;
+    body->instance.body_definition = fixture->call_mono_definition;
     body->owner = fixture->call_mono_definition;
     body->source_body = fixture->call_mono_body;
     body->locals = locals;
@@ -1863,11 +1879,14 @@ static void init_call_pair_mir(CmMirBody *body, CmMirLocal locals[7],
     blocks[0].terminator.data.call.callee_instance = callee_id;
     blocks[0].terminator.data.call.callee.definition =
         fixture->add_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->add_definition;
     blocks[0].terminator.data.call.target = 1u;
     blocks[1].terminator.kind = CM_MIR_TERMINATOR_RETURN;
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->call_pair_definition;
+    body->instance.body_definition = fixture->call_pair_definition;
     body->owner = fixture->call_pair_definition;
     body->source_body = fixture->call_pair_body;
     body->locals = locals;
@@ -1972,6 +1991,8 @@ static void init_nested_calls_mir(CmMirBody *body, CmMirLocal locals[7],
     blocks[0].terminator.data.call.callee_instance = callee_id;
     blocks[0].terminator.data.call.callee.definition =
         fixture->add_definition;
+    blocks[0].terminator.data.call.callee.body_definition =
+        fixture->add_definition;
     blocks[0].terminator.data.call.target = 1u;
     blocks[1].statements = &statements[2];
     blocks[1].statement_count = 1u;
@@ -1982,11 +2003,14 @@ static void init_nested_calls_mir(CmMirBody *body, CmMirLocal locals[7],
     blocks[1].terminator.data.call.callee_instance = callee_id;
     blocks[1].terminator.data.call.callee.definition =
         fixture->add_definition;
+    blocks[1].terminator.data.call.callee.body_definition =
+        fixture->add_definition;
     blocks[1].terminator.data.call.target = 2u;
     blocks[2].terminator.kind = CM_MIR_TERMINATOR_RETURN;
 
     memset(body, 0, sizeof(*body));
     body->instance.definition = fixture->nested_calls_definition;
+    body->instance.body_definition = fixture->nested_calls_definition;
     body->owner = fixture->nested_calls_definition;
     body->source_body = fixture->nested_calls_body;
     body->locals = locals;
@@ -2830,6 +2854,7 @@ static void assert_place_aggregate_model(CmMirContext *mir,
     aggregate_block.terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(&aggregate_body, 0, sizeof(aggregate_body));
     aggregate_body.instance.definition = fixture->aggregate_definition;
+    aggregate_body.instance.body_definition = fixture->aggregate_definition;
     aggregate_body.owner = fixture->aggregate_definition;
     aggregate_body.source_body = fixture->aggregate_body;
     aggregate_body.locals = aggregate_locals;
@@ -2900,6 +2925,7 @@ static void assert_place_aggregate_model(CmMirContext *mir,
     projection_block.terminator.kind = CM_MIR_TERMINATOR_RETURN;
     memset(&projection_body, 0, sizeof(projection_body));
     projection_body.instance.definition = fixture->projection_definition;
+    projection_body.instance.body_definition = fixture->projection_definition;
     projection_body.owner = fixture->projection_definition;
     projection_body.source_body = fixture->projection_body;
     projection_body.locals = projection_locals;
@@ -2977,6 +3003,7 @@ static void assert_borrow_dereference_schema(TestHir *fixture)
     locals[3].type = fixture->shared_outer_type;
     memset(&body, 0, sizeof(body));
     body.instance.definition = fixture->projection_definition;
+    body.instance.body_definition = fixture->projection_definition;
     body.owner = fixture->projection_definition;
     body.source_body = fixture->projection_body;
     body.locals = locals;
@@ -3092,7 +3119,7 @@ static void assert_borrow_dereference_schema(TestHir *fixture)
 static void assert_legacy_constant(const TestHir *fixture)
 {
     static const char expected[] =
-        "mir-v8 pointer-bits=0\n"
+        "mir-v9 pointer-bits=0\n"
         "body#1 owner=1:2 source-body#1 locals=1 blocks=1\n"
         "local body#1 _0 kind=return type=ty#4\n"
         "block body#1 bb0 statements=1\n"
@@ -3156,40 +3183,40 @@ static void assert_legacy_constant(const TestHir *fixture)
 static void assert_dump(const CmMirContext *mir)
 {
     static const char expected[] =
-        "mir-v8 pointer-bits=0\n"
-        "body#1 instance=1:2<ty#1> source-body#1 locals=2 blocks=1\n"
+        "mir-v9 pointer-bits=0\n"
+        "body#1 instance=1:2/body=1:2<ty#1> source-body#1 locals=2 blocks=1\n"
         "local body#1 _0 kind=return type=ty#1\n"
         "local body#1 _1 kind=argument type=ty#1\n"
         "statement body#1 bb0[0] assign _0 = "
         "use(move _1:ty#1) type=ty#1\n"
         "terminator body#1 bb0 return\n"
-        "body#2 instance=1:2<ty#3> source-body#1 locals=2 blocks=1\n"
+        "body#2 instance=1:2/body=1:2<ty#3> source-body#1 locals=2 blocks=1\n"
         "local body#2 _0 kind=return type=ty#3\n"
         "local body#2 _1 kind=argument type=ty#3\n"
         "statement body#2 bb0[0] assign _0 = "
         "use(move _1:ty#3) type=ty#3\n"
         "terminator body#2 bb0 return\n"
-        "body#3 instance=1:3 source-body#2 locals=2 blocks=2\n"
+        "body#3 instance=1:3/body=1:3 source-body#2 locals=2 blocks=2\n"
         "local body#3 _0 kind=return type=ty#1\n"
         "local body#3 _1 kind=argument type=ty#1\n"
         "terminator body#3 bb0 call destination=_0 callee=body#1 "
-        "instance=1:2<ty#1> args=[move _1:ty#1] target=bb1\n"
+        "instance=1:2/body=1:2<ty#1> args=[move _1:ty#1] target=bb1\n"
         "terminator body#3 bb1 return\n"
-        "body#4 instance=1:4 source-body#3 locals=3 blocks=1\n"
+        "body#4 instance=1:4/body=1:4 source-body#3 locals=3 blocks=1\n"
         "local body#4 _0 kind=return type=ty#1\n"
         "local body#4 _1 kind=argument type=ty#1\n"
         "local body#4 _2 kind=argument type=ty#1\n"
         "statement body#4 bb0[0] assign _0 = "
         "binary(add,move _1:ty#1,move _2:ty#1) type=ty#1\n"
         "terminator body#4 bb0 return\n"
-        "body#5 instance=1:5 source-body#4 locals=2 blocks=1\n"
+        "body#5 instance=1:5/body=1:5 source-body#4 locals=2 blocks=1\n"
         "local body#5 _0 kind=return type=ty#1\n"
         "local body#5 _1 kind=argument type=ty#1\n"
         "statement body#5 bb0[0] assign _0 = "
         "binary(add,move _1:ty#1,const-u32(4294967295):ty#1) "
         "type=ty#1\n"
         "terminator body#5 bb0 return\n"
-        "body#6 instance=1:6 source-body#5 locals=4 blocks=1\n"
+        "body#6 instance=1:6/body=1:6 source-body#5 locals=4 blocks=1\n"
         "local body#6 _0 kind=return type=ty#1\n"
         "local body#6 _1 kind=argument type=ty#1\n"
         "local body#6 _2 kind=argument type=ty#1\n"
@@ -3199,7 +3226,7 @@ static void assert_dump(const CmMirContext *mir)
         "statement body#6 bb0[1] assign _0 = "
         "binary(add,move _1:ty#1,move _3:ty#1) type=ty#1\n"
         "terminator body#6 bb0 return\n"
-        "body#7 instance=1:7 source-body#6 locals=5 blocks=2\n"
+        "body#7 instance=1:7/body=1:7 source-body#6 locals=5 blocks=2\n"
         "local body#7 _0 kind=return type=ty#1\n"
         "local body#7 _1 kind=argument type=ty#1\n"
         "local body#7 _2 kind=argument type=ty#1\n"
@@ -3210,15 +3237,15 @@ static void assert_dump(const CmMirContext *mir)
         "statement body#7 bb0[1] assign _4 = "
         "binary(add,move _1:ty#1,move _3:ty#1) type=ty#1\n"
         "terminator body#7 bb0 call destination=_0 callee=body#1 "
-        "instance=1:2<ty#1> args=[move _4:ty#1] target=bb1\n"
+        "instance=1:2/body=1:2<ty#1> args=[move _4:ty#1] target=bb1\n"
         "terminator body#7 bb1 return\n"
-        "body#8 instance=1:8 source-body#7 locals=2 blocks=2\n"
+        "body#8 instance=1:8/body=1:8 source-body#7 locals=2 blocks=2\n"
         "local body#8 _0 kind=return type=ty#1\n"
         "local body#8 _1 kind=argument type=ty#1\n"
         "terminator body#8 bb0 call destination=_0 callee=body#5 "
-        "instance=1:5 args=[move _1:ty#1] target=bb1\n"
+        "instance=1:5/body=1:5 args=[move _1:ty#1] target=bb1\n"
         "terminator body#8 bb1 return\n"
-        "body#9 instance=1:9 source-body#8 locals=7 blocks=2\n"
+        "body#9 instance=1:9/body=1:9 source-body#8 locals=7 blocks=2\n"
         "local body#9 _0 kind=return type=ty#1\n"
         "local body#9 _1 kind=argument type=ty#1\n"
         "local body#9 _2 kind=argument type=ty#1\n"
@@ -3235,10 +3262,10 @@ static void assert_dump(const CmMirContext *mir)
         "statement body#9 bb0[3] assign _6 = "
         "binary(add,move _5:ty#1,move _2:ty#1) type=ty#1\n"
         "terminator body#9 bb0 call destination=_0 callee=body#4 "
-        "instance=1:4 args=[move _4:ty#1,move _6:ty#1] target=bb1\n"
+        "instance=1:4/body=1:4 args=[move _4:ty#1,move _6:ty#1] target=bb1\n"
         "terminator body#9 bb1 return\n";
     static const char expected_nested[] =
-        "body#10 instance=1:10 source-body#9 locals=7 blocks=3\n"
+        "body#10 instance=1:10/body=1:10 source-body#9 locals=7 blocks=3\n"
         "local body#10 _0 kind=return type=ty#1\n"
         "local body#10 _1 kind=argument type=ty#1\n"
         "local body#10 _2 kind=argument type=ty#1\n"
@@ -3251,11 +3278,11 @@ static void assert_dump(const CmMirContext *mir)
         "statement body#10 bb0[1] assign _4 = "
         "binary(add,move _2:ty#1,const-u32(2):ty#1) type=ty#1\n"
         "terminator body#10 bb0 call destination=_5 callee=body#4 "
-        "instance=1:4 args=[move _3:ty#1,move _4:ty#1] target=bb1\n"
+        "instance=1:4/body=1:4 args=[move _3:ty#1,move _4:ty#1] target=bb1\n"
         "statement body#10 bb1[0] assign _6 = "
         "binary(add,move _1:ty#1,const-u32(3):ty#1) type=ty#1\n"
         "terminator body#10 bb1 call destination=_0 callee=body#4 "
-        "instance=1:4 args=[move _5:ty#1,move _6:ty#1] target=bb2\n"
+        "instance=1:4/body=1:4 args=[move _5:ty#1,move _6:ty#1] target=bb2\n"
         "terminator body#10 bb2 return\n";
     FILE *stream;
     char buffer[8192];
@@ -3323,6 +3350,7 @@ static void test_publication_atomicity(TestHir *fixture)
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     argument.data.type = fixture->u32_type;
     spec.selected_callable = fixture->identity_definition;
+    spec.body_definition = fixture->identity_definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     reachable.body = fixture->identity_body;
@@ -3481,6 +3509,7 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     CmMirInstance alias;
     CmMirInstance distinct;
     CmMirInstance inconsistent;
+    CmMirInstance forged_body_definition;
     CmMirInstance malformed;
     CmMirInstance borrowed;
     CmMirContext mir;
@@ -3513,9 +3542,11 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     alias_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     alias_argument.data.type = fixture->alternate_u32_type;
     spec.selected_callable = fixture->identity_definition;
+    spec.body_definition = fixture->identity_definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     alias_spec.selected_callable = fixture->identity_definition;
+    alias_spec.body_definition = fixture->identity_definition;
     alias_spec.item_arguments = &alias_argument;
     alias_spec.item_argument_count = 1u;
     reachable.body = fixture->identity_body;
@@ -3540,6 +3571,7 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     substitution = fixture->u32_type;
     memset(&first, 0, sizeof(first));
     first.definition = canonical.definition;
+    first.body_definition = canonical.body_definition;
     first.substitutions = &substitution;
     first.substitution_count = 1u;
     first.body = canonical.body;
@@ -3555,6 +3587,8 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     distinct.identity_bytes = distinct_bytes;
     inconsistent = first;
     inconsistent.substitutions = &fixture->u8_type;
+    forged_body_definition = first;
+    forged_body_definition.body_definition = fixture->probe_definition;
     malformed = first;
     malformed.identity_bytes = NULL;
     found = 99u;
@@ -3594,6 +3628,9 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     assert(cm_mir_publication_reserve_canonical(&publication, &inconsistent,
         fixture->identity_body, &found) == CM_MIR_INVALID_ADMISSION
         && found == CM_MIR_BODY_NONE);
+    assert(cm_mir_publication_reserve_canonical(&publication,
+        &forged_body_definition, fixture->identity_body, &found)
+            == CM_MIR_INVALID_ADMISSION && found == CM_MIR_BODY_NONE);
     assert(cm_mir_publication_reserve_canonical(&publication, &first,
         fixture->identity_body, &first_id) == CM_MIR_OK
         && first_id == 1u);
@@ -3678,6 +3715,13 @@ static void test_canonical_publication_ownership(TestHir *fixture)
     assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
         &identity, &found) == CM_MIR_INVALID_ADMISSION
         && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.instance = forged_body_definition;
+    identity.owner = fixture->probe_definition;
+    found = 99u;
+    assert(cm_mir_add_admitted_monomorphized_body(&mir, &admission,
+        &identity, &found) == CM_MIR_INVALID_ADMISSION
+        && found == CM_MIR_BODY_NONE && cm_mir_body_count(&mir) == 0u);
+    identity.owner = fixture->identity_definition;
     identity.instance = first;
     identity.semantic_evidence = CM_MIR_SEMANTIC_EVIDENCE_BODY;
     found = 99u;
@@ -3747,6 +3791,7 @@ static void test_canonical_blanket_impl_materialization(TestHir *fixture)
     argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = fixture->blanket_method_definition;
+    spec.body_definition = fixture->blanket_method_definition;
     spec.declared_trait_callable =
         fixture->blanket_declared_method_definition;
     spec.enclosing_impl = fixture->blanket_impl_definition;
@@ -3771,6 +3816,7 @@ static void test_canonical_blanket_impl_materialization(TestHir *fixture)
     init_identity_mir(&body, locals, &statement, &block, fixture,
         &substitution, fixture->u8_type);
     body.instance.definition = fixture->blanket_method_definition;
+    body.instance.body_definition = fixture->blanket_method_definition;
     body.instance.body = fixture->blanket_method_body;
     body.instance.identity_bytes = canonical_u8.bytes;
     body.instance.identity_size = canonical_u8.size;

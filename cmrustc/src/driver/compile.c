@@ -157,6 +157,7 @@ static CmHirItemId cm_compile_find_entry(const CmHirContext *hir,
 typedef struct CmCompileReachableInstance {
     CmHirCanonicalInstance identity;
     CmHirDefId definition;
+    CmHirDefId body_definition;
     CmHirTypeId substitution;
     uint32_t substitution_count;
     CmHirBodyId body;
@@ -285,6 +286,7 @@ static int cm_compile_instance_spec_for_item(const CmHirContext *hir,
     cm_hir_instance_spec_init(out_spec);
     memset(out_argument, 0, sizeof(*out_argument));
     out_spec->selected_callable = item->definition;
+    out_spec->body_definition = item->definition;
     if (cm_hir_def_id_is_none(item->parent_definition)) {
         if (!cm_hir_def_id_is_none(
                 item->data.function_item.trait_item_definition)
@@ -664,6 +666,7 @@ static int cm_compile_intern_exact(CmCompileExactState *state,
     memset(&instance, 0, sizeof(instance));
     instance.identity = identity;
     instance.definition = item->definition;
+    instance.body_definition = identity.body_definition;
     instance.substitution_count = substitution_count;
     if (substitution_count != 0u) {
         instance.substitution = substitutions[0];
@@ -685,7 +688,8 @@ static int cm_compile_intern_canonical(CmCompileExactState *state,
     size_t index;
 
     item = identity == NULL ? NULL
-        : cm_compile_definition_item(state->hir, identity->definition);
+        : cm_compile_definition_item(state->hir,
+            identity->body_definition);
     if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
         || identity->body != item->data.function_item.body
         || cm_hir_canonical_instance_validate(state->hir,
@@ -727,6 +731,7 @@ static int cm_compile_intern_canonical(CmCompileExactState *state,
         return 0;
     }
     instance.definition = identity->definition;
+    instance.body_definition = identity->body_definition;
     instance.substitution = substitution;
     instance.substitution_count = substitution_count;
     instance.body = identity->body;
@@ -1039,7 +1044,7 @@ static int cm_compile_discover_reachable_hir(CmCompileExactState *state,
             &state->instances, instance_index);
         if (instance == NULL) return 0;
         item = cm_compile_definition_item(state->hir,
-            instance->definition);
+            instance->body_definition);
         body = item == NULL ? NULL
             : cm_hir_get_body(state->hir, instance->body);
         if (item == NULL || body == NULL
@@ -1244,6 +1249,7 @@ static int cm_compile_publish_reachable_mir(CmCompileExactState *state,
             ? NULL : &instance->substitution;
         memset(&canonical, 0, sizeof(canonical));
         canonical.definition = instance->identity.definition;
+        canonical.body_definition = instance->identity.body_definition;
         canonical.substitutions = (CmHirTypeId *)substitutions;
         canonical.substitution_count = instance->substitution_count;
         canonical.body = instance->identity.body;

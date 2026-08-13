@@ -1603,6 +1603,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         expression->data.qualified_call.declared_trait_callable;
     facts->selected_impl = impl_item->definition;
     facts->selected_callable = selected_callable->definition;
+    facts->body_definition = selected_callable->definition;
     facts->enclosing_impl = impl_item->definition;
     facts->implemented_trait = expression->data.qualified_call.requested_trait;
     facts->self_owner = impl_item->definition;
@@ -2080,6 +2081,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         facts->declared_trait_callable = winner_declared->definition;
         facts->selected_impl = winner_impl->definition;
         facts->selected_callable = winner_callable->definition;
+        facts->body_definition = winner_callable->definition;
         facts->enclosing_impl = winner_impl->definition;
         facts->implemented_trait = winner_trait->definition;
         facts->self_owner = winner_impl->definition;
@@ -3564,6 +3566,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
     if (instance_spec != NULL
         && (!cm_hir_def_id_equal(instance_spec->selected_callable, owner)
+            || !cm_hir_def_id_equal(instance_spec->body_definition, owner)
             || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
                 ? !cm_hir_def_id_is_none(
                         instance_spec->declared_trait_callable)
@@ -3611,6 +3614,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         && (instance_parts->selected_callable.crate_id
                 != cm_semantic_session_local_crate(session)
             || !cm_hir_def_id_equal(instance_parts->selected_callable, owner)
+            || !cm_hir_def_id_equal(instance_parts->body_definition, owner)
             || (owner_kind == CM_HIR_BODY_FUNCTION_OWNER_FREE
                 ? !cm_hir_def_id_is_none(
                         instance_parts->declared_trait_callable)

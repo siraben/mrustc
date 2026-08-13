@@ -82,6 +82,7 @@ typedef struct CmSemanticCallableRecord {
     CmHirDefId declared_trait_callable;
     CmHirDefId selected_impl;
     CmHirDefId selected_callable;
+    CmHirDefId body_definition;
     CmHirDefId enclosing_impl;
     CmHirDefId implemented_trait;
     CmHirDefId self_owner;
@@ -302,6 +303,7 @@ static int cm_results_canonical_instance_empty(
 {
     return identity != NULL
         && cm_hir_def_id_is_none(identity->definition)
+        && cm_hir_def_id_is_none(identity->body_definition)
         && identity->body == CM_HIR_BODY_NONE
         && identity->bytes == NULL && identity->size == 0u;
 }
@@ -404,6 +406,8 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
             == record->requested_trait.crate_id
         && record->selected_impl.crate_id == record->requested_trait.crate_id
         && record->selected_callable.crate_id == record->requested_trait.crate_id
+        && cm_hir_def_id_equal(record->body_definition,
+            record->selected_callable)
         && trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
         && declared != NULL && declared->kind == CM_HIR_ITEM_FUNCTION
         && cm_hir_def_id_equal(declared->parent_definition,
@@ -638,7 +642,11 @@ static int cm_results_callable_matches_instantiated_hir(
     impl_item = cm_results_item(hir, record->selected_impl);
     selected = cm_results_item(hir, record->selected_callable);
     if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
-        || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION) {
+        || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_def_id_equal(record->body_definition,
+            record->selected_callable)
+        || !cm_hir_def_id_equal(fact->body_definition,
+            fact->selected_callable)) {
         return 0;
     }
     signature = &selected->data.function_item.signature;
@@ -2430,14 +2438,15 @@ static int cm_results_instance_membership_valid(
         || instance->body.callable_start != 0u
         || instance->body.callable_count != instance->callable_count
         || instance->identity.body == CM_HIR_BODY_NONE
-        || !cm_hir_def_id_equal(instance->identity.definition,
+        || !cm_hir_def_id_equal(instance->identity.body_definition,
             instance->body.owner)
         || instance->expression_count != hir->expressions.len
         || (instance->expression_count != 0u
             && instance->expressions == NULL)) return 0;
     body = cm_hir_get_body(hir, instance->identity.body);
     if (body == NULL || body->state != CM_HIR_BODY_TYPED
-        || !cm_hir_def_id_equal(body->owner, instance->identity.definition)) {
+        || !cm_hir_def_id_equal(body->owner,
+            instance->identity.body_definition)) {
         return 0;
     }
     present_count = 0u;
@@ -3289,7 +3298,9 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
             || fact->requested_self_type == CM_TYPECK_TYPE_NONE
             || fact->return_type == CM_TYPECK_TYPE_NONE
             || cm_hir_def_id_is_none(fact->selected_impl)
-            || cm_hir_def_id_is_none(fact->selected_callable)) {
+            || cm_hir_def_id_is_none(fact->selected_callable)
+            || !cm_hir_def_id_equal(fact->body_definition,
+                fact->selected_callable)) {
             status = CM_SEMANTIC_RESULTS_INVALID_HIR;
             break;
         }
@@ -3307,6 +3318,7 @@ CmSemanticBodyWritebackStatus cm_semantic_results_stage_checked_body(
         record->declared_trait_callable = fact->declared_trait_callable;
         record->selected_impl = fact->selected_impl;
         record->selected_callable = fact->selected_callable;
+        record->body_definition = fact->body_definition;
         record->enclosing_impl = fact->enclosing_impl;
         record->implemented_trait = fact->implemented_trait;
         record->self_owner = fact->self_owner;
@@ -4223,9 +4235,9 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     if (state->body != instance->body
         || check->body != instance->body
         || state->expression_count != results->expression_count
-        || !cm_hir_def_id_equal(state->owner, instance->definition)
+        || !cm_hir_def_id_equal(state->owner, instance->body_definition)
         || !cm_hir_def_id_equal(cm_semantic_session_exact_owner(session),
-            instance->definition)
+            instance->body_definition)
         || cm_results_find_instance(results, instance) != NULL) {
         return CM_SEMANTIC_RESULTS_INVALID_HIR;
     }
@@ -4934,6 +4946,7 @@ static CmSemanticResultsStatus cm_results_callable_callee_from_record(
     }
     memset(&parts, 0, sizeof(parts));
     parts.selected_callable = record->selected_callable;
+    parts.body_definition = record->body_definition;
     parts.declared_trait_callable = record->declared_trait_callable;
     parts.item_arguments = record->item_argument_count == 0u ? NULL
         : parts_storage;
@@ -5109,7 +5122,7 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
     status = cm_results_query_instance(results, admission, spec, &record);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     out_view->body = record->identity.body;
-    out_view->owner = record->identity.definition;
+    out_view->owner = record->identity.body_definition;
     out_view->expression_count = record->body.expression_count;
     out_view->projection_trace_count =
         record->body.projection_trace_count;
@@ -5120,7 +5133,7 @@ CmSemanticResultsStatus cm_semantic_results_instance_body(
 
 CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
-    CmHirDefId definition, CmHirBodyId body,
+    CmHirDefId definition, CmHirDefId body_definition, CmHirBodyId body,
     const unsigned char *identity_bytes, size_t identity_size,
     CmSemanticBodyView *out_view)
 {
@@ -5130,7 +5143,9 @@ CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
 
     if (out_view == NULL) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     memset(out_view, 0, sizeof(*out_view));
-    if (cm_hir_def_id_is_none(definition) || body == CM_HIR_BODY_NONE
+    if (cm_hir_def_id_is_none(definition)
+        || cm_hir_def_id_is_none(body_definition)
+        || body == CM_HIR_BODY_NONE
         || identity_bytes == NULL || identity_size == 0u) {
         return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
     }
@@ -5138,6 +5153,7 @@ CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     cm_hir_canonical_instance_init(&identity);
     identity.definition = definition;
+    identity.body_definition = body_definition;
     identity.body = body;
     identity.bytes = (unsigned char *)identity_bytes;
     identity.size = identity_size;
@@ -5145,7 +5161,7 @@ CmSemanticResultsStatus cm_semantic_results_canonical_instance_body(
         &identity, &record);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
     out_view->body = record->identity.body;
-    out_view->owner = record->identity.definition;
+    out_view->owner = record->identity.body_definition;
     out_view->expression_count = record->body.expression_count;
     out_view->projection_trace_count =
         record->body.projection_trace_count;
@@ -5400,7 +5416,7 @@ CmSemanticResultsStatus cm_semantic_results_instance_signature(
     out_view->definition = cm_hir_def_id_none();
     status = cm_results_query_instance(results, admission, spec, &record);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
-    out_view->definition = record->identity.definition;
+    out_view->definition = record->identity.body_definition;
     out_view->body = record->identity.body;
     out_view->parameter_count = record->body.signature_parameter_count;
     out_view->return_type.bytes = record->type_bytes
@@ -6181,7 +6197,7 @@ CmSemanticResultsStatus cm_semantic_results_canonical_instance_signature(
     status = cm_results_query_canonical_instance(results, admission, identity,
         &record);
     if (status != CM_SEMANTIC_RESULTS_OK) return status;
-    out_view->definition = record->identity.definition;
+    out_view->definition = record->identity.body_definition;
     out_view->body = record->identity.body;
     out_view->parameter_count = record->body.signature_parameter_count;
     out_view->return_type.bytes = record->type_bytes
@@ -6288,6 +6304,7 @@ cm_semantic_results_canonical_instance_callable_selection(
     out_view->declared_trait_callable = cm_hir_def_id_none();
     out_view->selected_impl = cm_hir_def_id_none();
     out_view->selected_callable = cm_hir_def_id_none();
+    out_view->body_definition = cm_hir_def_id_none();
     out_view->enclosing_impl = cm_hir_def_id_none();
     out_view->implemented_trait = cm_hir_def_id_none();
     out_view->self_owner = cm_hir_def_id_none();
@@ -6322,6 +6339,7 @@ cm_semantic_results_canonical_instance_callable_selection_for_callee(
     out_view->declared_trait_callable = cm_hir_def_id_none();
     out_view->selected_impl = cm_hir_def_id_none();
     out_view->selected_callable = cm_hir_def_id_none();
+    out_view->body_definition = cm_hir_def_id_none();
     out_view->enclosing_impl = cm_hir_def_id_none();
     out_view->implemented_trait = cm_hir_def_id_none();
     out_view->self_owner = cm_hir_def_id_none();
@@ -6697,6 +6715,7 @@ static CmSemanticResultsStatus cm_results_callable_selection_view(
     out_view->declared_trait_callable = cm_hir_def_id_none();
     out_view->selected_impl = cm_hir_def_id_none();
     out_view->selected_callable = cm_hir_def_id_none();
+    out_view->body_definition = cm_hir_def_id_none();
     out_view->enclosing_impl = cm_hir_def_id_none();
     out_view->implemented_trait = cm_hir_def_id_none();
     out_view->self_owner = cm_hir_def_id_none();
@@ -6727,6 +6746,7 @@ static CmSemanticResultsStatus cm_results_callable_selection_view(
     out_view->declared_trait_callable = record->declared_trait_callable;
     out_view->selected_impl = record->selected_impl;
     out_view->selected_callable = record->selected_callable;
+    out_view->body_definition = record->body_definition;
     out_view->enclosing_impl = record->enclosing_impl;
     out_view->implemented_trait = record->implemented_trait;
     out_view->self_owner = record->self_owner;

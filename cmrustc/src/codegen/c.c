@@ -571,12 +571,14 @@ static const CmHirItem *cm_c_instance_item(const CmHirContext *hir,
     const CmHirDefinition *definition;
     const CmHirItem *item;
 
-    if (body == NULL || cm_hir_def_id_is_none(body->instance.definition)
+    if (body == NULL
+        || cm_hir_def_id_is_none(body->instance.body_definition)
         || !cm_hir_def_id_equal(body->owner,
-            body->instance.definition)) {
+            body->instance.body_definition)) {
         return NULL;
     }
-    definition = cm_hir_lookup_definition(hir, body->instance.definition);
+    definition = cm_hir_lookup_definition(hir,
+        body->instance.body_definition);
     item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
         || definition->state != CM_HIR_DEFINITION_BOUND ? NULL
         : cm_hir_get_item(hir, definition->entity.item_id);
@@ -888,6 +890,8 @@ static int cm_c_instance_equal(const CmMirInstance *left,
     if (!cm_hir_def_id_equal(left->definition, right->definition)) {
         return 0;
     }
+    if (!cm_hir_def_id_equal(left->body_definition,
+            right->body_definition)) return 0;
     if (left_canonical || right_canonical) {
         return left_canonical && right_canonical
             && left->body == right->body
@@ -944,6 +948,8 @@ static void cm_c_instance_digest(const CmMirInstance *instance,
     cm_sha256_update(&context, domain, sizeof(domain));
     cm_c_sha256_u32(&context, instance->definition.crate_id);
     cm_c_sha256_u32(&context, instance->definition.index);
+    cm_c_sha256_u32(&context, instance->body_definition.crate_id);
+    cm_c_sha256_u32(&context, instance->body_definition.index);
     cm_c_sha256_u32(&context, instance->body);
     cm_c_sha256_u64(&context, (uint64_t)instance->identity_size);
     cm_sha256_update(&context, instance->identity_bytes,

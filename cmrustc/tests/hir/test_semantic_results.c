@@ -1003,6 +1003,7 @@ static void test_instance_commit_requires_producer_session(void)
         && stage.state != NULL);
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = body->owner;
+    spec.body_definition = body->owner;
     cm_hir_canonical_instance_init(&identity);
     assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
             &identity) == CM_HIR_INSTANCE_OK
@@ -1232,6 +1233,7 @@ static void test_durable_projection_trace_definition(void)
 
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = owner->definition;
+    spec.body_definition = owner->definition;
     reachable.body = owner->data.function_item.body;
     reachable.spec = &spec;
     memset(&instance_admission, 0, sizeof(instance_admission));
@@ -1252,28 +1254,33 @@ static void test_durable_projection_trace_definition(void)
         && cm_semantic_results_instance_body(results, &instance_admission,
             &spec, &body_view) == CM_SEMANTIC_RESULTS_OK
         && cm_semantic_results_canonical_instance_body(results,
-            &instance_admission, identity.definition, identity.body,
+            &instance_admission, identity.definition,
+            identity.body_definition, identity.body,
             identity.bytes, identity.size, &body_view)
                 == CM_SEMANTIC_RESULTS_OK
         && body_view.projection_trace_count == 1u
         && body_view.projection_step_count == 1u
         && cm_semantic_results_canonical_instance_body(results,
-            &instance_admission, identity.definition, identity.body,
+            &instance_admission, identity.definition,
+            identity.body_definition, identity.body,
             tampered_identity, identity.size, &body_view)
                 == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_canonical_instance_body(results,
-            &instance_admission, identity.definition, identity.body,
+            &instance_admission, identity.definition,
+            identity.body_definition, identity.body,
             identity.bytes, identity.size - 1u, &body_view)
                 == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_canonical_instance_body(results,
-            &instance_admission, identity.definition, identity.body,
+            &instance_admission, identity.definition,
+            identity.body_definition, identity.body,
             trailing_identity, identity.size + 1u, &body_view)
                 == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_canonical_instance_expression(results,
             &instance_admission, &identity, body->root_expression,
             &expression_view) == CM_SEMANTIC_RESULTS_OK
         && cm_semantic_results_canonical_instance_body(results,
-            &instance_admission, identity.definition, identity.body,
+            &instance_admission, identity.definition,
+            identity.body_definition, identity.body,
             NULL, identity.size, &body_view)
                 == CM_SEMANTIC_RESULTS_INVALID_ARGUMENT
         && cm_semantic_results_instance_projection_trace(results,
@@ -1330,8 +1337,10 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
 
     cm_hir_instance_spec_init(&caller);
     caller.selected_callable = caller_definition;
+    caller.body_definition = caller_definition;
     cm_hir_instance_spec_init(&callee);
     callee.selected_callable = expected->selected_callable;
+    callee.body_definition = expected->selected_callable;
     callee.declared_trait_callable = expected->declared_trait_callable;
     callee.enclosing_impl = expected->enclosing_impl;
     callee.implemented_trait = expected->implemented_trait;
@@ -1339,6 +1348,7 @@ static void assert_exact_callable_instance_recipe(Fixture *fixture,
     callee.self_type = self_type;
     cm_hir_instance_spec_init(&wrong_callee);
     wrong_callee.selected_callable = caller_definition;
+    wrong_callee.body_definition = caller_definition;
     reachable[0].body = caller_body;
     reachable[0].spec = &caller;
     reachable[1].body = callee_item->data.function_item.body;
@@ -1465,10 +1475,12 @@ static void test_canonical_parts_function_pointer_abi_parity(void)
     argument.data.type = function_pointer_id;
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = owner->definition;
+    spec.body_definition = owner->definition;
     spec.item_arguments = &argument;
     spec.item_argument_count = 1u;
     memset(&parts, 0, sizeof(parts));
     parts.selected_callable = owner->definition;
+    parts.body_definition = owner->definition;
     part.kind = CM_HIR_GENERIC_ARG_TYPE;
     part.bytes = payload;
     part.size = sizeof(payload);
@@ -1963,6 +1975,7 @@ static void test_durable_generic_impl_callable_recipes(void)
 
     cm_hir_instance_spec_init(&callee_spec);
     callee_spec.selected_callable = qualified_selection.selected_callable;
+    callee_spec.body_definition = qualified_selection.body_definition;
     callee_spec.declared_trait_callable =
         qualified_selection.declared_trait_callable;
     callee_spec.enclosing_impl = qualified_selection.enclosing_impl;
@@ -1996,6 +2009,7 @@ static void test_durable_generic_impl_callable_recipes(void)
     memset(&malformed_parts, 0, sizeof(malformed_parts));
     malformed_parts.selected_callable =
         qualified_selection.selected_callable;
+    malformed_parts.body_definition = qualified_selection.body_definition;
     malformed_parts.declared_trait_callable =
         qualified_selection.declared_trait_callable;
     malformed_parts.enclosing_impl = qualified_selection.enclosing_impl;

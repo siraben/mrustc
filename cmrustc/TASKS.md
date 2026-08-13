@@ -1028,8 +1028,15 @@ one- or two-argument same-module monomorphic calls, exact `usize < usize`, and
 the corresponding root value diamond. MIR is target-qualified before
 publication with an immutable 32- or 64-bit pointer width, stores `usize`
 constants in `uint64_t`, rejects 32-bit overflow, and advances the canonical
-dump to `mir-v8`. The legacy width-zero MIR path remains valid only for graphs
+dump to `mir-v9`. The legacy width-zero MIR path remains valid only for graphs
 with no reachable `usize`; generic identity substitution remains u32-only.
+
+Canonical callable instance format v2 and MIR `mir-v9` separately retain the
+selected dispatch/symbol definition and `body_definition`, the definition
+whose signature and HIR body execute. Semantic results, admission, reachable
+MIR, lowering, dumps, and C emission authenticate both identities. This
+checkpoint deliberately preserves `body_definition == selected_callable`;
+inherited trait-default selection is the next behavior-changing slice.
 
 Portable C maps Rust `usize` to `uintptr_t`, emits explicit
 `(uintptr_t)UINT32_C(...)` or `(uintptr_t)UINT64_C(...)` constants, and adds

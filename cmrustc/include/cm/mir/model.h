@@ -156,7 +156,10 @@ typedef struct CmMirRvalue {
 } CmMirRvalue;
 
 typedef struct CmMirInstance {
+    /* Dispatch/symbol identity selected for this concrete instance. */
     CmHirDefId definition;
+    /* Definition whose signature and HIR body are executed. */
+    CmHirDefId body_definition;
     /*
      * Transitional executable materialization for the original narrow
      * generic lowering path.  These process-local HIR IDs are not part of a

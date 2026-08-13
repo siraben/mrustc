@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-#define CM_INSTANCE_FORMAT_VERSION ((unsigned int)1u)
+#define CM_INSTANCE_FORMAT_VERSION ((unsigned int)2u)
 #define CM_INSTANCE_TYPE_DEPTH ((size_t)128u)
 
 typedef struct CmInstanceBuffer {
@@ -874,9 +874,16 @@ static CmHirInstanceStatus cm_instance_encode_parts_value(
         return selected == NULL ? CM_HIR_INSTANCE_INVALID_ID
             : CM_HIR_INSTANCE_FOREIGN_ADMISSION;
     }
+    if (!cm_hir_def_id_equal(parts->body_definition,
+            parts->selected_callable)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
     status = cm_instance_u8(buffer, CM_INSTANCE_FORMAT_VERSION);
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, parts->selected_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, parts->body_definition);
     }
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, parts->declared_trait_callable);
@@ -1116,6 +1123,9 @@ static CmHirInstanceStatus cm_instance_encode_direct_call(
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, callee->definition);
     }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, callee->definition);
+    }
     for (index = 0u; status == CM_HIR_INSTANCE_OK && index < 4u; ++index) {
         status = cm_instance_def(buffer, cm_hir_def_id_none());
     }
@@ -1165,9 +1175,16 @@ static CmHirInstanceStatus cm_instance_encode_spec(CmInstanceBuffer *buffer,
         return selected == NULL ? CM_HIR_INSTANCE_INVALID_ID
             : CM_HIR_INSTANCE_FOREIGN_ADMISSION;
     }
+    if (!cm_hir_def_id_equal(spec->body_definition,
+            spec->selected_callable)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
     status = cm_instance_u8(buffer, CM_INSTANCE_FORMAT_VERSION);
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, spec->selected_callable);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_def(buffer, spec->body_definition);
     }
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, spec->declared_trait_callable);
@@ -1348,6 +1365,7 @@ static int cm_canonical_instance_is_empty(
 {
     return instance != NULL
         && cm_hir_def_id_is_none(instance->definition)
+        && cm_hir_def_id_is_none(instance->body_definition)
         && instance->body == CM_HIR_BODY_NONE
         && instance->bytes == NULL && instance->size == 0u;
 }
@@ -1357,6 +1375,7 @@ static int cm_canonical_instance_is_valid(
 {
     return instance != NULL
         && !cm_hir_def_id_is_none(instance->definition)
+        && !cm_hir_def_id_is_none(instance->body_definition)
         && instance->body != CM_HIR_BODY_NONE
         && instance->bytes != NULL && instance->size != 0u;
 }
@@ -1366,6 +1385,7 @@ void cm_hir_canonical_instance_init(CmHirCanonicalInstance *instance)
     if (instance == NULL) return;
     memset(instance, 0, sizeof(*instance));
     instance->definition = cm_hir_def_id_none();
+    instance->body_definition = cm_hir_def_id_none();
 }
 
 CmHirInstanceStatus cm_hir_canonical_instance_encode(
@@ -1373,6 +1393,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode(
     const CmHirInstanceSpec *spec, CmHirCanonicalInstance *out_instance)
 {
     const CmHirItem *selected;
+    const CmHirItem *body_item;
     CmHirCanonicalInstance encoded;
     CmInstanceBuffer sizing;
     CmInstanceBuffer output;
@@ -1383,10 +1404,18 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode(
         return CM_HIR_INSTANCE_INVALID_ARGUMENT;
     }
     selected = cm_instance_item(hir, spec->selected_callable);
+    if (!cm_hir_def_id_equal(spec->body_definition,
+            spec->selected_callable)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    body_item = cm_instance_item(hir, spec->body_definition);
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION) {
         return CM_HIR_INSTANCE_INVALID_ID;
     }
-    if (selected->data.function_item.body == CM_HIR_BODY_NONE) {
+    if (body_item == NULL || body_item->kind != CM_HIR_ITEM_FUNCTION) {
+        return CM_HIR_INSTANCE_INVALID_ID;
+    }
+    if (body_item->data.function_item.body == CM_HIR_BODY_NONE) {
         return CM_HIR_INSTANCE_INVALID_RELATION;
     }
     memset(&sizing, 0, sizeof(sizing));
@@ -1406,7 +1435,8 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode(
             ? CM_HIR_INSTANCE_INVALID_RELATION : status;
     }
     encoded.definition = selected->definition;
-    encoded.body = selected->data.function_item.body;
+    encoded.body_definition = body_item->definition;
+    encoded.body = body_item->data.function_item.body;
     encoded.size = output.len;
     *out_instance = encoded;
     return CM_HIR_INSTANCE_OK;
@@ -1418,6 +1448,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_parts(
     CmHirCanonicalInstance *out_instance)
 {
     const CmHirItem *selected;
+    const CmHirItem *body_item;
     CmHirCanonicalInstance encoded;
     CmInstanceBuffer sizing;
     CmInstanceBuffer output;
@@ -1428,10 +1459,18 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_parts(
         return CM_HIR_INSTANCE_INVALID_ARGUMENT;
     }
     selected = cm_instance_item(hir, parts->selected_callable);
+    if (!cm_hir_def_id_equal(parts->body_definition,
+            parts->selected_callable)) {
+        return CM_HIR_INSTANCE_INVALID_RELATION;
+    }
+    body_item = cm_instance_item(hir, parts->body_definition);
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION) {
         return CM_HIR_INSTANCE_INVALID_ID;
     }
-    if (selected->data.function_item.body == CM_HIR_BODY_NONE) {
+    if (body_item == NULL || body_item->kind != CM_HIR_ITEM_FUNCTION) {
+        return CM_HIR_INSTANCE_INVALID_ID;
+    }
+    if (body_item->data.function_item.body == CM_HIR_BODY_NONE) {
         return CM_HIR_INSTANCE_INVALID_RELATION;
     }
     memset(&sizing, 0, sizeof(sizing));
@@ -1452,7 +1491,8 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_parts(
             ? CM_HIR_INSTANCE_INVALID_RELATION : status;
     }
     encoded.definition = selected->definition;
-    encoded.body = selected->data.function_item.body;
+    encoded.body_definition = body_item->definition;
+    encoded.body = body_item->data.function_item.body;
     encoded.size = output.len;
     *out_instance = encoded;
     return CM_HIR_INSTANCE_OK;
@@ -1512,6 +1552,7 @@ static CmHirInstanceStatus cm_canonical_instance_encode_direct_call_value(
             ? CM_HIR_INSTANCE_INVALID_RELATION : status;
     }
     encoded.definition = callee->definition;
+    encoded.body_definition = callee->definition;
     encoded.body = callee->data.function_item.body;
     encoded.size = output.len;
     *out_instance = encoded;
@@ -1550,6 +1591,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_clone(
     copy.bytes = (unsigned char *)cm_alloc(source->size);
     memcpy(copy.bytes, source->bytes, source->size);
     copy.definition = source->definition;
+    copy.body_definition = source->body_definition;
     copy.body = source->body;
     copy.size = source->size;
     *out_instance = copy;
@@ -1629,6 +1671,7 @@ void cm_hir_decoded_canonical_instance_init(
     if (decoded == NULL) return;
     memset(decoded, 0, sizeof(*decoded));
     decoded->parts.selected_callable = cm_hir_def_id_none();
+    decoded->parts.body_definition = cm_hir_def_id_none();
     decoded->parts.declared_trait_callable = cm_hir_def_id_none();
     decoded->parts.enclosing_impl = cm_hir_def_id_none();
     decoded->parts.implemented_trait = cm_hir_def_id_none();
@@ -1640,6 +1683,7 @@ static int cm_decoded_canonical_instance_is_empty(
 {
     return decoded != NULL
         && cm_hir_def_id_is_none(decoded->parts.selected_callable)
+        && cm_hir_def_id_is_none(decoded->parts.body_definition)
         && cm_hir_def_id_is_none(decoded->parts.declared_trait_callable)
         && decoded->parts.item_arguments == NULL
         && decoded->parts.item_argument_count == 0u
@@ -1680,6 +1724,8 @@ CmHirInstanceStatus cm_hir_canonical_instance_decode(
     CmHirCanonicalInstance encoded;
     CmInstanceReader reader;
     const CmHirItem *selected;
+    const CmHirItem *body_item;
+    const CmHirBody *body;
     const CmHirItem *enclosing;
     const CmHirItem *trait_item;
     CmHirInstanceStatus status;
@@ -1714,6 +1760,10 @@ CmHirInstanceStatus cm_hir_canonical_instance_decode(
     }
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_read_def(&reader,
+            &decoded.parts.body_definition);
+    }
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_instance_read_def(&reader,
             &decoded.parts.declared_trait_callable);
     }
     if (status == CM_HIR_INSTANCE_OK) {
@@ -1731,13 +1781,33 @@ CmHirInstanceStatus cm_hir_canonical_instance_decode(
     if (version != CM_INSTANCE_FORMAT_VERSION
         || !cm_hir_def_id_equal(decoded.parts.selected_callable,
             instance->definition)
+        || !cm_hir_def_id_equal(decoded.parts.body_definition,
+            instance->body_definition)
+        || !cm_hir_def_id_equal(decoded.parts.body_definition,
+            decoded.parts.selected_callable)
         || instance->definition.crate_id != local_crate) {
         status = CM_HIR_INSTANCE_INVALID_RELATION;
         goto done;
     }
     selected = cm_instance_item(hir, decoded.parts.selected_callable);
+    body_item = cm_instance_item(hir, decoded.parts.body_definition);
+    body = body_item == NULL || body_item->kind != CM_HIR_ITEM_FUNCTION
+            || body_item->data.function_item.body == CM_HIR_BODY_NONE
+        ? NULL : cm_hir_get_body(hir, body_item->data.function_item.body);
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
-        || selected->data.function_item.body != instance->body) {
+        || body_item == NULL || body_item->kind != CM_HIR_ITEM_FUNCTION
+        || body_item->data.function_item.body != instance->body
+        || body == NULL
+        || !cm_hir_def_id_equal(body->owner,
+            decoded.parts.body_definition)
+        || body->origin.kind != CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        || !cm_hir_def_id_equal(body->origin.definition,
+            decoded.parts.body_definition)
+        || !cm_hir_def_id_equal(body->origin.enclosing_definition,
+            decoded.parts.body_definition)
+        || !cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition,
+            decoded.parts.body_definition)) {
         status = CM_HIR_INSTANCE_INVALID_RELATION;
         goto done;
     }
@@ -1865,6 +1935,14 @@ CmHirInstanceStatus cm_hir_canonical_instance_compare(
             right->definition.index);
     }
     if (comparison == 0) {
+        comparison = cm_instance_compare_u32(left->body_definition.crate_id,
+            right->body_definition.crate_id);
+    }
+    if (comparison == 0) {
+        comparison = cm_instance_compare_u32(left->body_definition.index,
+            right->body_definition.index);
+    }
+    if (comparison == 0) {
         comparison = cm_instance_compare_u32(left->body, right->body);
     }
     shared = left->size < right->size ? left->size : right->size;
@@ -1897,6 +1975,7 @@ void cm_hir_instance_spec_init(CmHirInstanceSpec *spec)
     if (spec == NULL) return;
     memset(spec, 0, sizeof(*spec));
     spec->selected_callable = cm_hir_def_id_none();
+    spec->body_definition = cm_hir_def_id_none();
     spec->declared_trait_callable = cm_hir_def_id_none();
     spec->enclosing_impl = cm_hir_def_id_none();
     spec->implemented_trait = cm_hir_def_id_none();
@@ -2105,7 +2184,7 @@ CmHirInstanceStatus cm_hir_instance_key_dump(FILE *stream,
     status = cm_hir_instance_key_validate(key, admission);
     if (status != CM_HIR_INSTANCE_OK) return status;
     state = (const CmHirInstanceKeyState *)key->state;
-    fputs("hir-instance-v1 crate=", stream);
+    fputs("hir-instance-v2 crate=", stream);
     fprintf(stream, "%u generation=%llu key=",
         (unsigned int)state->local_crate,
         (unsigned long long)state->semantic_generation);

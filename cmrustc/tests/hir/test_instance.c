@@ -237,6 +237,7 @@ static CmHirInstanceSpec make_spec(const Fixture *fixture,
     arguments[1].data.type = fixture->array_128;
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = fixture->callable;
+    spec.body_definition = fixture->callable;
     spec.item_arguments = arguments;
     spec.item_argument_count = 2u;
     return spec;
@@ -299,7 +300,7 @@ static void test_structural_key_clone_compare_dump(void)
         && fflush(stream) == 0 && fseek(stream, 0L, SEEK_SET) == 0);
     count = fread(dump, 1u, sizeof(dump) - 1u, stream);
     dump[count] = '\0';
-    assert(strstr(dump, "hir-instance-v1 crate=1") != NULL
+    assert(strstr(dump, "hir-instance-v2 crate=1") != NULL
         && strstr(dump, "ffffffffffffffffffffffffffffffff") != NULL);
     fclose(stream);
     cm_hir_instance_key_destroy(&duplicate);
@@ -319,6 +320,7 @@ static void test_authenticated_method_identity(void)
     memset(&key, 0, sizeof(key));
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = fixture.selected_method;
+    spec.body_definition = fixture.selected_method;
     spec.declared_trait_callable = fixture.declared_method;
     spec.enclosing_impl = fixture.impl_definition;
     spec.implemented_trait = fixture.trait_definition;
@@ -327,6 +329,10 @@ static void test_authenticated_method_identity(void)
     assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
         == CM_HIR_INSTANCE_OK);
     cm_hir_instance_key_destroy(&key);
+    spec.body_definition = fixture.callable;
+    assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+        == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
+    spec.body_definition = fixture.selected_method;
     spec.declared_trait_callable = fixture.callable;
     assert(cm_hir_instance_key_init(&key, &fixture.admission, &spec)
         == CM_HIR_INSTANCE_INVALID_RELATION && key.state == NULL);
@@ -375,12 +381,23 @@ static void test_canonical_instance_decode(void)
     cm_hir_canonical_instance_init(&identity);
     cm_hir_canonical_instance_init(&reencoded);
     cm_hir_decoded_canonical_instance_init(&decoded);
+    spec.body_definition = cm_hir_def_id_none();
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_INVALID_RELATION
+        && cm_hir_def_id_is_none(identity.definition)
+        && cm_hir_def_id_is_none(identity.body_definition)
+        && identity.body == CM_HIR_BODY_NONE && identity.bytes == NULL
+        && identity.size == 0u);
+    spec.body_definition = fixture.callable;
     assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
             &identity) == CM_HIR_INSTANCE_OK
         && cm_hir_canonical_instance_decode(&fixture.hir, 1u, &identity,
             &decoded) == CM_HIR_INSTANCE_OK
         && cm_hir_def_id_equal(decoded.parts.selected_callable,
             fixture.callable)
+        && cm_hir_def_id_equal(decoded.parts.body_definition,
+            fixture.callable)
+        && cm_hir_def_id_equal(identity.body_definition, fixture.callable)
         && decoded.parts.item_argument_count == 2u
         && decoded.parts.item_arguments == decoded.owned_item_arguments
         && decoded.parts.method_arguments == NULL
@@ -395,6 +412,11 @@ static void test_canonical_instance_decode(void)
             &decoded.parts, &reencoded) == CM_HIR_INSTANCE_OK
         && cm_hir_canonical_instance_equal(&identity, &reencoded, &equal)
             == CM_HIR_INSTANCE_OK && equal);
+    decoded.parts.body_definition = fixture.selected_method;
+    assert(cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &decoded.parts, &(CmHirCanonicalInstance){0})
+        == CM_HIR_INSTANCE_INVALID_RELATION);
+    decoded.parts.body_definition = fixture.callable;
     cm_hir_decoded_canonical_instance_destroy(&decoded);
     assert(decoded.owned_item_arguments == NULL
         && decoded.parts.item_arguments == NULL
@@ -404,6 +426,7 @@ static void test_canonical_instance_decode(void)
 
     cm_hir_instance_spec_init(&spec);
     spec.selected_callable = fixture.selected_method;
+    spec.body_definition = fixture.selected_method;
     spec.declared_trait_callable = fixture.declared_method;
     spec.enclosing_impl = fixture.impl_definition;
     spec.implemented_trait = fixture.trait_definition;
@@ -414,6 +437,8 @@ static void test_canonical_instance_decode(void)
         && cm_hir_canonical_instance_decode(&fixture.hir, 1u, &identity,
             &decoded) == CM_HIR_INSTANCE_OK
         && cm_hir_def_id_equal(decoded.parts.selected_callable,
+            fixture.selected_method)
+        && cm_hir_def_id_equal(decoded.parts.body_definition,
             fixture.selected_method)
         && cm_hir_def_id_equal(decoded.parts.declared_trait_callable,
             fixture.declared_method)
@@ -537,7 +562,9 @@ static void test_direct_call_parts_parity(void)
             1u, &decoded.parts, &call, &from_parts) == CM_HIR_INSTANCE_OK
         && cm_hir_canonical_instance_equal(&from_spec, &from_parts, &equal)
             == CM_HIR_INSTANCE_OK && equal
-        && cm_hir_def_id_equal(from_parts.definition, fixture.callable));
+        && cm_hir_def_id_equal(from_parts.definition, fixture.callable)
+        && cm_hir_def_id_equal(from_parts.body_definition,
+            fixture.callable));
     decoded.parts.selected_callable = fixture.selected_method;
     assert(cm_hir_canonical_instance_encode_direct_call_parts(&fixture.hir,
             1u, &decoded.parts, &call, &(CmHirCanonicalInstance){0})

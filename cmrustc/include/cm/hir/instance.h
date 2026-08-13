@@ -26,6 +26,7 @@ typedef enum CmHirInstanceStatus {
  */
 typedef struct CmHirInstanceSpec {
     CmHirDefId selected_callable;
+    CmHirDefId body_definition;
     CmHirDefId declared_trait_callable;
     const CmHirGenericArg *item_arguments;
     uint32_t item_argument_count;

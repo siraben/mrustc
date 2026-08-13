@@ -126,6 +126,7 @@ static int cm_mir_instance_is_empty(const CmMirInstance *instance)
 {
     return instance != NULL
         && cm_hir_def_id_is_none(instance->definition)
+        && cm_hir_def_id_is_none(instance->body_definition)
         && instance->substitutions == NULL
         && instance->substitution_count == 0u
         && instance->body == CM_HIR_BODY_NONE
@@ -137,6 +138,7 @@ static int cm_mir_instance_is_canonical(const CmMirInstance *instance)
 {
     return instance != NULL
         && !cm_hir_def_id_is_none(instance->definition)
+        && !cm_hir_def_id_is_none(instance->body_definition)
         && instance->body != CM_HIR_BODY_NONE
         && instance->identity_bytes != NULL
         && instance->identity_size != 0u
@@ -148,6 +150,8 @@ static int cm_mir_instance_is_flat(const CmMirInstance *instance)
 {
     return instance != NULL
         && !cm_hir_def_id_is_none(instance->definition)
+        && cm_hir_def_id_equal(instance->body_definition,
+            instance->definition)
         && instance->body == CM_HIR_BODY_NONE
         && instance->identity_bytes == NULL
         && instance->identity_size == 0u
@@ -168,7 +172,9 @@ static int cm_mir_instance_equal(const CmMirInstance *left,
     uint32_t index;
 
     if (!cm_mir_instance_valid(left) || !cm_mir_instance_valid(right)
-        || !cm_hir_def_id_equal(left->definition, right->definition)) {
+        || !cm_hir_def_id_equal(left->definition, right->definition)
+        || !cm_hir_def_id_equal(left->body_definition,
+            right->body_definition)) {
         return 0;
     }
     if (cm_mir_instance_is_canonical(left)
@@ -209,6 +215,7 @@ static int cm_mir_instance_standalone_clone(CmMirInstance *out_instance,
     }
     memset(&copy, 0, sizeof(copy));
     copy.definition = source->definition;
+    copy.body_definition = source->body_definition;
     copy.substitution_count = source->substitution_count;
     copy.body = source->body;
     copy.identity_size = source->identity_size;
@@ -628,14 +635,16 @@ static const CmHirItem *cm_mir_instance_function(const CmHirContext *hir,
 
     if (hir == NULL || body == NULL
         || cm_hir_def_id_is_none(body->instance.definition)
-        || !cm_hir_def_id_equal(body->owner, body->instance.definition)
+        || !cm_hir_def_id_equal(body->owner,
+            body->instance.body_definition)
         || body->source_body == CM_HIR_BODY_NONE
         || !cm_mir_instance_valid(&body->instance)
         || (cm_mir_instance_is_canonical(&body->instance)
             && body->instance.body != body->source_body)) {
         return NULL;
     }
-    definition = cm_hir_lookup_definition(hir, body->instance.definition);
+    definition = cm_hir_lookup_definition(hir,
+        body->instance.body_definition);
     if (definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
         || definition->state != CM_HIR_DEFINITION_BOUND) {
         return NULL;
@@ -644,11 +653,11 @@ static const CmHirItem *cm_mir_instance_function(const CmHirContext *hir,
     source_body = cm_hir_get_body(hir, body->source_body);
     if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
         || !cm_hir_def_id_equal(item->definition,
-            body->instance.definition)
+            body->instance.body_definition)
         || item->data.function_item.body != body->source_body
         || source_body == NULL
         || !cm_hir_def_id_equal(source_body->owner,
-            body->instance.definition)) {
+            body->instance.body_definition)) {
         return NULL;
     }
     return item;
@@ -1016,6 +1025,7 @@ static int cm_mir_semantic_instance_query_init(
     }
     cm_hir_instance_spec_init(&query->spec);
     query->spec.selected_callable = body->instance.definition;
+    query->spec.body_definition = body->instance.body_definition;
     definition = cm_hir_lookup_definition(hir, body->instance.definition);
     item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
             || definition->state != CM_HIR_DEFINITION_BOUND
@@ -1077,12 +1087,22 @@ static void cm_mir_semantic_instance_query_destroy(
 static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
     const CmMirInstance *instance)
 {
+    CmHirCanonicalInstance identity;
+    CmHirCanonicalInstance encoded;
     CmMirBody query_body;
     CmMirSemanticInstanceQuery query;
-    CmHirCanonicalInstance encoded;
     int valid;
 
     if (!cm_mir_instance_is_canonical(instance)) return 0;
+    cm_hir_canonical_instance_init(&identity);
+    identity.definition = instance->definition;
+    identity.body_definition = instance->body_definition;
+    identity.body = instance->body;
+    identity.bytes = instance->identity_bytes;
+    identity.size = instance->identity_size;
+    if (cm_hir_canonical_instance_validate(hir,
+            instance->definition.crate_id, &identity)
+            != CM_HIR_INSTANCE_OK) return 0;
     memset(&query_body, 0, sizeof(query_body));
     query_body.instance = *instance;
     memset(&query, 0, sizeof(query));
@@ -1093,8 +1113,9 @@ static int cm_mir_canonical_materialization_valid(const CmHirContext *hir,
     valid = cm_hir_canonical_instance_encode(hir,
             instance->definition.crate_id, &query.spec, &encoded)
                 == CM_HIR_INSTANCE_OK
-        && encoded.definition.crate_id == instance->definition.crate_id
-        && encoded.definition.index == instance->definition.index
+        && cm_hir_def_id_equal(encoded.definition, instance->definition)
+        && cm_hir_def_id_equal(encoded.body_definition,
+            instance->body_definition)
         && encoded.body == instance->body
         && encoded.size == instance->identity_size
         && memcmp(encoded.bytes, instance->identity_bytes,
@@ -1112,6 +1133,7 @@ static int cm_mir_canonical_identity(const CmMirInstance *instance,
     }
     cm_hir_canonical_instance_init(out_identity);
     out_identity->definition = instance->definition;
+    out_identity->body_definition = instance->body_definition;
     out_identity->body = instance->body;
     out_identity->bytes = instance->identity_bytes;
     out_identity->size = instance->identity_size;
@@ -2694,7 +2716,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
                 body, semantic_instance, &semantic_signature)
                     != CM_SEMANTIC_RESULTS_OK
             || !cm_hir_def_id_equal(semantic_signature.definition,
-                body->instance.definition)
+                body->instance.body_definition)
             || semantic_signature.parameter_count == UINT32_MAX) {
             return 0;
         }
@@ -3243,6 +3265,7 @@ static CmMirStatus cm_mir_copy_body(const CmMirBody *body, CmMirBody *copy)
     copy->source_body = body->source_body;
     copy->semantic_evidence = body->semantic_evidence;
     copy->instance.definition = body->instance.definition;
+    copy->instance.body_definition = body->instance.body_definition;
     copy->instance.substitution_count = body->instance.substitution_count;
     copy->instance.body = body->instance.body;
     copy->instance.identity_size = body->instance.identity_size;
@@ -3584,6 +3607,7 @@ CmMirStatus cm_mir_publication_find_instance(
 
     memset(&key, 0, sizeof(key));
     key.definition = definition;
+    key.body_definition = definition;
     key.substitutions = (CmHirTypeId *)substitutions;
     key.substitution_count = substitution_count;
     return cm_mir_publication_find_key(publication, &key, out_id);
@@ -3640,7 +3664,8 @@ static CmMirStatus cm_mir_publication_reserve_key(
     memset(&semantic_body, 0, sizeof(semantic_body));
     admitted = 0;
     if (hir_body == NULL || hir_body->state != CM_HIR_BODY_TYPED
-        || !cm_hir_def_id_equal(hir_body->owner, instance->definition)
+        || !cm_hir_def_id_equal(hir_body->owner,
+            instance->body_definition)
         || instance->definition.crate_id != implementation->crate_id
         || semantic_results == NULL
         || (cm_mir_instance_is_canonical(instance)
@@ -3651,7 +3676,8 @@ static CmMirStatus cm_mir_publication_reserve_key(
     if (cm_mir_instance_is_canonical(instance)) {
         admitted = cm_semantic_results_canonical_instance_body(
             semantic_results, implementation->admission,
-            instance->definition, instance->body,
+            instance->definition, instance->body_definition,
+            instance->body,
             instance->identity_bytes, instance->identity_size,
             &semantic_body) == CM_SEMANTIC_RESULTS_OK;
     } else {
@@ -3666,7 +3692,7 @@ static CmMirStatus cm_mir_publication_reserve_key(
     cm_mir_semantic_instance_query_destroy(&query);
     if (!admitted || semantic_body.body != source_body
         || !cm_hir_def_id_equal(semantic_body.owner,
-            instance->definition)) {
+            instance->body_definition)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     cm_vec_reserve(&implementation->entries,
@@ -3690,6 +3716,7 @@ CmMirStatus cm_mir_publication_reserve(CmMirPublication *publication,
 
     memset(&key, 0, sizeof(key));
     key.definition = definition;
+    key.body_definition = definition;
     key.substitutions = (CmHirTypeId *)substitutions;
     key.substitution_count = substitution_count;
     return cm_mir_publication_reserve_key(publication, &key, source_body,
@@ -3769,7 +3796,8 @@ CmMirStatus cm_mir_publication_define(CmMirPublication *publication,
     if (entry->defined || body->owned_storage != NULL
         || !cm_mir_instance_equal(&entry->instance, &body->instance)
         || body->source_body != entry->source_body
-        || !cm_hir_def_id_equal(body->owner, entry->instance.definition)
+        || !cm_hir_def_id_equal(body->owner,
+            entry->instance.body_definition)
         || body->semantic_evidence
             != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
         return CM_MIR_INVARIANT_VIOLATION;
@@ -3982,6 +4010,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
     if (source_body == NULL || source_body->owner.crate_id != crate_id
         || body->owner.crate_id != crate_id
         || body->instance.definition.crate_id != crate_id
+        || body->instance.body_definition.crate_id != crate_id
         || semantic_results == NULL
         || (body->semantic_evidence != CM_MIR_SEMANTIC_EVIDENCE_BODY
             && body->semantic_evidence
@@ -3996,20 +4025,22 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
                     &body->instance)
                 || cm_semantic_results_canonical_instance_body(
                     semantic_results, admission,
-                    body->instance.definition, body->instance.body,
+                    body->instance.definition,
+                    body->instance.body_definition, body->instance.body,
                     body->instance.identity_bytes,
                     body->instance.identity_size, &canonical_body)
                         != CM_SEMANTIC_RESULTS_OK
                 || canonical_body.body != body->source_body
                 || !cm_hir_def_id_equal(canonical_body.owner,
-                    body->instance.definition)))
+                    body->instance.body_definition)))
         || (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY
             ? cm_semantic_results_body(semantic_results, admission,
                 body->source_body, &semantic_body)
             : cm_mir_instance_is_canonical(&body->instance)
                 ? cm_semantic_results_canonical_instance_body(
                     semantic_results, admission, body->instance.definition,
-                    body->instance.body, body->instance.identity_bytes,
+                    body->instance.body_definition, body->instance.body,
+                    body->instance.identity_bytes,
                     body->instance.identity_size, &semantic_body)
                 : cm_mir_semantic_instance_query_init(&query, hir, body)
                     ? cm_semantic_results_instance_body(semantic_results,
@@ -4017,7 +4048,7 @@ CmMirStatus cm_mir_add_admitted_monomorphized_body(CmMirContext *context,
                     : CM_SEMANTIC_RESULTS_INVALID_ARGUMENT)
             != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(semantic_body.owner,
-            body->instance.definition)) {
+            body->instance.body_definition)) {
         cm_mir_semantic_instance_query_destroy(&query);
         return CM_MIR_INVALID_ADMISSION;
     }
@@ -4078,7 +4109,7 @@ CmMirStatus cm_mir_validate_admitted_monomorphized_body(
             body, NULL, &signature)
                 != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(signature.definition,
-            body->instance.definition)) {
+            body->instance.body_definition)) {
         return CM_MIR_INVALID_ADMISSION;
     }
     if (!cm_mir_exact_body_shape_valid(context, hir, body, 1,
@@ -4116,7 +4147,7 @@ CmMirStatus cm_mir_admitted_signature(
         admission, body, NULL, out_view);
     if (results_status != CM_SEMANTIC_RESULTS_OK
         || !cm_hir_def_id_equal(out_view->definition,
-            body->instance.definition)
+            body->instance.body_definition)
         || out_view->body != body->source_body) {
         memset(out_view, 0, sizeof(*out_view));
         out_view->definition = cm_hir_def_id_none();
@@ -4154,7 +4185,7 @@ CmMirStatus cm_mir_admitted_signature_parameter(
         admission, body, NULL, &signature);
     if (results_status == CM_SEMANTIC_RESULTS_OK
         && cm_hir_def_id_equal(signature.definition,
-            body->instance.definition)
+            body->instance.body_definition)
         && signature.body == body->source_body
         && parameter < signature.parameter_count) {
         results_status = cm_mir_semantic_signature_parameter_query(
@@ -4202,6 +4233,7 @@ CmMirStatus cm_mir_find_instance(const CmMirContext *context,
 
     memset(&key, 0, sizeof(key));
     key.definition = definition;
+    key.body_definition = definition;
     key.substitutions = (CmHirTypeId *)substitutions;
     key.substitution_count = substitution_count;
     return cm_mir_find_key(context, &key, out_id);

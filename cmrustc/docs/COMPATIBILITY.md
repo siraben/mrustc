@@ -279,7 +279,7 @@ defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
 remains omitted rather than guessed. Canonical dumps are `hir-v29` and
-`mir-v7`.
+`mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
 expression slice. The proof is read-only and covers bounded MARKED evidence,
@@ -300,9 +300,13 @@ Canonical `hir-v29` records an explicit origin for every current function,
 const, and static body. The origin kind is `ITEM_SOURCE`, and its definition,
 enclosing definition, item backlink, and legacy owner must agree exactly.
 Construction, finalization, deterministic dumps, and typed barrier snapshots
-authenticate those fields. This is representation hardening only: multiple
-bodies per owner, type-position bodies, generated closure or promotion bodies,
-and trait-default execution selected through an impl remain unsupported.
+authenticate those fields. Exact canonical callable instances additionally
+encode separate dispatch and executable-body definitions. Semantic results,
+admission, MIR, reachability, and C emission preserve both, and `mir-v9` dumps
+render `dispatch/body`. The current admitted relation still requires both
+definitions to be equal, so trait-default execution selected through an impl
+remains unsupported. Multiple bodies per owner, type-position bodies, and
+generated closure or promotion bodies also remain unsupported.
 
 The first exact control-flow slice accepts `if left == right { then_u32 }
 else { else_u32 }`. Equality is restricted to exact u32 operands and produces

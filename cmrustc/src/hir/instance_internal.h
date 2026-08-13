@@ -10,6 +10,7 @@
  */
 typedef struct CmHirCanonicalInstance {
     CmHirDefId definition;
+    CmHirDefId body_definition;
     CmHirBodyId body;
     unsigned char *bytes;
     size_t size;
@@ -31,6 +32,7 @@ typedef struct CmHirCanonicalArgumentPart {
  */
 typedef struct CmHirCanonicalInstanceParts {
     CmHirDefId selected_callable;
+    CmHirDefId body_definition;
     CmHirDefId declared_trait_callable;
     const CmHirCanonicalArgumentPart *item_arguments;
     uint32_t item_argument_count;
