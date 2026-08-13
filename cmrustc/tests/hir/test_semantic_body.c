@@ -49,7 +49,17 @@ typedef struct WritebackProbe {
     int mutate_typeck;
     int require_integer_kind;
     CmHirIntType expected_integer_kind;
+    int require_qualified_callable;
+    CmHirDefId expected_trait;
+    CmHirDefId expected_declared_callable;
+    CmHirDefId expected_impl;
+    CmHirDefId expected_selected_callable;
 } WritebackProbe;
+
+static void fixture_init(TestFixture *fixture);
+static void fixture_destroy(TestFixture *fixture);
+static CmSemanticSessionOptions session_options(const TestFixture *fixture,
+    CmHirDefId owner);
 
 static CmSemanticBodyWritebackStatus probe_writeback(void *context,
     CmSemanticSession *session, CmHirBodyId body,
@@ -73,6 +83,31 @@ static CmSemanticBodyWritebackStatus probe_writeback(void *context,
         && expression_term_count == probe->hir->expressions.len);
     typeck = cm_semantic_session_typeck(session);
     assert(typeck != NULL);
+    if (probe->require_qualified_callable) {
+        const CmSemanticCheckedCallableFacts *callable;
+
+        assert(facts->call_count == 0u && facts->callable_count == 1u
+            && facts->callables != NULL);
+        callable = &facts->callables[0];
+        assert(callable->syntax == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+            && cm_hir_def_id_equal(callable->requested_trait,
+                probe->expected_trait)
+            && cm_hir_def_id_equal(callable->declared_trait_callable,
+                probe->expected_declared_callable)
+            && cm_hir_def_id_equal(callable->selected_impl,
+                probe->expected_impl)
+            && cm_hir_def_id_equal(callable->selected_callable,
+                probe->expected_selected_callable)
+            && callable->receiver_argument == 0u
+            && callable->argument_count == 1u
+            && callable->parameter_count == 1u
+            && callable->argument_expressions != NULL
+            && callable->parameter_types != NULL
+            && callable->receiver_expression
+                == callable->argument_expressions[0]
+            && callable->requested_self_type != CM_TYPECK_TYPE_NONE
+            && callable->return_type != CM_TYPECK_TYPE_NONE);
+    }
     if (probe->require_integer_kind) {
         CmTypeckTypeId resolved;
         const CmTypeckType *resolved_type;
@@ -462,6 +497,174 @@ static CmHirDefId add_impl(TestFixture *fixture, CmHirDefId trait_definition)
     item.data.impl_item.safety = CM_HIR_SAFE;
     assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
     return definition;
+}
+
+static void test_explicit_qualified_callable_selection(void)
+{
+    TestFixture fixture;
+    CmHirDefId trait_definition;
+    CmHirDefId impl_definition;
+    CmHirDefId declared_definition;
+    CmHirDefId selected_definition;
+    CmHirDefId caller_definition;
+    CmHirType self_type_value;
+    CmHirTypeId trait_self_type;
+    CmHirTypeId impl_self_type;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId impl_body;
+    CmHirBodyId caller_body;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId impl_root;
+    CmHirExprId argument;
+    CmHirExprId call;
+    CmHirExpr qualified;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+
+    fixture_init(&fixture);
+    trait_definition = add_trait(&fixture, "Value");
+    impl_definition = add_impl(&fixture, trait_definition);
+    memset(&self_type_value, 0, sizeof(self_type_value));
+    self_type_value.kind = CM_HIR_TYPE_SELF_KIND;
+    self_type_value.span = test_span(20u, 24u);
+    self_type_value.data.self_type.owner = trait_definition;
+    assert(cm_hir_add_type(&fixture.hir, &self_type_value,
+        &trait_self_type) == CM_HIR_OK);
+    self_type_value.data.self_type.owner = impl_definition;
+    assert(cm_hir_add_type(&fixture.hir, &self_type_value,
+        &impl_self_type) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(30u, 45u),
+        &declared_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = cm_hir_intern(&fixture.hir, "self");
+    parameter.type = trait_self_type;
+    parameter.span = test_span(34u, 38u);
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, declared_definition,
+        fixture.root, "value", &fixture.hir);
+    item.parent_definition = trait_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(46u, 65u),
+        &selected_definition) == CM_HIR_OK);
+    memset(&local, 0, sizeof(local));
+    local.name = cm_hir_intern(&fixture.hir, "self");
+    local.type = impl_self_type;
+    local.span = test_span(50u, 54u);
+    local.parameter_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = selected_definition;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.expected_type = fixture.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(46u, 65u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &impl_body) == CM_HIR_OK);
+    parameter.type = impl_self_type;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, selected_definition,
+        fixture.root, "value", &fixture.hir);
+    item.parent_definition = impl_definition;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = impl_body;
+    item.data.function_item.trait_item_definition = declared_definition;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+    assert(add_integer_expression(&fixture.hir, impl_body,
+        fixture.u32_type, 1u, test_span(56u, 60u), &impl_root)
+        == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture.hir, impl_body,
+        impl_root) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(70u, 100u),
+        &caller_definition) == CM_HIR_OK);
+    local.name = cm_hir_intern(&fixture.hir, "x");
+    local.type = fixture.u32_type;
+    local.span = test_span(75u, 76u);
+    memset(&body, 0, sizeof(body));
+    body.owner = caller_definition;
+    body.source = 1u;
+    body.source_expression_id = 2u;
+    body.expected_type = fixture.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.span = test_span(70u, 100u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &caller_body) == CM_HIR_OK);
+    parameter.name = local.name;
+    parameter.type = fixture.u32_type;
+    parameter.span = local.span;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, caller_definition,
+        fixture.root, "qualified_caller", &fixture.hir);
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = caller_body;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+    assert(add_local_expression(&fixture.hir, caller_body, 0u,
+        fixture.u32_type, test_span(82u, 83u), &argument) == CM_HIR_OK);
+    memset(&qualified, 0, sizeof(qualified));
+    qualified.kind = CM_HIR_EXPR_QUALIFIED_CALL;
+    qualified.owner_body = caller_body;
+    qualified.type = fixture.u32_type;
+    qualified.span = test_span(80u, 95u);
+    qualified.data.qualified_call.syntax =
+        CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD;
+    qualified.data.qualified_call.requested_self_type = fixture.u32_type;
+    qualified.data.qualified_call.requested_trait = trait_definition;
+    qualified.data.qualified_call.declared_trait_callable =
+        declared_definition;
+    qualified.data.qualified_call.arguments = &argument;
+    qualified.data.qualified_call.argument_count = 1u;
+    qualified.data.qualified_call.receiver_argument = 0u;
+    assert(cm_hir_add_expr(&fixture.hir, &qualified, &call) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&fixture.hir, caller_body, call)
+        == CM_HIR_OK);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, caller_definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = caller_body;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    probe.require_qualified_callable = 1;
+    probe.expected_trait = trait_definition;
+    probe.expected_declared_callable = declared_definition;
+    probe.expected_impl = impl_definition;
+    probe.expected_selected_callable = selected_definition;
+    result = cm_semantic_body_check_definition_with_writeback(&session,
+        caller_body, probe_writeback, &probe);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
 }
 
 static CmHirDefId add_trait_associated(TestFixture *fixture,
@@ -2065,6 +2268,7 @@ static void test_invalid_api_and_status_names(void)
 
 int main(void)
 {
+    test_explicit_qualified_callable_selection();
     test_positive_impl_and_missing_metadata();
     test_intrinsic_body_projection_normalization();
     test_projected_call_substitution_writeback();

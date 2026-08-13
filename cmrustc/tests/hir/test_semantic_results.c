@@ -1000,6 +1000,88 @@ static void test_durable_projection_trace_definition(void)
     fixture_destroy(&fixture);
 }
 
+static void test_durable_qualified_callable_recipe(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmSemanticBodyView body_view;
+    CmSemanticExpressionView argument_view;
+    CmSemanticTypeView parameter_type;
+    CmHirDefId wrapper_definition;
+    const CmHirDefinition *wrapper_record;
+    const CmHirItem *wrapper;
+    const CmHirBody *body;
+    CmHirExprId call_expression;
+    CmHirExprId argument;
+    size_t index;
+    int equal;
+
+    fixture_init(&fixture,
+        "trait Convert { fn convert(value: u32) -> u32; } "
+        "impl Convert for u32 { fn convert(value: u32) -> u32 { value } } "
+        "fn wrapper(value: u32) -> u32 { <u32 as Convert>::convert(value) }");
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&fixture, &admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK);
+    results = cm_semantic_admission_results(&admission);
+    wrapper_definition = find_named_item(&fixture, "wrapper",
+        cm_hir_def_id_none());
+    wrapper_record = cm_hir_lookup_definition(&fixture.hir,
+        wrapper_definition);
+    wrapper = wrapper_record == NULL ? NULL : cm_hir_get_item(&fixture.hir,
+        wrapper_record->entity.item_id);
+    body = wrapper == NULL ? NULL : cm_hir_get_body(&fixture.hir,
+        wrapper->data.function_item.body);
+    call_expression = CM_HIR_EXPR_NONE;
+    for (index = 0u; index < fixture.hir.expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(&fixture.hir,
+            (CmHirExprId)(index + 1u));
+        if (body != NULL && expression != NULL
+            && expression->owner_body == wrapper->data.function_item.body
+            && expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            call_expression = (CmHirExprId)(index + 1u);
+        }
+    }
+    assert(results != NULL && body != NULL
+        && call_expression != CM_HIR_EXPR_NONE
+        && cm_semantic_results_body(results, &admission,
+            wrapper->data.function_item.body, &body_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && body_view.callable_count == 1u
+        && cm_semantic_results_callable_selection(results, &admission,
+            wrapper->data.function_item.body, call_expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && selection.syntax == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+        && selection.argument_count == 1u
+        && selection.receiver_argument == CM_HIR_CALLABLE_RECEIVER_NONE
+        && selection.receiver_expression == CM_HIR_EXPR_NONE
+        && cm_semantic_results_callable_argument(results, &admission,
+            wrapper->data.function_item.body, call_expression, 0u,
+            &argument) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_expression(results, &admission,
+            wrapper->data.function_item.body, argument, &argument_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_callable_parameter(results, &admission,
+            wrapper->data.function_item.body, call_expression, 0u,
+            &parameter_type) == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&parameter_type,
+            &argument_view.adjusted_type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_results_callable_argument(results, &admission,
+            wrapper->data.function_item.body, call_expression, 1u,
+            &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND
+        && cm_semantic_results_callable_parameter(results, &admission,
+            wrapper->data.function_item.body, call_expression, 1u,
+            &parameter_type) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
 static void test_projection_failure_discards_partial_stage(void)
 {
     Fixture fixture;
@@ -1196,6 +1278,7 @@ int main(void)
     test_instance_commit_requires_producer_session();
     test_writeback_distinguishes_unsolved_terms();
     test_durable_projection_trace_definition();
+    test_durable_qualified_callable_recipe();
     test_projection_failure_discards_partial_stage();
     puts("semantic results tests passed");
     return 0;

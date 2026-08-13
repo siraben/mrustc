@@ -699,6 +699,9 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         case CM_HIR_EXPR_BLOCK: kind_name = "block"; break;
         case CM_HIR_EXPR_LOCAL: kind_name = "local"; break;
         case CM_HIR_EXPR_CALL: kind_name = "call"; break;
+        case CM_HIR_EXPR_QUALIFIED_CALL:
+            kind_name = "qualified-call";
+            break;
         case CM_HIR_EXPR_BINARY: kind_name = "binary"; break;
         case CM_HIR_EXPR_AGGREGATE: kind_name = "aggregate"; break;
         case CM_HIR_EXPR_FIELD: kind_name = "field"; break;
@@ -765,6 +768,35 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 if (child_index != 0u) fputc(',', stream);
                 fprintf(stream, "expr#%u", (unsigned int)
                     expression->data.call.arguments[child_index]);
+            }
+            fputc(']', stream);
+            break;
+        case CM_HIR_EXPR_QUALIFIED_CALL:
+            fputs("syntax=qualified-trait-method self=ty#", stream);
+            fprintf(stream, "%u trait=",
+                (unsigned int)expression->data.qualified_call
+                    .requested_self_type);
+            cm_hir_dump_def(stream,
+                expression->data.qualified_call.requested_trait);
+            fputs(" declared=", stream);
+            cm_hir_dump_def(stream,
+                expression->data.qualified_call.declared_trait_callable);
+            if (expression->data.qualified_call.receiver_argument
+                    == CM_HIR_CALLABLE_RECEIVER_NONE) {
+                fputs(" receiver=none", stream);
+            } else {
+                fprintf(stream, " receiver=argument[%u]",
+                    (unsigned int)expression->data.qualified_call
+                        .receiver_argument);
+            }
+            fputs(" arguments=[", stream);
+            for (child_index = 0u;
+                 child_index
+                    < expression->data.qualified_call.argument_count;
+                 ++child_index) {
+                if (child_index != 0u) fputc(',', stream);
+                fprintf(stream, "expr#%u", (unsigned int)
+                    expression->data.qualified_call.arguments[child_index]);
             }
             fputc(']', stream);
             break;

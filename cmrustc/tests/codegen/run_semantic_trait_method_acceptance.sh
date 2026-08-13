@@ -15,6 +15,23 @@ present_exe="$artifact_dir/present"
 "$CMRUSTC" --edition 2021 --emit-c \
     "$fixture_dir/semantic-trait-method-present.rs" -o "$present_c"
 test -s "$present_c"
+grep -Eq 'uint32_t[[:space:]]+[A-Za-z_][A-Za-z0-9_]*convert[A-Za-z0-9_]*[[:space:]]*\(uint32_t' \
+    "$present_c"
+awk '
+    /^uint32_t[[:space:]]+probe[[:space:]]*\(uint32_t/ {
+        in_probe = 1
+    }
+    in_probe && /convert[A-Za-z0-9_]*[[:space:]]*\(/ {
+        called_convert = 1
+    }
+    in_probe && /}/ {
+        finished_probe = 1
+        in_probe = 0
+    }
+    END {
+        if (!finished_probe || !called_convert) exit 1
+    }
+' "$present_c"
 "$CC" $CFLAGS -o "$present_exe" "$present_c" \
     "$fixture_dir/identity-probe-harness.c"
 "$present_exe"

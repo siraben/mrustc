@@ -350,11 +350,22 @@ static int cm_hir_body_ast_type_matches(const CmHirContext *context,
     const CmAst *ast, CmAstTypeId ast_type_id, CmHirTypeId hir_type_id)
 {
     const CmHirType *type;
+    const CmAstType *ast_type;
+    const CmAstPathSegment *segment;
 
     type = cm_hir_get_type(context, hir_type_id);
-    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && cm_hir_body_ast_type_is_integer(ast, ast_type_id,
+    ast_type = cm_ast_get_type(ast, ast_type_id);
+    segment = ast_type == NULL || ast_type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_hir_body_exact_path_segment(ast, ast_type->path);
+    if (type == NULL || segment == NULL || segment->argument_count != 0u) {
+        return 0;
+    }
+    if (type->kind == CM_HIR_TYPE_INTEGER_KIND) {
+        return cm_hir_body_ast_type_is_integer(ast, ast_type_id,
             type->data.integer_type.kind);
+    }
+    return type->kind == CM_HIR_TYPE_BOOL_KIND
+        && cm_hir_body_ast_text_is(ast, segment->name, "bool");
 }
 
 static void cm_hir_body_rollback_expressions(CmHirContext *context,
@@ -453,6 +464,16 @@ typedef struct CmHirBodyCallPlan {
     uint32_t argument_count;
     uint32_t substitution_count;
 } CmHirBodyCallPlan;
+
+typedef struct CmHirBodyQualifiedCallPlan {
+    CmHirTypeId requested_self_type;
+    CmHirDefId requested_trait;
+    CmHirDefId declared_trait_callable;
+    CmAstExprId arguments[2];
+    CmHirTypeId argument_types[2];
+    uint32_t argument_count;
+    uint32_t receiver_argument;
+} CmHirBodyQualifiedCallPlan;
 
 typedef struct CmHirBodyExpressionCounts {
     size_t expression_count;
@@ -974,6 +995,235 @@ static int cm_hir_body_qualified_path_valid(const CmAst *ast,
         && associated_path->span.end == expression->span.end;
 }
 
+static CmHirBodyLowerStatus cm_hir_body_load_resolve_path(
+    const CmHirBodyBuildState *state, const CmAstPath *path)
+{
+    size_t index;
+
+    if (path == NULL || path->segment_count == 0u || path->segments == NULL
+        || path->segment_count > state->path_segment_capacity) {
+        return CM_HIR_BODY_LOWER_INVALID_BODY;
+    }
+    for (index = 0u; index < path->segment_count; ++index) {
+        const CmAstPathSegment *segment;
+        const CmInternedString *name;
+
+        segment = &path->segments[index];
+        name = cm_ast_get_string(state->ast, segment->name);
+        if (segment->argument_count != 0u || segment->arguments != NULL
+            || name == NULL || name->len == 0u) {
+            return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+        }
+        state->path_segments[index].bytes = name->bytes;
+        state->path_segments[index].length = name->len;
+    }
+    return CM_HIR_BODY_LOWER_OK;
+}
+
+static CmHirTypeId cm_hir_body_resolve_qualified_self_type(
+    const CmHirBodyBuildState *state, CmAstTypeId ast_type_id)
+{
+    const CmAstType *ast_type;
+    const CmAstPathSegment *segment;
+    size_t index;
+
+    ast_type = cm_ast_get_type(state->ast, ast_type_id);
+    segment = ast_type == NULL || ast_type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_hir_body_exact_path_segment(state->ast,
+            ast_type->path);
+    if (segment == NULL || segment->argument_count != 0u) {
+        return CM_HIR_TYPE_NONE;
+    }
+    for (index = 0u; index < state->context->types.len; ++index) {
+        CmHirTypeId candidate;
+
+        if (index >= (size_t)UINT32_MAX) return CM_HIR_TYPE_NONE;
+        candidate = (CmHirTypeId)(index + 1u);
+        if (cm_hir_body_ast_type_matches(state->context, state->ast,
+                ast_type_id, candidate)) {
+            return candidate;
+        }
+    }
+    return CM_HIR_TYPE_NONE;
+}
+
+static CmHirTypeId cm_hir_body_qualified_declared_type(
+    const CmHirContext *context, CmHirDefId trait_definition,
+    CmHirTypeId requested_self, CmHirTypeId declared)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(context, declared);
+    if (type == NULL) return CM_HIR_TYPE_NONE;
+    if (type->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(type->data.self_type.owner,
+            trait_definition)) {
+        return requested_self;
+    }
+    return type->kind == CM_HIR_TYPE_BOOL_KIND
+            || type->kind == CM_HIR_TYPE_INTEGER_KIND
+            || (type->kind == CM_HIR_TYPE_ADT_KIND
+                && type->data.named_type.argument_count == 0u
+                && type->data.named_type.arguments == NULL)
+        ? declared : CM_HIR_TYPE_NONE;
+}
+
+static CmHirBodyLowerStatus cm_hir_body_resolve_qualified_call(
+    const CmHirBodyBuildState *state, const CmAstExpr *call,
+    CmHirTypeId expected_type, CmHirBodyQualifiedCallPlan *out_plan)
+{
+    const CmAstExpr *callee;
+    const CmAstPath *trait_path;
+    const CmAstPath *associated_path;
+    const CmAstPathSegment *associated;
+    const CmHirItem *trait_item;
+    const CmHirItem *declared;
+    const CmHirFunctionSignature *signature;
+    const CmAst *trait_ast;
+    const CmAstItem *source_trait;
+    CmResolvedBinding binding;
+    CmImportLookupStatus lookup;
+    CmHirModuleId hir_module;
+    CmHirTypeId requested_self;
+    CmHirTypeId declared_return;
+    size_t index;
+
+    memset(out_plan, 0, sizeof(*out_plan));
+    out_plan->receiver_argument = CM_HIR_CALLABLE_RECEIVER_NONE;
+    callee = cm_ast_get_expr(state->ast, call->data.call.callee);
+    if (callee == NULL || !cm_hir_body_qualified_path_valid(state->ast,
+            callee) || call->data.call.argument_count > 2u
+        || (call->data.call.argument_count == 0u)
+            != (call->data.call.arguments == NULL)) {
+        return callee == NULL
+            ? CM_HIR_BODY_LOWER_INVALID_BODY
+            : CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+    }
+    trait_path = cm_ast_get_path(state->ast,
+        callee->data.qualified_path.trait_path);
+    associated_path = cm_ast_get_path(state->ast,
+        callee->data.qualified_path.associated_path);
+    associated = associated_path == NULL
+            || associated_path->absolute
+            || associated_path->segment_count != 1u
+            || associated_path->segments == NULL
+        ? NULL : &associated_path->segments[0];
+    if (trait_path == NULL || associated == NULL
+        || associated->argument_count != 0u
+        || associated->arguments != NULL) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+    }
+    if (cm_hir_body_load_resolve_path(state, trait_path)
+            != CM_HIR_BODY_LOWER_OK) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+    }
+    lookup = cm_import_resolve_path_checked(state->imports, state->graph,
+        state->revision, state->graph_module, trait_path->absolute,
+        state->path_segments, trait_path->segment_count,
+        CM_RESOLVE_NAMESPACE_TYPE, &binding);
+    if (lookup == CM_IMPORT_LOOKUP_STALE_REVISION
+        || lookup == CM_IMPORT_LOOKUP_FAILED_BUILD) {
+        return CM_HIR_BODY_LOWER_SOURCE_MISMATCH;
+    }
+    if (lookup != CM_IMPORT_LOOKUP_OK || binding.is_ambiguous
+        || binding.is_anonymous || binding.item_kind != CM_AST_ITEM_TRAIT
+        || binding.declaration.source == 0u
+        || binding.declaration.item == CM_AST_ITEM_NONE) {
+        return CM_HIR_BODY_LOWER_UNRESOLVED_PATH;
+    }
+    if (cm_hir_module_map_lookup_hir(state->modules, state->graph,
+            state->revision, binding.module, state->context,
+            &hir_module) != CM_HIR_MODULE_MAP_OK
+        || !cm_module_graph_borrow_item_ast(state->graph, binding.module,
+            binding.declaration, &trait_ast)) {
+        return CM_HIR_BODY_LOWER_SOURCE_MISMATCH;
+    }
+    source_trait = cm_ast_get_item(trait_ast, binding.declaration.item);
+    trait_item = NULL;
+    for (index = 0u; index < state->context->items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(
+            &state->context->items, index);
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_TRAIT
+            || candidate->owner_module != hir_module
+            || candidate->span.source != binding.declaration.source
+            || source_trait == NULL
+            || candidate->span.start != source_trait->span.start
+            || candidate->span.end != source_trait->span.end
+            || !cm_hir_body_ast_hir_text_equal(trait_ast,
+                source_trait->name, state->context, candidate->name)) {
+            continue;
+        }
+        if (trait_item != NULL) return CM_HIR_BODY_LOWER_INVALID_BODY;
+        trait_item = candidate;
+    }
+    requested_self = cm_hir_body_resolve_qualified_self_type(state,
+        callee->data.qualified_path.self_type);
+    if (trait_item == NULL || source_trait == NULL
+        || source_trait->kind != CM_AST_ITEM_TRAIT
+        || requested_self == CM_HIR_TYPE_NONE
+        || trait_item->generic_parameter_count != 0u
+        || trait_item->predicate_scope_count != 0u
+        || trait_item->predicate_count != 0u
+        || trait_item->outlives_predicate_count != 0u) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+    }
+    declared = NULL;
+    for (index = 0u; index < state->context->items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(
+            &state->context->items, index);
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_hir_def_id_equal(candidate->parent_definition,
+                trait_item->definition)
+            || !cm_hir_body_ast_hir_text_equal(state->ast,
+                associated->name, state->context, candidate->name)) {
+            continue;
+        }
+        if (declared != NULL) return CM_HIR_BODY_LOWER_INVALID_BODY;
+        declared = candidate;
+    }
+    if (declared == NULL || declared->generic_parameter_count != 0u
+        || declared->data.function_item.body != CM_HIR_BODY_NONE
+        || declared->predicate_scope_count != 0u
+        || declared->predicate_count != 0u
+        || declared->outlives_predicate_count != 0u
+        || !cm_hir_def_id_is_none(
+            declared->data.function_item.trait_item_definition)) {
+        return CM_HIR_BODY_LOWER_UNSUPPORTED_BODY;
+    }
+    signature = &declared->data.function_item.signature;
+    declared_return = cm_hir_body_qualified_declared_type(state->context,
+        trait_item->definition, requested_self, signature->return_type);
+    if (signature->parameter_count != call->data.call.argument_count
+        || (signature->parameter_count == 0u)
+            != (signature->parameters == NULL)
+        || declared_return == CM_HIR_TYPE_NONE
+        || !cm_hir_body_type_equal(state->context, declared_return,
+            expected_type)) {
+        return CM_HIR_BODY_LOWER_TYPE_MISMATCH;
+    }
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        out_plan->argument_types[index] =
+            cm_hir_body_qualified_declared_type(state->context,
+                trait_item->definition, requested_self,
+                signature->parameters[index].type);
+        if (out_plan->argument_types[index] == CM_HIR_TYPE_NONE) {
+            return CM_HIR_BODY_LOWER_UNSUPPORTED_TYPE;
+        }
+        out_plan->arguments[index] = call->data.call.arguments[index];
+    }
+    out_plan->requested_self_type = requested_self;
+    out_plan->requested_trait = trait_item->definition;
+    out_plan->declared_trait_callable = declared->definition;
+    out_plan->argument_count = call->data.call.argument_count;
+    out_plan->receiver_argument = signature->receiver == CM_HIR_RECEIVER_NONE
+        ? CM_HIR_CALLABLE_RECEIVER_NONE : 0u;
+    return CM_HIR_BODY_LOWER_OK;
+}
+
 static CmHirBodyLowerStatus cm_hir_body_resolve_scalar_call(
     const CmHirContext *context, const CmHirItem *owner_item,
     const CmAst *ast,
@@ -1001,11 +1251,6 @@ static CmHirBodyLowerStatus cm_hir_body_resolve_scalar_call(
         || callee_ast->span.start < call->span.start
         || callee_ast->span.end > call->span.end) {
         return CM_HIR_BODY_LOWER_INVALID_BODY;
-    }
-    if (callee_ast->kind == CM_AST_EXPR_QUALIFIED_PATH) {
-        return cm_hir_body_qualified_path_valid(ast, callee_ast)
-            ? CM_HIR_BODY_LOWER_UNSUPPORTED_BODY
-            : CM_HIR_BODY_LOWER_INVALID_BODY;
     }
     callee_segment = callee_ast->kind != CM_AST_EXPR_PATH ? NULL
         : cm_hir_body_exact_path_segment(ast,
@@ -1776,11 +2021,38 @@ static CmHirBodyLowerStatus cm_hir_body_preflight_typed_expression(
     case CM_AST_EXPR_CALL:
     {
         CmHirBodyCallPlan plan;
+        CmHirBodyQualifiedCallPlan qualified_plan;
+        const CmAstExpr *callee;
         uint32_t index;
         size_t own_words;
 
         if (expression->data.call.callee >= expression_id) {
             return CM_HIR_BODY_LOWER_INVALID_BODY;
+        }
+        callee = cm_ast_get_expr(state->ast,
+            expression->data.call.callee);
+        if (callee != NULL
+            && callee->kind == CM_AST_EXPR_QUALIFIED_PATH) {
+            status = cm_hir_body_resolve_qualified_call(state, expression,
+                expected_type, &qualified_plan);
+            if (status != CM_HIR_BODY_LOWER_OK) return status;
+            out_counts->expression_count = 1u;
+            out_counts->call_word_count = qualified_plan.argument_count;
+            for (index = 0u; index < qualified_plan.argument_count;
+                 ++index) {
+                if (qualified_plan.arguments[index] >= expression_id) {
+                    return CM_HIR_BODY_LOWER_INVALID_BODY;
+                }
+                status = cm_hir_body_preflight_typed_expression(state,
+                    qualified_plan.argument_types[index],
+                    qualified_plan.arguments[index], expression->span,
+                    depth + 1u, &child);
+                if (status != CM_HIR_BODY_LOWER_OK) return status;
+                if (!cm_hir_body_counts_add(out_counts, &child)) {
+                    return CM_HIR_BODY_LOWER_HIR_FAILURE;
+                }
+            }
+            return CM_HIR_BODY_LOWER_OK;
         }
         status = cm_hir_body_resolve_scalar_call(state->context,
             state->owner_item, state->ast, expression, expected_type,
@@ -2441,8 +2713,10 @@ static CmHirStatus cm_hir_body_build_typed_expression(
     }
     if (expression->kind == CM_AST_EXPR_CALL) {
         CmHirBodyCallPlan plan;
+        CmHirBodyQualifiedCallPlan qualified_plan;
         CmHirExpr call;
         CmHirExprId arguments[2];
+        const CmAstExpr *callee;
         CmHirBodyLowerStatus lower_status;
         CmHirStatus status;
         uint32_t *call_words;
@@ -2450,6 +2724,69 @@ static CmHirStatus cm_hir_body_build_typed_expression(
         size_t next_cursor;
         uint32_t index;
 
+        callee = cm_ast_get_expr(state->ast,
+            expression->data.call.callee);
+        if (callee != NULL
+            && callee->kind == CM_AST_EXPR_QUALIFIED_PATH) {
+            lower_status = cm_hir_body_resolve_qualified_call(state,
+                expression, expected_type, &qualified_plan);
+            if (lower_status != CM_HIR_BODY_LOWER_OK) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            for (index = 0u; index < qualified_plan.argument_count;
+                 ++index) {
+                status = cm_hir_body_build_typed_expression(state,
+                    qualified_plan.argument_types[index],
+                    qualified_plan.arguments[index], &arguments[index]);
+                if (status != CM_HIR_OK) return status;
+            }
+            if (!cm_size_add(state->call_storage_cursor,
+                    (size_t)qualified_plan.argument_count, &next_cursor)
+                || next_cursor > state->call_storage_words
+                || (qualified_plan.argument_count != 0u
+                    && state->call_storage == NULL)) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            call_words = qualified_plan.argument_count == 0u ? NULL
+                : state->call_storage + state->call_storage_cursor;
+            for (index = 0u; index < qualified_plan.argument_count;
+                 ++index) {
+                call_words[index] = arguments[index];
+            }
+            memset(&call, 0, sizeof(call));
+            call.kind = CM_HIR_EXPR_QUALIFIED_CALL;
+            call.owner_body = state->body_id;
+            call.type = expected_type;
+            call.span = cm_hir_body_ast_span(state->source,
+                expression->span);
+            call.data.qualified_call.syntax =
+                CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD;
+            call.data.qualified_call.requested_self_type =
+                qualified_plan.requested_self_type;
+            call.data.qualified_call.requested_trait =
+                qualified_plan.requested_trait;
+            call.data.qualified_call.declared_trait_callable =
+                qualified_plan.declared_trait_callable;
+            call.data.qualified_call.arguments =
+                (CmHirExprId *)call_words;
+            call.data.qualified_call.argument_count =
+                qualified_plan.argument_count;
+            call.data.qualified_call.receiver_argument =
+                qualified_plan.receiver_argument;
+            if (state->aggregate_storage_count == 0u
+                && state->call_storage_cursor == 0u) {
+                call.data.qualified_call.owned_storage =
+                    (uint32_t *)state->transaction_storage;
+            }
+            state->call_storage_cursor = next_cursor;
+            status = cm_hir_add_owned_qualified_call_expr(state->context,
+                &call, out_expression);
+            if (status == CM_HIR_OK
+                && call.data.qualified_call.owned_storage != NULL) {
+                state->transaction_storage_adopted = 1;
+            }
+            return status;
+        }
         lower_status = cm_hir_body_resolve_scalar_call(state->context,
             state->owner_item, state->ast, expression,
             expected_type, &plan);
@@ -2600,7 +2937,7 @@ static CmHirStatus cm_hir_body_build_typed_expression(
     return CM_HIR_INVARIANT_VIOLATION;
 }
 
-static size_t cm_hir_body_max_struct_path_segments(const CmAst *ast)
+static size_t cm_hir_body_max_resolve_path_segments(const CmAst *ast)
 {
     size_t index;
     size_t maximum;
@@ -2612,9 +2949,16 @@ static size_t cm_hir_body_max_struct_path_segments(const CmAst *ast)
 
         expression = (const CmAstExpr *)cm_vec_at_const(
             &ast->expressions, index);
-        path = expression == NULL || expression->kind != CM_AST_EXPR_STRUCT
-            ? NULL : cm_ast_get_path(ast,
-                expression->data.struct_expr.path);
+        path = NULL;
+        if (expression != NULL && expression->kind == CM_AST_EXPR_STRUCT) {
+            path = cm_ast_get_path(ast, expression->data.struct_expr.path);
+        } else if (expression != NULL
+            && expression->kind == CM_AST_EXPR_QUALIFIED_PATH
+            && expression->data.qualified_path.trait_path
+                != CM_AST_PATH_NONE) {
+            path = cm_ast_get_path(ast,
+                expression->data.qualified_path.trait_path);
+        }
         if (path != NULL && path->segment_count > maximum) {
             maximum = path->segment_count;
         }
@@ -2685,7 +3029,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     size_t transaction_storage_bytes;
     size_t path_storage_bytes;
     size_t path_storage_offset;
-    size_t max_struct_path_segments;
+    size_t max_resolve_path_segments;
     CmSourceId source;
     uint32_t statement_count;
     uint32_t statement_index;
@@ -2798,8 +3142,8 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     build_state.base_local_count = body->local_count;
     build_state.allowed_if_expression = tail_ast->kind == CM_AST_EXPR_IF
         ? block_ast->data.block.tail : CM_AST_EXPR_NONE;
-    max_struct_path_segments = cm_hir_body_max_struct_path_segments(ast);
-    if (!cm_size_mul(max_struct_path_segments,
+    max_resolve_path_segments = cm_hir_body_max_resolve_path_segments(ast);
+    if (!cm_size_mul(max_resolve_path_segments,
             sizeof(CmResolvePathSegmentView), &path_storage_bytes)) {
         result.status = CM_HIR_BODY_LOWER_HIR_FAILURE;
         result.hir_status = CM_HIR_ID_EXHAUSTED;
@@ -2808,7 +3152,7 @@ CmHirBodyLowerResult cm_hir_lower_body(CmHirContext *context,
     if (path_storage_bytes != 0u) {
         build_state.path_segments = (CmResolvePathSegmentView *)cm_alloc(
             path_storage_bytes);
-        build_state.path_segment_capacity = max_struct_path_segments;
+        build_state.path_segment_capacity = max_resolve_path_segments;
     }
     if (statement_count != 0u) {
         let_plans = (CmHirBodyLetPlan *)cm_alloc_zeroed(statement_count,

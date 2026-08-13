@@ -681,6 +681,8 @@ typedef enum CmHirExprKind {
     CM_HIR_EXPR_LOCAL,
     /* A resolved free-function call with explicit type substitution. */
     CM_HIR_EXPR_CALL,
+    /* An unresolved, explicitly qualified trait callable site. */
+    CM_HIR_EXPR_QUALIFIED_CALL,
     /* One fully typed, body-owned binary operation. */
     CM_HIR_EXPR_BINARY,
     /* Complete construction of one known local nongeneric named struct. */
@@ -694,6 +696,12 @@ typedef enum CmHirExprKind {
     /* Explicit built-in dereference of one immutable erased reference. */
     CM_HIR_EXPR_DEREFERENCE
 } CmHirExprKind;
+
+typedef enum CmHirCallableSyntax {
+    CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD = 0
+} CmHirCallableSyntax;
+
+#define CM_HIR_CALLABLE_RECEIVER_NONE ((uint32_t)UINT32_MAX)
 
 /* Extend only when the model and source lowerer implement exact semantics. */
 typedef enum CmHirBinaryOperator {
@@ -757,6 +765,17 @@ typedef struct CmHirExpr {
             /* Non-null only when this node owns the transaction allocation. */
             uint32_t *owned_storage;
         } call;
+        struct {
+            CmHirCallableSyntax syntax;
+            CmHirTypeId requested_self_type;
+            CmHirDefId requested_trait;
+            CmHirDefId declared_trait_callable;
+            CmHirExprId *arguments;
+            uint32_t argument_count;
+            uint32_t receiver_argument;
+            /* Non-null only when this node owns the argument allocation. */
+            uint32_t *owned_storage;
+        } qualified_call;
         struct {
             CmHirBinaryOperator operator_kind;
             CmHirExprId left;
@@ -955,6 +974,8 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context, const CmHirExpr *expression,
  * API instead.
  */
 CmHirStatus cm_hir_add_owned_call_expr(CmHirContext *context,
+    const CmHirExpr *expression, CmHirExprId *out_id);
+CmHirStatus cm_hir_add_owned_qualified_call_expr(CmHirContext *context,
     const CmHirExpr *expression, CmHirExprId *out_id);
 /*
  * Transaction-builder hook for a validated aggregate field slice. For each

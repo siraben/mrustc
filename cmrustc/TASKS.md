@@ -1490,17 +1490,54 @@ optional u32` remains temporary lowering material, so this is still bounded
 monomorphization evidence rather than the completed task. The next authority
 checkpoints are general substitutions and the full semantic/MIR pass sequence.
 
-The next bounded semantic-recipe slice is explicit local UFCS trait-method
-calls. HIR will retain qualified callable syntax without a selected target; the
-semantic pass will uniquely select a supported concrete local impl method and
-publish the declared trait item, selected impl/callable, exact child
-expressions, argument/return types, and receiver-adjustment boundary. Read-only
-reachability will derive the canonical callee only from that sealed recipe, and
-exact MIR replay will verify it before emitting the existing call operation.
-This mirrors original mrustc's resolve, expression-typecheck/method-selection,
-UFCS-expansion, and final-validation order while avoiding post-typecheck HIR
-mutation. Defaults, generic methods/impls, coercions, autoderef/autoref, and
-foreign incomplete metadata remain fail-closed in the first slice.
+The explicit local UFCS trait-method checkpoint now crosses that recipe
+boundary. HIR retains `<Type as Trait>::method(arguments)` as unresolved
+qualified callable syntax with the requested concrete `Self`, requested trait,
+declared trait method, ordered child expressions, and receiver ordinal, but no
+selected impl or method. The all-local semantic pass proves the implemented-
+trait goal, requires one supported positive concrete local impl, authenticates
+the exact impl method's declaration link and signature, and atomically seals the
+declared trait item, selected impl/callable, child expressions, receiver
+boundary, and normalized parameter/return types in semantic results. Missing,
+ambiguous, negative, malformed, and unsupported candidates publish no recipe.
+
+Read-only reachability obtains the callee only from that sealed selection and
+then authenticates its exact DefId parent links; it does not repeat trait or
+method selection. Exact admission, MIR lowering, and MIR replay query and
+authenticate the same selection before emitting a direct call to the separately
+reachable impl method. A source fixture executes a public C-ABI wrapper calling
+the selected private impl method, while missing and ambiguous fixtures prove
+atomic output rejection. This follows original mrustc's resolve, expression
+typecheck/selection, typed-HIR validation, MIR, and translation ordering without
+performing lookup during reachability or MIR construction.
+
+This checkpoint remains deliberately bounded to concrete nongeneric local
+positive trait impls and methods with the currently supported scalar call
+shape. Trait defaults, inherent and dot-syntax method lookup, generic
+traits/impls/methods, broader substitutions and projections, coercions,
+autoderef/autoref/reborrow adjustments, cross-crate incomplete metadata, and
+general callable traits remain fail-closed. Stored MIR locals already carry the
+normalized semantic signature types, but the C backend still authenticates an
+impl-owned symbolic `Self` by inspecting the exact parent impl. That is bounded
+compatibility debt: admitted MIR validation and codegen must ultimately consume
+the sealed normalized signature view directly, leaving declaration inspection
+only for exact identity authentication.
+
+The next callable milestone generalizes body constraints rather than adding a
+new reachability special case. Source HIR will retain unresolved
+`receiver.method(arguments)` syntax and exact in-scope trait identities. The
+crate-wide semantic transaction will jointly constrain the receiver and
+arguments, select inherent or trait candidates, and publish one callable recipe
+containing the declared item, selected impl/callable, canonical instance,
+normalized parameter/return types, and an ordered immutable
+autoderef/autoref/reborrow adjustment sequence. Missing, ambiguous, negative,
+inapplicable, or metadata-incomplete candidates must reject the entire semantic
+transaction. Reachability and MIR will consume only the sealed recipe. Focused
+acceptance requires executable local inherent and trait method calls plus
+atomic ambiguity, adjustment, and incomplete-evidence rejection under strict,
+TinyCC, and sanitizer gates. Operators, indexing, and callable-trait syntax then
+reuse the same selection and adjustment machinery instead of introducing
+parallel lookup paths.
 
 ## M6: Build orchestration
 

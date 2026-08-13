@@ -147,6 +147,23 @@ static CmHirExprId find_body_call(const CmHirContext *hir, CmHirBodyId body)
     return CM_HIR_EXPR_NONE;
 }
 
+static CmHirExprId find_body_qualified_call(const CmHirContext *hir,
+    CmHirBodyId body)
+{
+    size_t index;
+
+    for (index = 0u; index < hir->expressions.len; ++index) {
+        const CmHirExpr *expression;
+
+        expression = cm_hir_get_expr(hir, (CmHirExprId)(index + 1u));
+        if (expression != NULL && expression->owner_body == body
+            && expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            return (CmHirExprId)(index + 1u);
+        }
+    }
+    return CM_HIR_EXPR_NONE;
+}
+
 static void test_success_and_stale(void)
 {
     Fixture f;
@@ -1201,6 +1218,108 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     fixture_destroy(&f);
 }
 
+static void test_exact_instance_closure_authenticates_qualified_call(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmission foreign;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance reachable[2];
+    CmSemanticReachableInstanceCall edge;
+    CmSemanticReachableInstanceCall duplicates[2];
+    CmHirInstanceSpec caller_spec;
+    CmHirInstanceSpec callee_spec;
+    const CmHirItem *caller;
+    const CmHirItem *callee;
+    const CmHirItem *impl_item;
+    const CmSemanticResults *results;
+    CmSemanticCallableSelectionView selection;
+    CmSemanticTypeView parameter;
+    CmSemanticExpressionView argument_view;
+    CmHirExprId call_expression;
+    CmHirExprId argument;
+    int equal;
+
+    fixture_init(&f,
+        "trait Convert { fn convert(value: u32) -> u32; } "
+        "impl Convert for u32 { fn convert(value: u32) -> u32 { value } } "
+        "fn caller(value: u32) -> u32 { <u32 as Convert>::convert(value) }");
+    caller = find_free_function(&f.hir, "caller");
+    callee = find_impl_method(&f.hir, "convert");
+    assert(caller != NULL && callee != NULL);
+    lower_function(&f, callee);
+    lower_function(&f, caller);
+    call_expression = find_body_qualified_call(&f.hir,
+        caller->data.function_item.body);
+    impl_item = cm_hir_get_item(&f.hir,
+        cm_hir_lookup_definition(&f.hir, callee->parent_definition)
+            ->entity.item_id);
+    assert(call_expression != CM_HIR_EXPR_NONE && impl_item != NULL
+        && impl_item->kind == CM_HIR_ITEM_IMPL);
+    cm_hir_instance_spec_init(&caller_spec);
+    caller_spec.selected_callable = caller->definition;
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = callee->definition;
+    callee_spec.declared_trait_callable =
+        callee->data.function_item.trait_item_definition;
+    callee_spec.enclosing_impl = impl_item->definition;
+    callee_spec.implemented_trait =
+        impl_item->data.impl_item.trait_type.definition;
+    callee_spec.self_owner = impl_item->definition;
+    callee_spec.self_type = impl_item->data.impl_item.self_type;
+    reachable[0].body = caller->data.function_item.body;
+    reachable[0].spec = &caller_spec;
+    reachable[1].body = callee->data.function_item.body;
+    reachable[1].spec = &callee_spec;
+    edge.caller = &caller_spec;
+    edge.expression = call_expression;
+    edge.callee = &callee_spec;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, &edge, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_instance_callable_selection(results,
+            &admission, &caller_spec, call_expression, &selection)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_def_id_equal(selection.selected_callable,
+            callee->definition)
+        && selection.argument_count == 1u
+        && cm_semantic_results_instance_callable_argument(results,
+            &admission, &caller_spec, call_expression, 0u, &argument)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_expression(results, &admission,
+            &caller_spec, argument, &argument_view)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_results_instance_callable_parameter(results,
+            &admission, &caller_spec, call_expression, 0u, &parameter)
+            == CM_SEMANTIC_RESULTS_OK
+        && cm_semantic_type_view_equal(&parameter,
+            &argument_view.adjusted_type, &equal) == CM_SEMANTIC_RESULTS_OK
+        && equal
+        && cm_semantic_results_instance_callable_argument(results,
+            &admission, &caller_spec, call_expression, 1u, &argument)
+            == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    memset(&foreign, 0, sizeof(foreign));
+    assert(cm_semantic_results_instance_callable_selection(results,
+        &foreign, &caller_spec, call_expression, &selection)
+        == CM_SEMANTIC_RESULTS_STALE);
+    cm_semantic_admission_destroy(&admission);
+
+    memset(&admission, 0, sizeof(admission));
+    duplicates[0] = edge;
+    duplicates[1] = edge;
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, duplicates, 2u).status
+            == CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT
+        && admission.state == NULL);
+    assert(cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, reachable, 2u, NULL, 0u).status
+            == CM_SEMANTIC_ADMISSION_HIR_FAILURE
+        && admission.state == NULL);
+    fixture_destroy(&f);
+}
+
 static void test_reachable_admission_scope_is_enforced(void)
 {
     Fixture f;
@@ -1360,6 +1479,7 @@ int main(void)
     test_leaf_instance_admitted_mir_is_exact();
     test_leaf_instance_admission_rejects_calls_and_bounds();
     test_exact_instance_closure_authenticates_generic_calls();
+    test_exact_instance_closure_authenticates_qualified_call();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();
     test_invalid_api();

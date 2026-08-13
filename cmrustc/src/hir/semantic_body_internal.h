@@ -21,6 +21,23 @@ typedef struct CmSemanticCheckedCallFacts {
     uint32_t parameter_count;
 } CmSemanticCheckedCallFacts;
 
+typedef struct CmSemanticCheckedCallableFacts {
+    CmHirExprId expression;
+    CmHirCallableSyntax syntax;
+    CmTypeckTypeId requested_self_type;
+    CmHirDefId requested_trait;
+    CmHirDefId declared_trait_callable;
+    CmHirDefId selected_impl;
+    CmHirDefId selected_callable;
+    CmHirExprId receiver_expression;
+    uint32_t receiver_argument;
+    const CmHirExprId *argument_expressions;
+    uint32_t argument_count;
+    const CmTypeckTypeId *parameter_types;
+    uint32_t parameter_count;
+    CmTypeckTypeId return_type;
+} CmSemanticCheckedCallableFacts;
+
 /* One expression-indexed step in source-to-target application order. */
 typedef struct CmSemanticCheckedAdjustmentFacts {
     CmHirExprId expression;
@@ -61,6 +78,8 @@ typedef struct CmSemanticCheckedBodyFacts {
     uint32_t signature_parameter_count;
     const CmSemanticCheckedCallFacts *calls;
     size_t call_count;
+    const CmSemanticCheckedCallableFacts *callables;
+    size_t callable_count;
     const CmSemanticCheckedAdjustmentFacts *adjustments;
     size_t adjustment_count;
     const CmSemanticCheckedPrimitiveBinaryFacts *primitive_binaries;

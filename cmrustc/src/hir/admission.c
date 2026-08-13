@@ -81,6 +81,54 @@ static const CmHirItem *cm_admission_item(const CmHirContext *hir,
         ? item : NULL;
 }
 
+static int cm_admission_instance_callable_supported(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirInstanceSpec *spec, const CmHirItem *item, int leaf_only)
+{
+    const CmHirItem *impl_item;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || spec == NULL
+        || item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+        || item->definition.crate_id != local_crate
+        || item->predicate_scope_count != 0u
+        || (leaf_only && item->predicate_count != 0u)
+        || item->outlives_predicate_count != 0u) return 0;
+    if (cm_hir_def_id_is_none(item->parent_definition)) {
+        return cm_hir_def_id_is_none(
+            item->data.function_item.trait_item_definition);
+    }
+    impl_item = cm_admission_item(hir, item->parent_definition);
+    return item->generic_parameter_count == 0u
+        && item->predicate_count == 0u
+        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->definition.crate_id == local_crate
+        && impl_item->generic_parameter_count == 0u
+        && impl_item->predicate_scope_count == 0u
+        && impl_item->predicate_count == 0u
+        && impl_item->outlives_predicate_count == 0u
+        && impl_item->data.impl_item.has_trait
+        && !impl_item->data.impl_item.is_negative
+        && impl_item->data.impl_item.trait_type.argument_count == 0u
+        && impl_item->data.impl_item.trait_type.arguments == NULL
+        && !cm_hir_def_id_is_none(
+            item->data.function_item.trait_item_definition)
+        && cm_hir_def_id_equal(spec->enclosing_impl,
+            impl_item->definition)
+        && cm_hir_def_id_equal(spec->implemented_trait,
+            impl_item->data.impl_item.trait_type.definition)
+        && cm_hir_def_id_equal(spec->declared_trait_callable,
+            item->data.function_item.trait_item_definition)
+        && cm_hir_def_id_equal(spec->self_owner, impl_item->definition)
+        && spec->item_argument_count == 0u
+        && spec->item_arguments == NULL
+        && spec->method_argument_count == 0u
+        && spec->method_arguments == NULL
+        && spec->enclosing_impl_argument_count == 0u
+        && spec->enclosing_impl_arguments == NULL
+        && spec->implemented_trait_argument_count == 0u
+        && spec->implemented_trait_arguments == NULL;
+}
+
 static CmHirStatus cm_admission_rollback(CmHirContext *hir,
     CmHirContextMark *mark, const CmHirBody *journal, size_t body_count)
 {
@@ -518,12 +566,8 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
         result.body = instances[index].body;
         item = cm_admission_item(hir, spec->selected_callable);
         body = cm_hir_get_body(hir, instances[index].body);
-        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
-            || item->definition.crate_id != local_crate
-            || !cm_hir_def_id_is_none(item->parent_definition)
-            || item->predicate_scope_count != 0u
-            || (leaf_only && item->predicate_count != 0u)
-            || item->outlives_predicate_count != 0u
+        if (!cm_admission_instance_callable_supported(hir, local_crate,
+                spec, item, leaf_only)
             || item->data.function_item.body != instances[index].body
             || body == NULL || body->state != CM_HIR_BODY_TYPED
             || body->root_expression == CM_HIR_EXPR_NONE
@@ -566,20 +610,50 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
         }
         expression = cm_hir_get_expr(hir, calls[index].expression);
         if (expression == NULL
-            || expression->kind != CM_HIR_EXPR_CALL
             || expression->owner_body
-                != canonical_calls[index].caller.body
-            || !cm_hir_def_id_equal(expression->data.call.callee,
-                canonical_calls[index].callee.definition)) {
+                != canonical_calls[index].caller.body) {
             cm_hir_canonical_instance_destroy(&checked_callee);
             goto cleanup_instances;
         }
-        if (cm_hir_canonical_instance_encode_direct_call(hir, local_crate,
-                calls[index].caller, expression, &checked_callee)
-                != CM_HIR_INSTANCE_OK
-            || cm_hir_canonical_instance_equal(&checked_callee,
-                &canonical_calls[index].callee, &equal)
-                != CM_HIR_INSTANCE_OK || !equal) {
+        if (expression->kind == CM_HIR_EXPR_CALL) {
+            if (!cm_hir_def_id_equal(expression->data.call.callee,
+                    canonical_calls[index].callee.definition)
+                || cm_hir_canonical_instance_encode_direct_call(hir,
+                    local_crate, calls[index].caller, expression,
+                    &checked_callee) != CM_HIR_INSTANCE_OK
+                || cm_hir_canonical_instance_equal(&checked_callee,
+                    &canonical_calls[index].callee, &equal)
+                    != CM_HIR_INSTANCE_OK || !equal) {
+                cm_hir_canonical_instance_destroy(&checked_callee);
+                goto cleanup_instances;
+            }
+        } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            CmHirInstanceSpec requested_spec;
+
+            requested_spec = *calls[index].callee;
+            requested_spec.self_type =
+                expression->data.qualified_call.requested_self_type;
+            if (calls[index].callee->selected_callable.crate_id
+                    != local_crate
+                || !cm_hir_def_id_equal(
+                    calls[index].callee->selected_callable,
+                    canonical_calls[index].callee.definition)
+                || !cm_hir_def_id_equal(
+                    calls[index].callee->declared_trait_callable,
+                    expression->data.qualified_call
+                        .declared_trait_callable)
+                || !cm_hir_def_id_equal(
+                    calls[index].callee->implemented_trait,
+                    expression->data.qualified_call.requested_trait)
+                || cm_hir_canonical_instance_encode(hir, local_crate,
+                    &requested_spec, &checked_callee) != CM_HIR_INSTANCE_OK
+                || cm_hir_canonical_instance_equal(&checked_callee,
+                    &canonical_calls[index].callee, &equal)
+                    != CM_HIR_INSTANCE_OK || !equal) {
+                cm_hir_canonical_instance_destroy(&checked_callee);
+                goto cleanup_instances;
+            }
+        } else {
             cm_hir_canonical_instance_destroy(&checked_callee);
             goto cleanup_instances;
         }
@@ -655,18 +729,23 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
         spec = instances[index].spec;
         result.owner = spec->selected_callable;
         result.body = instances[index].body;
-        substitution_count = spec->item_argument_count;
+        substitution_count = cm_hir_def_id_is_none(spec->enclosing_impl)
+            ? spec->item_argument_count : spec->method_argument_count;
         substitutions = substitution_count == 0u ? NULL
             : (const CmHirTypeId *)cm_alloc(
                 substitution_count * sizeof(*substitutions));
         for (argument = 0u; argument < substitution_count; ++argument) {
-            if (spec->item_arguments[argument].kind
+            const CmHirGenericArg *arguments;
+
+            arguments = cm_hir_def_id_is_none(spec->enclosing_impl)
+                ? spec->item_arguments : spec->method_arguments;
+            if (arguments[argument].kind
                     != CM_HIR_GENERIC_ARG_TYPE) {
                 cm_free((void *)substitutions);
                 goto cleanup_instances;
             }
             ((CmHirTypeId *)substitutions)[argument] =
-                spec->item_arguments[argument].data.type;
+                arguments[argument].data.type;
         }
         cm_semantic_session_options_init(&options);
         options.local_crate = local_crate;

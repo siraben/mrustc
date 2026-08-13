@@ -39,6 +39,7 @@ typedef struct CmSemanticBodyView {
     uint32_t expression_count;
     uint32_t projection_trace_count;
     uint32_t projection_step_count;
+    uint32_t callable_count;
 } CmSemanticBodyView;
 
 typedef struct CmSemanticExpressionView {
@@ -123,6 +124,27 @@ typedef struct CmSemanticDirectCallView {
     CmSemanticTypeView return_type;
 } CmSemanticDirectCallView;
 
+/*
+ * The complete authenticated selection for one explicitly qualified trait
+ * method call.  MIR must consume this recipe instead of repeating lookup.
+ * `receiver_argument` is either an argument ordinal or
+ * CM_HIR_CALLABLE_RECEIVER_NONE.
+ */
+typedef struct CmSemanticCallableSelectionView {
+    CmHirBodyId body;
+    CmHirExprId expression;
+    CmHirCallableSyntax syntax;
+    CmSemanticTypeView requested_self_type;
+    CmHirDefId requested_trait;
+    CmHirDefId declared_trait_callable;
+    CmHirDefId selected_impl;
+    CmHirDefId selected_callable;
+    CmHirExprId receiver_expression;
+    uint32_t receiver_argument;
+    uint32_t argument_count;
+    CmSemanticTypeView return_type;
+} CmSemanticCallableSelectionView;
+
 typedef enum CmSemanticProjectionDecisionKind {
     CM_SEMANTIC_PROJECTION_DECISION_EXPRESSION_TYPE = 0
 } CmSemanticProjectionDecisionKind;
@@ -200,6 +222,21 @@ CmSemanticResultsStatus cm_semantic_results_instance_direct_call_parameter(
     const struct CmHirInstanceSpec *caller, CmHirExprId expression,
     const struct CmHirInstanceSpec *expected_callee, uint32_t parameter,
     CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_callable_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    CmSemanticCallableSelectionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_instance_callable_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    uint32_t argument, CmHirExprId *out_expression);
+CmSemanticResultsStatus cm_semantic_results_instance_callable_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission,
+    const struct CmHirInstanceSpec *caller, CmHirExprId expression,
+    uint32_t parameter, CmSemanticTypeView *out_view);
 CmSemanticResultsStatus cm_semantic_results_instance_projection_trace(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission,
@@ -265,6 +302,20 @@ CmSemanticResultsStatus cm_semantic_results_direct_call(
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression, CmSemanticDirectCallView *out_view);
 CmSemanticResultsStatus cm_semantic_results_direct_call_parameter(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, uint32_t parameter,
+    CmSemanticTypeView *out_view);
+CmSemanticResultsStatus cm_semantic_results_callable_selection(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, CmSemanticCallableSelectionView *out_view);
+CmSemanticResultsStatus cm_semantic_results_callable_argument(
+    const CmSemanticResults *results,
+    const struct CmSemanticAdmission *admission, CmHirBodyId body,
+    CmHirExprId expression, uint32_t argument,
+    CmHirExprId *out_expression);
+CmSemanticResultsStatus cm_semantic_results_callable_parameter(
     const CmSemanticResults *results,
     const struct CmSemanticAdmission *admission, CmHirBodyId body,
     CmHirExprId expression, uint32_t parameter,

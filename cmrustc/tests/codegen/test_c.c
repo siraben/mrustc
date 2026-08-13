@@ -20,6 +20,7 @@ CmCEmitStatus cm_c_emit_program_reference_test_copy(CmStrBuf *output,
     CmHirItemId entry_item, const CmTargetDesc *target);
 CmCEmitStatus cm_c_emit_reachable_program_reference_test_copy(
     CmStrBuf *output, const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission,
     const CmMirBodyId *roots, uint32_t root_count,
     const CmTargetDesc *target);
 const char *cm_c_emit_status_name_reference_test_copy(CmCEmitStatus status);
@@ -684,7 +685,8 @@ static void test_reference_export_and_rejection(void)
     roots[0] = 1u;
     cm_str_buf_init(&output);
     cm_str_buf_append(&output, "sentinel");
-    assert(cm_c_emit_reachable_program(&output, &program.hir, &mir, roots,
+    assert(cm_c_emit_reachable_program(&output, &program.hir, &mir, NULL,
+        roots,
         1u, &test_target) == CM_C_EMIT_INVALID_MIR);
     assert(strcmp(cm_str_buf_c_str(&output), "sentinel") == 0);
 

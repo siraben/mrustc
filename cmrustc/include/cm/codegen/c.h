@@ -37,6 +37,7 @@ CmCEmitStatus cm_c_emit_program(CmStrBuf *output,
  */
 CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
     const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission,
     const CmMirBodyId *roots, uint32_t root_count,
     const CmTargetDesc *target);
 

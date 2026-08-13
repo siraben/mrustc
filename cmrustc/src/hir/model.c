@@ -273,6 +273,11 @@ void cm_hir_release_expr_owned_storage(CmHirExpr *expression)
         expression->data.call.type_substitutions = NULL;
         expression->data.call.arguments = NULL;
         expression->data.call.owned_storage = NULL;
+    } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        && expression->data.qualified_call.owned_storage != NULL) {
+        owned_storage = expression->data.qualified_call.owned_storage;
+        expression->data.qualified_call.arguments = NULL;
+        expression->data.qualified_call.owned_storage = NULL;
     } else if (expression->kind == CM_HIR_EXPR_AGGREGATE
         && expression->data.aggregate.owned_storage != NULL) {
         owned_storage = expression->data.aggregate.owned_storage;
@@ -4648,6 +4653,17 @@ static int cm_hir_expression_locals_visible(const CmHirContext *context,
             }
         }
         return 1;
+    case CM_HIR_EXPR_QUALIFIED_CALL:
+        for (index = 0u;
+             index < expression->data.qualified_call.argument_count;
+             ++index) {
+            if (!cm_hir_expression_locals_visible(context,
+                    expression->data.qualified_call.arguments[index],
+                    body_id, visible_local_count, depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
     case CM_HIR_EXPR_BINARY:
         return cm_hir_expression_locals_visible(context,
                 expression->data.binary.left, body_id,
@@ -4951,6 +4967,175 @@ static int cm_hir_call_expression_valid(const CmHirContext *context,
     return 1;
 }
 
+static int cm_hir_qualified_type_matches(const CmHirContext *context,
+    CmHirDefId trait_definition, CmHirTypeId requested_self,
+    CmHirTypeId declared, CmHirTypeId actual, size_t depth)
+{
+    const CmHirType *declared_type;
+    const CmHirType *actual_type;
+    uint32_t index;
+
+    if (context == NULL || depth > context->types.len) return 0;
+    declared_type = cm_hir_get_type(context, declared);
+    actual_type = cm_hir_get_type(context, actual);
+    if (declared_type == NULL || actual_type == NULL) return 0;
+    if (declared_type->kind == CM_HIR_TYPE_SELF_KIND) {
+        return cm_hir_def_id_equal(declared_type->data.self_type.owner,
+                trait_definition)
+            && cm_hir_body_type_equal(context, requested_self, actual);
+    }
+    if (declared_type->kind != actual_type->kind) return 0;
+    switch (declared_type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return declared_type->data.integer_type.kind
+            == actual_type->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return declared_type->data.float_type.kind
+            == actual_type->data.float_type.kind;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return declared_type->data.reference_type.mutability
+                == actual_type->data.reference_type.mutability
+            && cm_hir_call_region_matches(
+                &declared_type->data.reference_type.region,
+                &actual_type->data.reference_type.region)
+            && cm_hir_qualified_type_matches(context, trait_definition,
+                requested_self, declared_type->data.reference_type.pointee,
+                actual_type->data.reference_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return declared_type->data.raw_pointer_type.mutability
+                == actual_type->data.raw_pointer_type.mutability
+            && cm_hir_qualified_type_matches(context, trait_definition,
+                requested_self, declared_type->data.raw_pointer_type.pointee,
+                actual_type->data.raw_pointer_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (declared_type->data.tuple_type.element_count
+                != actual_type->data.tuple_type.element_count
+            || (declared_type->data.tuple_type.element_count == 0u)
+                != (declared_type->data.tuple_type.elements == NULL)
+            || (actual_type->data.tuple_type.element_count == 0u)
+                != (actual_type->data.tuple_type.elements == NULL)) {
+            return 0;
+        }
+        for (index = 0u;
+             index < declared_type->data.tuple_type.element_count; ++index) {
+            if (!cm_hir_qualified_type_matches(context, trait_definition,
+                    requested_self,
+                    declared_type->data.tuple_type.elements[index],
+                    actual_type->data.tuple_type.elements[index],
+                    depth + 1u)) return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_ADT_KIND:
+        return declared_type->data.named_type.argument_count == 0u
+            && declared_type->data.named_type.arguments == NULL
+            && actual_type->data.named_type.argument_count == 0u
+            && actual_type->data.named_type.arguments == NULL
+            && cm_hir_def_id_equal(
+                declared_type->data.named_type.definition,
+                actual_type->data.named_type.definition);
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_ARRAY_KIND:
+    case CM_HIR_TYPE_SLICE_KIND:
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_SELF_KIND:
+    case CM_HIR_TYPE_PARAMETER_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_CLOSURE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_hir_qualified_call_expression_valid(
+    const CmHirContext *context, const CmHirExpr *expression)
+{
+    const CmHirBody *body;
+    const CmHirItem *trait_item;
+    const CmHirItem *declared;
+    const CmHirFunctionSignature *signature;
+    const CmHirType *self_type;
+    uint32_t expected_receiver;
+    uint32_t index;
+
+    body = cm_hir_get_body(context, expression->owner_body);
+    trait_item = cm_hir_bound_definition_item(context,
+        expression->data.qualified_call.requested_trait);
+    declared = cm_hir_bound_definition_item(context,
+        expression->data.qualified_call.declared_trait_callable);
+    self_type = cm_hir_get_type(context,
+        expression->data.qualified_call.requested_self_type);
+    if (body == NULL
+        || expression->data.qualified_call.syntax
+            != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || trait_item->definition.crate_id != body->owner.crate_id
+        || trait_item->generic_parameter_count != 0u
+        || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_def_id_equal(declared->parent_definition,
+            trait_item->definition)
+        || !cm_hir_def_id_is_none(
+            declared->data.function_item.trait_item_definition)
+        || declared->generic_parameter_count != 0u
+        || declared->data.function_item.body != CM_HIR_BODY_NONE
+        || declared->predicate_scope_count != 0u
+        || declared->predicate_count != 0u
+        || declared->outlives_predicate_count != 0u
+        || self_type == NULL
+        || self_type->kind == CM_HIR_TYPE_ERROR_KIND
+        || self_type->kind == CM_HIR_TYPE_INFER_KIND
+        || self_type->kind == CM_HIR_TYPE_SELF_KIND
+        || self_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        || self_type->kind == CM_HIR_TYPE_PROJECTION_KIND
+        || (expression->data.qualified_call.argument_count == 0u)
+            != (expression->data.qualified_call.arguments == NULL)) {
+        return 0;
+    }
+    signature = &declared->data.function_item.signature;
+    expected_receiver = signature->receiver == CM_HIR_RECEIVER_NONE
+        ? CM_HIR_CALLABLE_RECEIVER_NONE : 0u;
+    if (signature->parameter_count
+            != expression->data.qualified_call.argument_count
+        || (signature->parameter_count == 0u)
+            != (signature->parameters == NULL)
+        || expression->data.qualified_call.receiver_argument
+            != expected_receiver
+        || !cm_hir_qualified_type_matches(context, trait_item->definition,
+            expression->data.qualified_call.requested_self_type,
+            signature->return_type, expression->type, 0u)) {
+        return 0;
+    }
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        const CmHirExpr *argument;
+
+        argument = cm_hir_get_expr(context,
+            expression->data.qualified_call.arguments[index]);
+        if (argument == NULL
+            || argument->owner_body != expression->owner_body
+            || argument->span.source != expression->span.source
+            || argument->span.start < expression->span.start
+            || argument->span.end > expression->span.end
+            || !cm_hir_qualified_type_matches(context,
+                trait_item->definition,
+                expression->data.qualified_call.requested_self_type,
+                signature->parameters[index].type, argument->type, 0u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int cm_hir_aggregate_expression_valid(const CmHirContext *context,
     const CmHirExpr *expression, const CmHirType *type,
     const CmHirBody *body)
@@ -5093,6 +5278,13 @@ static void cm_hir_claim_expression_tree(CmHirContext *context,
              ++index) {
             cm_hir_claim_expression_tree(context,
                 expression->data.call.arguments[index], body_id);
+        }
+    } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        for (index = 0u;
+             index < expression->data.qualified_call.argument_count;
+             ++index) {
+            cm_hir_claim_expression_tree(context,
+                expression->data.qualified_call.arguments[index], body_id);
         }
     } else if (expression->kind == CM_HIR_EXPR_BINARY) {
         cm_hir_claim_expression_tree(context, expression->data.binary.left,
@@ -5284,6 +5476,31 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
             : (CmHirExprId *)(owned_ids
                 + expression->data.call.type_substitution_count);
         copy.data.call.owned_storage = owned_ids;
+        break;
+    case CM_HIR_EXPR_QUALIFIED_CALL:
+        if (body == NULL
+            || !cm_hir_qualified_call_expression_valid(context,
+                expression)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        if (context->expressions.len >= (size_t)UINT32_MAX
+            || !cm_size_mul(
+                (size_t)expression->data.qualified_call.argument_count,
+                sizeof(uint32_t), &owned_bytes)
+            || !cm_size_add(context->expressions.len, 1u,
+                &reserved_count)) {
+            return CM_HIR_ID_EXHAUSTED;
+        }
+        cm_vec_reserve(&context->expressions, reserved_count);
+        owned_ids = expression->data.qualified_call.argument_count == 0u
+            ? NULL : (uint32_t *)cm_alloc(owned_bytes);
+        if (expression->data.qualified_call.argument_count != 0u) {
+            memcpy(owned_ids, expression->data.qualified_call.arguments,
+                (size_t)expression->data.qualified_call.argument_count
+                    * sizeof(uint32_t));
+        }
+        copy.data.qualified_call.arguments = (CmHirExprId *)owned_ids;
+        copy.data.qualified_call.owned_storage = owned_ids;
         break;
     case CM_HIR_EXPR_BINARY:
     {
@@ -5517,6 +5734,38 @@ CmHirStatus cm_hir_add_owned_call_expr(CmHirContext *context,
         || !cm_hir_span_is_ordered(expression->span)
         || !cm_hir_expression_body_span_valid(body, expression->span)
         || !cm_hir_call_expression_valid(context, expression)) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    return cm_hir_push(context, &context->expressions, expression, out_id);
+}
+
+CmHirStatus cm_hir_add_owned_qualified_call_expr(CmHirContext *context,
+    const CmHirExpr *expression, CmHirExprId *out_id)
+{
+    const CmHirType *type;
+    const CmHirBody *body;
+
+    if (context == NULL || expression == NULL || out_id == NULL) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    *out_id = CM_HIR_EXPR_NONE;
+    if (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+        || (expression->data.qualified_call.argument_count == 0u)
+            != (expression->data.qualified_call.arguments == NULL)
+        || context->expressions.len >= context->expressions.cap
+        || context->expressions.len >= (size_t)UINT32_MAX
+        || (expression->data.qualified_call.owned_storage != NULL
+            && expression->data.qualified_call.owned_storage
+                != (uint32_t *)expression->data.qualified_call.arguments)) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    type = cm_hir_get_type(context, expression->type);
+    body = cm_hir_get_body(context, expression->owner_body);
+    if (type == NULL || body == NULL
+        || body->state != CM_HIR_BODY_UNLOWERED
+        || !cm_hir_span_is_ordered(expression->span)
+        || !cm_hir_expression_body_span_valid(body, expression->span)
+        || !cm_hir_qualified_call_expression_valid(context, expression)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     return cm_hir_push(context, &context->expressions, expression, out_id);

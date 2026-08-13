@@ -851,7 +851,7 @@ static void test_rejections_are_transactional(void)
         "fn pick(value: u32) -> u32 { value } "
         "fn main(value: u32) -> u32 { "
         "<Missing as MissingTrait>::pick(value) }",
-        CM_HIR_BODY_LOWER_UNSUPPORTED_BODY);
+        CM_HIR_BODY_LOWER_UNRESOLVED_PATH);
     expect_body_failure("fn main() -> u32 { 7i32 }",
         CM_HIR_BODY_LOWER_INVALID_LITERAL);
     expect_body_failure(
@@ -908,6 +908,63 @@ static void test_rejections_are_transactional(void)
         && fixture.hir.expressions.len == 0u
         && cm_hir_get_body(&fixture.hir, fixture.body)->state
             == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&fixture);
+}
+
+static void test_graph_explicit_local_ufcs_call(void)
+{
+    static const char source[] =
+        "trait Value { fn value(self) -> u32; } "
+        "impl Value for u32 { fn value(self) -> u32 { self } } "
+        "fn main(x: u32) -> u32 { <u32 as Value>::value(x) }";
+    TestFixture fixture;
+    const CmHirBody *body;
+    const CmHirExpr *block;
+    const CmHirExpr *call;
+    const CmHirExpr *argument;
+    const CmHirItem *trait_item;
+    const CmHirItem *declared;
+    CmHirBodyLowerResult result;
+
+    fixture_init(&fixture, source);
+    result = lower_fixture_body(&fixture);
+    assert(result.status == CM_HIR_BODY_LOWER_OK);
+    body = cm_hir_get_body(&fixture.hir, fixture.body);
+    block = body == NULL ? NULL
+        : cm_hir_get_expr(&fixture.hir, body->root_expression);
+    call = block == NULL || block->kind != CM_HIR_EXPR_BLOCK
+        ? NULL : cm_hir_get_expr(&fixture.hir,
+            block->data.block.tail_expression);
+    assert(call != NULL && call->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        && call->data.qualified_call.syntax
+            == CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+        && call->data.qualified_call.argument_count == 1u
+        && call->data.qualified_call.arguments != NULL
+        && call->data.qualified_call.receiver_argument == 0u
+        && cm_hir_get_type(&fixture.hir,
+            call->data.qualified_call.requested_self_type)->kind
+                == CM_HIR_TYPE_INTEGER_KIND
+        && cm_hir_get_type(&fixture.hir,
+            call->data.qualified_call.requested_self_type)
+                ->data.integer_type.kind == CM_HIR_INT_U32);
+    trait_item = cm_hir_get_item(&fixture.hir,
+        cm_hir_lookup_definition(&fixture.hir,
+            call->data.qualified_call.requested_trait)->entity.item_id);
+    declared = cm_hir_get_item(&fixture.hir,
+        cm_hir_lookup_definition(&fixture.hir,
+            call->data.qualified_call.declared_trait_callable)
+                ->entity.item_id);
+    argument = cm_hir_get_expr(&fixture.hir,
+        call->data.qualified_call.arguments[0]);
+    assert(trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
+        && hir_name_is(&fixture.hir, trait_item->name, "Value")
+        && declared != NULL && declared->kind == CM_HIR_ITEM_FUNCTION
+        && hir_name_is(&fixture.hir, declared->name, "value")
+        && cm_hir_def_id_equal(declared->parent_definition,
+            trait_item->definition)
+        && declared->data.function_item.body == CM_HIR_BODY_NONE
+        && argument != NULL && argument->kind == CM_HIR_EXPR_LOCAL
+        && argument->data.local.local_index == 0u);
     fixture_destroy(&fixture);
 }
 
@@ -3613,6 +3670,7 @@ int main(void)
     test_oom_precedes_body_mutation();
     test_aggregate_payload_oom_is_transactional();
     test_graph_function_body();
+    test_graph_explicit_local_ufcs_call();
     test_graph_identity_call_bodies();
     test_graph_generic_identity_call_body();
     test_graph_generic_identity_call_rejects_wrong_parameter();

@@ -14,5 +14,5 @@ impl Convert for u32 {
 
 #[no_mangle]
 pub extern "C" fn probe(x: u32) -> u32 {
-    x
+    <u32 as Convert>::convert(x)
 }

@@ -456,20 +456,43 @@ static int cm_c_place_present(const CmMirPlace *place)
 static int cm_c_instance_type_is_u32(const CmHirContext *hir,
     const CmHirItem *item, const CmMirBody *body, CmHirTypeId id)
 {
+    const CmHirDefinition *parent_definition;
     const CmHirGenericParam *parameter;
+    const CmHirItem *parent_item;
     const CmHirType *type;
 
     if (cm_c_type_is_u32(hir, id)) return 1;
+    type = cm_hir_get_type(hir, id);
+    if (type != NULL && type->kind == CM_HIR_TYPE_SELF_KIND
+        && item != NULL
+        && body != NULL
+        && item->generic_parameter_count == 0u
+        && body->instance.substitution_count == 0u
+        && body->instance.substitutions == NULL
+        && !cm_hir_def_id_is_none(item->parent_definition)
+        && cm_hir_def_id_equal(type->data.self_type.owner,
+            item->parent_definition)) {
+        parent_definition = cm_hir_lookup_definition(hir,
+            item->parent_definition);
+        parent_item = parent_definition == NULL
+                || parent_definition->kind != CM_HIR_DEFINITION_ITEM
+                || parent_definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir,
+                parent_definition->entity.item_id);
+        return parent_item != NULL && parent_item->kind == CM_HIR_ITEM_IMPL
+            && parent_item->generic_parameter_count == 0u
+            && parent_item->data.impl_item.has_trait
+            && !parent_item->data.impl_item.is_negative
+            && cm_c_type_is_u32(hir,
+                parent_item->data.impl_item.self_type);
+    }
     if (item == NULL || body == NULL
         || item->generic_parameter_count != 1u
         || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
         || body->instance.substitution_count != 1u
         || body->instance.substitutions == NULL
-        || !cm_c_type_is_u32(hir, body->instance.substitutions[0])) {
-        return 0;
-    }
-    type = cm_hir_get_type(hir, id);
-    if (type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND) {
+        || !cm_c_type_is_u32(hir, body->instance.substitutions[0])
+        || type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND) {
         return 0;
     }
     parameter = cm_hir_get_generic_param(hir,
@@ -818,7 +841,8 @@ static int cm_c_instance_equal(const CmMirInstance *left,
 }
 
 static int cm_c_exact_body_shape(const CmHirContext *hir,
-    const CmMirContext *mir, CmMirBodyId body_id)
+    const CmMirContext *mir, const CmSemanticAdmission *admission,
+    CmMirBodyId body_id)
 {
     const CmMirBody *body;
     const CmHirBody *source_body;
@@ -831,11 +855,18 @@ static int cm_c_exact_body_shape(const CmHirContext *hir,
     CmMirLocalId diamond_bool_local;
     int is_if_diamond;
 
-    if (cm_mir_validate_monomorphized_body(mir, hir, body_id)
-            != CM_MIR_OK) {
+    body = cm_mir_get_body(mir, body_id);
+    if (body == NULL
+        || (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_NONE
+            ? cm_mir_validate_monomorphized_body(mir, hir, body_id)
+                != CM_MIR_OK
+            : body->semantic_evidence
+                    != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE
+                || admission == NULL
+                || cm_mir_validate_admitted_monomorphized_body(mir,
+                    admission, body_id) != CM_MIR_OK)) {
         return 0;
     }
-    body = cm_mir_get_body(mir, body_id);
     item = cm_c_instance_item(hir, body);
     signature = item == NULL ? NULL : &item->data.function_item.signature;
     source_body = body == NULL ? NULL
@@ -1582,6 +1613,7 @@ static void cm_c_append_assignment(CmStrBuf *output,
 
 CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
     const CmHirContext *hir, const CmMirContext *mir,
+    const CmSemanticAdmission *admission,
     const CmMirBodyId *roots, uint32_t root_count,
     const CmTargetDesc *target)
 {
@@ -1675,7 +1707,7 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
 
             if (reachable[index] == 0u) continue;
             body = cm_mir_get_body(mir, (CmMirBodyId)(index + 1u));
-            if (!cm_c_exact_body_shape(hir, mir,
+            if (!cm_c_exact_body_shape(hir, mir, admission,
                     (CmMirBodyId)(index + 1u))) {
                 goto cleanup_exact;
             }
@@ -1710,7 +1742,7 @@ CmCEmitStatus cm_c_emit_reachable_program(CmStrBuf *output,
 
         body = cm_mir_get_body(mir, (CmMirBodyId)(index + 1u));
         if (reachable[index] == 0u
-            || !cm_c_exact_body_shape(hir, mir,
+            || !cm_c_exact_body_shape(hir, mir, admission,
                 (CmMirBodyId)(index + 1u))
             || !cm_c_exact_name(hir, body, exported[index] != 0u,
                 names + index * CM_C_EXACT_NAME_CAPACITY,
