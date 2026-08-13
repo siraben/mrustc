@@ -28,6 +28,7 @@
             packages = with pkgs; [
               bashInteractive
               clang
+              cmake
               file
               gcc
               gh
