@@ -1174,7 +1174,7 @@ static int cm_mir_semantic_view_matches(const CmSemanticResults *results,
         && equal;
 }
 
-static int cm_mir_qualified_callee_matches_selection(
+static int cm_mir_selected_callee_matches_selection(
     const CmMirTreeMatch *match, const CmMirBody *callee,
     const CmSemanticCallableSelectionView *selection,
     const CmHirExpr *expression)
@@ -1185,7 +1185,8 @@ static int cm_mir_qualified_callee_matches_selection(
 
     if (match == NULL || callee == NULL || selection == NULL
         || expression == NULL
-        || expression->kind != CM_HIR_EXPR_QUALIFIED_CALL) return 0;
+        || (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+            && expression->kind != CM_HIR_EXPR_METHOD_CALL)) return 0;
     memset(&query, 0, sizeof(query));
     self_matches = 0;
     if (!cm_mir_semantic_instance_query_init(&query, match->hir, callee)) {
@@ -1219,6 +1220,68 @@ static int cm_mir_qualified_callee_matches_selection(
         && query.spec.implemented_trait_arguments == NULL;
     cm_mir_semantic_instance_query_destroy(&query);
     return valid;
+}
+
+static int cm_mir_callable_arguments(const CmHirExpr *expression,
+    CmHirExprId storage[2], const CmHirExprId **out_arguments,
+    uint32_t *out_count)
+{
+    uint32_t index;
+
+    if (expression == NULL || storage == NULL || out_arguments == NULL
+        || out_count == NULL) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (expression->data.qualified_call.argument_count == 0u
+            || expression->data.qualified_call.argument_count > 2u
+            || expression->data.qualified_call.arguments == NULL) return 0;
+        *out_arguments = expression->data.qualified_call.arguments;
+        *out_count = expression->data.qualified_call.argument_count;
+        return 1;
+    }
+    if (expression->kind != CM_HIR_EXPR_METHOD_CALL
+        || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+        || expression->data.method_call.argument_count > 1u
+        || (expression->data.method_call.argument_count != 0u
+            && expression->data.method_call.arguments == NULL)) return 0;
+    storage[0] = expression->data.method_call.receiver;
+    for (index = 0u; index < expression->data.method_call.argument_count;
+         ++index) {
+        storage[index + 1u] = expression->data.method_call.arguments[index];
+    }
+    *out_arguments = storage;
+    *out_count = expression->data.method_call.argument_count + 1u;
+    return 1;
+}
+
+static const CmHirItem *cm_mir_definition_item(const CmHirContext *hir,
+    CmHirDefId definition)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+
+    record = cm_hir_lookup_definition(hir, definition);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM
+            || record->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, record->entity.item_id);
+    return item != NULL && cm_hir_def_id_equal(item->definition, definition)
+        ? item : NULL;
+}
+
+static int cm_mir_method_trait_in_scope(const CmHirExpr *expression,
+    CmHirDefId trait_definition)
+{
+    uint32_t index;
+
+    if (expression == NULL || expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return 0;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count; ++index) {
+        if (cm_hir_def_id_equal(
+                expression->data.method_call.in_scope_traits[index],
+                trait_definition)) return 1;
+    }
+    return 0;
 }
 
 static int cm_mir_place_equal(const CmHirContext *hir,
@@ -1793,11 +1856,13 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         return 1;
     }
     if (expression->kind == CM_HIR_EXPR_CALL
-        || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
         const CmMirBasicBlock *block;
         const CmMirTerminator *terminator;
         const CmMirBody *callee_body;
         const CmHirExprId *call_arguments;
+        CmHirExprId call_argument_storage[2];
         CmMirOperand arguments[2];
         CmMirLocalId destination;
         CmHirDefId callee_definition;
@@ -1807,19 +1872,21 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         CmSemanticExpressionView semantic_expression;
         uint32_t call_argument_count;
         uint32_t call_substitution_count;
-        int qualified;
+        int selected_call;
         uint32_t index;
 
-        qualified = expression->kind == CM_HIR_EXPR_QUALIFIED_CALL;
-        call_arguments = qualified
-            ? expression->data.qualified_call.arguments
-            : expression->data.call.arguments;
-        call_argument_count = qualified
-            ? expression->data.qualified_call.argument_count
-            : expression->data.call.argument_count;
-        call_substitution_count = qualified
+        selected_call = expression->kind != CM_HIR_EXPR_CALL;
+        call_arguments = NULL;
+        call_argument_count = 0u;
+        if (!selected_call) {
+            call_arguments = expression->data.call.arguments;
+            call_argument_count = expression->data.call.argument_count;
+        } else if (!cm_mir_callable_arguments(expression,
+                call_argument_storage, &call_arguments,
+                &call_argument_count)) return 0;
+        call_substitution_count = selected_call
             ? 0u : expression->data.call.type_substitution_count;
-        callee_definition = qualified ? cm_hir_def_id_none()
+        callee_definition = selected_call ? cm_hir_def_id_none()
             : expression->data.call.callee;
         memset(&semantic_call, 0, sizeof(semantic_call));
         memset(&semantic_callable, 0, sizeof(semantic_callable));
@@ -1828,36 +1895,73 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         if (call_argument_count == 0u
             || call_argument_count > 2u
             || call_arguments == NULL
-            || (!qualified
+            || (!selected_call
                 && expression->data.call.type_substitution_count != 0u
                 && expression->data.call.type_substitutions == NULL)) {
             return 0;
         }
-        if (qualified) {
+        if (selected_call) {
+            const CmHirItem *declared;
+            const CmHirExpr *receiver;
+
+            declared = NULL;
+            receiver = NULL;
             if (match->semantic_results == NULL || match->admission == NULL
                 || cm_mir_semantic_callable_query(match, expression_id,
                     &semantic_callable) != CM_SEMANTIC_RESULTS_OK
                 || semantic_callable.body != match->body->source_body
                 || semantic_callable.expression != expression_id
-                || semantic_callable.syntax
-                    != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
-                || semantic_callable.syntax
-                    != expression->data.qualified_call.syntax
-                || !cm_hir_def_id_equal(semantic_callable.requested_trait,
-                    expression->data.qualified_call.requested_trait)
-                || !cm_hir_def_id_equal(
-                    semantic_callable.declared_trait_callable,
-                    expression->data.qualified_call.declared_trait_callable)
                 || cm_hir_def_id_is_none(semantic_callable.selected_impl)
                 || cm_hir_def_id_is_none(
                     semantic_callable.selected_callable)
                 || semantic_callable.argument_count != call_argument_count
-                || semantic_callable.receiver_argument
-                    != expression->data.qualified_call.receiver_argument
-                || !cm_mir_semantic_view_matches_hir(match,
-                    &semantic_callable.requested_self_type,
-                    expression->data.qualified_call.requested_self_type)) {
+                || (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+                    && (semantic_callable.syntax
+                            != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+                        || semantic_callable.syntax
+                            != expression->data.qualified_call.syntax
+                        || !cm_hir_def_id_equal(
+                            semantic_callable.requested_trait,
+                            expression->data.qualified_call.requested_trait)
+                        || !cm_hir_def_id_equal(
+                            semantic_callable.declared_trait_callable,
+                            expression->data.qualified_call
+                                .declared_trait_callable)
+                        || semantic_callable.receiver_argument
+                            != expression->data.qualified_call
+                                .receiver_argument
+                        || !cm_mir_semantic_view_matches_hir(match,
+                            &semantic_callable.requested_self_type,
+                            expression->data.qualified_call
+                                .requested_self_type)))) {
                 return 0;
+            }
+            if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+                declared = cm_mir_definition_item(match->hir,
+                    semantic_callable.declared_trait_callable);
+                receiver = cm_hir_get_expr(match->hir,
+                    expression->data.method_call.receiver);
+                if (semantic_callable.syntax != CM_HIR_CALLABLE_DOT_METHOD
+                    || semantic_callable.syntax
+                        != expression->data.method_call.syntax
+                    || semantic_callable.receiver_argument != 0u
+                    || semantic_callable.receiver_expression
+                        != expression->data.method_call.receiver
+                    || !cm_mir_method_trait_in_scope(expression,
+                        semantic_callable.requested_trait)
+                    || declared == NULL
+                    || declared->kind != CM_HIR_ITEM_FUNCTION
+                    || declared->name
+                        != expression->data.method_call.method_name
+                    || !cm_hir_def_id_equal(declared->parent_definition,
+                        semantic_callable.requested_trait)
+                    || declared->data.function_item.signature.receiver
+                        != CM_HIR_RECEIVER_VALUE
+                    || receiver == NULL
+                    || receiver->owner_body != expression->owner_body
+                    || !cm_mir_semantic_view_matches_hir(match,
+                        &semantic_callable.requested_self_type,
+                        receiver->type)) return 0;
             }
             if (semantic_callable.receiver_argument
                     == CM_HIR_CALLABLE_RECEIVER_NONE) {
@@ -1915,7 +2019,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         if (match->semantic_results != NULL) {
             if (match->admission == NULL
                 || callee_body == NULL
-                || (!qualified
+                || (!selected_call
                     && cm_mir_semantic_direct_call_query(match, callee_body,
                         expression_id, &semantic_call)
                             != CM_SEMANTIC_RESULTS_OK)
@@ -1928,8 +2032,8 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                     match->semantic_results, match->admission, match->body,
                     match->semantic_instance, expression_id,
                     &semantic_expression) != CM_SEMANTIC_RESULTS_OK
-                || (qualified
-                    ? (!cm_mir_qualified_callee_matches_selection(match,
+                || (selected_call
+                    ? (!cm_mir_selected_callee_matches_selection(match,
                             callee_body, &semantic_callable, expression)
                         || !cm_hir_def_id_equal(
                             semantic_signature.definition,
@@ -1960,7 +2064,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 return 0;
             }
             if (!cm_mir_semantic_view_matches_hir(match,
-                    qualified ? &semantic_callable.return_type
+                    selected_call ? &semantic_callable.return_type
                               : &semantic_call.return_type,
                     match->body->locals[destination].type)) {
                 return 0;
@@ -1985,13 +2089,13 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 CmSemanticExpressionView argument_expression;
                 CmHirExprId argument_expression_id;
 
-                if ((qualified
+                if ((selected_call
                         ? cm_mir_semantic_callable_parameter_query(match,
                             expression_id, index, &call_parameter)
                         : cm_mir_semantic_direct_call_parameter_query(match,
                             callee_body, expression_id, index,
                             &call_parameter)) != CM_SEMANTIC_RESULTS_OK
-                    || (qualified
+                    || (selected_call
                         && (cm_mir_semantic_callable_argument_query(match,
                                 expression_id, index,
                                 &argument_expression_id)

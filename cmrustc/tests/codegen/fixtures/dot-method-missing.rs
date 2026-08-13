@@ -1,0 +1,12 @@
+#![feature(no_core)]
+#![no_core]
+#![no_main]
+
+trait Value {
+    fn value(self, other: u32) -> u32;
+}
+
+#[no_mangle]
+pub extern "C" fn dot_value(input: u32) -> u32 {
+    input.value(input)
+}

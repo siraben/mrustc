@@ -81,6 +81,23 @@ static const CmHirItem *cm_admission_item(const CmHirContext *hir,
         ? item : NULL;
 }
 
+static int cm_admission_method_trait_in_scope(const CmHirExpr *expression,
+    CmHirDefId trait_definition)
+{
+    uint32_t index;
+
+    if (expression == NULL || expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return 0;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count; ++index) {
+        if (cm_hir_def_id_equal(
+                expression->data.method_call.in_scope_traits[index],
+                trait_definition)) return 1;
+    }
+    return 0;
+}
+
 static int cm_admission_instance_callable_supported(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirInstanceSpec *spec, const CmHirItem *item, int leaf_only)
@@ -645,6 +662,58 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
                 || !cm_hir_def_id_equal(
                     calls[index].callee->implemented_trait,
                     expression->data.qualified_call.requested_trait)
+                || cm_hir_canonical_instance_encode(hir, local_crate,
+                    &requested_spec, &checked_callee) != CM_HIR_INSTANCE_OK
+                || cm_hir_canonical_instance_equal(&checked_callee,
+                    &canonical_calls[index].callee, &equal)
+                    != CM_HIR_INSTANCE_OK || !equal) {
+                cm_hir_canonical_instance_destroy(&checked_callee);
+                goto cleanup_instances;
+            }
+        } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+            const CmHirExpr *receiver;
+            const CmHirItem *declared;
+            const CmHirItem *selected;
+            CmHirInstanceSpec requested_spec;
+
+            receiver = cm_hir_get_expr(hir,
+                expression->data.method_call.receiver);
+            declared = cm_admission_item(hir,
+                calls[index].callee->declared_trait_callable);
+            selected = cm_admission_item(hir,
+                calls[index].callee->selected_callable);
+            requested_spec = *calls[index].callee;
+            requested_spec.self_type = receiver == NULL
+                ? CM_HIR_TYPE_NONE : receiver->type;
+            if (expression->data.method_call.syntax
+                    != CM_HIR_CALLABLE_DOT_METHOD
+                || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+                || expression->data.method_call.argument_count > 1u
+                || (expression->data.method_call.argument_count != 0u
+                    && expression->data.method_call.arguments == NULL)
+                || receiver == NULL
+                || receiver->owner_body != expression->owner_body
+                || calls[index].callee->selected_callable.crate_id
+                    != local_crate
+                || !cm_hir_def_id_equal(
+                    calls[index].callee->selected_callable,
+                    canonical_calls[index].callee.definition)
+                || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+                || selected->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_VALUE
+                || selected->data.function_item.signature.parameter_count
+                    != expression->data.method_call.argument_count + 1u
+                || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
+                || declared->name != expression->data.method_call.method_name
+                || declared->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_VALUE
+                || !cm_hir_def_id_equal(declared->parent_definition,
+                    calls[index].callee->implemented_trait)
+                || !cm_admission_method_trait_in_scope(expression,
+                    calls[index].callee->implemented_trait)
+                || !cm_hir_def_id_equal(
+                    selected->data.function_item.trait_item_definition,
+                    declared->definition)
                 || cm_hir_canonical_instance_encode(hir, local_crate,
                     &requested_spec, &checked_callee) != CM_HIR_INSTANCE_OK
                 || cm_hir_canonical_instance_equal(&checked_callee,

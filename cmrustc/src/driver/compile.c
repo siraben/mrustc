@@ -325,56 +325,180 @@ static int cm_compile_type_is_u32(const CmHirContext *hir,
         && type->data.integer_type.kind == CM_HIR_INT_U32;
 }
 
-static int cm_compile_qualified_selection(
+static int cm_compile_method_trait_in_scope(const CmHirExpr *expression,
+    CmHirDefId trait_definition)
+{
+    uint32_t index;
+
+    if (expression == NULL || expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return 0;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count; ++index) {
+        if (cm_hir_def_id_equal(
+                expression->data.method_call.in_scope_traits[index],
+                trait_definition)) return 1;
+    }
+    return 0;
+}
+
+static int cm_compile_callable_arguments(const CmHirExpr *expression,
+    CmHirExprId storage[2], const CmHirExprId **out_arguments,
+    uint32_t *out_count)
+{
+    uint32_t index;
+
+    if (expression == NULL || storage == NULL || out_arguments == NULL
+        || out_count == NULL) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (expression->data.qualified_call.argument_count == 0u
+            || expression->data.qualified_call.argument_count > 2u
+            || expression->data.qualified_call.arguments == NULL) return 0;
+        *out_arguments = expression->data.qualified_call.arguments;
+        *out_count = expression->data.qualified_call.argument_count;
+        return 1;
+    }
+    if (expression->kind != CM_HIR_EXPR_METHOD_CALL
+        || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+        || expression->data.method_call.argument_count > 1u
+        || (expression->data.method_call.argument_count != 0u
+            && expression->data.method_call.arguments == NULL)) return 0;
+    storage[0] = expression->data.method_call.receiver;
+    for (index = 0u; index < expression->data.method_call.argument_count;
+         ++index) {
+        storage[index + 1u] = expression->data.method_call.arguments[index];
+    }
+    *out_arguments = storage;
+    *out_count = expression->data.method_call.argument_count + 1u;
+    return 1;
+}
+
+static int cm_compile_semantic_types_equal(const CmSemanticTypeView *left,
+    const CmSemanticTypeView *right)
+{
+    int equal;
+
+    equal = 0;
+    return cm_semantic_type_view_equal(left, right, &equal)
+            == CM_SEMANTIC_RESULTS_OK
+        && equal;
+}
+
+static int cm_compile_callable_selection(
     const CmCompileExactState *state, const CmHirExpr *expression,
     CmHirExprId expression_id, CmSemanticCallableSelectionView *out_view,
     char *message, size_t message_capacity)
 {
     const CmSemanticResults *results;
+    const CmHirExpr *receiver;
+    const CmHirItem *declared;
+    const CmHirExprId *arguments;
+    CmHirExprId argument_storage[2];
+    CmSemanticExpressionView expression_view;
+    CmSemanticExpressionView receiver_view;
+    uint32_t argument_count;
     int self_matches;
     uint32_t index;
 
     results = state == NULL ? NULL
         : cm_semantic_admission_results(state->all_local_admission);
+    receiver = NULL;
+    declared = NULL;
+    arguments = NULL;
+    argument_count = 0u;
+    memset(&expression_view, 0, sizeof(expression_view));
+    memset(&receiver_view, 0, sizeof(receiver_view));
     self_matches = 0;
     if (results == NULL || expression == NULL
-        || expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+        || (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+            && expression->kind != CM_HIR_EXPR_METHOD_CALL)
+        || !cm_compile_callable_arguments(expression, argument_storage,
+            &arguments, &argument_count)
         || cm_semantic_results_callable_selection(results,
             state->all_local_admission, expression->owner_body,
             expression_id, out_view) != CM_SEMANTIC_RESULTS_OK
         || out_view->body != expression->owner_body
         || out_view->expression != expression_id
-        || out_view->syntax != expression->data.qualified_call.syntax
-        || out_view->syntax != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
-        || !cm_hir_def_id_equal(out_view->requested_trait,
-            expression->data.qualified_call.requested_trait)
-        || !cm_hir_def_id_equal(out_view->declared_trait_callable,
-            expression->data.qualified_call.declared_trait_callable)
         || cm_hir_def_id_is_none(out_view->selected_impl)
         || cm_hir_def_id_is_none(out_view->selected_callable)
-        || out_view->receiver_argument
-            != expression->data.qualified_call.receiver_argument
-        || out_view->argument_count
-            != expression->data.qualified_call.argument_count
-        || cm_semantic_type_view_matches_monomorphic_hir(results,
-            state->all_local_admission, &out_view->requested_self_type,
-            expression->data.qualified_call.requested_self_type,
-            &self_matches) != CM_SEMANTIC_RESULTS_OK
-        || !self_matches) goto invalid;
+        || out_view->argument_count != argument_count
+        || cm_semantic_results_expression(results,
+            state->all_local_admission, expression->owner_body,
+            expression_id, &expression_view) != CM_SEMANTIC_RESULTS_OK
+        || expression_view.adjustment_count != 0u
+        || !cm_compile_semantic_types_equal(&expression_view.unadjusted_type,
+            &expression_view.adjusted_type)) goto invalid;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (out_view->syntax != expression->data.qualified_call.syntax
+            || out_view->syntax
+                != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+            || !cm_hir_def_id_equal(out_view->requested_trait,
+                expression->data.qualified_call.requested_trait)
+            || !cm_hir_def_id_equal(out_view->declared_trait_callable,
+                expression->data.qualified_call.declared_trait_callable)
+            || out_view->receiver_argument
+                != expression->data.qualified_call.receiver_argument
+            || cm_semantic_type_view_matches_monomorphic_hir(results,
+                state->all_local_admission, &out_view->requested_self_type,
+                expression->data.qualified_call.requested_self_type,
+                &self_matches) != CM_SEMANTIC_RESULTS_OK
+            || !self_matches) goto invalid;
+    } else {
+        receiver = cm_hir_get_expr(state->hir,
+            expression->data.method_call.receiver);
+        declared = cm_compile_definition_item(state->hir,
+            out_view->declared_trait_callable);
+        if (out_view->syntax != expression->data.method_call.syntax
+            || out_view->syntax != CM_HIR_CALLABLE_DOT_METHOD
+            || out_view->receiver_argument != 0u
+            || out_view->receiver_expression
+                != expression->data.method_call.receiver
+            || !cm_compile_method_trait_in_scope(expression,
+                out_view->requested_trait)
+            || declared == NULL
+            || declared->name != expression->data.method_call.method_name
+            || !cm_hir_def_id_equal(declared->parent_definition,
+                out_view->requested_trait)
+            || declared->data.function_item.signature.receiver
+                != CM_HIR_RECEIVER_VALUE
+            || receiver == NULL || receiver->owner_body != expression->owner_body
+            || cm_semantic_results_expression(results,
+                state->all_local_admission, expression->owner_body,
+                expression->data.method_call.receiver, &receiver_view)
+                    != CM_SEMANTIC_RESULTS_OK
+            || receiver_view.adjustment_count != 0u
+            || !cm_compile_semantic_types_equal(
+                &receiver_view.unadjusted_type, &receiver_view.adjusted_type)
+            || !cm_compile_semantic_types_equal(
+                &out_view->requested_self_type,
+                &receiver_view.adjusted_type)
+            || cm_semantic_type_view_matches_monomorphic_hir(results,
+                state->all_local_admission, &out_view->requested_self_type,
+                receiver->type, &self_matches) != CM_SEMANTIC_RESULTS_OK
+            || !self_matches) goto invalid;
+    }
     if (out_view->receiver_argument == CM_HIR_CALLABLE_RECEIVER_NONE) {
         if (out_view->receiver_expression != CM_HIR_EXPR_NONE) goto invalid;
     } else if (out_view->receiver_argument >= out_view->argument_count
         || out_view->receiver_expression
-            != expression->data.qualified_call.arguments[
-                out_view->receiver_argument]) goto invalid;
+            != arguments[out_view->receiver_argument]) goto invalid;
     for (index = 0u; index < out_view->argument_count; ++index) {
         CmHirExprId argument;
+        CmSemanticExpressionView argument_view;
 
+        memset(&argument_view, 0, sizeof(argument_view));
         if (cm_semantic_results_callable_argument(results,
                 state->all_local_admission, expression->owner_body,
                 expression_id, index, &argument)
                 != CM_SEMANTIC_RESULTS_OK
-            || argument != expression->data.qualified_call.arguments[index]) {
+            || argument != arguments[index]
+            || cm_semantic_results_expression(results,
+                state->all_local_admission, expression->owner_body,
+                argument, &argument_view) != CM_SEMANTIC_RESULTS_OK
+            || argument_view.adjustment_count != 0u
+            || !cm_compile_semantic_types_equal(
+                &argument_view.unadjusted_type,
+                &argument_view.adjusted_type)) {
             goto invalid;
         }
     }
@@ -382,7 +506,7 @@ static int cm_compile_qualified_selection(
 
 invalid:
     (void)snprintf(message, message_capacity,
-        "reachable qualified call lacks a matching sealed callable recipe");
+        "reachable selected call lacks a matching sealed callable recipe");
     return 0;
 }
 
@@ -616,45 +740,42 @@ static int cm_compile_discover_expression_callees(
             "reachable reference expressions require semantic evidence");
         return 0;
     case CM_HIR_EXPR_METHOD_CALL:
-        (void)snprintf(message, message_capacity,
-            "reachable method call requires sealed semantic selection");
-        return 0;
     case CM_HIR_EXPR_QUALIFIED_CALL:
     {
         const CmHirItem *callee;
         const CmHirItem *impl_item;
         const CmSemanticResults *results;
+        const CmHirExprId *call_arguments;
+        CmHirExprId argument_storage[2];
         CmSemanticCallableSelectionView selection;
         CmCompileReachableEdge edge;
+        uint32_t call_argument_count;
         int impl_self_matches;
 
         memset(&selection, 0, sizeof(selection));
         results = cm_semantic_admission_results(
             state->all_local_admission);
+        call_arguments = NULL;
+        call_argument_count = 0u;
         impl_self_matches = 0;
-        if (expression->data.qualified_call.argument_count == 0u
-            || expression->data.qualified_call.argument_count > 2u
-            || expression->data.qualified_call.arguments == NULL
-            || !cm_compile_qualified_selection(state, expression,
+        if (!cm_compile_callable_arguments(expression, argument_storage,
+                &call_arguments, &call_argument_count)
+            || !cm_compile_callable_selection(state, expression,
                 expression_id, &selection, message, message_capacity)) {
             if (message[0] == '\0') {
                 (void)snprintf(message, message_capacity,
-                    "reachable qualified call has an unsupported argument shape");
+                    "reachable selected call has an unsupported argument shape");
             }
             return 0;
         }
-        for (index = 0u;
-             index < expression->data.qualified_call.argument_count;
-             ++index) {
-            if (expression->data.qualified_call.arguments[index]
-                    >= expression_id
+        for (index = 0u; index < call_argument_count; ++index) {
+            if (call_arguments[index] >= expression_id
                 || !cm_compile_discover_expression_callees(state,
-                    caller_index,
-                    expression->data.qualified_call.arguments[index],
+                    caller_index, call_arguments[index],
                     depth + 1u, message, message_capacity)) {
                 if (message[0] == '\0') {
                     (void)snprintf(message, message_capacity,
-                        "reachable qualified call argument discovery failed");
+                        "reachable selected call argument discovery failed");
                 }
                 return 0;
             }
@@ -687,7 +808,7 @@ static int cm_compile_discover_expression_callees(
                 &edge.callee, message, message_capacity)) {
             if (message[0] == '\0') {
                 (void)snprintf(message, message_capacity,
-                    "reachable qualified selection is inconsistent with HIR");
+                    "reachable callable selection is inconsistent with HIR");
             }
             return 0;
         }
@@ -926,11 +1047,12 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
                         &substitution_count, message, message_capacity)) {
                     goto cleanup;
                 }
-            } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+                || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
                 CmSemanticCallableSelectionView selection;
 
                 memset(&selection, 0, sizeof(selection));
-                if (!cm_compile_qualified_selection(state, expression,
+                if (!cm_compile_callable_selection(state, expression,
                         edge->expression, &selection, message,
                         message_capacity)) goto cleanup;
                 substitution_count = 0u;

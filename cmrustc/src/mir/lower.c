@@ -384,6 +384,8 @@ static int cm_mir_lower_type(const CmHirContext *hir,
     uint32_t substitution_count, CmHirTypeId declared,
     CmHirTypeId *out_type)
 {
+    const CmHirDefinition *self_owner;
+    const CmHirItem *impl_item;
     const CmHirType *type;
     const CmHirGenericParam *parameter;
     uint32_t index;
@@ -408,6 +410,24 @@ static int cm_mir_lower_type(const CmHirContext *hir,
             type->data.named_type.definition) != NULL) {
         *out_type = declared;
         return 1;
+    }
+    if (type->kind == CM_HIR_TYPE_SELF_KIND) {
+        self_owner = cm_hir_lookup_definition(hir,
+            type->data.self_type.owner);
+        impl_item = self_owner == NULL
+                || self_owner->kind != CM_HIR_DEFINITION_ITEM
+                || self_owner->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, self_owner->entity.item_id);
+        if (item == NULL || impl_item == NULL
+            || impl_item->kind != CM_HIR_ITEM_IMPL
+            || !cm_hir_def_id_equal(item->parent_definition,
+                type->data.self_type.owner)
+            || !cm_hir_def_id_equal(impl_item->definition,
+                type->data.self_type.owner)
+            || impl_item->data.impl_item.self_type == declared) return 0;
+        return cm_mir_lower_type(hir, item, substitutions,
+            substitution_count, impl_item->data.impl_item.self_type,
+            out_type);
     }
     if (type->kind != CM_HIR_TYPE_PARAMETER_KIND) return 0;
     parameter = cm_hir_get_generic_param(hir,
@@ -545,7 +565,7 @@ static void cm_mir_lower_semantic_instance_query_destroy(
     memset(query, 0, sizeof(*query));
 }
 
-static int cm_mir_flow_qualified_callee_matches_selection(
+static int cm_mir_flow_selected_callee_matches_selection(
     const CmMirFlowPlan *plan, const CmMirBody *callee,
     const CmSemanticCallableSelectionView *selection,
     const CmHirExpr *expression)
@@ -556,7 +576,8 @@ static int cm_mir_flow_qualified_callee_matches_selection(
 
     if (plan == NULL || callee == NULL || selection == NULL
         || expression == NULL
-        || expression->kind != CM_HIR_EXPR_QUALIFIED_CALL) return 0;
+        || (expression->kind != CM_HIR_EXPR_QUALIFIED_CALL
+            && expression->kind != CM_HIR_EXPR_METHOD_CALL)) return 0;
     memset(&query, 0, sizeof(query));
     self_matches = 0;
     if (!cm_mir_lower_semantic_instance_query_init(&query, plan->hir,
@@ -586,6 +607,68 @@ static int cm_mir_flow_qualified_callee_matches_selection(
         && query.spec.implemented_trait_arguments == NULL;
     cm_mir_lower_semantic_instance_query_destroy(&query);
     return valid;
+}
+
+static int cm_mir_flow_callable_arguments(const CmHirExpr *expression,
+    CmHirExprId storage[2], const CmHirExprId **out_arguments,
+    uint32_t *out_count)
+{
+    uint32_t index;
+
+    if (expression == NULL || storage == NULL || out_arguments == NULL
+        || out_count == NULL) return 0;
+    if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (expression->data.qualified_call.argument_count == 0u
+            || expression->data.qualified_call.argument_count > 2u
+            || expression->data.qualified_call.arguments == NULL) return 0;
+        *out_arguments = expression->data.qualified_call.arguments;
+        *out_count = expression->data.qualified_call.argument_count;
+        return 1;
+    }
+    if (expression->kind != CM_HIR_EXPR_METHOD_CALL
+        || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+        || expression->data.method_call.argument_count > 1u
+        || (expression->data.method_call.argument_count != 0u
+            && expression->data.method_call.arguments == NULL)) return 0;
+    storage[0] = expression->data.method_call.receiver;
+    for (index = 0u; index < expression->data.method_call.argument_count;
+         ++index) {
+        storage[index + 1u] = expression->data.method_call.arguments[index];
+    }
+    *out_arguments = storage;
+    *out_count = expression->data.method_call.argument_count + 1u;
+    return 1;
+}
+
+static const CmHirItem *cm_mir_flow_definition_item(
+    const CmHirContext *hir, CmHirDefId definition)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+
+    record = cm_hir_lookup_definition(hir, definition);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM
+            || record->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, record->entity.item_id);
+    return item != NULL && cm_hir_def_id_equal(item->definition, definition)
+        ? item : NULL;
+}
+
+static int cm_mir_flow_method_trait_in_scope(const CmHirExpr *expression,
+    CmHirDefId trait_definition)
+{
+    uint32_t index;
+
+    if (expression == NULL || expression->kind != CM_HIR_EXPR_METHOD_CALL) {
+        return 0;
+    }
+    for (index = 0u;
+         index < expression->data.method_call.in_scope_trait_count; ++index) {
+        if (cm_hir_def_id_equal(
+                expression->data.method_call.in_scope_traits[index],
+                trait_definition)) return 1;
+    }
+    return 0;
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
@@ -1260,10 +1343,12 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 expression->data.if_expr.else_expression,
                 visible_local_count, 1, depth + 1u, NULL);
     } else if (expression->kind == CM_HIR_EXPR_CALL
-            || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+            || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+            || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
         CmHirTypeId callee_substitution;
         CmHirTypeId *callee_substitutions;
         const CmHirExprId *call_arguments;
+        CmHirExprId call_argument_storage[2];
         uint32_t call_argument_count;
         uint32_t call_substitution_count;
         CmMirBodyId callee_id;
@@ -1282,13 +1367,20 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         int has_aggregate_argument;
         CmMirStatus status;
         uint32_t index;
+        int selected_call;
 
-        call_arguments = expression->kind == CM_HIR_EXPR_CALL
-            ? expression->data.call.arguments
-            : expression->data.qualified_call.arguments;
-        call_argument_count = expression->kind == CM_HIR_EXPR_CALL
-            ? expression->data.call.argument_count
-            : expression->data.qualified_call.argument_count;
+        call_arguments = NULL;
+        call_argument_count = 0u;
+        selected_call = expression->kind != CM_HIR_EXPR_CALL;
+        if (expression->kind == CM_HIR_EXPR_CALL) {
+            call_arguments = expression->data.call.arguments;
+            call_argument_count = expression->data.call.argument_count;
+        } else if (!cm_mir_flow_callable_arguments(expression,
+                call_argument_storage, &call_arguments,
+                &call_argument_count)) {
+            return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
+                expression_id, CM_MIR_OK);
+        }
         call_substitution_count = expression->kind == CM_HIR_EXPR_CALL
             ? expression->data.call.type_substitution_count : 0u;
 
@@ -1315,38 +1407,79 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         memset(&semantic_callable, 0, sizeof(semantic_callable));
         memset(&semantic_callee_signature, 0,
             sizeof(semantic_callee_signature));
-        if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (selected_call) {
+            const CmHirItem *declared;
+            const CmHirExpr *receiver;
             int self_matches;
 
+            declared = NULL;
+            receiver = NULL;
             self_matches = 0;
             if (plan->semantic_results == NULL || plan->admission == NULL
                 || cm_mir_flow_semantic_callable_query(plan, expression_id,
                     &semantic_callable) != CM_SEMANTIC_RESULTS_OK
                 || semantic_callable.body != expression->owner_body
                 || semantic_callable.expression != expression_id
-                || semantic_callable.syntax
-                    != expression->data.qualified_call.syntax
-                || semantic_callable.syntax
-                    != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
-                || !cm_hir_def_id_equal(semantic_callable.requested_trait,
-                    expression->data.qualified_call.requested_trait)
-                || !cm_hir_def_id_equal(
-                    semantic_callable.declared_trait_callable,
-                    expression->data.qualified_call.declared_trait_callable)
                 || cm_hir_def_id_is_none(semantic_callable.selected_impl)
                 || cm_hir_def_id_is_none(
                     semantic_callable.selected_callable)
                 || semantic_callable.argument_count != call_argument_count
-                || semantic_callable.receiver_argument
-                    != expression->data.qualified_call.receiver_argument
-                || cm_semantic_type_view_matches_monomorphic_hir(
-                    plan->semantic_results, plan->admission,
-                    &semantic_callable.requested_self_type,
-                    expression->data.qualified_call.requested_self_type,
-                    &self_matches) != CM_SEMANTIC_RESULTS_OK
-                || !self_matches) {
+                || (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+                    && (semantic_callable.syntax
+                            != expression->data.qualified_call.syntax
+                        || semantic_callable.syntax
+                            != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
+                        || !cm_hir_def_id_equal(
+                            semantic_callable.requested_trait,
+                            expression->data.qualified_call.requested_trait)
+                        || !cm_hir_def_id_equal(
+                            semantic_callable.declared_trait_callable,
+                            expression->data.qualified_call
+                                .declared_trait_callable)
+                        || semantic_callable.receiver_argument
+                            != expression->data.qualified_call
+                                .receiver_argument
+                        || cm_semantic_type_view_matches_monomorphic_hir(
+                            plan->semantic_results, plan->admission,
+                            &semantic_callable.requested_self_type,
+                            expression->data.qualified_call.requested_self_type,
+                            &self_matches) != CM_SEMANTIC_RESULTS_OK
+                        || !self_matches))) {
                 return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
                     expression_id, CM_MIR_INVALID_ADMISSION);
+            }
+            if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+                declared = cm_mir_flow_definition_item(plan->hir,
+                    semantic_callable.declared_trait_callable);
+                receiver = cm_hir_get_expr(plan->hir,
+                    expression->data.method_call.receiver);
+                if (semantic_callable.syntax != CM_HIR_CALLABLE_DOT_METHOD
+                    || semantic_callable.syntax
+                        != expression->data.method_call.syntax
+                    || semantic_callable.receiver_argument != 0u
+                    || semantic_callable.receiver_expression
+                        != expression->data.method_call.receiver
+                    || !cm_mir_flow_method_trait_in_scope(expression,
+                        semantic_callable.requested_trait)
+                    || declared == NULL
+                    || declared->kind != CM_HIR_ITEM_FUNCTION
+                    || declared->name
+                        != expression->data.method_call.method_name
+                    || !cm_hir_def_id_equal(declared->parent_definition,
+                        semantic_callable.requested_trait)
+                    || declared->data.function_item.signature.receiver
+                        != CM_HIR_RECEIVER_VALUE
+                    || receiver == NULL
+                    || receiver->owner_body != expression->owner_body
+                    || cm_semantic_type_view_matches_monomorphic_hir(
+                        plan->semantic_results, plan->admission,
+                        &semantic_callable.requested_self_type,
+                        receiver->type, &self_matches)
+                            != CM_SEMANTIC_RESULTS_OK
+                    || !self_matches) {
+                    return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
+                        expression_id, CM_MIR_INVALID_ADMISSION);
+                }
             }
             if (semantic_callable.receiver_argument
                     == CM_HIR_CALLABLE_RECEIVER_NONE) {
@@ -1495,14 +1628,19 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                 || cm_mir_flow_semantic_expression_query(plan,
                     expression_id, &semantic_expression)
                     != CM_SEMANTIC_RESULTS_OK
+                || (selected_call
+                    && (semantic_expression.adjustment_count != 0u
+                        || !cm_mir_semantic_types_equal(
+                            &semantic_expression.unadjusted_type,
+                            &semantic_expression.adjusted_type)))
                 || cm_mir_flow_semantic_signature_query(plan, callee_body,
                     &semantic_callee_signature)
                     != CM_SEMANTIC_RESULTS_OK
                 || !cm_hir_def_id_equal(
                     semantic_callee_signature.definition,
                     callee_definition)
-                || (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
-                    ? (!cm_mir_flow_qualified_callee_matches_selection(plan,
+                || (selected_call
+                    ? (!cm_mir_flow_selected_callee_matches_selection(plan,
                             callee_body, &semantic_callable, expression)
                         || semantic_callee_signature.parameter_count
                             != semantic_callable.argument_count
@@ -1554,7 +1692,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         : cm_mir_flow_semantic_callable_parameter_query(plan,
                             expression_id, index, &semantic_parameter))
                         != CM_SEMANTIC_RESULTS_OK
-                    || (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+                    || (selected_call
                         && (cm_mir_flow_semantic_callable_argument_query(plan,
                                 expression_id, index, &argument_id)
                                 != CM_SEMANTIC_RESULTS_OK
@@ -1566,6 +1704,11 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                     || cm_mir_flow_semantic_expression_query(plan,
                         call_arguments[index],
                         &semantic_argument) != CM_SEMANTIC_RESULTS_OK
+                    || (selected_call
+                        && (semantic_argument.adjustment_count != 0u
+                            || !cm_mir_semantic_types_equal(
+                                &semantic_argument.unadjusted_type,
+                                &semantic_argument.adjusted_type)))
                     || !cm_mir_semantic_types_equal(&semantic_parameter,
                         &semantic_callee_parameter)
                     || !cm_mir_semantic_types_equal(&semantic_parameter,
@@ -2062,23 +2205,28 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         return 1;
     }
     if (expression->kind == CM_HIR_EXPR_CALL
-        || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        || expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+        || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
         const CmMirFlowCall *planned_call;
         CmMirInstance callee_instance;
         CmMirOperand call_arguments[2];
         const CmHirExprId *argument_expressions;
+        CmHirExprId argument_storage[2];
         uint32_t argument_count;
         CmMirLocalId destination;
         CmMirBasicBlock *block;
         size_t argument_start;
         uint32_t index;
 
-        argument_expressions = expression->kind == CM_HIR_EXPR_CALL
-            ? expression->data.call.arguments
-            : expression->data.qualified_call.arguments;
-        argument_count = expression->kind == CM_HIR_EXPR_CALL
-            ? expression->data.call.argument_count
-            : expression->data.qualified_call.argument_count;
+        argument_expressions = NULL;
+        argument_count = 0u;
+        if (expression->kind == CM_HIR_EXPR_CALL) {
+            argument_expressions = expression->data.call.arguments;
+            argument_count = expression->data.call.argument_count;
+        } else if (!cm_mir_flow_callable_arguments(expression,
+                argument_storage, &argument_expressions, &argument_count)) {
+            return 0;
+        }
 
         for (index = 0u; index < argument_count;
              ++index) {

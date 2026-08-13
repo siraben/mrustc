@@ -1561,11 +1561,30 @@ inherent methods, generics, autoderef/autoref/reborrow, metadata-incomplete
 selection, and nonprimitive receiver shapes remain fail-closed.
 
 Reachability, exact admission, MIR lowering/replay, and executable C acceptance
-must next consume only this sealed recipe. After that vertical checkpoint,
-canonical callable substitutions and slot-specific projection decisions must
-precede general adjustments. Operators, indexing, and callable-trait syntax
-then reuse the same selection and adjustment machinery instead of introducing
-parallel lookup paths.
+now consume only this sealed recipe for the same bounded dot-method slice. The
+driver validates syntax-aware receiver-first arguments, selected identity,
+concrete `Self`, and zero-adjustment expression facts before deriving a
+reachable callee from `selected_callable`. Exact admission authenticates the
+same selected trait/impl/method edge. MIR lowering and authoritative replay
+synthesize `[receiver, explicit arguments...]`, require the sealed normalized
+signature, reject every nonzero adjustment, and emit an ordinary direct call;
+the C backend remains method-agnostic and consumes only validated MIR.
+
+Impl-owned symbolic `Self` is concretized only for a method whose exact parent
+is the already selected impl, using that impl's concrete self type. This does
+not perform method lookup or reconstruct selection. A no-core fixture executes
+a public wrapper calling a separately reachable private impl method with one
+explicit argument. Missing impl, two viable in-scope traits, and a valid trait
+left outside lexical method scope all reject while preserving an existing
+output and creating no fresh output. The complete strict GCC suite, focused
+TinyCC, Clang ASan/UBSan/leak, MIR/admission/results tests, and executable
+acceptance pass. Inherent methods, generics, nonzero adjustments, borrowed
+receivers, and broader argument/result shapes remain fail-closed.
+
+The next checkpoint is canonical callable substitutions and slot-specific
+projection decisions; these must precede general adjustments. Operators,
+indexing, and callable-trait syntax then reuse the same selection and
+adjustment machinery instead of introducing parallel lookup paths.
 
 ## M6: Build orchestration
 
