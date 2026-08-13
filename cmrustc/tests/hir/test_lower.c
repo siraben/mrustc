@@ -2770,6 +2770,99 @@ static void test_generic_associated_type_entry_points(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_self_gat_projection_arguments(void)
+{
+    static const char source[] =
+        "trait Parent<Args> { type Gat<'a>; }"
+        "trait Child<Args>: Parent<Args> {"
+        "fn call(&self, args: Args) -> Self::Gat<'_>; }";
+    static const char *const invalid_sources[] = {
+        "trait Owner { type Gat<'a>; fn get(&self) -> Self::Gat; }",
+        "trait Owner { type Gat<'a>; fn get(&self) -> Self::Gat<'_, '_>; }",
+        "trait Owner { type Gat<'a>; fn get(&self) -> Self::Gat<u8>; }",
+        "trait Owner { type Assoc; fn get(&self) -> Self::Assoc<'_>; }",
+        "trait Owner { type Gat<T>; fn get(&self) -> Self::Gat<'_>; }",
+        "trait Owner { fn get(&self) -> Self<'_>; }"
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *parent;
+    const CmHirItem *child;
+    const CmHirItem *gat;
+    const CmHirItem *call;
+    const CmHirType *projection;
+    const CmHirType *self_type;
+    const CmHirType *trait_argument;
+    size_t index;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "Self GAT projection lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    parent = find_item(&context, "Parent");
+    child = find_item(&context, "Child");
+    gat = parent == NULL ? NULL
+        : find_child(&context, parent->definition, "Gat");
+    call = child == NULL ? NULL
+        : find_child(&context, child->definition, "call");
+    projection = call == NULL ? NULL : cm_hir_get_type(&context,
+        call->data.function_item.signature.return_type);
+    self_type = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.self_type);
+    trait_argument = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || projection->data.projection_type.trait_type.argument_count
+                != 1u
+            || projection->data.projection_type.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.trait_type.arguments[0]
+                .data.type);
+    assert(result.error_count == 0u
+        && parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT
+        && child != NULL && child->kind == CM_HIR_ITEM_TRAIT
+        && gat != NULL && gat->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && call != NULL && call->kind == CM_HIR_ITEM_FUNCTION
+        && projection != NULL
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            parent->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            gat->definition)
+        && self_type != NULL && self_type->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(self_type->data.self_type.owner,
+            child->definition)
+        && trait_argument != NULL
+        && trait_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && trait_argument->data.parameter_type.parameter
+            == child->generic_parameter_start
+        && projection->data.projection_type.associated_type.argument_count
+            == 1u
+        && projection->data.projection_type.associated_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.data.inference_variable
+            != 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u;
+         index < sizeof(invalid_sources) / sizeof(invalid_sources[0]);
+         ++index) {
+        result = lower_source(invalid_sources[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_same_trait_generic_self_projection(void)
 {
     static const char source[] =
@@ -6241,6 +6334,7 @@ int main(void)
     test_cross_trait_projection_default_entry_points();
     test_monomorphic_trait_impl_entry_points();
     test_generic_associated_type_entry_points();
+    test_self_gat_projection_arguments();
     test_same_trait_generic_self_projection();
     test_transitive_generic_self_projection_record_rollback();
     test_ordered_nominal_generic_impl_entry_points();
