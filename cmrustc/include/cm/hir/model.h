@@ -852,8 +852,28 @@ typedef enum CmHirBodyState {
     CM_HIR_BODY_ERROR
 } CmHirBodyState;
 
+typedef enum CmHirBodyOriginKind {
+    /* A source expression attached directly to one function/const/static. */
+    CM_HIR_BODY_ORIGIN_ITEM_SOURCE = 0
+} CmHirBodyOriginKind;
+
+typedef struct CmHirBodyOrigin {
+    CmHirBodyOriginKind kind;
+    /* Unique executable body identity; the item DefId in this checkpoint. */
+    CmHirDefId definition;
+    /* Lexical/generic environment; equal to owner during this migration. */
+    CmHirDefId enclosing_definition;
+    union {
+        struct {
+            CmHirDefId item_definition;
+        } item_source;
+    } data;
+} CmHirBodyOrigin;
+
 typedef struct CmHirBody {
+    /* Transitional lexical/generic owner; do not infer origin from this. */
     CmHirDefId owner;
+    CmHirBodyOrigin origin;
     CmHirBodyState state;
     CmHirTypeId expected_type;
     CmHirLocal *locals;
@@ -994,6 +1014,8 @@ CmHirStatus cm_hir_add_generic_param(CmHirContext *context,
 /* Assign exactly one validated default while the owner remains reserved. */
 CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     CmHirGenericParamId parameter_id, const CmHirGenericArg *argument);
+/* Construct the only body origin admitted by this additive checkpoint. */
+CmHirBodyOrigin cm_hir_body_origin_item_source(CmHirDefId definition);
 CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     CmHirBodyId *out_id);
 CmHirStatus cm_hir_add_expr(CmHirContext *context, const CmHirExpr *expression,

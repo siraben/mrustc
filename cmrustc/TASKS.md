@@ -387,7 +387,7 @@ meet the corpus-wide acceptance gates.
   to the bound side of their owning predicate. Predicate-prefix HRTBs use one
   item-owned scope shared by the subject and every atomic trait or outlives
   constraint expanded from the source predicate; scope counts and references
-  are validated together. Canonical dumps are `hir-v28`. This clears both
+  are validated together. Canonical dumps are `hir-v29`. This clears both
   `VaListImpl::with_copy` in `core/src/ffi/va_list.rs:246` and
   `for<'a> F: FnMut(GenericShunt<'a, I, R>) -> U` in
   `core/src/iter/adapters/mod.rs:155`. Graph-authenticated inherent methods may
@@ -1851,6 +1851,16 @@ must retain an expression body separately from a later evaluated scalar and
 use the exact enum repr type. Array lengths require stable type-position
 definition identities keyed by their source AST type occurrence; HIR TypeIds
 are not source identities and one item can own several independent lengths.
+
+As the prerequisite representation checkpoint, canonical `hir-v29` gives
+every existing function/const/static body an explicit authenticated
+`ITEM_SOURCE` origin. Its executable definition, enclosing definition, source
+item backlink, and transitional lexical owner are identical; construction,
+item publication, finalization, dumps, and typed barrier snapshots reject any
+mismatch. The historical one-body-per-owner rule remains in force until
+dedicated type-position/generated body definitions and occurrence registries
+land. Callable dispatch and execution-body identity are likewise unchanged in
+this checkpoint.
 
 The dependency-macro provenance follow-on must also pin producer and consumer
 module-graph lifetime IDs through dependency definitions/imports and

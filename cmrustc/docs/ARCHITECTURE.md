@@ -313,7 +313,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v28`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v29`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond advance the current canonical schema to `mir-v7`.
 
@@ -335,6 +335,15 @@ supertraits, associated bounds, ADT declaration fields, enum discriminants,
 and type-position expression bodies are deliberately not REGIONS roots yet;
 manifest body owners and enclosing trait/impl items with any predicate or
 outlives constraint are therefore rejected fail-closed.
+
+Every represented body also carries an explicit authenticated origin. In the
+first additive `hir-v29` checkpoint, the only admitted origin is
+`ITEM_SOURCE`: its executable definition, enclosing definition, item backlink,
+and transitional lexical owner must all be the same function, const, or static
+definition. This preserves one body per item and current execution behavior
+while removing `owner` as an implicit source of body identity. Type-position
+and generated origins, followed by the split between dispatch identity and the
+definition whose body executes, remain later atomic migrations.
 
 ### Named aggregate expression checkpoint
 
@@ -1306,7 +1315,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v28`.
+wrong-kind targets hard-error. The canonical format is `hir-v29`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

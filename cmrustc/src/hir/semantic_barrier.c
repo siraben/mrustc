@@ -281,7 +281,19 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
         const CmHirBody *body;
 
         body = (const CmHirBody *)cm_vec_at_const(&hir->bodies, index);
-        if (body == NULL || !cm_semantic_barrier_hash_array(&hash,
+        if (body == NULL
+            || !cm_semantic_barrier_hash_array(&hash,
+                &body->origin.kind, 1u, sizeof(body->origin.kind))
+            || !cm_semantic_barrier_hash_array(&hash,
+                &body->origin.definition, 1u,
+                sizeof(body->origin.definition))
+            || !cm_semantic_barrier_hash_array(&hash,
+                &body->origin.enclosing_definition, 1u,
+                sizeof(body->origin.enclosing_definition))
+            || !cm_semantic_barrier_hash_array(&hash,
+                &body->origin.data.item_source.item_definition, 1u,
+                sizeof(body->origin.data.item_source.item_definition))
+            || !cm_semantic_barrier_hash_array(&hash,
                 body->locals, (size_t)body->local_count,
                 sizeof(*body->locals))) return 0;
     }
@@ -852,6 +864,12 @@ static int cm_semantic_barrier_atom_still_matches(
         && cm_semantic_barrier_item_type(item) == atom->declared_type
         && cm_semantic_barrier_item_kind(item) == atom->kind
         && cm_hir_def_id_equal(body->owner, atom->owner)
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->origin.definition, atom->owner)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            atom->owner)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition, atom->owner)
         && body->expected_type == atom->declared_type
         && body->source == atom->source
         && body->source_expression_id == atom->source_expression;

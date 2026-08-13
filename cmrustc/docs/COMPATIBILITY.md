@@ -278,7 +278,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v28` and
+remains omitted rather than guessed. Canonical dumps are `hir-v29` and
 `mir-v7`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -295,6 +295,14 @@ expressions, and explicit enum discriminants remain outside this rooted proof.
 Manifest body owners and enclosing trait/impl items with predicates or
 outlives constraints reject instead of silently escaping that proof;
 the latter two still lack manifest atom identities.
+
+Canonical `hir-v29` records an explicit origin for every current function,
+const, and static body. The origin kind is `ITEM_SOURCE`, and its definition,
+enclosing definition, item backlink, and legacy owner must agree exactly.
+Construction, finalization, deterministic dumps, and typed barrier snapshots
+authenticate those fields. This is representation hardening only: multiple
+bodies per owner, type-position bodies, generated closure or promotion bodies,
+and trait-default execution selected through an impl remain unsupported.
 
 The first exact control-flow slice accepts `if left == right { then_u32 }
 else { else_u32 }`. Equality is restricted to exact u32 operands and produces
@@ -724,7 +732,7 @@ discarded. The graph-owned effective view evaluates cfg/cfg_attr before
 publication and preserves the parent enum plus original AST variant index.
 Enum-self, explicit variant, alias, glob, and checked-path imports use that
 identity; named-field variants are type-only, while unit and tuple variants
-also publish value constructors. Canonical HIR `hir-v28` pre-reserves a
+also publish value constructors. Canonical HIR `hir-v29` pre-reserves a
 distinct definition for every source variant, retains it on the variant
 payload, binds it to the final enum item/index, and revalidates structural
 imports when the enum becomes bound. The parent enum definition is never

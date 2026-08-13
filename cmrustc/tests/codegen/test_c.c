@@ -135,6 +135,7 @@ static void add_reference_test_function(TestReferenceProgram *program,
     }
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = program->u32_type;
     body.locals = locals;
@@ -376,6 +377,7 @@ static void test_program_init(TestProgram *program, int32_t value)
 
     memset(&hir_body, 0, sizeof(hir_body));
     hir_body.owner = definition;
+    hir_body.origin = cm_hir_body_origin_item_source(definition);
     hir_body.state = CM_HIR_BODY_TYPED;
     hir_body.expected_type = program->i32_type;
     hir_body.source = 1u;

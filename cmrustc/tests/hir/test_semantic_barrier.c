@@ -264,7 +264,7 @@ static void test_marked_usage_rules_and_dump(void)
         && fseek(stream, 0L, SEEK_SET) == 0);
     dump_size = fread(dump, 1u, sizeof(dump) - 1u, stream);
     dump[dump_size] = '\0';
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
         && strstr(dump, "usage=move static-borrow=not-promoted") != NULL
         && strstr(dump, "usage=borrow static-borrow=not-promoted") != NULL);
     assert(fclose(stream) == 0);
@@ -878,6 +878,58 @@ static void test_typed_success_and_phase_order(void)
     fixture_destroy(&fixture);
 }
 
+static void test_typed_snapshot_authenticates_body_origin(void)
+{
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    CmHirBody *body;
+    CmHirBodyOrigin saved_origin;
+    uint64_t capability;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+
+    fixture_init(&fixture, "fn value() -> i32 { 1 }");
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK);
+    body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies, 0u);
+    assert(body != NULL);
+    saved_origin = body->origin;
+    capability = cm_semantic_barrier_capability_id(&barrier);
+    semantic_generation = fixture.hir.semantic_generation;
+    rewind_generation = fixture.hir.rewind_generation;
+
+#define CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED() do { \
+        assert(cm_semantic_barrier_is_current(&barrier)); \
+        result = advance_marked(&barrier); \
+        assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR \
+            && result.phase == CM_SEMANTIC_BARRIER_TYPED \
+            && cm_semantic_barrier_capability_id(&barrier) == capability \
+            && fixture.hir.semantic_generation == semantic_generation \
+            && fixture.hir.rewind_generation == rewind_generation); \
+        body->origin = saved_origin; \
+    } while (0)
+
+    body->origin.kind = (CmHirBodyOriginKind)99;
+    CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED();
+    body->origin.definition = cm_hir_def_id_none();
+    CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED();
+    body->origin.enclosing_definition = cm_hir_def_id_none();
+    CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED();
+    body->origin.data.item_source.item_definition = cm_hir_def_id_none();
+    CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED();
+#undef CM_ASSERT_RAW_ORIGIN_MUTATION_REJECTED
+
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED);
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
 static void test_const_and_static_typed(void)
 {
     Fixture fixture;
@@ -1356,6 +1408,7 @@ int main(void)
     test_regions_parent_constraints_fail_closed();
     test_manifest_is_complete_stable_and_immutable();
     test_typed_success_and_phase_order();
+    test_typed_snapshot_authenticates_body_origin();
     test_const_and_static_typed();
     test_const_initializer_failure_rolls_back_all_bodies();
     test_trait_default_failure_rolls_back_all_bodies();

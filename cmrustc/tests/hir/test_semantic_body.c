@@ -645,6 +645,7 @@ static void test_closed_trait_default_definition_mode(void)
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = method_definition;
+    body.origin = cm_hir_body_origin_item_source(method_definition);
     body.source = 1u;
     body.source_expression_id = 1u;
     body.expected_type = fixture.u32_type;
@@ -865,6 +866,7 @@ static void test_explicit_qualified_callable_selection(void)
     locals[1].parameter_index = 1u;
     memset(&body, 0, sizeof(body));
     body.owner = selected_definition;
+    body.origin = cm_hir_body_origin_item_source(selected_definition);
     body.source = 1u;
     body.source_expression_id = 1u;
     body.expected_type = impl_parameter_type;
@@ -916,6 +918,7 @@ static void test_explicit_qualified_callable_selection(void)
     locals[1].parameter_index = 1u;
     memset(&body, 0, sizeof(body));
     body.owner = caller_definition;
+    body.origin = cm_hir_body_origin_item_source(caller_definition);
     body.source = 1u;
     body.source_expression_id = 2u;
     body.expected_type = fixture.u32_type;
@@ -968,6 +971,7 @@ static void test_explicit_qualified_callable_selection(void)
         &method_caller_definition) == CM_HIR_OK);
     memset(&body, 0, sizeof(body));
     body.owner = method_caller_definition;
+    body.origin = cm_hir_body_origin_item_source(method_caller_definition);
     body.source = 1u;
     body.source_expression_id = 3u;
     body.expected_type = fixture.u32_type;
@@ -1245,6 +1249,7 @@ static void test_generic_impl_method_instance_spec(void)
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = selected_definition;
+    body.origin = cm_hir_body_origin_item_source(selected_definition);
     body.source = 1u;
     body.source_expression_id = 1u;
     body.expected_type = impl_self_type;
@@ -1469,6 +1474,7 @@ static void test_generic_impl_method_instance_parts(void)
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = selected_definition;
+    body.origin = cm_hir_body_origin_item_source(selected_definition);
     body.source = 1u;
     body.source_expression_id = 1u;
     body.expected_type = impl_self_type;
@@ -1663,6 +1669,8 @@ static void method_fixture_init(MethodFixture *fixture, const char *trait_name,
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = fixture->selected_definition;
+    body.origin = cm_hir_body_origin_item_source(
+        fixture->selected_definition);
     body.source = 1u;
     body.source_expression_id = 1u;
     body.expected_type = fixture->base.u32_type;
@@ -1701,6 +1709,8 @@ static void method_fixture_init(MethodFixture *fixture, const char *trait_name,
     local.span = test_span(75u, 76u);
     memset(&body, 0, sizeof(body));
     body.owner = fixture->caller_definition;
+    body.origin = cm_hir_body_origin_item_source(
+        fixture->caller_definition);
     body.source = 1u;
     body.source_expression_id = 2u;
     body.expected_type = fixture->base.u32_type;
@@ -1864,6 +1874,7 @@ static void test_dot_method_ambiguity_is_order_independent(void)
         local.parameter_index = 0u;
         memset(&body, 0, sizeof(body));
         body.owner = selected;
+        body.origin = cm_hir_body_origin_item_source(selected);
         body.source = 1u;
         body.source_expression_id = 3u;
         body.expected_type = fixture.base.u32_type;
@@ -2097,6 +2108,7 @@ static CmHirDefId add_bounded_identity(TestFixture *fixture,
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = parameter_type;
     body.locals = &local;
@@ -2157,6 +2169,7 @@ static CmHirDefId add_caller(TestFixture *fixture, const char *name,
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = fixture->u32_type;
     body.locals = &local;
@@ -2293,6 +2306,7 @@ static CmHirDefId add_two_parameter_nested_caller(TestFixture *fixture,
     }
     memset(&body, 0, sizeof(body));
     body.owner = caller_definition;
+    body.origin = cm_hir_body_origin_item_source(caller_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = caller_types[3];
     body.locals = locals;
@@ -2415,6 +2429,7 @@ static ConstraintBody add_constraint_body(TestFixture *fixture)
     locals[2].parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
     memset(&body, 0, sizeof(body));
     body.owner = built.owner;
+    body.origin = cm_hir_body_origin_item_source(built.owner);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = fixture->u32_type;
     body.locals = locals;

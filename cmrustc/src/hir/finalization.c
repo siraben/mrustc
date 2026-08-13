@@ -88,8 +88,15 @@ static int cm_finalization_item_body_valid(const CmHirContext *hir,
 
     if (body_id == CM_HIR_BODY_NONE) return 1;
     body = cm_hir_get_body(hir, body_id);
-    return body != NULL && cm_hir_def_id_equal(body->owner,
-        item->definition);
+    return body != NULL
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->owner, item->definition)
+        && cm_hir_def_id_equal(body->origin.definition, item->definition)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            item->definition)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition,
+            item->definition);
 }
 
 static int cm_finalization_local_item_valid(const CmHirContext *hir,
@@ -232,6 +239,13 @@ static int cm_finalization_local_crate_valid(const CmHirContext *hir,
         body_id = (CmHirBodyId)(index + 1u);
         body = cm_hir_get_body(hir, body_id);
         if (body == NULL || body->owner.crate_id != local_crate) continue;
+        if (body->origin.kind != CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+            || !cm_hir_def_id_equal(body->origin.definition, body->owner)
+            || !cm_hir_def_id_equal(body->origin.enclosing_definition,
+                body->owner)
+            || !cm_hir_def_id_equal(
+                body->origin.data.item_source.item_definition,
+                body->owner)) return 0;
         owner = cm_hir_lookup_definition(hir, body->owner);
         if (owner == NULL || owner->kind != CM_HIR_DEFINITION_ITEM
             || owner->state != CM_HIR_DEFINITION_BOUND) return 0;

@@ -1190,6 +1190,7 @@ static void test_method_and_item_attribute_model(void)
     body_locals[0].span = test_span(112u, 117u);
     memset(&body, 0, sizeof(body));
     body.owner = impl_method_definition;
+    body.origin = cm_hir_body_origin_item_source(impl_method_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = u8_type;
     body.locals = body_locals;
@@ -1307,7 +1308,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1514,6 +1515,28 @@ static void test_body_public_invariants(void)
     body.expected_type = unit_type;
     body.source = 1u;
     body.source_expression_id = 1u;
+    body.span = test_span(10u, 20u);
+    body_id = CM_HIR_BODY_NONE;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT
+        && body_id == CM_HIR_BODY_NONE && context.bodies.len == 0u);
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.origin.kind = (CmHirBodyOriginKind)99;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT && context.bodies.len == 0u);
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.origin.definition = cm_hir_def_id_none();
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT && context.bodies.len == 0u);
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.origin.enclosing_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT && context.bodies.len == 0u);
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.origin.data.item_source.item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT && context.bodies.len == 0u);
+    body.origin = cm_hir_body_origin_item_source(definition);
     span = test_span(10u, 20u);
     span.source = 2u;
     body.span = span;
@@ -1544,6 +1567,7 @@ static void test_body_public_invariants(void)
     local.span = test_span(22u, 23u);
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = unit_type;
     body.locals = &local;
@@ -1579,6 +1603,7 @@ static void test_body_public_invariants(void)
     local.span = test_span(42u, 43u);
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = unit_type;
     body.locals = &local;
@@ -1656,6 +1681,7 @@ static void test_discard_parameter_model(void)
     locals[0].parameter_index = 1u;
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = unit_type;
     body.locals = locals;
@@ -1732,6 +1758,7 @@ static void test_discard_parameter_model(void)
         test_span(81u, 120u), &mismatch_definition) == CM_HIR_OK);
     memset(&body, 0, sizeof(body));
     body.owner = mismatch_definition;
+    body.origin = cm_hir_body_origin_item_source(mismatch_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = unit_type;
     body.parameter_count = 2u;
@@ -1776,8 +1803,9 @@ static void test_discard_parameter_model(void)
     assert(strstr(dump,
         "body-local body#1 index=0 origin=parameter[1] name=\"value\"")
         != NULL);
-    assert(strstr(dump, "body#1 owner=1:2 state=unlowered expected=ty#1 "
-        "locals=1 params=2") != NULL);
+    assert(strstr(dump, "body#1 owner=1:2 origin=item-source "
+        "definition=1:2 enclosing=1:2 item=1:2 state=unlowered "
+        "expected=ty#1 locals=1 params=2") != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
     cm_hir_context_destroy(&context);
@@ -2071,7 +2099,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -2315,7 +2343,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -3002,7 +3030,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -3484,7 +3512,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -4001,7 +4029,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -4415,6 +4443,7 @@ static void test_reference_expression_model(void)
     locals[1].parameter_index = 1u;
     memset(&body, 0, sizeof(body));
     body.owner = body_definition;
+    body.origin = cm_hir_body_origin_item_source(body_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = u32_type;
     body.locals = locals;
@@ -4428,6 +4457,7 @@ static void test_reference_expression_model(void)
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(101u, 180u), &other_body_definition) == CM_HIR_OK);
     body.owner = other_body_definition;
+    body.origin = cm_hir_body_origin_item_source(other_body_definition);
     body.locals = locals;
     body.local_count = 1u;
     body.parameter_count = 1u;
@@ -4652,6 +4682,8 @@ static void test_method_call_expression_model(void)
             &body_definitions[index]) == CM_HIR_OK);
         memset(&body, 0, sizeof(body));
         body.owner = body_definitions[index];
+        body.origin = cm_hir_body_origin_item_source(
+            body_definitions[index]);
         body.state = CM_HIR_BODY_UNLOWERED;
         body.expected_type = u32_type;
         body.locals = &local;
@@ -4943,6 +4975,7 @@ static void test_aggregate_expression_model(void)
         test_span(100u, 200u), &body_definition) == CM_HIR_OK);
     memset(&body, 0, sizeof(body));
     body.owner = body_definition;
+    body.origin = cm_hir_body_origin_item_source(body_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = struct_type;
     body.source = 1u;
@@ -4952,6 +4985,7 @@ static void test_aggregate_expression_model(void)
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(100u, 200u), &other_body_definition) == CM_HIR_OK);
     body.owner = other_body_definition;
+    body.origin = cm_hir_body_origin_item_source(other_body_definition);
     body.expected_type = u16_type;
     body.source_expression_id = 2u;
     assert(cm_hir_add_body(&context, &body, &other_body_id) == CM_HIR_OK);
@@ -5142,7 +5176,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -6105,7 +6139,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
         && strstr(dump, "trait-header item#2 safety=unsafe auto=1")
             != NULL
         && strstr(dump, "impl-header item#3 safety=safe negative=1")
@@ -6496,7 +6530,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -6908,6 +6942,7 @@ int main(void)
     locals[0].span = test_span(120u, 125u);
     memset(&body, 0, sizeof(body));
     body.owner = function_definition;
+    body.origin = cm_hir_body_origin_item_source(function_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = unit_type;
     body.locals = locals;
@@ -7044,7 +7079,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(first_dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,

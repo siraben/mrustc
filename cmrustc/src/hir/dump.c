@@ -447,7 +447,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v28\n", stream);
+    fputs("hir-v29\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -919,6 +919,17 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         body = (const CmHirBody *)cm_vec_at_const(&context->bodies, index);
         fprintf(stream, "body#%u owner=", (unsigned int)(index + 1u));
         cm_hir_dump_def(stream, body->owner);
+        fputs(" origin=", stream);
+        fputs(body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+                ? "item-source" : "invalid",
+            stream);
+        fputs(" definition=", stream);
+        cm_hir_dump_def(stream, body->origin.definition);
+        fputs(" enclosing=", stream);
+        cm_hir_dump_def(stream, body->origin.enclosing_definition);
+        fputs(" item=", stream);
+        cm_hir_dump_def(stream,
+            body->origin.data.item_source.item_definition);
         fprintf(stream, " state=%s expected=ty#%u locals=%u params=%u ",
             body->state == CM_HIR_BODY_UNLOWERED ? "unlowered"
                 : (body->state == CM_HIR_BODY_TYPED ? "typed" : "error"),

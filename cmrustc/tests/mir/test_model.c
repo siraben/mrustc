@@ -172,6 +172,7 @@ static void add_one_argument_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = return_type;
     body.locals = &local;
@@ -232,6 +233,7 @@ static void add_two_argument_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = type;
     body.locals = locals;
@@ -295,6 +297,7 @@ static void add_one_argument_let_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = type;
     body.locals = locals;
@@ -438,6 +441,8 @@ static void add_blanket_impl_method(TestHir *fixture,
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = fixture->blanket_method_definition;
+    body.origin = cm_hir_body_origin_item_source(
+        fixture->blanket_method_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = fixture->blanket_parameter_type;
     body.locals = &local;

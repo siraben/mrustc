@@ -6127,6 +6127,7 @@ static CmHirBodyId cm_lower_body(CmLowerState *state, CmHirDefId owner,
     }
     memset(&body, 0, sizeof(body));
     body.owner = owner;
+    body.origin = cm_hir_body_origin_item_source(owner);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = expected_type;
     body.locals = (CmHirLocal *)locals;

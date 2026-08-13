@@ -13,6 +13,8 @@ typedef struct CmHirPreboundAssociatedType {
     CmSpan span;
 } CmHirPreboundAssociatedType;
 
+static int cm_hir_body_item_source_origin_valid(const CmHirBody *body);
+
 static const void *cm_hir_get_id(const CmVec *arena, uint32_t id)
 {
     if (id == 0u || (size_t)id > arena->len) {
@@ -4029,17 +4031,26 @@ static CmHirStatus cm_hir_add_item_internal(CmHirContext *context,
         return CM_HIR_INVALID_ID;
     }
     if (item->kind == CM_HIR_ITEM_FUNCTION
-        && item->data.function_item.body != CM_HIR_BODY_NONE
-        && !cm_hir_def_id_equal(cm_hir_get_body(context,
-                item->data.function_item.body)->owner, definition_id)) {
-        return CM_HIR_INVARIANT_VIOLATION;
+        && item->data.function_item.body != CM_HIR_BODY_NONE) {
+        const CmHirBody *body;
+
+        body = cm_hir_get_body(context,
+            item->data.function_item.body);
+        if (!cm_hir_body_item_source_origin_valid(body)
+            || !cm_hir_def_id_equal(body->owner, definition_id)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
     }
     if ((item->kind == CM_HIR_ITEM_CONST
             || item->kind == CM_HIR_ITEM_STATIC)
-        && item->data.value_item.body != CM_HIR_BODY_NONE
-        && !cm_hir_def_id_equal(cm_hir_get_body(context,
-                item->data.value_item.body)->owner, definition_id)) {
-        return CM_HIR_INVARIANT_VIOLATION;
+        && item->data.value_item.body != CM_HIR_BODY_NONE) {
+        const CmHirBody *body;
+
+        body = cm_hir_get_body(context, item->data.value_item.body);
+        if (!cm_hir_body_item_source_origin_valid(body)
+            || !cm_hir_def_id_equal(body->owner, definition_id)) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
     }
     copy = *item;
     copy.definition = definition_id;
@@ -4471,6 +4482,29 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
 static void cm_hir_claim_expression_tree(CmHirContext *context,
     CmHirExprId expression_id, CmHirBodyId body_id);
 
+CmHirBodyOrigin cm_hir_body_origin_item_source(CmHirDefId definition)
+{
+    CmHirBodyOrigin origin;
+
+    memset(&origin, 0, sizeof(origin));
+    origin.kind = CM_HIR_BODY_ORIGIN_ITEM_SOURCE;
+    origin.definition = definition;
+    origin.enclosing_definition = definition;
+    origin.data.item_source.item_definition = definition;
+    return origin;
+}
+
+static int cm_hir_body_item_source_origin_valid(const CmHirBody *body)
+{
+    return body != NULL
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->origin.definition, body->owner)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            body->owner)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition, body->owner);
+}
+
 CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     CmHirBodyId *out_id)
 {
@@ -4486,6 +4520,7 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     }
     owner_definition = cm_hir_lookup_definition(context, body->owner);
     if (!cm_hir_span_is_ordered(body->span)
+        || !cm_hir_body_item_source_origin_valid(body)
         || owner_definition == NULL
         || owner_definition->kind != CM_HIR_DEFINITION_ITEM
         || !cm_hir_type_id_valid(context, body->expected_type)

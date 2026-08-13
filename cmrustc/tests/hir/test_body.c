@@ -2999,7 +2999,7 @@ static void test_graph_u32_add_body(void)
     stream = tmpfile();
     assert(stream != NULL && cm_hir_dump(stream, &fixture.hir) == 0);
     dump = read_dump(stream);
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0);
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0);
     assert(snprintf(binary_record, sizeof(binary_record),
         "expr#3 binary type=ty#%u operator=add left=expr#1 "
         "right=expr#2 owner=body#1",
@@ -3838,7 +3838,7 @@ static void test_graph_explicit_u32_let_block(void)
     stream = tmpfile();
     assert(stream != NULL && cm_hir_dump(stream, &fixture.hir) == 0);
     dump = read_dump(stream);
-    assert(strncmp(dump, "hir-v28\n", strlen("hir-v28\n")) == 0
+    assert(strncmp(dump, "hir-v29\n", strlen("hir-v29\n")) == 0
         && strstr(dump,
             "statements=[let(local=2,initializer=expr#3") != NULL
         && strstr(dump,
@@ -4276,6 +4276,8 @@ static void test_owned_local_and_instantiated_call_model(void)
     identity_local.parameter_index = 0u;
     memset(&identity_body_value, 0, sizeof(identity_body_value));
     identity_body_value.owner = identity_definition;
+    identity_body_value.origin =
+        cm_hir_body_origin_item_source(identity_definition);
     identity_body_value.state = CM_HIR_BODY_UNLOWERED;
     identity_body_value.expected_type = parameter_type;
     identity_body_value.locals = &identity_local;
@@ -4336,6 +4338,8 @@ static void test_owned_local_and_instantiated_call_model(void)
     probe_local.parameter_index = 0u;
     memset(&probe_body_value, 0, sizeof(probe_body_value));
     probe_body_value.owner = probe_definition;
+    probe_body_value.origin =
+        cm_hir_body_origin_item_source(probe_definition);
     probe_body_value.state = CM_HIR_BODY_UNLOWERED;
     probe_body_value.expected_type = u32_type;
     probe_body_value.locals = &probe_local;

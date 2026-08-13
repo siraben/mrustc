@@ -181,6 +181,7 @@ static void add_impl_method(TestFixture *fixture)
     local.parameter_index = 0u;
     memset(&body, 0, sizeof(body));
     body.owner = fixture->impl_method;
+    body.origin = cm_hir_body_origin_item_source(fixture->impl_method);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = fixture->u32_type;
     body.locals = &local;
@@ -330,6 +331,7 @@ static void give_trait_method_default_body(TestFixture *fixture)
 
     memset(&body, 0, sizeof(body));
     body.owner = fixture->trait_method;
+    body.origin = cm_hir_body_origin_item_source(fixture->trait_method);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = fixture->u32_type;
     body.source = 1u;

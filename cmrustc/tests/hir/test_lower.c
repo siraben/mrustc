@@ -378,16 +378,38 @@ static void test_complete_declarations(void)
     assert(consume->data.function_item.body != CM_HIR_BODY_NONE);
     body = cm_hir_get_body(&context,
         consume->data.function_item.body);
-    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED);
+    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->origin.definition,
+            consume->definition)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            consume->definition)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition,
+            consume->definition));
     assert(body->source_expression_id != 0u);
     assert(body->parameter_count == 1u);
     assert(limit->data.value_item.body != CM_HIR_BODY_NONE);
     body = cm_hir_get_body(&context, limit->data.value_item.body);
-    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED);
+    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->origin.definition, limit->definition)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            limit->definition)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition,
+            limit->definition));
     assert(body->source_expression_id != 0u);
     assert(flag->data.value_item.mutability == CM_HIR_MUTABLE);
     body = cm_hir_get_body(&context, flag->data.value_item.body);
-    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED);
+    assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        && cm_hir_def_id_equal(body->origin.definition, flag->definition)
+        && cm_hir_def_id_equal(body->origin.enclosing_definition,
+            flag->definition)
+        && cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition,
+            flag->definition));
     assert(declaration->data.function_item.body == CM_HIR_BODY_NONE);
     cm_hir_context_destroy(&context);
 }

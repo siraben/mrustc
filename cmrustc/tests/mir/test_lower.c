@@ -104,6 +104,7 @@ static CmHirBodyId add_function_body(CmHirContext *hir,
     }
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = state;
     body.expected_type = return_type;
     body.source = 1u;
@@ -182,6 +183,7 @@ static void add_one_argument_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = return_type;
     body.locals = &local;
@@ -242,6 +244,7 @@ static void add_two_argument_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = type;
     body.locals = locals;
@@ -305,6 +308,7 @@ static void add_mixed_argument_function(CmHirContext *hir,
 
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = return_type;
     body.locals = locals;
@@ -841,6 +845,7 @@ static void add_nested_add_function(CmHirContext *hir,
     }
     memset(&body, 0, sizeof(body));
     body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = u32_type;
     body.locals = locals;
@@ -1023,6 +1028,7 @@ static void add_let_flow_fixture(CmHirContext *hir,
     locals[3].parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
     memset(&body, 0, sizeof(body));
     body.owner = caller_definition;
+    body.origin = cm_hir_body_origin_item_source(caller_definition);
     body.state = CM_HIR_BODY_UNLOWERED;
     body.expected_type = u32_type;
     body.locals = locals;
