@@ -14,7 +14,9 @@
 #include "cm/hir/semantic_body.h"
 #include "cm/hir/semantic_item.h"
 #include "cm/hir/semantic_results.h"
+#include "../hir/admission_internal.h"
 #include "../hir/instance_internal.h"
+#include "../hir/semantic_results_internal.h"
 #include "cm/macro/expand.h"
 #include "cm/mir/lower.h"
 #include "cm/mir/model.h"
@@ -510,6 +512,54 @@ invalid:
     return 0;
 }
 
+static int cm_compile_callable_executable_substitution(
+    const CmCompileExactState *state, const CmHirExpr *expression,
+    CmHirExprId expression_id,
+    const CmSemanticCallableSelectionView *selection,
+    CmHirTypeId *out_substitution, uint32_t *out_substitution_count,
+    char *message, size_t message_capacity)
+{
+    const CmSemanticResults *results;
+    CmSemanticGenericArgumentView argument;
+
+    if (state == NULL || expression == NULL || selection == NULL
+        || out_substitution == NULL || out_substitution_count == NULL) {
+        return 0;
+    }
+    *out_substitution = CM_HIR_TYPE_NONE;
+    *out_substitution_count = 0u;
+    if (selection->item_argument_count != 0u
+        || selection->method_argument_count != 0u
+        || selection->implemented_trait_argument_count != 0u
+        || selection->enclosing_impl_argument_count > 1u) {
+        goto unsupported;
+    }
+    if (selection->enclosing_impl_argument_count == 0u) return 1;
+    results = cm_semantic_admission_results(state->all_local_admission);
+    memset(&argument, 0, sizeof(argument));
+    if (results == NULL
+        || cm_semantic_results_callable_generic_argument(results,
+            state->all_local_admission, expression->owner_body,
+            expression_id,
+            CM_SEMANTIC_CALLABLE_GENERIC_ARGUMENT_ENCLOSING_IMPL, 0u,
+            &argument) != CM_SEMANTIC_RESULTS_OK
+        || argument.kind != CM_HIR_GENERIC_ARG_TYPE
+        || cm_semantic_type_view_materialize_existing_hir(results,
+            state->all_local_admission, &argument.normalized,
+            out_substitution) != CM_SEMANTIC_RESULTS_OK) {
+        goto unsupported;
+    }
+    *out_substitution_count = 1u;
+    return 1;
+
+unsupported:
+    *out_substitution = CM_HIR_TYPE_NONE;
+    *out_substitution_count = 0u;
+    (void)snprintf(message, message_capacity,
+        "reachable selected-call executable substitutions are unsupported");
+    return 0;
+}
+
 static int cm_compile_materialize_call_substitutions(
     const CmCompileExactState *state, size_t caller_index,
     const CmHirExpr *expression, CmHirTypeId *substitution,
@@ -619,6 +669,67 @@ static int cm_compile_intern_exact(CmCompileExactState *state,
         instance.substitution = substitutions[0];
     }
     instance.body = item->data.function_item.body;
+    instance.mir_body = CM_MIR_BODY_NONE;
+    (void)cm_vec_push(&state->instances, &instance);
+    *out_instance = state->instances.len - 1u;
+    return 1;
+}
+
+static int cm_compile_intern_canonical(CmCompileExactState *state,
+    const CmHirCanonicalInstance *identity, CmHirTypeId substitution,
+    uint32_t substitution_count, size_t *out_instance,
+    char *message, size_t message_capacity)
+{
+    CmCompileReachableInstance instance;
+    const CmHirItem *item;
+    size_t index;
+
+    item = identity == NULL ? NULL
+        : cm_compile_definition_item(state->hir, identity->definition);
+    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+        || identity->body != item->data.function_item.body
+        || cm_hir_canonical_instance_validate(state->hir,
+            state->local_crate, identity) != CM_HIR_INSTANCE_OK
+        || substitution_count > 1u
+        || (substitution_count != 0u
+            && substitution == CM_HIR_TYPE_NONE)) {
+        (void)snprintf(message, message_capacity,
+            "retained reachable instance is not canonical");
+        return 0;
+    }
+    for (index = 0u; index < state->instances.len; ++index) {
+        const CmCompileReachableInstance *candidate;
+        int equal;
+
+        candidate = (const CmCompileReachableInstance *)cm_vec_at_const(
+            &state->instances, index);
+        equal = 0;
+        if (candidate != NULL
+            && cm_hir_canonical_instance_equal(&candidate->identity,
+                identity, &equal) == CM_HIR_INSTANCE_OK && equal) {
+            if (candidate->substitution_count != substitution_count
+                || (substitution_count != 0u
+                    && candidate->substitution != substitution)) {
+                (void)snprintf(message, message_capacity,
+                    "canonical instance has inconsistent executable material");
+                return 0;
+            }
+            *out_instance = index;
+            return 1;
+        }
+    }
+    memset(&instance, 0, sizeof(instance));
+    cm_hir_canonical_instance_init(&instance.identity);
+    if (cm_hir_canonical_instance_clone(&instance.identity, identity)
+            != CM_HIR_INSTANCE_OK) {
+        (void)snprintf(message, message_capacity,
+            "canonical instance identity cannot be retained");
+        return 0;
+    }
+    instance.definition = identity->definition;
+    instance.substitution = substitution;
+    instance.substitution_count = substitution_count;
+    instance.body = identity->body;
     instance.mir_body = CM_MIR_BODY_NONE;
     (void)cm_vec_push(&state->instances, &instance);
     *out_instance = state->instances.len - 1u;
@@ -749,19 +860,24 @@ static int cm_compile_discover_expression_callees(
         CmHirExprId argument_storage[2];
         CmSemanticCallableSelectionView selection;
         CmCompileReachableEdge edge;
+        CmHirCanonicalInstance selected_identity;
+        CmHirTypeId executable_type;
+        uint32_t executable_type_count;
         uint32_t call_argument_count;
-        int impl_self_matches;
 
         memset(&selection, 0, sizeof(selection));
+        cm_hir_canonical_instance_init(&selected_identity);
         results = cm_semantic_admission_results(
             state->all_local_admission);
         call_arguments = NULL;
         call_argument_count = 0u;
-        impl_self_matches = 0;
+        executable_type = CM_HIR_TYPE_NONE;
+        executable_type_count = 0u;
         if (!cm_compile_callable_arguments(expression, argument_storage,
                 &call_arguments, &call_argument_count)
             || !cm_compile_callable_selection(state, expression,
                 expression_id, &selection, message, message_capacity)) {
+            cm_hir_canonical_instance_destroy(&selected_identity);
             if (message[0] == '\0') {
                 (void)snprintf(message, message_capacity,
                     "reachable selected call has an unsupported argument shape");
@@ -773,6 +889,7 @@ static int cm_compile_discover_expression_callees(
                 || !cm_compile_discover_expression_callees(state,
                     caller_index, call_arguments[index],
                     depth + 1u, message, message_capacity)) {
+                cm_hir_canonical_instance_destroy(&selected_identity);
                 if (message[0] == '\0') {
                     (void)snprintf(message, message_capacity,
                         "reachable selected call argument discovery failed");
@@ -795,17 +912,20 @@ static int cm_compile_discover_expression_callees(
                 impl_item->data.impl_item.trait_type.definition,
                 selection.requested_trait)
             || results == NULL
-            || cm_semantic_type_view_matches_monomorphic_hir(results,
+            || cm_semantic_results_callable_callee_identity(results,
                 state->all_local_admission,
-                &selection.requested_self_type,
-                impl_item->data.impl_item.self_type,
-                &impl_self_matches) != CM_SEMANTIC_RESULTS_OK
-            || !impl_self_matches
+                expression->owner_body, expression_id,
+                &selected_identity) != CM_SEMANTIC_RESULTS_OK
+            || !cm_compile_callable_executable_substitution(state,
+                expression, expression_id, &selection, &executable_type,
+                &executable_type_count, message, message_capacity)
             || !cm_hir_def_id_equal(
                 callee->data.function_item.trait_item_definition,
                 selection.declared_trait_callable)
-            || !cm_compile_intern_exact(state, callee, NULL, 0u,
+            || !cm_compile_intern_canonical(state, &selected_identity,
+                executable_type, executable_type_count,
                 &edge.callee, message, message_capacity)) {
+            cm_hir_canonical_instance_destroy(&selected_identity);
             if (message[0] == '\0') {
                 (void)snprintf(message, message_capacity,
                     "reachable callable selection is inconsistent with HIR");
@@ -822,12 +942,14 @@ static int cm_compile_discover_expression_callees(
             if (callee_instance == NULL
                 || cm_hir_canonical_instance_clone(&edge.callee_identity,
                     &callee_instance->identity) != CM_HIR_INSTANCE_OK) {
+                cm_hir_canonical_instance_destroy(&selected_identity);
                 cm_hir_canonical_instance_destroy(&edge.callee_identity);
                 (void)snprintf(message, message_capacity,
                     "reachable callable identity cannot be retained");
                 return 0;
             }
         }
+        cm_hir_canonical_instance_destroy(&selected_identity);
         edge.expression = expression_id;
         (void)cm_vec_push(&state->edges, &edge);
         return 1;
@@ -961,10 +1083,8 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
     CmHirCrateId local_crate, CmSemanticAdmission *admission,
     char *message, size_t message_capacity)
 {
-    CmSemanticReachableInstance *reachable;
-    CmSemanticReachableInstanceCall *calls;
-    CmHirInstanceSpec *specs;
-    CmHirGenericArg *arguments;
+    CmSemanticCanonicalReachableInstance *reachable;
+    CmSemanticCanonicalReachableInstanceCall *calls;
     CmSemanticAdmissionResult admission_result;
     size_t instance_index;
     size_t edge_index;
@@ -978,17 +1098,11 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
     }
     if (state->instances.len == 0u
         || state->instances.len > (size_t)-1 / sizeof(*reachable)
-        || state->instances.len > (size_t)-1 / sizeof(*specs)
-        || state->instances.len > (size_t)-1 / sizeof(*arguments)
         || state->edges.len > (size_t)-1 / sizeof(*calls)) return 0;
-    reachable = (CmSemanticReachableInstance *)cm_alloc_zeroed(
+    reachable = (CmSemanticCanonicalReachableInstance *)cm_alloc_zeroed(
         state->instances.len, sizeof(*reachable));
-    specs = (CmHirInstanceSpec *)cm_alloc_zeroed(state->instances.len,
-        sizeof(*specs));
-    arguments = (CmHirGenericArg *)cm_alloc_zeroed(state->instances.len,
-        sizeof(*arguments));
     calls = state->edges.len == 0u ? NULL
-        : (CmSemanticReachableInstanceCall *)cm_alloc_zeroed(
+        : (CmSemanticCanonicalReachableInstanceCall *)cm_alloc_zeroed(
             state->edges.len, sizeof(*calls));
     ok = 0;
     for (instance_index = 0u; instance_index < state->instances.len;
@@ -997,18 +1111,11 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
 
         instance = (const CmCompileReachableInstance *)cm_vec_at_const(
             &state->instances, instance_index);
-        if (instance == NULL || instance->substitution_count > 1u) {
-            goto cleanup;
-        }
-        if (!cm_compile_instance_spec_for_item(state->hir,
-                cm_compile_definition_item(state->hir,
-                    instance->definition),
-                instance->substitution_count == 0u ? NULL
-                    : &instance->substitution,
-                instance->substitution_count, &specs[instance_index],
-                &arguments[instance_index])) goto cleanup;
-        reachable[instance_index].body = instance->body;
-        reachable[instance_index].spec = &specs[instance_index];
+        if (instance == NULL
+            || cm_hir_canonical_instance_validate(state->hir, local_crate,
+                &instance->identity) != CM_HIR_INSTANCE_OK
+            || instance->identity.body != instance->body) goto cleanup;
+        reachable[instance_index].identity = &instance->identity;
     }
     for (instance_index = 0u; instance_index < state->instances.len;
          ++instance_index) {
@@ -1024,13 +1131,8 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
              ++caller_edge) {
             const CmCompileReachableEdge *edge;
             const CmHirExpr *expression;
-            CmHirTypeId substitution;
-            uint32_t substitution_count;
-            CmHirInstanceSpec materialized;
-            CmHirGenericArg materialized_argument;
-            CmHirCanonicalInstance identity;
-            int equal_edge;
             int equal_target;
+            const CmCompileReachableInstance *callee_instance;
 
             edge_index = caller->edge_start + caller_edge;
             edge = (const CmCompileReachableEdge *)cm_vec_at_const(
@@ -1041,13 +1143,7 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
                 || edge->callee >= state->instances.len) {
                 goto cleanup;
             }
-            if (expression->kind == CM_HIR_EXPR_CALL) {
-                if (!cm_compile_materialize_call_substitutions(state,
-                        instance_index, expression, &substitution,
-                        &substitution_count, message, message_capacity)) {
-                    goto cleanup;
-                }
-            } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+            if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
                 || expression->kind == CM_HIR_EXPR_METHOD_CALL) {
                 CmSemanticCallableSelectionView selection;
 
@@ -1055,43 +1151,32 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
                 if (!cm_compile_callable_selection(state, expression,
                         edge->expression, &selection, message,
                         message_capacity)) goto cleanup;
-                substitution_count = 0u;
-            } else {
+            } else if (expression->kind != CM_HIR_EXPR_CALL) {
                 goto cleanup;
             }
-            if (!cm_compile_instance_spec_for_item(state->hir,
-                    cm_compile_definition_item(state->hir,
-                        ((const CmCompileReachableInstance *)cm_vec_at_const(
-                            &state->instances, edge->callee))->definition),
-                    substitution_count == 0u ? NULL : &substitution,
-                    substitution_count, &materialized,
-                    &materialized_argument)) goto cleanup;
-            cm_hir_canonical_instance_init(&identity);
-            equal_edge = 0;
             equal_target = 0;
-            if (cm_hir_canonical_instance_encode(state->hir, local_crate,
-                    &materialized, &identity) != CM_HIR_INSTANCE_OK
-                || cm_hir_canonical_instance_equal(&identity,
-                    &edge->callee_identity, &equal_edge)
+            callee_instance =
+                (const CmCompileReachableInstance *)cm_vec_at_const(
+                    &state->instances, edge->callee);
+            if (callee_instance == NULL
+                || cm_hir_canonical_instance_validate(state->hir,
+                    local_crate, &edge->callee_identity)
                     != CM_HIR_INSTANCE_OK
-                || cm_hir_canonical_instance_equal(&identity,
-                    &((const CmCompileReachableInstance *)
-                        cm_vec_at_const(&state->instances,
-                            edge->callee))->identity, &equal_target)
+                || cm_hir_canonical_instance_equal(&edge->callee_identity,
+                    &callee_instance->identity, &equal_target)
                     != CM_HIR_INSTANCE_OK
-                || !equal_edge || !equal_target) {
-                cm_hir_canonical_instance_destroy(&identity);
+                || !equal_target) {
                 (void)snprintf(message, message_capacity,
                     "reachable call target identity is inconsistent");
                 goto cleanup;
             }
-            cm_hir_canonical_instance_destroy(&identity);
-            calls[edge_index].caller = &specs[instance_index];
+            calls[edge_index].caller = &caller->identity;
             calls[edge_index].expression = edge->expression;
-            calls[edge_index].callee = &specs[edge->callee];
+            calls[edge_index].callee = &callee_instance->identity;
         }
     }
-    admission_result = cm_semantic_admit_typed_instance_closure(admission,
+    admission_result =
+        cm_semantic_admit_typed_canonical_instance_closure(admission,
         state->hir, local_crate, reachable, state->instances.len, calls,
         state->edges.len);
     if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
@@ -1122,8 +1207,6 @@ static int cm_compile_admit_instance_closure(CmCompileExactState *state,
 
 cleanup:
     cm_free(calls);
-    cm_free(arguments);
-    cm_free(specs);
     cm_free(reachable);
     return ok;
 }

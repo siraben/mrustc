@@ -4,6 +4,8 @@
 
 #include "cm/alloc.h"
 
+#include "../../src/hir/instance_internal.h"
+
 #include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -335,6 +337,219 @@ static void test_authenticated_method_identity(void)
     fixture_destroy(&fixture);
 }
 
+static int canonical_bytes_are_borrowed(
+    const CmHirCanonicalInstance *identity,
+    const unsigned char *bytes, size_t size)
+{
+    size_t offset;
+
+    if (identity == NULL || identity->bytes == NULL || bytes == NULL) return 0;
+    for (offset = 0u; offset <= identity->size; ++offset) {
+        if (bytes == identity->bytes + offset) {
+            return size <= identity->size - offset;
+        }
+    }
+    return 0;
+}
+
+static int canonical_argument_is_borrowed(
+    const CmHirCanonicalInstance *identity,
+    const CmHirCanonicalArgumentPart *argument)
+{
+    return argument != NULL && canonical_bytes_are_borrowed(identity,
+        argument->bytes, argument->size);
+}
+
+static void test_canonical_instance_decode(void)
+{
+    Fixture fixture;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec spec;
+    CmHirCanonicalInstance identity;
+    CmHirCanonicalInstance reencoded;
+    CmHirDecodedCanonicalInstance decoded;
+    int equal;
+
+    fixture_init(&fixture);
+    spec = make_spec(&fixture, arguments);
+    cm_hir_canonical_instance_init(&identity);
+    cm_hir_canonical_instance_init(&reencoded);
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_decode(&fixture.hir, 1u, &identity,
+            &decoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_def_id_equal(decoded.parts.selected_callable,
+            fixture.callable)
+        && decoded.parts.item_argument_count == 2u
+        && decoded.parts.item_arguments == decoded.owned_item_arguments
+        && decoded.parts.method_arguments == NULL
+        && decoded.parts.enclosing_impl_arguments == NULL
+        && decoded.parts.implemented_trait_arguments == NULL
+        && decoded.parts.self_type == NULL
+        && canonical_argument_is_borrowed(&identity,
+            &decoded.parts.item_arguments[0])
+        && canonical_argument_is_borrowed(&identity,
+            &decoded.parts.item_arguments[1])
+        && cm_hir_canonical_instance_encode_parts(&fixture.hir, 1u,
+            &decoded.parts, &reencoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&identity, &reencoded, &equal)
+            == CM_HIR_INSTANCE_OK && equal);
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    assert(decoded.owned_item_arguments == NULL
+        && decoded.parts.item_arguments == NULL
+        && cm_hir_def_id_is_none(decoded.parts.selected_callable));
+    cm_hir_canonical_instance_destroy(&reencoded);
+    cm_hir_canonical_instance_destroy(&identity);
+
+    cm_hir_instance_spec_init(&spec);
+    spec.selected_callable = fixture.selected_method;
+    spec.declared_trait_callable = fixture.declared_method;
+    spec.enclosing_impl = fixture.impl_definition;
+    spec.implemented_trait = fixture.trait_definition;
+    spec.self_owner = fixture.impl_definition;
+    spec.self_type = fixture.u32_type;
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+            &identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_decode(&fixture.hir, 1u, &identity,
+            &decoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_def_id_equal(decoded.parts.selected_callable,
+            fixture.selected_method)
+        && cm_hir_def_id_equal(decoded.parts.declared_trait_callable,
+            fixture.declared_method)
+        && cm_hir_def_id_equal(decoded.parts.enclosing_impl,
+            fixture.impl_definition)
+        && cm_hir_def_id_equal(decoded.parts.implemented_trait,
+            fixture.trait_definition)
+        && cm_hir_def_id_equal(decoded.parts.self_owner,
+            fixture.impl_definition)
+        && decoded.parts.item_argument_count == 0u
+        && decoded.parts.method_argument_count == 0u
+        && decoded.parts.enclosing_impl_argument_count == 0u
+        && decoded.parts.implemented_trait_argument_count == 0u
+        && canonical_bytes_are_borrowed(&identity,
+            decoded.parts.self_type, decoded.parts.self_type_size));
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    cm_hir_canonical_instance_destroy(&identity);
+    fixture_destroy(&fixture);
+}
+
+static void test_canonical_instance_decode_rejects_malformed(void)
+{
+    Fixture fixture;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec spec;
+    CmHirCanonicalInstance identity;
+    CmHirCanonicalInstance malformed;
+    CmHirDecodedCanonicalInstance decoded;
+    unsigned char *trailing_bytes;
+    unsigned char saved;
+
+    fixture_init(&fixture);
+    spec = make_spec(&fixture, arguments);
+    cm_hir_canonical_instance_init(&identity);
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    assert(cm_hir_canonical_instance_encode(&fixture.hir, 1u, &spec,
+        &identity) == CM_HIR_INSTANCE_OK && identity.size > 1u);
+
+    malformed = identity;
+    malformed.size -= 1u;
+    assert(cm_hir_canonical_instance_decode(&fixture.hir, 1u, &malformed,
+            &decoded) != CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_validate(&fixture.hir, 1u, &malformed)
+            != CM_HIR_INSTANCE_OK
+        && cm_hir_def_id_is_none(decoded.parts.selected_callable));
+
+    trailing_bytes = (unsigned char *)cm_alloc(identity.size + 1u);
+    memcpy(trailing_bytes, identity.bytes, identity.size);
+    trailing_bytes[identity.size] = 0u;
+    malformed.bytes = trailing_bytes;
+    malformed.size = identity.size + 1u;
+    assert(cm_hir_canonical_instance_decode(&fixture.hir, 1u, &malformed,
+            &decoded) == CM_HIR_INSTANCE_INVALID_RELATION
+        && cm_hir_canonical_instance_validate(&fixture.hir, 1u, &malformed)
+            == CM_HIR_INSTANCE_INVALID_RELATION
+        && cm_hir_def_id_is_none(decoded.parts.selected_callable));
+    cm_free(trailing_bytes);
+
+    saved = identity.bytes[0];
+    identity.bytes[0] ^= 1u;
+    assert(cm_hir_canonical_instance_decode(&fixture.hir, 1u, &identity,
+            &decoded) == CM_HIR_INSTANCE_INVALID_RELATION
+        && cm_hir_canonical_instance_validate(&fixture.hir, 1u, &identity)
+            == CM_HIR_INSTANCE_INVALID_RELATION
+        && cm_hir_def_id_is_none(decoded.parts.selected_callable));
+    identity.bytes[0] = saved;
+
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    cm_hir_canonical_instance_destroy(&identity);
+    fixture_destroy(&fixture);
+}
+
+static void test_direct_call_parts_parity(void)
+{
+    Fixture fixture;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec caller_spec;
+    CmHirCanonicalInstance caller_identity;
+    CmHirCanonicalInstance from_spec;
+    CmHirCanonicalInstance from_parts;
+    CmHirDecodedCanonicalInstance decoded;
+    const CmHirDefinition *definition;
+    const CmHirItem *caller;
+    CmHirExpr call;
+    CmHirTypeId substitutions[2];
+    int equal;
+
+    fixture_init(&fixture);
+    definition = cm_hir_lookup_definition(&fixture.hir,
+        fixture.callable);
+    caller = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
+        ? NULL : cm_hir_get_item(&fixture.hir, definition->entity.item_id);
+    caller_spec = make_spec(&fixture, arguments);
+    memset(&call, 0, sizeof(call));
+    if (caller != NULL && caller->kind == CM_HIR_ITEM_FUNCTION
+        && caller->data.function_item.signature.parameter_count == 2u) {
+        substitutions[0] = caller->data.function_item.signature.parameters[0]
+            .type;
+        substitutions[1] = caller->data.function_item.signature.parameters[1]
+            .type;
+        call.kind = CM_HIR_EXPR_CALL;
+        call.owner_body = caller->data.function_item.body;
+        call.data.call.callee = fixture.callable;
+        call.data.call.type_substitutions = substitutions;
+        call.data.call.type_substitution_count = 2u;
+    }
+    cm_hir_canonical_instance_init(&caller_identity);
+    cm_hir_canonical_instance_init(&from_spec);
+    cm_hir_canonical_instance_init(&from_parts);
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    assert(caller != NULL && call.kind == CM_HIR_EXPR_CALL
+        && call.data.call.type_substitution_count == 2u
+        && cm_hir_def_id_equal(call.data.call.callee, fixture.callable)
+        && cm_hir_canonical_instance_encode(&fixture.hir, 1u, &caller_spec,
+            &caller_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_decode(&fixture.hir, 1u,
+            &caller_identity, &decoded) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode_direct_call(&fixture.hir, 1u,
+            &caller_spec, &call, &from_spec) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode_direct_call_parts(&fixture.hir,
+            1u, &decoded.parts, &call, &from_parts) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_equal(&from_spec, &from_parts, &equal)
+            == CM_HIR_INSTANCE_OK && equal
+        && cm_hir_def_id_equal(from_parts.definition, fixture.callable));
+    decoded.parts.selected_callable = fixture.selected_method;
+    assert(cm_hir_canonical_instance_encode_direct_call_parts(&fixture.hir,
+            1u, &decoded.parts, &call, &(CmHirCanonicalInstance){0})
+            == CM_HIR_INSTANCE_INVALID_RELATION);
+    decoded.parts.selected_callable = fixture.callable;
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    cm_hir_canonical_instance_destroy(&from_parts);
+    cm_hir_canonical_instance_destroy(&from_spec);
+    cm_hir_canonical_instance_destroy(&caller_identity);
+    fixture_destroy(&fixture);
+}
+
 static void test_adt_argument_kind_is_authenticated(void)
 {
     Fixture fixture;
@@ -499,6 +714,9 @@ int main(void)
 {
     test_structural_key_clone_compare_dump();
     test_authenticated_method_identity();
+    test_canonical_instance_decode();
+    test_canonical_instance_decode_rejects_malformed();
+    test_direct_call_parts_parity();
     test_adt_argument_kind_is_authenticated();
     test_fail_closed_and_stale();
     test_same_hir_foreign_admission();

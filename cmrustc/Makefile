@@ -183,7 +183,7 @@ $(BUILD_DIR)/obj/%.o: src/%.c $(HEADER_FILES)
 $(BUILD_DIR)/obj/hir/library.o: src/hir/library_internal.h
 $(BUILD_DIR)/obj/hir/metadata.o: src/hir/library_internal.h src/hir/metadata_codec.h
 $(BUILD_DIR)/obj/hir/metadata_codec.o: src/hir/metadata_codec.h
-$(BUILD_DIR)/obj/hir/admission.o: src/hir/semantic_results_internal.h
+$(BUILD_DIR)/obj/hir/admission.o: src/hir/admission_internal.h src/hir/instance_internal.h src/hir/semantic_results_internal.h
 $(BUILD_DIR)/obj/hir/semantic_body.o: src/hir/semantic_body_internal.h
 $(BUILD_DIR)/obj/hir/semantic_results.o: src/hir/semantic_results_internal.h
 
@@ -299,7 +299,7 @@ $(HIR_SEMANTIC_ITEM_TEST_PROGRAM): tests/hir/test_semantic_item.c $(HIR_SEMANTIC
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(HIR_SEMANTIC_ITEM_OBJECTS) $(BASE_OBJECTS) $(LDLIBS)
 
 $(BUILD_DIR)/obj/hir/instance.o: src/hir/instance_internal.h
-$(BUILD_DIR)/obj/driver/compile.o: src/hir/instance_internal.h
+$(BUILD_DIR)/obj/driver/compile.o: src/hir/admission_internal.h src/hir/instance_internal.h src/hir/semantic_results_internal.h
 $(BUILD_DIR)/obj/mir/model.o: src/hir/instance_internal.h
 
 $(HIR_INSTANCE_TEST_PROGRAM): tests/hir/test_instance.c $(LIBRARY_OBJECTS)

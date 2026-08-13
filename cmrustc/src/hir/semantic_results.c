@@ -4965,6 +4965,37 @@ static CmSemanticResultsStatus cm_results_callable_callee_from_record(
     return cm_results_instance_status(instance_status);
 }
 
+CmSemanticResultsStatus
+cm_semantic_results_stage_callable_callee_identity(
+    const CmSemanticResultsBodyStage *stage, CmHirExprId expression,
+    CmHirCanonicalInstance *out_identity)
+{
+    const CmSemanticResultsBodyStageState *state;
+    const CmSemanticExpressionRecord *expression_record;
+    const CmSemanticCallableRecord *callable;
+
+    state = stage == NULL ? NULL
+        : (const CmSemanticResultsBodyStageState *)stage->state;
+    if (state == NULL || !cm_results_canonical_instance_empty(out_identity)) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (expression == CM_HIR_EXPR_NONE
+        || (size_t)expression > state->expression_count) {
+        return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    }
+    expression_record = &state->expressions[(size_t)expression - 1u];
+    callable = expression_record->present
+            && expression_record->body == state->body
+            && expression_record->has_callable_selection
+            && expression_record->callable_index < state->callable_count
+        ? &state->callables[expression_record->callable_index] : NULL;
+    if (callable == NULL) return CM_SEMANTIC_RESULTS_NOT_FOUND;
+    return cm_results_callable_callee_from_record(state->hir,
+        state->local_crate, state->type_bytes, state->type_bytes_len,
+        state->callable_generic_arguments,
+        state->callable_generic_argument_count, callable, out_identity);
+}
+
 CmSemanticResultsStatus cm_semantic_results_callable_callee_identity(
     const CmSemanticResults *results, const CmSemanticAdmission *admission,
     CmHirBodyId body, CmHirExprId expression,

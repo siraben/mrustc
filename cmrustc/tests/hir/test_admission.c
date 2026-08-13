@@ -4,7 +4,9 @@
 #include "cm/hir/semantic_results.h"
 #include "cm/mir/lower.h"
 #include "cm/source.h"
+#include "cm/alloc.h"
 
+#include "../../src/hir/admission_internal.h"
 #include "../../src/hir/instance_internal.h"
 #include "../../src/hir/semantic_results_internal.h"
 
@@ -1509,6 +1511,224 @@ static void test_exact_instance_closure_authenticates_generic_calls(void)
     fixture_destroy(&f);
 }
 
+typedef struct CanonicalAdmissionSnapshot {
+    size_t expression_count;
+    size_t type_count;
+    uint64_t semantic_generation;
+    uint64_t rewind_generation;
+} CanonicalAdmissionSnapshot;
+
+static CanonicalAdmissionSnapshot canonical_admission_snapshot(
+    const CmHirContext *hir)
+{
+    CanonicalAdmissionSnapshot snapshot;
+
+    snapshot.expression_count = hir->expressions.len;
+    snapshot.type_count = hir->types.len;
+    snapshot.semantic_generation = hir->semantic_generation;
+    snapshot.rewind_generation = hir->rewind_generation;
+    return snapshot;
+}
+
+static void assert_canonical_admission_rejected_unchanged(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    const CmSemanticCanonicalReachableInstance *instances,
+    size_t instance_count,
+    const CmSemanticCanonicalReachableInstanceCall *calls,
+    size_t call_count, CanonicalAdmissionSnapshot snapshot,
+    CmSemanticAdmissionStatus expected_status)
+{
+    CmSemanticAdmissionResult result;
+
+    result = cm_semantic_admit_typed_canonical_instance_closure(admission,
+        hir, 1u, instances, instance_count, calls, call_count);
+    assert(result.status == expected_status
+        && admission->state == NULL
+        && cm_semantic_admission_results(admission) == NULL
+        && hir->expressions.len == snapshot.expression_count
+        && hir->types.len == snapshot.type_count
+        && hir->semantic_generation == snapshot.semantic_generation
+        && hir->rewind_generation == snapshot.rewind_generation);
+}
+
+static void test_canonical_instance_closure_is_exact_and_atomic(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableInstance flat_instances[2];
+    CmSemanticReachableInstanceCall flat_call;
+    CmSemanticCanonicalReachableInstance canonical_instances[2];
+    CmSemanticCanonicalReachableInstance malformed_instances[2];
+    CmSemanticCanonicalReachableInstance duplicate_instances[2];
+    CmSemanticCanonicalReachableInstanceCall canonical_call;
+    CmSemanticCanonicalReachableInstanceCall duplicate_calls[2];
+    CmHirInstanceSpec caller_spec;
+    CmHirInstanceSpec callee_spec;
+    CmHirInstanceSpec wrong_callee_spec;
+    CmHirGenericArg callee_argument;
+    CmHirGenericArg wrong_argument;
+    CmHirCanonicalInstance caller_identity;
+    CmHirCanonicalInstance callee_identity;
+    CmHirCanonicalInstance wrong_callee_identity;
+    CmHirCanonicalInstance flat_retained_identity;
+    CmHirCanonicalInstance canonical_retained_identity;
+    CmHirCanonicalInstance truncated_identity;
+    CmHirCanonicalInstance trailing_identity;
+    const CmHirItem *caller;
+    const CmHirItem *phantom;
+    const CmSemanticResults *results;
+    CanonicalAdmissionSnapshot snapshot;
+    CmHirExprId call_expression;
+    CmHirTypeId u32_type;
+    CmHirTypeId i32_type;
+    unsigned char *trailing_bytes;
+    size_t index;
+    int equal;
+
+    fixture_init(&f,
+        "fn phantom<T>(x: T) -> T { x } "
+        "fn caller(x: u32) -> u32 { phantom::<u32>(x) } "
+        "fn i32_value(x: i32) -> i32 { x }");
+    caller = find_free_function(&f.hir, "caller");
+    phantom = find_free_function(&f.hir, "phantom");
+    assert(caller != NULL && phantom != NULL);
+    lower_function(&f, phantom);
+    lower_function(&f, caller);
+    call_expression = find_body_call(&f.hir,
+        caller->data.function_item.body);
+    assert(call_expression != CM_HIR_EXPR_NONE);
+    u32_type = CM_HIR_TYPE_NONE;
+    i32_type = CM_HIR_TYPE_NONE;
+    for (index = 0u; index < f.hir.types.len; ++index) {
+        const CmHirType *type;
+
+        type = cm_hir_get_type(&f.hir, (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND) {
+            if (type->data.integer_type.kind == CM_HIR_INT_U32) {
+                u32_type = (CmHirTypeId)(index + 1u);
+            } else if (type->data.integer_type.kind == CM_HIR_INT_I32) {
+                i32_type = (CmHirTypeId)(index + 1u);
+            }
+        }
+    }
+    assert(u32_type != CM_HIR_TYPE_NONE && i32_type != CM_HIR_TYPE_NONE);
+    memset(&callee_argument, 0, sizeof(callee_argument));
+    memset(&wrong_argument, 0, sizeof(wrong_argument));
+    callee_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    callee_argument.data.type = u32_type;
+    wrong_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    wrong_argument.data.type = i32_type;
+    cm_hir_instance_spec_init(&caller_spec);
+    caller_spec.selected_callable = caller->definition;
+    cm_hir_instance_spec_init(&callee_spec);
+    callee_spec.selected_callable = phantom->definition;
+    callee_spec.item_arguments = &callee_argument;
+    callee_spec.item_argument_count = 1u;
+    wrong_callee_spec = callee_spec;
+    wrong_callee_spec.item_arguments = &wrong_argument;
+    flat_instances[0].body = caller->data.function_item.body;
+    flat_instances[0].spec = &caller_spec;
+    flat_instances[1].body = phantom->data.function_item.body;
+    flat_instances[1].spec = &callee_spec;
+    flat_call.caller = &caller_spec;
+    flat_call.expression = call_expression;
+    flat_call.callee = &callee_spec;
+    memset(&admission, 0, sizeof(admission));
+    cm_hir_canonical_instance_init(&caller_identity);
+    cm_hir_canonical_instance_init(&callee_identity);
+    cm_hir_canonical_instance_init(&wrong_callee_identity);
+    cm_hir_canonical_instance_init(&flat_retained_identity);
+    cm_hir_canonical_instance_init(&canonical_retained_identity);
+    assert(cm_hir_canonical_instance_encode(&f.hir, 1u, &caller_spec,
+            &caller_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode(&f.hir, 1u, &callee_spec,
+            &callee_identity) == CM_HIR_INSTANCE_OK
+        && cm_hir_canonical_instance_encode(&f.hir, 1u,
+            &wrong_callee_spec, &wrong_callee_identity)
+                == CM_HIR_INSTANCE_OK);
+
+    result = cm_semantic_admit_typed_instance_closure(&admission, &f.hir,
+        1u, flat_instances, 2u, &flat_call, 1u);
+    results = cm_semantic_admission_results(&admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_canonical_instance_callee_identity(results,
+            &admission, &caller_identity, call_expression,
+            &flat_retained_identity) == CM_SEMANTIC_RESULTS_OK);
+    cm_semantic_admission_destroy(&admission);
+
+    canonical_instances[0].identity = &caller_identity;
+    canonical_instances[1].identity = &callee_identity;
+    canonical_call.caller = &caller_identity;
+    canonical_call.expression = call_expression;
+    canonical_call.callee = &callee_identity;
+    result = cm_semantic_admit_typed_canonical_instance_closure(&admission,
+        &f.hir, 1u, canonical_instances, 2u, &canonical_call, 1u);
+    results = cm_semantic_admission_results(&admission);
+    equal = 0;
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK && results != NULL
+        && cm_semantic_results_canonical_instance_callee_identity(results,
+            &admission, &caller_identity, call_expression,
+            &canonical_retained_identity) == CM_SEMANTIC_RESULTS_OK
+        && cm_hir_canonical_instance_equal(&flat_retained_identity,
+            &canonical_retained_identity, &equal) == CM_HIR_INSTANCE_OK
+        && equal);
+    cm_semantic_admission_destroy(&admission);
+    snapshot = canonical_admission_snapshot(&f.hir);
+
+    truncated_identity = callee_identity;
+    truncated_identity.size -= 1u;
+    malformed_instances[0] = canonical_instances[0];
+    malformed_instances[1].identity = &truncated_identity;
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        malformed_instances, 2u, &canonical_call, 1u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+
+    trailing_bytes = (unsigned char *)cm_alloc(callee_identity.size + 1u);
+    memcpy(trailing_bytes, callee_identity.bytes, callee_identity.size);
+    trailing_bytes[callee_identity.size] = 0u;
+    trailing_identity = callee_identity;
+    trailing_identity.bytes = trailing_bytes;
+    trailing_identity.size += 1u;
+    malformed_instances[1].identity = &trailing_identity;
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        malformed_instances, 2u, &canonical_call, 1u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    cm_free(trailing_bytes);
+
+    duplicate_instances[0] = canonical_instances[0];
+    duplicate_instances[1] = canonical_instances[0];
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        duplicate_instances, 2u, NULL, 0u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        canonical_instances, 2u, NULL, 0u, snapshot,
+        CM_SEMANTIC_ADMISSION_HIR_FAILURE);
+    duplicate_calls[0] = canonical_call;
+    duplicate_calls[1] = canonical_call;
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        canonical_instances, 2u, duplicate_calls, 2u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        canonical_instances, 1u, &canonical_call, 1u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+
+    malformed_instances[0] = canonical_instances[0];
+    malformed_instances[1].identity = &wrong_callee_identity;
+    canonical_call.callee = &wrong_callee_identity;
+    assert_canonical_admission_rejected_unchanged(&admission, &f.hir,
+        malformed_instances, 2u, &canonical_call, 1u, snapshot,
+        CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+
+    cm_hir_canonical_instance_destroy(&canonical_retained_identity);
+    cm_hir_canonical_instance_destroy(&flat_retained_identity);
+    cm_hir_canonical_instance_destroy(&wrong_callee_identity);
+    cm_hir_canonical_instance_destroy(&callee_identity);
+    cm_hir_canonical_instance_destroy(&caller_identity);
+    fixture_destroy(&f);
+}
+
 static void test_exact_instance_closure_authenticates_qualified_call(void)
 {
     Fixture f;
@@ -1894,6 +2114,7 @@ int main(void)
     test_leaf_instance_admitted_mir_is_exact();
     test_leaf_instance_admission_rejects_calls_and_bounds();
     test_exact_instance_closure_authenticates_generic_calls();
+    test_canonical_instance_closure_is_exact_and_atomic();
     test_exact_instance_closure_authenticates_qualified_call();
     test_reachable_admission_scope_is_enforced();
     test_admitted_mir_header_uses_semantic_signature();

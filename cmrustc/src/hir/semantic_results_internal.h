@@ -36,6 +36,12 @@ CmSemanticResultsStatus cm_semantic_results_commit_checked_instance(
     const CmHirCanonicalInstance *instance,
     const CmSemanticBodyResult *check, CmSemanticResultsBodyStage *stage,
     const CmSemanticCanonicalCallInput *calls, size_t call_count);
+/* Derive the complete selected-callee key from one uncommitted checked-body
+ * stage.  Admission uses this before accepting an externally supplied edge. */
+CmSemanticResultsStatus
+cm_semantic_results_stage_callable_callee_identity(
+    const CmSemanticResultsBodyStage *stage, CmHirExprId expression,
+    CmHirCanonicalInstance *out_identity);
 /* Construct an owned exact callee key from authenticated durable evidence. */
 CmSemanticResultsStatus cm_semantic_results_callable_callee_identity(
     const CmSemanticResults *results,

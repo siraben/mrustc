@@ -47,6 +47,20 @@ typedef struct CmHirCanonicalInstanceParts {
     size_t self_type_size;
 } CmHirCanonicalInstanceParts;
 
+/*
+ * Owned decoding workspace for one authenticated canonical instance.  The
+ * four argument arrays are owned by this value; every argument payload and
+ * the Self-type payload borrow bytes from the source canonical instance.
+ * Consequently the source instance must outlive this decoded value.
+ */
+typedef struct CmHirDecodedCanonicalInstance {
+    CmHirCanonicalInstanceParts parts;
+    CmHirCanonicalArgumentPart *owned_item_arguments;
+    CmHirCanonicalArgumentPart *owned_method_arguments;
+    CmHirCanonicalArgumentPart *owned_enclosing_impl_arguments;
+    CmHirCanonicalArgumentPart *owned_implemented_trait_arguments;
+} CmHirDecodedCanonicalInstance;
+
 void cm_hir_canonical_instance_init(CmHirCanonicalInstance *instance);
 CmHirInstanceStatus cm_hir_canonical_instance_encode(
     const CmHirContext *hir, CmHirCrateId local_crate,
@@ -59,12 +73,24 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirInstanceSpec *caller, const CmHirExpr *call,
     CmHirCanonicalInstance *out_instance);
+CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call_parts(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstanceParts *caller, const CmHirExpr *call,
+    CmHirCanonicalInstance *out_instance);
 CmHirInstanceStatus cm_hir_canonical_instance_clone(
     CmHirCanonicalInstance *out_instance,
     const CmHirCanonicalInstance *source);
 CmHirInstanceStatus cm_hir_canonical_instance_validate(
     const CmHirContext *hir, CmHirCrateId local_crate,
     const CmHirCanonicalInstance *instance);
+void cm_hir_decoded_canonical_instance_init(
+    CmHirDecodedCanonicalInstance *decoded);
+CmHirInstanceStatus cm_hir_canonical_instance_decode(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstance *instance,
+    CmHirDecodedCanonicalInstance *out_decoded);
+void cm_hir_decoded_canonical_instance_destroy(
+    CmHirDecodedCanonicalInstance *decoded);
 void cm_hir_canonical_instance_destroy(CmHirCanonicalInstance *instance);
 CmHirInstanceStatus cm_hir_canonical_instance_equal(
     const CmHirCanonicalInstance *left,

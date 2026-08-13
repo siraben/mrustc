@@ -1074,8 +1074,8 @@ static CmHirInstanceStatus cm_instance_validate_arguments(
 
 static CmHirInstanceStatus cm_instance_encode_direct_call(
     CmInstanceBuffer *buffer, const CmHirContext *hir,
-    CmHirCrateId local_crate, const CmHirInstanceSpec *caller,
-    const CmHirExpr *call)
+    CmHirCrateId local_crate, const CmHirInstanceSpec *caller_spec,
+    const CmHirCanonicalInstanceParts *caller_parts, const CmHirExpr *call)
 {
     const CmHirItem *caller_item;
     const CmHirItem *callee;
@@ -1083,7 +1083,11 @@ static CmHirInstanceStatus cm_instance_encode_direct_call(
     CmHirInstanceStatus status;
     uint32_t index;
 
-    caller_item = cm_instance_item(hir, caller->selected_callable);
+    if ((caller_spec == NULL) == (caller_parts == NULL)) {
+        return CM_HIR_INSTANCE_INVALID_ARGUMENT;
+    }
+    caller_item = cm_instance_item(hir, caller_spec != NULL
+        ? caller_spec->selected_callable : caller_parts->selected_callable);
     callee = call == NULL || call->kind != CM_HIR_EXPR_CALL ? NULL
         : cm_instance_item(hir, call->data.call.callee);
     if (caller_item == NULL || caller_item->kind != CM_HIR_ITEM_FUNCTION
@@ -1101,8 +1105,13 @@ static CmHirInstanceStatus cm_instance_encode_direct_call(
     }
     memset(&caller_substitution, 0, sizeof(caller_substitution));
     caller_substitution.owner = caller_item->definition;
-    caller_substitution.arguments = caller->item_arguments;
-    caller_substitution.argument_count = caller->item_argument_count;
+    if (caller_spec != NULL) {
+        caller_substitution.arguments = caller_spec->item_arguments;
+        caller_substitution.argument_count = caller_spec->item_argument_count;
+    } else {
+        caller_substitution.parts = caller_parts->item_arguments;
+        caller_substitution.argument_count = caller_parts->item_argument_count;
+    }
     status = cm_instance_u8(buffer, CM_INSTANCE_FORMAT_VERSION);
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_def(buffer, callee->definition);
@@ -1449,9 +1458,10 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_parts(
     return CM_HIR_INSTANCE_OK;
 }
 
-CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
+static CmHirInstanceStatus cm_canonical_instance_encode_direct_call_value(
     const CmHirContext *hir, CmHirCrateId local_crate,
-    const CmHirInstanceSpec *caller, const CmHirExpr *call,
+    const CmHirInstanceSpec *caller_spec,
+    const CmHirCanonicalInstanceParts *caller_parts, const CmHirExpr *call,
     CmHirCanonicalInstance *out_instance)
 {
     const CmHirItem *callee;
@@ -1461,13 +1471,21 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     CmInstanceBuffer output;
     CmHirInstanceStatus status;
 
-    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || caller == NULL
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE
+        || (caller_spec == NULL) == (caller_parts == NULL)
         || call == NULL || !cm_canonical_instance_is_empty(out_instance)) {
         return CM_HIR_INSTANCE_INVALID_ARGUMENT;
     }
     cm_hir_canonical_instance_init(&caller_identity);
-    status = cm_hir_canonical_instance_encode(hir, local_crate, caller,
-        &caller_identity);
+    status = caller_spec != NULL
+        ? cm_hir_canonical_instance_encode(hir, local_crate, caller_spec,
+            &caller_identity)
+        : cm_hir_canonical_instance_encode_parts(hir, local_crate,
+            caller_parts, &caller_identity);
+    if (status == CM_HIR_INSTANCE_OK) {
+        status = cm_hir_canonical_instance_validate(hir, local_crate,
+            &caller_identity);
+    }
     cm_hir_canonical_instance_destroy(&caller_identity);
     if (status != CM_HIR_INSTANCE_OK) return status;
     callee = call->kind == CM_HIR_EXPR_CALL
@@ -1479,7 +1497,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     memset(&sizing, 0, sizeof(sizing));
     sizing.sizing = 1;
     status = cm_instance_encode_direct_call(&sizing, hir, local_crate,
-        caller, call);
+        caller_spec, caller_parts, call);
     if (status != CM_HIR_INSTANCE_OK) return status;
     cm_hir_canonical_instance_init(&encoded);
     encoded.bytes = (unsigned char *)cm_alloc(sizing.len);
@@ -1487,7 +1505,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     output.data = encoded.bytes;
     output.cap = sizing.len;
     status = cm_instance_encode_direct_call(&output, hir, local_crate,
-        caller, call);
+        caller_spec, caller_parts, call);
     if (status != CM_HIR_INSTANCE_OK || output.len != sizing.len) {
         cm_hir_canonical_instance_destroy(&encoded);
         return status == CM_HIR_INSTANCE_OK
@@ -1498,6 +1516,24 @@ CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
     encoded.size = output.len;
     *out_instance = encoded;
     return CM_HIR_INSTANCE_OK;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirInstanceSpec *caller, const CmHirExpr *call,
+    CmHirCanonicalInstance *out_instance)
+{
+    return cm_canonical_instance_encode_direct_call_value(hir, local_crate,
+        caller, NULL, call, out_instance);
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_encode_direct_call_parts(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstanceParts *caller, const CmHirExpr *call,
+    CmHirCanonicalInstance *out_instance)
+{
+    return cm_canonical_instance_encode_direct_call_value(hir, local_crate,
+        NULL, caller, call, out_instance);
 }
 
 CmHirInstanceStatus cm_hir_canonical_instance_clone(
@@ -1587,15 +1623,60 @@ static CmHirInstanceStatus cm_instance_read_part_arguments(
     return CM_HIR_INSTANCE_OK;
 }
 
-CmHirInstanceStatus cm_hir_canonical_instance_validate(
-    const CmHirContext *hir, CmHirCrateId local_crate,
-    const CmHirCanonicalInstance *instance)
+void cm_hir_decoded_canonical_instance_init(
+    CmHirDecodedCanonicalInstance *decoded)
 {
-    CmHirCanonicalArgumentPart *item_arguments;
-    CmHirCanonicalArgumentPart *method_arguments;
-    CmHirCanonicalArgumentPart *impl_arguments;
-    CmHirCanonicalArgumentPart *trait_arguments;
-    CmHirCanonicalInstanceParts parts;
+    if (decoded == NULL) return;
+    memset(decoded, 0, sizeof(*decoded));
+    decoded->parts.selected_callable = cm_hir_def_id_none();
+    decoded->parts.declared_trait_callable = cm_hir_def_id_none();
+    decoded->parts.enclosing_impl = cm_hir_def_id_none();
+    decoded->parts.implemented_trait = cm_hir_def_id_none();
+    decoded->parts.self_owner = cm_hir_def_id_none();
+}
+
+static int cm_decoded_canonical_instance_is_empty(
+    const CmHirDecodedCanonicalInstance *decoded)
+{
+    return decoded != NULL
+        && cm_hir_def_id_is_none(decoded->parts.selected_callable)
+        && cm_hir_def_id_is_none(decoded->parts.declared_trait_callable)
+        && decoded->parts.item_arguments == NULL
+        && decoded->parts.item_argument_count == 0u
+        && decoded->parts.method_arguments == NULL
+        && decoded->parts.method_argument_count == 0u
+        && cm_hir_def_id_is_none(decoded->parts.enclosing_impl)
+        && decoded->parts.enclosing_impl_arguments == NULL
+        && decoded->parts.enclosing_impl_argument_count == 0u
+        && cm_hir_def_id_is_none(decoded->parts.implemented_trait)
+        && decoded->parts.implemented_trait_arguments == NULL
+        && decoded->parts.implemented_trait_argument_count == 0u
+        && cm_hir_def_id_is_none(decoded->parts.self_owner)
+        && decoded->parts.self_type == NULL
+        && decoded->parts.self_type_size == 0u
+        && decoded->owned_item_arguments == NULL
+        && decoded->owned_method_arguments == NULL
+        && decoded->owned_enclosing_impl_arguments == NULL
+        && decoded->owned_implemented_trait_arguments == NULL;
+}
+
+void cm_hir_decoded_canonical_instance_destroy(
+    CmHirDecodedCanonicalInstance *decoded)
+{
+    if (decoded == NULL) return;
+    cm_free(decoded->owned_implemented_trait_arguments);
+    cm_free(decoded->owned_enclosing_impl_arguments);
+    cm_free(decoded->owned_method_arguments);
+    cm_free(decoded->owned_item_arguments);
+    cm_hir_decoded_canonical_instance_init(decoded);
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_decode(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstance *instance,
+    CmHirDecodedCanonicalInstance *out_decoded)
+{
+    CmHirDecodedCanonicalInstance decoded;
     CmHirCanonicalInstance encoded;
     CmInstanceReader reader;
     const CmHirItem *selected;
@@ -1612,82 +1693,85 @@ CmHirInstanceStatus cm_hir_canonical_instance_validate(
     int equal;
 
     if (hir == NULL || local_crate == CM_HIR_CRATE_NONE
-        || !cm_canonical_instance_is_valid(instance)) {
+        || !cm_canonical_instance_is_valid(instance)
+        || !cm_decoded_canonical_instance_is_empty(out_decoded)) {
         return CM_HIR_INSTANCE_INVALID_ARGUMENT;
     }
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    cm_hir_canonical_instance_init(&encoded);
     memset(&reader, 0, sizeof(reader));
     reader.hir = hir;
     reader.data = instance->bytes;
     reader.len = instance->size;
-    memset(&parts, 0, sizeof(parts));
-    item_arguments = NULL;
-    method_arguments = NULL;
-    impl_arguments = NULL;
-    trait_arguments = NULL;
     item_count = 0u;
     method_count = 0u;
     impl_count = 0u;
     trait_count = 0u;
     status = cm_instance_read_u8(&reader, &version);
     if (status == CM_HIR_INSTANCE_OK) {
-        status = cm_instance_read_def(&reader, &parts.selected_callable);
+        status = cm_instance_read_def(&reader,
+            &decoded.parts.selected_callable);
     }
     if (status == CM_HIR_INSTANCE_OK) {
         status = cm_instance_read_def(&reader,
-            &parts.declared_trait_callable);
+            &decoded.parts.declared_trait_callable);
     }
     if (status == CM_HIR_INSTANCE_OK) {
-        status = cm_instance_read_def(&reader, &parts.enclosing_impl);
+        status = cm_instance_read_def(&reader,
+            &decoded.parts.enclosing_impl);
     }
     if (status == CM_HIR_INSTANCE_OK) {
-        status = cm_instance_read_def(&reader, &parts.implemented_trait);
+        status = cm_instance_read_def(&reader,
+            &decoded.parts.implemented_trait);
     }
     if (status == CM_HIR_INSTANCE_OK) {
-        status = cm_instance_read_def(&reader, &parts.self_owner);
+        status = cm_instance_read_def(&reader, &decoded.parts.self_owner);
     }
     if (status != CM_HIR_INSTANCE_OK) goto done;
     if (version != CM_INSTANCE_FORMAT_VERSION
-        || !cm_hir_def_id_equal(parts.selected_callable,
+        || !cm_hir_def_id_equal(decoded.parts.selected_callable,
             instance->definition)
         || instance->definition.crate_id != local_crate) {
         status = CM_HIR_INSTANCE_INVALID_RELATION;
         goto done;
     }
-    selected = cm_instance_item(hir, parts.selected_callable);
+    selected = cm_instance_item(hir, decoded.parts.selected_callable);
     if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
         || selected->data.function_item.body != instance->body) {
         status = CM_HIR_INSTANCE_INVALID_RELATION;
         goto done;
     }
     if (cm_hir_def_id_is_none(selected->parent_definition)) {
-        if (!cm_hir_def_id_is_none(parts.declared_trait_callable)
-            || !cm_hir_def_id_is_none(parts.enclosing_impl)
-            || !cm_hir_def_id_is_none(parts.implemented_trait)
-            || !cm_hir_def_id_is_none(parts.self_owner)) {
+        if (!cm_hir_def_id_is_none(
+                decoded.parts.declared_trait_callable)
+            || !cm_hir_def_id_is_none(decoded.parts.enclosing_impl)
+            || !cm_hir_def_id_is_none(decoded.parts.implemented_trait)
+            || !cm_hir_def_id_is_none(decoded.parts.self_owner)) {
             status = CM_HIR_INSTANCE_INVALID_RELATION;
             goto done;
         }
         status = cm_instance_read_part_arguments(&reader, selected, 1u,
-            &item_arguments, &item_count);
-        parts.item_arguments = item_arguments;
-        parts.item_argument_count = item_count;
+            &decoded.owned_item_arguments, &item_count);
+        decoded.parts.item_arguments = decoded.owned_item_arguments;
+        decoded.parts.item_argument_count = item_count;
     } else {
-        enclosing = cm_instance_item(hir, parts.enclosing_impl);
-        trait_item = cm_instance_item(hir, parts.implemented_trait);
+        enclosing = cm_instance_item(hir, decoded.parts.enclosing_impl);
+        trait_item = cm_instance_item(hir,
+            decoded.parts.implemented_trait);
         if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
             || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
             status = CM_HIR_INSTANCE_INVALID_RELATION;
             goto done;
         }
         status = cm_instance_read_part_arguments(&reader, selected, 2u,
-            &method_arguments, &method_count);
+            &decoded.owned_method_arguments, &method_count);
         if (status == CM_HIR_INSTANCE_OK) {
             status = cm_instance_read_part_arguments(&reader, enclosing, 3u,
-                &impl_arguments, &impl_count);
+                &decoded.owned_enclosing_impl_arguments, &impl_count);
         }
         if (status == CM_HIR_INSTANCE_OK) {
             status = cm_instance_read_part_arguments(&reader, trait_item, 4u,
-                &trait_arguments, &trait_count);
+                &decoded.owned_implemented_trait_arguments, &trait_count);
         }
         if (status == CM_HIR_INSTANCE_OK) {
             status = cm_instance_read_u8(&reader, &section);
@@ -1700,22 +1784,23 @@ CmHirInstanceStatus cm_hir_canonical_instance_validate(
         self_start = reader.pos;
         status = cm_instance_validate_type_payload(&reader, 0u);
         if (status != CM_HIR_INSTANCE_OK) goto done;
-        parts.method_arguments = method_arguments;
-        parts.method_argument_count = method_count;
-        parts.enclosing_impl_arguments = impl_arguments;
-        parts.enclosing_impl_argument_count = impl_count;
-        parts.implemented_trait_arguments = trait_arguments;
-        parts.implemented_trait_argument_count = trait_count;
-        parts.self_type = reader.data + self_start;
-        parts.self_type_size = reader.pos - self_start;
+        decoded.parts.method_arguments = decoded.owned_method_arguments;
+        decoded.parts.method_argument_count = method_count;
+        decoded.parts.enclosing_impl_arguments =
+            decoded.owned_enclosing_impl_arguments;
+        decoded.parts.enclosing_impl_argument_count = impl_count;
+        decoded.parts.implemented_trait_arguments =
+            decoded.owned_implemented_trait_arguments;
+        decoded.parts.implemented_trait_argument_count = trait_count;
+        decoded.parts.self_type = reader.data + self_start;
+        decoded.parts.self_type_size = reader.pos - self_start;
     }
     if (reader.pos != reader.len) {
         status = CM_HIR_INSTANCE_INVALID_RELATION;
         goto done;
     }
-    cm_hir_canonical_instance_init(&encoded);
     status = cm_hir_canonical_instance_encode_parts(hir, local_crate,
-        &parts, &encoded);
+        &decoded.parts, &encoded);
     if (status == CM_HIR_INSTANCE_OK) {
         equal = 0;
         status = cm_hir_canonical_instance_equal(instance, &encoded, &equal);
@@ -1723,13 +1808,28 @@ CmHirInstanceStatus cm_hir_canonical_instance_validate(
             status = CM_HIR_INSTANCE_INVALID_RELATION;
         }
     }
-    cm_hir_canonical_instance_destroy(&encoded);
+    if (status == CM_HIR_INSTANCE_OK) {
+        *out_decoded = decoded;
+        cm_hir_decoded_canonical_instance_init(&decoded);
+    }
 
 done:
-    cm_free(trait_arguments);
-    cm_free(impl_arguments);
-    cm_free(method_arguments);
-    cm_free(item_arguments);
+    cm_hir_canonical_instance_destroy(&encoded);
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
+    return status;
+}
+
+CmHirInstanceStatus cm_hir_canonical_instance_validate(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirCanonicalInstance *instance)
+{
+    CmHirDecodedCanonicalInstance decoded;
+    CmHirInstanceStatus status;
+
+    cm_hir_decoded_canonical_instance_init(&decoded);
+    status = cm_hir_canonical_instance_decode(hir, local_crate, instance,
+        &decoded);
+    cm_hir_decoded_canonical_instance_destroy(&decoded);
     return status;
 }
 

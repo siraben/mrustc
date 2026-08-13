@@ -1,5 +1,6 @@
 #include "cm/hir/admission.h"
 
+#include "admission_internal.h"
 #include "semantic_results_internal.h"
 
 #include "cm/alloc.h"
@@ -96,83 +97,6 @@ static int cm_admission_method_trait_in_scope(const CmHirExpr *expression,
                 trait_definition)) return 1;
     }
     return 0;
-}
-
-static int cm_admission_type_only_instance_arguments(
-    const CmHirContext *hir, const CmHirItem *owner,
-    const CmHirGenericArg *arguments, uint32_t argument_count)
-{
-    uint32_t index;
-
-    if (hir == NULL || owner == NULL
-        || owner->generic_parameter_count != argument_count
-        || (argument_count == 0u) != (arguments == NULL)) return 0;
-    if (argument_count == 0u) {
-        return owner->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE;
-    }
-    if (owner->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
-        || argument_count - 1u
-            > UINT32_MAX - owner->generic_parameter_start) return 0;
-    for (index = 0u; index < argument_count; ++index) {
-        const CmHirGenericParam *parameter;
-
-        parameter = cm_hir_get_generic_param(hir,
-            owner->generic_parameter_start + index);
-        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
-            || parameter->index != index
-            || !cm_hir_def_id_equal(parameter->owner, owner->definition)
-            || arguments[index].kind != CM_HIR_GENERIC_ARG_TYPE) return 0;
-    }
-    return 1;
-}
-
-static int cm_admission_instance_callable_supported(
-    const CmHirContext *hir, CmHirCrateId local_crate,
-    const CmHirInstanceSpec *spec, const CmHirItem *item, int leaf_only)
-{
-    const CmHirItem *impl_item;
-
-    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || spec == NULL
-        || item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
-        || item->definition.crate_id != local_crate
-        || item->predicate_scope_count != 0u
-        || (leaf_only && item->predicate_count != 0u)
-        || item->outlives_predicate_count != 0u) return 0;
-    if (cm_hir_def_id_is_none(item->parent_definition)) {
-        return cm_hir_def_id_is_none(
-            item->data.function_item.trait_item_definition);
-    }
-    impl_item = cm_admission_item(hir, item->parent_definition);
-    return item->generic_parameter_count == 0u
-        && item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
-        && item->predicate_count == 0u
-        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
-        && impl_item->definition.crate_id == local_crate
-        && impl_item->predicate_scope_count == 0u
-        && impl_item->predicate_count == 0u
-        && impl_item->outlives_predicate_count == 0u
-        && impl_item->data.impl_item.has_trait
-        && !impl_item->data.impl_item.is_negative
-        && impl_item->data.impl_item.trait_type.argument_count == 0u
-        && impl_item->data.impl_item.trait_type.arguments == NULL
-        && !cm_hir_def_id_is_none(
-            item->data.function_item.trait_item_definition)
-        && cm_hir_def_id_equal(spec->enclosing_impl,
-            impl_item->definition)
-        && cm_hir_def_id_equal(spec->implemented_trait,
-            impl_item->data.impl_item.trait_type.definition)
-        && cm_hir_def_id_equal(spec->declared_trait_callable,
-            item->data.function_item.trait_item_definition)
-        && cm_hir_def_id_equal(spec->self_owner, impl_item->definition)
-        && spec->item_argument_count == 0u
-        && spec->item_arguments == NULL
-        && spec->method_argument_count == 0u
-        && spec->method_arguments == NULL
-        && cm_admission_type_only_instance_arguments(hir, impl_item,
-            spec->enclosing_impl_arguments,
-            spec->enclosing_impl_argument_count)
-        && spec->implemented_trait_argument_count == 0u
-        && spec->implemented_trait_arguments == NULL;
 }
 
 static CmHirStatus cm_admission_rollback(CmHirContext *hir,
@@ -553,16 +477,153 @@ cleanup:
     return result;
 }
 
-typedef struct CmAdmissionCanonicalCall {
-    CmHirCanonicalInstance caller;
+typedef struct CmAdmissionCanonicalCallInput {
+    const CmHirCanonicalInstance *caller;
     CmHirExprId expression;
-    CmHirCanonicalInstance callee;
-} CmAdmissionCanonicalCall;
+    const CmHirCanonicalInstance *callee;
+} CmAdmissionCanonicalCallInput;
 
-static CmSemanticAdmissionResult cm_admit_typed_instances(
+static int cm_admission_canonical_member(
+    const CmHirCanonicalInstance *instances, size_t instance_count,
+    const CmHirCanonicalInstance *identity)
+{
+    size_t index;
+    int matches;
+
+    matches = 0;
+    for (index = 0u; index < instance_count; ++index) {
+        int equal;
+
+        equal = 0;
+        if (cm_hir_canonical_instance_equal(&instances[index], identity,
+                &equal) != CM_HIR_INSTANCE_OK) return -1;
+        matches += equal;
+    }
+    return matches;
+}
+
+static int cm_admission_canonical_call_supported(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirDecodedCanonicalInstance *caller,
+    const CmHirExpr *expression,
+    const CmHirDecodedCanonicalInstance *callee,
+    const CmHirCanonicalInstance *callee_identity)
+{
+    const CmHirItem *declared;
+    const CmHirItem *selected;
+    CmHirCanonicalInstance expected;
+    int equal;
+
+    if (hir == NULL || caller == NULL || expression == NULL
+        || callee == NULL || callee_identity == NULL) return 0;
+    cm_hir_canonical_instance_init(&expected);
+    equal = 0;
+    if (expression->kind == CM_HIR_EXPR_CALL) {
+        if (!cm_hir_def_id_equal(expression->data.call.callee,
+                callee->parts.selected_callable)
+            || cm_hir_canonical_instance_encode_direct_call_parts(hir,
+                local_crate, &caller->parts, expression, &expected)
+                    != CM_HIR_INSTANCE_OK) {
+            cm_hir_canonical_instance_destroy(&expected);
+            return 0;
+        }
+    } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
+        if (callee->parts.selected_callable.crate_id != local_crate
+            || !cm_hir_def_id_equal(callee->parts.declared_trait_callable,
+                expression->data.qualified_call.declared_trait_callable)
+            || !cm_hir_def_id_equal(callee->parts.implemented_trait,
+                expression->data.qualified_call.requested_trait)) {
+            return 0;
+        }
+        /* The complete key is authenticated against staged callable evidence
+         * before results are committed.  Source syntax only constrains the
+         * declaration and requested trait at this earlier boundary. */
+        return 1;
+    } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+        declared = cm_admission_item(hir,
+            callee->parts.declared_trait_callable);
+        selected = cm_admission_item(hir,
+            callee->parts.selected_callable);
+        if (expression->data.method_call.syntax != CM_HIR_CALLABLE_DOT_METHOD
+            || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
+            || expression->data.method_call.argument_count > 1u
+            || (expression->data.method_call.argument_count != 0u
+                && expression->data.method_call.arguments == NULL)
+            || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+            || selected->data.function_item.signature.receiver
+                != CM_HIR_RECEIVER_VALUE
+            || selected->data.function_item.signature.parameter_count
+                != expression->data.method_call.argument_count + 1u
+            || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
+            || declared->name != expression->data.method_call.method_name
+            || declared->data.function_item.signature.receiver
+                != CM_HIR_RECEIVER_VALUE
+            || !cm_hir_def_id_equal(declared->parent_definition,
+                callee->parts.implemented_trait)
+            || !cm_admission_method_trait_in_scope(expression,
+                callee->parts.implemented_trait)
+            || !cm_hir_def_id_equal(
+                selected->data.function_item.trait_item_definition,
+                declared->definition)) return 0;
+        return 1;
+    } else {
+        return 0;
+    }
+    if (cm_hir_canonical_instance_equal(&expected, callee_identity,
+            &equal) != CM_HIR_INSTANCE_OK) equal = 0;
+    cm_hir_canonical_instance_destroy(&expected);
+    return equal;
+}
+
+static int cm_admission_canonical_instance_supported(
+    const CmHirContext *hir, CmHirCrateId local_crate,
+    const CmHirDecodedCanonicalInstance *decoded, const CmHirBody *body,
+    int leaf_only)
+{
+    const CmHirItem *selected;
+    const CmHirItem *enclosing;
+
+    if (hir == NULL || local_crate == CM_HIR_CRATE_NONE || decoded == NULL
+        || body == NULL || body->state != CM_HIR_BODY_TYPED
+        || body->root_expression == CM_HIR_EXPR_NONE) return 0;
+    selected = cm_admission_item(hir, decoded->parts.selected_callable);
+    if (selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || selected->definition.crate_id != local_crate
+        || selected->predicate_scope_count != 0u
+        || (leaf_only && selected->predicate_count != 0u)
+        || selected->outlives_predicate_count != 0u
+        || selected->data.function_item.body == CM_HIR_BODY_NONE
+        || !cm_hir_def_id_equal(body->owner, selected->definition)) {
+        return 0;
+    }
+    if (cm_hir_def_id_is_none(selected->parent_definition)) {
+        return cm_hir_def_id_is_none(
+                selected->data.function_item.trait_item_definition)
+            && decoded->parts.item_argument_count
+                == selected->generic_parameter_count;
+    }
+    enclosing = cm_admission_item(hir, decoded->parts.enclosing_impl);
+    return selected->generic_parameter_count
+            == decoded->parts.method_argument_count
+        && selected->predicate_count == 0u
+        && enclosing != NULL && enclosing->kind == CM_HIR_ITEM_IMPL
+        && enclosing->definition.crate_id == local_crate
+        && enclosing->predicate_scope_count == 0u
+        && enclosing->predicate_count == 0u
+        && enclosing->outlives_predicate_count == 0u
+        && enclosing->data.impl_item.has_trait
+        && !enclosing->data.impl_item.is_negative
+        && cm_hir_def_id_equal(selected->parent_definition,
+            enclosing->definition)
+        && cm_hir_def_id_equal(decoded->parts.self_owner,
+            enclosing->definition);
+}
+
+static CmSemanticAdmissionResult cm_admit_typed_canonical_instances(
     CmSemanticAdmission *admission, CmHirContext *hir,
-    CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
-    size_t instance_count, const CmSemanticReachableInstanceCall *calls,
+    CmHirCrateId local_crate,
+    const CmSemanticCanonicalReachableInstance *instances,
+    size_t instance_count, const CmAdmissionCanonicalCallInput *calls,
     size_t call_count, int leaf_only)
 {
     CmSemanticAdmissionResult result;
@@ -572,8 +633,8 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
     CmSemanticResultsBodyStage stage;
     CmSemanticAdmissionState *state;
     CmHirCanonicalInstance *identities;
-    CmAdmissionCanonicalCall *canonical_calls;
-    size_t call_bytes;
+    CmHirDecodedCanonicalInstance *decoded;
+    size_t allocation_size;
     size_t index;
 
     result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
@@ -584,8 +645,8 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
         || (leaf_only && call_count != 0u)
         || cm_hir_get_crate(hir, local_crate) == NULL
         || !cm_size_mul(instance_count, sizeof(*identities), NULL)
-        || !cm_size_mul(call_count, sizeof(*canonical_calls),
-            &call_bytes)) return result;
+        || !cm_size_mul(instance_count, sizeof(*decoded),
+            &allocation_size)) return result;
     memset(&finalization, 0, sizeof(finalization));
     memset(&session, 0, sizeof(session));
     cm_semantic_results_body_stage_init(&stage);
@@ -593,42 +654,30 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
     state = NULL;
     identities = (CmHirCanonicalInstance *)cm_alloc_zeroed(instance_count,
         sizeof(*identities));
-    canonical_calls = call_count == 0u ? NULL
-        : (CmAdmissionCanonicalCall *)cm_alloc_zeroed(1u, call_bytes);
-    for (index = 0u; index < call_count; ++index) {
-        cm_hir_canonical_instance_init(&canonical_calls[index].caller);
-        cm_hir_canonical_instance_init(&canonical_calls[index].callee);
-    }
+    decoded = (CmHirDecodedCanonicalInstance *)cm_alloc_zeroed(1u,
+        allocation_size);
     for (index = 0u; index < instance_count; ++index) {
-        const CmHirItem *item;
         const CmHirBody *body;
-        const CmHirInstanceSpec *spec;
-        CmHirInstanceStatus instance_status;
         size_t previous;
 
-        spec = instances[index].spec;
-        if (spec == NULL) goto cleanup_instances;
-        result.owner = spec->selected_callable;
-        result.body = instances[index].body;
-        item = cm_admission_item(hir, spec->selected_callable);
-        body = cm_hir_get_body(hir, instances[index].body);
-        if (!cm_admission_instance_callable_supported(hir, local_crate,
-                spec, item, leaf_only)
-            || item->data.function_item.body != instances[index].body
-            || body == NULL || body->state != CM_HIR_BODY_TYPED
-            || body->root_expression == CM_HIR_EXPR_NONE
-            || !cm_hir_def_id_equal(body->owner, item->definition)) {
+        cm_hir_canonical_instance_init(&identities[index]);
+        cm_hir_decoded_canonical_instance_init(&decoded[index]);
+        if (instances[index].identity == NULL
+            || cm_hir_canonical_instance_clone(&identities[index],
+                instances[index].identity) != CM_HIR_INSTANCE_OK
+            || cm_hir_canonical_instance_decode(hir, local_crate,
+                &identities[index], &decoded[index]) != CM_HIR_INSTANCE_OK) {
             goto cleanup_instances;
         }
-        instance_status = cm_hir_canonical_instance_encode(hir, local_crate,
-            spec, &identities[index]);
-        if (instance_status != CM_HIR_INSTANCE_OK
-            || identities[index].body != instances[index].body) {
-            goto cleanup_instances;
-        }
+        result.owner = identities[index].definition;
+        result.body = identities[index].body;
+        body = cm_hir_get_body(hir, identities[index].body);
+        if (!cm_admission_canonical_instance_supported(hir, local_crate,
+                &decoded[index], body, leaf_only)) goto cleanup_instances;
         for (previous = 0u; previous < index; ++previous) {
             int equal;
 
+            equal = 0;
             if (cm_hir_canonical_instance_equal(&identities[previous],
                     &identities[index], &equal) != CM_HIR_INSTANCE_OK
                 || equal) goto cleanup_instances;
@@ -636,156 +685,55 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
     }
     for (index = 0u; index < call_count; ++index) {
         const CmHirExpr *expression;
-        CmHirCanonicalInstance checked_callee;
-        size_t instance_index;
+        size_t caller_index;
+        size_t callee_index;
         size_t previous;
-        int caller_member;
-        int callee_member;
         int equal;
 
-        cm_hir_canonical_instance_init(&checked_callee);
-        canonical_calls[index].expression = calls[index].expression;
         if (calls[index].caller == NULL || calls[index].callee == NULL
-            || cm_hir_canonical_instance_encode(hir, local_crate,
-                calls[index].caller, &canonical_calls[index].caller)
-                != CM_HIR_INSTANCE_OK
-            || cm_hir_canonical_instance_encode(hir, local_crate,
-                calls[index].callee, &canonical_calls[index].callee)
-                != CM_HIR_INSTANCE_OK) {
-            goto cleanup_instances;
-        }
+            || cm_hir_canonical_instance_validate(hir, local_crate,
+                calls[index].caller) != CM_HIR_INSTANCE_OK
+            || cm_hir_canonical_instance_validate(hir, local_crate,
+                calls[index].callee) != CM_HIR_INSTANCE_OK
+            || cm_admission_canonical_member(identities, instance_count,
+                calls[index].caller) != 1
+            || cm_admission_canonical_member(identities, instance_count,
+                calls[index].callee) != 1) goto cleanup_instances;
         expression = cm_hir_get_expr(hir, calls[index].expression);
         if (expression == NULL
-            || expression->owner_body
-                != canonical_calls[index].caller.body) {
-            cm_hir_canonical_instance_destroy(&checked_callee);
+            || expression->owner_body != calls[index].caller->body) {
             goto cleanup_instances;
         }
-        if (expression->kind == CM_HIR_EXPR_CALL) {
-            if (!cm_hir_def_id_equal(expression->data.call.callee,
-                    canonical_calls[index].callee.definition)
-                || cm_hir_canonical_instance_encode_direct_call(hir,
-                    local_crate, calls[index].caller, expression,
-                    &checked_callee) != CM_HIR_INSTANCE_OK
-                || cm_hir_canonical_instance_equal(&checked_callee,
-                    &canonical_calls[index].callee, &equal)
-                    != CM_HIR_INSTANCE_OK || !equal) {
-                cm_hir_canonical_instance_destroy(&checked_callee);
-                goto cleanup_instances;
-            }
-        } else if (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL) {
-            CmHirInstanceSpec requested_spec;
-
-            requested_spec = *calls[index].callee;
-            requested_spec.self_type =
-                expression->data.qualified_call.requested_self_type;
-            if (calls[index].callee->selected_callable.crate_id
-                    != local_crate
-                || !cm_hir_def_id_equal(
-                    calls[index].callee->selected_callable,
-                    canonical_calls[index].callee.definition)
-                || !cm_hir_def_id_equal(
-                    calls[index].callee->declared_trait_callable,
-                    expression->data.qualified_call
-                        .declared_trait_callable)
-                || !cm_hir_def_id_equal(
-                    calls[index].callee->implemented_trait,
-                    expression->data.qualified_call.requested_trait)
-                || cm_hir_canonical_instance_encode(hir, local_crate,
-                    &requested_spec, &checked_callee) != CM_HIR_INSTANCE_OK
-                || cm_hir_canonical_instance_equal(&checked_callee,
-                    &canonical_calls[index].callee, &equal)
-                    != CM_HIR_INSTANCE_OK || !equal) {
-                cm_hir_canonical_instance_destroy(&checked_callee);
-                goto cleanup_instances;
-            }
-        } else if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
-            const CmHirExpr *receiver;
-            const CmHirItem *declared;
-            const CmHirItem *selected;
-            CmHirInstanceSpec requested_spec;
-
-            receiver = cm_hir_get_expr(hir,
-                expression->data.method_call.receiver);
-            declared = cm_admission_item(hir,
-                calls[index].callee->declared_trait_callable);
-            selected = cm_admission_item(hir,
-                calls[index].callee->selected_callable);
-            requested_spec = *calls[index].callee;
-            requested_spec.self_type = receiver == NULL
-                ? CM_HIR_TYPE_NONE : receiver->type;
-            if (expression->data.method_call.syntax
-                    != CM_HIR_CALLABLE_DOT_METHOD
-                || expression->data.method_call.receiver == CM_HIR_EXPR_NONE
-                || expression->data.method_call.argument_count > 1u
-                || (expression->data.method_call.argument_count != 0u
-                    && expression->data.method_call.arguments == NULL)
-                || receiver == NULL
-                || receiver->owner_body != expression->owner_body
-                || calls[index].callee->selected_callable.crate_id
-                    != local_crate
-                || !cm_hir_def_id_equal(
-                    calls[index].callee->selected_callable,
-                    canonical_calls[index].callee.definition)
-                || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
-                || selected->data.function_item.signature.receiver
-                    != CM_HIR_RECEIVER_VALUE
-                || selected->data.function_item.signature.parameter_count
-                    != expression->data.method_call.argument_count + 1u
-                || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
-                || declared->name != expression->data.method_call.method_name
-                || declared->data.function_item.signature.receiver
-                    != CM_HIR_RECEIVER_VALUE
-                || !cm_hir_def_id_equal(declared->parent_definition,
-                    calls[index].callee->implemented_trait)
-                || !cm_admission_method_trait_in_scope(expression,
-                    calls[index].callee->implemented_trait)
-                || !cm_hir_def_id_equal(
-                    selected->data.function_item.trait_item_definition,
-                    declared->definition)
-                || cm_hir_canonical_instance_encode(hir, local_crate,
-                    &requested_spec, &checked_callee) != CM_HIR_INSTANCE_OK
-                || cm_hir_canonical_instance_equal(&checked_callee,
-                    &canonical_calls[index].callee, &equal)
-                    != CM_HIR_INSTANCE_OK || !equal) {
-                cm_hir_canonical_instance_destroy(&checked_callee);
-                goto cleanup_instances;
-            }
-        } else {
-            cm_hir_canonical_instance_destroy(&checked_callee);
-            goto cleanup_instances;
-        }
-        cm_hir_canonical_instance_destroy(&checked_callee);
-        caller_member = 0;
-        callee_member = 0;
-        for (instance_index = 0u; instance_index < instance_count;
-             ++instance_index) {
+        caller_index = 0u;
+        while (caller_index < instance_count) {
             equal = 0;
-            if (cm_hir_canonical_instance_equal(
-                    &canonical_calls[index].caller,
-                    &identities[instance_index], &equal)
-                    != CM_HIR_INSTANCE_OK) goto cleanup_instances;
-            caller_member += equal;
+            if (cm_hir_canonical_instance_equal(&identities[caller_index],
+                    calls[index].caller, &equal) != CM_HIR_INSTANCE_OK) {
+                goto cleanup_instances;
+            }
+            if (equal) break;
+            ++caller_index;
+        }
+        callee_index = 0u;
+        while (callee_index < instance_count) {
             equal = 0;
-            if (cm_hir_canonical_instance_equal(
-                    &canonical_calls[index].callee,
-                    &identities[instance_index], &equal)
-                    != CM_HIR_INSTANCE_OK) goto cleanup_instances;
-            callee_member += equal;
+            if (cm_hir_canonical_instance_equal(&identities[callee_index],
+                    calls[index].callee, &equal) != CM_HIR_INSTANCE_OK) {
+                goto cleanup_instances;
+            }
+            if (equal) break;
+            ++callee_index;
         }
-        if (caller_member != 1 || callee_member != 1) {
-            goto cleanup_instances;
-        }
+        if (caller_index == instance_count || callee_index == instance_count
+            || !cm_admission_canonical_call_supported(hir, local_crate,
+                &decoded[caller_index], expression, &decoded[callee_index],
+                calls[index].callee)) goto cleanup_instances;
         for (previous = 0u; previous < index; ++previous) {
             equal = 0;
-            if (canonical_calls[previous].expression
-                    == canonical_calls[index].expression
-                && cm_hir_canonical_instance_equal(
-                    &canonical_calls[previous].caller,
-                    &canonical_calls[index].caller, &equal)
-                    == CM_HIR_INSTANCE_OK && equal) {
-                goto cleanup_instances;
-            }
+            if (calls[previous].expression == calls[index].expression
+                && cm_hir_canonical_instance_equal(calls[previous].caller,
+                    calls[index].caller, &equal) == CM_HIR_INSTANCE_OK
+                && equal) goto cleanup_instances;
         }
     }
     result.hir_status = cm_hir_crate_finalization_init(&finalization, hir,
@@ -814,19 +762,17 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
         goto cleanup_instances;
     }
     for (index = 0u; index < instance_count; ++index) {
-        const CmHirInstanceSpec *spec;
         CmSemanticSessionOptions options;
         CmSemanticResultsStatus results_status;
         CmSemanticCanonicalCallInput *instance_calls;
         size_t instance_call_count;
         size_t call_index;
 
-        spec = instances[index].spec;
-        result.owner = spec->selected_callable;
-        result.body = instances[index].body;
+        result.owner = identities[index].definition;
+        result.body = identities[index].body;
         cm_semantic_session_options_init(&options);
         options.local_crate = local_crate;
-        options.exact_owner = spec->selected_callable;
+        options.exact_owner = identities[index].definition;
         options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
         options.finalization = &finalization;
         result.session_status = cm_semantic_session_init(&session, hir,
@@ -845,8 +791,9 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
                 cm_semantic_results_stage_projection_decision;
             writeback.discard = cm_semantic_results_discard_body_stage;
             result.body_result =
-                cm_semantic_body_check_instance_spec_with_evidence(
-                    &session, instances[index].body, spec, &writeback);
+                cm_semantic_body_check_instance_parts_with_evidence(
+                    &session, identities[index].body,
+                    &decoded[index].parts, &writeback);
         }
         if (result.body_result.status != CM_SEMANTIC_BODY_OK) {
             result.status = CM_SEMANTIC_ADMISSION_BODY_FAILURE;
@@ -858,28 +805,52 @@ static CmSemanticAdmissionResult cm_admit_typed_instances(
 
             equal = 0;
             if (cm_hir_canonical_instance_equal(&identities[index],
-                    &canonical_calls[call_index].caller, &equal)
+                    calls[call_index].caller, &equal)
                     == CM_HIR_INSTANCE_OK && equal) {
                 ++instance_call_count;
             }
         }
         if (!cm_size_mul(instance_call_count, sizeof(*instance_calls),
-                &call_bytes)) goto cleanup_instances;
+                &allocation_size)) goto cleanup_instances;
         instance_calls = instance_call_count == 0u ? NULL
             : (CmSemanticCanonicalCallInput *)cm_alloc_zeroed(1u,
-                call_bytes);
+                allocation_size);
         instance_call_count = 0u;
         for (call_index = 0u; call_index < call_count; ++call_index) {
             int equal;
 
             equal = 0;
             if (cm_hir_canonical_instance_equal(&identities[index],
-                    &canonical_calls[call_index].caller, &equal)
+                    calls[call_index].caller, &equal)
                     == CM_HIR_INSTANCE_OK && equal) {
+                const CmHirExpr *expression;
+
+                expression = cm_hir_get_expr(hir,
+                    calls[call_index].expression);
+                if (expression != NULL
+                    && (expression->kind == CM_HIR_EXPR_QUALIFIED_CALL
+                        || expression->kind == CM_HIR_EXPR_METHOD_CALL)) {
+                    CmHirCanonicalInstance expected;
+
+                    cm_hir_canonical_instance_init(&expected);
+                    equal = 0;
+                    if (cm_semantic_results_stage_callable_callee_identity(
+                            &stage, calls[call_index].expression, &expected)
+                            != CM_SEMANTIC_RESULTS_OK
+                        || cm_hir_canonical_instance_equal(&expected,
+                            calls[call_index].callee, &equal)
+                            != CM_HIR_INSTANCE_OK || !equal) {
+                        cm_hir_canonical_instance_destroy(&expected);
+                        cm_free(instance_calls);
+                        result.status = CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT;
+                        goto cleanup_instances;
+                    }
+                    cm_hir_canonical_instance_destroy(&expected);
+                }
                 instance_calls[instance_call_count].expression =
-                    canonical_calls[call_index].expression;
+                    calls[call_index].expression;
                 instance_calls[instance_call_count].callee =
-                    &canonical_calls[call_index].callee;
+                    calls[call_index].callee;
                 ++instance_call_count;
             }
         }
@@ -927,13 +898,10 @@ cleanup_instances:
     cm_hir_crate_finalization_destroy(&finalization);
     cm_semantic_results_destroy(semantic_results);
     for (index = 0u; index < instance_count; ++index) {
+        cm_hir_decoded_canonical_instance_destroy(&decoded[index]);
         cm_hir_canonical_instance_destroy(&identities[index]);
     }
-    for (index = 0u; index < call_count; ++index) {
-        cm_hir_canonical_instance_destroy(&canonical_calls[index].caller);
-        cm_hir_canonical_instance_destroy(&canonical_calls[index].callee);
-    }
-    cm_free(canonical_calls);
+    cm_free(decoded);
     cm_free(identities);
     return result;
 }
@@ -943,8 +911,42 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_leaf_instances(
     CmHirCrateId local_crate, const CmSemanticReachableInstance *instances,
     size_t instance_count)
 {
-    return cm_admit_typed_instances(admission, hir, local_crate, instances,
-        instance_count, NULL, 0u, 1);
+    CmSemanticCanonicalReachableInstance *canonical;
+    CmHirCanonicalInstance *identities;
+    CmSemanticAdmissionResult result;
+    size_t allocation_size;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    if (instances == NULL || instance_count == 0u
+        || !cm_size_mul(instance_count, sizeof(*canonical),
+            &allocation_size)
+        || !cm_size_mul(instance_count, sizeof(*identities), NULL)) {
+        return result;
+    }
+    canonical = (CmSemanticCanonicalReachableInstance *)cm_alloc_zeroed(1u,
+        allocation_size);
+    identities = (CmHirCanonicalInstance *)cm_alloc_zeroed(instance_count,
+        sizeof(*identities));
+    for (index = 0u; index < instance_count; ++index) {
+        cm_hir_canonical_instance_init(&identities[index]);
+        if (instances[index].spec == NULL
+            || cm_hir_canonical_instance_encode(hir, local_crate,
+                instances[index].spec, &identities[index])
+                    != CM_HIR_INSTANCE_OK
+            || identities[index].body != instances[index].body) goto cleanup;
+        canonical[index].identity = &identities[index];
+    }
+    result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
+        canonical, instance_count, NULL, 0u, 1);
+
+cleanup:
+    for (index = 0u; index < instance_count; ++index) {
+        cm_hir_canonical_instance_destroy(&identities[index]);
+    }
+    cm_free(identities);
+    cm_free(canonical);
+    return result;
 }
 
 CmSemanticAdmissionResult cm_semantic_admit_typed_instance_closure(
@@ -953,8 +955,124 @@ CmSemanticAdmissionResult cm_semantic_admit_typed_instance_closure(
     size_t instance_count, const CmSemanticReachableInstanceCall *calls,
     size_t call_count)
 {
-    return cm_admit_typed_instances(admission, hir, local_crate, instances,
-        instance_count, calls, call_count, 0);
+    CmSemanticCanonicalReachableInstance *canonical;
+    CmHirCanonicalInstance *identities;
+    CmAdmissionCanonicalCallInput *canonical_calls;
+    CmSemanticAdmissionResult result;
+    size_t allocation_size;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    if (instances == NULL || instance_count == 0u
+        || (call_count == 0u) != (calls == NULL)
+        || !cm_size_mul(instance_count, sizeof(*canonical),
+            &allocation_size)
+        || !cm_size_mul(instance_count, sizeof(*identities), NULL)) {
+        return result;
+    }
+    canonical = (CmSemanticCanonicalReachableInstance *)cm_alloc_zeroed(1u,
+        allocation_size);
+    identities = (CmHirCanonicalInstance *)cm_alloc_zeroed(instance_count,
+        sizeof(*identities));
+    canonical_calls = call_count == 0u ? NULL
+        : (CmAdmissionCanonicalCallInput *)cm_alloc_zeroed(call_count,
+            sizeof(*canonical_calls));
+    for (index = 0u; index < instance_count; ++index) {
+        cm_hir_canonical_instance_init(&identities[index]);
+        if (instances[index].spec == NULL
+            || cm_hir_canonical_instance_encode(hir, local_crate,
+                instances[index].spec, &identities[index])
+                    != CM_HIR_INSTANCE_OK
+            || identities[index].body != instances[index].body) goto cleanup;
+        canonical[index].identity = &identities[index];
+    }
+    for (index = 0u; index < call_count; ++index) {
+        size_t caller_index;
+        size_t callee_index;
+
+        caller_index = instance_count;
+        callee_index = instance_count;
+        if (calls[index].caller == NULL || calls[index].callee == NULL) {
+            goto cleanup;
+        }
+        for (allocation_size = 0u; allocation_size < instance_count;
+             ++allocation_size) {
+            CmHirCanonicalInstance temporary;
+            int equal;
+
+            cm_hir_canonical_instance_init(&temporary);
+            equal = 0;
+            if (cm_hir_canonical_instance_encode(hir, local_crate,
+                    calls[index].caller, &temporary) != CM_HIR_INSTANCE_OK
+                || cm_hir_canonical_instance_equal(&temporary,
+                    &identities[allocation_size], &equal)
+                    != CM_HIR_INSTANCE_OK) {
+                cm_hir_canonical_instance_destroy(&temporary);
+                goto cleanup;
+            }
+            cm_hir_canonical_instance_destroy(&temporary);
+            if (equal) caller_index = allocation_size;
+            cm_hir_canonical_instance_init(&temporary);
+            equal = 0;
+            if (cm_hir_canonical_instance_encode(hir, local_crate,
+                    calls[index].callee, &temporary) != CM_HIR_INSTANCE_OK
+                || cm_hir_canonical_instance_equal(&temporary,
+                    &identities[allocation_size], &equal)
+                    != CM_HIR_INSTANCE_OK) {
+                cm_hir_canonical_instance_destroy(&temporary);
+                goto cleanup;
+            }
+            cm_hir_canonical_instance_destroy(&temporary);
+            if (equal) callee_index = allocation_size;
+        }
+        if (caller_index == instance_count || callee_index == instance_count) {
+            goto cleanup;
+        }
+        canonical_calls[index].caller = &identities[caller_index];
+        canonical_calls[index].expression = calls[index].expression;
+        canonical_calls[index].callee = &identities[callee_index];
+    }
+    result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
+        canonical, instance_count, canonical_calls, call_count, 0);
+
+cleanup:
+    for (index = 0u; index < instance_count; ++index) {
+        cm_hir_canonical_instance_destroy(&identities[index]);
+    }
+    cm_free(canonical_calls);
+    cm_free(identities);
+    cm_free(canonical);
+    return result;
+}
+
+CmSemanticAdmissionResult
+cm_semantic_admit_typed_canonical_instance_closure(
+    CmSemanticAdmission *admission, CmHirContext *hir,
+    CmHirCrateId local_crate,
+    const CmSemanticCanonicalReachableInstance *instances,
+    size_t instance_count,
+    const CmSemanticCanonicalReachableInstanceCall *calls,
+    size_t call_count)
+{
+    CmAdmissionCanonicalCallInput *inputs;
+    CmSemanticAdmissionResult result;
+    size_t bytes;
+    size_t index;
+
+    result = cm_admission_result(CM_SEMANTIC_ADMISSION_INVALID_ARGUMENT);
+    if ((call_count == 0u) != (calls == NULL)
+        || !cm_size_mul(call_count, sizeof(*inputs), &bytes)) return result;
+    inputs = call_count == 0u ? NULL
+        : (CmAdmissionCanonicalCallInput *)cm_alloc_zeroed(1u, bytes);
+    for (index = 0u; index < call_count; ++index) {
+        inputs[index].caller = calls[index].caller;
+        inputs[index].expression = calls[index].expression;
+        inputs[index].callee = calls[index].callee;
+    }
+    result = cm_admit_typed_canonical_instances(admission, hir, local_crate,
+        instances, instance_count, inputs, call_count, 0);
+    cm_free(inputs);
+    return result;
 }
 
 void cm_semantic_admission_destroy(CmSemanticAdmission *admission)

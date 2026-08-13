@@ -1695,22 +1695,42 @@ call endpoints fail closed instead of discarding the canonical half. The old
 flat reconstruction remains only for legacy exact-instance compatibility APIs
 whose input is still `DefId + CmHirTypeId[]`.
 
-The next vertical gate is executable generic-impl materialization. A borrowed
-semantic type can now be matched deterministically to the lowest
-already-existing structurally equivalent monomorphic HIR `TypeId`, after
-authenticating both the sealed results capability and the borrowed byte arena.
-The operation never adds or rewrites a HIR type; focused tests cover `u32`,
-`u8`, duplicate-equivalent IDs, unsupported symbolic types, foreign views and
-admissions, stale HIR, and invariant `hir.types.len`. The driver must next
-intern the retained canonical callee rather than reconstructing a nongeneric
-impl method, and MIR lowering/replay must treat the materialized `TypeId` only
-as executable storage for the authenticated impl-owned parameter and `Self`.
-Qualified and dot calls through one blanket method must execute independently
-for `u32` and `u8`, retain two canonical MIR bodies and C symbols, and reject a
-wrong owner, domain, arity, or transitional `TypeId` transactionally. After
-that bounded bridge, the major ordering milestone remains the all-local
-typed/rewritten/validated HIR barrier before broad MIR generation and
-MIR-driven reachability, matching original mrustc's semantic-pass ordering.
+Canonical closure admission now accepts the complete retained keys directly.
+An owned decoder authenticates every tag, domain, argument payload, owner/body
+relation, truncation/trailing byte, and byte-identical canonical re-encoding;
+its argument arrays are owned while payloads borrow from the source key.
+Direct free-function calls are re-encoded structurally from the decoded caller.
+Selected qualified and dot calls derive the complete expected callee key from
+the just-checked staged semantic evidence before results commit. The closure
+requires unique member identities, unique caller/expression edges, complete
+edge coverage, exact caller body ownership, and full-key callee equality. The
+old flat leaf/closure APIs are compatibility wrappers over this canonical core.
+Malformed, duplicate, missing, nonmember, and same-ABI-but-wrong-generic
+identities reject without an admission capability or HIR type/expression or
+generation mutation.
+
+The driver now interns each selected callee from the durable canonical identity
+and passes those same retained identities into closure admission instead of
+rebuilding flat impl-method specs. Canonical bytes alone control reachability
+deduplication and identity. A concrete nongeneric impl retains zero executable
+substitutions. The one admitted generic-impl bridge reads exactly one normalized
+type argument from the enclosing-impl domain and materializes it read-only to
+the lowest equivalent existing HIR `TypeId`; item, method, implemented-trait,
+non-type, or wider generic shapes fail closed. That `TypeId` is transitional
+MIR storage only and never identity. Strict GCC, TinyCC, and Clang
+ASan/UBSan/leak gates pass for instance/admission/results, MIR model/lowering,
+C codegen, qualified UFCS, dot methods, generic free-function chains, and
+recursive publication.
+
+The next vertical gate removes MIR's assumption that the flat substitution
+array belongs only to the selected function item. Qualified and dot calls
+through one blanket method must execute independently for `u32` and `u8`,
+retain two canonical MIR bodies and two digest-derived private C symbols, and
+reject a wrong owner, domain, arity, kind, or transitional `TypeId`
+transactionally without changing `hir.types.len`. After that bounded bridge,
+the major ordering milestone remains the all-local typed/rewritten/validated
+HIR barrier before broad MIR generation and MIR-driven reachability, matching
+original mrustc's semantic-pass ordering.
 
 ## M6: Build orchestration
 
