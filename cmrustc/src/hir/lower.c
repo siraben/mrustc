@@ -7871,6 +7871,7 @@ static int cm_lower_pattern_binding(CmLowerState *state,
     CmHirParameterBindingMode *out_binding_mode)
 {
     const CmAstPattern *pattern;
+    const CmAstPattern *binding;
 
     pattern = cm_ast_get_pattern(state->ast, pattern_id);
     if (pattern == NULL) {
@@ -7886,6 +7887,29 @@ static int cm_lower_pattern_binding(CmLowerState *state,
         *out_binding_kind = CM_HIR_BINDING_DISCARD;
         *out_binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
         return 1;
+    }
+    if (pattern->kind == CM_AST_PATTERN_REFERENCE) {
+        binding = cm_ast_get_pattern(state->ast,
+            pattern->data.reference.pattern);
+        if (pattern->data.reference.is_mutable || binding == NULL
+            || binding->kind != CM_AST_PATTERN_BINDING
+            || binding->data.binding.subpattern != CM_AST_PATTERN_NONE
+            || binding->data.binding.is_ref
+            || binding->data.binding.is_mutable) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                cm_lower_span(state, pattern->span), ast_item_id,
+                CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "function reference parameter supports only `&binding`"
+                " with an immutable binding");
+            return 0;
+        }
+        *out_name = cm_lower_copy_string(state, binding->data.binding.name,
+            cm_lower_span(state, binding->span), ast_item_id);
+        *out_mutability = CM_HIR_IMMUTABLE;
+        *out_span = cm_lower_span(state, pattern->span);
+        *out_binding_kind = CM_HIR_BINDING_NAMED;
+        *out_binding_mode = CM_HIR_PARAMETER_BINDING_DEREF_SHARED;
+        return !state->failed;
     }
     if (pattern->kind != CM_AST_PATTERN_BINDING
         || pattern->data.binding.subpattern != CM_AST_PATTERN_NONE) {
@@ -8001,12 +8025,27 @@ static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
 
 static CmHirTypeId cm_lower_parameter_binding_type(CmLowerState *state,
     CmHirTypeId parameter_type, CmHirParameterBindingMode binding_mode,
-    CmSpan span)
+    CmSpan span, CmAstItemId ast_item_id)
 {
+    const CmHirType *abi_type;
     CmHirType reference;
 
     if (binding_mode == CM_HIR_PARAMETER_BINDING_MOVE) {
         return parameter_type;
+    }
+    if (binding_mode == CM_HIR_PARAMETER_BINDING_DEREF_SHARED) {
+        abi_type = cm_hir_get_type(state->hir, parameter_type);
+        if (abi_type == NULL
+            || abi_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            || abi_type->data.reference_type.mutability
+                != CM_HIR_IMMUTABLE) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "function `&binding` parameter requires a shared reference"
+                " type");
+            return CM_HIR_TYPE_NONE;
+        }
+        return abi_type->data.reference_type.pointee;
     }
     memset(&reference, 0, sizeof(reference));
     reference.kind = CM_HIR_TYPE_REFERENCE_KIND;
@@ -8594,7 +8633,8 @@ static int cm_lower_function_item(CmLowerState *state,
         if (binding_kind == CM_HIR_BINDING_NAMED) {
             locals[local_count].name = name;
             locals[local_count].type = cm_lower_parameter_binding_type(state,
-                parameters[index].type, binding_mode, parameter_span);
+                parameters[index].type, binding_mode, parameter_span,
+                ast_item_id);
             if (state->failed) break;
             locals[local_count].mutability = mutability;
             locals[local_count].span = parameter_span;
@@ -17774,8 +17814,10 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                         : item->data.impl_item.is_negative
                             ? "duplicate exact negative impl candidate for "
                               "one trait and self type"
-                            : "duplicate exact impl candidate for one trait "
+                        : "duplicate exact impl candidate for one trait "
                               "and self type");
+            cm_free(adt_definitions);
+            cm_free(classes);
             return 0;
         }
     }

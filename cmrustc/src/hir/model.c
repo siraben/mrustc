@@ -2164,9 +2164,20 @@ static int cm_hir_parameter_local_type_matches(
     const CmHirLocal *local)
 {
     const CmHirType *local_type;
+    const CmHirType *parameter_type;
 
     if (parameter->binding_mode == CM_HIR_PARAMETER_BINDING_MOVE) {
         return local->type == parameter->type;
+    }
+    if (parameter->binding_mode
+            == CM_HIR_PARAMETER_BINDING_DEREF_SHARED) {
+        parameter_type = cm_hir_get_type(context, parameter->type);
+        return parameter_type != NULL
+            && parameter_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && parameter_type->data.reference_type.mutability
+                == CM_HIR_IMMUTABLE
+            && local->type == parameter_type->data.reference_type.pointee
+            && local->mutability == CM_HIR_IMMUTABLE;
     }
     local_type = cm_hir_get_type(context, local->type);
     return (parameter->binding_mode == CM_HIR_PARAMETER_BINDING_REF_SHARED
@@ -2467,7 +2478,7 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
         }
         if (!binding_valid
             || (unsigned int)parameter->binding_mode
-                > (unsigned int)CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+                > (unsigned int)CM_HIR_PARAMETER_BINDING_DEREF_SHARED
             || !cm_hir_type_id_valid(context, parameter->type)
             || !cm_hir_span_is_ordered(parameter->span)) {
             return 0;

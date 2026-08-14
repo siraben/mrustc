@@ -3916,9 +3916,14 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
          owner_argument_index < owner_item->data.function_item.signature
             .parameter_count;
          ++owner_argument_index) {
-        if (owner_item->data.function_item.signature.parameters[
-                owner_argument_index].binding_mode
-                != CM_HIR_PARAMETER_BINDING_MOVE) {
+        switch (owner_item->data.function_item.signature.parameters[
+                owner_argument_index].binding_mode) {
+        case CM_HIR_PARAMETER_BINDING_MOVE:
+            break;
+        case CM_HIR_PARAMETER_BINDING_REF_SHARED:
+        case CM_HIR_PARAMETER_BINDING_REF_MUTABLE:
+        case CM_HIR_PARAMETER_BINDING_DEREF_SHARED:
+        default:
             result.status = CM_SEMANTIC_BODY_UNSUPPORTED;
             return result;
         }

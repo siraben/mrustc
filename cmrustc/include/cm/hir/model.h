@@ -534,7 +534,9 @@ typedef enum CmHirBindingKind {
 typedef enum CmHirParameterBindingMode {
     CM_HIR_PARAMETER_BINDING_MOVE = 0,
     CM_HIR_PARAMETER_BINDING_REF_SHARED,
-    CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+    CM_HIR_PARAMETER_BINDING_REF_MUTABLE,
+    /* Shared-reference pattern `&binding`: move/copy the pointee locally. */
+    CM_HIR_PARAMETER_BINDING_DEREF_SHARED
 } CmHirParameterBindingMode;
 
 #define CM_HIR_TUPLE_PARAMETER_BINDING_COUNT UINT32_C(2)

@@ -540,6 +540,33 @@ static void test_free_value_body_owners(void)
     fixture_destroy(&fixture);
 }
 
+static void test_deref_shared_parameter_owner_fails_closed(void)
+{
+    TestFixture fixture;
+    const CmHirItem *function;
+    const CmHirBody *body;
+    CmHirLocalBodiesResult result;
+
+    fixture_init_named(&fixture,
+        "fn first(&value: &u32) -> u32 { value }", "first");
+    function = find_function(&fixture.hir, "first");
+    body = function == NULL ? NULL : cm_hir_get_body(&fixture.hir,
+        function->data.function_item.body);
+    assert(function != NULL
+        && function->data.function_item.signature.parameter_count == 1u
+        && function->data.function_item.signature.parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_DEREF_SHARED
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->local_count == 1u
+        && cm_hir_body_function_owner_kind(&fixture.hir, function)
+            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    result = lower_fixture_local_bodies(&fixture);
+    assert(result.status == CM_HIR_LOCAL_BODIES_UNSUPPORTED_OWNER
+        && result.body == function->data.function_item.body
+        && body->state == CM_HIR_BODY_UNLOWERED);
+    fixture_destroy(&fixture);
+}
+
 static void test_value_body_atomic_rollback_and_owner_rejection(void)
 {
     TestFixture fixture;
@@ -4461,6 +4488,7 @@ int main(void)
 {
     test_all_local_bodies_transaction();
     test_free_value_body_owners();
+    test_deref_shared_parameter_owner_fails_closed();
     test_value_body_atomic_rollback_and_owner_rejection();
     test_value_block_rejections_are_transactional();
     test_closed_trait_default_bodies();

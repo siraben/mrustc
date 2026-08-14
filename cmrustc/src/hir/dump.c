@@ -466,7 +466,9 @@ static const char *cm_hir_binding_name(CmHirBindingKind kind)
 static const char *cm_hir_parameter_binding_mode_name(
     CmHirParameterBindingMode mode)
 {
-    static const char *const names[] = { "move", "ref", "ref-mut" };
+    static const char *const names[] = {
+        "move", "ref", "ref-mut", "deref-shared"
+    };
 
     if ((unsigned int)mode >= (unsigned int)CM_ARRAY_LEN(names)) {
         return "bad-mode";

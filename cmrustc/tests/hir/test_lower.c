@@ -8112,7 +8112,11 @@ static void test_typed_parameter_patterns_remain_bounded(void)
 {
     static const char *const sources[] = {
         "fn subpattern(value @ _: u8) {}",
-        "fn reference(&value: &u8) {}",
+        "fn mutable_reference(&mut value: &mut u8) {}",
+        "fn nested_reference_binding(&ref value: &u8) {}",
+        "fn tuple_reference(&(left, right): &(u8, u8)) {}",
+        "fn wildcard_reference(&_: &u8) {}",
+        "fn wrong_reference_type(&value: u8) {}",
         "fn nested(((left, right), third): ((u8, u8), u8)) {}",
         "fn rest((left, ..): (u8, u8)) {}",
         "fn by_ref((ref left, right): (u8, u8)) {}",
@@ -8208,6 +8212,71 @@ static void test_typed_parameter_patterns_remain_bounded(void)
         }
         cm_hir_context_destroy(&context);
     }
+}
+
+static void test_shared_reference_parameter_pattern(void)
+{
+    static const char source[] =
+        "trait Step {"
+        " fn steps_between(start: &char, end: &char) -> char;"
+        "}"
+        "impl Step for char {"
+        " fn steps_between(&start: &char, &end: &char) -> char { start }"
+        "}";
+    const CmHirItem *impl_item;
+    const CmHirItem *method;
+    const CmHirFunctionSignature *signature;
+    const CmHirBody *body;
+    const CmHirType *first_abi;
+    const CmHirType *second_abi;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    impl_item = find_impl(&context);
+    method = impl_item == NULL ? NULL : find_child(&context,
+        impl_item->definition, "steps_between");
+    signature = method == NULL ? NULL
+        : &method->data.function_item.signature;
+    body = method == NULL ? NULL
+        : cm_hir_get_body(&context, method->data.function_item.body);
+    first_abi = signature == NULL || signature->parameter_count != 2u
+        ? NULL : cm_hir_get_type(&context, signature->parameters[0].type);
+    second_abi = signature == NULL || signature->parameter_count != 2u
+        ? NULL : cm_hir_get_type(&context, signature->parameters[1].type);
+    assert(result.error_count == 0u && method != NULL
+        && signature->parameter_count == 2u
+        && signature->parameters[0].binding_kind == CM_HIR_BINDING_NAMED
+        && signature->parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_DEREF_SHARED
+        && hir_string_is(&context, signature->parameters[0].name, "start")
+        && signature->parameters[1].binding_kind == CM_HIR_BINDING_NAMED
+        && signature->parameters[1].binding_mode
+            == CM_HIR_PARAMETER_BINDING_DEREF_SHARED
+        && hir_string_is(&context, signature->parameters[1].name, "end")
+        && first_abi != NULL
+        && first_abi->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first_abi->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && second_abi != NULL
+        && second_abi->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && second_abi->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->parameter_count == 2u && body->local_count == 2u
+        && body->locals[0].name == signature->parameters[0].name
+        && body->locals[0].type
+            == first_abi->data.reference_type.pointee
+        && body->locals[0].mutability == CM_HIR_IMMUTABLE
+        && body->locals[0].parameter_index == 0u
+        && body->locals[0].parameter_binding_index == 0u
+        && body->locals[1].name == signature->parameters[1].name
+        && body->locals[1].type
+            == second_abi->data.reference_type.pointee
+        && body->locals[1].mutability == CM_HIR_IMMUTABLE
+        && body->locals[1].parameter_index == 1u
+        && body->locals[1].parameter_binding_index == 0u
+        && cm_hir_body_function_owner_kind(&context, method)
+            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_cfg_sensitive_trait_impl_members(void)
@@ -9204,6 +9273,7 @@ int main(void)
     test_higher_ranked_trait_lifetime_argument_lowers();
     test_typed_parameter_binding_modes();
     test_partition_in_place_parameter_shape();
+    test_shared_reference_parameter_pattern();
     test_typed_parameter_patterns_remain_bounded();
     test_unsupported_method_forms_are_errors();
     test_cfg_sensitive_trait_impl_members();

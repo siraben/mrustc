@@ -77,8 +77,13 @@ static int cm_hir_body_owner_parameter_bindings_supported(
     if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION) return 0;
     signature = &item->data.function_item.signature;
     for (index = 0u; index < signature->parameter_count; ++index) {
-        if (signature->parameters[index].binding_mode
-                != CM_HIR_PARAMETER_BINDING_MOVE) {
+        switch (signature->parameters[index].binding_mode) {
+        case CM_HIR_PARAMETER_BINDING_MOVE:
+            break;
+        case CM_HIR_PARAMETER_BINDING_REF_SHARED:
+        case CM_HIR_PARAMETER_BINDING_REF_MUTABLE:
+        case CM_HIR_PARAMETER_BINDING_DEREF_SHARED:
+        default:
             return 0;
         }
     }

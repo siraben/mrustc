@@ -2048,6 +2048,112 @@ static void test_tuple_parameter_model(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_deref_shared_parameter_model(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirTypeId unit_type;
+    CmHirTypeId u8_type;
+    CmHirTypeId shared_u8_type;
+    CmHirTypeId mutable_u8_type;
+    CmHirType type;
+    CmHirDefId definition;
+    CmHirBody body;
+    CmHirBody *stored_body;
+    CmHirBodyId body_id;
+    CmHirLocal local;
+    CmHirFunctionParameter parameter;
+    CmHirItem item;
+    CmHirItemId item_id;
+    FILE *dump_file;
+    char *dump;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "deref_shared_parameter"),
+        CM_HIR_EDITION_2024, test_span(0u, 100u), &crate_id, &root_id)
+        == CM_HIR_OK);
+    unit_type = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(1u, 2u));
+    u8_type = add_simple_type(&context, CM_HIR_TYPE_INTEGER_KIND,
+        test_span(2u, 3u));
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(4u, 7u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    type.data.reference_type.pointee = u8_type;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&context, &type, &shared_u8_type) == CM_HIR_OK);
+    type.data.reference_type.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_type(&context, &type, &mutable_u8_type) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(10u, 60u), &definition)
+        == CM_HIR_OK);
+    memset(&local, 0, sizeof(local));
+    local.name = cm_hir_intern(&context, "value");
+    local.type = u8_type;
+    local.mutability = CM_HIR_IMMUTABLE;
+    local.span = test_span(20u, 26u);
+    local.parameter_index = 0u;
+    local.parameter_binding_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = unit_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 1u;
+    body.span = test_span(10u, 60u);
+    assert(cm_hir_add_body(&context, &body, &body_id) == CM_HIR_OK);
+
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.name = local.name;
+    parameter.type = shared_u8_type;
+    parameter.span = local.span;
+    parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_DEREF_SHARED;
+    init_test_item(&item, CM_HIR_ITEM_FUNCTION, definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "first"),
+        test_span(10u, 60u));
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = unit_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&context, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+
+    parameter.type = u8_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.type = mutable_u8_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.type = shared_u8_type;
+    stored_body = (CmHirBody *)cm_vec_at(&context.bodies,
+        (size_t)body_id - 1u);
+    assert(stored_body != NULL && stored_body->local_count == 1u);
+    stored_body->locals[0].type = shared_u8_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[0].type = u8_type;
+    stored_body->locals[0].mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[0].mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
+    dump_file = tmpfile();
+    assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
+    dump = read_dump(dump_file);
+    assert(strstr(dump,
+        "function-param item#1 index=0 binding=named name=\"value\" "
+        "mode=deref-shared") != NULL);
+    free(dump);
+    assert(fclose(dump_file) == 0);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_supertrait_model_invariants(void)
 {
     CmHirContext context;
@@ -8242,6 +8348,7 @@ int main(void)
     test_body_public_invariants();
     test_discard_parameter_model();
     test_tuple_parameter_model();
+    test_deref_shared_parameter_model();
     test_supertrait_model_invariants();
     test_trait_alias_model_invariants();
     test_static_supertrait_model_invariants();
