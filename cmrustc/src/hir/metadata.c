@@ -2285,6 +2285,28 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         || owned->modules.len > (size_t)CM_META_MAX_MODULES
         || (crate_value = cm_hir_get_crate(identity.context,
             identity.crate_id)) == NULL) return result;
+    if (semantic) {
+        size_t item_index;
+
+        for (item_index = 0u;
+             item_index < identity.context->items.len; ++item_index) {
+            const CmHirItem *item;
+
+            item = (const CmHirItem *)cm_vec_at_const(
+                &identity.context->items, item_index);
+            if (item == NULL) {
+                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                return result;
+            }
+            if (item->definition.crate_id == identity.crate_id
+                && item->is_specializable) {
+                /* v1.1 carries the impl header but has no item-defaultness
+                 * field.  Reject instead of publishing a falsely-final impl. */
+                result.status = CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR;
+                return result;
+            }
+        }
+    }
 
     cm_vec_init(&modules, sizeof(CmMetaEncodeModule));
     cm_vec_init(&items, sizeof(CmMetaEncodeItem));

@@ -3238,7 +3238,8 @@ static void test_rustc_future_ready_pending_fixture(void)
         && strstr(hir_dump, "binding=named name=\"cx\"") != NULL
         && strstr(hir_dump, "locals=1 params=2") != NULL
         && strstr(hir_dump,
-            "origin=parameter[0] name=\"self\" mutability=immutable")
+            "origin=parameter[0].binding[0] name=\"self\" "
+            "mutability=immutable")
             != NULL,
         "Future/Ready/Pending hir-v30 dump lost binding distinctions");
     free(hir_dump);
@@ -6461,6 +6462,111 @@ static void test_generated_trait_impl_consts(void)
         && impl_count == 3u && zero_count == 3u && one_count == 3u
         && definitions_valid,
         "generated trait impl consts lost declaration links, Self, or bodies");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_specializable_impl_members(void)
+{
+    static const unsigned char source[] =
+        "trait Specialize { fn build(); type Output; const VALUE: u8; }\n"
+        "struct Direct; struct Generated;\n"
+        "impl Specialize for Direct {\n"
+        "  default fn build() {}\n"
+        "  default type Output = u8;\n"
+        "  default const VALUE: u8 = 1;\n"
+        "}\n"
+        "macro_rules! defaults { () => {\n"
+        "  default fn build() {}\n"
+        "  default type Output = u16;\n"
+        "  default const VALUE: u8 = 2;\n"
+        "} }\n"
+        "impl Specialize for Generated { defaults!(); }\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *direct_type;
+    const CmHirItem *generated_type;
+    const CmHirItem *impls[2];
+    const char *labels[2];
+    char *dump;
+    size_t index;
+    int members_valid;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "specializable/lib.rs", source,
+        sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add specialization marker fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "hir-graph-lower specialization marker: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    direct_type = find_hir_item_anywhere(&hir, "Direct");
+    generated_type = find_hir_item_anywhere(&hir, "Generated");
+    impls[0] = direct_type == NULL ? NULL
+        : find_hir_impl_for(&hir, direct_type->definition);
+    impls[1] = generated_type == NULL ? NULL
+        : find_hir_impl_for(&hir, generated_type->definition);
+    labels[0] = "direct";
+    labels[1] = "macro-generated";
+    members_valid = 1;
+    for (index = 0u; index < 2u; ++index) {
+        const CmHirItem *method;
+        const CmHirItem *alias;
+        const CmHirItem *constant;
+
+        method = impls[index] == NULL ? NULL
+            : find_hir_associated_item(&hir, impls[index]->definition,
+                CM_HIR_ITEM_FUNCTION, "build");
+        alias = impls[index] == NULL ? NULL
+            : find_hir_associated_item(&hir, impls[index]->definition,
+                CM_HIR_ITEM_TYPE_ALIAS, "Output");
+        constant = impls[index] == NULL ? NULL
+            : find_hir_associated_item(&hir, impls[index]->definition,
+                CM_HIR_ITEM_CONST, "VALUE");
+        if (method == NULL || alias == NULL || constant == NULL
+            || method->is_specializable != 1
+            || alias->is_specializable != 1
+            || constant->is_specializable != 1
+            || method->data.function_item.body == CM_HIR_BODY_NONE
+            || alias->data.type_alias_item.target == CM_HIR_TYPE_NONE
+            || constant->data.value_item.body == CM_HIR_BODY_NONE) {
+            fprintf(stderr, "hir-graph-lower: %s specialization members "
+                "lost marker or value\n", labels[index]);
+            members_valid = 0;
+        }
+    }
+    dump = dump_hir(&hir);
+    check(graph_result.error_count == 0u && result.error_count == 0u
+        && result.lowered_item_count == 14u && hir.items.len == 14u
+        && hir.bodies.len == 4u && impls[0] != NULL && impls[1] != NULL
+        && members_valid && dump != NULL
+        && text_count_between(dump, dump + strlen(dump),
+            "specializable=1") == 6u,
+        "direct or macro-generated default fn/type/const did not retain "
+        "specialization identity");
+    free(dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
@@ -11898,6 +12004,7 @@ int main(void)
     test_source_const();
     test_trait_associated_const_declarations();
     test_generated_trait_impl_consts();
+    test_specializable_impl_members();
     test_source_static_with_named_array_length();
     test_enum_variant_glob_import();
     test_macro_import_identity();

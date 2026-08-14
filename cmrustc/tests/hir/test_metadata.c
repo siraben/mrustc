@@ -1734,15 +1734,18 @@ static void init_empty_artifact(CmHirContext *context, CmHirCrateId crate_id,
 static void assert_semantic_encode_unsupported(CmHirContext *context,
     CmHirCrateId crate_id, CmHirModuleId root_module)
 {
+    static const unsigned char sentinel[] = { 'k', 'e', 'e', 'p' };
     CmHirLibraryArtifact artifact;
     CmByteBuf encoded;
     CmHirMetadataArtifactResult result;
 
     init_empty_artifact(context, crate_id, root_module, &artifact);
     cm_byte_buf_init(&encoded);
+    cm_byte_buf_append(&encoded, sentinel, sizeof(sentinel));
     result = cm_hir_metadata_encode_semantic_artifact(&encoded, &artifact);
     assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR);
-    assert(encoded.len == 0u);
+    assert(encoded.len == sizeof(sentinel)
+        && memcmp(encoded.data, sentinel, sizeof(sentinel)) == 0);
     cm_byte_buf_destroy(&encoded);
     cm_hir_library_artifact_destroy(&artifact);
 }
@@ -1756,8 +1759,13 @@ static void test_semantic_unsupported_producers(void)
     CmHirModuleId local_root;
     CmHirDefId foreign_trait;
     CmHirDefId implemented_trait;
+    CmHirDefId impl_definition;
+    CmHirDefId trait_member_definition;
+    CmHirDefId impl_member_definition;
     CmHirDefId predicate_trait;
     CmHirTypeId u8_type;
+    CmHirItem item;
+    CmHirItemId item_id;
 
     cm_hir_context_init(&context);
     assert(cm_hir_create_crate(&context,
@@ -1796,6 +1804,50 @@ static void test_semantic_unsupported_producers(void)
         local_root, "Predicate", 0, 4u);
     add_metadata_predicate_impl(&context, local_crate, local_root,
         implemented_trait, predicate_trait, u8_type, 5u);
+    assert_semantic_encode_unsupported(&context, local_crate, local_root);
+    cm_hir_context_destroy(&context);
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "specializable_impl"),
+        CM_HIR_EDITION_2024, test_span(1u, 20u), &local_crate,
+        &local_root) == CM_HIR_OK);
+    u8_type = add_integer_type(&context, CM_HIR_INT_U8, 2u);
+    implemented_trait = add_metadata_trait(&context, local_crate,
+        local_root, "Specialize", 0, 3u);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_TYPE_ALIAS, test_span(4u, 5u),
+        &trait_member_definition) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_TYPE_ALIAS;
+    item.definition = trait_member_definition;
+    item.owner_module = local_root;
+    item.parent_definition = implemented_trait;
+    item.name = cm_hir_intern(&context, "Output");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(4u, 5u);
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    impl_definition = add_metadata_impl(&context, local_crate, local_root,
+        implemented_trait, u8_type, 0, 6u);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_TYPE_ALIAS, test_span(7u, 8u),
+        &impl_member_definition) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_TYPE_ALIAS;
+    item.definition = impl_member_definition;
+    item.owner_module = local_root;
+    item.parent_definition = impl_definition;
+    item.is_specializable = 1;
+    item.name = cm_hir_intern(&context, "Output");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(7u, 8u);
+    item.data.type_alias_item.target = u8_type;
+    item.data.type_alias_item.trait_item_definition =
+        trait_member_definition;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     assert_semantic_encode_unsupported(&context, local_crate, local_root);
     cm_hir_context_destroy(&context);
 }

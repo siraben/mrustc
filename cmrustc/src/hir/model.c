@@ -1673,12 +1673,17 @@ static CmHirStatus cm_hir_item_parent_status(const CmHirContext *context,
     const CmHirModule *module, const CmHirItem *item)
 {
     const CmHirItem *parent;
+    const CmHirItem *implemented_trait;
 
+    if (item->is_specializable != 0 && item->is_specializable != 1) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
     if (!cm_hir_def_id_has_valid_shape(item->parent_definition)) {
         return CM_HIR_INVALID_ID;
     }
     if (cm_hir_def_id_is_none(item->parent_definition)) {
-        return CM_HIR_OK;
+        return item->is_specializable
+            ? CM_HIR_INVARIANT_VIOLATION : CM_HIR_OK;
     }
     if (item->parent_definition.crate_id != module->crate_id
         || cm_hir_lookup_definition(context,
@@ -1707,6 +1712,19 @@ static CmHirStatus cm_hir_item_parent_status(const CmHirContext *context,
     if (item->kind != CM_HIR_ITEM_FUNCTION
         && item->kind != CM_HIR_ITEM_TYPE_ALIAS
         && item->kind != CM_HIR_ITEM_CONST) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    if (!item->is_specializable) return CM_HIR_OK;
+    if (parent->kind != CM_HIR_ITEM_IMPL
+        || !parent->data.impl_item.has_trait
+        || parent->data.impl_item.is_negative) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    implemented_trait = cm_hir_bound_definition_item(context,
+        parent->data.impl_item.trait_type.definition);
+    if (implemented_trait == NULL
+        || implemented_trait->kind != CM_HIR_ITEM_TRAIT
+        || implemented_trait->data.trait_item.is_auto) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     return CM_HIR_OK;

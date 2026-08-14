@@ -7716,6 +7716,8 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     const CmAstItem *ast_item, const CmLowerItemRecord *record,
     CmHirItem *out_item)
 {
+    const CmHirItem *implemented_trait;
+    const CmHirItem *parent_impl;
     CmSpan span;
 
     span = cm_lower_span(state, ast_item->span);
@@ -7726,10 +7728,32 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
         return 0;
     }
     if (ast_item->is_default) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
-            ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "default specialization semantics are not supported");
-        return 0;
+        parent_impl = record->parent_kind == CM_LOWER_PARENT_IMPL
+            ? cm_lower_bound_item(state, record->parent_definition) : NULL;
+        implemented_trait = parent_impl != NULL
+                && parent_impl->kind == CM_HIR_ITEM_IMPL
+                && parent_impl->data.impl_item.has_trait
+            ? cm_lower_bound_item(state,
+                parent_impl->data.impl_item.trait_type.definition) : NULL;
+        if (record->is_foreign
+            || record->parent_kind != CM_LOWER_PARENT_IMPL
+            || (ast_item->kind != CM_AST_ITEM_FUNCTION
+                && ast_item->kind != CM_AST_ITEM_TYPE_ALIAS
+                && ast_item->kind != CM_AST_ITEM_CONST)
+            || parent_impl == NULL
+            || parent_impl->kind != CM_HIR_ITEM_IMPL
+            || !parent_impl->data.impl_item.has_trait
+            || parent_impl->data.impl_item.is_negative
+            || implemented_trait == NULL
+            || implemented_trait->kind != CM_HIR_ITEM_TRAIT
+            || implemented_trait->data.trait_item.is_auto) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "default specialization is supported only on fn, type, "
+                "and const definitions directly inside a positive "
+                "ordinary trait impl");
+            return 0;
+        }
     }
     if (record->expanded_item != NULL
         && record->expanded_item->inner_attribute_count != 0u) {
@@ -7759,6 +7783,7 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     out_item->definition = record->definition;
     out_item->owner_module = record->owner_module;
     out_item->parent_definition = record->parent_definition;
+    out_item->is_specializable = ast_item->is_default;
     out_item->name = record->hir_name;
     out_item->span = span;
     out_item->attributes = cm_lower_item_attributes(state,
@@ -14593,7 +14618,6 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
         parent_item = parent_record == NULL ? NULL
             : cm_ast_get_item(parent_record->ast, parent_record->ast_id);
         if (parent_item == NULL || parent_item->kind != CM_AST_ITEM_IMPL
-            || item->is_default
             || item->data.value_item.type == CM_AST_TYPE_NONE
             || !item->data.value_item.has_value
             || item->data.value_item.initializer == CM_AST_EXPR_NONE
@@ -14601,7 +14625,7 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
                 reference.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                "associated consts must be non-default, immutable, "
+                "associated consts must be immutable, "
                 "explicitly typed initializer-bearing definitions");
             return 0;
         }

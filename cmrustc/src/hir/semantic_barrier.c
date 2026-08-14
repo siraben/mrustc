@@ -142,6 +142,8 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
 
         item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
         if (item == NULL) return 0;
+        hash = cm_semantic_barrier_hash_bytes(hash,
+            &item->is_specializable, sizeof(item->is_specializable));
         if (!cm_semantic_barrier_hash_array(&hash,
                 item->predicate_scopes,
                 (size_t)item->predicate_scope_count,

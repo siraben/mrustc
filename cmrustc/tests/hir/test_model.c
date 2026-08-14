@@ -769,9 +769,11 @@ static void test_known_trait_projection_model(void)
     init_test_item(&item, CM_HIR_ITEM_TYPE_ALIAS, cm_hir_def_id_none(),
         root_id, cm_hir_def_id_none(), cm_hir_intern(&context, "Targetless"),
         test_span(181u, 190u));
+    item.is_specializable = 1;
     item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
     definition_count = context.definitions.len;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVARIANT_VIOLATION);
     assert(item_id == CM_HIR_ITEM_NONE
         && context.definitions.len == definition_count);
 
@@ -780,9 +782,11 @@ static void test_known_trait_projection_model(void)
     init_test_item(&item, CM_HIR_ITEM_TYPE_ALIAS, trait_target_definition,
         root_id, trait_definition, cm_hir_intern(&context, "Defaulted"),
         test_span(185u, 190u));
+    item.is_specializable = 1;
     item.data.type_alias_item.target = u8_type;
     item_count = context.items.len;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVARIANT_VIOLATION);
     assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count);
 
     init_test_item(&item, CM_HIR_ITEM_TYPE_ALIAS, cm_hir_def_id_none(),
@@ -895,6 +899,19 @@ static void test_known_trait_projection_model(void)
         cm_hir_intern(&context, "Assoc"), test_span(200u, 210u));
     item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
     item.data.type_alias_item.trait_item_definition = associated_definition;
+    item.parent_definition = negative_impl_definition;
+    item.is_specializable = 1;
+    item_count = context.items.len;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    item.parent_definition = inherent_impl_definition;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count
+        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+    item.parent_definition = impl_definition;
+    item.is_specializable = 0;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(211u, 220u), &impl_alias_definition) == CM_HIR_OK);
@@ -911,6 +928,10 @@ static void test_known_trait_projection_model(void)
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count);
     item.name = cm_hir_intern(&context, "Assoc");
+    item.is_specializable = 2;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ARGUMENT);
+    item.is_specializable = 1;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     memset(&parameter, 0, sizeof(parameter));
     parameter.kind = CM_HIR_GENERIC_TYPE;
@@ -922,6 +943,9 @@ static void test_known_trait_projection_model(void)
     item.generic_parameter_start = impl_associated_parameter;
     item.generic_parameter_count = 1u;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    stored_associated = cm_hir_get_item(&context, item_id);
+    assert(stored_associated != NULL
+        && stored_associated->is_specializable == 1);
 
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(221u, 225u), &duplicate_impl_alias_definition)
@@ -960,7 +984,8 @@ static void test_known_trait_projection_model(void)
         "projection <ty#1 as 1:2<ty#1>>::1:3<ty#2>") != NULL);
     assert(strstr(dump, "impl def=") != NULL
         && strstr(dump, "name=none") != NULL
-        && strstr(dump, "name=\"Assoc\" trait-item=1:3") != NULL);
+        && strstr(dump, "name=\"Assoc\" trait-item=1:3") != NULL
+        && strstr(dump, "specializable=1") != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
     cm_hir_context_destroy(&context);

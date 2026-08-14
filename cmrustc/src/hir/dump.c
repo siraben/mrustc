@@ -1152,6 +1152,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
             (unsigned int)item->generic_parameter_start,
             (unsigned int)(item->generic_parameter_start
                 + item->generic_parameter_count));
+        fprintf(stream, " specializable=%d", item->is_specializable);
         fprintf(stream, " attrs=%u span=",
             (unsigned int)item->attribute_count);
         cm_hir_dump_span(stream, item->span);

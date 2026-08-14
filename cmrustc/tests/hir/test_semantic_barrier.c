@@ -98,6 +98,7 @@ static void test_tuple_parameter_fingerprint(void)
     CmHirBody *body;
     CmInternId saved_name;
     uint32_t saved_binding_index;
+    int saved_specializable;
 
     fixture_init(&fixture, source);
     item = (CmHirItem *)cm_vec_at(&fixture.hir.items, 0u);
@@ -126,6 +127,14 @@ static void test_tuple_parameter_fingerprint(void)
         && result.phase == CM_SEMANTIC_BARRIER_TYPED);
     item->data.function_item.signature.parameters[0]
         .tuple_bindings[1].name = saved_name;
+    assert(cm_semantic_barrier_is_current(&barrier));
+
+    saved_specializable = item->is_specializable;
+    item->is_specializable = 1;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED);
+    item->is_specializable = saved_specializable;
     assert(cm_semantic_barrier_is_current(&barrier));
 
     saved_binding_index = body->locals[1].parameter_binding_index;

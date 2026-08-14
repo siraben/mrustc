@@ -252,6 +252,20 @@ static void expect_invalid_ast_lowering(const CmAst *ast,
     cm_hir_context_destroy(&context);
 }
 
+static void expect_unsupported_lowering(const CmAst *ast,
+    const CmHirLowerOptions *options, const char *message)
+{
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    cm_hir_context_init(&context);
+    result = cm_hir_lower_crate(&context, ast, options);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
+        && strstr(result.first_error.message, message) != NULL);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_complete_declarations(void)
 {
     static const char source[] =
@@ -485,56 +499,112 @@ static void test_union_declarations(void)
     cm_ast_destroy(&ast);
 }
 
-static void test_default_specialization_fails_closed(void)
+static void test_default_specialization_lowering(void)
 {
     static const char source[] =
-        "trait Marker { fn specialize(); } struct Value; "
-        "impl Marker for Value { default fn specialize() {} }";
+        "trait Marker { fn specialize(); type Output; } struct Value; "
+        "impl Marker for Value { default fn specialize() {} "
+        "default type Output = u8; }";
     CmAst ast;
     CmParseResult parse_result;
     CmHirLowerOptions options;
     CmHirContext context;
     CmHirLowerResult result;
+    const CmHirItem *hir_impl;
+    const CmHirItem *hir_method;
+    const CmHirItem *hir_alias;
     const CmAstItemId *impl_id;
-    const CmAstItem *impl_item;
+    CmAstItem *impl_item;
+    CmAstItem *root_item;
+    CmAstItem *trait_method;
     CmAstItem *method;
+    CmAstItem *alias;
+    FILE *stream;
+    char dump[8192];
+    size_t dump_size;
 
     cm_ast_init(&ast);
     parse_result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
         CM_EDITION_2024);
     assert(parse_result.error_count == 0u && ast.root_items.len == 3u);
     impl_id = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 2u);
-    impl_item = impl_id == NULL ? NULL : cm_ast_get_item(&ast, *impl_id);
+    impl_item = impl_id == NULL ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
+        (size_t)*impl_id - 1u);
     method = impl_item == NULL || impl_item->kind != CM_AST_ITEM_IMPL
-            || impl_item->data.impl_item.item_count != 1u
+            || impl_item->data.impl_item.item_count != 2u
         ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
             (size_t)impl_item->data.impl_item.items[0] - 1u);
+    alias = impl_item == NULL || impl_item->kind != CM_AST_ITEM_IMPL
+            || impl_item->data.impl_item.item_count != 2u
+        ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
+            (size_t)impl_item->data.impl_item.items[1] - 1u);
     assert(method != NULL && method->kind == CM_AST_ITEM_FUNCTION
-        && method->is_default == 1);
+        && method->is_default == 1
+        && alias != NULL && alias->kind == CM_AST_ITEM_TYPE_ALIAS
+        && alias->is_default == 1);
 
     cm_hir_lower_options_init(&options);
     options.crate_name = "default_specialization_test";
     options.source = 7u;
     cm_hir_context_init(&context);
     result = cm_hir_lower_crate(&context, &ast, &options);
-    if (result.error_count != 1u
-        || result.first_error.kind != CM_HIR_LOWER_UNSUPPORTED_ITEM
-        || strstr(result.first_error.message,
-            "default specialization semantics") == NULL) {
+    if (result.error_count != 0u) {
         fprintf(stderr, "default specialization lowering actual: %s: %s\n",
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
-        && strstr(result.first_error.message,
-            "default specialization semantics") != NULL);
+    hir_impl = find_impl(&context);
+    hir_method = hir_impl == NULL ? NULL : find_child(&context,
+        hir_impl->definition, "specialize");
+    hir_alias = hir_impl == NULL ? NULL : find_child(&context,
+        hir_impl->definition, "Output");
+    assert(result.error_count == 0u && result.lowered_item_count == 7u
+        && hir_impl != NULL && hir_method != NULL
+        && hir_method->kind == CM_HIR_ITEM_FUNCTION
+        && hir_method->is_specializable == 1
+        && hir_alias != NULL && hir_alias->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && hir_alias->is_specializable == 1);
+    stream = tmpfile();
+    assert(stream != NULL && cm_hir_dump(stream, &context) == 0
+        && fseek(stream, 0L, SEEK_SET) == 0);
+    dump_size = fread(dump, 1u, sizeof(dump) - 1u, stream);
+    dump[dump_size] = '\0';
+    assert(strstr(dump, "specializable=1") != NULL);
+    assert(fclose(stream) == 0);
     cm_hir_context_destroy(&context);
 
     method->is_default = 99;
     expect_invalid_ast_lowering(&ast, &options,
         "invalid default specialization flag");
-    method->is_default = 1;
+    method->is_default = 0;
+
+    root_item = (CmAstItem *)cm_vec_at(&ast.items,
+        (size_t)*(const CmAstItemId *)cm_vec_at_const(
+            &ast.root_items, 0u) - 1u);
+    trait_method = root_item == NULL
+            || root_item->kind != CM_AST_ITEM_TRAIT
+            || root_item->data.trait_item.item_count == 0u
+        ? NULL : (CmAstItem *)cm_vec_at(&ast.items,
+            (size_t)root_item->data.trait_item.items[0] - 1u);
+    assert(trait_method != NULL);
+    trait_method->is_default = 1;
+    expect_unsupported_lowering(&ast, &options,
+        "positive ordinary trait impl");
+    trait_method->is_default = 0;
+
+    root_item = (CmAstItem *)cm_vec_at(&ast.items,
+        (size_t)*(const CmAstItemId *)cm_vec_at_const(
+            &ast.root_items, 1u) - 1u);
+    assert(root_item != NULL && root_item->kind == CM_AST_ITEM_STRUCT);
+    root_item->is_default = 1;
+    expect_unsupported_lowering(&ast, &options,
+        "positive ordinary trait impl");
+    root_item->is_default = 0;
+
+    impl_item->is_default = 1;
+    expect_unsupported_lowering(&ast, &options,
+        "positive ordinary trait impl");
+    impl_item->is_default = 0;
     cm_ast_destroy(&ast);
 }
 
@@ -8280,7 +8350,7 @@ int main(void)
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
-    test_default_specialization_fails_closed();
+    test_default_specialization_lowering();
     test_trait_alias_lowering();
     test_auto_trait_and_negative_impl_lowering();
     test_generic_reference_impl_entry_points();

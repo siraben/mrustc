@@ -1148,6 +1148,47 @@ static void test_explicit_auto_trait_impl_headers(void)
     fixture_destroy(&fixture);
 }
 
+static void test_specialization_is_a_hard_barrier(void)
+{
+    TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmProjectionNormalizeLimits limits;
+    CmSemanticItemResult result;
+
+    fixture_init(&fixture, 1, 1);
+    mutable_item(&fixture, fixture.impl_method)->is_specializable = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION
+        && cm_hir_def_id_equal(result.impl_definition,
+            fixture.impl_definition)
+        && cm_hir_def_id_equal(result.trait_definition,
+            fixture.trait_definition)
+        && cm_hir_def_id_equal(result.impl_member, fixture.impl_method)
+        && cm_hir_def_id_equal(result.trait_member,
+            fixture.trait_method));
+
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    limits.max_nodes = 4096u;
+    limits.max_projection_steps = 256u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION
+        && cm_hir_def_id_equal(result.impl_member, fixture.impl_method));
+    cm_hir_crate_finalization_destroy(&finalization);
+
+    mutable_item(&fixture, fixture.impl_method)->is_specializable = 0;
+    mutable_item(&fixture, fixture.impl_type)->is_specializable = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION
+        && cm_hir_def_id_equal(result.impl_member, fixture.impl_type)
+        && cm_hir_def_id_equal(result.trait_member, fixture.trait_type));
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_positive_and_signature_mismatches();
@@ -1162,6 +1203,7 @@ int main(void)
     test_associated_type_bounds_are_pending();
     test_pending_and_invalid();
     test_explicit_auto_trait_impl_headers();
+    test_specialization_is_a_hard_barrier();
     puts("hir semantic item tests passed");
     return 0;
 }

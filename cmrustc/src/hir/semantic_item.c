@@ -584,6 +584,34 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
     result = cm_semantic_item_result(CM_SEMANTIC_ITEM_INVALID);
     result.impl_definition = impl_item->definition;
     result.trait_definition = impl_item->data.impl_item.trait_type.definition;
+    for (item_index = 0u; item_index < hir->items.len; ++item_index) {
+        const CmHirItem *impl_member;
+
+        impl_member = (const CmHirItem *)cm_vec_at_const(&hir->items,
+            item_index);
+        if (impl_member == NULL
+            || !cm_hir_def_id_equal(impl_member->parent_definition,
+                impl_item->definition)) continue;
+        result.impl_member = impl_member->definition;
+        if (impl_member->kind == CM_HIR_ITEM_FUNCTION) {
+            result.trait_member = impl_member->data.function_item
+                .trait_item_definition;
+        } else if (impl_member->kind == CM_HIR_ITEM_TYPE_ALIAS) {
+            result.trait_member = impl_member->data.type_alias_item
+                .trait_item_definition;
+        } else if (impl_member->kind == CM_HIR_ITEM_CONST) {
+            result.trait_member = impl_member->data.value_item
+                .trait_item_definition;
+        }
+        if (impl_member->is_specializable != 0
+            && impl_member->is_specializable != 1) return result;
+        if (impl_member->is_specializable) {
+            result.status = CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION;
+            return result;
+        }
+        result.impl_member = cm_hir_def_id_none();
+        result.trait_member = cm_hir_def_id_none();
+    }
     status = cm_semantic_item_declaration_shape(impl_item, 1);
     if (status != CM_SEMANTIC_ITEM_OK) {
         result.status = status;

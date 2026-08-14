@@ -608,6 +608,13 @@ typedef struct CmHirItem {
     CmHirModuleId owner_module;
     /* Non-none only for a function, const, or type alias in a trait/impl. */
     CmHirDefId parent_definition;
+    /*
+     * An impl-associated `default fn/type/const` may be overridden by a
+     * more-specific impl.  This is mrustc's per-ImplEnt marker and the
+     * value-bearing subset of rustc_hir::Defaultness; containing `default
+     * impl` semantics remain deliberately outside this structural slice.
+     */
+    int is_specializable;
     CmInternId name;
     CmHirVisibility visibility;
     CmSpan span;
