@@ -8949,13 +8949,14 @@ static int cm_lower_predicate_subject_kind_supported(CmLowerState *state,
     type = cm_hir_get_type(state->hir, subject);
     if (type != NULL && (type->kind == CM_HIR_TYPE_SELF_KIND
             || type->kind == CM_HIR_TYPE_PARAMETER_KIND
-            || type->kind == CM_HIR_TYPE_PROJECTION_KIND)) {
+            || type->kind == CM_HIR_TYPE_PROJECTION_KIND
+            || type->kind == CM_HIR_TYPE_ADT_KIND)) {
         return 1;
     }
     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
         ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
         "trait predicate subject must be Self, a type parameter, or an "
-        "associated type projection");
+        "associated type projection or nominal ADT");
     return 0;
 }
 

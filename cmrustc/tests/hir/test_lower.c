@@ -3927,6 +3927,115 @@ static void test_trait_method_predicate_boundaries(void)
     }
 }
 
+static void test_nominal_adt_trait_predicate_subjects(void)
+{
+    static const char source[] =
+        "struct Wrap<T>; struct LaneCount<const N: usize>; trait Bound {} "
+        "fn require<T, const N: usize>() where "
+        "Wrap<T>: Bound, LaneCount<N>: Bound {}";
+    const CmHirItem *wrap;
+    const CmHirItem *lane_count;
+    const CmHirItem *bound;
+    const CmHirItem *function;
+    const CmHirGenericParam *type_parameter;
+    const CmHirGenericParam *const_parameter;
+    const CmHirGenericParam *lane_count_parameter;
+    const CmHirTraitPredicate *type_predicate;
+    const CmHirTraitPredicate *const_predicate;
+    const CmHirType *type_subject;
+    const CmHirType *const_subject;
+    const CmHirType *type_argument;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "nominal predicate lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    wrap = find_item(&context, "Wrap");
+    lane_count = find_item(&context, "LaneCount");
+    bound = find_item(&context, "Bound");
+    function = find_item(&context, "require");
+    type_parameter = function == NULL
+            || function->generic_parameter_count != 2u
+        ? NULL : cm_hir_get_generic_param(&context,
+            function->generic_parameter_start);
+    const_parameter = function == NULL
+            || function->generic_parameter_count != 2u
+        ? NULL : cm_hir_get_generic_param(&context,
+            function->generic_parameter_start + 1u);
+    lane_count_parameter = lane_count == NULL
+            || lane_count->generic_parameter_count != 1u
+        ? NULL : cm_hir_get_generic_param(&context,
+            lane_count->generic_parameter_start);
+    type_predicate = function == NULL || function->predicate_count != 2u
+        ? NULL : &function->predicates[0];
+    const_predicate = type_predicate == NULL
+        ? NULL : &function->predicates[1];
+    type_subject = type_predicate == NULL ? NULL
+        : cm_hir_get_type(&context, type_predicate->subject);
+    const_subject = const_predicate == NULL ? NULL
+        : cm_hir_get_type(&context, const_predicate->subject);
+    type_argument = type_subject == NULL
+            || type_subject->kind != CM_HIR_TYPE_ADT_KIND
+            || type_subject->data.named_type.argument_count != 1u
+            || type_subject->data.named_type.arguments == NULL
+            || type_subject->data.named_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            type_subject->data.named_type.arguments[0].data.type);
+    assert(result.error_count == 0u
+        && wrap != NULL && wrap->kind == CM_HIR_ITEM_STRUCT
+        && lane_count != NULL && lane_count->kind == CM_HIR_ITEM_STRUCT
+        && bound != NULL && bound->kind == CM_HIR_ITEM_TRAIT
+        && function != NULL && function->kind == CM_HIR_ITEM_FUNCTION
+        && type_parameter != NULL
+        && type_parameter->kind == CM_HIR_GENERIC_TYPE
+        && const_parameter != NULL
+        && const_parameter->kind == CM_HIR_GENERIC_CONST
+        && lane_count_parameter != NULL
+        && lane_count_parameter->kind == CM_HIR_GENERIC_CONST
+        && type_predicate != NULL && const_predicate != NULL
+        && cm_hir_def_id_equal(type_predicate->trait_type.definition,
+            bound->definition)
+        && cm_hir_def_id_equal(const_predicate->trait_type.definition,
+            bound->definition)
+        && type_subject != NULL
+        && cm_hir_def_id_equal(type_subject->data.named_type.definition,
+            wrap->definition)
+        && type_argument != NULL
+        && type_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && type_argument->data.parameter_type.parameter
+            == function->generic_parameter_start
+        && const_subject != NULL
+        && const_subject->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(const_subject->data.named_type.definition,
+            lane_count->definition)
+        && const_subject->data.named_type.argument_count == 1u
+        && const_subject->data.named_type.arguments != NULL
+        && const_subject->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && const_subject->data.named_type.arguments[0].data.constant.kind
+            == CM_HIR_CONST_PARAMETER
+        && const_subject->data.named_type.arguments[0].data.constant
+                .data.parameter
+            == function->generic_parameter_start + 1u
+        && const_subject->data.named_type.arguments[0].data.constant.type
+            == lane_count_parameter->declared_type);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Bound {} fn primitive() where u8: Bound {}",
+        &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "predicate subject must be") != NULL);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_callable_tuple_provenance(void)
 {
     static const char callable[] =
@@ -6928,6 +7037,7 @@ int main(void)
     test_trait_method_self_sized_predicate();
     test_trait_method_const_predicates();
     test_trait_method_predicate_boundaries();
+    test_nominal_adt_trait_predicate_subjects();
     test_callable_tuple_provenance();
     test_parenthesized_and_singleton_tuple_types();
     test_trait_method_predicate_storage_mismatch();
