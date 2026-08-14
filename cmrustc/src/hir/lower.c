@@ -15170,6 +15170,38 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
 }
 
 /*
+ * Decide whether two already-classified self types can overlap before doing
+ * the more expensive structural comparison of their implemented-trait
+ * arguments.  A mismatch here is definitive for the bounded candidate
+ * subset, so it is safe to use this as a cheap pair gate.
+ */
+static int cm_lower_impl_self_candidates_may_overlap(
+    const CmHirContext *hir, CmLowerImplSelfClass left_class,
+    CmHirDefId left_adt_definition, CmHirTypeId left_self_type,
+    CmLowerImplSelfClass right_class, CmHirDefId right_adt_definition,
+    CmHirTypeId right_self_type)
+{
+    if (left_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+        || right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER) {
+        return 1;
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
+        && right_class == CM_LOWER_IMPL_SELF_MONOMORPHIC) {
+        return cm_lower_impl_self_equal(hir, left_self_type,
+            right_self_type);
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
+        && right_class
+            == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER) {
+        return cm_lower_impl_self_equal(hir, left_self_type,
+            right_self_type);
+    }
+    return left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+        && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+        && cm_hir_def_id_equal(left_adt_definition, right_adt_definition);
+}
+
+/*
  * Trait arguments in two impl headers use different DefIds for their
  * parameters.  Compare the supported structural forms after normalizing a
  * parameter to its positional index within its owning impl.  This is kept
@@ -15459,8 +15491,41 @@ static int cm_lower_impl_trait_arguments_equal(const CmHirContext *hir,
 
 static int cm_lower_validate_impl_candidates(CmLowerState *state)
 {
+    CmLowerImplSelfClass *classes;
+    CmHirDefId *adt_definitions;
     size_t index;
 
+    classes = (CmLowerImplSelfClass *)cm_alloc_zeroed(
+        state->hir->items.len, sizeof(*classes));
+    adt_definitions = (CmHirDefId *)cm_alloc_zeroed(
+        state->hir->items.len, sizeof(*adt_definitions));
+    /* Classify each local trait impl exactly once.  In particular, this
+     * avoids rescanning all HIR children for every prior candidate pair. */
+    for (index = 0u; index < state->hir->items.len && !state->failed;
+         ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+            || item->definition.crate_id != state->result.crate_id
+            || !item->data.impl_item.has_trait) {
+            continue;
+        }
+        classes[index] = cm_lower_impl_self_class(state, item,
+            &adt_definitions[index]);
+        if (classes[index] == CM_LOWER_IMPL_SELF_UNSUPPORTED) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "impl self type is outside the bounded scalar, single-type "
+                "parameter, zero-argument local ADT, or full ordered "
+                "generic local ADT subset");
+            cm_free(adt_definitions);
+            cm_free(classes);
+            return 0;
+        }
+    }
     for (index = 0u; index < state->hir->items.len && !state->failed;
          ++index) {
         const CmHirItem *item;
@@ -15475,22 +15540,12 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             || !item->data.impl_item.has_trait) {
             continue;
         }
-        item_class = cm_lower_impl_self_class(state, item,
-            &item_adt_definition);
-        if (item_class == CM_LOWER_IMPL_SELF_UNSUPPORTED) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
-                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
-                CM_HIR_OK,
-                "impl self type is outside the bounded scalar, single-type "
-                "parameter, zero-argument local ADT, or full ordered "
-                "generic local ADT subset");
-            return 0;
-        }
+        item_class = classes[index];
+        item_adt_definition = adt_definitions[index];
         for (prior_index = 0u; prior_index < index; ++prior_index) {
             const CmHirItem *prior;
             CmLowerImplSelfClass prior_class;
             CmHirDefId prior_adt_definition;
-            int overlaps;
 
             prior = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
                 prior_index);
@@ -15498,57 +15553,42 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 || prior->definition.crate_id != state->result.crate_id
                 || !cm_hir_def_id_equal(
                     prior->data.impl_item.trait_type.definition,
-                    item->data.impl_item.trait_type.definition)
-                || !cm_lower_impl_trait_arguments_equal(state->hir, prior,
-                    item)) {
+                    item->data.impl_item.trait_type.definition)) {
                 continue;
             }
-            prior_class = cm_lower_impl_self_class(state, prior,
-                &prior_adt_definition);
-            overlaps = prior_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
-                    || item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
-                ? 1
-                : prior_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
-                    && item_class == CM_LOWER_IMPL_SELF_MONOMORPHIC
-                ? cm_lower_impl_self_equal(state->hir,
-                    prior->data.impl_item.self_type,
-                    item->data.impl_item.self_type)
-                : prior_class
-                            == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
-                        && item_class
-                            == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
-                    ? cm_lower_impl_self_equal(state->hir,
-                        prior->data.impl_item.self_type,
-                        item->data.impl_item.self_type)
-                : prior_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
-                    && item_class
-                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
-                    && cm_hir_def_id_equal(prior_adt_definition,
-                        item_adt_definition);
-            if (overlaps) {
-                cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
-                    CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
-                    CM_HIR_OK,
-                    item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
-                        || prior_class
-                            == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
-                        ? "overlapping blanket impl candidates for one trait"
-                    : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
-                        ? "overlapping ordered generic impl candidates for "
-                          "one trait and local ADT head"
-                        : prior->data.impl_item.is_negative
-                                != item->data.impl_item.is_negative
-                            ? "conflicting positive and negative impl "
-                              "candidates for one trait and self type"
-                            : item->data.impl_item.is_negative
-                                ? "duplicate exact negative impl candidate "
-                                  "for one auto trait and self type"
-                                : "duplicate exact impl candidate for one "
-                                  "trait and self type");
-                return 0;
+            prior_class = classes[prior_index];
+            prior_adt_definition = adt_definitions[prior_index];
+            if (!cm_lower_impl_self_candidates_may_overlap(state->hir,
+                    prior_class, prior_adt_definition,
+                    prior->data.impl_item.self_type, item_class,
+                    item_adt_definition, item->data.impl_item.self_type)) {
+                continue;
             }
+            if (!cm_lower_impl_trait_arguments_equal(state->hir, prior,
+                    item)) continue;
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                    || prior_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                    ? "overlapping blanket impl candidates for one trait"
+                : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+                    ? "overlapping ordered generic impl candidates for one "
+                      "trait and local ADT head"
+                    : prior->data.impl_item.is_negative
+                            != item->data.impl_item.is_negative
+                        ? "conflicting positive and negative impl candidates "
+                          "for one trait and self type"
+                        : item->data.impl_item.is_negative
+                            ? "duplicate exact negative impl candidate for "
+                              "one auto trait and self type"
+                            : "duplicate exact impl candidate for one trait "
+                              "and self type");
+            return 0;
         }
     }
+    cm_free(adt_definitions);
+    cm_free(classes);
     return !state->failed;
 }
 
