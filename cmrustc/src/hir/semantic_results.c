@@ -445,7 +445,9 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
             || ((declared->data.function_item.signature.receiver
                         == CM_HIR_RECEIVER_VALUE
                     || declared->data.function_item.signature.receiver
-                        == CM_HIR_RECEIVER_REF_SHARED)
+                        == CM_HIR_RECEIVER_REF_SHARED
+                    || declared->data.function_item.signature.receiver
+                        == CM_HIR_RECEIVER_REF_MUTABLE)
                 && selected->data.function_item.signature.receiver
                     == declared->data.function_item.signature.receiver
                 && record->receiver_argument == 0u
@@ -532,7 +534,9 @@ static int cm_results_callable_source_valid(const CmHirContext *hir,
         && (declared->data.function_item.signature.receiver
                 == CM_HIR_RECEIVER_VALUE
             || declared->data.function_item.signature.receiver
-                == CM_HIR_RECEIVER_REF_SHARED);
+                == CM_HIR_RECEIVER_REF_SHARED
+            || declared->data.function_item.signature.receiver
+                == CM_HIR_RECEIVER_REF_MUTABLE);
 }
 
 static CmHirExprId cm_results_callable_source_argument(
@@ -2189,14 +2193,20 @@ static int cm_results_instance_adjustments_valid(
     return counted == instance->adjustment_count;
 }
 
-static int cm_results_shared_borrow_adjustment_valid(
+static int cm_results_borrow_adjustment_valid(
     const unsigned char *bytes, size_t bytes_len,
-    const CmSemanticAdjustmentRecord *adjustment)
+    const CmSemanticAdjustmentRecord *adjustment,
+    CmSemanticAdjustmentKind expected_kind,
+    CmHirMutability expected_mutability)
 {
     size_t expected_target_size;
 
     if (bytes == NULL || adjustment == NULL
-        || adjustment->kind != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+        || (expected_kind != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+            && expected_kind != CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE)
+        || (unsigned int)expected_mutability
+            > (unsigned int)CM_HIR_MUTABLE
+        || adjustment->kind != expected_kind
         || adjustment->has_selected_trait
         || !cm_hir_def_id_is_none(adjustment->selected_trait)
         || !cm_hir_def_id_is_none(adjustment->selected_method)
@@ -2218,7 +2228,7 @@ static int cm_results_shared_borrow_adjustment_valid(
         && bytes[adjustment->target_type.type_offset + 1u]
             == (unsigned char)CM_HIR_REGION_ERASED
         && bytes[adjustment->target_type.type_offset + 2u]
-            == (unsigned char)CM_HIR_IMMUTABLE
+            == (unsigned char)expected_mutability
         && memcmp(bytes + adjustment->target_type.type_offset + 3u,
             bytes + adjustment->source_type.type_offset,
             adjustment->source_type.type_size) == 0;
@@ -2234,7 +2244,12 @@ static int cm_results_callable_argument_recipes_valid(
     size_t *out_receiver_adjustment_count)
 {
     const CmHirItem *selected;
+    const CmHirExpr *receiver_expression;
+    const CmHirBody *receiver_body;
     const CmSemanticExpressionRecord *receiver;
+    CmHirReceiverKind receiver_kind;
+    CmSemanticAdjustmentKind adjustment_kind;
+    CmHirMutability reference_mutability;
     uint32_t index;
 
     if (out_receiver_adjustment_count == NULL) return 0;
@@ -2288,14 +2303,33 @@ static int cm_results_callable_argument_recipes_valid(
             == CM_HIR_RECEIVER_VALUE) {
         return receiver->adjustment_count == 0u;
     }
-    if (selected->data.function_item.signature.receiver
-            != CM_HIR_RECEIVER_REF_SHARED
+    receiver_kind = selected->data.function_item.signature.receiver;
+    if ((receiver_kind != CM_HIR_RECEIVER_REF_SHARED
+            && receiver_kind != CM_HIR_RECEIVER_REF_MUTABLE)
         || receiver->adjustment_count != 1u
         || adjustments == NULL
-        || receiver->adjustment_start >= adjustment_count
-        || !cm_results_shared_borrow_adjustment_valid(bytes, bytes_len,
-            &adjustments[receiver->adjustment_start])) {
+        || receiver->adjustment_start >= adjustment_count) {
         return 0;
+    }
+    adjustment_kind = receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE
+        ? CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+        : CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
+    reference_mutability = receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE
+        ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
+    if (!cm_results_borrow_adjustment_valid(bytes, bytes_len,
+            &adjustments[receiver->adjustment_start], adjustment_kind,
+            reference_mutability)) return 0;
+    if (receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE) {
+        receiver_expression = cm_hir_get_expr(hir,
+            callable->receiver_expression);
+        receiver_body = cm_hir_get_body(hir, receiver->body);
+        if (receiver_expression == NULL || receiver_body == NULL
+            || receiver_expression->owner_body != receiver->body
+            || receiver_expression->kind != CM_HIR_EXPR_LOCAL
+            || receiver_expression->data.local.local_index
+                >= receiver_body->local_count
+            || receiver_body->locals[receiver_expression->data.local
+                    .local_index].mutability != CM_HIR_MUTABLE) return 0;
     }
     *out_receiver_adjustment_count = 1u;
     return 1;

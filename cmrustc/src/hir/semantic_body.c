@@ -1840,6 +1840,19 @@ static int cm_semantic_body_method_receiver_supported(
         || type->kind == CM_HIR_TYPE_FLOAT_KIND);
 }
 
+static int cm_semantic_body_mutable_local_receiver_supported(
+    const CmSemanticBodyConstraints *constraints, const CmHirExpr *receiver)
+{
+    uint32_t local_index;
+
+    if (constraints == NULL || constraints->body == NULL || receiver == NULL
+        || receiver->kind != CM_HIR_EXPR_LOCAL) return 0;
+    local_index = receiver->data.local.local_index;
+    return local_index < constraints->body->local_count
+        && constraints->body->locals[local_index].mutability
+            == CM_HIR_MUTABLE;
+}
+
 static CmSemanticBodyStatus cm_semantic_body_stronger_method_failure(
     CmSemanticBodyStatus left, CmSemanticBodyStatus right)
 {
@@ -2050,9 +2063,21 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             || (declared->data.function_item.signature.receiver
                     != CM_HIR_RECEIVER_VALUE
                 && declared->data.function_item.signature.receiver
-                    != CM_HIR_RECEIVER_REF_SHARED)
+                    != CM_HIR_RECEIVER_REF_SHARED
+                && declared->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_REF_MUTABLE)
             || declared->data.function_item.signature.parameter_count
                 != expression->data.method_call.argument_count + 1u) {
+            blocking_failure = cm_semantic_body_stronger_method_failure(
+                blocking_failure == CM_SEMANTIC_BODY_OK
+                    ? CM_SEMANTIC_BODY_NO_SOLUTION : blocking_failure,
+                CM_SEMANTIC_BODY_UNSUPPORTED);
+            continue;
+        }
+        if (declared->data.function_item.signature.receiver
+                == CM_HIR_RECEIVER_REF_MUTABLE
+            && !cm_semantic_body_mutable_local_receiver_supported(
+                constraints, receiver)) {
             blocking_failure = cm_semantic_body_stronger_method_failure(
                 blocking_failure == CM_SEMANTIC_BODY_OK
                     ? CM_SEMANTIC_BODY_NO_SOLUTION : blocking_failure,
@@ -2257,7 +2282,8 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             || signature->receiver
                 != winner_declared->data.function_item.signature.receiver
             || (signature->receiver != CM_HIR_RECEIVER_VALUE
-                && signature->receiver != CM_HIR_RECEIVER_REF_SHARED)) {
+                && signature->receiver != CM_HIR_RECEIVER_REF_SHARED
+                && signature->receiver != CM_HIR_RECEIVER_REF_MUTABLE)) {
             status = CM_SEMANTIC_BODY_INVALID;
             goto method_cleanup;
         }
@@ -2338,10 +2364,17 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             ((CmTypeckTypeId *)facts->parameter_types)[parameter_index] =
                 declared_type;
             if (parameter_index == 0u
-                && signature->receiver == CM_HIR_RECEIVER_REF_SHARED) {
+                && (signature->receiver == CM_HIR_RECEIVER_REF_SHARED
+                    || signature->receiver
+                        == CM_HIR_RECEIVER_REF_MUTABLE)) {
                 CmTypeckTypeId resolved_type;
                 const CmTypeckType *reference_type;
                 CmSemanticCheckedAdjustmentFacts *adjustment;
+                CmHirMutability expected_mutability;
+
+                expected_mutability = signature->receiver
+                        == CM_HIR_RECEIVER_REF_MUTABLE
+                    ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
 
                 constraints->typeck_status = cm_typeck_resolve(
                     constraints->typeck, declared_type, &resolved_type);
@@ -2356,7 +2389,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 if (reference_type == NULL
                     || reference_type->kind != CM_TYPECK_TYPE_REFERENCE
                     || reference_type->data.reference_type.mutability
-                        != CM_HIR_IMMUTABLE
+                        != expected_mutability
                     || reference_type->data.reference_type.region.kind
                         != CM_HIR_REGION_ERASED) {
                     status = CM_SEMANTIC_BODY_UNSUPPORTED;
@@ -2378,7 +2411,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                         constraints->checked_facts->adjustment_count++];
                 memset(adjustment, 0, sizeof(*adjustment));
                 adjustment->expression = facts->receiver_expression;
-                adjustment->kind = CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
+                adjustment->kind = signature->receiver
+                        == CM_HIR_RECEIVER_REF_MUTABLE
+                    ? CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+                    : CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
                 adjustment->source_type = actual_type;
                 adjustment->target_type = declared_type;
                 adjustment->selected_trait = cm_hir_def_id_none();

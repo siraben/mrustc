@@ -784,28 +784,28 @@ static void assert_stage_rejects(CmSemanticSession *session,
     cm_semantic_results_body_stage_destroy(&stage);
 }
 
-typedef struct SharedAdjustmentProbe {
+typedef struct ReceiverAdjustmentProbe {
     CmHirBodyId body;
+    CmSemanticAdjustmentKind expected_kind;
     size_t invocation_count;
-} SharedAdjustmentProbe;
+} ReceiverAdjustmentProbe;
 
-static CmSemanticBodyWritebackStatus shared_adjustment_probe_writeback(
+static CmSemanticBodyWritebackStatus receiver_adjustment_probe_writeback(
     void *context, CmSemanticSession *session, CmHirBodyId body,
     const CmSemanticCheckedBodyFacts *facts)
 {
-    SharedAdjustmentProbe *probe;
+    ReceiverAdjustmentProbe *probe;
     CmSemanticCheckedBodyFacts mutated;
     CmSemanticCheckedAdjustmentFacts adjustments[2];
 
-    probe = (SharedAdjustmentProbe *)context;
+    probe = (ReceiverAdjustmentProbe *)context;
     assert(probe != NULL && session != NULL && facts != NULL
         && body == probe->body
         && facts->callable_count == 1u
         && facts->callables != NULL
         && facts->adjustment_count == 1u
         && facts->adjustments != NULL
-        && facts->adjustments[0].kind
-            == CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED);
+        && facts->adjustments[0].kind == probe->expected_kind);
     probe->invocation_count += 1u;
 
     mutated = *facts;
@@ -813,7 +813,26 @@ static CmSemanticBodyWritebackStatus shared_adjustment_probe_writeback(
     assert_stage_rejects(session, body, &mutated);
 
     adjustments[0] = facts->adjustments[0];
-    adjustments[0].kind = CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE;
+    adjustments[0].kind = probe->expected_kind
+            == CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+        ? CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+        : CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
+    mutated = *facts;
+    mutated.adjustments = adjustments;
+    assert_stage_rejects(session, body, &mutated);
+
+    adjustments[0] = facts->adjustments[0];
+    adjustments[0].source_type = adjustments[0].target_type;
+    mutated = *facts;
+    mutated.adjustments = adjustments;
+    assert_stage_rejects(session, body, &mutated);
+
+    adjustments[0] = facts->adjustments[0];
+    adjustments[0].has_selected_trait = 1;
+    adjustments[0].selected_trait = facts->callables[0].requested_trait;
+    adjustments[0].selected_method =
+        facts->callables[0].declared_trait_callable;
+    adjustments[0].selected_impl = facts->callables[0].selected_impl;
     mutated = *facts;
     mutated.adjustments = adjustments;
     assert_stage_rejects(session, body, &mutated);
@@ -1651,7 +1670,7 @@ static void test_durable_qualified_callable_recipe(void)
     fixture_destroy(&fixture);
 }
 
-static void assert_durable_dot_method_recipe(int shared_receiver)
+static void assert_durable_dot_method_recipe(CmHirReceiverKind receiver_kind)
 {
     Fixture fixture;
     CmSemanticAdmission admission;
@@ -1676,10 +1695,21 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
     CmHirExprId argument;
     CmSemanticMarkResult mark_result;
     CmSemanticRegionsResult regions_result;
+    CmHirBody *mutable_body;
+    const char *source;
     size_t index;
+    int borrowed_receiver;
+    int mutable_receiver;
     int equal;
 
-    fixture_init(&fixture, shared_receiver
+    borrowed_receiver = receiver_kind != CM_HIR_RECEIVER_VALUE;
+    mutable_receiver = receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE;
+    source = mutable_receiver
+        ? "trait Value { fn value(&mut self, other: u32) -> u32; } "
+          "impl Value for u32 { "
+          "fn value(&mut self, other: u32) -> u32 { 1u32 } } "
+          "fn wrapper(mut value: u32) -> u32 { value.value(1u32) }"
+        : receiver_kind == CM_HIR_RECEIVER_REF_SHARED
         ? "trait Value { fn value(&self, other: u32) -> u32; } "
           "impl Value for u32 { "
           "fn value(&self, other: u32) -> u32 { 1u32 } } "
@@ -1687,7 +1717,8 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
         : "trait Value { fn value(self, other: u32) -> u32; } "
           "impl Value for u32 { "
           "fn value(self, other: u32) -> u32 { 1u32 } } "
-          "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
+          "fn wrapper(value: u32) -> u32 { value.value(1u32) }";
+    fixture_init(&fixture, source);
     lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
         &fixture.graph, fixture.graph_result.revision, &fixture.imports,
         &fixture.modules);
@@ -1756,9 +1787,9 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
         && cm_semantic_results_expression(results, &admission,
             wrapper->data.function_item.body, argument, &receiver_view)
             == CM_SEMANTIC_RESULTS_OK
-        && receiver_view.adjustment_count == (shared_receiver ? 1u : 0u)
+        && receiver_view.adjustment_count == (borrowed_receiver ? 1u : 0u)
         && cm_semantic_type_view_equal(&selection.requested_self_type,
-            shared_receiver ? &receiver_view.unadjusted_type
+            borrowed_receiver ? &receiver_view.unadjusted_type
                 : &receiver_view.adjusted_type, &equal)
             == CM_SEMANTIC_RESULTS_OK && equal
         && cm_semantic_results_callable_parameter(results, &admission,
@@ -1787,7 +1818,7 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
             wrapper->data.function_item.body, call_expression, 2u,
             &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND);
     memset(&adjustment_view, 0, sizeof(adjustment_view));
-    if (shared_receiver) {
+    if (borrowed_receiver) {
         assert(cm_semantic_results_expression_adjustment(results, &admission,
                 wrapper->data.function_item.body,
                 source_call->data.method_call.receiver, 0u,
@@ -1797,8 +1828,9 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
             && adjustment_view.expression
                 == source_call->data.method_call.receiver
             && adjustment_view.index == 0u
-            && adjustment_view.kind
-                == CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+            && adjustment_view.kind == (mutable_receiver
+                    ? CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+                    : CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED)
             && !adjustment_view.has_selected_trait
             && cm_hir_def_id_is_none(adjustment_view.selected_trait)
             && cm_hir_def_id_is_none(adjustment_view.selected_method)
@@ -1827,7 +1859,10 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
      * be accepted merely because no element would be dereferenced. */
     mutable_call = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
         (size_t)call_expression - 1u);
+    mutable_body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)wrapper->data.function_item.body - 1u);
     assert(mutable_call != NULL
+        && mutable_body != NULL
         && mutable_call->data.method_call.argument_count == 1u
         && mutable_call->data.method_call.arguments != NULL);
     mutable_call->data.method_call.argument_count = 0u;
@@ -1837,12 +1872,28 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
         && mark_result.expression == call_expression
         && cm_semantic_admission_is_current(&admission));
     mutable_call->data.method_call.argument_count = 1u;
+    if (mutable_receiver) {
+        assert(cm_hir_get_expr(&fixture.hir,
+                source_call->data.method_call.receiver)->kind
+                == CM_HIR_EXPR_LOCAL);
+        mutable_body->locals[cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->data.local.local_index]
+                .mutability = CM_HIR_IMMUTABLE;
+        mark_result = cm_hir_semantic_mark_admitted_bodies(&fixture.hir,
+            &reachable.body, 1u, &admission);
+        assert(mark_result.status == CM_SEMANTIC_MARK_INVALID_HIR
+            && mark_result.expression == call_expression
+            && cm_semantic_admission_is_current(&admission));
+        mutable_body->locals[cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->data.local.local_index]
+                .mutability = CM_HIR_MUTABLE;
+    }
     mark_result = cm_hir_semantic_mark_admitted_bodies(&fixture.hir,
         &reachable.body, 1u, &admission);
     assert(mark_result.status == CM_SEMANTIC_MARK_OK
         && cm_hir_get_expr(&fixture.hir,
             source_call->data.method_call.receiver)->usage
-            == (shared_receiver ? CM_HIR_USAGE_BORROW : CM_HIR_USAGE_MOVE)
+            == (borrowed_receiver ? CM_HIR_USAGE_BORROW : CM_HIR_USAGE_MOVE)
         && !cm_semantic_admission_is_current(&admission));
     cm_semantic_admission_destroy(&admission);
 
@@ -1857,6 +1908,19 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
         && regions_result.expression == call_expression
         && cm_semantic_admission_is_current(&admission));
     mutable_call->data.method_call.argument_count = 1u;
+    if (mutable_receiver) {
+        mutable_body->locals[cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->data.local.local_index]
+                .mutability = CM_HIR_IMMUTABLE;
+        regions_result = cm_hir_semantic_check_admitted_regions(
+            &fixture.hir, &reachable.body, 1u, &admission);
+        assert(regions_result.status == CM_SEMANTIC_REGIONS_INVALID_HIR
+            && regions_result.expression == call_expression
+            && cm_semantic_admission_is_current(&admission));
+        mutable_body->locals[cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->data.local.local_index]
+                .mutability = CM_HIR_MUTABLE;
+    }
     regions_result = cm_hir_semantic_check_admitted_regions(&fixture.hir,
         &reachable.body, 1u, &admission);
     assert(regions_result.status == CM_SEMANTIC_REGIONS_OK);
@@ -1866,11 +1930,13 @@ static void assert_durable_dot_method_recipe(int shared_receiver)
 
 static void test_durable_dot_method_recipe(void)
 {
-    assert_durable_dot_method_recipe(0);
-    assert_durable_dot_method_recipe(1);
+    assert_durable_dot_method_recipe(CM_HIR_RECEIVER_VALUE);
+    assert_durable_dot_method_recipe(CM_HIR_RECEIVER_REF_SHARED);
+    assert_durable_dot_method_recipe(CM_HIR_RECEIVER_REF_MUTABLE);
 }
 
-static void test_shared_receiver_adjustments_fail_closed(void)
+static void test_receiver_adjustments_fail_closed(
+    CmHirReceiverKind receiver_kind)
 {
     Fixture fixture;
     CmHirLocalBodiesResult lower_result;
@@ -1881,13 +1947,19 @@ static void test_shared_receiver_adjustments_fail_closed(void)
     CmSemanticSession session;
     CmSemanticSessionOptions options;
     CmSemanticBodyResult body_result;
-    SharedAdjustmentProbe probe;
+    ReceiverAdjustmentProbe probe;
+    const char *source;
 
-    fixture_init(&fixture,
-        "trait Value { fn value(&self, other: u32) -> u32; } "
-        "impl Value for u32 { "
-        "fn value(&self, other: u32) -> u32 { 1u32 } } "
-        "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
+    source = receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE
+        ? "trait Value { fn value(&mut self, other: u32) -> u32; } "
+          "impl Value for u32 { "
+          "fn value(&mut self, other: u32) -> u32 { 1u32 } } "
+          "fn wrapper(mut value: u32) -> u32 { value.value(1u32) }"
+        : "trait Value { fn value(&self, other: u32) -> u32; } "
+          "impl Value for u32 { "
+          "fn value(&self, other: u32) -> u32 { 1u32 } } "
+          "fn wrapper(value: u32) -> u32 { value.value(1u32) }";
+    fixture_init(&fixture, source);
     lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
         &fixture.graph, fixture.graph_result.revision, &fixture.imports,
         &fixture.modules);
@@ -1913,8 +1985,11 @@ static void test_shared_receiver_adjustments_fail_closed(void)
         == CM_TRAIT_SOLVER_PROVEN);
     memset(&probe, 0, sizeof(probe));
     probe.body = wrapper->data.function_item.body;
+    probe.expected_kind = receiver_kind == CM_HIR_RECEIVER_REF_MUTABLE
+        ? CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+        : CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
     body_result = cm_semantic_body_check_definition_with_writeback(&session,
-        probe.body, shared_adjustment_probe_writeback, &probe);
+        probe.body, receiver_adjustment_probe_writeback, &probe);
     assert(body_result.status == CM_SEMANTIC_BODY_OK
         && probe.invocation_count == 1u);
 
@@ -1923,7 +1998,7 @@ static void test_shared_receiver_adjustments_fail_closed(void)
     fixture_destroy(&fixture);
 }
 
-static void test_mutable_receiver_remains_unsupported(void)
+static void assert_mutable_receiver_shape_rejected(const char *source)
 {
     Fixture fixture;
     CmSemanticAdmission admission;
@@ -1934,10 +2009,7 @@ static void test_mutable_receiver_remains_unsupported(void)
     const CmHirDefinition *wrapper_record;
     const CmHirItem *wrapper;
 
-    fixture_init(&fixture,
-        "trait Value { fn value(&mut self) -> u32; } "
-        "impl Value for u32 { fn value(&mut self) -> u32 { 1u32 } } "
-        "fn wrapper(value: u32) -> u32 { value.value() }");
+    fixture_init(&fixture, source);
     lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
         &fixture.graph, fixture.graph_result.revision, &fixture.imports,
         &fixture.modules);
@@ -1961,7 +2033,26 @@ static void test_mutable_receiver_remains_unsupported(void)
     fixture_destroy(&fixture);
 }
 
-static void test_inferred_receiver_region_remains_unsupported(void)
+static void test_mutable_receiver_shapes_fail_closed(void)
+{
+    assert_mutable_receiver_shape_rejected(
+        "trait Value { fn value(&mut self) -> u32; } "
+        "impl Value for u32 { fn value(&mut self) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value() }");
+    assert_mutable_receiver_shape_rejected(
+        "trait Value { fn value(&mut self) -> u32; } "
+        "impl Value for u32 { fn value(&mut self) -> u32 { 1u32 } } "
+        "fn wrapper(mut value: &'static mut u32) -> u32 { "
+        "value.value() }");
+    assert_mutable_receiver_shape_rejected(
+        "struct Holder { value: u32 } "
+        "trait Value { fn value(&mut self) -> u32; } "
+        "impl Value for u32 { fn value(&mut self) -> u32 { 1u32 } } "
+        "fn wrapper(mut holder: Holder) -> u32 { holder.value.value() }");
+}
+
+static void assert_inferred_receiver_region_remains_unsupported(
+    const char *source)
 {
     Fixture fixture;
     CmSemanticAdmission admission;
@@ -1972,10 +2063,7 @@ static void test_inferred_receiver_region_remains_unsupported(void)
     const CmHirDefinition *wrapper_record;
     const CmHirItem *wrapper;
 
-    fixture_init(&fixture,
-        "trait Value { fn value(&'_ self) -> u32; } "
-        "impl Value for u32 { fn value(&'_ self) -> u32 { 1u32 } } "
-        "fn wrapper(value: u32) -> u32 { value.value() }");
+    fixture_init(&fixture, source);
     lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
         &fixture.graph, fixture.graph_result.revision, &fixture.imports,
         &fixture.modules);
@@ -1998,6 +2086,18 @@ static void test_inferred_receiver_region_remains_unsupported(void)
         && admission.state == NULL);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
+}
+
+static void test_inferred_receiver_regions_remain_unsupported(void)
+{
+    assert_inferred_receiver_region_remains_unsupported(
+        "trait Value { fn value(&'_ self) -> u32; } "
+        "impl Value for u32 { fn value(&'_ self) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value() }");
+    assert_inferred_receiver_region_remains_unsupported(
+        "trait Value { fn value(&'_ mut self) -> u32; } "
+        "impl Value for u32 { fn value(&'_ mut self) -> u32 { 1u32 } } "
+        "fn wrapper(mut value: u32) -> u32 { value.value() }");
 }
 
 static CmSemanticGenericArgumentView assert_generic_impl_callable_recipe(
@@ -2567,9 +2667,10 @@ int main(void)
     test_durable_projection_trace_definition();
     test_durable_qualified_callable_recipe();
     test_durable_dot_method_recipe();
-    test_shared_receiver_adjustments_fail_closed();
-    test_mutable_receiver_remains_unsupported();
-    test_inferred_receiver_region_remains_unsupported();
+    test_receiver_adjustments_fail_closed(CM_HIR_RECEIVER_REF_SHARED);
+    test_receiver_adjustments_fail_closed(CM_HIR_RECEIVER_REF_MUTABLE);
+    test_mutable_receiver_shapes_fail_closed();
+    test_inferred_receiver_regions_remain_unsupported();
     test_durable_generic_impl_callable_recipes();
     test_canonical_parts_function_pointer_abi_parity();
     test_projection_failure_discards_partial_stage();

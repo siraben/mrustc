@@ -847,7 +847,9 @@ static int cm_admission_canonical_call_supported(
             || (selected->data.function_item.signature.receiver
                     != CM_HIR_RECEIVER_VALUE
                 && selected->data.function_item.signature.receiver
-                    != CM_HIR_RECEIVER_REF_SHARED)
+                    != CM_HIR_RECEIVER_REF_SHARED
+                && selected->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_REF_MUTABLE)
             || selected->data.function_item.signature.parameter_count
                 != expression->data.method_call.argument_count + 1u
             || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION

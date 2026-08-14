@@ -140,13 +140,31 @@ static int cm_semantic_regions_selected_call(
                     || adjustment.expression != arguments[index]
                     || adjustment.body != scratch->body
                     || adjustment.index != 0u
-                    || adjustment.kind
-                        != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+                    || (adjustment.kind
+                            != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+                        && adjustment.kind
+                            != CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE)
                     || adjustment.has_selected_trait
                     || !cm_hir_def_id_is_none(adjustment.selected_trait)
                     || !cm_hir_def_id_is_none(adjustment.selected_method)
                     || !cm_hir_def_id_is_none(adjustment.selected_impl)) {
                     return 0;
+                }
+                if (adjustment.kind
+                        == CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE) {
+                    const CmHirBody *body;
+                    const CmHirExpr *receiver_expression;
+
+                    body = cm_hir_get_body(scratch->hir, scratch->body);
+                    receiver_expression = cm_hir_get_expr(scratch->hir,
+                        arguments[index]);
+                    if (body == NULL || receiver_expression == NULL
+                        || receiver_expression->kind != CM_HIR_EXPR_LOCAL
+                        || receiver_expression->data.local.local_index
+                            >= body->local_count
+                        || body->locals[receiver_expression->data.local
+                                .local_index].mutability
+                            != CM_HIR_MUTABLE) return 0;
                 }
                 argument_usage = CM_HIR_USAGE_BORROW;
             }
