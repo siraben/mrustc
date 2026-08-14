@@ -2520,6 +2520,189 @@ static void check_monomorphic_impl_result(CmHirContext *context)
             impl_associated->definition));
 }
 
+static void check_defaulted_impl_trait_self(const CmHirContext *context)
+{
+    const CmHirItem *trait_item;
+    const CmHirItem *impl_item;
+    const CmHirGenericArg *argument;
+
+    trait_item = find_item(context, "T");
+    impl_item = find_impl(context);
+    argument = impl_item == NULL
+            || impl_item->data.impl_item.trait_type.argument_count != 1u
+            || impl_item->data.impl_item.trait_type.arguments == NULL
+        ? NULL : &impl_item->data.impl_item.trait_type.arguments[0];
+    assert(trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
+        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->data.impl_item.has_trait
+        && cm_hir_def_id_equal(
+            impl_item->data.impl_item.trait_type.definition,
+            trait_item->definition)
+        && argument != NULL && argument->kind == CM_HIR_GENERIC_ARG_TYPE
+        && argument->data.type == impl_item->data.impl_item.self_type);
+}
+
+static void test_generic_impl_trait_arguments(void)
+{
+    static const char *const default_self_sources[] = {
+        "trait T<Rhs = Self> {} struct S; impl T for S {}",
+        "trait T<Rhs = Self> {} struct Wrap<U>; "
+            "impl<U> T for Wrap<U> {}"
+    };
+    static const char explicit_source[] =
+        "trait T<Rhs = Self> {} struct S; impl T<u8> for S {}";
+    static const char structural_source[] =
+        "trait T<A, B = (A, Self)> {} struct S; impl T<u16> for S {}";
+    static const char const_method_source[] =
+        "trait T<const N: usize> { fn value(); } "
+        "struct S<const N: usize>; "
+        "impl<const N: usize> T<N> for S<N> { fn value() {} }";
+    static const char *const rejected[] = {
+        "trait T<Rhs> {} struct S; impl T for S {}",
+        "trait T<Rhs = Self> {} struct S; impl T<u8, u16> for S {}",
+        "trait T<'a> {} struct S; impl T<u8> for S {}",
+        "trait T<Rhs = Self> { type A; } struct S; "
+            "impl T<A = u8> for S { type A = u8; }",
+        "trait Copy {} trait T<Rhs = Self> { type A; } struct S; "
+            "impl T<A: Copy> for S { type A = u8; }",
+        "trait T<const N: usize> {} struct S; impl T for S {}"
+    };
+    static const CmHirLowerErrorKind rejected_kinds[] = {
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+        CM_HIR_LOWER_UNSUPPORTED_GENERIC
+    };
+    static const char *const rejected_messages[] = {
+        "omits a required type argument",
+        "supplies too many positional arguments",
+        "argument kind differs from its parameter",
+        "associated equality is not allowed",
+        "associated-type constraints are not supported",
+        "omits a required lifetime or const argument"
+    };
+    CmAst ast;
+    CmExpandedAst expanded;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *impl_item;
+    const CmHirItem *impl_method;
+    const CmHirItem *trait_item;
+    const CmHirItem *trait_method;
+    const CmHirGenericParam *const_parameter;
+    const CmHirType *argument_type;
+    const CmHirType *tuple_type;
+    size_t index;
+
+    for (index = 0u;
+         index < sizeof(default_self_sources)
+            / sizeof(default_self_sources[0]);
+         ++index) {
+        result = lower_source(default_self_sources[index], &context, NULL);
+        assert(result.error_count == 0u && result.lowered_item_count == 3u);
+        check_defaulted_impl_trait_self(&context);
+        cm_hir_context_destroy(&context);
+
+        make_cfg_view(default_self_sources[index], &ast, &expanded);
+        result = lower_cfg_view(&context, &ast, &expanded);
+        assert(result.error_count == 0u && result.lowered_item_count == 3u);
+        check_defaulted_impl_trait_self(&context);
+        cm_hir_context_destroy(&context);
+        cm_expanded_ast_destroy(&expanded);
+        cm_ast_destroy(&ast);
+    }
+
+    result = lower_source(explicit_source, &context, NULL);
+    impl_item = find_impl(&context);
+    argument_type = impl_item == NULL
+            || impl_item->data.impl_item.trait_type.argument_count != 1u
+            || impl_item->data.impl_item.trait_type.arguments == NULL
+            || impl_item->data.impl_item.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            impl_item->data.impl_item.trait_type.arguments[0].data.type);
+    assert(result.error_count == 0u && impl_item != NULL
+        && argument_type != NULL
+        && argument_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && argument_type->data.integer_type.kind == CM_HIR_INT_U8
+        && impl_item->data.impl_item.trait_type.arguments[0].data.type
+            != impl_item->data.impl_item.self_type);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(structural_source, &context, NULL);
+    impl_item = find_impl(&context);
+    tuple_type = impl_item == NULL
+            || impl_item->data.impl_item.trait_type.argument_count != 2u
+            || impl_item->data.impl_item.trait_type.arguments == NULL
+            || impl_item->data.impl_item.trait_type.arguments[1].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            impl_item->data.impl_item.trait_type.arguments[1].data.type);
+    assert(result.error_count == 0u && impl_item != NULL
+        && impl_item->data.impl_item.trait_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE
+        && tuple_type != NULL && tuple_type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && tuple_type->data.tuple_type.element_count == 2u
+        && tuple_type->data.tuple_type.elements[0]
+            == impl_item->data.impl_item.trait_type.arguments[0].data.type
+        && tuple_type->data.tuple_type.elements[1]
+            == impl_item->data.impl_item.self_type);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(const_method_source, &context, NULL);
+    trait_item = find_item(&context, "T");
+    impl_item = find_impl(&context);
+    trait_method = trait_item == NULL ? NULL
+        : find_child(&context, trait_item->definition, "value");
+    impl_method = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "value");
+    const_parameter = impl_item == NULL
+            || impl_item->generic_parameter_count != 1u
+        ? NULL : cm_hir_get_generic_param(&context,
+            impl_item->generic_parameter_start);
+    assert(result.error_count == 0u
+        && trait_item != NULL && impl_item != NULL
+        && impl_item->data.impl_item.trait_type.argument_count == 1u
+        && impl_item->data.impl_item.trait_type.arguments != NULL
+        && impl_item->data.impl_item.trait_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && impl_item->data.impl_item.trait_type.arguments[0]
+                .data.constant.kind == CM_HIR_CONST_PARAMETER
+        && const_parameter != NULL
+        && const_parameter->kind == CM_HIR_GENERIC_CONST
+        && impl_item->data.impl_item.trait_type.arguments[0]
+                .data.constant.data.parameter
+            == impl_item->generic_parameter_start
+        && trait_method != NULL && impl_method != NULL
+        && cm_hir_def_id_equal(
+            impl_method->data.function_item.trait_item_definition,
+            trait_method->definition));
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        if (result.error_count != 1u
+            || result.first_error.kind != rejected_kinds[index]
+            || strstr(result.first_error.message,
+                rejected_messages[index]) == NULL) {
+            fprintf(stderr,
+                "generic trait impl rejection mismatch for %s: "
+                "count=%lu kind=%s message=%s\n",
+                rejected[index], (unsigned long)result.error_count,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == rejected_kinds[index]
+            && strstr(result.first_error.message,
+                rejected_messages[index]) != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_monomorphic_trait_impl_entry_points(void)
 {
     static const char source[] =
@@ -7025,6 +7208,7 @@ int main(void)
     test_defaulted_alias_entry_points();
     test_explicit_projection_entry_points();
     test_cross_trait_projection_default_entry_points();
+    test_generic_impl_trait_arguments();
     test_monomorphic_trait_impl_entry_points();
     test_generic_associated_type_entry_points();
     test_self_gat_projection_arguments();

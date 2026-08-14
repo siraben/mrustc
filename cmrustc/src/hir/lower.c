@@ -7900,6 +7900,13 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
             arguments[explicit_count].kind = CM_HIR_GENERIC_ARG_TYPE;
             arguments[explicit_count].data.type = cm_lower_type(state,
                 ast_argument->type, module, owner);
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_TYPE) {
+            if (!cm_lower_const_path_argument(state, ast_argument, owner,
+                    parameter, cm_lower_span(state, ast_argument->span),
+                    &arguments[explicit_count])) {
+                break;
+            }
         } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
             && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
             const CmHirGenericParam *lifetime_parameter;
@@ -7953,11 +7960,8 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
     for (index = explicit_count;
          index < trait_target->generic_parameter_count && !state->failed;
          ++index) {
-        CmHirTypeId argument_default_self;
         const CmHirGenericParam *parameter;
-        const CmHirType *default_type;
 
-        argument_default_self = default_self;
         parameter = cm_hir_get_generic_param(state->hir,
             trait_target->generic_parameter_start + index);
         if (parameter != NULL
@@ -7968,31 +7972,8 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
                 "argument");
             break;
         }
-        default_type = parameter == NULL || !parameter->has_default
-                || parameter->default_argument.kind
-                    != CM_HIR_GENERIC_ARG_TYPE
-            ? NULL : cm_hir_get_type(state->hir,
-                parameter->default_argument.data.type);
-        if (argument_default_self != CM_HIR_TYPE_NONE
-            && !allow_synthesized_default_self
-            && (default_type == NULL
-                || default_type->kind != CM_HIR_TYPE_SELF_KIND
-                || !cm_hir_def_id_equal(default_type->data.self_type.owner,
-                    trait_target->definition))) {
-            argument_default_self = CM_HIR_TYPE_NONE;
-        }
-        if (argument_default_self == CM_HIR_TYPE_NONE
-            && allow_synthesized_default_self
-            && default_type != NULL
-            && default_type->kind == CM_HIR_TYPE_SELF_KIND
-            && cm_hir_def_id_equal(default_type->data.self_type.owner,
-                trait_target->definition)) {
-            argument_default_self = cm_lower_self_type(state,
-                CM_AST_TYPE_NONE, span, owner);
-            if (state->failed) break;
-        }
         if (!cm_lower_trait_default_argument(state, ast_item_id,
-                trait_target, index, argument_default_self, owner,
+                trait_target, index, default_self, owner,
                 allow_synthesized_default_self, arguments, span,
                 &arguments[index])) {
             break;
@@ -8160,29 +8141,13 @@ static int cm_lower_trait_reference(CmLowerState *state,
                 : "impl trait path does not name a trait");
         return 0;
     }
-    if (!is_supertrait
-        && (out_target->generic_parameter_count != 0u
-            || path->segments[path->segment_count - 1u].argument_count
-                != 0u)) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-            ast_item_id, ast_type_id, ast_type->path, CM_HIR_OK,
-            is_supertrait
-                ? "generic supertraits require structural trait-bound "
-                  "substitution"
-                : "generic implemented traits require structural impl "
-                  "substitution");
-        return 0;
-    }
     out_trait->definition = out_target->definition;
-    if (is_supertrait) {
-        if (!cm_lower_trait_positional_arguments(state, ast_item_id,
-                &path->segments[path->segment_count - 1u], out_target, module,
-                owner, default_self, allow_bindings, allow_constraints, 1,
-                span,
-                &out_trait->arguments,
-                &out_trait->argument_count)) {
-            return 0;
-        }
+    if (!cm_lower_trait_positional_arguments(state, ast_item_id,
+            &path->segments[path->segment_count - 1u], out_target, module,
+            owner, default_self, allow_bindings, allow_constraints,
+            is_supertrait, span, &out_trait->arguments,
+            &out_trait->argument_count)) {
+        return 0;
     }
     return 1;
 }
@@ -10536,9 +10501,13 @@ static int cm_lower_impl_item(CmLowerState *state,
         ast_item->data.impl_item.is_negative;
     hir_item->data.impl_item.safety = ast_item->data.impl_item.is_unsafe
         ? CM_HIR_UNSAFE : CM_HIR_SAFE;
+    hir_item->data.impl_item.self_type = cm_lower_type(state,
+        ast_item->data.impl_item.self_type, record->owner_module,
+        record->definition);
+    if (state->failed) return 0;
     if (!cm_lower_trait_reference(state, ast_item_id,
             ast_item->data.impl_item.trait_type, record->owner_module,
-            record->definition, CM_HIR_TYPE_NONE,
+            record->definition, hir_item->data.impl_item.self_type,
             &hir_item->data.impl_item.trait_type, &trait_target,
             0, 0, 0, 0)) {
         return 0;
@@ -10578,10 +10547,14 @@ static int cm_lower_impl_item(CmLowerState *state,
             "impl safety does not match trait safety");
         return 0;
     }
-    hir_item->data.impl_item.self_type = cm_lower_type(state,
-        ast_item->data.impl_item.self_type, record->owner_module,
-        record->definition);
     return !state->failed;
+}
+
+static void cm_lower_free_impl_temporary(CmHirItem *item)
+{
+    if (item->kind != CM_HIR_ITEM_IMPL
+        || !item->data.impl_item.has_trait) return;
+    cm_free(item->data.impl_item.trait_type.arguments);
 }
 
 static int cm_lower_trait_alias_item(CmLowerState *state,
@@ -11275,6 +11248,7 @@ static int cm_lower_one_record_internal(CmLowerState *state,
         cm_lower_free_enum_temporary(&hir_item);
         cm_lower_free_trait_temporary(&hir_item);
         cm_lower_free_alias_temporary(&hir_item);
+        cm_lower_free_impl_temporary(&hir_item);
         cm_lower_free_item_predicates(&hir_item);
         cm_free(hir_item.attributes);
         if (hir_item.kind == CM_HIR_ITEM_FUNCTION) {
@@ -11315,6 +11289,7 @@ static int cm_lower_one_record_internal(CmLowerState *state,
     cm_lower_free_enum_temporary(&hir_item);
     cm_lower_free_trait_temporary(&hir_item);
     cm_lower_free_alias_temporary(&hir_item);
+    cm_lower_free_impl_temporary(&hir_item);
     cm_lower_free_item_predicates(&hir_item);
     cm_free(hir_item.attributes);
     if (hir_item.kind == CM_HIR_ITEM_FUNCTION) {
@@ -15116,15 +15091,27 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             adt_item->generic_parameter_start + index);
         argument = &type->data.named_type.arguments[index];
         if (impl_parameter == NULL || adt_parameter == NULL
-            || impl_parameter->kind != CM_HIR_GENERIC_TYPE
             || impl_parameter->has_default
-            || adt_parameter->kind != CM_HIR_GENERIC_TYPE
-            || argument->kind != CM_HIR_GENERIC_ARG_TYPE
-            || (argument_type = cm_hir_get_type(state->hir,
-                argument->data.type)) == NULL
-            || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
-            || argument_type->data.parameter_type.parameter
-                != impl_item->generic_parameter_start + index) {
+            || impl_parameter->kind != adt_parameter->kind) {
+            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+        }
+        if (impl_parameter->kind == CM_HIR_GENERIC_TYPE) {
+            argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
+            if (argument_type == NULL
+                || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+                || argument_type->data.parameter_type.parameter
+                    != impl_item->generic_parameter_start + index) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        } else if (impl_parameter->kind == CM_HIR_GENERIC_CONST) {
+            if (argument->kind != CM_HIR_GENERIC_ARG_CONST
+                || argument->data.constant.kind != CM_HIR_CONST_PARAMETER
+                || argument->data.constant.data.parameter
+                    != impl_item->generic_parameter_start + index) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        } else {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
     }

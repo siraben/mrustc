@@ -1791,7 +1791,9 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
     }
     trait_item = cm_hir_bound_definition_item(context,
         item->data.impl_item.trait_type.definition);
-    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || !cm_hir_named_type_matches_item_parameters(context,
+            &item->data.impl_item.trait_type, trait_item)) {
         return 0;
     }
     if (item->data.impl_item.is_negative) {
