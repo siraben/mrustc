@@ -14981,13 +14981,11 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
 } CmLowerImplSelfClass;
 
-static int cm_lower_impl_has_only_methods(const CmLowerState *state,
+static int cm_lower_impl_has_supported_members(const CmLowerState *state,
     CmHirDefId impl_definition)
 {
     size_t index;
-    int has_method;
 
-    has_method = 0;
     for (index = 0u; index < state->hir->items.len; ++index) {
         const CmHirItem *child;
 
@@ -14995,10 +14993,11 @@ static int cm_lower_impl_has_only_methods(const CmLowerState *state,
             index);
         if (child == NULL || !cm_hir_def_id_equal(child->parent_definition,
                 impl_definition)) continue;
-        if (child->kind != CM_HIR_ITEM_FUNCTION) return 0;
-        has_method = 1;
+        if (child->kind != CM_HIR_ITEM_FUNCTION
+            && child->kind != CM_HIR_ITEM_TYPE_ALIAS
+            && child->kind != CM_HIR_ITEM_CONST) return 0;
     }
-    return has_method;
+    return 1;
 }
 
 static CmLowerImplSelfClass cm_lower_impl_self_class(
@@ -15028,7 +15027,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             && !parameter->has_default && parameter->index == 0u
             && cm_hir_def_id_equal(parameter->owner,
                 impl_item->definition)
-            && cm_lower_impl_has_only_methods(state,
+            && cm_lower_impl_has_supported_members(state,
                 impl_item->definition)) {
             return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER;
         }

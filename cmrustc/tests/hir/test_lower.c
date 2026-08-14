@@ -2889,7 +2889,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
     static const char *const rejected[] = {
         "impl u8 { type A = u16; }",
         "trait T { type A; } impl !T for u8 { type A = u16; }",
-        "trait T { type A; } impl<X> T for X { type A = u8; }",
         "trait T { type A<'a>; } impl T for u8 { type A = u8; }",
         "trait T { type A; } impl T for u8 {}",
         "trait T { type A; type B; } impl T for u8 { type A = u8; }",
@@ -2912,7 +2911,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
@@ -2930,7 +2928,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
     static const char *const rejected_messages[] = {
         "inherent impls",
         "negative impl must",
-        "full ordered generic local ADT subset",
         "generic arity differs",
         "missing a required associated type",
         "missing a required associated type",
@@ -3577,6 +3574,18 @@ static void test_trait_argument_coherence(void)
         && second_argument_type != NULL
         && second_argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
         && first_argument->data.type != second_argument->data.type);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait BitOr<Rhs = Self> { type Output; }"
+        "struct NonZero<T>;"
+        "impl<T> BitOr<NonZero<T>> for T {"
+        "type Output = NonZero<T>; }",
+        &context, NULL);
+    first = find_impl(&context);
+    assert(result.error_count == 0u && first != NULL
+        && first->generic_parameter_count == 1u
+        && find_child(&context, first->definition, "Output") != NULL);
     cm_hir_context_destroy(&context);
 }
 
