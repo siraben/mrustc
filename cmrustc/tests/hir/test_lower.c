@@ -737,7 +737,6 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         "impl<T: PointeeSized> const !Send for *const T {} "
         "unsafe impl const Send for u8 {}";
     static const char *const rejected[] = {
-        "trait Marker {} impl const !Marker for u8 {}",
         "unsafe auto trait Marker {} unsafe impl const !Marker for u8 {}",
         "auto trait Marker { fn f(); }",
         "auto trait Marker<T> {}",
@@ -749,7 +748,6 @@ static void test_auto_trait_and_negative_impl_lowering(void)
             "unsafe impl Marker for u8 {}"
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
-        CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
@@ -902,6 +900,101 @@ static void test_auto_trait_and_negative_impl_lowering(void)
             && result.first_error.kind == rejected_kinds[index]);
         cm_hir_context_destroy(&context);
     }
+}
+
+static void test_generic_reference_impl_entry_points(void)
+{
+    static const char source[] =
+        "trait Marker {}"
+        "impl<T> Marker for &T {}"
+        "impl<T> !Marker for &mut T {}";
+    static const char duplicate_source[] =
+        "trait Marker {}"
+        "impl<T> Marker for &T {}"
+        "impl<U> Marker for &U {}";
+    static const char overlap_source[] =
+        "trait Marker {}"
+        "impl<T> Marker for &T {}"
+        "impl<U> !Marker for &U {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *positive;
+    const CmHirItem *negative;
+    const CmHirType *positive_self;
+    const CmHirType *negative_self;
+    const CmHirType *positive_pointee;
+    const CmHirType *negative_pointee;
+    uint32_t positive_parameter;
+    uint32_t negative_parameter;
+    size_t index;
+    size_t impl_count;
+
+    result = lower_source(source, &context, NULL);
+    positive = NULL;
+    negative = NULL;
+    impl_count = 0u;
+    for (index = 0u; index < context.items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&context.items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL) continue;
+        if (item->data.impl_item.is_negative) negative = item;
+        else positive = item;
+        impl_count += 1u;
+    }
+    positive_parameter = positive == NULL
+        ? CM_HIR_GENERIC_PARAM_NONE : positive->generic_parameter_start;
+    negative_parameter = negative == NULL
+        ? CM_HIR_GENERIC_PARAM_NONE : negative->generic_parameter_start;
+    positive_self = positive == NULL ? NULL : cm_hir_get_type(&context,
+        positive->data.impl_item.self_type);
+    negative_self = negative == NULL ? NULL : cm_hir_get_type(&context,
+        negative->data.impl_item.self_type);
+    positive_pointee = positive_self == NULL
+            || positive_self->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            positive_self->data.reference_type.pointee);
+    negative_pointee = negative_self == NULL
+            || negative_self->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            negative_self->data.reference_type.pointee);
+    assert(result.error_count == 0u && result.lowered_item_count == 3u
+        && impl_count == 2u && positive != NULL && negative != NULL
+        && positive->generic_parameter_count == 1u
+        && negative->generic_parameter_count == 1u
+        && positive->data.impl_item.has_trait
+        && negative->data.impl_item.has_trait
+        && !positive->data.impl_item.is_negative
+        && negative->data.impl_item.is_negative
+        && positive_self != NULL
+        && positive_self->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && positive_self->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && negative_self != NULL
+        && negative_self->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && negative_self->data.reference_type.mutability == CM_HIR_MUTABLE
+        && positive_pointee != NULL
+        && positive_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && positive_pointee->data.parameter_type.parameter
+            == positive_parameter
+        && negative_pointee != NULL
+        && negative_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && negative_pointee->data.parameter_type.parameter
+            == negative_parameter);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(duplicate_source, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(overlap_source, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "conflicting positive and negative") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_unresolved_path_is_hard_error(void)
@@ -1226,6 +1319,37 @@ static void test_const_generic_trait_method_declaration(void)
     }
 }
 
+static void test_macro_expanded_array_length_expression(void)
+{
+    static const char source[] =
+        "struct Holder<T> { values: [T; ((32 - 1) - 1)] }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *holder;
+    const CmHirType *array;
+    const CmHirType *length_type;
+
+    result = lower_source(source, &context, NULL);
+    holder = find_item(&context, "Holder");
+    array = holder == NULL || holder->kind != CM_HIR_ITEM_STRUCT
+            || holder->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            holder->data.aggregate_item.fields[0].type);
+    length_type = array == NULL || array->kind != CM_HIR_TYPE_ARRAY_KIND
+        ? NULL : cm_hir_get_type(&context,
+            array->data.array_type.length.type);
+    assert(result.error_count == 0u
+        && holder != NULL && array != NULL
+        && array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && array->data.array_type.length.data.value.low_bits == 30u
+        && length_type != NULL
+        && length_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && length_type->data.integer_type.kind == CM_HIR_INT_USIZE);
+    cm_hir_context_destroy(&context);
+
+}
+
 static void test_generic_parameter_shadows_type_path_prefix(void)
 {
     static const char *const rejected[] = {
@@ -1275,6 +1399,45 @@ static void test_generic_parameter_shadows_type_path_prefix(void)
     assert(item != NULL && item->kind == CM_HIR_ITEM_TYPE_ALIAS
         && outer != NULL && outer->kind == CM_HIR_TYPE_PROJECTION_KIND
         && inner != NULL && inner->kind == CM_HIR_TYPE_PROJECTION_KIND);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_shorthand_inherited_associated_type_projection(void)
+{
+    static const char source[] =
+        "trait Deref { type Target; }"
+        "trait DerefMut: Deref {}"
+        "fn alias<P: DerefMut>() -> P::Target {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *deref;
+    const CmHirItem *alias;
+    const CmHirType *projection;
+    const CmHirType *self_type;
+
+    result = lower_source(source, &context, NULL);
+    deref = find_item(&context, "Deref");
+    alias = find_item(&context, "alias");
+    projection = alias == NULL || alias->kind != CM_HIR_ITEM_FUNCTION
+            || alias->data.function_item.signature.return_type
+                == CM_HIR_TYPE_NONE
+        ? NULL : cm_hir_get_type(&context,
+            alias->data.function_item.signature.return_type);
+    self_type = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.self_type);
+    assert(result.error_count == 0u
+        && deref != NULL && deref->kind == CM_HIR_ITEM_TRAIT
+        && alias != NULL && projection != NULL
+        && projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(
+            projection->data.projection_type.trait_type.definition,
+            deref->definition)
+        && projection->data.projection_type.trait_type.argument_count == 0u
+        && projection->data.projection_type.trait_type.arguments == NULL
+        && self_type != NULL
+        && self_type->kind == CM_HIR_TYPE_PARAMETER_KIND);
     cm_hir_context_destroy(&context);
 }
 
@@ -7457,6 +7620,7 @@ int main(void)
     test_default_specialization_fails_closed();
     test_trait_alias_lowering();
     test_auto_trait_and_negative_impl_lowering();
+    test_generic_reference_impl_entry_points();
     test_discard_parameter_entry_points();
     test_supertrait_entry_points();
     test_unresolved_path_is_hard_error();
@@ -7466,7 +7630,9 @@ int main(void)
     test_adt_default_declaration_order_entry_points();
     test_const_parameter_adt_argument();
     test_const_generic_trait_method_declaration();
+    test_macro_expanded_array_length_expression();
     test_generic_parameter_shadows_type_path_prefix();
+    test_shorthand_inherited_associated_type_projection();
     test_defaulted_alias_entry_points();
     test_explicit_projection_entry_points();
     test_cross_trait_projection_default_entry_points();

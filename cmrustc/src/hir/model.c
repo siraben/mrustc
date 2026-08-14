@@ -1825,8 +1825,11 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
         return 0;
     }
     if (item->data.impl_item.is_negative) {
-        return item->data.impl_item.safety == CM_HIR_SAFE
-            && trait_item->data.trait_item.is_auto;
+        /* Negative impls are authenticated by their resolved trait identity;
+         * auto-ness is relevant to the auto-trait solver, not to HIR
+         * declaration validity.  The lowerer already enforces safe,
+         * itemless negative headers. */
+        return item->data.impl_item.safety == CM_HIR_SAFE;
     }
     return trait_item->data.trait_item.safety
         == item->data.impl_item.safety;

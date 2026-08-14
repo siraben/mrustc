@@ -67,6 +67,10 @@ typedef struct CmLowerTraitTarget {
 
 typedef struct CmLowerAssociatedTarget {
     CmHirDefId definition;
+    /* Trait that directly declares this associated item.  This may differ
+     * from the trait through which it was found when resolving shorthand
+     * projections such as `P::Target` across supertraits. */
+    CmHirDefId trait_definition;
     uint32_t generic_parameter_count;
     const CmHirItem *item;
     const CmLowerItemRecord *local_record;
@@ -2189,6 +2193,131 @@ static int cm_lower_parse_u64(const CmInternedString *text,
     return 1;
 }
 
+/*
+ * Macro-expanded array lengths can retain a small constant expression rather
+ * than a single decimal token.  The core `array_impl_default!` recursion, for
+ * example, produces nested forms such as `((32 - 1) - 1)`.  Keep this parser
+ * deliberately narrow: only unsigned decimal literals, parentheses, and
+ * checked addition/subtraction are admitted.  Names, suffixes, and all other
+ * operators continue to fail closed in the array-lowering path below.
+ */
+typedef struct CmLowerArrayLengthParser {
+    const unsigned char *bytes;
+    size_t length;
+    size_t position;
+} CmLowerArrayLengthParser;
+
+static void cm_lower_array_length_skip_space(
+    CmLowerArrayLengthParser *parser)
+{
+    while (parser->position < parser->length) {
+        unsigned char byte;
+
+        byte = parser->bytes[parser->position];
+        if (byte != (unsigned char)' '
+            && byte != (unsigned char)'\t'
+            && byte != (unsigned char)'\r'
+            && byte != (unsigned char)'\n') break;
+        parser->position += 1u;
+    }
+}
+
+static int cm_lower_array_length_parse_expression(
+    CmLowerArrayLengthParser *parser, uint64_t *out_value);
+
+static int cm_lower_array_length_parse_atom(
+    CmLowerArrayLengthParser *parser, uint64_t *out_value)
+{
+    uint64_t value;
+    int saw_digit;
+
+    cm_lower_array_length_skip_space(parser);
+    if (parser->position >= parser->length) return 0;
+    if (parser->bytes[parser->position] == (unsigned char)'(') {
+        parser->position += 1u;
+        if (!cm_lower_array_length_parse_expression(parser, &value)) {
+            return 0;
+        }
+        cm_lower_array_length_skip_space(parser);
+        if (parser->position >= parser->length
+            || parser->bytes[parser->position] != (unsigned char)')') {
+            return 0;
+        }
+        parser->position += 1u;
+        *out_value = value;
+        return 1;
+    }
+    value = 0u;
+    saw_digit = 0;
+    while (parser->position < parser->length) {
+        unsigned int digit;
+        unsigned char byte;
+
+        byte = parser->bytes[parser->position];
+        if (byte == (unsigned char)'_') {
+            parser->position += 1u;
+            continue;
+        }
+        if (byte < (unsigned char)'0' || byte > (unsigned char)'9') break;
+        digit = (unsigned int)(byte - (unsigned char)'0');
+        if (value > (UINT64_MAX - (uint64_t)digit) / 10u) return 0;
+        value = value * 10u + (uint64_t)digit;
+        saw_digit = 1;
+        parser->position += 1u;
+    }
+    if (!saw_digit) return 0;
+    *out_value = value;
+    return 1;
+}
+
+static int cm_lower_array_length_parse_expression(
+    CmLowerArrayLengthParser *parser, uint64_t *out_value)
+{
+    uint64_t value;
+
+    if (!cm_lower_array_length_parse_atom(parser, &value)) return 0;
+    for (;;) {
+        uint64_t right;
+        unsigned char operator;
+
+        cm_lower_array_length_skip_space(parser);
+        if (parser->position >= parser->length
+            || parser->bytes[parser->position] == (unsigned char)')') {
+            break;
+        }
+        operator = parser->bytes[parser->position];
+        if (operator != (unsigned char)'+'
+            && operator != (unsigned char)'-') return 0;
+        parser->position += 1u;
+        if (!cm_lower_array_length_parse_atom(parser, &right)) return 0;
+        if (operator == (unsigned char)'+') {
+            if (value > UINT64_MAX - right) return 0;
+            value += right;
+        } else {
+            if (value < right) return 0;
+            value -= right;
+        }
+    }
+    *out_value = value;
+    return 1;
+}
+
+static int cm_lower_parse_array_length_expression(
+    const CmInternedString *text, uint64_t *out_value)
+{
+    CmLowerArrayLengthParser parser;
+
+    if (text == NULL || out_value == NULL) return 0;
+    parser.bytes = text->bytes;
+    parser.length = text->len;
+    parser.position = 0u;
+    if (!cm_lower_array_length_parse_expression(&parser, out_value)) {
+        return 0;
+    }
+    cm_lower_array_length_skip_space(&parser);
+    return parser.position == parser.length;
+}
+
 static CmHirTypeId cm_lower_add_type(CmLowerState *state,
     const CmHirType *type, CmAstTypeId ast_type_id)
 {
@@ -3734,6 +3863,12 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     CmHirType parameter_type;
     CmHirType projection;
     CmHirTypeId self_type;
+    CmHirNamedType projection_trait;
+    CmHirGenericArg *owned_trait_arguments;
+    CmHirDefId defining_trait;
+    const CmHirItem *associated_item;
+    uint32_t projection_argument_count;
+    uint32_t projection_matches;
     uint32_t matches;
 
     predicate = NULL;
@@ -3776,14 +3911,57 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     parameter_type.data.parameter_type.parameter = generic->hir_id;
     self_type = cm_lower_add_type(state, &parameter_type, ast_type_id);
     if (state->failed) return CM_HIR_TYPE_NONE;
+    associated_item = associated.item != NULL ? associated.item
+        : cm_lower_bound_item(state, associated.definition);
+    defining_trait = associated_item != NULL
+        ? associated_item->parent_definition
+        : associated.local_record != NULL
+            ? associated.local_record->parent_definition
+            : cm_hir_def_id_none();
+    if (cm_hir_def_id_is_none(defining_trait)) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "shorthand associated type lost its defining trait");
+        return CM_HIR_TYPE_NONE;
+    }
+    memset(&projection_trait, 0, sizeof(projection_trait));
+    owned_trait_arguments = NULL;
+    projection_argument_count = 0u;
+    if (cm_hir_def_id_equal(defining_trait,
+            predicate->trait_type.definition)) {
+        projection_trait = predicate->trait_type;
+    } else {
+        projection_matches = 0u;
+        if (!cm_lower_find_instantiated_supertrait(state,
+                &predicate->trait_type, defining_trait, self_type, span,
+                &owned_trait_arguments, &projection_argument_count,
+                &projection_matches)) {
+            cm_free(owned_trait_arguments);
+            return CM_HIR_TYPE_NONE;
+        }
+        if (projection_matches != 1u) {
+            cm_free(owned_trait_arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_TRAIT, span,
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "shorthand associated type has no unique defining "
+                "supertrait");
+            return CM_HIR_TYPE_NONE;
+        }
+        projection_trait.definition = defining_trait;
+        projection_trait.arguments = owned_trait_arguments;
+        projection_trait.argument_count = projection_argument_count;
+    }
     memset(&projection, 0, sizeof(projection));
     projection.kind = CM_HIR_TYPE_PROJECTION_KIND;
     projection.span = span;
     projection.data.projection_type.self_type = self_type;
-    projection.data.projection_type.trait_type = predicate->trait_type;
+    projection.data.projection_type.trait_type = projection_trait;
     projection.data.projection_type.associated_type.definition =
         associated.definition;
-    return cm_lower_add_type(state, &projection, ast_type_id);
+    self_type = cm_lower_add_type(state, &projection, ast_type_id);
+    cm_free(owned_trait_arguments);
+    return self_type;
 }
 
 static CmResolvePrimitiveKind cm_lower_graph_primitive_path(
@@ -4097,6 +4275,7 @@ static void cm_lower_find_associated_type(
             && cm_lower_hir_name_matches_ast(state, record->hir_name,
                 ast_name)) {
             out_target->definition = record->definition;
+            out_target->trait_definition = trait_definition;
             out_target->generic_parameter_count =
                 record->generic_parameter_count;
             out_target->item = cm_lower_bound_item(state,
@@ -4118,6 +4297,7 @@ static void cm_lower_find_associated_type(
             && cm_lower_hir_name_matches_ast(state, item->name,
                 ast_name)) {
             out_target->definition = item->definition;
+            out_target->trait_definition = trait_definition;
             out_target->generic_parameter_count =
                 item->generic_parameter_count;
             out_target->item = item;
@@ -4558,6 +4738,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         length_parameter_type = NULL;
         has_literal_length = cm_lower_parse_u64(length_text, &length_value);
         if (!has_literal_length) {
+            has_literal_length = cm_lower_parse_array_length_expression(
+                length_text, &length_value);
+        }
+        if (!has_literal_length) {
             length_generic = cm_lower_find_generic_in_scope(state, owner,
                 ast_type->text);
             if (length_generic == NULL) {
@@ -4588,9 +4772,9 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         } else if (!has_literal_length && length_record == NULL) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
                 CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "array length is neither a plain, in-range decimal "
-                "constant, a typed const parameter, nor a resolved simple "
-                "const name");
+                "array length is neither a plain, in-range decimal or "
+                "constant expression, a typed const parameter, nor a "
+                "resolved simple const name");
             return CM_HIR_TYPE_NONE;
         }
         memset(&usize_type, 0, sizeof(usize_type));
@@ -10550,13 +10734,15 @@ static int cm_lower_impl_item(CmLowerState *state,
             "negative impl must be safe and have no associated items");
         return 0;
     }
-    if (ast_item->data.impl_item.is_negative
-        && !trait_item->data.trait_item.is_auto) {
-        cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
-            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "negative impl target is not an authenticated auto trait");
-        return 0;
-    }
+    /*
+     * Negative impls are an unstable language feature, but the compiler's
+     * authenticated HIR admits them for ordinary traits as well as auto
+     * traits (for example, core's `impl !Clone for &mut T`).  Keep the
+     * structural safety checks above authoritative: the target must resolve
+     * to an authenticated trait, the impl must be safe, and it must have no
+     * associated items.  Do not infer polarity from the trait's `is_auto`
+     * bit; that bit only controls auto-trait solving and dyn-trait markers.
+     */
     if (!ast_item->data.impl_item.is_negative
         && safety != hir_item->data.impl_item.safety) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
@@ -14978,7 +15164,8 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_MONOMORPHIC,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
-    CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
+    CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
+    CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
 } CmLowerImplSelfClass;
 
 static int cm_lower_impl_has_supported_members(const CmLowerState *state,
@@ -15049,6 +15236,34 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             && pointee->data.parameter_type.parameter
                 == impl_item->generic_parameter_start) {
             return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER;
+        }
+    }
+    /*
+     * Core has blanket Clone polarity entries over shared and mutable
+     * references (`impl<T> Clone for &T` and `impl<T> !Clone for &mut T`).
+     * Admit the same bounded shape as raw-pointer blankets: exactly one
+     * required type parameter used as the reference pointee.  The elided
+     * reference region is intentionally not part of this class key; all
+     * such references can overlap for coherence purposes, while mutability
+     * remains a discriminant in cm_lower_impl_self_equal().
+     */
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && impl_item->generic_parameter_count == 1u) {
+        const CmHirGenericParam *parameter;
+        const CmHirType *pointee;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            impl_item->generic_parameter_start);
+        pointee = cm_hir_get_type(state->hir,
+            type->data.reference_type.pointee);
+        if (parameter != NULL
+            && parameter->kind == CM_HIR_GENERIC_TYPE
+            && !parameter->has_default
+            && pointee != NULL
+            && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && pointee->data.parameter_type.parameter
+                == impl_item->generic_parameter_start) {
+            return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE;
         }
     }
     if (impl_item->generic_parameter_count == 0u) {
@@ -15166,6 +15381,13 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
         return left->data.raw_pointer_type.mutability
             == right->data.raw_pointer_type.mutability;
     }
+    if (left->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        /* Elided reference regions are inferred independently per impl and
+         * therefore are not a stable coherence key.  Mutability is the
+         * only discriminant in this bounded generic-reference class. */
+        return left->data.reference_type.mutability
+            == right->data.reference_type.mutability;
+    }
     return 0;
 }
 
@@ -15193,6 +15415,11 @@ static int cm_lower_impl_self_candidates_may_overlap(
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
         && right_class
             == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER) {
+        return cm_lower_impl_self_equal(hir, left_self_type,
+            right_self_type);
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
+        && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE) {
         return cm_lower_impl_self_equal(hir, left_self_type,
             right_self_type);
     }
@@ -15519,8 +15746,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
                 "impl self type is outside the bounded scalar, single-type "
-                "parameter, zero-argument local ADT, or full ordered "
-                "generic local ADT subset");
+                "parameter, generic reference/raw-pointer, zero-argument "
+                "local ADT, or full ordered generic local ADT subset");
             cm_free(adt_definitions);
             cm_free(classes);
             return 0;
@@ -15581,7 +15808,7 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                           "for one trait and self type"
                         : item->data.impl_item.is_negative
                             ? "duplicate exact negative impl candidate for "
-                              "one auto trait and self type"
+                              "one trait and self type"
                             : "duplicate exact impl candidate for one trait "
                               "and self type");
             return 0;

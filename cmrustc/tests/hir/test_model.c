@@ -551,6 +551,7 @@ static void test_known_trait_projection_model(void)
     CmHirDefId arbitrary_child_definition;
     CmHirDefId self_parent_definition;
     CmHirDefId impl_definition;
+    CmHirDefId negative_impl_definition;
     CmHirDefId inherent_impl_definition;
     CmHirDefId unsafe_impl_definition;
     CmHirDefId impl_alias_definition;
@@ -796,6 +797,8 @@ static void test_known_trait_projection_model(void)
 
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(191u, 230u), &impl_definition) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(231u, 260u), &negative_impl_definition) == CM_HIR_OK);
     init_test_item(&item, CM_HIR_ITEM_IMPL, impl_definition, root_id,
         cm_hir_def_id_none(), cm_hir_intern(&context, "NamedImpl"),
         test_span(191u, 230u));
@@ -814,8 +817,12 @@ static void test_known_trait_projection_model(void)
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.is_negative = 1;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    item.definition = negative_impl_definition;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    item.definition = impl_definition;
     item.data.impl_item.is_negative = 0;
+    item_count = context.items.len;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
     item.data.impl_item.trait_type.definition = struct_definition;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.trait_type.definition = trait_definition;
@@ -6230,6 +6237,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     CmHirDefId ordinary_definition;
     CmHirDefId auto_definition;
     CmHirDefId negative_definition;
+    CmHirDefId ordinary_negative_definition;
     CmHirDefId positive_definition;
     CmHirDefId child_definition;
     CmHirType type;
@@ -6370,6 +6378,9 @@ static void test_auto_trait_and_negative_impl_model(void)
     assert(cm_hir_reserve_item_definition_as(&context, crate_id,
         CM_HIR_ITEM_IMPL, test_span(61u, 100u), &negative_definition)
         == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_IMPL, test_span(101u, 140u),
+        &ordinary_negative_definition) == CM_HIR_OK);
     init_test_item(&item, CM_HIR_ITEM_IMPL, negative_definition,
         root_module, cm_hir_def_id_none(), CM_INTERN_ID_NONE,
         test_span(61u, 100u));
@@ -6385,7 +6396,9 @@ static void test_auto_trait_and_negative_impl_model(void)
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = ordinary_definition;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    item.definition = ordinary_negative_definition;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    item.definition = negative_definition;
     item.data.impl_item.trait_type.definition = auto_definition;
     item.data.impl_item.safety = CM_HIR_UNSAFE;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
@@ -6421,7 +6434,9 @@ static void test_auto_trait_and_negative_impl_model(void)
             != NULL
         && strstr(dump, "impl-header item#3 safety=safe negative=1")
             != NULL
-        && strstr(dump, "impl-header item#4 safety=unsafe negative=0")
+        && strstr(dump, "impl-header item#4 safety=safe negative=1")
+            != NULL
+        && strstr(dump, "impl-header item#5 safety=unsafe negative=0")
             != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
