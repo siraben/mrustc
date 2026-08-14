@@ -1676,6 +1676,162 @@ static void test_generic_parameter_shadows_type_path_prefix(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_primitive_qualified_module_type_paths(void)
+{
+    static const char source[] =
+        "pub mod char {"
+            "pub struct EscapeDebug; pub struct EscapeUnicode; }"
+        "mod text {"
+            "use crate::char::{self};"
+            "type Debug = char::EscapeDebug;"
+            "type Unicode = char::EscapeUnicode;"
+            "type Primitive = char; }"
+        "mod shadow {"
+            "mod char { pub struct LocalEscape; }"
+            "type Chosen = char::LocalEscape; }";
+    static const char *const rejected[] = {
+        ("pub mod char { pub struct RootOnly; }"
+            "mod text { type Bad = char::RootOnly; }"),
+        ("pub mod char {}"
+            "mod text { type Bad = char::Missing; }")
+    };
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmCfgSet cfg;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *escape_debug;
+    const CmHirItem *escape_unicode;
+    const CmHirItem *local_escape;
+    const CmHirItem *debug;
+    const CmHirItem *unicode;
+    const CmHirItem *chosen;
+    const CmHirItem *primitive;
+    const CmHirType *debug_type;
+    const CmHirType *unicode_type;
+    const CmHirType *chosen_type;
+    const CmHirType *primitive_type;
+    TestResolver resolver;
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    assert(cm_source_add_memory(&sources, "primitive-path/lib.rs",
+        (const unsigned char *)source, sizeof(source) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    cm_import_resolver_init(&imports);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    cm_hir_context_init(&context);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "primitive_path_graph";
+    result = cm_hir_lower_module_graph(&context, &graph,
+        graph_result.revision, &imports, &map, &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "primitive module type path failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    escape_debug = find_item(&context, "EscapeDebug");
+    escape_unicode = find_item(&context, "EscapeUnicode");
+    local_escape = find_item(&context, "LocalEscape");
+    debug = find_item(&context, "Debug");
+    unicode = find_item(&context, "Unicode");
+    chosen = find_item(&context, "Chosen");
+    primitive = find_item(&context, "Primitive");
+    debug_type = debug == NULL || debug->kind != CM_HIR_ITEM_TYPE_ALIAS
+        ? NULL : cm_hir_get_type(&context,
+            debug->data.type_alias_item.target);
+    unicode_type = unicode == NULL || unicode->kind != CM_HIR_ITEM_TYPE_ALIAS
+        ? NULL : cm_hir_get_type(&context,
+            unicode->data.type_alias_item.target);
+    chosen_type = chosen == NULL || chosen->kind != CM_HIR_ITEM_TYPE_ALIAS
+        ? NULL : cm_hir_get_type(&context,
+            chosen->data.type_alias_item.target);
+    primitive_type = primitive == NULL
+        || primitive->kind != CM_HIR_ITEM_TYPE_ALIAS
+        ? NULL : cm_hir_get_type(&context,
+            primitive->data.type_alias_item.target);
+    assert(graph_result.error_count == 0u && import_result.error_count == 0u
+        && result.error_count == 0u
+        && escape_debug != NULL && escape_debug->kind == CM_HIR_ITEM_STRUCT
+        && escape_unicode != NULL
+        && escape_unicode->kind == CM_HIR_ITEM_STRUCT
+        && local_escape != NULL && local_escape->kind == CM_HIR_ITEM_STRUCT
+        && debug_type != NULL && debug_type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(debug_type->data.named_type.definition,
+            escape_debug->definition)
+        && unicode_type != NULL
+        && unicode_type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(unicode_type->data.named_type.definition,
+            escape_unicode->definition)
+        && chosen_type != NULL && chosen_type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(chosen_type->data.named_type.definition,
+            local_escape->definition)
+        && primitive_type != NULL
+        && primitive_type->kind == CM_HIR_TYPE_CHAR_KIND);
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&context);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        memset(&resolver, 0, sizeof(resolver));
+        result = lower_source(rejected[index], &context, &resolver);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+            && strstr(result.first_error.message,
+                "primitive-qualified path") != NULL
+            && resolver.calls == 0u);
+        cm_hir_context_destroy(&context);
+    }
+
+    result = lower_source("type Generic<char> = char;", &context, NULL);
+    debug = find_item(&context, "Generic");
+    debug_type = debug == NULL ? NULL : cm_hir_get_type(&context,
+        debug->data.type_alias_item.target);
+    assert(result.error_count == 0u && debug_type != NULL
+        && debug_type->kind == CM_HIR_TYPE_PARAMETER_KIND);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source("type char = u8; type Alias = char;", &context,
+        NULL);
+    debug = find_item(&context, "Alias");
+    debug_type = debug == NULL ? NULL : cm_hir_get_type(&context,
+        debug->data.type_alias_item.target);
+    assert(result.error_count == 0u && debug_type != NULL
+        && debug_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && debug_type->data.integer_type.kind == CM_HIR_INT_U8);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source("struct char; type Alias = char;", &context,
+        NULL);
+    escape_debug = find_item(&context, "char");
+    debug = find_item(&context, "Alias");
+    debug_type = debug == NULL ? NULL : cm_hir_get_type(&context,
+        debug->data.type_alias_item.target);
+    assert(result.error_count == 0u && escape_debug != NULL
+        && debug_type != NULL && debug_type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(debug_type->data.named_type.definition,
+            escape_debug->definition));
+    cm_hir_context_destroy(&context);
+}
+
 static void test_shorthand_inherited_associated_type_projection(void)
 {
     static const char source[] =
@@ -8467,6 +8623,7 @@ int main(void)
     test_const_generic_type_alias_application();
     test_adt_function_pointer_default_substitution();
     test_generic_parameter_shadows_type_path_prefix();
+    test_primitive_qualified_module_type_paths();
     test_shorthand_inherited_associated_type_projection();
     test_shorthand_projection_route_coalescing();
     test_shorthand_projection_declaration_order();

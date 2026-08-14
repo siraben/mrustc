@@ -4886,6 +4886,54 @@ static CmResolvePrimitiveKind cm_lower_graph_primitive_path(
     return result;
 }
 
+/* A lexical declaration or generic parameter wins over a builtin spelling. */
+static int cm_lower_primitive_name_is_shadowed(
+    const CmLowerState *state, const CmAstPath *path,
+    CmHirModuleId current_module)
+{
+    const CmLowerItemRecord *record;
+
+    if (path == NULL || path->absolute || path->segment_count == 0u
+        || path->segments == NULL) {
+        return 0;
+    }
+    if (state->graph == NULL) {
+        record = cm_lower_find_name_in_module(state, current_module,
+            path->segments[0].name);
+        return record != NULL && record->kind != CM_AST_ITEM_MODULE;
+    }
+    {
+        CmResolvePathSegmentView segment;
+        CmResolvedBinding binding;
+        const CmInternedString *name;
+        CmImportLookupStatus status;
+
+        name = cm_ast_get_string(state->ast, path->segments[0].name);
+        if (name == NULL || name->len == 0u) return 0;
+        segment.bytes = name->bytes;
+        segment.length = name->len;
+        memset(&binding, 0, sizeof(binding));
+        status = cm_import_resolve_path_checked(state->imports,
+            state->graph, state->graph_revision, state->graph_module, 0,
+            &segment, 1u, CM_RESOLVE_NAMESPACE_TYPE, &binding);
+        if (status == CM_IMPORT_LOOKUP_NOT_FOUND) return 0;
+        if (status != CM_IMPORT_LOOKUP_OK
+            || binding.revision != state->graph_revision
+            || binding.namespace_kind != CM_RESOLVE_NAMESPACE_TYPE
+            || binding.is_ambiguous) {
+            return 1;
+        }
+        if (binding.target_module != CM_MODULE_NONE
+            && binding.item_kind == CM_AST_ITEM_MODULE) {
+            return 0;
+        }
+        return !(binding.primitive_kind != CM_RESOLVE_PRIMITIVE_NONE
+            && binding.target_module == CM_MODULE_NONE
+            && binding.declaration.source == 0u
+            && binding.declaration.item == CM_AST_ITEM_NONE);
+    }
+}
+
 static CmHirTypeId cm_lower_path_type(CmLowerState *state,
     CmAstTypeId ast_type_id, const CmAstType *ast_type,
     CmHirModuleId module, CmHirDefId owner)
@@ -4899,6 +4947,7 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
     CmHirType type;
     CmHirGenericArg *arguments;
     CmResolvePrimitiveKind primitive_kind;
+    int primitive_prefix;
     uint32_t argument_count;
     CmSpan span;
     uint32_t index;
@@ -4923,6 +4972,7 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
     }
     memset(&type, 0, sizeof(type));
     type.span = span;
+    primitive_prefix = 0;
     if (!path->absolute
         && cm_lower_string_is(state, path->segments[0].name, "Self")) {
         return cm_lower_self_path_type(state, ast_type_id, path, span,
@@ -4930,17 +4980,6 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
     }
     if (!path->absolute && path->segment_count <= 2u
         && path->segments[0].argument_count == 0u) {
-        if (cm_lower_primitive(state, path->segments[0].name, &type)) {
-            if (path->segment_count != 1u) {
-                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
-                    CM_AST_ITEM_NONE, ast_type_id, ast_type->path,
-                    CM_HIR_OK,
-                    "primitive types do not provide shorthand associated "
-                    "paths in this HIR slice");
-                return CM_HIR_TYPE_NONE;
-            }
-            return cm_lower_add_type(state, &type, ast_type_id);
-        }
         generic = cm_lower_find_generic_in_scope(state, owner,
             path->segments[0].name);
         if (generic != NULL) {
@@ -4957,6 +4996,14 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
             type.kind = CM_HIR_TYPE_PARAMETER_KIND;
             type.data.parameter_type.parameter = generic->hir_id;
             return cm_lower_add_type(state, &type, ast_type_id);
+        }
+        if (cm_lower_primitive(state, path->segments[0].name, &type)) {
+            primitive_prefix = 1;
+            if (path->segment_count == 1u
+                && !cm_lower_primitive_name_is_shadowed(state, path,
+                    module)) {
+                return cm_lower_add_type(state, &type, ast_type_id);
+            }
         }
     }
     if (cm_lower_type_path_starts_with_parameter(state, path, owner)) {
@@ -4999,6 +5046,13 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
         cm_lower_fail(state, CM_HIR_LOWER_WRONG_NAMESPACE, span,
             CM_AST_ITEM_NONE, ast_type_id, ast_type->path, CM_HIR_OK,
             "resolved path does not name a type definition");
+        return CM_HIR_TYPE_NONE;
+    }
+    if (lookup == CM_LOWER_LOOKUP_NOT_FOUND && primitive_prefix) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+            CM_AST_ITEM_NONE, ast_type_id, ast_type->path, CM_HIR_OK,
+            "primitive-qualified path has no authenticated module type; "
+            "primitive associated paths are not supported");
         return CM_HIR_TYPE_NONE;
     }
     memset(&resolution, 0, sizeof(resolution));
