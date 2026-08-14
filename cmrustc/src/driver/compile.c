@@ -1863,7 +1863,8 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
         || output_path == NULL || output_path[0] == '\0'
         || !cm_compile_identifier_valid(crate_name) || target == NULL
         || (output_kind != CM_COMPILE_CMHIR_DECLARATION
-            && output_kind != CM_COMPILE_CMHIR_SEMANTIC)
+            && output_kind != CM_COMPILE_CMHIR_SEMANTIC
+            && output_kind != CM_COMPILE_CMHIR_DECLARATION_V2)
         || strcmp(input_path, output_path) == 0
         || (dependency_count != 0u && dependencies == NULL)
         || dependency_count > (size_t)UINT32_MAX
@@ -1882,7 +1883,9 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
             || (dependencies[dependency_index].kind
                     != CM_COMPILE_CMHIR_DECLARATION
                 && dependencies[dependency_index].kind
-                    != CM_COMPILE_CMHIR_SEMANTIC)
+                    != CM_COMPILE_CMHIR_SEMANTIC
+                && dependencies[dependency_index].kind
+                    != CM_COMPILE_CMHIR_DECLARATION_V2)
             || strcmp(output_path,
                 dependencies[dependency_index].path) == 0) return result;
         for (prior_index = 0u; prior_index < dependency_index;
@@ -1991,6 +1994,13 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
                 metadata_file->bytes, metadata_file->length,
                 dependencies[dependency_index].extern_name,
                 metadata_source);
+        } else if (dependencies[dependency_index].kind
+                == CM_COMPILE_CMHIR_DECLARATION_V2) {
+            metadata_result = cm_hir_metadata_decode_declaration_artifact(
+                &hir, &dependency_artifacts[dependency_index],
+                metadata_file->bytes, metadata_file->length,
+                dependencies[dependency_index].extern_name,
+                metadata_source);
         } else {
             result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
                 "invalid cmhir dependency kind");
@@ -2051,9 +2061,15 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
                 : hir_result.first_error.message);
         goto cleanup_cmhir;
     }
-    library_result = cm_hir_library_artifact_build(&output_artifact, &hir,
-        hir_result.crate_id, &graph, graph_result.revision, &module_map,
-        crate_name);
+    if (output_kind == CM_COMPILE_CMHIR_DECLARATION_V2) {
+        library_result = cm_hir_library_declaration_artifact_build(
+            &output_artifact, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &module_map, crate_name);
+    } else {
+        library_result = cm_hir_library_artifact_build(&output_artifact,
+            &hir, hir_result.crate_id, &graph, graph_result.revision,
+            &module_map, crate_name);
+    }
     if (library_result.status != CM_HIR_LIBRARY_OK) {
         result = cm_compile_result(CM_COMPILE_METADATA,
             "cmhir declaration capture failed");
@@ -2062,10 +2078,16 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
             cm_hir_library_status_name(library_result.status));
         goto cleanup_cmhir;
     }
-    metadata_result = output_kind == CM_COMPILE_CMHIR_SEMANTIC
-        ? cm_hir_metadata_encode_semantic_artifact(&encoded,
-            &output_artifact)
-        : cm_hir_metadata_encode_artifact(&encoded, &output_artifact);
+    if (output_kind == CM_COMPILE_CMHIR_SEMANTIC) {
+        metadata_result = cm_hir_metadata_encode_semantic_artifact(&encoded,
+            &output_artifact);
+    } else if (output_kind == CM_COMPILE_CMHIR_DECLARATION_V2) {
+        metadata_result = cm_hir_metadata_encode_declaration_artifact(
+            &encoded, &output_artifact);
+    } else {
+        metadata_result = cm_hir_metadata_encode_artifact(&encoded,
+            &output_artifact);
+    }
     if (metadata_result.status != CM_HIR_METADATA_ARTIFACT_OK
         || encoded.len == 0u) {
         result = cm_compile_result(CM_COMPILE_METADATA,

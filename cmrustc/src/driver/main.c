@@ -28,6 +28,10 @@ static void cm_print_usage(FILE *stream)
           "                          emit private declaration metadata\n"
           "    --extern-cmhir NAME FILE\n"
           "                          load one private metadata dependency\n"
+          "  --emit-cmhir-v2 FILE --crate-name NAME -o FILE\n"
+          "                          emit exact v2 declaration metadata\n"
+          "    --extern-cmhir-v2 NAME FILE\n"
+          "                          load exact v2 declaration metadata\n"
           "  --emit-semantic-cmhir FILE --crate-name NAME -o FILE\n"
           "                          emit exact v1.1 OPEN semantic metadata\n"
           "    --extern-semantic-cmhir NAME FILE\n"
@@ -330,6 +334,19 @@ static int cm_emit_cmhir_cli(int argc, char **argv, int action_index,
                 CM_COMPILE_CMHIR_SEMANTIC;
             dependency_count += 1u;
             index += 3;
+        } else if (strcmp(argv[index], "--extern-cmhir-v2") == 0) {
+            if (index + 2 >= argc) {
+                fputs("cmrustc: --extern-cmhir-v2 requires 'NAME FILE'\n",
+                    stderr);
+                free(dependencies);
+                return 2;
+            }
+            dependencies[dependency_count].extern_name = argv[index + 1];
+            dependencies[dependency_count].path = argv[index + 2];
+            dependencies[dependency_count].kind =
+                CM_COMPILE_CMHIR_DECLARATION_V2;
+            dependency_count += 1u;
+            index += 3;
         } else if (strcmp(argv[index], "-o") == 0) {
             if (output_path != NULL || index + 1 >= argc) {
                 fputs("cmrustc: -o requires one unique output file\n",
@@ -448,6 +465,9 @@ int cm_driver_main(int argc, char **argv)
         } else if (strcmp(argument, "--emit-cmhir") == 0) {
             return cm_emit_cmhir_cli(argc, argv, index, edition, target,
                 CM_COMPILE_CMHIR_DECLARATION);
+        } else if (strcmp(argument, "--emit-cmhir-v2") == 0) {
+            return cm_emit_cmhir_cli(argc, argv, index, edition, target,
+                CM_COMPILE_CMHIR_DECLARATION_V2);
         } else if (strcmp(argument, "--emit-semantic-cmhir") == 0) {
             return cm_emit_cmhir_cli(argc, argv, index, edition, target,
                 CM_COMPILE_CMHIR_SEMANTIC);

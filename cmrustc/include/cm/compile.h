@@ -26,7 +26,8 @@ typedef struct CmCompileResult {
 
 enum CmCompileCmhirKind {
     CM_COMPILE_CMHIR_DECLARATION = 0,
-    CM_COMPILE_CMHIR_SEMANTIC
+    CM_COMPILE_CMHIR_SEMANTIC,
+    CM_COMPILE_CMHIR_DECLARATION_V2
 };
 
 typedef struct CmCompileCmhirDependency {
@@ -69,8 +70,11 @@ CmCompileResult cm_compile_emit_cmhir(const char *input_path,
 
 /*
  * Explicit variant of cm_compile_emit_cmhir. Semantic mode publishes exact
- * cmhir-meta-v1.1 and accepts only dependencies whose per-entry kind also
- * selects v1.1. Its transported trait universe remains OPEN.
+ * cmhir-meta-v1.1; declaration-v2 mode publishes exact cmhir-meta-v2.0 with
+ * supported public free-function, const, and static declarations. Each
+ * dependency kind selects one exact decoder and never auto-detects another
+ * wire version. The v1.1 transported trait universe remains OPEN. The v2.0
+ * declarations contain no bodies, evaluated constants, MIR, or link objects.
  */
 CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
     const char *output_path, const char *crate_name,
