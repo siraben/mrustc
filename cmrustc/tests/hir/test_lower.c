@@ -2004,11 +2004,16 @@ static void check_explicit_projection_result(const CmHirContext *context)
 {
     const CmHirItem *trait_item;
     const CmHirItem *associated_item;
+    const CmHirItem *generic_trait_item;
+    const CmHirItem *generic_associated_item;
+    const CmHirItem *generic_project_item;
     const CmHirItem *project_item;
     const CmHirItem *concrete_item;
     const CmHirItem *defaulted_item;
     const CmHirItem *default_concrete_item;
     const CmHirType *project_type;
+    const CmHirType *generic_project_type;
+    const CmHirType *generic_argument_type;
     const CmHirType *concrete_type;
     const CmHirType *default_concrete_type;
     const CmHirType *self_type;
@@ -2016,6 +2021,9 @@ static void check_explicit_projection_result(const CmHirContext *context)
 
     trait_item = find_item(context, "Trait");
     associated_item = find_item(context, "Assoc");
+    generic_trait_item = find_item(context, "Generic");
+    generic_associated_item = find_item(context, "GenericAssoc");
+    generic_project_item = find_item(context, "GenericProject");
     project_item = find_item(context, "Project");
     concrete_item = find_item(context, "Concrete");
     defaulted_item = find_item(context, "Defaulted");
@@ -2026,6 +2034,16 @@ static void check_explicit_projection_result(const CmHirContext *context)
         && associated_item->data.type_alias_item.target == CM_HIR_TYPE_NONE
         && cm_hir_def_id_equal(associated_item->parent_definition,
             trait_item->definition));
+    assert(generic_trait_item != NULL
+        && generic_trait_item->kind == CM_HIR_ITEM_TRAIT
+        && generic_trait_item->generic_parameter_count == 1u);
+    assert(generic_associated_item != NULL
+        && generic_associated_item->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && cm_hir_def_id_equal(generic_associated_item->parent_definition,
+            generic_trait_item->definition));
+    assert(generic_project_item != NULL
+        && generic_project_item->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && generic_project_item->generic_parameter_count == 2u);
     assert(project_item != NULL
         && project_item->kind == CM_HIR_ITEM_TYPE_ALIAS);
     assert(concrete_item != NULL
@@ -2037,6 +2055,8 @@ static void check_explicit_projection_result(const CmHirContext *context)
         && default_concrete_item->kind == CM_HIR_ITEM_TYPE_ALIAS);
     project_type = cm_hir_get_type(context,
         project_item->data.type_alias_item.target);
+    generic_project_type = cm_hir_get_type(context,
+        generic_project_item->data.type_alias_item.target);
     concrete_type = cm_hir_get_type(context,
         concrete_item->data.type_alias_item.target);
     assert(project_type != NULL
@@ -2055,6 +2075,27 @@ static void check_explicit_projection_result(const CmHirContext *context)
         && cm_hir_def_id_equal(
             concrete_type->data.projection_type.associated_type.definition,
             associated_item->definition));
+    assert(generic_project_type != NULL
+        && generic_project_type->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(generic_project_type->data.projection_type
+                .trait_type.definition,
+            generic_trait_item->definition)
+        && cm_hir_def_id_equal(generic_project_type->data.projection_type
+                .associated_type.definition,
+            generic_associated_item->definition)
+        && generic_project_type->data.projection_type.trait_type
+                .argument_count == 1u
+        && generic_project_type->data.projection_type.trait_type
+                .arguments != NULL
+        && generic_project_type->data.projection_type.trait_type
+                .arguments[0].kind == CM_HIR_GENERIC_ARG_TYPE);
+    generic_argument_type = cm_hir_get_type(context,
+        generic_project_type->data.projection_type.trait_type
+            .arguments[0].data.type);
+    assert(generic_argument_type != NULL
+        && generic_argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && generic_argument_type->data.parameter_type.parameter
+            == generic_project_item->generic_parameter_start + 1u);
     self_type = cm_hir_get_type(context,
         concrete_type->data.projection_type.self_type);
     assert(self_type != NULL && self_type->kind == CM_HIR_TYPE_INTEGER_KIND
@@ -2083,7 +2124,9 @@ static void test_explicit_projection_entry_points(void)
         "type DefaultConcrete = Defaulted<u32>;"
         "type Defaulted<T, U = <T as Trait>::Assoc> = U;"
         "type Project<T> = <T as Trait>::Assoc;"
-        "trait Trait { type Assoc; }";
+        "trait Trait { type Assoc; }"
+        "type GenericProject<T, U> = <T as Generic<U>>::GenericAssoc;"
+        "trait Generic<V> { type GenericAssoc; }";
     static const char *const rejected[] = {
         "type Free;",
         "trait Trait { type Assoc = u8; }",
@@ -2107,7 +2150,7 @@ static void test_explicit_projection_entry_points(void)
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }
-    assert(result.error_count == 0u && result.lowered_item_count == 6u);
+    assert(result.error_count == 0u && result.lowered_item_count == 9u);
     check_explicit_projection_result(&context);
     cm_hir_context_destroy(&context);
 
@@ -2123,7 +2166,7 @@ static void test_explicit_projection_entry_points(void)
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }
-    assert(result.error_count == 0u && result.lowered_item_count == 6u);
+    assert(result.error_count == 0u && result.lowered_item_count == 9u);
     check_explicit_projection_result(&context);
     cm_hir_context_destroy(&context);
     cm_expanded_ast_destroy(&expanded);

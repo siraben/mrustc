@@ -163,6 +163,10 @@ static int cm_alias_normalize_const(CmAliasNormalizeState *state,
         return cm_alias_normalize_const(state, source_type,
             &argument->data.constant, out);
     case CM_HIR_CONST_UNEVALUATED:
+        /* A definition-backed constant is already a stable typed identity.
+         * Alias expansion may normalize the surrounding type without
+         * evaluating or otherwise rewriting that independent definition. */
+        return 1;
     case CM_HIR_CONST_INFER:
     case CM_HIR_CONST_ERROR:
         return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST,

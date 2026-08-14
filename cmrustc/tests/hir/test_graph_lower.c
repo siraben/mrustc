@@ -11010,9 +11010,9 @@ static void test_generated_failure_is_transactional(void)
         "#![allow(dead_code)] "
             "macro_rules! make { () => { struct G { x: Missing } } } "
             "make!();",
-        "macro_rules! make { () => { enum G { A = 1 } } } make!();",
-        "macro_rules! make { () => { struct G<T> where T: Copy { x: T } "
-            "} } make!();",
+        "macro_rules! make { () => { enum G { A = 1 * 2 } } } make!();",
+        "macro_rules! make { () => { struct G<T = T> { x: T } } } "
+            "make!();",
         "mod defs { pub fn value(); } use crate::defs::value as Imported; "
             "struct Consumer { value: Imported }",
         "struct Outer; mod child { macro_rules! make { () => { "

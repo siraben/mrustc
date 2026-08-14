@@ -167,6 +167,12 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
 static int cm_lower_trait_identity_arguments(CmLowerState *state,
     CmAstItemId ast_item_id, const CmHirItem *trait_item, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count);
+static int cm_lower_trait_positional_arguments(CmLowerState *state,
+    CmAstItemId ast_item_id, const CmAstPathSegment *segment,
+    const CmLowerTraitTarget *trait_target, CmHirModuleId module,
+    CmHirDefId owner, CmHirTypeId default_self, int allow_bindings,
+    int allow_constraints, int allow_synthesized_default_self, CmSpan span,
+    CmHirGenericArg **out_arguments, uint32_t *out_count);
 static int cm_lower_find_instantiated_supertrait(CmLowerState *state,
     const CmHirNamedType *root, CmHirDefId target_definition,
     CmHirTypeId self_type, CmSpan span, CmHirGenericArg **out_arguments,
@@ -4744,9 +4750,11 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
     CmLowerAssociatedTarget associated_record;
     CmLowerLookupResult lookup;
     CmHirType type;
+    CmHirGenericArg *trait_arguments;
     CmSpan span;
     uint32_t index;
     uint32_t matches;
+    uint32_t trait_argument_count;
 
     span = cm_lower_span(state, ast_type->span);
     trait_path = cm_ast_get_path(state->ast,
@@ -4762,7 +4770,7 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
             CM_HIR_OK, "explicit projection has invalid structural parts");
         return CM_HIR_TYPE_NONE;
     }
-    for (index = 0u; index < trait_path->segment_count; ++index) {
+    for (index = 0u; index + 1u < trait_path->segment_count; ++index) {
         if (trait_path->segments[index].argument_count != 0u) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
                 CM_AST_ITEM_NONE, ast_type_id,
@@ -4829,17 +4837,40 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
             CM_HIR_OK, "trait associated-type identity is ambiguous");
         return CM_HIR_TYPE_NONE;
     }
+    trait_arguments = NULL;
+    trait_argument_count = 0u;
+    if (!cm_lower_trait_positional_arguments(state, CM_AST_ITEM_NONE,
+            &trait_path->segments[trait_path->segment_count - 1u],
+            &trait_target, module, owner, CM_HIR_TYPE_NONE, 0, 0, 0, span,
+            &trait_arguments, &trait_argument_count)) {
+        return CM_HIR_TYPE_NONE;
+    }
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_PROJECTION_KIND;
     type.span = span;
     type.data.projection_type.self_type = cm_lower_type(state,
         ast_type->projection.self_type, module, owner);
-    if (state->failed) return CM_HIR_TYPE_NONE;
+    if (state->failed) {
+        cm_free(trait_arguments);
+        return CM_HIR_TYPE_NONE;
+    }
     type.data.projection_type.trait_type.definition =
         trait_target.definition;
+    type.data.projection_type.trait_type.arguments = trait_arguments;
+    type.data.projection_type.trait_type.argument_count = trait_argument_count;
     type.data.projection_type.associated_type.definition =
         associated_record.definition;
-    return cm_lower_add_type(state, &type, ast_type_id);
+    if (state->failed) {
+        cm_free(trait_arguments);
+        return CM_HIR_TYPE_NONE;
+    }
+    {
+        CmHirTypeId result;
+
+        result = cm_lower_add_type(state, &type, ast_type_id);
+        cm_free(trait_arguments);
+        return result;
+    }
 }
 
 static int cm_lower_lifetime_binder_is_valid(
