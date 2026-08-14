@@ -37,6 +37,17 @@ typedef struct ParsedProducerFixture {
     CmHirLibraryArtifact artifact;
 } ParsedProducerFixture;
 
+typedef struct DeclarationProducerFixture {
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirTypeId u32_type;
+    CmHirTypeId bool_type;
+    CmHirDefId shared_type;
+    CmHirDefId function_value;
+    CmHirDefId const_value;
+    CmHirDefId static_value;
+} DeclarationProducerFixture;
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -109,6 +120,18 @@ static CmHirTypeId add_integer_type(CmHirContext *context,
     type.kind = CM_HIR_TYPE_INTEGER_KIND;
     type.span = test_span(start, start + 1u);
     type.data.integer_type.kind = kind;
+    assert(cm_hir_add_type(context, &type, &id) == CM_HIR_OK);
+    return id;
+}
+
+static CmHirTypeId add_bool_type(CmHirContext *context, uint32_t start)
+{
+    CmHirType type;
+    CmHirTypeId id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_BOOL_KIND;
+    type.span = test_span(start, start + 1u);
     assert(cm_hir_add_type(context, &type, &id) == CM_HIR_OK);
     return id;
 }
@@ -466,12 +489,116 @@ static CmHirLibraryBinding primitive_binding(CmHirPrimitiveKind primitive)
     return binding;
 }
 
+static CmHirLibraryBinding value_binding(CmHirDefId definition,
+    CmHirLibraryValueKind kind)
+{
+    CmHirLibraryBinding binding;
+
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
+    binding.definition = definition;
+    binding.type_kind = CM_HIR_TYPE_ERROR_KIND;
+    binding.primitive_kind = CM_HIR_PRIMITIVE_NONE;
+    binding.value_kind = kind;
+    return binding;
+}
+
 static void add_entry(CmHirLibraryOwnedData *owned, size_t module_index,
     const char *name, CmHirLibraryBinding binding)
 {
     assert(cm_hir_library_owned_data_add_entry(owned, module_index,
         (const unsigned char *)name, strlen(name), &binding)
         == CM_HIR_LIBRARY_OK);
+}
+
+static void declaration_producer_init(DeclarationProducerFixture *fixture)
+{
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    const CmHirModule *module;
+    CmHirLibraryOwnedData owned;
+    CmHirLibraryArtifactResult restored;
+    CmHirLibraryValue value;
+    CmHirTypeId parameter_types[1];
+    size_t root_index;
+
+    memset(fixture, 0, sizeof(*fixture));
+    cm_hir_context_init(&fixture->context);
+    assert(cm_hir_create_crate(&fixture->context,
+        cm_hir_intern(&fixture->context, "declaration_wire"),
+        CM_HIR_EDITION_2024, test_span(1u, 100u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    module = cm_hir_get_module(&fixture->context, root_module);
+    assert(module != NULL);
+    fixture->shared_type = add_extern_type(&fixture->context, crate_id,
+        root_module, "Shared", 10u);
+    fixture->u32_type = add_integer_type(&fixture->context,
+        CM_HIR_INT_U32, 11u);
+    fixture->bool_type = add_bool_type(&fixture->context, 12u);
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(20u, 21u),
+        &fixture->function_value) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_CONST, test_span(22u, 23u), &fixture->const_value)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture->context, crate_id,
+        CM_HIR_ITEM_STATIC, test_span(24u, 25u), &fixture->static_value)
+        == CM_HIR_OK);
+
+    cm_hir_library_owned_data_init(&owned);
+    assert(cm_hir_library_owned_data_add_module(&owned,
+        module->definition, &root_index) == CM_HIR_LIBRARY_OK);
+    memset(&value, 0, sizeof(value));
+    value.definition = fixture->static_value;
+    value.kind = CM_HIR_LIBRARY_VALUE_STATIC;
+    value.data.value.type = fixture->u32_type;
+    value.data.value.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_library_owned_data_add_value(&owned, &value)
+        == CM_HIR_LIBRARY_OK);
+    parameter_types[0] = fixture->u32_type;
+    memset(&value, 0, sizeof(value));
+    value.definition = fixture->function_value;
+    value.kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+    value.data.function.parameter_types = parameter_types;
+    value.data.function.parameter_count = 1u;
+    value.data.function.return_type = fixture->bool_type;
+    value.data.function.abi = cm_hir_intern(&fixture->context, "C");
+    value.data.function.safety = CM_HIR_UNSAFE;
+    value.data.function.is_const = 0;
+    value.data.function.is_async = 0;
+    value.data.function.is_variadic = 0;
+    assert(cm_hir_library_owned_data_add_value(&owned, &value)
+        == CM_HIR_LIBRARY_OK);
+    memset(&value, 0, sizeof(value));
+    value.definition = fixture->const_value;
+    value.kind = CM_HIR_LIBRARY_VALUE_CONST;
+    value.data.value.type = fixture->u32_type;
+    value.data.value.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_library_owned_data_add_value(&owned, &value)
+        == CM_HIR_LIBRARY_OK);
+
+    add_entry(&owned, root_index, "Shared", extern_type_binding(
+        fixture->shared_type));
+    add_entry(&owned, root_index, "Shared", value_binding(
+        fixture->function_value, CM_HIR_LIBRARY_VALUE_FUNCTION));
+    add_entry(&owned, root_index, "LIMIT", value_binding(
+        fixture->const_value, CM_HIR_LIBRARY_VALUE_CONST));
+    add_entry(&owned, root_index, "COUNTER", value_binding(
+        fixture->static_value, CM_HIR_LIBRARY_VALUE_STATIC));
+    cm_hir_library_artifact_init(&fixture->artifact);
+    restored = cm_hir_library_artifact_restore_owned(&fixture->artifact,
+        &fixture->context, crate_id, module->definition, "producer", &owned);
+    assert(restored.status == CM_HIR_LIBRARY_OK);
+    assert(restored.public_type_entry_count == 1u);
+    assert(restored.public_value_entry_count == 3u);
+    cm_hir_library_owned_data_destroy(&owned);
+}
+
+static void declaration_producer_destroy(
+    DeclarationProducerFixture *fixture)
+{
+    cm_hir_library_artifact_destroy(&fixture->artifact);
+    cm_hir_context_destroy(&fixture->context);
 }
 
 static void producer_init(ProducerFixture *fixture, int reverse_order)
@@ -621,7 +748,8 @@ static void producer_destroy(ProducerFixture *fixture)
 
 static int parsed_producer_build(ParsedProducerFixture *fixture,
     const unsigned char *source, size_t source_length,
-    size_t expected_modules, size_t expected_entries)
+    size_t expected_modules, size_t expected_entries,
+    size_t expected_value_entries, int declaration)
 {
     CmSourceSet sources;
     CmSourceId root_source;
@@ -690,18 +818,26 @@ static int parsed_producer_build(ParsedProducerFixture *fixture,
         }
     }
     if (ok) {
-        artifact_result = cm_hir_library_artifact_build(&fixture->artifact,
-            &fixture->context, lower_result.crate_id, &graph,
-            graph_result.revision, &modules, "producer");
+        artifact_result = declaration
+            ? cm_hir_library_declaration_artifact_build(&fixture->artifact,
+                &fixture->context, lower_result.crate_id, &graph,
+                graph_result.revision, &modules, "producer")
+            : cm_hir_library_artifact_build(&fixture->artifact,
+                &fixture->context, lower_result.crate_id, &graph,
+                graph_result.revision, &modules, "producer");
         ok = artifact_result.status == CM_HIR_LIBRARY_OK
             && artifact_result.module_count == expected_modules
-            && artifact_result.public_type_entry_count == expected_entries;
+            && artifact_result.public_type_entry_count == expected_entries
+            && artifact_result.public_value_entry_count
+                == expected_value_entries;
         if (!ok) {
             fprintf(stderr,
-                "parsed metadata capture failed: %s modules=%lu entries=%lu\n",
+                "parsed metadata capture failed: %s modules=%lu "
+                "type-entries=%lu value-entries=%lu\n",
                 cm_hir_library_status_name(artifact_result.status),
                 (unsigned long)artifact_result.module_count,
-                (unsigned long)artifact_result.public_type_entry_count);
+                (unsigned long)artifact_result.public_type_entry_count,
+                (unsigned long)artifact_result.public_value_entry_count);
         }
     }
     cm_hir_module_map_destroy(&modules);
@@ -767,9 +903,9 @@ static int parsed_producer_init(ParsedProducerFixture *fixture,
 
     return reverse_order
         ? parsed_producer_build(fixture, reverse_source,
-            sizeof(reverse_source) - 1u, 3u, 12u)
+            sizeof(reverse_source) - 1u, 3u, 12u, 0u, 0)
         : parsed_producer_build(fixture, forward_source,
-            sizeof(forward_source) - 1u, 3u, 12u);
+            sizeof(forward_source) - 1u, 3u, 12u, 0u, 0);
 }
 
 static void parsed_producer_destroy(ParsedProducerFixture *fixture)
@@ -922,6 +1058,23 @@ static CmHirLibraryBinding lookup(const CmHirLibraryArtifact *artifact,
     assert(cm_hir_library_artifact_lookup_binding(artifact, path, count,
         &binding) == CM_HIR_LIBRARY_OK);
     return binding;
+}
+
+static CmHirLibraryValue lookup_value(
+    const CmHirLibraryArtifact *artifact, const char *extern_name,
+    const char *name)
+{
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryValue value;
+
+    path[0].bytes = (const unsigned char *)extern_name;
+    path[0].length = strlen(extern_name);
+    path[1].bytes = (const unsigned char *)name;
+    path[1].length = strlen(name);
+    memset(&value, 0, sizeof(value));
+    assert(cm_hir_library_artifact_lookup_value(artifact, path, 2u,
+        &value) == CM_HIR_LIBRARY_OK);
+    return value;
 }
 
 static const CmHirItem *binding_item(const CmHirContext *context,
@@ -1970,7 +2123,7 @@ static void test_parsed_unsupported_hir_rejected(void)
     CmHirMetadataArtifactResult result;
 
     assert(parsed_producer_build(&producer, source, sizeof(source) - 1u,
-        1u, 2u));
+        1u, 2u, 0u, 0));
     cm_byte_buf_init(&encoded);
     cm_byte_buf_append(&encoded, sentinel, sizeof(sentinel));
     result = cm_hir_metadata_encode_artifact(&encoded, &producer.artifact);
@@ -2115,6 +2268,181 @@ static void assert_sentinel_preserved(const CmHirContext *context,
     assert(keep.type_kind == CM_HIR_TYPE_FOREIGN_KIND);
 }
 
+static void test_declaration_v2_value_round_trip(void)
+{
+    DeclarationProducerFixture producer;
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmByteBuf legacy_encoded;
+    CmHirMetadataArtifactResult result;
+    CmHirMetadataEnvelope envelope;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_root;
+    CmHirTypeId sentinel_type;
+    ContextLengths before;
+    CmHirLibraryBinding shared_type;
+    CmHirLibraryValue function_value;
+    CmHirLibraryValue const_value;
+    CmHirLibraryValue static_value;
+    const CmHirType *parameter_type;
+    const CmHirType *return_type;
+    const CmHirDefinition *definition;
+    const CmInternedString *abi;
+    CmHirLibraryOwnedData legacy_owned;
+    CmHirLibraryArtifact legacy_artifact;
+    CmHirLibraryArtifactIdentity producer_identity;
+    size_t root_index;
+
+    declaration_producer_init(&producer);
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    assert(result.module_count == 1u);
+    assert(result.public_entry_count == 4u);
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(encoded.data,
+        encoded.len, (uint16_t)CM_HIR_METADATA_DECLARATION_MAJOR,
+        (uint16_t)CM_HIR_METADATA_DECLARATION_MINOR, &envelope)
+        == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_decode_envelope(encoded.data, encoded.len,
+        &envelope) == CM_HIR_METADATA_UNSUPPORTED_VERSION);
+
+    cm_byte_buf_init(&reencoded);
+    reencoded.data = (unsigned char *)cm_alloc(1u);
+    reencoded.data[0] = UINT8_C(0x5a);
+    reencoded.len = 1u;
+    reencoded.cap = 1u;
+    result = cm_hir_metadata_encode_artifact(&reencoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_HIR);
+    assert(reencoded.len == 1u && reencoded.data[0] == UINT8_C(0x5a));
+    cm_byte_buf_destroy(&reencoded);
+
+    assert(cm_hir_library_artifact_identity(&producer.artifact,
+        &producer_identity));
+    cm_hir_library_owned_data_init(&legacy_owned);
+    assert(cm_hir_library_owned_data_add_module(&legacy_owned,
+        producer_identity.root_definition, &root_index)
+        == CM_HIR_LIBRARY_OK);
+    add_entry(&legacy_owned, root_index, "Shared", extern_type_binding(
+        producer.shared_type));
+    cm_hir_library_artifact_init(&legacy_artifact);
+    assert(cm_hir_library_artifact_restore_owned(&legacy_artifact,
+        &producer.context, producer_identity.crate_id,
+        producer_identity.root_definition, "legacy", &legacy_owned).status
+        == CM_HIR_LIBRARY_OK);
+    cm_hir_library_owned_data_destroy(&legacy_owned);
+    cm_byte_buf_init(&legacy_encoded);
+    assert(cm_hir_metadata_encode_artifact(&legacy_encoded,
+        &legacy_artifact).status == CM_HIR_METADATA_ARTIFACT_OK);
+
+    cm_hir_context_init(&consumer);
+    assert(cm_hir_create_crate(&consumer, cm_hir_intern(&consumer,
+        "sentinel"), CM_HIR_EDITION_2021, test_span(0u, 1u),
+        &sentinel_crate, &sentinel_root) == CM_HIR_OK);
+    sentinel_type = add_integer_type(&consumer, CM_HIR_INT_I16, 2u);
+    assert(sentinel_type != CM_HIR_TYPE_NONE);
+    cm_hir_library_artifact_init(&artifact);
+    before = context_lengths(&consumer);
+    result = cm_hir_metadata_decode_artifact(&consumer, &artifact,
+        encoded.data, encoded.len, "wrong_v1", 90u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_context_lengths(&consumer, before);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, legacy_encoded.data, legacy_encoded.len, "wrong_v2", 90u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_context_lengths(&consumer, before);
+
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 91u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    assert(result.crate_id > sentinel_crate);
+    assert(result.root_module > sentinel_root);
+    assert(result.module_count == 1u);
+    assert(result.public_entry_count == 4u);
+    shared_type = lookup(&artifact, "dep", "Shared", NULL);
+    assert(shared_type.kind == CM_HIR_LIBRARY_BINDING_TYPE);
+    assert(shared_type.type_kind == CM_HIR_TYPE_FOREIGN_KIND);
+    function_value = lookup_value(&artifact, "dep", "Shared");
+    assert(function_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION);
+    assert(function_value.data.function.parameter_count == 1u);
+    assert(function_value.data.function.safety == CM_HIR_UNSAFE);
+    parameter_type = cm_hir_get_type(&consumer,
+        function_value.data.function.parameter_types[0]);
+    return_type = cm_hir_get_type(&consumer,
+        function_value.data.function.return_type);
+    assert(parameter_type != NULL
+        && parameter_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && parameter_type->data.integer_type.kind == CM_HIR_INT_U32);
+    assert(return_type != NULL && return_type->kind == CM_HIR_TYPE_BOOL_KIND);
+    assert(function_value.data.function.parameter_types[0]
+        != producer.u32_type);
+    abi = cm_interner_get(&consumer.strings,
+        function_value.data.function.abi);
+    assert(abi != NULL && abi->len == 1u && abi->bytes[0] == 'C');
+    definition = cm_hir_lookup_definition(&consumer,
+        function_value.definition);
+    assert(definition != NULL
+        && definition->state == CM_HIR_DEFINITION_RESERVED
+        && definition->has_reserved_item_kind
+        && definition->reserved_item_kind == CM_HIR_ITEM_FUNCTION);
+    const_value = lookup_value(&artifact, "dep", "LIMIT");
+    assert(const_value.kind == CM_HIR_LIBRARY_VALUE_CONST);
+    assert(const_value.data.value.mutability == CM_HIR_IMMUTABLE);
+    static_value = lookup_value(&artifact, "dep", "COUNTER");
+    assert(static_value.kind == CM_HIR_LIBRARY_VALUE_STATIC);
+    assert(static_value.data.value.mutability == CM_HIR_MUTABLE);
+
+    cm_byte_buf_init(&reencoded);
+    assert(cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact).status == CM_HIR_METADATA_ARTIFACT_OK);
+    assert(reencoded.len == encoded.len);
+    assert(memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&legacy_encoded);
+    cm_hir_library_artifact_destroy(&legacy_artifact);
+    cm_byte_buf_destroy(&encoded);
+    declaration_producer_destroy(&producer);
+}
+
+static void test_parsed_declaration_v2_capture(void)
+{
+    static const unsigned char source[] =
+        "pub struct Api;\n"
+        "pub unsafe extern \"C\" fn call(value: u32) -> bool { "
+            "value == 0 }\n"
+        "pub const LIMIT: u32 = 7;\n"
+        "pub static COUNTER: u32 = 0;\n";
+    ParsedProducerFixture producer;
+    CmHirLibraryValue function_value;
+    CmHirLibraryValue const_value;
+    CmHirLibraryValue static_value;
+    CmByteBuf encoded;
+
+    assert(parsed_producer_build(&producer, source, sizeof(source) - 1u,
+        1u, 1u, 3u, 1));
+    function_value = lookup_value(&producer.artifact, "producer", "call");
+    assert(function_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION);
+    assert(function_value.data.function.parameter_count == 1u);
+    assert(function_value.data.function.safety == CM_HIR_UNSAFE);
+    const_value = lookup_value(&producer.artifact, "producer", "LIMIT");
+    assert(const_value.kind == CM_HIR_LIBRARY_VALUE_CONST);
+    static_value = lookup_value(&producer.artifact, "producer", "COUNTER");
+    assert(static_value.kind == CM_HIR_LIBRARY_VALUE_STATIC);
+    assert(static_value.data.value.mutability == CM_HIR_IMMUTABLE);
+    cm_byte_buf_init(&encoded);
+    assert(cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact).status == CM_HIR_METADATA_ARTIFACT_OK);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+}
+
 static int produce_process_artifact(const char *path, int reverse_order)
 {
     ParsedProducerFixture producer;
@@ -2138,6 +2466,73 @@ static int produce_process_artifact(const char *path, int reverse_order)
     }
     cm_byte_buf_destroy(&encoded);
     parsed_producer_destroy(&producer);
+    return ok;
+}
+
+static int produce_declaration_process_artifact(const char *path)
+{
+    DeclarationProducerFixture producer;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+    int ok;
+
+    declaration_producer_init(&producer);
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 4u
+        && write_metadata_file(path, &encoded);
+    cm_byte_buf_destroy(&encoded);
+    declaration_producer_destroy(&producer);
+    return ok;
+}
+
+static int consume_declaration_process_artifact(const char *path)
+{
+    CmByteBuf encoded;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_root;
+    CmHirTypeId sentinel_type;
+    CmHirMetadataArtifactResult result;
+    CmHirLibraryValue function_value;
+    const CmHirType *parameter_type;
+    const CmHirDefinition *definition;
+    int ok;
+
+    if (!read_metadata_file(path, &encoded)) return 0;
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context, cm_hir_intern(&context,
+        "process_sentinel"), CM_HIR_EDITION_2021, test_span(0u, 1u),
+        &sentinel_crate, &sentinel_root) == CM_HIR_OK);
+    sentinel_type = add_integer_type(&context, CM_HIR_INT_I8, 2u);
+    assert(sentinel_type != CM_HIR_TYPE_NONE);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&context,
+        &artifact, encoded.data, encoded.len, "dep", 101u);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.crate_id > sentinel_crate
+        && result.root_module > sentinel_root
+        && result.public_entry_count == 4u;
+    if (ok) {
+        function_value = lookup_value(&artifact, "dep", "Shared");
+        parameter_type = cm_hir_get_type(&context,
+            function_value.data.function.parameter_types[0]);
+        definition = cm_hir_lookup_definition(&context,
+            function_value.definition);
+        ok = function_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+            && parameter_type != NULL
+            && parameter_type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && parameter_type->data.integer_type.kind == CM_HIR_INT_U32
+            && definition != NULL
+            && definition->state == CM_HIR_DEFINITION_RESERVED
+            && definition->reserved_item_kind == CM_HIR_ITEM_FUNCTION;
+    }
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_byte_buf_destroy(&encoded);
     return ok;
 }
 
@@ -2273,9 +2668,16 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "consume") == 0) {
         return consume_process_artifact(argv[2]) ? 0 : 1;
     }
+    if (argc == 3 && strcmp(argv[1], "produce-declaration") == 0) {
+        return produce_declaration_process_artifact(argv[2]) ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "consume-declaration") == 0) {
+        return consume_declaration_process_artifact(argv[2]) ? 0 : 1;
+    }
     if (argc != 1) {
         fputs("usage: test_hir_metadata "
-            "[produce-forward|produce-reverse|consume FILE]\n", stderr);
+            "[produce-forward|produce-reverse|consume|produce-declaration|"
+            "consume-declaration FILE]\n", stderr);
         return 2;
     }
     test_primitive_only_round_trip();
@@ -2284,6 +2686,8 @@ int main(int argc, char **argv)
     test_unsupported_hir_rejected();
     test_parsed_unsupported_hir_rejected();
     test_semantic_round_trip();
+    test_declaration_v2_value_round_trip();
+    test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(
         CM_HIR_METADATA_ARTIFACT_OK), "ok") == 0);
     return 0;

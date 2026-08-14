@@ -63,6 +63,20 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     const void *encoded, size_t encoded_length, const char *extern_name,
     CmSourceId metadata_source);
 
+/*
+ * Exact cmhir-meta-v2.0 declaration boundary. It extends v1.0 with
+ * authenticated monomorphic public free-function signatures and public
+ * const/static declarations in a separate value namespace. Bodies, MIR,
+ * evaluated constants, generics, predicates, and link objects are absent by
+ * contract; unsupported declaration types reject the complete transaction.
+ */
+CmHirMetadataArtifactResult cm_hir_metadata_encode_declaration_artifact(
+    CmByteBuf *output, const CmHirLibraryArtifact *artifact);
+CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
+    CmHirContext *context, CmHirLibraryArtifact *artifact,
+    const void *encoded, size_t encoded_length, const char *extern_name,
+    CmSourceId metadata_source);
+
 const char *cm_hir_metadata_artifact_status_name(
     CmHirMetadataArtifactStatus status);
 

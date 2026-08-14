@@ -21,6 +21,7 @@ typedef struct CmHirLibraryArtifactResult {
     CmHirLibraryStatus status;
     size_t module_count;
     size_t public_type_entry_count;
+    size_t public_value_entry_count;
 } CmHirLibraryArtifactResult;
 
 typedef struct CmHirLibraryPathSegment {
@@ -34,11 +35,51 @@ typedef struct CmHirLibraryType {
     CmHirPrimitiveKind primitive_kind;
 } CmHirLibraryType;
 
+typedef enum CmHirLibraryValueKind {
+    CM_HIR_LIBRARY_VALUE_NONE = 0,
+    CM_HIR_LIBRARY_VALUE_FUNCTION,
+    CM_HIR_LIBRARY_VALUE_CONST,
+    CM_HIR_LIBRARY_VALUE_STATIC
+} CmHirLibraryValueKind;
+
+/*
+ * Declaration-only callable shape. Parameter patterns and bodies are not
+ * part of a cross-crate function signature. `parameter_types` and the ABI
+ * intern ID are borrowed from the artifact's identity context.
+ */
+typedef struct CmHirLibraryFunctionSignature {
+    const CmHirTypeId *parameter_types;
+    uint32_t parameter_count;
+    CmHirTypeId return_type;
+    CmInternId abi;
+    CmHirSafety safety;
+    int is_const;
+    int is_async;
+    int is_variadic;
+} CmHirLibraryFunctionSignature;
+
+/*
+ * Authenticated value-namespace declaration. This first declaration slice
+ * never carries a body, MIR, initializer, evaluated const, or link object.
+ */
+typedef struct CmHirLibraryValue {
+    CmHirDefId definition;
+    CmHirLibraryValueKind kind;
+    union {
+        CmHirLibraryFunctionSignature function;
+        struct {
+            CmHirTypeId type;
+            CmHirMutability mutability;
+        } value;
+    } data;
+} CmHirLibraryValue;
+
 typedef enum CmHirLibraryBindingKind {
     CM_HIR_LIBRARY_BINDING_TYPE = 0,
     CM_HIR_LIBRARY_BINDING_MODULE,
     CM_HIR_LIBRARY_BINDING_TRAIT,
-    CM_HIR_LIBRARY_BINDING_PRIMITIVE
+    CM_HIR_LIBRARY_BINDING_PRIMITIVE,
+    CM_HIR_LIBRARY_BINDING_VALUE
 } CmHirLibraryBindingKind;
 
 typedef struct CmHirLibraryBinding {
@@ -46,6 +87,7 @@ typedef struct CmHirLibraryBinding {
     CmHirDefId definition;
     CmHirTypeKind type_kind;
     CmHirPrimitiveKind primitive_kind;
+    CmHirLibraryValueKind value_kind;
 } CmHirLibraryBinding;
 
 typedef struct CmHirLibraryImport {
@@ -74,14 +116,23 @@ void cm_hir_library_artifact_destroy(CmHirLibraryArtifact *artifact);
  * destroyed. Referenced DefIds remain owned by `context`, which must outlive
  * the artifact and every consumer that uses it.
  *
- * This artifact slice publishes modules, traits, ADTs, type aliases, extern
- * types, and builtin primitives, including public type-namespace reexports
- * whose targets belong to the same producer crate. Exact non-glob consumer
- * imports of those entries are authenticated separately. Values, macros,
- * transitive external reexports, globs, and serialization are intentionally
- * omitted.
+ * This legacy artifact slice publishes modules, traits, ADTs, type aliases,
+ * extern types, and builtin primitives, including same-crate public
+ * type-namespace reexports. Values are intentionally omitted.
  */
 CmHirLibraryArtifactResult cm_hir_library_artifact_build(
+    CmHirLibraryArtifact *artifact, const CmHirContext *context,
+    CmHirCrateId crate_id, const CmModuleGraph *graph,
+    CmModuleGraphRevision revision, const CmHirModuleMap *modules,
+    const char *extern_name);
+
+/*
+ * Builds the declaration-v2 library view. In addition to the legacy type
+ * namespace, it authenticates monomorphic public free functions, consts, and
+ * statics plus same-crate value reexports. Bodies, evaluated consts, external
+ * reexports, globs, macros, and link objects are not represented.
+ */
+CmHirLibraryArtifactResult cm_hir_library_declaration_artifact_build(
     CmHirLibraryArtifact *artifact, const CmHirContext *context,
     CmHirCrateId crate_id, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmHirModuleMap *modules,
@@ -102,6 +153,12 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_type(
     const CmHirLibraryArtifact *artifact,
     const CmHirLibraryPathSegment *segments, size_t segment_count,
     CmHirLibraryType *out_type);
+
+/* Resolves one exact public value-namespace declaration. */
+CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
+    const CmHirLibraryArtifact *artifact,
+    const CmHirLibraryPathSegment *segments, size_t segment_count,
+    CmHirLibraryValue *out_value);
 
 /*
  * Authenticates one unresolved, non-glob consumer type-namespace use-tree

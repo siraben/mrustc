@@ -13,6 +13,7 @@ typedef struct CmHirLibraryOwnedEntry {
     CmHirDefId target;
     CmHirTypeKind type_kind;
     CmHirPrimitiveKind primitive_kind;
+    CmHirLibraryValueKind value_kind;
     CmHirLibraryBindingKind kind;
 } CmHirLibraryOwnedEntry;
 
@@ -25,9 +26,15 @@ typedef struct CmHirLibraryOwnedModule {
     CmHirModuleId capture_hir_module;
 } CmHirLibraryOwnedModule;
 
+typedef struct CmHirLibraryOwnedValue {
+    CmHirLibraryValue declaration;
+    CmHirTypeId *parameter_types;
+} CmHirLibraryOwnedValue;
+
 typedef struct CmHirLibraryOwnedData {
     CmInterner names;
     CmVec modules;
+    CmVec values;
 } CmHirLibraryOwnedData;
 
 void cm_hir_library_owned_data_init(CmHirLibraryOwnedData *data);
@@ -46,6 +53,10 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_entry(
     CmHirLibraryOwnedData *data, size_t module_index,
     const unsigned char *name, size_t name_length,
     const CmHirLibraryBinding *binding);
+
+/* Copies one unique declaration, including its function parameter types. */
+CmHirLibraryStatus cm_hir_library_owned_data_add_value(
+    CmHirLibraryOwnedData *data, const CmHirLibraryValue *value);
 
 /*
  * Validate and install `data` over an already initialized artifact.  Success

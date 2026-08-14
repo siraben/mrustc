@@ -15,12 +15,14 @@
 #define CM_META_MAX_ENTRIES UINT32_C(131072)
 #define CM_META_MAX_TRAITS UINT32_C(65536)
 #define CM_META_MAX_IMPLS UINT32_C(131072)
+#define CM_META_MAX_VALUES UINT32_C(131072)
 #define CM_META_MAX_STRING UINT32_C(1048576)
 
 #define CM_META_BINDING_MODULE UINT8_C(1)
 #define CM_META_BINDING_TYPE UINT8_C(2)
 #define CM_META_BINDING_PRIMITIVE UINT8_C(3)
 #define CM_META_BINDING_TRAIT UINT8_C(4)
+#define CM_META_BINDING_VALUE UINT8_C(5)
 
 #define CM_META_UNIVERSE_OPEN UINT8_C(0)
 
@@ -29,6 +31,10 @@
 #define CM_META_ITEM_UNION UINT8_C(3)
 #define CM_META_ITEM_ENUM UINT8_C(4)
 #define CM_META_ITEM_ALIAS UINT8_C(5)
+
+#define CM_META_VALUE_FUNCTION UINT8_C(1)
+#define CM_META_VALUE_CONST UINT8_C(2)
+#define CM_META_VALUE_STATIC UINT8_C(3)
 
 #define CM_META_GENERIC_LIFETIME UINT8_C(1)
 #define CM_META_GENERIC_TYPE UINT8_C(2)
@@ -91,6 +97,10 @@ static const unsigned char cm_meta_tag_namespace[4] = {
     (unsigned char)'N', (unsigned char)'S',
     (unsigned char)'P', (unsigned char)'C'
 };
+static const unsigned char cm_meta_tag_values[4] = {
+    (unsigned char)'V', (unsigned char)'A',
+    (unsigned char)'L', (unsigned char)'U'
+};
 static const unsigned char cm_meta_tag_trait_universe[4] = {
     (unsigned char)'T', (unsigned char)'U',
     (unsigned char)'N', (unsigned char)'I'
@@ -141,6 +151,14 @@ typedef struct CmMetaEncodeImpl {
     uint32_t owner;
     uint32_t trait_local;
 } CmMetaEncodeImpl;
+
+typedef struct CmMetaEncodeValue {
+    CmHirDefId definition;
+    const CmHirLibraryOwnedValue *value;
+    const CmInternedString *canonical_name;
+    uint32_t canonical_module;
+    uint8_t kind;
+} CmMetaEncodeValue;
 
 typedef struct CmMetaWireName {
     const unsigned char *bytes;
@@ -282,6 +300,26 @@ typedef struct CmMetaWireImpl {
     uint8_t safety;
     int is_negative;
 } CmMetaWireImpl;
+
+typedef struct CmMetaWireValue {
+    uint8_t kind;
+    union {
+        struct {
+            uint32_t *parameter_types;
+            uint32_t parameter_count;
+            uint32_t return_type;
+            CmMetaWireName abi;
+            uint8_t safety;
+            int is_const;
+            int is_async;
+            int is_variadic;
+        } function;
+        struct {
+            uint32_t type;
+            uint8_t mutability;
+        } value;
+    } data;
+} CmMetaWireValue;
 
 static CmHirMetadataArtifactResult cm_meta_result(
     CmHirMetadataArtifactStatus status)
@@ -490,6 +528,33 @@ static CmHirTypeKind cm_meta_item_type_kind(uint8_t item_kind)
     return CM_HIR_TYPE_ADT_KIND;
 }
 
+static uint8_t cm_meta_value_kind_to_wire(CmHirLibraryValueKind kind)
+{
+    switch (kind) {
+    case CM_HIR_LIBRARY_VALUE_FUNCTION: return CM_META_VALUE_FUNCTION;
+    case CM_HIR_LIBRARY_VALUE_CONST: return CM_META_VALUE_CONST;
+    case CM_HIR_LIBRARY_VALUE_STATIC: return CM_META_VALUE_STATIC;
+    case CM_HIR_LIBRARY_VALUE_NONE: return UINT8_C(0);
+    }
+    return UINT8_C(0);
+}
+
+static int cm_meta_value_kind_from_wire(uint8_t wire,
+    CmHirLibraryValueKind *out_kind)
+{
+    if (out_kind == NULL) return 0;
+    switch (wire) {
+    case CM_META_VALUE_FUNCTION:
+        *out_kind = CM_HIR_LIBRARY_VALUE_FUNCTION; return 1;
+    case CM_META_VALUE_CONST:
+        *out_kind = CM_HIR_LIBRARY_VALUE_CONST; return 1;
+    case CM_META_VALUE_STATIC:
+        *out_kind = CM_HIR_LIBRARY_VALUE_STATIC; return 1;
+    default:
+        return 0;
+    }
+}
+
 static uint8_t cm_meta_integer_to_wire(CmHirIntType kind)
 {
     switch (kind) {
@@ -667,6 +732,23 @@ static uint32_t cm_meta_trait_local(const CmVec *traits,
     return UINT32_C(0);
 }
 
+static uint32_t cm_meta_value_local(const CmVec *values,
+    CmHirDefId definition)
+{
+    size_t index;
+
+    for (index = 0u; index < values->len; ++index) {
+        const CmMetaEncodeValue *value;
+
+        value = (const CmMetaEncodeValue *)cm_vec_at_const(values, index);
+        if (value != NULL
+            && cm_hir_def_id_equal(value->definition, definition)) {
+            return (uint32_t)(index + 1u);
+        }
+    }
+    return UINT32_C(0);
+}
+
 static int cm_meta_module_compare(const void *left_value,
     const void *right_value)
 {
@@ -715,6 +797,25 @@ static int cm_meta_trait_compare(const void *left_value,
     if (names != 0) return names;
     if (left->definition.index < right->definition.index) return -1;
     if (left->definition.index > right->definition.index) return 1;
+    return 0;
+}
+
+static int cm_meta_value_compare(const void *left_value,
+    const void *right_value)
+{
+    const CmMetaEncodeValue *left;
+    const CmMetaEncodeValue *right;
+    int names;
+
+    left = (const CmMetaEncodeValue *)left_value;
+    right = (const CmMetaEncodeValue *)right_value;
+    if (left->canonical_module < right->canonical_module) return -1;
+    if (left->canonical_module > right->canonical_module) return 1;
+    names = cm_meta_name_compare(left->canonical_name,
+        right->canonical_name);
+    if (names != 0) return names;
+    if (left->kind < right->kind) return -1;
+    if (left->kind > right->kind) return 1;
     return 0;
 }
 
@@ -891,6 +992,18 @@ static int cm_meta_write_name(CmHirMetadataWriter *writer,
             == CM_HIR_METADATA_OK;
 }
 
+static int cm_meta_write_string(CmHirMetadataWriter *writer,
+    const CmInternedString *string)
+{
+    if (string == NULL || string->len == 0u
+        || string->len > (size_t)CM_META_MAX_STRING
+        || string->len > (size_t)UINT32_MAX) return 0;
+    return cm_hir_metadata_write_u32(writer, (uint32_t)string->len)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_write_bytes(writer, string->bytes, string->len)
+            == CM_HIR_METADATA_OK;
+}
+
 static int cm_meta_write_generic_name(CmHirMetadataWriter *writer,
     const CmInternedString *name, uint8_t kind)
 {
@@ -903,7 +1016,7 @@ static int cm_meta_write_generic_name(CmHirMetadataWriter *writer,
 }
 
 static int cm_meta_collect_items(const CmHirLibraryArtifactIdentity *identity,
-    const CmVec *modules, CmVec *items, int semantic)
+    const CmVec *modules, CmVec *items, int semantic, int declaration)
 {
     size_t item_index;
 
@@ -918,6 +1031,9 @@ static int cm_meta_collect_items(const CmHirLibraryArtifactIdentity *identity,
         if (item == NULL) return 0;
         if (item->definition.crate_id != identity->crate_id) continue;
         if (item->kind == CM_HIR_ITEM_MODULE) continue;
+        if (declaration && (item->kind == CM_HIR_ITEM_FUNCTION
+                || item->kind == CM_HIR_ITEM_CONST
+                || item->kind == CM_HIR_ITEM_STATIC)) continue;
         if (semantic && (item->kind == CM_HIR_ITEM_TRAIT
                 || item->kind == CM_HIR_ITEM_IMPL)) continue;
         memset(&collected, 0, sizeof(collected));
@@ -1063,9 +1179,94 @@ static int cm_meta_collect_trait_universe(
     return 1;
 }
 
+static int cm_meta_collect_values(const CmHirLibraryOwnedData *owned,
+    const CmVec *modules, CmVec *values)
+{
+    size_t value_index;
+
+    if (owned == NULL || modules == NULL || values == NULL
+        || owned->values.elem_size != sizeof(CmHirLibraryOwnedValue)) {
+        return 0;
+    }
+    for (value_index = 0u; value_index < owned->values.len; ++value_index) {
+        const CmHirLibraryOwnedValue *owned_value;
+        CmMetaEncodeValue collected;
+        size_t module_index;
+
+        owned_value = (const CmHirLibraryOwnedValue *)cm_vec_at_const(
+            &owned->values, value_index);
+        memset(&collected, 0, sizeof(collected));
+        if (owned_value == NULL) return 0;
+        collected.definition = owned_value->declaration.definition;
+        collected.value = owned_value;
+        collected.kind = cm_meta_value_kind_to_wire(
+            owned_value->declaration.kind);
+        if (collected.kind == 0u) return 0;
+        for (module_index = 0u; module_index < owned->modules.len;
+                ++module_index) {
+            const CmHirLibraryOwnedModule *module;
+            uint32_t module_local;
+            size_t entry_index;
+
+            module = (const CmHirLibraryOwnedModule *)cm_vec_at_const(
+                &owned->modules, module_index);
+            module_local = module == NULL ? UINT32_C(0)
+                : cm_meta_module_local(modules, module->definition);
+            if (module == NULL || module_local == 0u) return 0;
+            for (entry_index = 0u; entry_index < module->entries.len;
+                    ++entry_index) {
+                const CmHirLibraryOwnedEntry *entry;
+                const CmInternedString *name;
+
+                entry = (const CmHirLibraryOwnedEntry *)cm_vec_at_const(
+                    &module->entries, entry_index);
+                if (entry == NULL
+                    || entry->kind != CM_HIR_LIBRARY_BINDING_VALUE
+                    || !cm_hir_def_id_equal(entry->target,
+                        collected.definition)
+                    || entry->value_kind
+                        != owned_value->declaration.kind) continue;
+                name = cm_interner_get(&owned->names, entry->name);
+                if (name == NULL) return 0;
+                if (collected.canonical_module == 0u
+                    || module_local < collected.canonical_module
+                    || (module_local == collected.canonical_module
+                        && cm_meta_name_compare(name,
+                            collected.canonical_name) < 0)) {
+                    collected.canonical_module = module_local;
+                    collected.canonical_name = name;
+                }
+            }
+        }
+        if (collected.canonical_module == 0u
+            || collected.canonical_name == NULL) return 0;
+        (void)cm_vec_push(values, &collected);
+        if (values->len > (size_t)CM_META_MAX_VALUES) return 0;
+    }
+    if (values->len > 1u) {
+        qsort(values->data, values->len, sizeof(CmMetaEncodeValue),
+            cm_meta_value_compare);
+    }
+    for (value_index = 1u; value_index < values->len; ++value_index) {
+        const CmMetaEncodeValue *prior;
+        const CmMetaEncodeValue *value;
+
+        prior = (const CmMetaEncodeValue *)cm_vec_at_const(values,
+            value_index - 1u);
+        value = (const CmMetaEncodeValue *)cm_vec_at_const(values,
+            value_index);
+        if (prior == NULL || value == NULL
+            || (prior->canonical_module == value->canonical_module
+                && cm_meta_name_compare(prior->canonical_name,
+                    value->canonical_name) == 0)) return 0;
+    }
+    return 1;
+}
+
 static int cm_meta_collect_entries(const CmHirLibraryOwnedData *owned,
     const CmVec *modules, const CmVec *items, const CmVec *traits,
-    CmVec *entries, size_t *out_public_entry_count)
+    const CmVec *values, CmVec *entries,
+    size_t *out_public_entry_count)
 {
     size_t module_index;
     size_t public_entry_count;
@@ -1123,6 +1324,19 @@ static int cm_meta_collect_entries(const CmHirLibraryOwnedData *owned,
                 collected.kind = CM_META_BINDING_TRAIT;
                 collected.target = cm_meta_trait_local(traits,
                     entry->target);
+            } else if (entry != NULL && values != NULL
+                && entry->kind == CM_HIR_LIBRARY_BINDING_VALUE) {
+                const CmMetaEncodeValue *target_value;
+
+                collected.kind = CM_META_BINDING_VALUE;
+                collected.target = cm_meta_value_local(values,
+                    entry->target);
+                target_value = collected.target == 0u ? NULL
+                    : (const CmMetaEncodeValue *)cm_vec_at_const(values,
+                        (size_t)(collected.target - 1u));
+                if (target_value == NULL
+                    || target_value->value->declaration.kind
+                        != entry->value_kind) return 0;
             }
             if (collected.name == NULL || collected.kind == 0u
                 || collected.target == 0u) return 0;
@@ -1149,7 +1363,9 @@ static int cm_meta_collect_entries(const CmHirLibraryOwnedData *owned,
             module_index);
         if (prior == NULL || entry == NULL
             || (prior->module == entry->module
-                && cm_meta_name_compare(prior->name, entry->name) == 0)) {
+                && cm_meta_name_compare(prior->name, entry->name) == 0
+                && (prior->kind == CM_META_BINDING_VALUE)
+                    == (entry->kind == CM_META_BINDING_VALUE))) {
             return 0;
         }
     }
@@ -1422,7 +1638,8 @@ static int cm_meta_collect_type(const CmHirLibraryArtifactIdentity *identity,
 
 static int cm_meta_collect_types(
     const CmHirLibraryArtifactIdentity *identity, const CmVec *items,
-    const CmVec *generics, const CmVec *impls, CmVec *types)
+    const CmVec *generics, const CmVec *impls, const CmVec *values,
+    CmVec *types)
 {
     unsigned char *states;
     size_t index;
@@ -1493,6 +1710,36 @@ static int cm_meta_collect_types(
         valid = impl_value != NULL
             && cm_meta_collect_type(identity, items, generics, types,
                 states, impl_value->item->data.impl_item.self_type);
+    }
+    for (index = 0u; valid && values != NULL && index < values->len;
+            ++index) {
+        const CmMetaEncodeValue *encoded_value;
+        const CmHirLibraryValue *value;
+        uint32_t parameter;
+
+        encoded_value = (const CmMetaEncodeValue *)cm_vec_at_const(values,
+            index);
+        value = encoded_value == NULL ? NULL
+            : &encoded_value->value->declaration;
+        if (value == NULL) {
+            valid = 0;
+            break;
+        }
+        if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
+            for (parameter = 0u; valid
+                    && parameter < value->data.function.parameter_count;
+                    ++parameter) {
+                valid = cm_meta_collect_type(identity, items, generics,
+                    types, states,
+                    value->data.function.parameter_types[parameter]);
+            }
+            if (valid) valid = cm_meta_collect_type(identity, items,
+                generics, types, states,
+                value->data.function.return_type);
+        } else {
+            valid = cm_meta_collect_type(identity, items, generics, types,
+                states, value->data.value.type);
+        }
     }
     cm_free(states);
     return valid;
@@ -1939,8 +2186,68 @@ static int cm_meta_write_item(CmHirMetadataWriter *writer,
     return 0;
 }
 
+static int cm_meta_write_value(CmHirMetadataWriter *writer,
+    const CmHirLibraryArtifactIdentity *identity,
+    const CmMetaEncodeValue *encoded, const CmVec *types)
+{
+    const CmHirLibraryValue *value;
+
+    if (writer == NULL || identity == NULL || encoded == NULL
+        || encoded->value == NULL || types == NULL) return 0;
+    value = &encoded->value->declaration;
+    if (cm_hir_metadata_write_u8(writer, encoded->kind)
+            != CM_HIR_METADATA_OK) return 0;
+    if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
+        uint32_t index;
+        uint32_t local;
+
+        if (cm_hir_metadata_write_u32(writer,
+                value->data.function.parameter_count)
+                != CM_HIR_METADATA_OK) return 0;
+        for (index = 0u; index < value->data.function.parameter_count;
+                ++index) {
+            local = cm_meta_type_local(types,
+                value->data.function.parameter_types[index]);
+            if (local == 0u || cm_hir_metadata_write_u32(writer, local)
+                    != CM_HIR_METADATA_OK) return 0;
+        }
+        local = cm_meta_type_local(types, value->data.function.return_type);
+        return local != 0u
+            && cm_hir_metadata_write_u32(writer, local)
+                == CM_HIR_METADATA_OK
+            && cm_meta_write_string(writer, cm_interner_get(
+                &identity->context->strings, value->data.function.abi))
+            && cm_hir_metadata_write_u8(writer,
+                (uint8_t)value->data.function.safety)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u8(writer,
+                value->data.function.is_const ? UINT8_C(1) : UINT8_C(0))
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u8(writer,
+                value->data.function.is_async ? UINT8_C(1) : UINT8_C(0))
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u8(writer,
+                value->data.function.is_variadic
+                    ? UINT8_C(1) : UINT8_C(0)) == CM_HIR_METADATA_OK;
+    }
+    {
+        uint32_t local;
+        uint8_t mutability;
+
+        local = cm_meta_type_local(types, value->data.value.type);
+        mutability = cm_meta_mutability_to_wire(
+            value->data.value.mutability);
+        return local != 0u && mutability != 0u
+            && cm_hir_metadata_write_u32(writer, local)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u8(writer, mutability)
+                == CM_HIR_METADATA_OK;
+    }
+}
+
 static CmHirMetadataArtifactResult cm_meta_encode_artifact(
-    CmByteBuf *output, const CmHirLibraryArtifact *artifact, int semantic)
+    CmByteBuf *output, const CmHirLibraryArtifact *artifact, int semantic,
+    int declaration)
 {
     CmHirMetadataArtifactResult result;
     CmHirLibraryArtifactIdentity identity;
@@ -1953,6 +2260,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     CmVec entries;
     CmVec traits;
     CmVec impls;
+    CmVec values;
     CmByteBuf crate_section;
     CmByteBuf module_section;
     CmByteBuf generic_section;
@@ -1960,6 +2268,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     CmByteBuf item_section;
     CmByteBuf namespace_section;
     CmByteBuf trait_universe_section;
+    CmByteBuf value_section;
     CmByteBuf payload;
     CmHirMetadataWriter writer;
     CmHirMetadataWriter payload_writer;
@@ -1968,7 +2277,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     size_t public_entry_count;
 
     result = cm_meta_result(CM_HIR_METADATA_ARTIFACT_INVALID_ARGUMENT);
-    if (output == NULL || artifact == NULL
+    if (output == NULL || artifact == NULL || (semantic && declaration)
         || !cm_hir_library_artifact_identity(artifact, &identity)
         || (owned = cm_hir_library_artifact_owned_data_const(artifact))
             == NULL
@@ -1984,22 +2293,27 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     cm_vec_init(&entries, sizeof(CmMetaEncodeEntry));
     cm_vec_init(&traits, sizeof(CmMetaEncodeTrait));
     cm_vec_init(&impls, sizeof(CmMetaEncodeImpl));
+    cm_vec_init(&values, sizeof(CmMetaEncodeValue));
     if (!cm_meta_collect_modules(&identity, owned, &modules)) {
         result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
         goto cleanup_views;
     }
-    if (!cm_meta_collect_items(&identity, &modules, &items, semantic)
+    if (!cm_meta_collect_items(&identity, &modules, &items, semantic,
+            declaration)
         || (semantic && !cm_meta_collect_trait_universe(&identity,
             &modules, &traits, &impls))
+        || (declaration && !cm_meta_collect_values(owned, &modules,
+            &values))
         || !cm_meta_collect_generics(&identity, &items, &generics)
         || !cm_meta_collect_types(&identity, &items, &generics,
-            semantic ? &impls : NULL, &types)
+            semantic ? &impls : NULL, declaration ? &values : NULL, &types)
         || !cm_meta_encode_aliases_acyclic(&identity, &items)) {
         result.status = CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR;
         goto cleanup_views;
     }
     if (!cm_meta_collect_entries(owned, &modules, &items,
-            semantic ? &traits : NULL, &entries,
+            semantic ? &traits : NULL, declaration ? &values : NULL,
+            &entries,
             &public_entry_count)) {
         result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
         goto cleanup_views;
@@ -2011,6 +2325,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     cm_byte_buf_init(&item_section);
     cm_byte_buf_init(&namespace_section);
     cm_byte_buf_init(&trait_universe_section);
+    cm_byte_buf_init(&value_section);
     cm_byte_buf_init(&payload);
 
     cm_hir_metadata_writer_init(&writer, &crate_section,
@@ -2141,6 +2456,24 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         }
     }
 
+    if (declaration) {
+        cm_hir_metadata_writer_init(&writer, &value_section,
+            CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
+        if (cm_hir_metadata_write_u32(&writer, (uint32_t)values.len)
+                != CM_HIR_METADATA_OK) goto encode_limit;
+        for (module_index = 0u; module_index < values.len; ++module_index) {
+            const CmMetaEncodeValue *value;
+
+            value = (const CmMetaEncodeValue *)cm_vec_at_const(&values,
+                module_index);
+            if (value == NULL || !cm_meta_write_value(&writer, &identity,
+                    value, &types)) {
+                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                goto cleanup_encode;
+            }
+        }
+    }
+
     cm_hir_metadata_writer_init(&writer, &namespace_section,
         CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
     if (cm_hir_metadata_write_u32(&writer, (uint32_t)entries.len)
@@ -2244,6 +2577,9 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     if (codec_status == CM_HIR_METADATA_OK)
         codec_status = cm_hir_metadata_write_section(&payload_writer,
             cm_meta_tag_items, item_section.data, item_section.len);
+    if (codec_status == CM_HIR_METADATA_OK && declaration)
+        codec_status = cm_hir_metadata_write_section(&payload_writer,
+            cm_meta_tag_values, value_section.data, value_section.len);
     if (codec_status == CM_HIR_METADATA_OK)
         codec_status = cm_hir_metadata_write_section(&payload_writer,
             cm_meta_tag_namespace, namespace_section.data,
@@ -2257,9 +2593,11 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         goto cleanup_encode;
     }
     codec_status = cm_hir_metadata_encode_envelope_version(output,
-        (uint16_t)CM_HIR_METADATA_MAJOR,
-        (uint16_t)(semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
-            : CM_HIR_METADATA_MINOR), UINT32_C(0), payload.data,
+        (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MAJOR
+            : CM_HIR_METADATA_MAJOR),
+        (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MINOR
+            : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
+                : CM_HIR_METADATA_MINOR)), UINT32_C(0), payload.data,
         payload.len);
     if (codec_status != CM_HIR_METADATA_OK) {
         result.status = cm_meta_codec_status(codec_status);
@@ -2275,6 +2613,7 @@ encode_limit:
 
 cleanup_encode:
     cm_byte_buf_destroy(&payload);
+    cm_byte_buf_destroy(&value_section);
     cm_byte_buf_destroy(&trait_universe_section);
     cm_byte_buf_destroy(&namespace_section);
     cm_byte_buf_destroy(&item_section);
@@ -2283,6 +2622,7 @@ cleanup_encode:
     cm_byte_buf_destroy(&module_section);
     cm_byte_buf_destroy(&crate_section);
 cleanup_views:
+    cm_vec_destroy(&values);
     cm_vec_destroy(&impls);
     cm_vec_destroy(&traits);
     cm_vec_destroy(&entries);
@@ -2296,13 +2636,19 @@ cleanup_views:
 CmHirMetadataArtifactResult cm_hir_metadata_encode_artifact(
     CmByteBuf *output, const CmHirLibraryArtifact *artifact)
 {
-    return cm_meta_encode_artifact(output, artifact, 0);
+    return cm_meta_encode_artifact(output, artifact, 0, 0);
 }
 
 CmHirMetadataArtifactResult cm_hir_metadata_encode_semantic_artifact(
     CmByteBuf *output, const CmHirLibraryArtifact *artifact)
 {
-    return cm_meta_encode_artifact(output, artifact, 1);
+    return cm_meta_encode_artifact(output, artifact, 1, 0);
+}
+
+CmHirMetadataArtifactResult cm_hir_metadata_encode_declaration_artifact(
+    CmByteBuf *output, const CmHirLibraryArtifact *artifact)
+{
+    return cm_meta_encode_artifact(output, artifact, 0, 1);
 }
 
 static int cm_meta_read_name(CmHirMetadataReader *reader,
@@ -2318,6 +2664,22 @@ static int cm_meta_read_name(CmHirMetadataReader *reader,
         || !cm_meta_identifier_bytes_valid(bytes, (size_t)length)) return 0;
     out_name->bytes = bytes;
     out_name->length = (size_t)length;
+    return 1;
+}
+
+static int cm_meta_read_string(CmHirMetadataReader *reader,
+    CmMetaWireName *out_string)
+{
+    uint32_t length;
+    const unsigned char *bytes;
+
+    if (reader == NULL || out_string == NULL
+        || cm_hir_metadata_read_u32(reader, &length) != CM_HIR_METADATA_OK
+        || length == 0u || length > CM_META_MAX_STRING
+        || cm_hir_metadata_read_bytes(reader, (size_t)length, &bytes)
+            != CM_HIR_METADATA_OK) return 0;
+    out_string->bytes = bytes;
+    out_string->length = (size_t)length;
     return 1;
 }
 
@@ -2876,9 +3238,114 @@ static int cm_meta_decode_items(const CmHirMetadataSection *section,
     return cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK;
 }
 
+static void cm_meta_wire_values_destroy(CmVec *values)
+{
+    size_t index;
+
+    for (index = 0u; index < values->len; ++index) {
+        CmMetaWireValue *value;
+
+        value = (CmMetaWireValue *)cm_vec_at(values, index);
+        if (value != NULL && value->kind == CM_META_VALUE_FUNCTION)
+            cm_free(value->data.function.parameter_types);
+    }
+    cm_vec_destroy(values);
+}
+
+static int cm_meta_decode_values(const CmHirMetadataSection *section,
+    uint32_t type_count, CmVec *values)
+{
+    CmHirMetadataReader reader;
+    uint32_t count;
+    uint32_t index;
+
+    cm_hir_metadata_reader_init(&reader, section->data, section->length);
+    if (cm_hir_metadata_read_u32(&reader, &count) != CM_HIR_METADATA_OK
+        || count > CM_META_MAX_VALUES) return 0;
+    for (index = 0u; index < count; ++index) {
+        CmMetaWireValue value;
+
+        memset(&value, 0, sizeof(value));
+        if (cm_hir_metadata_read_u8(&reader, &value.kind)
+                != CM_HIR_METADATA_OK) return 0;
+        if (value.kind == CM_META_VALUE_FUNCTION) {
+            uint32_t parameter;
+            uint8_t safety;
+            uint8_t is_const;
+            uint8_t is_async;
+            uint8_t is_variadic;
+
+            if (cm_hir_metadata_read_u32(&reader,
+                    &value.data.function.parameter_count)
+                    != CM_HIR_METADATA_OK
+                || value.data.function.parameter_count > CM_META_MAX_TYPES) {
+                return 0;
+            }
+            value.data.function.parameter_types = (uint32_t *)
+                cm_alloc_zeroed(
+                    (size_t)value.data.function.parameter_count,
+                    sizeof(uint32_t));
+            for (parameter = 0u;
+                    parameter < value.data.function.parameter_count;
+                    ++parameter) {
+                if (cm_hir_metadata_read_u32(&reader,
+                        &value.data.function.parameter_types[parameter])
+                        != CM_HIR_METADATA_OK
+                    || value.data.function.parameter_types[parameter] == 0u
+                    || value.data.function.parameter_types[parameter]
+                        > type_count) {
+                    cm_free(value.data.function.parameter_types);
+                    return 0;
+                }
+            }
+            if (cm_hir_metadata_read_u32(&reader,
+                    &value.data.function.return_type)
+                    != CM_HIR_METADATA_OK
+                || value.data.function.return_type == 0u
+                || value.data.function.return_type > type_count
+                || !cm_meta_read_string(&reader,
+                    &value.data.function.abi)
+                || cm_hir_metadata_read_u8(&reader, &safety)
+                    != CM_HIR_METADATA_OK
+                || safety > (uint8_t)CM_HIR_UNSAFE
+                || cm_hir_metadata_read_u8(&reader, &is_const)
+                    != CM_HIR_METADATA_OK || is_const > 1u
+                || cm_hir_metadata_read_u8(&reader, &is_async)
+                    != CM_HIR_METADATA_OK || is_async > 1u
+                || cm_hir_metadata_read_u8(&reader, &is_variadic)
+                    != CM_HIR_METADATA_OK || is_variadic > 1u) {
+                cm_free(value.data.function.parameter_types);
+                return 0;
+            }
+            value.data.function.safety = safety;
+            value.data.function.is_const = is_const != 0u;
+            value.data.function.is_async = is_async != 0u;
+            value.data.function.is_variadic = is_variadic != 0u;
+        } else if (value.kind == CM_META_VALUE_CONST
+                || value.kind == CM_META_VALUE_STATIC) {
+            if (cm_hir_metadata_read_u32(&reader,
+                    &value.data.value.type) != CM_HIR_METADATA_OK
+                || value.data.value.type == 0u
+                || value.data.value.type > type_count
+                || cm_hir_metadata_read_u8(&reader,
+                    &value.data.value.mutability) != CM_HIR_METADATA_OK
+                || (value.data.value.mutability != CM_META_MUT_IMMUTABLE
+                    && value.data.value.mutability
+                        != CM_META_MUT_MUTABLE)
+                || (value.kind == CM_META_VALUE_CONST
+                    && value.data.value.mutability
+                        != CM_META_MUT_IMMUTABLE)) return 0;
+        } else {
+            return 0;
+        }
+        (void)cm_vec_push(values, &value);
+    }
+    return cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK;
+}
+
 static int cm_meta_decode_entries(const CmHirMetadataSection *section,
     uint32_t module_count, uint32_t item_count, uint32_t trait_count,
-    CmVec *entries)
+    uint32_t value_count, CmVec *entries)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -2908,10 +3375,13 @@ static int cm_meta_decode_entries(const CmHirMetadataSection *section,
                 && !cm_meta_primitive_from_wire(entry.target, &primitive))
             || (entry.kind == CM_META_BINDING_TRAIT
                 && (entry.target == 0u || entry.target > trait_count))
+            || (entry.kind == CM_META_BINDING_VALUE
+                && (entry.target == 0u || entry.target > value_count))
             || (entry.kind != CM_META_BINDING_MODULE
                 && entry.kind != CM_META_BINDING_TYPE
                 && entry.kind != CM_META_BINDING_PRIMITIVE
-                && entry.kind != CM_META_BINDING_TRAIT)) return 0;
+                && entry.kind != CM_META_BINDING_TRAIT
+                && entry.kind != CM_META_BINDING_VALUE)) return 0;
         (void)cm_vec_push(entries, &entry);
     }
     return cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK;
@@ -3184,7 +3654,8 @@ static int cm_meta_wire_trait_universe_canonical(const CmVec *traits,
 }
 
 static int cm_meta_wire_valid(const CmVec *modules, const CmVec *generics,
-    const CmVec *types, const CmVec *items, const CmVec *entries)
+    const CmVec *types, const CmVec *items, const CmVec *values,
+    const CmVec *entries)
 {
     size_t index;
     unsigned char *alias_states;
@@ -3256,9 +3727,43 @@ static int cm_meta_wire_valid(const CmVec *modules, const CmVec *generics,
         if (prior == NULL || entry == NULL
             || prior->module > entry->module
             || (prior->module == entry->module
-                && cm_meta_bytes_compare(prior->name.bytes,
-                    prior->name.length, entry->name.bytes,
-                    entry->name.length) >= 0)) return 0;
+                && (cm_meta_bytes_compare(prior->name.bytes,
+                        prior->name.length, entry->name.bytes,
+                        entry->name.length) > 0
+                    || (cm_meta_name_equal(prior->name, entry->name)
+                        && ((prior->kind == CM_META_BINDING_VALUE)
+                                == (entry->kind
+                                    == CM_META_BINDING_VALUE)
+                            || prior->kind
+                                == CM_META_BINDING_VALUE))))) return 0;
+    }
+    if (values != NULL) {
+        unsigned char *seen;
+        uint32_t next;
+
+        seen = (unsigned char *)cm_alloc_zeroed(values->len,
+            sizeof(unsigned char));
+        next = UINT32_C(1);
+        for (index = 0u; index < entries->len; ++index) {
+            const CmMetaWireEntry *entry;
+
+            entry = (const CmMetaWireEntry *)cm_vec_at_const(entries,
+                index);
+            if (entry == NULL) {
+                cm_free(seen);
+                return 0;
+            }
+            if (entry->kind != CM_META_BINDING_VALUE
+                || seen[entry->target - 1u] != 0u) continue;
+            if (entry->target != next) {
+                cm_free(seen);
+                return 0;
+            }
+            seen[entry->target - 1u] = UINT8_C(1);
+            next += 1u;
+        }
+        cm_free(seen);
+        if ((size_t)(next - 1u) != values->len) return 0;
     }
     alias_states = (unsigned char *)cm_alloc_zeroed(items->len,
         sizeof(unsigned char));
@@ -3644,7 +4149,7 @@ static int cm_meta_bind_runtime_impl(CmHirContext *context,
 static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     CmHirContext *context, CmHirLibraryArtifact *artifact,
     const void *encoded, size_t encoded_length, const char *extern_name,
-    CmSourceId metadata_source, int semantic)
+    CmSourceId metadata_source, int semantic, int declaration)
 {
     CmHirMetadataArtifactResult result;
     CmHirMetadataEnvelope envelope;
@@ -3660,6 +4165,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     CmVec entries;
     CmVec traits;
     CmVec impls;
+    CmVec values;
     uint32_t item_count;
     uint32_t type_count;
     uint32_t root_local;
@@ -3671,6 +4177,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     CmHirDefId *runtime_items;
     CmHirDefId *runtime_traits;
     CmHirDefId *runtime_impls;
+    CmHirDefId *runtime_values;
     CmHirGenericParamId *runtime_generics;
     CmHirTypeId *runtime_types;
     unsigned char *module_created;
@@ -3684,20 +4191,25 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
 
     result = cm_meta_result(CM_HIR_METADATA_ARTIFACT_INVALID_ARGUMENT);
     if (context == NULL || artifact == NULL || artifact->state == NULL
+        || (semantic && declaration)
         || (encoded_length != 0u && encoded == NULL)
         || !cm_meta_identifier_c_str_valid(extern_name)) return result;
     memset(&envelope, 0, sizeof(envelope));
     codec_status = cm_hir_metadata_decode_envelope_version(encoded,
-        encoded_length, (uint16_t)CM_HIR_METADATA_MAJOR,
-        (uint16_t)(semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
-            : CM_HIR_METADATA_MINOR), &envelope);
+        encoded_length,
+        (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MAJOR
+            : CM_HIR_METADATA_MAJOR),
+        (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MINOR
+            : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
+                : CM_HIR_METADATA_MINOR)), &envelope);
     if (codec_status != CM_HIR_METADATA_OK) {
         result.status = cm_meta_codec_status(codec_status);
         return result;
     }
     cm_hir_metadata_reader_init(&section_reader, envelope.payload,
         envelope.payload_length);
-    for (index = 0u; index < (semantic ? 7u : 6u); ++index) {
+    for (index = 0u; index < ((semantic || declaration) ? 7u : 6u);
+            ++index) {
         codec_status = cm_hir_metadata_read_section(&section_reader,
             &sections[index]);
         if (codec_status != CM_HIR_METADATA_OK) {
@@ -3712,7 +4224,12 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         || !cm_meta_section_tag_is(&sections[2], cm_meta_tag_generics)
         || !cm_meta_section_tag_is(&sections[3], cm_meta_tag_types)
         || !cm_meta_section_tag_is(&sections[4], cm_meta_tag_items)
-        || !cm_meta_section_tag_is(&sections[5], cm_meta_tag_namespace)
+        || (!declaration && !cm_meta_section_tag_is(&sections[5],
+            cm_meta_tag_namespace))
+        || (declaration && (!cm_meta_section_tag_is(&sections[5],
+                cm_meta_tag_values)
+            || !cm_meta_section_tag_is(&sections[6],
+                cm_meta_tag_namespace)))
         || (semantic && !cm_meta_section_tag_is(&sections[6],
             cm_meta_tag_trait_universe))) {
         result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
@@ -3726,6 +4243,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     cm_vec_init(&entries, sizeof(CmMetaWireEntry));
     cm_vec_init(&traits, sizeof(CmMetaWireTrait));
     cm_vec_init(&impls, sizeof(CmMetaWireImpl));
+    cm_vec_init(&values, sizeof(CmMetaWireValue));
     memset(&crate_name, 0, sizeof(crate_name));
     root_local = UINT32_C(0);
     item_count = UINT32_C(0);
@@ -3743,13 +4261,16 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         || !cm_meta_decode_items(&sections[4], (uint32_t)modules.len,
             (uint32_t)generics.len, type_count, &items)
         || items.len != (size_t)item_count
+        || (declaration && !cm_meta_decode_values(&sections[5], type_count,
+            &values))
         || (semantic && !cm_meta_decode_trait_universe(&sections[6],
             (uint32_t)modules.len, type_count, &traits, &impls))
-        || !cm_meta_decode_entries(&sections[5], (uint32_t)modules.len,
+        || !cm_meta_decode_entries(&sections[declaration ? 6u : 5u],
+            (uint32_t)modules.len,
             item_count, semantic ? (uint32_t)traits.len : UINT32_C(0),
-            &entries)
+            declaration ? (uint32_t)values.len : UINT32_C(0), &entries)
         || !cm_meta_wire_valid(&modules, &generics, &types, &items,
-            &entries)
+            declaration ? &values : NULL, &entries)
         || (semantic && !cm_meta_wire_trait_universe_canonical(&traits,
             &impls))) {
         result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
@@ -3774,6 +4295,8 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     runtime_traits = (CmHirDefId *)cm_alloc_zeroed(traits.len,
         sizeof(CmHirDefId));
     runtime_impls = (CmHirDefId *)cm_alloc_zeroed(impls.len,
+        sizeof(CmHirDefId));
+    runtime_values = (CmHirDefId *)cm_alloc_zeroed(values.len,
         sizeof(CmHirDefId));
     runtime_generics = (CmHirGenericParamId *)cm_alloc_zeroed(generics.len,
         sizeof(CmHirGenericParamId));
@@ -3866,6 +4389,30 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                     goto rollback;
                 }
             }
+        }
+    }
+
+    for (index = 0u; index < (uint32_t)values.len; ++index) {
+        const CmMetaWireValue *wire_value;
+        CmHirLibraryValueKind value_kind;
+        CmHirItemKind item_kind;
+
+        wire_value = (const CmMetaWireValue *)cm_vec_at_const(&values,
+            index);
+        if (wire_value == NULL
+            || !cm_meta_value_kind_from_wire(wire_value->kind,
+                &value_kind)) {
+            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            goto rollback;
+        }
+        item_kind = value_kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+            ? CM_HIR_ITEM_FUNCTION
+            : (value_kind == CM_HIR_LIBRARY_VALUE_CONST
+                ? CM_HIR_ITEM_CONST : CM_HIR_ITEM_STATIC);
+        if (cm_hir_reserve_item_definition_as(context, crate_id,
+                item_kind, span, &runtime_values[index]) != CM_HIR_OK) {
+            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            goto rollback;
         }
     }
 
@@ -3993,6 +4540,64 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         }
     }
 
+    for (index = 0u; index < (uint32_t)values.len; ++index) {
+        const CmMetaWireValue *wire_value;
+        CmHirLibraryValue value;
+        CmHirTypeId *parameter_types;
+        uint32_t parameter;
+
+        wire_value = (const CmMetaWireValue *)cm_vec_at_const(&values,
+            index);
+        memset(&value, 0, sizeof(value));
+        parameter_types = NULL;
+        if (wire_value == NULL
+            || !cm_meta_value_kind_from_wire(wire_value->kind,
+                &value.kind)) {
+            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            goto rollback;
+        }
+        value.definition = runtime_values[index];
+        if (value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
+            if (wire_value->data.function.parameter_count != 0u) {
+                parameter_types = (CmHirTypeId *)cm_alloc(
+                    (size_t)wire_value->data.function.parameter_count
+                        * sizeof(CmHirTypeId));
+                for (parameter = 0u;
+                        parameter < wire_value->data.function.parameter_count;
+                        ++parameter) {
+                    parameter_types[parameter] = runtime_types[
+                        wire_value->data.function.parameter_types[parameter]
+                            - 1u];
+                }
+            }
+            value.data.function.parameter_types = parameter_types;
+            value.data.function.parameter_count =
+                wire_value->data.function.parameter_count;
+            value.data.function.return_type = runtime_types[
+                wire_value->data.function.return_type - 1u];
+            value.data.function.abi = cm_meta_intern_name(context,
+                wire_value->data.function.abi);
+            value.data.function.safety =
+                (CmHirSafety)wire_value->data.function.safety;
+            value.data.function.is_const = wire_value->data.function.is_const;
+            value.data.function.is_async = wire_value->data.function.is_async;
+            value.data.function.is_variadic =
+                wire_value->data.function.is_variadic;
+        } else {
+            value.data.value.type = runtime_types[
+                wire_value->data.value.type - 1u];
+            value.data.value.mutability = cm_meta_mutability_from_wire(
+                wire_value->data.value.mutability);
+        }
+        if (cm_hir_library_owned_data_add_value(&owned, &value)
+                != CM_HIR_LIBRARY_OK) {
+            cm_free(parameter_types);
+            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            goto rollback;
+        }
+        cm_free(parameter_types);
+    }
+
     public_entry_count = 0u;
     for (index = 0u; index < (uint32_t)entries.len; ++index) {
         const CmMetaWireEntry *wire_entry;
@@ -4008,6 +4613,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         memset(&binding, 0, sizeof(binding));
         binding.type_kind = CM_HIR_TYPE_ERROR_KIND;
         binding.primitive_kind = CM_HIR_PRIMITIVE_NONE;
+        binding.value_kind = CM_HIR_LIBRARY_VALUE_NONE;
         if (wire_entry->kind == CM_META_BINDING_MODULE) {
             const CmHirModule *target_module;
 
@@ -4039,6 +4645,20 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_TRAIT;
             binding.definition = runtime_traits[wire_entry->target - 1u];
+            public_entry_count += 1u;
+        } else if (wire_entry->kind == CM_META_BINDING_VALUE) {
+            const CmMetaWireValue *target_value;
+
+            target_value = (const CmMetaWireValue *)cm_vec_at_const(&values,
+                (size_t)(wire_entry->target - 1u));
+            if (target_value == NULL
+                || !cm_meta_value_kind_from_wire(target_value->kind,
+                    &binding.value_kind)) {
+                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+                goto rollback;
+            }
+            binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
+            binding.definition = runtime_values[wire_entry->target - 1u];
             public_entry_count += 1u;
         } else {
             if (!cm_meta_primitive_from_wire(wire_entry->target,
@@ -4114,11 +4734,13 @@ cleanup_runtime:
     cm_free(runtime_types);
     cm_free(runtime_generics);
     cm_free(runtime_impls);
+    cm_free(runtime_values);
     cm_free(runtime_traits);
     cm_free(runtime_items);
     cm_free(runtime_modules);
 
 cleanup_wire:
+    cm_meta_wire_values_destroy(&values);
     cm_vec_destroy(&impls);
     cm_vec_destroy(&traits);
     cm_vec_destroy(&entries);
@@ -4135,7 +4757,7 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_artifact(
     CmSourceId metadata_source)
 {
     return cm_meta_decode_artifact(context, artifact, encoded,
-        encoded_length, extern_name, metadata_source, 0);
+        encoded_length, extern_name, metadata_source, 0, 0);
 }
 
 CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
@@ -4144,7 +4766,16 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     CmSourceId metadata_source)
 {
     return cm_meta_decode_artifact(context, artifact, encoded,
-        encoded_length, extern_name, metadata_source, 1);
+        encoded_length, extern_name, metadata_source, 1, 0);
+}
+
+CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
+    CmHirContext *context, CmHirLibraryArtifact *artifact,
+    const void *encoded, size_t encoded_length, const char *extern_name,
+    CmSourceId metadata_source)
+{
+    return cm_meta_decode_artifact(context, artifact, encoded,
+        encoded_length, extern_name, metadata_source, 0, 1);
 }
 
 const char *cm_hir_metadata_artifact_status_name(
