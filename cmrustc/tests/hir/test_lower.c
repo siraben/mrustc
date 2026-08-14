@@ -2703,6 +2703,100 @@ static void test_generic_impl_trait_arguments(void)
     }
 }
 
+static void check_positive_impl_predicates(const CmHirContext *context)
+{
+    const CmHirItem *bound;
+    const CmHirItem *extra;
+    const CmHirItem *trait_item;
+    const CmHirItem *trait_method;
+    const CmHirItem *impl_item;
+    const CmHirItem *impl_method;
+    const CmHirType *first_subject;
+    const CmHirType *second_subject;
+
+    bound = find_item(context, "Bound");
+    extra = find_item(context, "Extra");
+    trait_item = find_item(context, "Trait");
+    impl_item = find_impl(context);
+    trait_method = trait_item == NULL ? NULL
+        : find_child(context, trait_item->definition, "run");
+    impl_method = impl_item == NULL ? NULL
+        : find_child(context, impl_item->definition, "run");
+    first_subject = impl_item == NULL || impl_item->predicate_count != 2u
+        ? NULL : cm_hir_get_type(context, impl_item->predicates[0].subject);
+    second_subject = impl_item == NULL || impl_item->predicate_count != 2u
+        ? NULL : cm_hir_get_type(context, impl_item->predicates[1].subject);
+    assert(bound != NULL && extra != NULL && trait_item != NULL
+        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->generic_parameter_count == 1u
+        && impl_item->predicate_count == 2u
+        && impl_item->predicates != NULL
+        && first_subject != NULL
+        && first_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && first_subject->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && second_subject != NULL
+        && second_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && second_subject->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && cm_hir_def_id_equal(
+            impl_item->predicates[0].trait_type.definition,
+            bound->definition)
+        && cm_hir_def_id_equal(
+            impl_item->predicates[1].trait_type.definition,
+            extra->definition)
+        && trait_method != NULL && impl_method != NULL
+        && cm_hir_def_id_equal(
+            impl_method->data.function_item.trait_item_definition,
+            trait_method->definition));
+}
+
+static void test_positive_impl_predicates(void)
+{
+    static const char source[] =
+        "trait Bound {} trait Extra {} trait Trait { fn run(); } "
+        "struct Wrapper<T>; "
+        "impl<T: Bound> Trait for Wrapper<T> where T: Extra { "
+        "fn run() {} }";
+    static const char monomorphic[] =
+        "trait Bound {} trait Trait {} "
+        "impl Trait for u8 where u8: Bound {}";
+    CmAst ast;
+    CmExpandedAst expanded;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *bound;
+    const CmHirItem *impl_item;
+    const CmHirType *subject;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 0u);
+    check_positive_impl_predicates(&context);
+    cm_hir_context_destroy(&context);
+
+    make_cfg_view(source, &ast, &expanded);
+    result = lower_cfg_view(&context, &ast, &expanded);
+    assert(result.error_count == 0u);
+    check_positive_impl_predicates(&context);
+    cm_hir_context_destroy(&context);
+    cm_expanded_ast_destroy(&expanded);
+    cm_ast_destroy(&ast);
+
+    result = lower_source(monomorphic, &context, NULL);
+    bound = find_item(&context, "Bound");
+    impl_item = find_impl(&context);
+    subject = impl_item == NULL || impl_item->predicate_count != 1u
+        ? NULL : cm_hir_get_type(&context, impl_item->predicates[0].subject);
+    assert(result.error_count == 0u && bound != NULL && impl_item != NULL
+        && impl_item->predicate_count == 1u
+        && subject != NULL && subject->kind == CM_HIR_TYPE_INTEGER_KIND
+        && subject->data.integer_type.kind == CM_HIR_INT_U8
+        && cm_hir_def_id_equal(
+            impl_item->predicates[0].trait_type.definition,
+            bound->definition));
+    cm_hir_context_destroy(&context);
+}
+
 static void test_monomorphic_trait_impl_entry_points(void)
 {
     static const char source[] =
@@ -2719,7 +2813,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         "impl u8 { type A = u16; }",
         "trait T { type A; } impl !T for u8 { type A = u16; }",
         "trait T { type A; } impl<X> T for X { type A = u8; }",
-        "trait T { type A; } impl T for u8 where u8: Copy { type A = u16; }",
         "trait T { type A<'a>; } impl T for u8 { type A = u8; }",
         "trait T { type A; } impl T for u8 {}",
         "trait T { type A; type B; } impl T for u8 { type A = u8; }",
@@ -2743,7 +2836,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
@@ -2762,7 +2854,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         "inherent impls",
         "negative impl must",
         "full ordered generic local ADT subset",
-        "where predicates",
         "generic arity differs",
         "missing a required associated type",
         "missing a required associated type",
@@ -3378,10 +3469,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<const N: usize> Trait for Wrapper<u8> { type Assoc = u8; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<T: Copy> Trait for Wrapper<T> { type Assoc = T; }",
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<T> Trait for Wrapper<T> where T: Copy { type Assoc = T; }",
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<T> Trait for Wrapper<T> { type Assoc = T; } "
             "impl<U> Trait for Wrapper<U> { type Assoc = U; }",
         "struct Wrapper<T>; type Alias<T> = Wrapper<T>; "
@@ -3397,8 +3484,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
@@ -3410,8 +3495,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
-        "generic bounds and const declarations",
-        "where predicates",
         "overlapping ordered generic impl candidates",
         "overlapping ordered generic impl candidates"
     };
@@ -4032,11 +4115,6 @@ static void test_trait_method_predicate_boundaries(void)
         const char *message;
     } rejected[] = {
         {
-            "trait Sized {} trait T { fn f() where u8: Sized; }",
-            CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-            "predicate subject must be"
-        },
-        {
             "trait Sized {} trait T { fn f() where Self: ?Sized; }",
             CM_HIR_LOWER_UNSUPPORTED_GENERIC,
             "relaxed trait bounds"
@@ -4110,112 +4188,144 @@ static void test_trait_method_predicate_boundaries(void)
     }
 }
 
-static void test_nominal_adt_trait_predicate_subjects(void)
+static void test_arbitrary_trait_predicate_subjects(void)
 {
     static const char source[] =
-        "struct Wrap<T>; struct LaneCount<const N: usize>; trait Bound {} "
-        "fn require<T, const N: usize>() where "
-        "Wrap<T>: Bound, LaneCount<N>: Bound {}";
-    const CmHirItem *wrap;
+        "trait SupportedLaneCount {} struct LaneCount<const N: usize>; "
+        "trait Swizzle<const N: usize> {"
+        " fn swizzle<T, const M: usize>() where "
+        "LaneCount<N>: SupportedLaneCount, "
+        "LaneCount<M>: SupportedLaneCount; }";
+    static const char compound_source[] =
+        "trait Bound {} fn require<'a, T, const N: usize>() where "
+        "u8: Bound, &'a T: Bound, (T, u8): Bound, [T; N]: Bound {}";
+    static const char first_predicate_text[] =
+        "LaneCount<N>: SupportedLaneCount";
+    static const char second_predicate_text[] =
+        "LaneCount<M>: SupportedLaneCount";
+    const CmHirItem *supported_lane_count;
     const CmHirItem *lane_count;
-    const CmHirItem *bound;
-    const CmHirItem *function;
-    const CmHirGenericParam *type_parameter;
-    const CmHirGenericParam *const_parameter;
+    const CmHirItem *swizzle;
+    const CmHirItem *method;
+    const CmHirGenericParam *trait_const_parameter;
+    const CmHirGenericParam *method_const_parameter;
     const CmHirGenericParam *lane_count_parameter;
-    const CmHirTraitPredicate *type_predicate;
-    const CmHirTraitPredicate *const_predicate;
-    const CmHirType *type_subject;
-    const CmHirType *const_subject;
-    const CmHirType *type_argument;
+    const CmHirTraitPredicate *trait_const_predicate;
+    const CmHirTraitPredicate *method_const_predicate;
+    const CmHirType *trait_const_subject;
+    const CmHirType *method_const_subject;
     CmHirContext context;
     CmHirLowerResult result;
 
     result = lower_source(source, &context, NULL);
     if (result.error_count != 0u) {
-        fprintf(stderr, "nominal predicate lowering failed: %s: %s\n",
+        fprintf(stderr, "const ADT predicate lowering failed: %s: %s\n",
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }
-    wrap = find_item(&context, "Wrap");
+    supported_lane_count = find_item(&context, "SupportedLaneCount");
     lane_count = find_item(&context, "LaneCount");
-    bound = find_item(&context, "Bound");
-    function = find_item(&context, "require");
-    type_parameter = function == NULL
-            || function->generic_parameter_count != 2u
+    swizzle = find_item(&context, "Swizzle");
+    method = swizzle == NULL ? NULL
+        : find_child(&context, swizzle->definition, "swizzle");
+    trait_const_parameter = swizzle == NULL
+            || swizzle->generic_parameter_count != 1u
         ? NULL : cm_hir_get_generic_param(&context,
-            function->generic_parameter_start);
-    const_parameter = function == NULL
-            || function->generic_parameter_count != 2u
+            swizzle->generic_parameter_start);
+    method_const_parameter = method == NULL
+            || method->generic_parameter_count != 2u
         ? NULL : cm_hir_get_generic_param(&context,
-            function->generic_parameter_start + 1u);
+            method->generic_parameter_start + 1u);
     lane_count_parameter = lane_count == NULL
             || lane_count->generic_parameter_count != 1u
         ? NULL : cm_hir_get_generic_param(&context,
             lane_count->generic_parameter_start);
-    type_predicate = function == NULL || function->predicate_count != 2u
-        ? NULL : &function->predicates[0];
-    const_predicate = type_predicate == NULL
-        ? NULL : &function->predicates[1];
-    type_subject = type_predicate == NULL ? NULL
-        : cm_hir_get_type(&context, type_predicate->subject);
-    const_subject = const_predicate == NULL ? NULL
-        : cm_hir_get_type(&context, const_predicate->subject);
-    type_argument = type_subject == NULL
-            || type_subject->kind != CM_HIR_TYPE_ADT_KIND
-            || type_subject->data.named_type.argument_count != 1u
-            || type_subject->data.named_type.arguments == NULL
-            || type_subject->data.named_type.arguments[0].kind
-                != CM_HIR_GENERIC_ARG_TYPE
-        ? NULL : cm_hir_get_type(&context,
-            type_subject->data.named_type.arguments[0].data.type);
+    trait_const_predicate = method == NULL || method->predicate_count != 2u
+        ? NULL : &method->predicates[0];
+    method_const_predicate = trait_const_predicate == NULL
+        ? NULL : &method->predicates[1];
+    trait_const_subject = trait_const_predicate == NULL ? NULL
+        : cm_hir_get_type(&context, trait_const_predicate->subject);
+    method_const_subject = method_const_predicate == NULL ? NULL
+        : cm_hir_get_type(&context, method_const_predicate->subject);
     assert(result.error_count == 0u
-        && wrap != NULL && wrap->kind == CM_HIR_ITEM_STRUCT
+        && supported_lane_count != NULL
+        && supported_lane_count->kind == CM_HIR_ITEM_TRAIT
         && lane_count != NULL && lane_count->kind == CM_HIR_ITEM_STRUCT
-        && bound != NULL && bound->kind == CM_HIR_ITEM_TRAIT
-        && function != NULL && function->kind == CM_HIR_ITEM_FUNCTION
-        && type_parameter != NULL
-        && type_parameter->kind == CM_HIR_GENERIC_TYPE
-        && const_parameter != NULL
-        && const_parameter->kind == CM_HIR_GENERIC_CONST
+        && swizzle != NULL && swizzle->kind == CM_HIR_ITEM_TRAIT
+        && method != NULL && method->kind == CM_HIR_ITEM_FUNCTION
+        && trait_const_parameter != NULL
+        && trait_const_parameter->kind == CM_HIR_GENERIC_CONST
+        && method_const_parameter != NULL
+        && method_const_parameter->kind == CM_HIR_GENERIC_CONST
         && lane_count_parameter != NULL
         && lane_count_parameter->kind == CM_HIR_GENERIC_CONST
-        && type_predicate != NULL && const_predicate != NULL
-        && cm_hir_def_id_equal(type_predicate->trait_type.definition,
-            bound->definition)
-        && cm_hir_def_id_equal(const_predicate->trait_type.definition,
-            bound->definition)
-        && type_subject != NULL
-        && cm_hir_def_id_equal(type_subject->data.named_type.definition,
-            wrap->definition)
-        && type_argument != NULL
-        && type_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && type_argument->data.parameter_type.parameter
-            == function->generic_parameter_start
-        && const_subject != NULL
-        && const_subject->kind == CM_HIR_TYPE_ADT_KIND
-        && cm_hir_def_id_equal(const_subject->data.named_type.definition,
+        && trait_const_predicate != NULL
+        && method_const_predicate != NULL
+        && cm_hir_def_id_equal(
+            trait_const_predicate->trait_type.definition,
+            supported_lane_count->definition)
+        && cm_hir_def_id_equal(
+            method_const_predicate->trait_type.definition,
+            supported_lane_count->definition)
+        && trait_const_subject != NULL
+        && trait_const_subject->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(
+            trait_const_subject->data.named_type.definition,
             lane_count->definition)
-        && const_subject->data.named_type.argument_count == 1u
-        && const_subject->data.named_type.arguments != NULL
-        && const_subject->data.named_type.arguments[0].kind
+        && trait_const_subject->data.named_type.argument_count == 1u
+        && trait_const_subject->data.named_type.arguments != NULL
+        && trait_const_subject->data.named_type.arguments[0].kind
             == CM_HIR_GENERIC_ARG_CONST
-        && const_subject->data.named_type.arguments[0].data.constant.kind
+        && trait_const_subject->data.named_type.arguments[0]
+                .data.constant.kind
             == CM_HIR_CONST_PARAMETER
-        && const_subject->data.named_type.arguments[0].data.constant
+        && trait_const_subject->data.named_type.arguments[0].data.constant
                 .data.parameter
-            == function->generic_parameter_start + 1u
-        && const_subject->data.named_type.arguments[0].data.constant.type
-            == lane_count_parameter->declared_type);
+            == swizzle->generic_parameter_start
+        && trait_const_subject->data.named_type.arguments[0].data.constant
+                .type == lane_count_parameter->declared_type
+        && method_const_subject != NULL
+        && method_const_subject->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(
+            method_const_subject->data.named_type.definition,
+            lane_count->definition)
+        && method_const_subject->data.named_type.argument_count == 1u
+        && method_const_subject->data.named_type.arguments != NULL
+        && method_const_subject->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && method_const_subject->data.named_type.arguments[0]
+                .data.constant.kind == CM_HIR_CONST_PARAMETER
+        && method_const_subject->data.named_type.arguments[0].data.constant
+                .data.parameter == method->generic_parameter_start + 1u
+        && method_const_subject->data.named_type.arguments[0].data.constant
+                .type == lane_count_parameter->declared_type
+        && trait_const_predicate->span.end
+            - trait_const_predicate->span.start
+                == sizeof(first_predicate_text) - 1u
+        && memcmp(source + trait_const_predicate->span.start,
+            first_predicate_text, sizeof(first_predicate_text) - 1u) == 0
+        && method_const_predicate->span.end
+            - method_const_predicate->span.start
+                == sizeof(second_predicate_text) - 1u
+        && memcmp(source + method_const_predicate->span.start,
+            second_predicate_text, sizeof(second_predicate_text) - 1u) == 0
+        && trait_const_predicate->span.start
+            < method_const_predicate->span.start);
     cm_hir_context_destroy(&context);
 
-    result = lower_source(
-        "trait Bound {} fn primitive() where u8: Bound {}",
-        &context, NULL);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && strstr(result.first_error.message,
-            "predicate subject must be") != NULL);
+    result = lower_source(compound_source, &context, NULL);
+    method = find_item(&context, "require");
+    assert(result.error_count == 0u
+        && method != NULL && method->predicate_count == 4u
+        && cm_hir_get_type(&context, method->predicates[0].subject)->kind
+            == CM_HIR_TYPE_INTEGER_KIND
+        && cm_hir_get_type(&context, method->predicates[1].subject)->kind
+            == CM_HIR_TYPE_REFERENCE_KIND
+        && cm_hir_get_type(&context, method->predicates[2].subject)->kind
+            == CM_HIR_TYPE_TUPLE_KIND
+        && cm_hir_get_type(&context, method->predicates[3].subject)->kind
+            == CM_HIR_TYPE_ARRAY_KIND);
     cm_hir_context_destroy(&context);
 }
 
@@ -6065,8 +6175,6 @@ static void test_unsupported_method_forms_are_errors(void)
 {
     static const char *const rejected[] = {
         "trait T { fn f(); } impl T for u8 { fn f<U>() {} }",
-        "trait T { fn f() where u8: Copy; }",
-        "trait T { fn f(); } impl T for u8 { fn f() where u8: Copy {} }",
         "trait T { extern \"C\" fn f(); }",
         "trait T { fn f(); } impl T for u8 { extern \"C\" fn f() {} }",
         "trait T { const fn f(); }",
@@ -6078,8 +6186,6 @@ static void test_unsupported_method_forms_are_errors(void)
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -6090,8 +6196,6 @@ static void test_unsupported_method_forms_are_errors(void)
     };
     static const char *const rejected_messages[] = {
         "generic arity differs",
-        "predicate subject must be",
-        "predicate subject must be",
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
@@ -6110,6 +6214,19 @@ static void test_unsupported_method_forms_are_errors(void)
 
     result = lower_source("trait T { fn f<U>(); }", &context, NULL);
     assert(result.error_count == 0u && result.lowered_item_count == 2u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Copy {} trait T { fn f() where u8: Copy; }",
+        &context, NULL);
+    assert(result.error_count == 0u && result.lowered_item_count == 3u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "trait Copy {} trait T { fn f() where u8: Copy; }"
+        " impl T for u8 { fn f() where u8: Copy {} }",
+        &context, NULL);
+    assert(result.error_count == 0u && result.lowered_item_count == 5u);
     cm_hir_context_destroy(&context);
 
     result = lower_source("trait T { async fn f(); }", &context, NULL);
@@ -7209,6 +7326,7 @@ int main(void)
     test_explicit_projection_entry_points();
     test_cross_trait_projection_default_entry_points();
     test_generic_impl_trait_arguments();
+    test_positive_impl_predicates();
     test_monomorphic_trait_impl_entry_points();
     test_generic_associated_type_entry_points();
     test_self_gat_projection_arguments();
@@ -7221,7 +7339,7 @@ int main(void)
     test_trait_method_self_sized_predicate();
     test_trait_method_const_predicates();
     test_trait_method_predicate_boundaries();
-    test_nominal_adt_trait_predicate_subjects();
+    test_arbitrary_trait_predicate_subjects();
     test_callable_tuple_provenance();
     test_parenthesized_and_singleton_tuple_types();
     test_trait_method_predicate_storage_mismatch();

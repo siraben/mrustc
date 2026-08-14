@@ -8905,26 +8905,6 @@ static int cm_lower_associated_constraint_predicates(
     return !state->failed;
 }
 
-static int cm_lower_predicate_subject_kind_supported(CmLowerState *state,
-    CmHirTypeId subject, CmSpan span, CmAstItemId ast_item_id,
-    CmAstTypeId ast_type_id)
-{
-    const CmHirType *type;
-
-    type = cm_hir_get_type(state->hir, subject);
-    if (type != NULL && (type->kind == CM_HIR_TYPE_SELF_KIND
-            || type->kind == CM_HIR_TYPE_PARAMETER_KIND
-            || type->kind == CM_HIR_TYPE_PROJECTION_KIND
-            || type->kind == CM_HIR_TYPE_ADT_KIND)) {
-        return 1;
-    }
-    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-        ast_item_id, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-        "trait predicate subject must be Self, a type parameter, or an "
-        "associated type projection or nominal ADT");
-    return 0;
-}
-
 static int cm_lower_item_trait_predicates(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item)
@@ -9134,8 +9114,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     }
     if (total_count == 0u && outlives_total_count == 0u) return 1;
     if (!(((ast_item->kind == CM_AST_ITEM_TRAIT
-                || (ast_item->kind == CM_AST_ITEM_IMPL
-                    && ast_item->data.impl_item.is_negative))
+                || ast_item->kind == CM_AST_ITEM_IMPL)
             && record->parent_kind == CM_LOWER_PARENT_NONE)
         || (ast_item->kind == CM_AST_ITEM_FUNCTION
             && (record->parent_kind == CM_LOWER_PARENT_NONE
@@ -9149,9 +9128,9 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
             has_inline_predicate
                 ? "generic bounds and const declarations are not supported "
                   "on this item kind"
-                : "where predicates are supported only on traits, free "
-                  "functions, methods, and trait-associated types in this "
-                  "HIR slice");
+                : "where predicates are supported only on traits, impls, "
+                  "free functions, methods, and trait-associated types in "
+                  "this HIR slice");
         return 0;
     }
     predicates = total_count == 0u ? NULL
@@ -9444,12 +9423,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
             subject = cm_lower_type(state, ast_predicate->subject,
                 record->owner_module, record->definition);
             state->active_lifetime_binder = previous_lifetime_binder;
-            if (state->failed
-                || !cm_lower_predicate_subject_kind_supported(state,
-                    subject, cm_lower_span(state, ast_predicate->span),
-                    ast_item_id, ast_predicate->subject)) {
-                break;
-            }
+            if (state->failed) break;
             if (predicate_scope != NULL) {
                 predicate_scope->subject_kind = CM_HIR_OUTLIVES_TYPE;
                 predicate_scope->subject.type = subject;

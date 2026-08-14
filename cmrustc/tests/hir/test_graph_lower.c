@@ -1902,9 +1902,11 @@ static void test_generated_method_effective_children(void)
 {
     static const unsigned char source[] =
         "macro_rules! make { () => {\n"
+        "  trait GeneratedBound {}\n"
         "  trait GeneratedTrait { fn provided(&self) {} }\n"
-        "  struct GeneratedSubject;\n"
-        "  impl GeneratedTrait for GeneratedSubject {\n"
+        "  struct GeneratedSubject<T>;\n"
+        "  impl<T> GeneratedTrait for GeneratedSubject<T>\n"
+        "  where T: GeneratedBound {\n"
         "    fn provided(&self) {}\n"
         "  }\n"
         "} }\n"
@@ -1924,11 +1926,13 @@ static void test_generated_method_effective_children(void)
     CmHirLowerOptions options;
     CmHirLowerResult result;
     const CmHirItem *trait_item;
+    const CmHirItem *bound_item;
     const CmHirItem *impl_item;
     const CmHirItem *trait_method;
     const CmHirItem *impl_method;
     const CmHirBody *trait_body;
     const CmHirBody *impl_body;
+    const CmHirType *predicate_subject;
 
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
@@ -2005,6 +2009,7 @@ static void test_generated_method_effective_children(void)
             result.first_error.message);
     }
     trait_item = find_hir_item_anywhere(&hir, "GeneratedTrait");
+    bound_item = find_hir_item_anywhere(&hir, "GeneratedBound");
     impl_item = find_hir_impl(&hir);
     trait_method = trait_item == NULL ? NULL
         : find_hir_associated_item(&hir, trait_item->definition,
@@ -2016,7 +2021,10 @@ static void test_generated_method_effective_children(void)
         : cm_hir_get_body(&hir, trait_method->data.function_item.body);
     impl_body = impl_method == NULL ? NULL
         : cm_hir_get_body(&hir, impl_method->data.function_item.body);
-    check(result.error_count == 0u && trait_item != NULL && impl_item != NULL
+    predicate_subject = impl_item == NULL || impl_item->predicate_count != 1u
+        ? NULL : cm_hir_get_type(&hir, impl_item->predicates[0].subject);
+    check(result.error_count == 0u && trait_item != NULL && bound_item != NULL
+        && impl_item != NULL
         && trait_method != NULL && impl_method != NULL
         && trait_body != NULL && impl_body != NULL
         && trait_body->source == root && impl_body->source == root
@@ -2027,6 +2035,20 @@ static void test_generated_method_effective_children(void)
             impl_method->data.function_item.trait_item_definition,
             trait_method->definition),
         "generated trait/impl methods lost body source or semantic linkage");
+    check(bound_item != NULL && impl_item != NULL
+        && impl_item->generic_parameter_count == 1u
+        && impl_item->predicate_count == 1u
+        && impl_item->predicates != NULL
+        && predicate_subject != NULL
+        && predicate_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && predicate_subject->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && cm_hir_def_id_equal(
+            impl_item->predicates[0].trait_type.definition,
+            bound_item->definition)
+        && impl_item->predicates[0].span.source == root,
+        "generated positive impl predicate lost owner, subject, trait, or "
+        "source identity");
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);

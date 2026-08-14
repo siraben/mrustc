@@ -802,6 +802,8 @@ static void test_known_trait_projection_model(void)
     item.data.impl_item.self_type = u8_type;
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.trait_type.arguments = trait_arguments;
+    item.data.impl_item.trait_type.argument_count = 1u;
     item.data.impl_item.safety = CM_HIR_SAFE;
     arena_bytes = cm_arena_bytes_used(&context.storage);
     item_count = context.items.len;
@@ -825,6 +827,14 @@ static void test_known_trait_projection_model(void)
     assert(stored_definition != NULL
         && stored_definition->state == CM_HIR_DEFINITION_RESERVED);
     item.data.impl_item.safety = CM_HIR_SAFE;
+    item.data.impl_item.trait_type.argument_count = 0u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    item.data.impl_item.trait_type.argument_count = 1u;
+    trait_arguments[0].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+    trait_arguments[0].data.lifetime.kind = CM_HIR_REGION_ERASED;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    trait_arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_arguments[0].data.type = u8_type;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     stored_impl = cm_hir_get_item(&context, item_id);
     assert(stored_impl != NULL && stored_impl->name == CM_INTERN_ID_NONE
@@ -832,7 +842,14 @@ static void test_known_trait_projection_model(void)
         && stored_impl->data.impl_item.is_negative == 0
         && cm_hir_def_id_equal(
             stored_impl->data.impl_item.trait_type.definition,
-            trait_definition));
+            trait_definition)
+        && stored_impl->data.impl_item.trait_type.arguments
+            != trait_arguments
+        && stored_impl->data.impl_item.trait_type.argument_count == 1u
+        && stored_impl->data.impl_item.trait_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE
+        && stored_impl->data.impl_item.trait_type.arguments[0].data.type
+            == u8_type);
     assert(cm_hir_reserve_item_definition(&context, crate_id,
         test_span(191u, 225u), &inherent_impl_definition) == CM_HIR_OK);
     init_test_item(&item, CM_HIR_ITEM_IMPL, inherent_impl_definition, root_id,
@@ -971,6 +988,7 @@ static void test_method_and_item_attribute_model(void)
     CmHirGenericParam self_default_parameter;
     CmHirGenericParamId self_default_parameter_id;
     CmHirGenericArg self_default;
+    CmHirGenericArg impl_trait_argument;
     CmHirItem item;
     CmHirItemId item_id;
     CmHirItemId trait_method_item_id;
@@ -1163,6 +1181,11 @@ static void test_method_and_item_attribute_model(void)
     item.data.impl_item.self_type = u8_type;
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = trait_definition;
+    memset(&impl_trait_argument, 0, sizeof(impl_trait_argument));
+    impl_trait_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    impl_trait_argument.data.type = u8_type;
+    item.data.impl_item.trait_type.arguments = &impl_trait_argument;
+    item.data.impl_item.trait_type.argument_count = 1u;
     item.data.impl_item.safety = CM_HIR_SAFE;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     memset(&type, 0, sizeof(type));
