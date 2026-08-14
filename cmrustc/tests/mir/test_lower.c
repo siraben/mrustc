@@ -3686,6 +3686,284 @@ static void test_tuple_parameter_lowering(void)
     cm_hir_context_destroy(&hir);
 }
 
+static void test_newtype_parameter_lowering(void)
+{
+    CmHirContext hir;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirTypeId u32_type;
+    CmHirTypeId i32_type;
+    CmHirDefId newtype_definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId newtype_generic;
+    CmHirGenericParamId function_generic;
+    CmHirType type;
+    CmHirTypeId declared_field_type;
+    CmHirTypeId function_generic_type;
+    CmHirGenericArg argument;
+    CmHirTypeId applied_type;
+    CmHirTypeId wrong_applied_type;
+    CmHirField field;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirDefId function_definition;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirExpr expression;
+    CmHirExprId root;
+    CmMirContext mir;
+    CmMirLowerResult result;
+    const CmMirBody *stored;
+    CmMirBody *mutable_stored;
+    CmMirStatement *statements;
+    CmMirOperand *operand;
+    CmMirPlaceProjection *projection;
+    CmMirPlaceProjectionKind saved_projection_kind;
+    CmMirOperandKind saved_operand_kind;
+    CmHirTypeId saved_type;
+    CmHirDefId saved_definition;
+    CmSpan saved_span;
+    uint32_t saved_value;
+
+    cm_hir_context_init(&hir);
+    assert(cm_hir_create_crate(&hir,
+        cm_hir_intern(&hir, "mir_newtype_parameter_boundary"),
+        CM_HIR_EDITION_2021, test_span(0u, 140u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    i32_type = add_integer_type(&hir, CM_HIR_INT_I32, 2u);
+
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_STRUCT, test_span(10u, 40u), &newtype_definition)
+        == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = newtype_definition;
+    generic.name = cm_hir_intern(&hir, "T");
+    generic.span = test_span(18u, 19u);
+    assert(cm_hir_add_generic_param(&hir, &generic, &newtype_generic)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = generic.span;
+    type.data.parameter_type.parameter = newtype_generic;
+    assert(cm_hir_add_type(&hir, &type, &declared_field_type) == CM_HIR_OK);
+    memset(&field, 0, sizeof(field));
+    field.type = declared_field_type;
+    field.visibility.kind = CM_HIR_VIS_PUBLIC;
+    field.visibility.restriction = cm_hir_def_id_none();
+    field.span = test_span(24u, 28u);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_STRUCT;
+    item.definition = newtype_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&hir, "Newtype");
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(10u, 40u);
+    item.generic_parameter_start = newtype_generic;
+    item.generic_parameter_count = 1u;
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_TUPLE;
+    item.data.aggregate_item.fields = &field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(50u, 120u), &function_definition)
+        == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = function_definition;
+    generic.name = cm_hir_intern(&hir, "E");
+    generic.span = test_span(54u, 55u);
+    assert(cm_hir_add_generic_param(&hir, &generic, &function_generic)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = generic.span;
+    type.data.parameter_type.parameter = function_generic;
+    assert(cm_hir_add_type(&hir, &type, &function_generic_type)
+        == CM_HIR_OK);
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = function_generic_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(60u, 70u);
+    type.data.named_type.definition = newtype_definition;
+    type.data.named_type.arguments = &argument;
+    type.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&hir, &type, &applied_type) == CM_HIR_OK);
+    argument.data.type = i32_type;
+    assert(cm_hir_add_type(&hir, &type, &wrong_applied_type) == CM_HIR_OK);
+
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = applied_type;
+    parameter.span = test_span(60u, 80u);
+    parameter.binding_kind = CM_HIR_BINDING_NEWTYPE_PATTERN;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.newtype_binding.name = cm_hir_intern(&hir, "value");
+    parameter.newtype_binding.span = test_span(68u, 73u);
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.newtype_binding.name;
+    local.type = function_generic_type;
+    local.mutability = CM_HIR_IMMUTABLE;
+    local.span = parameter.newtype_binding.span;
+    local.parameter_index = 0u;
+    local.parameter_binding_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = function_definition;
+    body.origin = cm_hir_body_origin_item_source(function_definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = function_generic_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 50u;
+    body.span = test_span(50u, 120u);
+    assert(cm_hir_add_body(&hir, &body, &body_id) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = function_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&hir, "unwrap_newtype");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = body.span;
+    item.generic_parameter_start = function_generic;
+    item.generic_parameter_count = 1u;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = function_generic_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_id;
+    expression.type = function_generic_type;
+    expression.span = test_span(90u, 95u);
+    expression.data.local.local_index = 0u;
+    assert(cm_hir_add_expr(&hir, &expression, &root) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&hir, body_id, root)
+        == CM_HIR_OK);
+
+    cm_mir_context_init(&mir);
+    result = cm_mir_lower_instance(&mir, &hir, body_id, &u32_type, 1u);
+    stored = cm_mir_get_body(&mir, result.body);
+    assert(result.error_count == 0u && result.lowered_body_count == 1u
+        && stored != NULL && stored->owned_storage != NULL
+        && stored->instance.substitution_count == 1u
+        && stored->instance.substitutions[0] == u32_type
+        && stored->local_count == 3u
+        && stored->locals[0].kind == CM_MIR_LOCAL_RETURN
+        && stored->locals[0].type == u32_type
+        && stored->locals[1].kind == CM_MIR_LOCAL_ARGUMENT
+        && stored->locals[1].type == applied_type
+        && stored->locals[2].kind == CM_MIR_LOCAL_USER
+        && stored->locals[2].type == u32_type
+        && stored->basic_block_count == 1u
+        && stored->basic_blocks[0].statement_count == 2u
+        && stored->basic_blocks[0].terminator.kind
+            == CM_MIR_TERMINATOR_RETURN);
+    mutable_stored = (CmMirBody *)stored;
+    statements = mutable_stored->basic_blocks[0].statements;
+    assert(statements != NULL && statements[0].kind == CM_MIR_STATEMENT_ASSIGN
+        && statements[0].data.assign.destination == 2u
+        && statements[0].data.assign.value.kind == CM_MIR_RVALUE_USE
+        && statements[1].data.assign.destination == CM_MIR_RETURN_LOCAL);
+    operand = &statements[0].data.assign.value.data.use;
+    projection = operand->data.place.projections;
+    assert(operand->kind == CM_MIR_OPERAND_MOVE_PLACE
+        && operand->type == u32_type
+        && operand->data.place.base == 1u
+        && operand->data.place.type == u32_type
+        && operand->data.place.projection_count == 1u
+        && operand->data.place.span.source
+            == parameter.newtype_binding.span.source
+        && operand->data.place.span.start
+            == parameter.newtype_binding.span.start
+        && operand->data.place.span.end == parameter.newtype_binding.span.end
+        && projection != NULL
+        && projection->kind == CM_MIR_PROJECTION_FIELD
+        && cm_hir_def_id_equal(projection->definition,
+            newtype_definition)
+        && projection->field_index == 0u
+        && cm_mir_validate_place(&hir, stored, &operand->data.place)
+            == CM_MIR_OK
+        && cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+            == CM_MIR_OK);
+
+    saved_type = mutable_stored->locals[1].type;
+    mutable_stored->locals[1].type = wrong_applied_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->locals[1].type = saved_type;
+
+    saved_operand_kind = operand->kind;
+    operand->kind = CM_MIR_OPERAND_COPY_PLACE;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->kind = saved_operand_kind;
+    saved_projection_kind = projection->kind;
+    projection->kind = CM_MIR_PROJECTION_DEREFERENCE;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projection->kind = saved_projection_kind;
+    saved_definition = projection->definition;
+    projection->definition = function_definition;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projection->definition = saved_definition;
+    saved_value = projection->field_index;
+    projection->field_index = 1u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projection->field_index = saved_value;
+    saved_value = operand->data.place.base;
+    operand->data.place.base = CM_MIR_RETURN_LOCAL;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->data.place.base = saved_value;
+    saved_type = operand->type;
+    operand->type = i32_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->type = saved_type;
+    saved_type = operand->data.place.type;
+    operand->data.place.type = i32_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->data.place.type = saved_type;
+    saved_span = operand->data.place.span;
+    operand->data.place.span.start += 1u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->data.place.span = saved_span;
+    saved_value = operand->data.place.projection_count;
+    operand->data.place.projection_count = 0u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    operand->data.place.projection_count = saved_value;
+    saved_value = statements[0].data.assign.destination;
+    statements[0].data.assign.destination = CM_MIR_RETURN_LOCAL;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    statements[0].data.assign.destination = saved_value;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_OK);
+
+    cm_mir_context_destroy(&mir);
+    cm_hir_context_destroy(&hir);
+}
+
 int main(void)
 {
     CmHirContext hir;
@@ -3835,6 +4113,7 @@ int main(void)
     test_reference_lowering_stays_fail_closed();
     test_discard_parameter_lowering();
     test_tuple_parameter_lowering();
+    test_newtype_parameter_lowering();
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);
     puts("mir lowering tests: ok");

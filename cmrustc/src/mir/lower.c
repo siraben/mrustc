@@ -78,6 +78,21 @@ static int cm_mir_hir_type_equal_inner(const CmHirContext *hir,
                 right->data.reference_type.pointee, depth + 1u);
     }
     if (left->kind == CM_HIR_TYPE_ADT_KIND) {
+        if (left->data.named_type.argument_count == 1u
+            && right->data.named_type.argument_count == 1u
+            && left->data.named_type.arguments != NULL
+            && right->data.named_type.arguments != NULL
+            && left->data.named_type.arguments[0].kind
+                == CM_HIR_GENERIC_ARG_TYPE
+            && right->data.named_type.arguments[0].kind
+                == CM_HIR_GENERIC_ARG_TYPE) {
+            return cm_hir_def_id_equal(left->data.named_type.definition,
+                    right->data.named_type.definition)
+                && cm_mir_hir_type_equal_inner(hir,
+                    left->data.named_type.arguments[0].data.type,
+                    right->data.named_type.arguments[0].data.type,
+                    depth + 1u);
+        }
         return left->data.named_type.argument_count == 0u
             && left->data.named_type.arguments == NULL
             && right->data.named_type.argument_count == 0u
@@ -292,6 +307,95 @@ static const CmHirItem *cm_mir_lower_named_struct(
         ? item : NULL;
 }
 
+/*
+ * Moving a field out of a Drop type is illegal.  MIR does not yet carry a
+ * resolved Drop lang-item identity, so conservatively reject a local unary
+ * newtype if any positive trait impl has the same ADT head.  This deliberately
+ * over-rejects until lang-item identities are available.
+ */
+static int cm_mir_lower_newtype_has_positive_trait_impl(
+    const CmHirContext *hir, CmHirDefId definition)
+{
+    size_t index;
+
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+        const CmHirType *self_type;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+            || !item->data.impl_item.has_trait
+            || item->data.impl_item.is_negative) {
+            continue;
+        }
+        self_type = cm_hir_get_type(hir, item->data.impl_item.self_type);
+        if (self_type != NULL && self_type->kind == CM_HIR_TYPE_ADT_KIND
+            && cm_hir_def_id_equal(self_type->data.named_type.definition,
+                definition)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const CmHirItem *cm_mir_lower_applied_newtype(
+    const CmHirContext *hir, const CmHirItem *function,
+    CmHirTypeId type_id, CmHirTypeId *out_field_type)
+{
+    const CmHirType *type;
+    const CmHirDefinition *definition;
+    const CmHirItem *item;
+    const CmHirGenericParam *parameter;
+    const CmHirType *declared_field;
+
+    if (out_field_type != NULL) *out_field_type = CM_HIR_TYPE_NONE;
+    type = cm_hir_get_type(hir, type_id);
+    definition = type == NULL || type->kind != CM_HIR_TYPE_ADT_KIND
+            || type->data.named_type.argument_count != 1u
+            || type->data.named_type.arguments == NULL
+            || type->data.named_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_lookup_definition(hir,
+            type->data.named_type.definition);
+    item = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (function == NULL || item == NULL || item->kind != CM_HIR_ITEM_STRUCT
+        || !cm_hir_def_id_equal(item->definition,
+            type->data.named_type.definition)
+        || item->definition.crate_id != function->definition.crate_id
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->generic_parameter_count != 1u
+        || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || item->data.aggregate_item.form != CM_HIR_AGGREGATE_TUPLE
+        || item->data.aggregate_item.field_count != 1u
+        || item->data.aggregate_item.fields == NULL
+        || cm_hir_get_type(hir,
+            type->data.named_type.arguments[0].data.type) == NULL
+        || cm_mir_lower_newtype_has_positive_trait_impl(hir,
+            item->definition)) {
+        return NULL;
+    }
+    parameter = cm_hir_get_generic_param(hir,
+        item->generic_parameter_start);
+    declared_field = cm_hir_get_type(hir,
+        item->data.aggregate_item.fields[0].type);
+    if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+        || parameter->index != 0u
+        || !cm_hir_def_id_equal(parameter->owner, item->definition)
+        || declared_field == NULL
+        || declared_field->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || declared_field->data.parameter_type.parameter
+            != item->generic_parameter_start) {
+        return NULL;
+    }
+    if (out_field_type != NULL) {
+        *out_field_type = type->data.named_type.arguments[0].data.type;
+    }
+    return item;
+}
+
 static CmHirTypeId cm_mir_lower_monomorphic_self_type(
     const CmHirContext *hir, CmHirTypeId id, size_t depth)
 {
@@ -488,6 +592,14 @@ static int cm_mir_lower_type_target_valid(const CmMirContext *context,
         return 1;
     }
     if (type->kind != CM_HIR_TYPE_ADT_KIND) return 1;
+    if (type->data.named_type.argument_count == 1u) {
+        CmHirTypeId field_type;
+
+        return cm_mir_lower_applied_newtype(hir, function, type_id,
+                &field_type) != NULL
+            && cm_mir_lower_type_target_valid(context, hir, function,
+                field_type, depth + 1u);
+    }
     item = type->data.named_type.argument_count != 0u
             || type->data.named_type.arguments != NULL
         ? NULL : cm_mir_lower_named_struct(hir, function,
@@ -581,6 +693,11 @@ static int cm_mir_lower_type(const CmHirContext *hir,
         && type->data.named_type.arguments == NULL
         && cm_mir_lower_named_struct(hir, item,
             type->data.named_type.definition) != NULL) {
+        *out_type = declared;
+        return 1;
+    }
+    if (type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_mir_lower_applied_newtype(hir, item, declared, NULL) != NULL) {
         *out_type = declared;
         return 1;
     }
@@ -773,6 +890,46 @@ static int cm_mir_lower_parameter_layout(const CmMirContext *context,
             }
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            const CmHirLocal *local;
+            CmHirTypeId declared_field_type;
+            CmHirTypeId field_type;
+            CmHirTypeId local_type;
+
+            if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+                || parameter->name != CM_INTERN_ID_NONE
+                || cm_mir_lower_applied_newtype(hir, item, parameter->type,
+                    &declared_field_type) == NULL
+                || !cm_mir_lower_type(hir, item, substitutions,
+                    substitution_count, declared_field_type, &field_type)
+                || !cm_mir_lower_type_is_scalar(hir, field_type)
+                || hir_local_index >= hir_body->local_count) {
+                return 0;
+            }
+            local = &hir_body->locals[hir_local_index];
+            if (!cm_mir_lower_type(hir, item, substitutions,
+                    substitution_count, local->type, &local_type)
+                || local_type != field_type
+                || local->parameter_index != parameter_index
+                || local->parameter_binding_index != 0u
+                || local->name != parameter->newtype_binding.name
+                || local->mutability != CM_HIR_IMMUTABLE
+                || local->span.source
+                    != parameter->newtype_binding.span.source
+                || local->span.start
+                    != parameter->newtype_binding.span.start
+                || local->span.end
+                    != parameter->newtype_binding.span.end) {
+                return 0;
+            }
+            if (hir_to_mir != NULL) {
+                hir_to_mir[hir_local_index] = 1u
+                    + signature->parameter_count + tuple_binding_index;
+            }
+            hir_local_index += 1u;
+            tuple_binding_index += 1u;
+            continue;
+        }
         /* Every future binding form remains outside this exact slice. */
         return 0;
     }
@@ -834,6 +991,16 @@ static int cm_mir_lower_hir_local_id(
             continue;
         }
         if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
+        if (parameter->binding_kind == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            if (parameter_local == hir_local) {
+                *out_local = 1u + signature->parameter_count
+                    + tuple_binding;
+                return *out_local < layout->non_temporary_local_count;
+            }
+            parameter_local += 1u;
+            tuple_binding += 1u;
+            continue;
+        }
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }
@@ -2882,6 +3049,57 @@ static int cm_mir_flow_append_tuple_parameter_prologue(
             continue;
         }
         if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
+        if (parameter->binding_kind == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            const CmHirType *parameter_type;
+            CmHirTypeId declared_field_type;
+            CmHirTypeId field_type;
+            CmMirPlaceProjection projection;
+            CmMirOperand operand;
+            CmMirLocalId destination;
+            size_t projection_index;
+
+            parameter_type = cm_hir_get_type(output->plan->hir,
+                parameter->type);
+            if (parameter_type == NULL
+                || cm_mir_lower_applied_newtype(output->plan->hir,
+                    output->plan->item, parameter->type,
+                    &declared_field_type) == NULL
+                || !cm_mir_lower_type(output->plan->hir,
+                    output->plan->item,
+                    output->plan->instance->substitutions,
+                    output->plan->instance->substitution_count,
+                    declared_field_type, &field_type)
+                || !cm_mir_lower_hir_local_id(signature,
+                    output->plan->body,
+                    &output->plan->parameter_layout,
+                    hir_local_index, &destination)
+                || output->projections->len >= output->projections->cap) {
+                return 0;
+            }
+            memset(&projection, 0, sizeof(projection));
+            projection.kind = CM_MIR_PROJECTION_FIELD;
+            projection.definition =
+                parameter_type->data.named_type.definition;
+            projection.field_index = 0u;
+            projection_index = output->projections->len;
+            (void)cm_vec_push(output->projections, &projection);
+
+            memset(&operand, 0, sizeof(operand));
+            operand.kind = CM_MIR_OPERAND_MOVE_PLACE;
+            operand.type = field_type;
+            operand.data.place.base = parameter_index + 1u;
+            operand.data.place.type = field_type;
+            operand.data.place.projections =
+                (CmMirPlaceProjection *)output->projections->data
+                    + projection_index;
+            operand.data.place.projection_count = 1u;
+            operand.data.place.span = parameter->newtype_binding.span;
+            if (!cm_mir_flow_append_use(output, destination, &operand)) {
+                return 0;
+            }
+            hir_local_index += 1u;
+            continue;
+        }
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }

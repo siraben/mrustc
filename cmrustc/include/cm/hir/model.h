@@ -527,7 +527,9 @@ typedef enum CmHirBindingKind {
     /* Positional ABI slot with no name-resolution binding, e.g. `_`. */
     CM_HIR_BINDING_DISCARD,
     /* One ABI tuple slot destructured into two lexical move bindings. */
-    CM_HIR_BINDING_TUPLE_PATTERN
+    CM_HIR_BINDING_TUPLE_PATTERN,
+    /* One applied tuple-newtype ABI slot destructured into one move binding. */
+    CM_HIR_BINDING_NEWTYPE_PATTERN
 } CmHirBindingKind;
 
 /* How a named function-parameter pattern binds its ABI input value. */
@@ -546,8 +548,13 @@ typedef struct CmHirTupleParameterBinding {
     CmSpan span;
 } CmHirTupleParameterBinding;
 
+typedef struct CmHirNewtypeParameterBinding {
+    CmInternId name;
+    CmSpan span;
+} CmHirNewtypeParameterBinding;
+
 typedef struct CmHirFunctionParameter {
-    /* Root binding name; none for discard and tuple-pattern parameters. */
+    /* Root binding name; none for discard and destructuring parameters. */
     CmInternId name;
     /* Exact incoming ABI type, including the tuple before destructuring. */
     CmHirTypeId type;
@@ -557,6 +564,8 @@ typedef struct CmHirFunctionParameter {
     /* Embedded, bounded lexical leaves for TUPLE_PATTERN only. */
     CmHirTupleParameterBinding
         tuple_bindings[CM_HIR_TUPLE_PARAMETER_BINDING_COUNT];
+    /* The sole lexical leaf for NEWTYPE_PATTERN only. */
+    CmHirNewtypeParameterBinding newtype_binding;
 } CmHirFunctionParameter;
 
 typedef enum CmHirReceiverKind {

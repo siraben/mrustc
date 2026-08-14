@@ -454,7 +454,7 @@ static const char *cm_hir_receiver_name(CmHirReceiverKind kind)
 static const char *cm_hir_binding_name(CmHirBindingKind kind)
 {
     static const char *const names[] = {
-        "named", "discard", "tuple-pattern"
+        "named", "discard", "tuple-pattern", "newtype-pattern"
     };
 
     if ((unsigned int)kind >= (unsigned int)CM_ARRAY_LEN(names)) {
@@ -1528,6 +1528,19 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                             parameter->tuple_bindings[binding_index].span);
                         fputc('\n', stream);
                     }
+                } else if (parameter->binding_kind
+                        == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+                    fprintf(stream,
+                        "function-param-binding item#%u parameter=%u "
+                        "index=0 name=",
+                        (unsigned int)(index + 1u),
+                        (unsigned int)parameter_index);
+                    cm_hir_dump_string(stream, context,
+                        parameter->newtype_binding.name);
+                    fputs(" span=", stream);
+                    cm_hir_dump_span(stream,
+                        parameter->newtype_binding.span);
+                    fputc('\n', stream);
                 }
             }
         }

@@ -2211,6 +2211,22 @@ static int cm_hir_parameter_tuple_payload_empty(
     return 1;
 }
 
+static int cm_hir_parameter_newtype_payload_empty(
+    const CmHirFunctionParameter *parameter)
+{
+    return parameter->newtype_binding.name == CM_INTERN_ID_NONE
+        && parameter->newtype_binding.span.source == 0u
+        && parameter->newtype_binding.span.start == 0u
+        && parameter->newtype_binding.span.end == 0u;
+}
+
+static int cm_hir_parameter_pattern_payload_empty(
+    const CmHirFunctionParameter *parameter)
+{
+    return cm_hir_parameter_tuple_payload_empty(parameter)
+        && cm_hir_parameter_newtype_payload_empty(parameter);
+}
+
 static int cm_hir_parameter_tuple_payload_valid(
     const CmHirContext *context, const CmHirFunctionParameter *parameter)
 {
@@ -2218,7 +2234,8 @@ static int cm_hir_parameter_tuple_payload_valid(
     uint32_t index;
 
     if (parameter->name != CM_INTERN_ID_NONE
-        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE) {
+        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+        || !cm_hir_parameter_newtype_payload_empty(parameter)) {
         return 0;
     }
     tuple_type = cm_hir_get_type(context, parameter->type);
@@ -2244,6 +2261,69 @@ static int cm_hir_parameter_tuple_payload_valid(
     }
     return parameter->tuple_bindings[0].name
         != parameter->tuple_bindings[1].name;
+}
+
+static int cm_hir_parameter_newtype_payload_valid(
+    const CmHirContext *context, const CmHirFunctionParameter *parameter,
+    CmHirTypeId *out_field_type)
+{
+    const CmHirType *parameter_type;
+    const CmHirGenericArg *argument;
+    const CmHirItem *aggregate;
+    const CmHirGenericParam *generic;
+    const CmHirType *declared_field_type;
+    const CmHirNewtypeParameterBinding *binding;
+
+    if (out_field_type != NULL) *out_field_type = CM_HIR_TYPE_NONE;
+    if (parameter->name != CM_INTERN_ID_NONE
+        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+        || !cm_hir_parameter_tuple_payload_empty(parameter)) {
+        return 0;
+    }
+    binding = &parameter->newtype_binding;
+    if (!cm_hir_intern_id_nonempty(context, binding->name)
+        || cm_hir_intern_matches(context, binding->name, "_")
+        || !cm_hir_span_is_ordered(binding->span)
+        || binding->span.source != parameter->span.source
+        || binding->span.start < parameter->span.start
+        || binding->span.end > parameter->span.end) {
+        return 0;
+    }
+    parameter_type = cm_hir_get_type(context, parameter->type);
+    if (parameter_type == NULL
+        || parameter_type->kind != CM_HIR_TYPE_ADT_KIND
+        || parameter_type->data.named_type.argument_count != 1u
+        || parameter_type->data.named_type.arguments == NULL) {
+        return 0;
+    }
+    argument = &parameter_type->data.named_type.arguments[0];
+    aggregate = cm_hir_bound_definition_item(context,
+        parameter_type->data.named_type.definition);
+    if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        || aggregate == NULL || aggregate->kind != CM_HIR_ITEM_STRUCT
+        || aggregate->data.aggregate_item.form != CM_HIR_AGGREGATE_TUPLE
+        || aggregate->data.aggregate_item.field_count != 1u
+        || aggregate->data.aggregate_item.fields == NULL
+        || aggregate->generic_parameter_count != 1u
+        || aggregate->generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    generic = cm_hir_get_generic_param(context,
+        aggregate->generic_parameter_start);
+    declared_field_type = cm_hir_get_type(context,
+        aggregate->data.aggregate_item.fields[0].type);
+    if (generic == NULL || generic->kind != CM_HIR_GENERIC_TYPE
+        || generic->index != 0u
+        || !cm_hir_def_id_equal(generic->owner, aggregate->definition)
+        || declared_field_type == NULL
+        || declared_field_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || declared_field_type->data.parameter_type.parameter
+            != aggregate->generic_parameter_start) {
+        return 0;
+    }
+    if (out_field_type != NULL) *out_field_type = argument->data.type;
+    return 1;
 }
 
 static int cm_hir_function_body_matches_signature(
@@ -2313,6 +2393,31 @@ static int cm_hir_function_body_matches_signature(
                 }
                 local_index += 1u;
             }
+            continue;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            const CmHirLocal *local;
+            CmHirTypeId field_type;
+
+            if (!cm_hir_parameter_newtype_payload_valid(context, parameter,
+                    &field_type)
+                || local_index >= body->local_count) {
+                return 0;
+            }
+            local = &body->locals[local_index];
+            if (local->parameter_index != index
+                || local->parameter_binding_index != 0u
+                || local->name != parameter->newtype_binding.name
+                || local->type != field_type
+                || local->mutability != CM_HIR_IMMUTABLE
+                || local->span.source
+                    != parameter->newtype_binding.span.source
+                || local->span.start
+                    != parameter->newtype_binding.span.start
+                || local->span.end != parameter->newtype_binding.span.end) {
+                return 0;
+            }
+            local_index += 1u;
             continue;
         }
         return 0;
@@ -2461,11 +2566,11 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
             binding_valid = cm_hir_intern_id_nonempty(context,
                     parameter->name)
                 && !cm_hir_intern_matches(context, parameter->name, "_")
-                && cm_hir_parameter_tuple_payload_empty(parameter);
+                && cm_hir_parameter_pattern_payload_empty(parameter);
         } else if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
             binding_valid = parameter->name == CM_INTERN_ID_NONE
                 && parameter->binding_mode == CM_HIR_PARAMETER_BINDING_MOVE
-                && cm_hir_parameter_tuple_payload_empty(parameter);
+                && cm_hir_parameter_pattern_payload_empty(parameter);
         } else if (parameter->binding_kind
                 == CM_HIR_BINDING_TUPLE_PATTERN) {
             binding_valid = cm_hir_parameter_tuple_payload_valid(context,
@@ -2473,6 +2578,11 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
                 && cm_hir_def_id_is_none(item->parent_definition)
                 && item->data.function_item.body != CM_HIR_BODY_NONE
                 && signature->receiver == CM_HIR_RECEIVER_NONE;
+        } else if (parameter->binding_kind
+                == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            binding_valid = cm_hir_parameter_newtype_payload_valid(context,
+                    parameter, NULL)
+                && item->data.function_item.body != CM_HIR_BODY_NONE;
         } else {
             binding_valid = 0;
         }

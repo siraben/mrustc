@@ -771,6 +771,138 @@ static void test_tuple_parameter_definition_lockstep(void)
     fixture_destroy(&fixture);
 }
 
+static void test_newtype_parameter_definition_lockstep(void)
+{
+    TestFixture fixture;
+    CmHirDefId newtype_definition;
+    CmHirDefId function_definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId generic_id;
+    CmHirTypeId generic_type;
+    CmHirField field;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirGenericArg argument;
+    CmHirType applied_value;
+    CmHirTypeId applied_type;
+    CmHirFunctionParameter parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBody *stored_body;
+    CmHirBodyId body_id;
+    CmHirExprId root;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmSpan saved_span;
+
+    fixture_init(&fixture);
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_STRUCT, test_span(10u, 35u),
+        &newtype_definition) == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = newtype_definition;
+    generic.name = cm_hir_intern(&fixture.hir, "T");
+    generic.span = test_span(18u, 19u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &generic, &generic_id)
+        == CM_HIR_OK);
+    generic_type = add_parameter_type(&fixture.hir, generic_id);
+    memset(&field, 0, sizeof(field));
+    field.type = generic_type;
+    field.visibility.kind = CM_HIR_VIS_PUBLIC;
+    field.visibility.restriction = cm_hir_def_id_none();
+    field.span = test_span(22u, 28u);
+    init_item(&item, CM_HIR_ITEM_STRUCT, newtype_definition, fixture.root,
+        "Newtype", &fixture.hir);
+    item.generic_parameter_start = generic_id;
+    item.generic_parameter_count = 1u;
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_TUPLE;
+    item.data.aggregate_item.fields = &field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = fixture.u32_type;
+    memset(&applied_value, 0, sizeof(applied_value));
+    applied_value.kind = CM_HIR_TYPE_ADT_KIND;
+    applied_value.span = test_span(40u, 52u);
+    applied_value.data.named_type.definition = newtype_definition;
+    applied_value.data.named_type.arguments = &argument;
+    applied_value.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&fixture.hir, &applied_value, &applied_type)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(40u, 80u),
+        &function_definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = applied_type;
+    parameter.span = test_span(44u, 60u);
+    parameter.binding_kind = CM_HIR_BINDING_NEWTYPE_PATTERN;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.newtype_binding.name = cm_hir_intern(&fixture.hir, "value");
+    parameter.newtype_binding.span = test_span(52u, 57u);
+    memset(&local, 0, sizeof(local));
+    local.name = parameter.newtype_binding.name;
+    local.type = fixture.u32_type;
+    local.mutability = CM_HIR_IMMUTABLE;
+    local.span = parameter.newtype_binding.span;
+    local.parameter_index = 0u;
+    local.parameter_binding_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = function_definition;
+    body.origin = cm_hir_body_origin_item_source(function_definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = fixture.u32_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 10u;
+    body.span = test_span(40u, 80u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &body_id) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, function_definition,
+        fixture.root, "unwrap_newtype", &fixture.hir);
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK
+        && add_local_expression(&fixture.hir, body_id, 0u,
+            fixture.u32_type, test_span(65u, 70u), &root) == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture.hir, body_id, root)
+            == CM_HIR_OK);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, function_definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    stored_body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)body_id - 1u);
+    assert(stored_body != NULL);
+    saved_span = stored_body->locals[0].span;
+    stored_body->locals[0].span.start += 1u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_body->locals[0].span = saved_span;
+    stored_body->locals[0].type = fixture.bool_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH);
+    stored_body->locals[0].type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_closed_trait_default_definition_mode(void)
 {
     TestFixture fixture;
@@ -941,6 +1073,284 @@ static CmHirDefId add_blanket_impl(TestFixture *fixture,
     item.data.impl_item.safety = CM_HIR_SAFE;
     assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
     return definition;
+}
+
+static void test_newtype_parameter_enclosing_impl_substitution(void)
+{
+    TestFixture fixture;
+    CmHirDefId newtype_definition;
+    CmHirDefId trait_definition;
+    CmHirDefId declared_definition;
+    CmHirDefId impl_definition;
+    CmHirDefId selected_definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId newtype_parameter_id;
+    CmHirGenericParamId trait_parameter_id;
+    CmHirGenericParamId impl_parameter_id;
+    CmHirTypeId newtype_parameter_type;
+    CmHirTypeId trait_parameter_type;
+    CmHirTypeId trait_self_type;
+    CmHirTypeId impl_parameter_type;
+    CmHirTypeId applied_impl_type;
+    CmHirTypeId applied_u32_type;
+    CmHirType type;
+    CmHirGenericArg applied_impl_argument;
+    CmHirGenericArg applied_u32_argument;
+    CmHirGenericArg trait_impl_argument;
+    CmHirGenericArg instance_impl_argument;
+    CmHirGenericArg instance_trait_argument;
+    CmHirField field;
+    CmHirFunctionParameter declared_parameter;
+    CmHirFunctionParameter selected_parameter;
+    CmHirLocal local;
+    CmHirBody body;
+    CmHirBody *stored_body;
+    CmHirBodyId body_id;
+    CmHirItem item;
+    CmHirItem *stored_newtype;
+    CmHirItemId newtype_item_id;
+    CmHirItemId item_id;
+    CmHirExprId root;
+    CmHirInstanceSpec spec;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyEvidenceWriteback evidence;
+    CmSemanticBodyResult result;
+    WritebackProbe probe;
+
+    fixture_init(&fixture);
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_STRUCT, test_span(10u, 30u),
+        &newtype_definition) == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = newtype_definition;
+    generic.name = cm_hir_intern(&fixture.hir, "T");
+    generic.span = test_span(14u, 15u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &generic,
+        &newtype_parameter_id) == CM_HIR_OK);
+    newtype_parameter_type = add_parameter_type(&fixture.hir,
+        newtype_parameter_id);
+    memset(&field, 0, sizeof(field));
+    field.type = newtype_parameter_type;
+    field.visibility.kind = CM_HIR_VIS_PUBLIC;
+    field.visibility.restriction = cm_hir_def_id_none();
+    field.span = test_span(20u, 25u);
+    init_item(&item, CM_HIR_ITEM_STRUCT, newtype_definition, fixture.root,
+        "Newtype", &fixture.hir);
+    item.generic_parameter_start = newtype_parameter_id;
+    item.generic_parameter_count = 1u;
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_TUPLE;
+    item.data.aggregate_item.fields = &field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&fixture.hir, &item, &newtype_item_id)
+        == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_TRAIT, test_span(31u, 50u),
+        &trait_definition) == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = trait_definition;
+    generic.name = cm_hir_intern(&fixture.hir, "R");
+    generic.span = test_span(35u, 36u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &generic,
+        &trait_parameter_id) == CM_HIR_OK);
+    trait_parameter_type = add_parameter_type(&fixture.hir,
+        trait_parameter_id);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_SELF_KIND;
+    type.span = test_span(40u, 44u);
+    type.data.self_type.owner = trait_definition;
+    assert(cm_hir_add_type(&fixture.hir, &type, &trait_self_type)
+        == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TRAIT, trait_definition, fixture.root,
+        "FromResidual", &fixture.hir);
+    item.generic_parameter_start = trait_parameter_id;
+    item.generic_parameter_count = 1u;
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(51u, 70u),
+        &declared_definition) == CM_HIR_OK);
+    memset(&declared_parameter, 0, sizeof(declared_parameter));
+    declared_parameter.name = cm_hir_intern(&fixture.hir, "residual");
+    declared_parameter.type = trait_parameter_type;
+    declared_parameter.span = test_span(56u, 64u);
+    declared_parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    declared_parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    init_item(&item, CM_HIR_ITEM_FUNCTION, declared_definition,
+        fixture.root, "from_residual", &fixture.hir);
+    item.parent_definition = trait_definition;
+    item.data.function_item.signature.parameters = &declared_parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = trait_self_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_IMPL, test_span(71u, 95u),
+        &impl_definition) == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = impl_definition;
+    generic.name = cm_hir_intern(&fixture.hir, "E");
+    generic.span = test_span(76u, 77u);
+    assert(cm_hir_add_generic_param(&fixture.hir, &generic,
+        &impl_parameter_id) == CM_HIR_OK);
+    impl_parameter_type = add_parameter_type(&fixture.hir,
+        impl_parameter_id);
+    memset(&applied_impl_argument, 0, sizeof(applied_impl_argument));
+    applied_impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    applied_impl_argument.data.type = impl_parameter_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(80u, 90u);
+    type.data.named_type.definition = newtype_definition;
+    type.data.named_type.arguments = &applied_impl_argument;
+    type.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&fixture.hir, &type, &applied_impl_type)
+        == CM_HIR_OK);
+    memset(&trait_impl_argument, 0, sizeof(trait_impl_argument));
+    trait_impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_impl_argument.data.type = applied_impl_type;
+    init_item(&item, CM_HIR_ITEM_IMPL, impl_definition, fixture.root, NULL,
+        &fixture.hir);
+    item.generic_parameter_start = impl_parameter_id;
+    item.generic_parameter_count = 1u;
+    item.data.impl_item.self_type = impl_parameter_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.trait_type.arguments = &trait_impl_argument;
+    item.data.impl_item.trait_type.argument_count = 1u;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(96u, 140u),
+        &selected_definition) == CM_HIR_OK);
+    memset(&selected_parameter, 0, sizeof(selected_parameter));
+    selected_parameter.type = applied_impl_type;
+    selected_parameter.span = test_span(104u, 122u);
+    selected_parameter.binding_kind = CM_HIR_BINDING_NEWTYPE_PATTERN;
+    selected_parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    selected_parameter.newtype_binding.name =
+        cm_hir_intern(&fixture.hir, "value");
+    selected_parameter.newtype_binding.span = test_span(112u, 117u);
+    memset(&local, 0, sizeof(local));
+    local.name = selected_parameter.newtype_binding.name;
+    local.type = impl_parameter_type;
+    local.mutability = CM_HIR_IMMUTABLE;
+    local.span = selected_parameter.newtype_binding.span;
+    local.parameter_index = 0u;
+    local.parameter_binding_index = 0u;
+    memset(&body, 0, sizeof(body));
+    body.owner = selected_definition;
+    body.origin = cm_hir_body_origin_item_source(selected_definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = impl_parameter_type;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 10u;
+    body.span = test_span(96u, 140u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &body_id) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, selected_definition,
+        fixture.root, "from_residual", &fixture.hir);
+    item.parent_definition = impl_definition;
+    item.data.function_item.signature.parameters = &selected_parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = impl_parameter_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    item.data.function_item.trait_item_definition = declared_definition;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK
+        && add_local_expression(&fixture.hir, body_id, 0u,
+            impl_parameter_type, test_span(128u, 133u), &root) == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture.hir, body_id, root)
+            == CM_HIR_OK
+        && cm_hir_body_function_owner_kind(&fixture.hir,
+            cm_hir_get_item(&fixture.hir, item_id))
+            == CM_HIR_BODY_FUNCTION_OWNER_TYPE_GENERIC_TRAIT_IMPL_METHOD);
+
+    memset(&applied_u32_argument, 0, sizeof(applied_u32_argument));
+    applied_u32_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    applied_u32_argument.data.type = fixture.u32_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(80u, 90u);
+    type.data.named_type.definition = newtype_definition;
+    type.data.named_type.arguments = &applied_u32_argument;
+    type.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&fixture.hir, &type, &applied_u32_type)
+        == CM_HIR_OK);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, selected_definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN
+        && cm_hir_def_id_equal(cm_semantic_session_enclosing_owner(&session),
+            impl_definition));
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+
+    memset(&instance_impl_argument, 0, sizeof(instance_impl_argument));
+    instance_impl_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    instance_impl_argument.data.type = fixture.u32_type;
+    memset(&instance_trait_argument, 0, sizeof(instance_trait_argument));
+    instance_trait_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    instance_trait_argument.data.type = applied_u32_type;
+    memset(&spec, 0, sizeof(spec));
+    spec.selected_callable = selected_definition;
+    spec.body_definition = selected_definition;
+    spec.declared_trait_callable = declared_definition;
+    spec.enclosing_impl = impl_definition;
+    spec.enclosing_impl_arguments = &instance_impl_argument;
+    spec.enclosing_impl_argument_count = 1u;
+    spec.implemented_trait = trait_definition;
+    spec.implemented_trait_arguments = &instance_trait_argument;
+    spec.implemented_trait_argument_count = 1u;
+    spec.self_owner = impl_definition;
+    spec.self_type = fixture.u32_type;
+    memset(&probe, 0, sizeof(probe));
+    probe.hir = &fixture.hir;
+    probe.expected_body = body_id;
+    probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
+    memset(&evidence, 0, sizeof(evidence));
+    evidence.context = &probe;
+    evidence.checked_body = probe_writeback;
+    result = cm_semantic_body_check_instance_spec_with_evidence(&session,
+        body_id, &spec, &evidence);
+    assert(result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u);
+
+    stored_body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)body_id - 1u);
+    assert(stored_body != NULL);
+    stored_body->locals[0].type = fixture.bool_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH);
+    stored_body->locals[0].type = impl_parameter_type;
+
+    stored_newtype = (CmHirItem *)cm_vec_at(&fixture.hir.items,
+        (size_t)newtype_item_id - 1u);
+    assert(stored_newtype != NULL);
+    stored_newtype->data.aggregate_item.fields[0].type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_newtype->data.aggregate_item.fields[0].type =
+        newtype_parameter_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
 }
 
 static void test_explicit_qualified_callable_selection(void)
@@ -4027,6 +4437,8 @@ static void test_invalid_api_and_status_names(void)
 int main(void)
 {
     test_tuple_parameter_definition_lockstep();
+    test_newtype_parameter_definition_lockstep();
+    test_newtype_parameter_enclosing_impl_substitution();
     test_closed_trait_default_definition_mode();
     test_explicit_qualified_callable_selection();
     test_generic_trait_argument_callable();

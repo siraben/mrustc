@@ -8279,20 +8279,32 @@ static void test_shared_reference_parameter_pattern(void)
     cm_hir_context_destroy(&context);
 }
 
-static void test_unit_newtype_parameter_pattern(void)
+static void test_newtype_parameter_pattern(void)
 {
-    static const char positive[] =
+    static const char unit_positive[] =
         "mod ops { pub struct Yeet<T>(pub T); }"
         "struct Opt<T>(T);"
         "trait FromResidual<R> { fn from_residual(residual: R); }"
         "impl<T> FromResidual<ops::Yeet<()>> for Opt<T> {"
         " fn from_residual(ops::Yeet(()): ops::Yeet<()>) {}"
         "}";
+    static const char binding_positive[] =
+        "mod ops { pub struct Yeet<T>(pub T); }"
+        "struct Opt<T, E>(T, E);"
+        "trait FromResidual<R> { fn from_residual(residual: R); }"
+        "impl<T, E> FromResidual<ops::Yeet<E>> for Opt<T, E> {"
+        " fn from_residual(ops::Yeet(e): ops::Yeet<E>) {}"
+        "}";
     static const char *const negatives[] = {
         "struct A<T>(T); struct B<T>(T); fn f(A(()): B<()>) {}",
         "struct Yeet<T>(T); fn f(Yeet(()): Yeet<u8>) {}",
-        "struct Yeet<T>(T); fn f(Yeet(value): Yeet<()>) {}",
         "struct Yeet<T>(T); fn f(Yeet(..): Yeet<()>) {}",
+        "struct Yeet<T>(T); fn f(Yeet((value,)): Yeet<(u8,)>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(ref value): Yeet<u8>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(mut value): Yeet<u8>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(value @ _): Yeet<u8>) {}",
+        "struct Yeet<T>(T); fn f(Yeet::<u8>(value): Yeet<u8>) {}",
+        "struct Wrap<T>(u8); fn f(Wrap(value): Wrap<u8>) {}",
         "struct Pair<T>(T, T); fn f(Pair(()): Pair<()>) {}",
         "enum E<T> { V(T) } fn f(E::V(()): E<()>) {}"
     };
@@ -8306,7 +8318,7 @@ static void test_unit_newtype_parameter_pattern(void)
     CmHirLowerResult result;
     size_t index;
 
-    result = lower_source(positive, &context, NULL);
+    result = lower_source(unit_positive, &context, NULL);
     impl_item = find_impl(&context);
     method = impl_item == NULL ? NULL : find_child(&context,
         impl_item->definition, "from_residual");
@@ -8340,6 +8352,54 @@ static void test_unit_newtype_parameter_pattern(void)
         && body->locals == NULL);
     cm_hir_context_destroy(&context);
 
+    result = lower_source(binding_positive, &context, NULL);
+    impl_item = find_impl(&context);
+    method = impl_item == NULL ? NULL : find_child(&context,
+        impl_item->definition, "from_residual");
+    signature = method == NULL ? NULL
+        : &method->data.function_item.signature;
+    body = method == NULL ? NULL
+        : cm_hir_get_body(&context, method->data.function_item.body);
+    parameter_type = signature == NULL
+            || signature->parameter_count != 1u
+        ? NULL : cm_hir_get_type(&context, signature->parameters[0].type);
+    argument_type = parameter_type == NULL
+            || parameter_type->kind != CM_HIR_TYPE_ADT_KIND
+            || parameter_type->data.named_type.argument_count != 1u
+            || parameter_type->data.named_type.arguments == NULL
+            || parameter_type->data.named_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            parameter_type->data.named_type.arguments[0].data.type);
+    assert(result.error_count == 0u && method != NULL
+        && signature->receiver == CM_HIR_RECEIVER_NONE
+        && signature->parameters[0].binding_kind
+            == CM_HIR_BINDING_NEWTYPE_PATTERN
+        && signature->parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && signature->parameters[0].name == CM_INTERN_ID_NONE
+        && hir_string_is(&context,
+            signature->parameters[0].newtype_binding.name, "e")
+        && parameter_type != NULL
+        && parameter_type->kind == CM_HIR_TYPE_ADT_KIND
+        && argument_type != NULL
+        && argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->parameter_count == 1u && body->local_count == 1u
+        && body->locals != NULL
+        && body->locals[0].name
+            == signature->parameters[0].newtype_binding.name
+        && body->locals[0].type
+            == parameter_type->data.named_type.arguments[0].data.type
+        && body->locals[0].mutability == CM_HIR_IMMUTABLE
+        && body->locals[0].span.start
+            == signature->parameters[0].newtype_binding.span.start
+        && body->locals[0].span.end
+            == signature->parameters[0].newtype_binding.span.end
+        && body->locals[0].parameter_index == 0u
+        && body->locals[0].parameter_binding_index == 0u);
+    cm_hir_context_destroy(&context);
+
     for (index = 0u; index < sizeof(negatives) / sizeof(negatives[0]);
          ++index) {
         result = lower_source(negatives[index], &context, NULL);
@@ -8351,6 +8411,82 @@ static void test_unit_newtype_parameter_pattern(void)
                     == CM_HIR_LOWER_WRONG_NAMESPACE));
         cm_hir_context_destroy(&context);
     }
+}
+
+static void test_newtype_parameter_forged_ast(void)
+{
+    static const char source[] =
+        "struct Yeet<T>(T); fn f(Yeet(()): Yeet<()>) {}";
+    CmAst ast;
+    CmParseResult parse_result;
+    const CmAstItemId *root_item_id;
+    CmAstItem *function_item;
+    CmAstPattern *root_pattern;
+    CmAstPattern *field_pattern;
+    CmAstPatternId forged_pattern_id;
+    CmHirLowerOptions options;
+
+    cm_ast_init(&ast);
+    parse_result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
+        CM_EDITION_2024);
+    assert(parse_result.error_count == 0u && ast.root_items.len == 2u);
+    root_item_id = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 1u);
+    function_item = root_item_id == NULL ? NULL
+        : (CmAstItem *)cm_vec_at(&ast.items, (size_t)*root_item_id - 1u);
+    root_pattern = function_item == NULL
+            || function_item->kind != CM_AST_ITEM_FUNCTION
+            || function_item->data.function_item.parameter_count != 1u
+            || function_item->data.function_item.parameters == NULL
+        ? NULL : (CmAstPattern *)cm_vec_at(&ast.patterns,
+            (size_t)function_item->data.function_item.parameters[0].pattern
+                - 1u);
+    field_pattern = root_pattern == NULL
+            || root_pattern->kind != CM_AST_PATTERN_STRUCT
+            || root_pattern->data.struct_pattern.field_count != 1u
+            || root_pattern->data.struct_pattern.fields == NULL
+        ? NULL : (CmAstPattern *)cm_vec_at(&ast.patterns,
+            (size_t)root_pattern->data.struct_pattern.fields[0].pattern
+                - 1u);
+    assert(root_pattern != NULL && field_pattern != NULL
+        && root_pattern->data.struct_pattern.is_tuple == 1
+        && root_pattern->data.struct_pattern.fields[0].name
+            == CM_INTERN_ID_NONE
+        && root_pattern->data.struct_pattern.fields[0].is_shorthand == 0
+        && field_pattern->kind == CM_AST_PATTERN_TUPLE
+        && field_pattern->data.list.pattern_count == 0u
+        && field_pattern->data.list.patterns == NULL
+        && field_pattern->data.list.has_rest == 0
+        && field_pattern->data.list.rest_index == 0u);
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "forged_newtype_parameter";
+    options.source = 7u;
+
+    root_pattern->data.struct_pattern.is_tuple = 2;
+    expect_invalid_ast_lowering(&ast, &options,
+        "tuple-struct parameter field metadata is invalid");
+    root_pattern->data.struct_pattern.is_tuple = 1;
+
+    root_pattern->data.struct_pattern.fields[0].name = (CmInternId)1u;
+    expect_invalid_ast_lowering(&ast, &options,
+        "tuple-struct parameter field metadata is invalid");
+    root_pattern->data.struct_pattern.fields[0].name = CM_INTERN_ID_NONE;
+
+    root_pattern->data.struct_pattern.fields[0].is_shorthand = 2;
+    expect_invalid_ast_lowering(&ast, &options,
+        "tuple-struct parameter field metadata is invalid");
+    root_pattern->data.struct_pattern.fields[0].is_shorthand = 0;
+
+    field_pattern->data.list.rest_index = 1u;
+    expect_invalid_ast_lowering(&ast, &options,
+        "tuple-struct parameter field tuple metadata is invalid");
+    field_pattern->data.list.rest_index = 0u;
+
+    forged_pattern_id = CM_AST_PATTERN_NONE;
+    field_pattern->data.list.patterns = &forged_pattern_id;
+    expect_invalid_ast_lowering(&ast, &options,
+        "tuple-struct parameter field tuple metadata is invalid");
+    field_pattern->data.list.patterns = NULL;
+    cm_ast_destroy(&ast);
 }
 
 static void test_cfg_sensitive_trait_impl_members(void)
@@ -9348,7 +9484,8 @@ int main(void)
     test_typed_parameter_binding_modes();
     test_partition_in_place_parameter_shape();
     test_shared_reference_parameter_pattern();
-    test_unit_newtype_parameter_pattern();
+    test_newtype_parameter_pattern();
+    test_newtype_parameter_forged_ast();
     test_typed_parameter_patterns_remain_bounded();
     test_unsupported_method_forms_are_errors();
     test_cfg_sensitive_trait_impl_members();

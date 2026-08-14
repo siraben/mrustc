@@ -7935,15 +7935,16 @@ static int cm_lower_pattern_binding(CmLowerState *state,
 }
 
 /*
- * A tuple-struct newtype containing `()` is irrefutable and introduces no
- * lexical bindings.  Once the constructor and instantiated field type are
- * authenticated, its runtime effect is exactly the same as an ABI discard.
- * Keep this deliberately narrow until general typed pattern HIR exists.
+ * A unary identity newtype pattern is irrefutable once its constructor and
+ * instantiated field type are authenticated.  Keep this deliberately narrow
+ * until general typed pattern HIR exists: either discard an explicit `()` or
+ * bind the sole field with one immutable by-value binding.
  */
-static int cm_lower_unit_newtype_parameter_pattern(CmLowerState *state,
+static int cm_lower_newtype_parameter_pattern(CmLowerState *state,
     CmAstPatternId pattern_id, CmHirTypeId parameter_type,
     CmHirModuleId module, CmSpan item_span, CmAstItemId ast_item_id,
-    CmSpan *out_span)
+    uint32_t parameter_index, CmHirFunctionParameter *out_parameter,
+    CmHirLocal *out_local, int *out_has_local)
 {
     const CmAstPattern *pattern;
     const CmAstPattern *field_pattern;
@@ -7961,27 +7962,47 @@ static int cm_lower_unit_newtype_parameter_pattern(CmLowerState *state,
 
     pattern = cm_ast_get_pattern(state->ast, pattern_id);
     span = pattern == NULL ? item_span : cm_lower_span(state, pattern->span);
-    if (pattern == NULL || pattern->kind != CM_AST_PATTERN_STRUCT
+    if (out_parameter == NULL || out_local == NULL
+        || out_has_local == NULL || pattern == NULL
+        || pattern->kind != CM_AST_PATTERN_STRUCT
         || !pattern->data.struct_pattern.is_tuple
         || pattern->data.struct_pattern.has_rest
         || pattern->data.struct_pattern.field_count != 1u
         || pattern->data.struct_pattern.fields == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "function tuple-struct parameter requires one unit field");
+            "function tuple-struct parameter requires one field");
+        return 0;
+    }
+    if (pattern->data.struct_pattern.is_tuple != 1
+        || pattern->data.struct_pattern.fields[0].name != CM_INTERN_ID_NONE
+        || pattern->data.struct_pattern.fields[0].is_shorthand != 0) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, pattern->data.struct_pattern.path,
+            CM_HIR_INVALID_ID,
+            "function tuple-struct parameter field metadata is invalid");
         return 0;
     }
     field_pattern = cm_ast_get_pattern(state->ast,
         pattern->data.struct_pattern.fields[0].pattern);
-    if (field_pattern == NULL || field_pattern->kind != CM_AST_PATTERN_TUPLE
-        || field_pattern->data.list.has_rest
-        || field_pattern->data.list.pattern_count != 0u
-        || field_pattern->data.list.patterns != NULL) {
+    if (field_pattern == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
-            field_pattern == NULL ? span
-                : cm_lower_span(state, field_pattern->span),
+            span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "function tuple-struct parameter field must be `()`");
+            "function tuple-struct parameter has an invalid field pattern");
+        return 0;
+    }
+    if (field_pattern->kind == CM_AST_PATTERN_TUPLE
+        && field_pattern->data.list.has_rest == 0
+        && ((field_pattern->data.list.pattern_count == 0u
+                && field_pattern->data.list.patterns != NULL)
+            || field_pattern->data.list.rest_index != 0u)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+            cm_lower_span(state, field_pattern->span), ast_item_id,
+            CM_AST_TYPE_NONE, pattern->data.struct_pattern.path,
+            CM_HIR_INVALID_ID,
+            "function tuple-struct parameter field tuple metadata is "
+            "invalid");
         return 0;
     }
     path = cm_ast_get_path(state->ast,
@@ -8055,16 +8076,60 @@ static int cm_lower_unit_newtype_parameter_pattern(CmLowerState *state,
         || field_type == NULL || field_type->kind != CM_HIR_TYPE_PARAMETER_KIND
         || field_type->data.parameter_type.parameter
             != item->generic_parameter_start
-        || argument_type == NULL
-        || argument_type->kind != CM_HIR_TYPE_UNIT_KIND) {
+        || argument_type == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
             ast_item_id, CM_AST_TYPE_NONE,
             pattern->data.struct_pattern.path, CM_HIR_OK,
-            "function tuple-struct parameter requires a unit-instantiated "
+            "function tuple-struct parameter requires an instantiated "
             "identity field");
         return 0;
     }
-    *out_span = span;
+
+    out_parameter->name = CM_INTERN_ID_NONE;
+    out_parameter->span = span;
+    out_parameter->binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    *out_has_local = 0;
+    if (field_pattern->kind == CM_AST_PATTERN_TUPLE
+        && !field_pattern->data.list.has_rest
+        && field_pattern->data.list.pattern_count == 0u
+        && field_pattern->data.list.patterns == NULL) {
+        if (argument_type->kind != CM_HIR_TYPE_UNIT_KIND) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                cm_lower_span(state, field_pattern->span), ast_item_id,
+                CM_AST_TYPE_NONE, pattern->data.struct_pattern.path,
+                CM_HIR_OK,
+                "unit newtype pattern requires a unit-instantiated field");
+            return 0;
+        }
+        out_parameter->binding_kind = CM_HIR_BINDING_DISCARD;
+        return 1;
+    }
+    if (field_pattern->kind != CM_AST_PATTERN_BINDING
+        || field_pattern->data.binding.subpattern != CM_AST_PATTERN_NONE
+        || field_pattern->data.binding.is_ref
+        || field_pattern->data.binding.is_mutable) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+            cm_lower_span(state, field_pattern->span), ast_item_id,
+            CM_AST_TYPE_NONE, pattern->data.struct_pattern.path, CM_HIR_OK,
+            "function newtype parameter supports only `()` or one "
+            "immutable move binding");
+        return 0;
+    }
+    out_parameter->newtype_binding.span =
+        cm_lower_span(state, field_pattern->span);
+    out_parameter->newtype_binding.name = cm_lower_copy_string(state,
+        field_pattern->data.binding.name, out_parameter->newtype_binding.span,
+        ast_item_id);
+    if (state->failed) return 0;
+    out_parameter->binding_kind = CM_HIR_BINDING_NEWTYPE_PATTERN;
+    out_local->name = out_parameter->newtype_binding.name;
+    out_local->type =
+        abi_type->data.named_type.arguments[0].data.type;
+    out_local->mutability = CM_HIR_IMMUTABLE;
+    out_local->span = out_parameter->newtype_binding.span;
+    out_local->parameter_index = parameter_index;
+    out_local->parameter_binding_index = 0u;
+    *out_has_local = 1;
     return 1;
 }
 
@@ -8735,6 +8800,8 @@ static int cm_lower_function_item(CmLowerState *state,
             if (ast_pattern != NULL
                 && ast_pattern->kind == CM_AST_PATTERN_STRUCT
                 && ast_pattern->data.struct_pattern.is_tuple) {
+                int has_newtype_local;
+
                 if (record->is_foreign
                     || function->body == CM_AST_EXPR_NONE) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -8744,17 +8811,14 @@ static int cm_lower_function_item(CmLowerState *state,
                         "Rust function");
                     break;
                 }
-                if (!cm_lower_unit_newtype_parameter_pattern(state,
+                if (!cm_lower_newtype_parameter_pattern(state,
                         function->parameters[index].pattern,
                         parameters[index].type, record->owner_module, span,
-                        ast_item_id, &parameter_span)) {
+                        ast_item_id, index, &parameters[index],
+                        &locals[local_count], &has_newtype_local)) {
                     break;
                 }
-                parameters[index].name = CM_INTERN_ID_NONE;
-                parameters[index].span = parameter_span;
-                parameters[index].binding_kind = CM_HIR_BINDING_DISCARD;
-                parameters[index].binding_mode =
-                    CM_HIR_PARAMETER_BINDING_MOVE;
+                local_count += has_newtype_local != 0 ? 1u : 0u;
                 continue;
             }
             if (ast_pattern != NULL

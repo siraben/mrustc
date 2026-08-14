@@ -3296,6 +3296,59 @@ static CmSemanticBodyStatus cm_semantic_body_constrain_expression(
     return CM_SEMANTIC_BODY_INVALID;
 }
 
+static int cm_semantic_body_newtype_parameter_field_type(
+    const CmHirContext *hir, const CmHirFunctionParameter *parameter,
+    CmHirTypeId *out_type)
+{
+    const CmHirDefinition *definition;
+    const CmHirGenericParam *generic;
+    const CmHirItem *item;
+    const CmHirType *field_type;
+    const CmHirType *parameter_type;
+
+    if (hir == NULL || parameter == NULL || out_type == NULL) return 0;
+    parameter_type = cm_hir_get_type(hir, parameter->type);
+    definition = parameter_type == NULL
+            || parameter_type->kind != CM_HIR_TYPE_ADT_KIND
+        ? NULL : cm_hir_lookup_definition(hir,
+            parameter_type->data.named_type.definition);
+    item = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT
+        || !cm_hir_def_id_equal(item->definition,
+            parameter_type->data.named_type.definition)
+        || item->data.aggregate_item.form != CM_HIR_AGGREGATE_TUPLE
+        || item->data.aggregate_item.field_count != 1u
+        || item->data.aggregate_item.fields == NULL
+        || item->generic_parameter_count != 1u
+        || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || parameter_type->data.named_type.argument_count != 1u
+        || parameter_type->data.named_type.arguments == NULL
+        || parameter_type->data.named_type.arguments[0].kind
+            != CM_HIR_GENERIC_ARG_TYPE) {
+        return 0;
+    }
+    generic = cm_hir_get_generic_param(hir,
+        item->generic_parameter_start);
+    field_type = cm_hir_get_type(hir,
+        item->data.aggregate_item.fields[0].type);
+    if (generic == NULL || generic->kind != CM_HIR_GENERIC_TYPE
+        || generic->index != 0u
+        || !cm_hir_def_id_equal(generic->owner, item->definition)
+        || field_type == NULL
+        || field_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || field_type->data.parameter_type.parameter
+            != item->generic_parameter_start
+        || cm_hir_get_type(hir,
+            parameter_type->data.named_type.arguments[0].data.type) == NULL) {
+        return 0;
+    }
+    *out_type = parameter_type->data.named_type.arguments[0].data.type;
+    return 1;
+}
+
 static CmSemanticBodyStatus cm_semantic_body_constrain(
     CmSemanticBodyConstraints *constraints, const CmHirItem *owner_item)
 {
@@ -3354,6 +3407,68 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
             }
             status = cm_semantic_body_unify_owner_types(constraints,
                 local->type, parameter->type);
+            if (status != CM_SEMANTIC_BODY_OK) goto finish;
+            initial_local_count += 1u;
+            continue;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_NEWTYPE_PATTERN) {
+            const CmInternedString *binding_name;
+            const CmHirLocal *local;
+            CmHirTypeId field_type;
+            uint32_t payload_index;
+
+            binding_name = cm_interner_get(&constraints->hir->strings,
+                parameter->newtype_binding.name);
+            if (initial_local_count >= constraints->body->local_count
+                || parameter->name != CM_INTERN_ID_NONE
+                || parameter->binding_mode
+                    != CM_HIR_PARAMETER_BINDING_MOVE
+                || binding_name == NULL || binding_name->len == 0u
+                || (binding_name->len == 1u
+                    && binding_name->bytes[0] == '_')
+                || parameter->newtype_binding.span.source == 0u
+                || parameter->newtype_binding.span.source
+                    != parameter->span.source
+                || parameter->newtype_binding.span.start
+                    > parameter->newtype_binding.span.end
+                || parameter->newtype_binding.span.start
+                    < parameter->span.start
+                || parameter->newtype_binding.span.end > parameter->span.end
+                || !cm_semantic_body_newtype_parameter_field_type(
+                    constraints->hir, parameter, &field_type)) {
+                status = CM_SEMANTIC_BODY_INVALID;
+                goto finish;
+            }
+            for (payload_index = 0u;
+                 payload_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++payload_index) {
+                if (parameter->tuple_bindings[payload_index].name
+                        != CM_INTERN_ID_NONE
+                    || parameter->tuple_bindings[payload_index].span.source
+                        != 0u
+                    || parameter->tuple_bindings[payload_index].span.start
+                        != 0u
+                    || parameter->tuple_bindings[payload_index].span.end
+                        != 0u) {
+                    status = CM_SEMANTIC_BODY_INVALID;
+                    goto finish;
+                }
+            }
+            local = &constraints->body->locals[initial_local_count];
+            if (local->parameter_index != index
+                || local->parameter_binding_index != 0u
+                || local->name != parameter->newtype_binding.name
+                || local->mutability != CM_HIR_IMMUTABLE
+                || local->span.source
+                    != parameter->newtype_binding.span.source
+                || local->span.start
+                    != parameter->newtype_binding.span.start
+                || local->span.end != parameter->newtype_binding.span.end) {
+                status = CM_SEMANTIC_BODY_INVALID;
+                goto finish;
+            }
+            status = cm_semantic_body_unify_owner_types(constraints,
+                local->type, field_type);
             if (status != CM_SEMANTIC_BODY_OK) goto finish;
             initial_local_count += 1u;
             continue;
