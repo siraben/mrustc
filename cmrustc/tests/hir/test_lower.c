@@ -1487,7 +1487,7 @@ static void test_macro_expanded_array_length_expression(void)
         ("struct Rejected { values: "
             "[u8; (18446744073709551615 + 1) / 8] }"),
         "struct Rejected<const N: usize> { values: [u8; (N + 7) / 8] }",
-        "struct Rejected { values: [u8; 2 * 3] }",
+        "struct Rejected { values: [u8; 7 % 4] }",
         "struct Rejected { values: [u8; -1] }",
         "struct Rejected { values: [u8; 16 / size_of::<u8>()] }"
     };
@@ -1614,6 +1614,139 @@ static void test_const_generic_type_alias_application(void)
         && concrete_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
         && concrete_array->data.array_type.length.data.value.low_bits == 4u);
     cm_hir_context_destroy(&context);
+}
+
+static void test_const_generic_literal_expression_application(void)
+{
+    static const char source[] =
+        "struct Simd<T, const N: usize>;"
+        "type Bytes = Simd<u8, { 4 * 16 }>;"
+        "type Precedence = Simd<u8, { 2 + 3 * 4 }>;"
+        "type Grouped = Simd<u8, { (2 + 3) * 4 }>;"
+        "type Zero = Simd<u8, { 0 * 64 }>;"
+        "type Alias<T, const N: usize> = Simd<T, N>;"
+        "type AliasBytes = Alias<u8, { 3 * 8 }>;"
+        "trait Width<const N: usize> {}"
+        "struct Value; impl Width<{ 2 * 3 + 1 }> for Value {}";
+    static const struct {
+        const char *name;
+        uint64_t expected;
+        int uses_alias_parameter;
+    } aliases[] = {
+        { "Bytes", 64u, 0 },
+        { "Precedence", 14u, 0 },
+        { "Grouped", 20u, 0 },
+        { "Zero", 0u, 0 },
+        { "AliasBytes", 24u, 1 }
+    };
+    static const char *const rejected[] = {
+        ("struct Simd<T, const N: usize>; const N: usize = 3; "
+            "type Rejected = Simd<u8, { N * 2 }>;"),
+        ("struct Simd<T, const N: usize>; type Rejected = "
+            "Simd<u8, { 18446744073709551615 * 2 }>;"),
+        ("struct Simd<T, const N: usize>; "
+            "type Rejected = Simd<u8, { 1 / 0 }>;"),
+        ("struct Simd<T, const N: usize>; "
+            "type Rejected = Simd<u8, { 7 % 4 }>;"),
+        ("struct Simd<T, const N: usize>; type Rejected = "
+            "Simd<u8, { let value = 2; value * 3 }>;"),
+        ("struct Flag<const B: bool>; "
+            "type Rejected = Flag<{ 1 * 1 }>;"),
+        ("struct Byte<const N: u8>; "
+            "type Rejected = Byte<{ 1 * 1 }>;"),
+        ("struct Simd<T, const N: usize>; type Rejected = "
+            "Simd<u8, { const { 2 * 3 } }>;"),
+        ("struct Simd<T, const N: usize>; type Rejected = "
+            "Simd<u8, { #![allow(dead_code)] 2 * 3 }>;"),
+        ("struct Simd<T, const N: usize>; type Rejected = "
+            "Simd<u8, { #[allow(dead_code)] 2 * 3 }>;"),
+        ("struct Pair<T, const N: usize>; "
+            "type Rejected = Pair<{ 2 * 3 }>;"),
+        ("struct Simd<T, const N: usize>; "
+            "type Rejected = Simd<u8, { 2 * 3 }, { 4 * 5 }>;"),
+        ("trait Width<const N: usize> {} struct Value; "
+            "impl Width<{ 18446744073709551615 * 2 }> for Value {}")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *item;
+    const CmHirItem *impl_item;
+    const CmHirItem *simd;
+    const CmHirItem *alias;
+    const CmHirItem *width;
+    const CmHirGenericParam *simd_parameter;
+    const CmHirGenericParam *alias_parameter;
+    const CmHirGenericParam *width_parameter;
+    const CmHirType *type;
+    const CmHirGenericArg *argument;
+    CmHirTypeId expected_type;
+    size_t index;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "const literal expression lowering: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    simd = find_item(&context, "Simd");
+    alias = find_item(&context, "Alias");
+    width = find_item(&context, "Width");
+    simd_parameter = simd == NULL || simd->generic_parameter_count != 2u
+        ? NULL : cm_hir_get_generic_param(&context,
+            simd->generic_parameter_start + 1u);
+    alias_parameter = alias == NULL || alias->generic_parameter_count != 2u
+        ? NULL : cm_hir_get_generic_param(&context,
+            alias->generic_parameter_start + 1u);
+    width_parameter = width == NULL || width->generic_parameter_count != 1u
+        ? NULL : cm_hir_get_generic_param(&context,
+            width->generic_parameter_start);
+    assert(result.error_count == 0u && simd_parameter != NULL
+        && simd_parameter->kind == CM_HIR_GENERIC_CONST
+        && alias_parameter != NULL
+        && alias_parameter->kind == CM_HIR_GENERIC_CONST
+        && width_parameter != NULL
+        && width_parameter->kind == CM_HIR_GENERIC_CONST);
+    for (index = 0u; index < sizeof(aliases) / sizeof(aliases[0]);
+         ++index) {
+        item = find_item(&context, aliases[index].name);
+        type = item == NULL || item->kind != CM_HIR_ITEM_TYPE_ALIAS
+            ? NULL : cm_hir_get_type(&context,
+                item->data.type_alias_item.target);
+        argument = type == NULL || type->kind != CM_HIR_TYPE_ADT_KIND
+                || type->data.named_type.argument_count != 2u
+                || type->data.named_type.arguments == NULL
+            ? NULL : &type->data.named_type.arguments[1];
+        expected_type = aliases[index].uses_alias_parameter
+            ? alias_parameter->declared_type : simd_parameter->declared_type;
+        assert(result.error_count == 0u && argument != NULL
+            && argument->kind == CM_HIR_GENERIC_ARG_CONST
+            && argument->data.constant.kind == CM_HIR_CONST_VALUE
+            && argument->data.constant.type == expected_type
+            && argument->data.constant.data.value.low_bits
+                == aliases[index].expected
+            && argument->data.constant.data.value.high_bits == 0u);
+    }
+    impl_item = find_impl(&context);
+    argument = impl_item == NULL
+            || impl_item->data.impl_item.trait_type.argument_count != 1u
+            || impl_item->data.impl_item.trait_type.arguments == NULL
+        ? NULL : &impl_item->data.impl_item.trait_type.arguments[0];
+    assert(result.error_count == 0u && argument != NULL
+        && argument->kind == CM_HIR_GENERIC_ARG_CONST
+        && argument->data.constant.kind == CM_HIR_CONST_VALUE
+        && argument->data.constant.type == width_parameter->declared_type
+        && argument->data.constant.data.value.low_bits == 7u
+        && argument->data.constant.data.value.high_bits == 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+            && find_item(&context, "Rejected") == NULL);
+        cm_hir_context_destroy(&context);
+    }
 }
 
 static void test_adt_function_pointer_default_substitution(void)
@@ -2420,9 +2553,7 @@ static void test_const_parameter_adt_argument(void)
         "struct Array<T, const N: usize>; trait Owner<const N: u8> {"
             "fn get() -> Array<u8, N>; }",
         "struct Array<T, const N: usize>; trait Owner<const N: usize> {"
-            "fn get() -> Array<u8, u8>; }",
-        "struct Array<T, const N: usize>; trait Owner {"
-            "fn get() -> Array<u8, {1 + 1}>; }"
+            "fn get() -> Array<u8, u8>; }"
     };
     CmHirContext context;
     CmHirLowerResult result;
@@ -7972,8 +8103,6 @@ static void test_associated_type_bound_scope_errors(void)
         "trait Bound<T> {} trait Owner { type Assoc: Bound<'static>; }",
         "trait Bound<'a> {} trait Owner { "
             "type Assoc: Bound<u8>; }",
-        "trait Bound<const N: usize> {} trait Owner { "
-            "type Assoc: Bound<{1 + 1}>; }",
         "trait Bound<T> { type Item; } trait Owner { "
             "type Assoc: Bound<Item = u8, u16>; }",
         "trait Bound<'a, T> {} trait Owner { "
@@ -8009,7 +8138,6 @@ static void test_associated_type_bound_scope_errors(void)
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_UNRESOLVED_PATH,
@@ -8025,7 +8153,6 @@ static void test_associated_type_bound_scope_errors(void)
         "associated type defaults",
         "argument kind differs",
         "argument kind differs",
-        "supported integer argument",
         "must precede associated equalities",
         "omits a required type argument",
         "authenticated associated-type subject",
@@ -8663,6 +8790,7 @@ int main(void)
     test_const_generic_trait_method_declaration();
     test_macro_expanded_array_length_expression();
     test_const_generic_type_alias_application();
+    test_const_generic_literal_expression_application();
     test_adt_function_pointer_default_substitution();
     test_generic_parameter_shadows_type_path_prefix();
     test_primitive_qualified_module_type_paths();

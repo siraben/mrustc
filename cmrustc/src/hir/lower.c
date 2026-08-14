@@ -2401,16 +2401,17 @@ static int cm_lower_interned_string_is(const CmInternedString *string,
 }
 
 /*
- * Array length text is captured before HIR lowering, but the expression
+ * Literal const text is captured before HIR lowering, but the expression
  * parser remains the authority for grouping and operator precedence.  Parse
  * into a private AST so failed evaluation cannot append recovery nodes to the
  * source AST, then admit only checked arithmetic over nonnegative decimal
  * literals.  Subtraction and left shift retain the earlier bootstrap surface;
- * division is needed by portable-simd's `($lanes + 7) / 8` expansion.  The
- * u64 bound is a conservative bootstrap shortcut until the configured target
- * usize width is carried into HIR lowering.
+ * division and multiplication are needed by portable-simd expansions.  The
+ * exact portable-SIMD values admitted here are at most 64 and fit both
+ * supported target usize widths.  General target-width validation is deferred
+ * until configured integer widths are carried into HIR lowering.
  */
-static int cm_lower_eval_array_length_ast(const CmAst *ast,
+static int cm_lower_eval_literal_const_ast(const CmAst *ast,
     CmAstExprId expression_id, size_t depth, uint64_t *out_value)
 {
     const CmAstExpr *expression;
@@ -2423,9 +2424,22 @@ static int cm_lower_eval_array_length_ast(const CmAst *ast,
         || depth >= CM_LOWER_APIT_MAX_DEPTH) return 0;
     expression = cm_ast_get_expr(ast, expression_id);
     if (expression == NULL) return 0;
+    if (expression->attribute_count != 0u
+        || expression->attributes != NULL) return 0;
     if (expression->kind == CM_AST_EXPR_LITERAL) {
         return cm_lower_parse_u64(cm_ast_get_string(ast,
             expression->data.literal.text), out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_BLOCK) {
+        if (expression->data.block.inner_attribute_count != 0u
+            || expression->data.block.inner_attributes != NULL
+            || expression->data.block.statement_count != 0u
+            || expression->data.block.statements != NULL
+            || expression->data.block.tail == CM_AST_EXPR_NONE
+            || expression->data.block.is_unsafe
+            || expression->data.block.is_const) return 0;
+        return cm_lower_eval_literal_const_ast(ast,
+            expression->data.block.tail, depth + 1u, out_value);
     }
     if (expression->kind != CM_AST_EXPR_BINARY) return 0;
     operator_name = cm_ast_get_string(ast,
@@ -2433,10 +2447,11 @@ static int cm_lower_eval_array_length_ast(const CmAst *ast,
     if (!cm_lower_interned_string_is(operator_name, "+")
         && !cm_lower_interned_string_is(operator_name, "-")
         && !cm_lower_interned_string_is(operator_name, "<<")
+        && !cm_lower_interned_string_is(operator_name, "*")
         && !cm_lower_interned_string_is(operator_name, "/")) return 0;
-    if (!cm_lower_eval_array_length_ast(ast,
+    if (!cm_lower_eval_literal_const_ast(ast,
             expression->data.binary.left, depth + 1u, &left)
-        || !cm_lower_eval_array_length_ast(ast,
+        || !cm_lower_eval_literal_const_ast(ast,
             expression->data.binary.right, depth + 1u, &right)) return 0;
     if (cm_lower_interned_string_is(operator_name, "+")) {
         if (left > UINT64_MAX - right) return 0;
@@ -2447,6 +2462,9 @@ static int cm_lower_eval_array_length_ast(const CmAst *ast,
     } else if (cm_lower_interned_string_is(operator_name, "<<")) {
         if (right >= 64u || left > (UINT64_MAX >> right)) return 0;
         value = left << right;
+    } else if (cm_lower_interned_string_is(operator_name, "*")) {
+        if (left != 0u && right > UINT64_MAX / left) return 0;
+        value = left * right;
     } else {
         if (right == 0u) return 0;
         value = left / right;
@@ -2466,7 +2484,7 @@ static enum cm_edition cm_lower_syntax_edition(CmHirEdition edition)
     }
 }
 
-static int cm_lower_eval_array_length_expression(
+static int cm_lower_eval_literal_const_expression(
     const CmInternedString *text, CmHirEdition edition,
     uint64_t *out_value)
 {
@@ -2481,11 +2499,47 @@ static int cm_lower_eval_array_length_expression(
         (const char *)text->bytes, text->len,
         cm_lower_syntax_edition(edition));
     evaluated = fragment.parse.error_count == 0u
-        && cm_lower_eval_array_length_ast(&expression_ast,
+        && cm_lower_eval_literal_const_ast(&expression_ast,
             fragment.expression, 0u, &value);
     cm_ast_destroy(&expression_ast);
     if (!evaluated) return 0;
     *out_value = value;
+    return 1;
+}
+
+static int cm_lower_literal_const_argument(CmLowerState *state,
+    const CmAstGenericArg *ast_argument,
+    const CmHirGenericParam *parameter, CmHirDefId expected_owner,
+    uint32_t expected_index, CmHirGenericArg *out_argument)
+{
+    const CmHirType *declared_type;
+    const CmInternedString *text;
+    CmHirGenericArg argument;
+    uint64_t value;
+    int is_plain_literal;
+
+    if (state == NULL || ast_argument == NULL || parameter == NULL
+        || out_argument == NULL
+        || ast_argument->kind != CM_AST_GENERIC_CONST
+        || parameter->kind != CM_HIR_GENERIC_CONST
+        || !cm_hir_def_id_equal(parameter->owner, expected_owner)
+        || parameter->index != expected_index) return 0;
+    declared_type = cm_hir_get_type(state->hir, parameter->declared_type);
+    text = cm_lower_ast_string(state, ast_argument->text);
+    is_plain_literal = cm_lower_parse_u64(text, &value);
+    if (declared_type == NULL
+        || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) return 0;
+    if (!is_plain_literal
+        && (declared_type->data.integer_type.kind != CM_HIR_INT_USIZE
+            || !cm_lower_eval_literal_const_expression(text,
+                state->options->edition, &value))) return 0;
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_CONST;
+    argument.data.constant.kind = CM_HIR_CONST_VALUE;
+    argument.data.constant.type = parameter->declared_type;
+    argument.data.constant.data.value.low_bits = value;
+    argument.data.constant.data.value.high_bits = 0u;
+    *out_argument = argument;
     return 1;
 }
 
@@ -3175,15 +3229,9 @@ static int cm_lower_alias_arguments(CmLowerState *state,
                 argument);
         } else if (parameter->kind == CM_HIR_GENERIC_CONST
             && ast_argument->kind == CM_AST_GENERIC_CONST) {
-            const CmHirType *declared_type;
-            uint64_t value;
-
-            declared_type = cm_hir_get_type(state->hir,
-                parameter->declared_type);
-            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
-                    ast_argument->text), &value)
-                || declared_type == NULL
-                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+            if (!cm_lower_literal_const_argument(state, ast_argument,
+                    parameter, alias_definition, parameter_index,
+                    argument)) {
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                     cm_lower_span(state, ast_argument->span),
                     CM_AST_ITEM_NONE, ast_argument->type,
@@ -3192,11 +3240,6 @@ static int cm_lower_alias_arguments(CmLowerState *state,
                     "literal");
                 break;
             }
-            argument->kind = CM_HIR_GENERIC_ARG_CONST;
-            argument->data.constant.kind = CM_HIR_CONST_VALUE;
-            argument->data.constant.type = parameter->declared_type;
-            argument->data.constant.data.value.low_bits = value;
-            argument->data.constant.data.value.high_bits = 0u;
         } else {
             cm_lower_fail(state, CM_HIR_LOWER_ALIAS_ARGUMENT_MISMATCH,
                 cm_lower_span(state, ast_argument->span),
@@ -3443,15 +3486,9 @@ static int cm_lower_adt_arguments(CmLowerState *state,
             }
         } else if (parameter->kind == CM_HIR_GENERIC_CONST
             && ast_argument->kind == CM_AST_GENERIC_CONST) {
-            uint64_t value;
-            const CmHirType *declared_type;
-
-            declared_type = cm_hir_get_type(state->hir,
-                parameter->declared_type);
-            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
-                    ast_argument->text), &value)
-                || declared_type == NULL
-                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+            if (!cm_lower_literal_const_argument(state, ast_argument,
+                    parameter, definition, index,
+                    &explicit_arguments[index])) {
                 cm_free(arguments);
                 cm_free(explicit_arguments);
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
@@ -3461,14 +3498,6 @@ static int cm_lower_adt_arguments(CmLowerState *state,
                     "argument");
                 return 0;
             }
-            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_CONST;
-            explicit_arguments[index].data.constant.kind =
-                CM_HIR_CONST_VALUE;
-            explicit_arguments[index].data.constant.type =
-                parameter->declared_type;
-            explicit_arguments[index].data.constant.data.value.low_bits =
-                value;
-            explicit_arguments[index].data.constant.data.value.high_bits = 0u;
         } else {
             cm_free(arguments);
             cm_free(explicit_arguments);
@@ -5928,7 +5957,7 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         length_parameter_type = NULL;
         has_literal_length = cm_lower_parse_u64(length_text, &length_value);
         if (!has_literal_length) {
-            has_literal_length = cm_lower_eval_array_length_expression(
+            has_literal_length = cm_lower_eval_literal_const_expression(
                 length_text, state->options->edition, &length_value);
         }
         if (!has_literal_length) {
@@ -9723,15 +9752,9 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
             }
         } else if (parameter->kind == CM_HIR_GENERIC_CONST
             && ast_argument->kind == CM_AST_GENERIC_CONST) {
-            uint64_t value;
-            const CmHirType *declared_type;
-
-            declared_type = cm_hir_get_type(state->hir,
-                parameter->declared_type);
-            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
-                    ast_argument->text), &value)
-                || declared_type == NULL
-                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+            if (!cm_lower_literal_const_argument(state, ast_argument,
+                    parameter, trait_target->definition, explicit_count,
+                    &arguments[explicit_count])) {
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                     cm_lower_span(state, ast_argument->span), ast_item_id,
                     CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -9739,14 +9762,6 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
                     "argument");
                 break;
             }
-            arguments[explicit_count].kind = CM_HIR_GENERIC_ARG_CONST;
-            arguments[explicit_count].data.constant.kind =
-                CM_HIR_CONST_VALUE;
-            arguments[explicit_count].data.constant.type =
-                parameter->declared_type;
-            arguments[explicit_count].data.constant.data.value.low_bits =
-                value;
-            arguments[explicit_count].data.constant.data.value.high_bits = 0u;
         } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
             && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
             const CmHirGenericParam *lifetime_parameter;
