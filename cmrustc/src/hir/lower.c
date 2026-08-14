@@ -6119,7 +6119,8 @@ static CmHirField *cm_lower_fields(CmLowerState *state,
 static int cm_lower_pattern_binding(CmLowerState *state,
     CmAstPatternId pattern_id, CmSpan item_span, CmAstItemId ast_item_id,
     CmInternId *out_name, CmHirMutability *out_mutability, CmSpan *out_span,
-    CmHirBindingKind *out_binding_kind)
+    CmHirBindingKind *out_binding_kind,
+    CmHirParameterBindingMode *out_binding_mode)
 {
     const CmAstPattern *pattern;
 
@@ -6135,11 +6136,11 @@ static int cm_lower_pattern_binding(CmLowerState *state,
         *out_mutability = CM_HIR_IMMUTABLE;
         *out_span = cm_lower_span(state, pattern->span);
         *out_binding_kind = CM_HIR_BINDING_DISCARD;
+        *out_binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
         return 1;
     }
     if (pattern->kind != CM_AST_PATTERN_BINDING
-        || pattern->data.binding.subpattern != CM_AST_PATTERN_NONE
-        || pattern->data.binding.is_ref) {
+        || pattern->data.binding.subpattern != CM_AST_PATTERN_NONE) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
             cm_lower_span(state, pattern->span), ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -6148,11 +6149,40 @@ static int cm_lower_pattern_binding(CmLowerState *state,
     }
     *out_name = cm_lower_copy_string(state, pattern->data.binding.name,
         cm_lower_span(state, pattern->span), ast_item_id);
-    *out_mutability = pattern->data.binding.is_mutable
+    *out_mutability = !pattern->data.binding.is_ref
+            && pattern->data.binding.is_mutable
         ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
     *out_span = cm_lower_span(state, pattern->span);
     *out_binding_kind = CM_HIR_BINDING_NAMED;
+    *out_binding_mode = pattern->data.binding.is_ref
+        ? pattern->data.binding.is_mutable
+            ? CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+            : CM_HIR_PARAMETER_BINDING_REF_SHARED
+        : CM_HIR_PARAMETER_BINDING_MOVE;
     return !state->failed;
+}
+
+static CmHirTypeId cm_lower_parameter_binding_type(CmLowerState *state,
+    CmHirTypeId parameter_type, CmHirParameterBindingMode binding_mode,
+    CmSpan span)
+{
+    CmHirType reference;
+
+    if (binding_mode == CM_HIR_PARAMETER_BINDING_MOVE) {
+        return parameter_type;
+    }
+    memset(&reference, 0, sizeof(reference));
+    reference.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    reference.span = span;
+    reference.data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    reference.data.reference_type.region.data.inference_variable =
+        state->next_region_inference;
+    state->next_region_inference += 1u;
+    reference.data.reference_type.pointee = parameter_type;
+    reference.data.reference_type.mutability =
+        binding_mode == CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+            ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
+    return cm_lower_add_type(state, &reference, CM_AST_TYPE_NONE);
 }
 
 static int cm_lower_receiver_pattern(CmLowerState *state,
@@ -6580,6 +6610,9 @@ static int cm_lower_function_item(CmLowerState *state,
         CmHirMutability mutability;
         CmSpan parameter_span;
         CmHirBindingKind binding_kind;
+        CmHirParameterBindingMode binding_mode;
+
+        binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
 
         if (function->parameters[index].is_self) {
             int has_explicit_type;
@@ -6648,7 +6681,8 @@ static int cm_lower_function_item(CmLowerState *state,
             }
             if (!cm_lower_pattern_binding(state,
                     function->parameters[index].pattern, span, ast_item_id,
-                    &name, &mutability, &parameter_span, &binding_kind)) {
+                    &name, &mutability, &parameter_span, &binding_kind,
+                    &binding_mode)) {
                 break;
             }
             parameters[index].type = cm_lower_type(state,
@@ -6658,9 +6692,12 @@ static int cm_lower_function_item(CmLowerState *state,
         parameters[index].name = name;
         parameters[index].span = parameter_span;
         parameters[index].binding_kind = binding_kind;
+        parameters[index].binding_mode = binding_mode;
         if (binding_kind == CM_HIR_BINDING_NAMED) {
             locals[local_count].name = name;
-            locals[local_count].type = parameters[index].type;
+            locals[local_count].type = cm_lower_parameter_binding_type(state,
+                parameters[index].type, binding_mode, parameter_span);
+            if (state->failed) break;
             locals[local_count].mutability = mutability;
             locals[local_count].span = parameter_span;
             locals[local_count].parameter_index = index;

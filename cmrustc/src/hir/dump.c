@@ -418,6 +418,17 @@ static const char *cm_hir_binding_name(CmHirBindingKind kind)
     return names[(unsigned int)kind];
 }
 
+static const char *cm_hir_parameter_binding_mode_name(
+    CmHirParameterBindingMode mode)
+{
+    static const char *const names[] = { "move", "ref", "ref-mut" };
+
+    if ((unsigned int)mode >= (unsigned int)CM_ARRAY_LEN(names)) {
+        return "bad-mode";
+    }
+    return names[(unsigned int)mode];
+}
+
 static const char *cm_hir_supertrait_modifier_name(
     CmHirSupertraitModifier modifier)
 {
@@ -1420,7 +1431,9 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 } else {
                     cm_hir_dump_string(stream, context, parameter->name);
                 }
-                fprintf(stream, " type=ty#%u span=",
+                fprintf(stream, " mode=%s type=ty#%u span=",
+                    cm_hir_parameter_binding_mode_name(
+                        parameter->binding_mode),
                     (unsigned int)parameter->type);
                 cm_hir_dump_span(stream, parameter->span);
                 fputc('\n', stream);

@@ -1942,6 +1942,30 @@ static int cm_hir_fields_self_roots_valid(const CmHirContext *context,
     return 1;
 }
 
+static int cm_hir_parameter_local_type_matches(
+    const CmHirContext *context, const CmHirFunctionParameter *parameter,
+    const CmHirLocal *local)
+{
+    const CmHirType *local_type;
+
+    if (parameter->binding_mode == CM_HIR_PARAMETER_BINDING_MOVE) {
+        return local->type == parameter->type;
+    }
+    local_type = cm_hir_get_type(context, local->type);
+    return (parameter->binding_mode == CM_HIR_PARAMETER_BINDING_REF_SHARED
+            || parameter->binding_mode
+                == CM_HIR_PARAMETER_BINDING_REF_MUTABLE)
+        && local_type != NULL
+        && local_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && local_type->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && local_type->data.reference_type.pointee == parameter->type
+        && local_type->data.reference_type.mutability
+            == (parameter->binding_mode
+                    == CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+                ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE)
+        && local->mutability == CM_HIR_IMMUTABLE;
+}
+
 static int cm_hir_function_body_matches_signature(
     const CmHirContext *context, const CmHirItem *item)
 {
@@ -1966,7 +1990,8 @@ static int cm_hir_function_body_matches_signature(
         if (local_index >= body->local_count
             || body->locals[local_index].parameter_index != index
             || body->locals[local_index].name != parameter->name
-            || body->locals[local_index].type != parameter->type) {
+            || !cm_hir_parameter_local_type_matches(context, parameter,
+                &body->locals[local_index])) {
             return 0;
         }
         local_index += 1u;
@@ -1987,6 +2012,7 @@ static int cm_hir_receiver_shape_valid(const CmHirContext *context,
     if (signature->parameter_count == 0u) return 0;
     parameter = &signature->parameters[0];
     if (parameter->binding_kind != CM_HIR_BINDING_NAMED
+        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
         || !cm_hir_intern_matches(context, parameter->name, "self")) {
         return 0;
     }
@@ -2114,8 +2140,12 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
             ? cm_hir_intern_id_nonempty(context, parameter->name)
                 && !cm_hir_intern_matches(context, parameter->name, "_")
             : parameter->binding_kind == CM_HIR_BINDING_DISCARD
-                && parameter->name == CM_INTERN_ID_NONE;
+                && parameter->name == CM_INTERN_ID_NONE
+                && parameter->binding_mode
+                    == CM_HIR_PARAMETER_BINDING_MOVE;
         if (!binding_valid
+            || (unsigned int)parameter->binding_mode
+                > (unsigned int)CM_HIR_PARAMETER_BINDING_REF_MUTABLE
             || !cm_hir_type_id_valid(context, parameter->type)
             || !cm_hir_span_is_ordered(parameter->span)) {
             return 0;

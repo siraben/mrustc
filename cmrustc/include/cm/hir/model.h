@@ -517,11 +517,19 @@ typedef enum CmHirBindingKind {
     CM_HIR_BINDING_DISCARD
 } CmHirBindingKind;
 
+/* How a named function-parameter pattern binds its ABI input value. */
+typedef enum CmHirParameterBindingMode {
+    CM_HIR_PARAMETER_BINDING_MOVE = 0,
+    CM_HIR_PARAMETER_BINDING_REF_SHARED,
+    CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+} CmHirParameterBindingMode;
+
 typedef struct CmHirFunctionParameter {
     CmInternId name;
     CmHirTypeId type;
     CmSpan span;
     CmHirBindingKind binding_kind;
+    CmHirParameterBindingMode binding_mode;
 } CmHirFunctionParameter;
 
 typedef enum CmHirReceiverKind {

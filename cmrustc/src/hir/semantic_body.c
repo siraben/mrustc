@@ -3597,6 +3597,17 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                 : owner_type_substitution_count != 0u)) {
         return result;
     }
+    for (owner_argument_index = 0u;
+         owner_argument_index < owner_item->data.function_item.signature
+            .parameter_count;
+         ++owner_argument_index) {
+        if (owner_item->data.function_item.signature.parameters[
+                owner_argument_index].binding_mode
+                != CM_HIR_PARAMETER_BINDING_MOVE) {
+            result.status = CM_SEMANTIC_BODY_UNSUPPORTED;
+            return result;
+        }
+    }
     if (instance_spec != NULL
         && (!cm_hir_def_id_equal(instance_spec->selected_callable, owner)
             || !cm_hir_def_id_equal(instance_spec->body_definition, owner)

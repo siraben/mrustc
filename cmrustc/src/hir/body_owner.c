@@ -68,6 +68,23 @@ static int cm_hir_body_owner_constraints_empty(const CmHirItem *item)
         && item->outlives_predicates == NULL;
 }
 
+static int cm_hir_body_owner_parameter_bindings_supported(
+    const CmHirItem *item)
+{
+    const CmHirFunctionSignature *signature;
+    uint32_t index;
+
+    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION) return 0;
+    signature = &item->data.function_item.signature;
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        if (signature->parameters[index].binding_mode
+                != CM_HIR_PARAMETER_BINDING_MOVE) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int cm_hir_body_trait_default_scalar_type(
     const CmHirContext *context, CmHirTypeId type_id)
 {
@@ -362,7 +379,8 @@ CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
     const CmHirItem *trait_method;
 
     if (context == NULL || item == NULL
-        || item->kind != CM_HIR_ITEM_FUNCTION) {
+        || item->kind != CM_HIR_ITEM_FUNCTION
+        || !cm_hir_body_owner_parameter_bindings_supported(item)) {
         return CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED;
     }
     if (cm_hir_def_id_is_none(item->parent_definition)) {

@@ -1749,9 +1749,17 @@ static void test_discard_parameter_model(void)
     parameters[0].name = cm_hir_intern(&context, "discard");
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     parameters[0].name = CM_INTERN_ID_NONE;
+    parameters[0].binding_mode = CM_HIR_PARAMETER_BINDING_REF_SHARED;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameters[0].binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
     parameters[1].type = unit_type;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     parameters[1].type = u8_type;
+    parameters[1].binding_mode = (CmHirParameterBindingMode)99;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameters[1].binding_mode = CM_HIR_PARAMETER_BINDING_REF_MUTABLE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameters[1].binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
 
     assert(cm_hir_reserve_item_definition(&context, crate_id,

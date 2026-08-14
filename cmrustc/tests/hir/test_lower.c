@@ -1,4 +1,5 @@
 #include "cm/hir/lower.h"
+#include "cm/hir/body.h"
 #include "cm/hir/projection.h"
 #include "cm/syntax/parser.h"
 
@@ -5866,6 +5867,159 @@ static void test_unsupported_method_forms_are_errors(void)
     }
 }
 
+static void test_typed_parameter_binding_modes(void)
+{
+    static const char source[] =
+        "fn modes(value: u8, mut mutable: u8, ref shared: u8, "
+        "ref mut unique: u8, _: u8) {}";
+    const CmHirItem *function;
+    const CmHirFunctionSignature *signature;
+    const CmHirBody *body;
+    const CmHirType *shared_type;
+    const CmHirType *unique_type;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    function = find_item(&context, "modes");
+    signature = function == NULL ? NULL
+        : &function->data.function_item.signature;
+    body = function == NULL ? NULL
+        : cm_hir_get_body(&context, function->data.function_item.body);
+    shared_type = body == NULL || body->local_count != 4u ? NULL
+        : cm_hir_get_type(&context, body->locals[2].type);
+    unique_type = body == NULL || body->local_count != 4u ? NULL
+        : cm_hir_get_type(&context, body->locals[3].type);
+    assert(result.error_count == 0u && signature != NULL
+        && signature->parameter_count == 5u
+        && signature->parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && signature->parameters[1].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && signature->parameters[2].binding_mode
+            == CM_HIR_PARAMETER_BINDING_REF_SHARED
+        && signature->parameters[3].binding_mode
+            == CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+        && signature->parameters[4].binding_kind == CM_HIR_BINDING_DISCARD
+        && signature->parameters[4].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->parameter_count == 5u && body->local_count == 4u
+        && body->locals[0].type == signature->parameters[0].type
+        && body->locals[0].mutability == CM_HIR_IMMUTABLE
+        && body->locals[1].type == signature->parameters[1].type
+        && body->locals[1].mutability == CM_HIR_MUTABLE
+        && shared_type != NULL
+        && shared_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && shared_type->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && shared_type->data.reference_type.pointee
+            == signature->parameters[2].type
+        && shared_type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && body->locals[2].mutability == CM_HIR_IMMUTABLE
+        && unique_type != NULL
+        && unique_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && unique_type->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && unique_type->data.reference_type.pointee
+            == signature->parameters[3].type
+        && unique_type->data.reference_type.mutability == CM_HIR_MUTABLE
+        && body->locals[3].mutability == CM_HIR_IMMUTABLE
+        && cm_hir_body_function_owner_kind(&context, function)
+            == CM_HIR_BODY_FUNCTION_OWNER_UNSUPPORTED);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_partition_in_place_parameter_shape(void)
+{
+    static const char source[] =
+        "trait Iterator {"
+        " fn partition_in_place<'a, T: 'a, P>(mut self, "
+        " ref mut predicate: P) -> usize where Self: Sized, P: Bound {"
+        "  loop {}"
+        " }"
+        "} trait Sized {} trait Bound {}";
+    const CmHirItem *trait_item;
+    const CmHirItem *method;
+    const CmHirFunctionSignature *signature;
+    const CmHirBody *body;
+    const CmHirType *predicate_local;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    trait_item = find_item(&context, "Iterator");
+    method = trait_item == NULL ? NULL : find_child(&context,
+        trait_item->definition, "partition_in_place");
+    signature = method == NULL ? NULL
+        : &method->data.function_item.signature;
+    body = method == NULL ? NULL
+        : cm_hir_get_body(&context, method->data.function_item.body);
+    predicate_local = body == NULL || body->local_count != 2u ? NULL
+        : cm_hir_get_type(&context, body->locals[1].type);
+    assert(result.error_count == 0u && method != NULL
+        && method->generic_parameter_count == 3u
+        && signature->receiver == CM_HIR_RECEIVER_VALUE
+        && signature->parameter_count == 2u
+        && signature->parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && signature->parameters[1].binding_mode
+            == CM_HIR_PARAMETER_BINDING_REF_MUTABLE
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->locals[1].parameter_index == 1u
+        && predicate_local != NULL
+        && predicate_local->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && predicate_local->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && predicate_local->data.reference_type.pointee
+            == signature->parameters[1].type
+        && predicate_local->data.reference_type.mutability
+            == CM_HIR_MUTABLE);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_typed_parameter_patterns_remain_bounded(void)
+{
+    static const char *const sources[] = {
+        "fn subpattern(value @ _: u8) {}",
+        "fn reference(&value: &u8) {}",
+        "fn tuple((left, right): (u8, u8)) {}"
+    };
+    size_t index;
+
+    for (index = 0u; index < sizeof(sources) / sizeof(sources[0]); ++index) {
+        CmHirContext context;
+        CmHirLowerResult result;
+
+        result = lower_source(sources[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
+            && strstr(result.first_error.message,
+                "parameter patterns require typed pattern HIR") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+
+    {
+        CmHirContext context;
+        CmHirLowerResult result;
+        size_t type_index;
+
+        result = lower_source(
+            "fn rollback(ref shared: u8, (left, right): (u8, u8)) {}",
+            &context, NULL);
+        assert(result.error_count == 1u && find_item(&context, "rollback")
+            == NULL);
+        for (type_index = 0u; type_index < context.types.len; ++type_index) {
+            const CmHirType *type;
+
+            type = (const CmHirType *)cm_vec_at_const(&context.types,
+                type_index);
+            assert(type != NULL
+                && type->kind != CM_HIR_TYPE_REFERENCE_KIND);
+        }
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_cfg_sensitive_trait_impl_members(void)
 {
     static const char paired_members[] =
@@ -6728,6 +6882,9 @@ int main(void)
     test_higher_ranked_where_bound_lowers();
     test_higher_ranked_where_predicate_lowers();
     test_higher_ranked_trait_lifetime_argument_lowers();
+    test_typed_parameter_binding_modes();
+    test_partition_in_place_parameter_shape();
+    test_typed_parameter_patterns_remain_bounded();
     test_unsupported_method_forms_are_errors();
     test_cfg_sensitive_trait_impl_members();
     test_cfg_active_tree_drives_lowering();
