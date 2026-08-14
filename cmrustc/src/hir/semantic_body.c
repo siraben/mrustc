@@ -926,6 +926,8 @@ static CmSemanticBodyStatus cm_semantic_body_copy_generic_arguments(
     return CM_SEMANTIC_BODY_OK;
 }
 
+typedef struct CmSemanticBodyConstraints CmSemanticBodyConstraints;
+
 typedef struct CmSemanticBodyEquality {
     CmTypeckTypeId left;
     CmTypeckTypeId right;
@@ -935,7 +937,7 @@ typedef struct CmSemanticBodyEquality {
     int resolved;
 } CmSemanticBodyEquality;
 
-typedef struct CmSemanticBodyConstraints {
+struct CmSemanticBodyConstraints {
     CmSemanticSession *session;
     CmTypeckContext *typeck;
     const CmHirContext *hir;
@@ -956,7 +958,139 @@ typedef struct CmSemanticBodyConstraints {
     uint32_t failed_predicate_index;
     CmTypeckStatus typeck_status;
     CmTraitSolverResultKind solver_kind;
-} CmSemanticBodyConstraints;
+};
+
+/*
+ * HIR call nodes do not carry explicit trait generic arguments.  Build the
+ * canonical query shape with one fresh type variable per type parameter so
+ * trait selection can infer arguments from the impl header.  This deliberately
+ * admits only type parameters: lifetime/const arguments need source syntax or
+ * a richer inference policy and remain outside this body slice.
+ */
+static CmSemanticBodyStatus cm_semantic_body_trait_query(
+    CmSemanticBodyConstraints *constraints, const CmHirItem *trait_item,
+    CmTypeckNamedType *out_trait)
+{
+    uint32_t index;
+
+    if (constraints == NULL || trait_item == NULL || out_trait == NULL
+        || trait_item->kind != CM_HIR_ITEM_TRAIT) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    memset(out_trait, 0, sizeof(*out_trait));
+    out_trait->definition = trait_item->definition;
+    out_trait->argument_count = trait_item->generic_parameter_count;
+    if (out_trait->argument_count == 0u) return CM_SEMANTIC_BODY_OK;
+    out_trait->arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
+        out_trait->argument_count, sizeof(*out_trait->arguments));
+    for (index = 0u; index < out_trait->argument_count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmTypeckStatus typeck_status;
+
+        parameter = cm_hir_get_generic_param(constraints->hir,
+            trait_item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE) {
+            cm_free(out_trait->arguments);
+            out_trait->arguments = NULL;
+            out_trait->argument_count = 0u;
+            return CM_SEMANTIC_BODY_UNSUPPORTED;
+        }
+        out_trait->arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+        typeck_status = cm_typeck_new_variable(constraints->typeck,
+            CM_HIR_INFER_GENERAL, parameter->span,
+            &out_trait->arguments[index].data.type);
+        if (typeck_status != CM_TYPECK_OK) {
+            cm_free(out_trait->arguments);
+            out_trait->arguments = NULL;
+            out_trait->argument_count = 0u;
+            constraints->typeck_status = typeck_status;
+            return cm_semantic_typeck_status(typeck_status);
+        }
+    }
+    return CM_SEMANTIC_BODY_OK;
+}
+
+/* Instantiate an impl header's trait arguments and retain both the query
+ * inputs and solved arguments for semantic-results writeback. */
+static CmSemanticBodyStatus cm_semantic_body_copy_trait_arguments(
+    CmSemanticBodyConstraints *constraints, const CmHirItem *impl_item,
+    const CmTypeckInstantiation *impl_instantiation,
+    const CmTypeckNamedType *query_trait,
+    const CmHirDefId expected_trait,
+    const CmTypeckGenericArg **out_inputs,
+    const CmTypeckGenericArg **out_arguments, uint32_t *out_count)
+{
+    CmTypeckInstantiationFrame frame;
+    CmTypeckScopedInstantiation scoped;
+    CmTypeckNamedType implemented;
+    CmTypeckStatus typeck_status;
+    CmSemanticBodyStatus status;
+
+    if (constraints == NULL || impl_item == NULL || impl_instantiation == NULL
+        || query_trait == NULL || out_inputs == NULL
+        || out_arguments == NULL || out_count == NULL
+        || impl_item->kind != CM_HIR_ITEM_IMPL
+        || !impl_item->data.impl_item.has_trait
+        || !cm_hir_def_id_equal(impl_item->data.impl_item.trait_type
+            .definition, expected_trait)
+        || query_trait->argument_count
+            != impl_item->data.impl_item.trait_type.argument_count) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    *out_inputs = NULL;
+    *out_arguments = NULL;
+    *out_count = 0u;
+    memset(&frame, 0, sizeof(frame));
+    frame.parameter_owner = impl_item->definition;
+    frame.arguments = impl_instantiation->arguments;
+    frame.argument_count = impl_instantiation->argument_count;
+    cm_typeck_scoped_instantiation_init(constraints->typeck, &scoped);
+    scoped.frames = &frame;
+    scoped.frame_count = 1u;
+    if (!cm_typeck_scoped_instantiation_is_valid(constraints->typeck,
+            &scoped)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    memset(&implemented, 0, sizeof(implemented));
+    typeck_status = cm_typeck_instantiate_hir_named_scoped(
+        constraints->typeck, &impl_item->data.impl_item.trait_type,
+        &scoped, &implemented);
+    if (typeck_status != CM_TYPECK_OK) {
+        constraints->typeck_status = typeck_status;
+        return cm_semantic_typeck_status(typeck_status);
+    }
+    if (!cm_hir_def_id_equal(implemented.definition, expected_trait)
+        || implemented.argument_count != query_trait->argument_count
+        || (implemented.argument_count != 0u
+            && implemented.arguments == NULL)) {
+        return CM_SEMANTIC_BODY_INVALID;
+    }
+    if (query_trait->argument_count == 0u) {
+        status = CM_SEMANTIC_BODY_OK;
+    } else {
+        size_t bytes;
+
+        if (!cm_size_mul((size_t)query_trait->argument_count,
+                sizeof(*query_trait->arguments), &bytes)) {
+            status = CM_SEMANTIC_BODY_OVERFLOW;
+        } else {
+            *out_inputs = (CmTypeckGenericArg *)cm_alloc(bytes);
+            *out_arguments = (CmTypeckGenericArg *)cm_alloc(bytes);
+            memcpy((void *)*out_inputs, query_trait->arguments, bytes);
+            memcpy((void *)*out_arguments, implemented.arguments, bytes);
+            status = CM_SEMANTIC_BODY_OK;
+        }
+    }
+    *out_count = implemented.argument_count;
+    if (status != CM_SEMANTIC_BODY_OK) {
+        cm_free((void *)*out_inputs);
+        cm_free((void *)*out_arguments);
+        *out_inputs = NULL;
+        *out_arguments = NULL;
+        *out_count = 0u;
+    }
+    return status;
+}
 
 static int cm_semantic_body_typeck_arguments_match_hir(
     CmSemanticBodyConstraints *constraints,
@@ -1451,6 +1585,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     CmHirExprId expression_id, const CmHirExpr *expression,
     CmSemanticCheckedCallableFacts *facts)
 {
+    const CmHirItem *requested_trait_item;
     const CmHirItem *impl_item;
     const CmHirItem *declared_callable;
     const CmHirItem *selected_callable;
@@ -1459,6 +1594,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     CmTraitGoal goal;
     CmTraitSelectionResult selection;
     CmTypeckInstantiation impl_instantiation;
+    CmTypeckNamedType query_trait;
     CmTypeckInstantiationFrame frames[2];
     CmTypeckScopedInstantiation callable_instantiation;
     CmTypeckTypeId actual_type;
@@ -1474,12 +1610,21 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         return CM_SEMANTIC_BODY_INVALID;
     }
     memset(facts, 0, sizeof(*facts));
+    memset(&query_trait, 0, sizeof(query_trait));
     cm_trait_impl_selection_witness_init(&witness);
     memset(&goal, 0, sizeof(goal));
     goal.kind = CM_TRAIT_GOAL_IMPLEMENTED;
     goal.data.implemented.owner = constraints->body->owner;
+    requested_trait_item = cm_semantic_body_item(constraints->hir,
+        expression->data.qualified_call.requested_trait);
+    status = cm_semantic_body_trait_query(constraints, requested_trait_item,
+        &query_trait);
+    if (status != CM_SEMANTIC_BODY_OK) goto cleanup;
     goal.data.implemented.trait_type.definition =
         expression->data.qualified_call.requested_trait;
+    goal.data.implemented.trait_type.arguments = query_trait.arguments;
+    goal.data.implemented.trait_type.argument_count =
+        query_trait.argument_count;
     status = cm_semantic_body_instantiate_owner_type(constraints,
         expression->data.qualified_call.requested_self_type,
         &goal.data.implemented.self_type);
@@ -1511,8 +1656,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
             impl_item->generic_parameter_count)
         || !impl_item->data.impl_item.has_trait
         || impl_item->data.impl_item.is_negative
-        || impl_item->data.impl_item.trait_type.argument_count != 0u
-        || impl_item->data.impl_item.trait_type.arguments != NULL
+        || impl_item->data.impl_item.trait_type.argument_count
+            != query_trait.argument_count
+        || (impl_item->data.impl_item.trait_type.argument_count != 0u)
+            != (impl_item->data.impl_item.trait_type.arguments != NULL)
         || !cm_hir_def_id_equal(impl_item->data.impl_item.trait_type
             .definition,
             expression->data.qualified_call.requested_trait)) {
@@ -1613,6 +1760,13 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         status = CM_SEMANTIC_BODY_INVALID;
         goto cleanup;
     }
+    status = cm_semantic_body_copy_trait_arguments(constraints, impl_item,
+        &impl_instantiation, &query_trait,
+        expression->data.qualified_call.requested_trait,
+        &facts->implemented_trait_argument_inputs,
+        &facts->implemented_trait_arguments,
+        &facts->implemented_trait_argument_count);
+    if (status != CM_SEMANTIC_BODY_OK) goto cleanup;
     facts->expression = expression_id;
     facts->syntax = expression->data.qualified_call.syntax;
     facts->requested_self_type = goal.data.implemented.self_type;
@@ -1667,6 +1821,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
     }
     status = CM_SEMANTIC_BODY_OK;
 cleanup:
+    cm_free(query_trait.arguments);
     cm_trait_impl_selection_witness_destroy(&witness);
     if (status != CM_SEMANTIC_BODY_OK) {
         cm_semantic_body_callable_facts_clear(facts);
@@ -1884,7 +2039,6 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         }
         if (trait_item->definition.crate_id
                 != constraints->body->owner.crate_id
-            || trait_item->generic_parameter_count != 0u
             || trait_item->predicate_scope_count != 0u
             || trait_item->predicate_count != 0u
             || trait_item->outlives_predicate_count != 0u
@@ -1926,11 +2080,30 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             goal.data.implemented.self_type = receiver_type;
             goal.data.implemented.trait_type.definition =
                 trait_item->definition;
+            status = cm_semantic_body_trait_query(constraints, trait_item,
+                &goal.data.implemented.trait_type);
+            if (status != CM_SEMANTIC_BODY_OK) {
+                cm_free(goal.data.implemented.trait_type.arguments);
+                (void)cm_typeck_rollback(constraints->typeck,
+                    &probe_snapshot);
+                failure = cm_semantic_body_stronger_method_failure(failure,
+                    status);
+                if (status != CM_SEMANTIC_BODY_NO_SOLUTION
+                    && status != CM_SEMANTIC_BODY_NEGATIVE) {
+                    blocking_failure = blocking_failure
+                            == CM_SEMANTIC_BODY_OK
+                        ? status
+                        : cm_semantic_body_stronger_method_failure(
+                            blocking_failure, status);
+                }
+                continue;
+            }
             selection = cm_semantic_session_solve_goal(
                 constraints->session, constraints->typeck,
                 environment_substitution, &goal);
             probe_status = cm_typeck_rollback(constraints->typeck,
                 &probe_snapshot);
+            cm_free(goal.data.implemented.trait_type.arguments);
             if (probe_status != CM_TYPECK_OK
                 || cm_typeck_type_count(constraints->typeck)
                     != probe_type_count) {
@@ -1973,8 +2146,11 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                     impl_item, impl_item->generic_parameter_count)
                 || !impl_item->data.impl_item.has_trait
                 || impl_item->data.impl_item.is_negative
-                || impl_item->data.impl_item.trait_type.argument_count != 0u
-                || impl_item->data.impl_item.trait_type.arguments != NULL
+                || impl_item->data.impl_item.trait_type.argument_count
+                    != trait_item->generic_parameter_count
+                || (impl_item->data.impl_item.trait_type.argument_count != 0u)
+                    != (impl_item->data.impl_item.trait_type.arguments
+                        != NULL)
                 || !cm_hir_def_id_equal(impl_item->data.impl_item.trait_type
                     .definition, trait_item->definition)) {
                 return CM_SEMANTIC_BODY_INVALID;
@@ -2034,6 +2210,9 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         goal.data.implemented.self_type = receiver_type;
         goal.data.implemented.trait_type.definition =
             winner_trait->definition;
+        status = cm_semantic_body_trait_query(constraints, winner_trait,
+            &goal.data.implemented.trait_type);
+        if (status != CM_SEMANTIC_BODY_OK) goto method_cleanup;
         selection = cm_semantic_session_solve_goal_with_impl_witness(
             constraints->session, constraints->typeck,
             environment_substitution, &goal, &witness);
@@ -2061,6 +2240,13 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         if (status != CM_SEMANTIC_BODY_OK) goto method_cleanup;
         facts->enclosing_impl_argument_count =
             impl_instantiation.argument_count;
+        status = cm_semantic_body_copy_trait_arguments(constraints,
+            winner_impl, &impl_instantiation,
+            &goal.data.implemented.trait_type, winner_trait->definition,
+            &facts->implemented_trait_argument_inputs,
+            &facts->implemented_trait_arguments,
+            &facts->implemented_trait_argument_count);
+        if (status != CM_SEMANTIC_BODY_OK) goto method_cleanup;
         signature = &winner_callable->data.function_item.signature;
         if (signature->parameter_count
                 != expression->data.method_call.argument_count + 1u
@@ -2150,6 +2336,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         }
         status = CM_SEMANTIC_BODY_OK;
 method_cleanup:
+        cm_free(goal.data.implemented.trait_type.arguments);
         cm_trait_impl_selection_witness_destroy(&witness);
         if (status != CM_SEMANTIC_BODY_OK) {
             cm_semantic_body_callable_facts_clear(facts);

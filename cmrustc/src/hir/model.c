@@ -383,6 +383,22 @@ const CmHirDefinition *cm_hir_lookup_definition(const CmHirContext *context,
     if (context == NULL || cm_hir_def_id_is_none(id)) {
         return NULL;
     }
+    /* A freshly lowered local crate owns the only crate arena and allocates
+     * definition indices in the same one-based order as this vector.  Keep
+     * the general scan below for multi-crate/metadata contexts, where foreign
+     * definitions may be interleaved and the index is only crate-local. */
+    if (context->crates.len == 1u
+        && (size_t)id.crate_id == context->crates.len
+        && id.index != CM_HIR_DEF_INDEX_NONE
+        && (size_t)id.index <= context->definitions.len) {
+        const CmHirDefinition *definition;
+
+        definition = (const CmHirDefinition *)cm_vec_at_const(
+            &context->definitions, (size_t)id.index - 1u);
+        if (definition != NULL && cm_hir_def_id_equal(definition->id, id)) {
+            return definition;
+        }
+    }
     for (index = 0u; index < context->definitions.len; ++index) {
         const CmHirDefinition *definition;
 
@@ -400,6 +416,18 @@ static CmHirDefinition *cm_hir_lookup_definition_mut(CmHirContext *context,
 {
     size_t index;
 
+    if (context->crates.len == 1u
+        && (size_t)id.crate_id == context->crates.len
+        && id.index != CM_HIR_DEF_INDEX_NONE
+        && (size_t)id.index <= context->definitions.len) {
+        CmHirDefinition *definition;
+
+        definition = (CmHirDefinition *)cm_vec_at(&context->definitions,
+            (size_t)id.index - 1u);
+        if (definition != NULL && cm_hir_def_id_equal(definition->id, id)) {
+            return definition;
+        }
+    }
     for (index = 0u; index < context->definitions.len; ++index) {
         CmHirDefinition *definition;
 
@@ -5447,6 +5475,7 @@ static int cm_hir_qualified_type_matches(const CmHirContext *context,
 {
     const CmHirType *declared_type;
     const CmHirType *actual_type;
+    const CmHirGenericParam *parameter;
     uint32_t index;
 
     if (context == NULL || depth > context->types.len) return 0;
@@ -5457,6 +5486,14 @@ static int cm_hir_qualified_type_matches(const CmHirContext *context,
         return cm_hir_def_id_equal(declared_type->data.self_type.owner,
                 trait_definition)
             && cm_hir_body_type_equal(context, requested_self, actual);
+    }
+    if (declared_type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+        /* The concrete trait argument is inferred by semantic checking. */
+        parameter = cm_hir_get_generic_param(context,
+            declared_type->data.parameter_type.parameter);
+        return parameter != NULL
+            && cm_hir_def_id_equal(parameter->owner, trait_definition)
+            && actual_type->kind != CM_HIR_TYPE_ERROR_KIND;
     }
     if (declared_type->kind != actual_type->kind) return 0;
     switch (declared_type->kind) {
@@ -5513,6 +5550,8 @@ static int cm_hir_qualified_type_matches(const CmHirContext *context,
             && cm_hir_def_id_equal(
                 declared_type->data.named_type.definition,
                 actual_type->data.named_type.definition);
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return 0;
     case CM_HIR_TYPE_ERROR_KIND:
     case CM_HIR_TYPE_INFER_KIND:
     case CM_HIR_TYPE_ARRAY_KIND:
@@ -5521,7 +5560,6 @@ static int cm_hir_qualified_type_matches(const CmHirContext *context,
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_SELF_KIND:
-    case CM_HIR_TYPE_PARAMETER_KIND:
     case CM_HIR_TYPE_PROJECTION_KIND:
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
@@ -5555,7 +5593,6 @@ static int cm_hir_qualified_call_expression_valid(
             != CM_HIR_CALLABLE_QUALIFIED_TRAIT_METHOD
         || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
         || trait_item->definition.crate_id != body->owner.crate_id
-        || trait_item->generic_parameter_count != 0u
         || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
         || !cm_hir_def_id_equal(declared->parent_definition,
             trait_item->definition)
