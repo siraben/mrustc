@@ -2579,6 +2579,98 @@ static int cm_lower_parse_pointer_storage_length(
     return 1;
 }
 
+/* Rust 1.90's integer byte-conversion methods spell their array bounds as
+ * `size_of::<Self>()`.  Until HIR retains general unevaluated const
+ * expressions, admit only that exact expression at an authenticated
+ * declaration destination: a method of a bound, nongeneric inherent impl for
+ * a concrete integer primitive.  Fixed-width integers have fixed byte sizes;
+ * isize and usize follow the existing bootstrap-compiler pointer-width
+ * convention used by TypeId storage above. */
+static int cm_lower_primitive_self_size_length(const CmLowerState *state,
+    CmHirDefId owner, const CmInternedString *text, uint64_t *out_value)
+{
+    static const unsigned char expected[] = "size_of::<Self>()";
+    const CmLowerItemRecord *owner_record;
+    const CmHirItem *parent_impl;
+    const CmHirType *self_type;
+    const CmInternedString *method_name;
+    size_t expected_position;
+    size_t position;
+
+    if (state == NULL || text == NULL || out_value == NULL) return 0;
+    expected_position = 0u;
+    for (position = 0u; position < text->len; ++position) {
+        unsigned char byte;
+
+        byte = text->bytes[position];
+        if (byte == (unsigned char)' '
+            || byte == (unsigned char)'\t'
+            || byte == (unsigned char)'\r'
+            || byte == (unsigned char)'\n') {
+            continue;
+        }
+        if (expected_position + 1u >= sizeof(expected)
+            || byte != expected[expected_position]) {
+            return 0;
+        }
+        expected_position += 1u;
+    }
+    if (expected_position + 1u != sizeof(expected)) return 0;
+
+    owner_record = cm_lower_find_record_by_definition(state, owner);
+    if (owner_record == NULL || owner_record->kind != CM_AST_ITEM_FUNCTION
+        || owner_record->parent_kind != CM_LOWER_PARENT_IMPL
+        || owner_record->generic_parameter_count != 0u) return 0;
+    method_name = cm_interner_get(&state->hir->strings,
+        owner_record->hir_name);
+    if (!cm_lower_interned_string_is(method_name, "to_be_bytes")
+        && !cm_lower_interned_string_is(method_name, "to_le_bytes")
+        && !cm_lower_interned_string_is(method_name, "to_ne_bytes")
+        && !cm_lower_interned_string_is(method_name, "from_be_bytes")
+        && !cm_lower_interned_string_is(method_name, "from_le_bytes")
+        && !cm_lower_interned_string_is(method_name, "from_ne_bytes")) {
+        return 0;
+    }
+    parent_impl = cm_lower_bound_item(state,
+        owner_record->parent_definition);
+    if (parent_impl == NULL || parent_impl->kind != CM_HIR_ITEM_IMPL
+        || parent_impl->data.impl_item.has_trait
+        || parent_impl->data.impl_item.is_negative
+        || parent_impl->generic_parameter_count != 0u) return 0;
+    self_type = cm_hir_get_type(state->hir,
+        parent_impl->data.impl_item.self_type);
+    if (self_type == NULL
+        || self_type->kind != CM_HIR_TYPE_INTEGER_KIND) return 0;
+    switch (self_type->data.integer_type.kind) {
+    case CM_HIR_INT_I8:
+    case CM_HIR_INT_U8:
+        *out_value = 1u;
+        return 1;
+    case CM_HIR_INT_I16:
+    case CM_HIR_INT_U16:
+        *out_value = 2u;
+        return 1;
+    case CM_HIR_INT_I32:
+    case CM_HIR_INT_U32:
+        *out_value = 4u;
+        return 1;
+    case CM_HIR_INT_I64:
+    case CM_HIR_INT_U64:
+        *out_value = 8u;
+        return 1;
+    case CM_HIR_INT_I128:
+    case CM_HIR_INT_U128:
+        *out_value = 16u;
+        return 1;
+    case CM_HIR_INT_ISIZE:
+    case CM_HIR_INT_USIZE:
+        *out_value = (uint64_t)sizeof(void *);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static CmHirTypeId cm_lower_add_type(CmLowerState *state,
     const CmHirType *type, CmAstTypeId ast_type_id)
 {
@@ -5963,6 +6055,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         if (!has_literal_length) {
             has_literal_length = cm_lower_parse_pointer_storage_length(
                 length_text, &length_value);
+        }
+        if (!has_literal_length) {
+            has_literal_length = cm_lower_primitive_self_size_length(state,
+                owner, length_text, &length_value);
         }
         if (!has_literal_length) {
             length_generic = cm_lower_find_generic_in_scope(state, owner,

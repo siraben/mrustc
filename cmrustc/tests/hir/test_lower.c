@@ -238,6 +238,49 @@ static CmHirLowerResult lower_source(const char *source,
     return result;
 }
 
+static CmHirLowerResult lower_graph_source(const char *source,
+    CmHirContext *context)
+{
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmCfgSet cfg;
+    CmHirLowerResult result;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    assert(cm_source_add_memory(&sources, "lower-graph/lib.rs",
+        (const unsigned char *)source, strlen(source), &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    cm_import_resolver_init(&imports);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    cm_hir_context_init(context);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "lower_graph_test";
+    assert(graph_result.error_count == 0u
+        && import_result.error_count == 0u);
+    result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &options);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+    return result;
+}
+
 static void expect_invalid_ast_lowering(const CmAst *ast,
     const CmHirLowerOptions *options, const char *message)
 {
@@ -1555,6 +1598,114 @@ static void test_macro_expanded_array_length_expression(void)
         assert(result.error_count == 1u
             && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
             && find_item(&context, "Rejected") == NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
+static void test_primitive_self_size_array_length(void)
+{
+    static const char source[] =
+        "impl i8 {"
+        " fn to_be_bytes() -> [u8; size_of::<Self>()] { loop {} }"
+        " fn from_be_bytes(value: [u8; size_of::<Self>()]) {}"
+        "}"
+        "impl i128 {"
+        " fn to_le_bytes() -> [u8; size_of::<Self>()] { loop {} }"
+        " fn from_le_bytes(value: [u8; size_of :: < Self > ( )]) {}"
+        "}"
+        "impl isize {"
+        " fn to_ne_bytes() -> [u8; size_of::<Self>()] { loop {} }"
+        " fn from_ne_bytes(value: [u8; size_of::<Self>()]) {}"
+        "}";
+    static const struct {
+        const char *name;
+        uint64_t expected;
+        int use_parameter;
+    } methods[] = {
+        { "to_be_bytes", 1u, 0 },
+        { "from_be_bytes", 1u, 1 },
+        { "to_le_bytes", 16u, 0 },
+        { "from_le_bytes", 16u, 1 },
+        { "to_ne_bytes", (uint64_t)sizeof(void *), 0 },
+        { "from_ne_bytes", (uint64_t)sizeof(void *), 1 }
+    };
+    static const char *const rejected[] = {
+        "fn to_be_bytes() -> [u8; size_of::<Self>()] { loop {} }",
+        ("trait Bad {"
+            " fn to_be_bytes() -> [u8; size_of::<Self>()];"
+            "}"),
+        ("struct Nominal; impl Nominal {"
+            " fn to_be_bytes() -> [u8; size_of::<Self>()] { loop {} }"
+            "}"),
+        ("impl<T> i8 {"
+            " fn to_be_bytes() -> [u8; size_of::<Self>()] { loop {} }"
+            "}"),
+        ("impl i8 {"
+            " fn to_be_bytes() -> [u8; size_of::<i8>()] { loop {} }"
+            "}"),
+        ("impl i8 {"
+            " fn bytes() -> [u8; size_of::<Self>()] { loop {} }"
+            "}"),
+        ("impl i8 {"
+            " fn to_be_bytes() -> [u8; align_of::<Self>()] { loop {} }"
+            "}"),
+        ("impl i8 {"
+            " fn to_be_bytes() -> [u8; 2 * size_of::<Self>()] { loop {} }"
+            "}"),
+        ("impl i8 {"
+            " fn to_be_bytes() -> [u8; size_of::<Self>() + 1] { loop {} }"
+            "}")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *method;
+    const CmHirType *array;
+    const CmHirType *length_type;
+    size_t index;
+
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "primitive Self size lowering: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    for (index = 0u; index < sizeof(methods) / sizeof(methods[0]);
+         ++index) {
+        method = find_item(&context, methods[index].name);
+        array = method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
+            ? NULL : cm_hir_get_type(&context,
+                methods[index].use_parameter
+                    ? method->data.function_item.signature.parameters[0].type
+                    : method->data.function_item.signature.return_type);
+        length_type = array == NULL || array->kind != CM_HIR_TYPE_ARRAY_KIND
+            ? NULL : cm_hir_get_type(&context,
+                array->data.array_type.length.type);
+        assert(method != NULL && array != NULL
+            && array->kind == CM_HIR_TYPE_ARRAY_KIND
+            && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && array->data.array_type.length.data.value.low_bits
+                == methods[index].expected
+            && array->data.array_type.length.data.value.high_bits == 0u
+            && length_type != NULL
+            && length_type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && length_type->data.integer_type.kind == CM_HIR_INT_USIZE);
+    }
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_graph_source(rejected[index], &context);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_UNSUPPORTED_TYPE) {
+            fprintf(stderr, "primitive Self size rejection %u: errors=%u "
+                "kind=%s message=%s\n", (unsigned int)index,
+                (unsigned int)result.error_count,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
         cm_hir_context_destroy(&context);
     }
 }
@@ -8827,6 +8978,7 @@ int main(void)
     test_const_parameter_adt_argument();
     test_const_generic_trait_method_declaration();
     test_macro_expanded_array_length_expression();
+    test_primitive_self_size_array_length();
     test_const_generic_type_alias_application();
     test_const_generic_literal_expression_application();
     test_adt_function_pointer_default_substitution();
