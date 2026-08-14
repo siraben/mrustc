@@ -1792,7 +1792,7 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
         || !cm_hir_type_late_bound_free(context,
             item->data.impl_item.self_type, 0u)
         || !cm_hir_type_self_owner_valid(context,
-            item->data.impl_item.self_type, cm_hir_def_id_none(), 0u)
+            item->data.impl_item.self_type, item->definition, 0u)
         || (item->data.impl_item.has_trait != 0
             && item->data.impl_item.has_trait != 1)
         || (item->data.impl_item.is_negative != 0
@@ -1814,7 +1814,7 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
         || !cm_hir_named_late_bound_free(context,
             &item->data.impl_item.trait_type, 0u)
         || !cm_hir_named_self_owner_valid(context,
-            &item->data.impl_item.trait_type, cm_hir_def_id_none(), 0u)) {
+            &item->data.impl_item.trait_type, item->definition, 0u)) {
         return 0;
     }
     trait_item = cm_hir_bound_definition_item(context,

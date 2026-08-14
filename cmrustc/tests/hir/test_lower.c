@@ -997,6 +997,72 @@ static void test_generic_reference_impl_entry_points(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_impl_header_self_in_trait_argument(void)
+{
+    static const char source[] =
+        "trait Marker<Rhs = Self> {}"
+        "struct CStr;"
+        "impl Marker<&Self> for CStr {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *impl;
+    const CmHirItem *cstr;
+    const CmHirType *trait_argument;
+    const CmHirType *argument_pointee;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "impl-header Self probe: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    impl = find_impl(&context);
+    cstr = find_item(&context, "CStr");
+    trait_argument = impl == NULL
+            || !impl->data.impl_item.has_trait
+            || impl->data.impl_item.trait_type.argument_count == 0u
+            || impl->data.impl_item.trait_type.arguments == NULL
+            || impl->data.impl_item.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            impl->data.impl_item.trait_type.arguments[0].data.type);
+    argument_pointee = trait_argument == NULL
+            || trait_argument->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            trait_argument->data.reference_type.pointee);
+    assert(impl != NULL && cstr != NULL && trait_argument != NULL
+        && argument_pointee != NULL
+        && argument_pointee->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(argument_pointee->data.named_type.definition,
+            cstr->definition));
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "mod cmp { pub trait Marker<Rhs = Self> {} }"
+        "struct CStr;"
+        "impl cmp::Marker<&Self> for CStr {}", &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "qualified impl-header Self probe: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "struct CStr;"
+        "impl cmp::Marker<&Self> for CStr {}"
+        "mod cmp { pub trait Marker<Rhs = Self> {} }", &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "forward qualified impl-header Self probe: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_unresolved_path_is_hard_error(void)
 {
     CmHirContext context;
@@ -1350,6 +1416,56 @@ static void test_macro_expanded_array_length_expression(void)
 
 }
 
+static void test_adt_function_pointer_default_substitution(void)
+{
+    static const char source[] =
+        "struct Lazy<T, F = fn() -> T> {}"
+        "type Concrete = Lazy<u8>;";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *lazy;
+    const CmHirItem *concrete;
+    const CmHirType *concrete_type;
+    const CmHirGenericArg *function_argument;
+    const CmHirType *function_type;
+    const CmHirType *return_type;
+
+    result = lower_source(source, &context, NULL);
+    lazy = find_item(&context, "Lazy");
+    concrete = find_item(&context, "Concrete");
+    concrete_type = concrete == NULL
+            || concrete->kind != CM_HIR_ITEM_TYPE_ALIAS
+        ? NULL : cm_hir_get_type(&context,
+            concrete->data.type_alias_item.target);
+    function_argument = concrete_type == NULL
+            || concrete_type->kind != CM_HIR_TYPE_ADT_KIND
+            || concrete_type->data.named_type.argument_count != 2u
+            || concrete_type->data.named_type.arguments == NULL
+        ? NULL : &concrete_type->data.named_type.arguments[1];
+    function_type = function_argument == NULL
+            || function_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context, function_argument->data.type);
+    return_type = function_type == NULL
+            || function_type->kind != CM_HIR_TYPE_FN_POINTER_KIND
+        ? NULL : cm_hir_get_type(&context,
+            function_type->data.fn_pointer_type.return_type);
+    assert(result.error_count == 0u
+        && lazy != NULL && lazy->kind == CM_HIR_ITEM_STRUCT
+        && lazy->generic_parameter_count == 2u
+        && concrete != NULL
+        && concrete->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && concrete_type != NULL
+        && concrete_type->kind == CM_HIR_TYPE_ADT_KIND
+        && function_argument != NULL
+        && function_type != NULL
+        && function_type->data.fn_pointer_type.parameter_count == 0u
+        && function_type->data.fn_pointer_type.parameters == NULL
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && return_type->data.integer_type.kind == CM_HIR_INT_U8);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_generic_parameter_shadows_type_path_prefix(void)
 {
     static const char *const rejected[] = {
@@ -1438,6 +1554,77 @@ static void test_shorthand_inherited_associated_type_projection(void)
         && projection->data.projection_type.trait_type.arguments == NULL
         && self_type != NULL
         && self_type->kind == CM_HIR_TYPE_PARAMETER_KIND);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_shorthand_projection_declaration_order(void)
+{
+    static const char source[] =
+        "trait Iter { type Item; }"
+        "trait Other {}"
+        "fn flatten_like<I, U>() -> U::Item "
+            "where I: Iter, U: Iter, I: Other {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *function;
+    const CmHirType *return_type;
+
+    result = lower_source(source, &context, NULL);
+    function = find_item(&context, "flatten_like");
+    return_type = function == NULL
+            || function->kind != CM_HIR_ITEM_FUNCTION
+        ? NULL : cm_hir_get_type(&context,
+            function->data.function_item.signature.return_type);
+    assert(result.error_count == 0u
+        && function != NULL
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_PROJECTION_KIND);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_impl_header_self_type_projection(void)
+{
+    static const char source[] =
+        "trait Eq<Rhs> {}"
+        "struct C;"
+        "impl Eq<&Self> for C {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_const_literal_adt_argument(void)
+{
+    static const char source[] =
+        "trait T<const N: usize> {}"
+        "struct S;"
+        "impl T<1> for S {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_struct_inline_trait_bound(void)
+{
+    static const char source[] =
+        "trait ZeroablePrimitive {}"
+        "struct NonZero<T: ZeroablePrimitive>(T);";
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "struct inline bound: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 }
 
@@ -1537,7 +1724,7 @@ static void test_const_parameter_adt_argument(void)
         "struct Array<T, const N: usize>; trait Owner<const N: usize> {"
             "fn get() -> Array<u8, u8>; }",
         "struct Array<T, const N: usize>; trait Owner {"
-            "fn get() -> Array<u8, 1>; }"
+            "fn get() -> Array<u8, {1 + 1}>; }"
     };
     CmHirContext context;
     CmHirLowerResult result;
@@ -5254,7 +5441,7 @@ static void test_associated_type_constraint_record_rollback(void)
 static void test_associated_type_constraint_fails_closed(void)
 {
     static const char source[] =
-        "trait Bound {} trait Iterator { type Item; } "
+        "trait Bound {} trait Iterator { type Item<'a>; } "
         "trait Owner { fn check<T>() where "
         "T: Iterator<Item<'static>: Bound>; }";
     const CmAstItemId *owner_id;
@@ -5315,10 +5502,7 @@ static void test_associated_type_constraint_fails_closed(void)
     options.source = 7u;
     cm_hir_context_init(&context);
     result = cm_hir_lower_crate(&context, &ast, &options);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && strstr(result.first_error.message,
-            "GAT associated-type constraint names") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     constraint->bound_count = 0u;
@@ -6988,7 +7172,7 @@ static void test_associated_type_bound_scope_errors(void)
         "trait Bound<'a> {} trait Owner { "
             "type Assoc: Bound<u8>; }",
         "trait Bound<const N: usize> {} trait Owner { "
-            "type Assoc: Bound<1>; }",
+            "type Assoc: Bound<{1 + 1}>; }",
         "trait Bound<T> { type Item; } trait Owner { "
             "type Assoc: Bound<Item = u8, u16>; }",
         "trait Bound<'a, T> {} trait Owner { "
@@ -7040,7 +7224,7 @@ static void test_associated_type_bound_scope_errors(void)
         "associated type defaults",
         "argument kind differs",
         "argument kind differs",
-        "const trait arguments",
+        "supported integer argument",
         "must precede associated equalities",
         "omits a required type argument",
         "authenticated associated-type subject",
@@ -7621,6 +7805,7 @@ int main(void)
     test_trait_alias_lowering();
     test_auto_trait_and_negative_impl_lowering();
     test_generic_reference_impl_entry_points();
+    test_impl_header_self_in_trait_argument();
     test_discard_parameter_entry_points();
     test_supertrait_entry_points();
     test_unresolved_path_is_hard_error();
@@ -7631,8 +7816,13 @@ int main(void)
     test_const_parameter_adt_argument();
     test_const_generic_trait_method_declaration();
     test_macro_expanded_array_length_expression();
+    test_adt_function_pointer_default_substitution();
     test_generic_parameter_shadows_type_path_prefix();
     test_shorthand_inherited_associated_type_projection();
+    test_shorthand_projection_declaration_order();
+    test_impl_header_self_type_projection();
+    test_const_literal_adt_argument();
+    test_struct_inline_trait_bound();
     test_defaulted_alias_entry_points();
     test_explicit_projection_entry_points();
     test_cross_trait_projection_default_entry_points();

@@ -23,6 +23,12 @@ typedef struct CmAliasNormalizeState {
     size_t recursion_depth;
 } CmAliasNormalizeState;
 
+static int cm_alias_fail(CmAliasNormalizeState *state,
+    CmHirTypeAliasStatus status, CmHirTypeId source_type,
+    CmHirDefId alias_definition, CmHirGenericParamId parameter,
+    CmHirStatus hir_status);
+static const CmHirGenericArg *cm_alias_find_argument(
+    const CmAliasNormalizeState *state, CmHirGenericParamId parameter);
 static int cm_alias_normalize_type(CmAliasNormalizeState *state,
     CmHirTypeId source_id, CmHirTypeId *out_type);
 static const CmHirItem *cm_alias_bound_owner(const CmHirContext *context,
@@ -43,8 +49,15 @@ static int cm_alias_const_argument_valid(
     int compatible;
 
     argument = &source->arguments[index];
-    if (argument->kind != CM_HIR_GENERIC_ARG_CONST
-        || argument->data.constant.kind != CM_HIR_CONST_PARAMETER) {
+    if (argument->kind != CM_HIR_GENERIC_ARG_CONST) {
+        return 0;
+    }
+    if (argument->data.constant.kind == CM_HIR_CONST_VALUE) {
+        return argument->data.constant.type != CM_HIR_TYPE_NONE
+            && cm_hir_get_type(state->context,
+                argument->data.constant.type) != NULL;
+    }
+    if (argument->data.constant.kind != CM_HIR_CONST_PARAMETER) {
         return 0;
     }
     owner = cm_alias_bound_owner(state->context, source->definition);
@@ -83,6 +96,82 @@ static int cm_alias_const_argument_valid(
         && (argument->data.constant.data.parameter == parameter_id
             || permits_external_parameter)
         && compatible;
+}
+
+static int cm_alias_const_equal(const CmHirConstArg *left,
+    const CmHirConstArg *right)
+{
+    if (left->kind != right->kind || left->type != right->type) return 0;
+    switch (left->kind) {
+    case CM_HIR_CONST_VALUE:
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    case CM_HIR_CONST_PARAMETER:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_CONST_UNEVALUATED:
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    case CM_HIR_CONST_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_CONST_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_alias_normalize_const(CmAliasNormalizeState *state,
+    CmHirTypeId source_type, const CmHirConstArg *source,
+    CmHirConstArg *out)
+{
+    const CmHirGenericParam *parameter;
+    const CmHirGenericArg *argument;
+
+    *out = *source;
+    if (source->type == CM_HIR_TYPE_NONE
+        || cm_hir_get_type(state->context, source->type) == NULL) {
+        return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
+            source_type, cm_hir_def_id_none(), CM_HIR_GENERIC_PARAM_NONE,
+            CM_HIR_INVALID_ID);
+    }
+    switch (source->kind) {
+    case CM_HIR_CONST_VALUE:
+        return 1;
+    case CM_HIR_CONST_PARAMETER:
+        parameter = cm_hir_get_generic_param(state->context,
+            source->data.parameter);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_CONST) {
+            return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
+                source_type, cm_hir_def_id_none(), source->data.parameter,
+                CM_HIR_INVALID_ID);
+        }
+        argument = cm_alias_find_argument(state, source->data.parameter);
+        if (argument == NULL) {
+            if (state->frame != NULL) {
+                return cm_alias_fail(state,
+                    CM_HIR_TYPE_ALIAS_INVALID_ALIAS, source_type,
+                    state->frame->definition, source->data.parameter,
+                    CM_HIR_INVARIANT_VIOLATION);
+            }
+            return 1;
+        }
+        if (argument->kind != CM_HIR_GENERIC_ARG_CONST) {
+            return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_ARGUMENT_KIND,
+                source_type, parameter->owner, source->data.parameter,
+                CM_HIR_INVARIANT_VIOLATION);
+        }
+        return cm_alias_normalize_const(state, source_type,
+            &argument->data.constant, out);
+    case CM_HIR_CONST_UNEVALUATED:
+    case CM_HIR_CONST_INFER:
+    case CM_HIR_CONST_ERROR:
+        return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST,
+            source_type, cm_hir_def_id_none(), CM_HIR_GENERIC_PARAM_NONE,
+            CM_HIR_OK);
+    }
+    return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE, source_type,
+        cm_hir_def_id_none(), CM_HIR_GENERIC_PARAM_NONE,
+        CM_HIR_INVALID_ARGUMENT);
 }
 
 static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
@@ -262,7 +351,8 @@ static int cm_alias_add_type(CmAliasNormalizeState *state,
 
 static int cm_alias_normalize_named_arguments(CmAliasNormalizeState *state,
     CmHirTypeId source_type, const CmHirNamedType *source,
-    CmHirGenericArg **out_arguments, int *out_changed)
+    CmHirGenericArg **out_arguments, int *out_changed,
+    int allow_const_values)
 {
     CmHirGenericArg *arguments;
     uint32_t index;
@@ -306,16 +396,33 @@ static int cm_alias_normalize_named_arguments(CmAliasNormalizeState *state,
             }
             break;
         case CM_HIR_GENERIC_ARG_CONST:
-            if (state->frame != NULL
-                || !cm_alias_const_argument_valid(state, source,
-                    index)) {
+        {
+            CmHirConstArg normalized;
+            if ((!allow_const_values
+                    && source->arguments[index].data.constant.kind
+                        == CM_HIR_CONST_VALUE)
+                || (!cm_alias_const_argument_valid(state, source, index)
+                    && !(allow_const_values
+                        && source->arguments[index].data.constant.kind
+                            == CM_HIR_CONST_VALUE))) {
                 cm_free(arguments);
                 return cm_alias_fail(state,
                     CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, source_type,
                     source->definition, CM_HIR_GENERIC_PARAM_NONE,
                     CM_HIR_OK);
             }
+            if (!cm_alias_normalize_const(state, source_type,
+                    &source->arguments[index].data.constant, &normalized)) {
+                cm_free(arguments);
+                return 0;
+            }
+            if (!cm_alias_const_equal(
+                    &source->arguments[index].data.constant, &normalized)) {
+                *out_changed = 1;
+            }
+            arguments[index].data.constant = normalized;
             break;
+        }
         default:
             cm_free(arguments);
             return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
@@ -340,7 +447,7 @@ static int cm_alias_normalize_nominal(CmAliasNormalizeState *state,
             CM_HIR_INVALID_ID);
     }
     if (!cm_alias_normalize_named_arguments(state, source_id,
-            &source->data.named_type, &arguments, &changed)) {
+            &source->data.named_type, &arguments, &changed, 1)) {
         return 0;
     }
     if (!changed) {
@@ -383,7 +490,7 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
     if (source->data.dyn_trait_type.has_principal
         && !cm_alias_normalize_named_arguments(state, source_id,
             &source->data.dyn_trait_type.principal_trait,
-            &principal_arguments, &changed)) return 0;
+            &principal_arguments, &changed, 1)) return 0;
     markers = source->data.dyn_trait_type.auto_trait_count == 0u ? NULL
         : (CmHirNamedType *)cm_alloc_zeroed(
             source->data.dyn_trait_type.auto_trait_count, sizeof(*markers));
@@ -395,7 +502,7 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
         if (cm_alias_def_is_none(markers[index].definition)
             || !cm_alias_normalize_named_arguments(state, source_id,
                 &source->data.dyn_trait_type.auto_traits[index],
-                &markers[index].arguments, &marker_changed)) {
+                &markers[index].arguments, &marker_changed, 1)) {
             CmHirDefId failed_definition;
             uint32_t cleanup;
 
@@ -518,12 +625,12 @@ static int cm_alias_normalize_projection(CmAliasNormalizeState *state,
             source->data.projection_type.self_type, &self_type)
         || !cm_alias_normalize_named_arguments(state, source_id,
             &source->data.projection_type.trait_type, &trait_arguments,
-            &trait_changed)) {
+            &trait_changed, 0)) {
         return 0;
     }
     if (!cm_alias_normalize_named_arguments(state, source_id,
             &source->data.projection_type.associated_type,
-            &associated_arguments, &associated_changed)) {
+            &associated_arguments, &associated_changed, 0)) {
         cm_free(trait_arguments);
         return 0;
     }
@@ -591,15 +698,12 @@ static int cm_alias_validate_signature(CmAliasNormalizeState *state,
                 source_id, item->definition, parameter_id,
                 CM_HIR_INVARIANT_VIOLATION);
         }
-        if (parameter->kind == CM_HIR_GENERIC_CONST) {
-            return cm_alias_fail(state,
-                CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, source_id,
-                item->definition, parameter_id, CM_HIR_OK);
-        }
         if (parameter->kind == CM_HIR_GENERIC_TYPE) {
             expected_kind = CM_HIR_GENERIC_ARG_TYPE;
         } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME) {
             expected_kind = CM_HIR_GENERIC_ARG_LIFETIME;
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST) {
+            expected_kind = CM_HIR_GENERIC_ARG_CONST;
         } else {
             return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_ALIAS,
                 source_id, item->definition, parameter_id,
@@ -609,6 +713,17 @@ static int cm_alias_validate_signature(CmAliasNormalizeState *state,
             if (application->arguments[index].kind != expected_kind) {
                 return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_ARGUMENT_KIND,
                     source_id, item->definition, parameter_id, CM_HIR_OK);
+            }
+            if (expected_kind == CM_HIR_GENERIC_ARG_CONST
+                && (application->arguments[index].data.constant.type
+                        != parameter->declared_type
+                    || application->arguments[index].data.constant.kind
+                        == CM_HIR_CONST_ERROR
+                    || application->arguments[index].data.constant.kind
+                        == CM_HIR_CONST_INFER)) {
+                return cm_alias_fail(state,
+                    CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, source_id,
+                    item->definition, parameter_id, CM_HIR_OK);
             }
         } else if (parameter->kind != CM_HIR_GENERIC_TYPE
             || !parameter->has_default
@@ -706,18 +821,27 @@ static int cm_alias_validate_instantiation(CmAliasNormalizeState *state,
                 root, owner_definition, parameter_id,
                 CM_HIR_INVARIANT_VIOLATION);
         }
-        if (parameter->kind == CM_HIR_GENERIC_CONST) {
-            return cm_alias_fail(state,
-                CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, root,
-                owner_definition, parameter_id, CM_HIR_OK);
-        }
         expected_kind = parameter->kind == CM_HIR_GENERIC_TYPE
-            ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_LIFETIME;
+            ? CM_HIR_GENERIC_ARG_TYPE
+            : parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter->kind == CM_HIR_GENERIC_CONST
+                    ? CM_HIR_GENERIC_ARG_CONST
+                    : CM_HIR_GENERIC_ARG_TYPE;
         if (arguments[index].kind != expected_kind) {
             return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_ARGUMENT_KIND,
                 root, owner_definition, parameter_id, CM_HIR_OK);
         }
-        if (expected_kind == CM_HIR_GENERIC_ARG_TYPE) {
+        if (expected_kind == CM_HIR_GENERIC_ARG_CONST) {
+            if (arguments[index].data.constant.type
+                    != parameter->declared_type
+                || arguments[index].data.constant.kind == CM_HIR_CONST_ERROR
+                || arguments[index].data.constant.kind == CM_HIR_CONST_INFER) {
+                return cm_alias_fail(state,
+                    CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, root,
+                    owner_definition, parameter_id, CM_HIR_OK);
+            }
+        } else if (expected_kind == CM_HIR_GENERIC_ARG_TYPE) {
             CmHirTypeId normalized;
 
             if (!cm_alias_normalize_type(state,
@@ -1012,39 +1136,22 @@ static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
         return 1;
     }
     case CM_HIR_TYPE_ARRAY_KIND:
-        if (source.data.array_type.length.kind == CM_HIR_CONST_PARAMETER) {
-            const CmHirGenericParam *parameter;
+    {
+        CmHirConstArg normalized_length;
+        int length_changed;
 
-            parameter = cm_hir_get_generic_param(state->context,
-                source.data.array_type.length.data.parameter);
-            if (parameter == NULL
-                || parameter->kind != CM_HIR_GENERIC_CONST) {
-                return cm_alias_fail(state,
-                    CM_HIR_TYPE_ALIAS_INVALID_TYPE, source_id,
-                    cm_hir_def_id_none(),
-                    source.data.array_type.length.data.parameter,
-                    CM_HIR_INVALID_ID);
-            }
-            if (state->frame != NULL) {
-                return cm_alias_fail(state,
-                    CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, source_id,
-                    state->frame->definition,
-                    source.data.array_type.length.data.parameter,
-                    CM_HIR_OK);
-            }
-        } else if (source.data.array_type.length.kind != CM_HIR_CONST_VALUE
-            && source.data.array_type.length.kind
-                != CM_HIR_CONST_UNEVALUATED) {
-            return cm_alias_fail(state,
-                CM_HIR_TYPE_ALIAS_UNSUPPORTED_CONST, source_id,
-                cm_hir_def_id_none(), CM_HIR_GENERIC_PARAM_NONE,
-                CM_HIR_OK);
+        if (!cm_alias_normalize_const(state, source_id,
+                &source.data.array_type.length, &normalized_length)) {
+            return 0;
         }
+        length_changed = !cm_alias_const_equal(
+            &source.data.array_type.length, &normalized_length);
         if (!cm_alias_normalize_type(state,
                 source.data.array_type.element, &child)) {
             return 0;
         }
         replacement.data.array_type.element = child;
+        replacement.data.array_type.length = normalized_length;
         if (!cm_alias_normalize_type(state,
                 source.data.array_type.length.type,
                 &replacement.data.array_type.length.type)) {
@@ -1052,12 +1159,14 @@ static int cm_alias_normalize_type_inner(CmAliasNormalizeState *state,
         }
         if (replacement.data.array_type.element ==
                 source.data.array_type.element
+            && !length_changed
             && replacement.data.array_type.length.type ==
                 source.data.array_type.length.type) {
             *out_type = source_id;
             return 1;
         }
         return cm_alias_add_type(state, source_id, &replacement, out_type);
+    }
     case CM_HIR_TYPE_SLICE_KIND:
         if (!cm_alias_normalize_type(state,
                 source.data.slice_type.element, &child)) {

@@ -141,6 +141,14 @@ static void cm_lower_find_inherited_associated_type(
     CmInternId ast_name, CmLowerAssociatedTarget *out_target,
     uint32_t *out_matches);
 static int cm_lower_ast_path_storage_valid(const CmAstPath *path);
+static int cm_lower_attribute_has_head(const CmLowerState *state,
+    CmAstAttributeId attribute_id, const char *expected);
+static int cm_lower_record_self_type_matches(
+    const CmLowerState *state, const CmLowerItemRecord *impl_record,
+    const CmLowerItemRecord *type_record);
+static const CmLowerItemRecord *cm_lower_associated_const_length(
+    const CmLowerState *state, CmHirDefId owner,
+    const CmInternedString *text);
 static int cm_lower_validate_impl_trait_type(CmLowerState *state,
     CmAstItemId ast_item_id, CmAstTypeId ast_type_id,
     const CmAstType *ast_type, int *out_relaxed_sized);
@@ -150,6 +158,12 @@ static int cm_lower_lifetime_binder_is_valid(
 static int cm_lower_item_trait_predicates(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item);
+static int cm_lower_one_trait_predicate(CmLowerState *state,
+    CmAstItemId ast_item_id, const CmLowerItemRecord *record,
+    CmHirTypeId subject, CmAstTypeId trait_ast_type, CmSpan predicate_span,
+    const CmAstLifetimeBinder *ast_binder,
+    CmHirTraitPredicateModifier modifier,
+    CmHirTraitPredicate *out_predicate);
 static int cm_lower_trait_identity_arguments(CmLowerState *state,
     CmAstItemId ast_item_id, const CmHirItem *trait_item, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count);
@@ -174,6 +188,10 @@ typedef enum CmLowerLookupResult {
     CM_LOWER_LOOKUP_RESOLVER_ERROR,
     CM_LOWER_LOOKUP_STALE_GRAPH
 } CmLowerLookupResult;
+
+static CmLowerLookupResult cm_lower_lookup_trait_target(
+    CmLowerState *state, const CmAstPath *path, CmHirModuleId module,
+    CmLowerTraitTarget *out_target);
 
 static CmSpan cm_lower_span(const CmLowerState *state, CmAstSpan ast_span)
 {
@@ -2193,13 +2211,40 @@ static int cm_lower_parse_u64(const CmInternedString *text,
     return 1;
 }
 
+static int cm_lower_parse_negative_u64(const CmInternedString *text,
+    uint64_t *out_magnitude)
+{
+    size_t index;
+    uint64_t value;
+
+    if (text == NULL || text->len < 2u
+        || text->bytes[0] != (unsigned char)'-') return 0;
+    value = 0u;
+    for (index = 1u; index < text->len; ++index) {
+        unsigned int digit;
+        unsigned char byte;
+
+        byte = text->bytes[index];
+        if (byte == (unsigned char)'_') continue;
+        if (byte < (unsigned char)'0' || byte > (unsigned char)'9') {
+            return 0;
+        }
+        digit = (unsigned int)(byte - (unsigned char)'0');
+        if (value > (UINT64_MAX - (uint64_t)digit) / 10u) return 0;
+        value = value * 10u + (uint64_t)digit;
+    }
+    *out_magnitude = value;
+    return 1;
+}
+
 /*
  * Macro-expanded array lengths can retain a small constant expression rather
  * than a single decimal token.  The core `array_impl_default!` recursion, for
  * example, produces nested forms such as `((32 - 1) - 1)`.  Keep this parser
- * deliberately narrow: only unsigned decimal literals, parentheses, and
- * checked addition/subtraction are admitted.  Names, suffixes, and all other
- * operators continue to fail closed in the array-lowering path below.
+ * deliberately narrow: only unsigned decimal literals, parentheses, checked
+ * addition/subtraction, and checked left shifts are admitted.  Names, suffixes,
+ * and all other operators continue to fail closed in the array-lowering path
+ * below.
  */
 typedef struct CmLowerArrayLengthParser {
     const unsigned char *bytes;
@@ -2286,6 +2331,19 @@ static int cm_lower_array_length_parse_expression(
             break;
         }
         operator = parser->bytes[parser->position];
+        if (operator == (unsigned char)'<'
+            && parser->position + 1u < parser->length
+            && parser->bytes[parser->position + 1u] == (unsigned char)'<') {
+            uint64_t shift;
+
+            parser->position += 2u;
+            if (!cm_lower_array_length_parse_atom(parser, &shift)
+                || shift >= 64u || value > (UINT64_MAX >> shift)) {
+                return 0;
+            }
+            value <<= shift;
+            continue;
+        }
         if (operator != (unsigned char)'+'
             && operator != (unsigned char)'-') return 0;
         parser->position += 1u;
@@ -3009,6 +3067,40 @@ static int cm_lower_adt_default_argument(CmLowerState *state,
             return 1;
         }
     }
+    /* A common ADT default pattern is a zero-argument function pointer whose
+     * return type is the immediately preceding type parameter, e.g.
+     * `LazyCell<T, F = fn() -> T>`.  Preserve the authenticated function
+     * pointer shape while substituting that prior application argument. */
+    if (default_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && default_type->data.fn_pointer_type.parameter_count == 0u
+        && default_type->data.fn_pointer_type.parameters == NULL
+        && prior_arguments != NULL) {
+        const CmHirType *return_type;
+        const CmHirGenericParam *source;
+
+        return_type = cm_hir_get_type(state->hir,
+            default_type->data.fn_pointer_type.return_type);
+        source = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+            ? NULL : cm_hir_get_generic_param(state->hir,
+                return_type->data.parameter_type.parameter);
+        if (source != NULL
+            && cm_hir_def_id_equal(source->owner, definition)
+            && source->kind == CM_HIR_GENERIC_TYPE
+            && source->index < parameter_index
+            && prior_arguments[source->index].kind
+                == CM_HIR_GENERIC_ARG_TYPE) {
+            CmHirType replacement;
+
+            replacement = *default_type;
+            replacement.data.fn_pointer_type.return_type =
+                prior_arguments[source->index].data.type;
+            out_argument->data.type = cm_lower_add_type(state, &replacement,
+                CM_AST_TYPE_NONE);
+            if (out_argument->data.type == CM_HIR_TYPE_NONE) return 0;
+            return 1;
+        }
+    }
     switch (default_type->kind) {
     case CM_HIR_TYPE_NEVER_KIND:
     case CM_HIR_TYPE_UNIT_KIND:
@@ -3123,6 +3215,34 @@ static int cm_lower_adt_arguments(CmLowerState *state,
                 cm_free(explicit_arguments);
                 return 0;
             }
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_CONST) {
+            uint64_t value;
+            const CmHirType *declared_type;
+
+            declared_type = cm_hir_get_type(state->hir,
+                parameter->declared_type);
+            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
+                    ast_argument->text), &value)
+                || declared_type == NULL
+                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+                cm_free(arguments);
+                cm_free(explicit_arguments);
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    span, CM_AST_ITEM_NONE, ast_argument->type,
+                    CM_AST_PATH_NONE, CM_HIR_OK,
+                    "const generic literal is not a supported integer "
+                    "argument");
+                return 0;
+            }
+            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_CONST;
+            explicit_arguments[index].data.constant.kind =
+                CM_HIR_CONST_VALUE;
+            explicit_arguments[index].data.constant.type =
+                parameter->declared_type;
+            explicit_arguments[index].data.constant.data.value.low_bits =
+                value;
+            explicit_arguments[index].data.constant.data.value.high_bits = 0u;
         } else {
             cm_free(arguments);
             cm_free(explicit_arguments);
@@ -3506,6 +3626,42 @@ static int cm_lower_self_context(const CmLowerState *state,
             return 1;
         }
     }
+    if (parent == NULL && record->kind == CM_AST_ITEM_IMPL
+        && state->active_item != NULL
+        && state->active_item->kind == CM_HIR_ITEM_IMPL
+        && cm_hir_def_id_equal(state->active_item->definition,
+            record->definition)
+        && state->active_item->owner_module == record->owner_module
+        && state->active_item->generic_parameter_start
+            == record->generic_parameter_start
+        && state->active_item->generic_parameter_count
+            == record->generic_parameter_count) {
+        /* The impl header is lowered before its HIR item is bound.  During
+         * that window the active item is the authenticated owner for a bare
+         * `Self` in an implemented trait's generic arguments (for example,
+         * `impl PartialEq<&Self> for CStr`). */
+        *out_self_owner = record->definition;
+        if (state->active_item->data.impl_item.has_trait) {
+            *out_trait_definition = state->active_item
+                ->data.impl_item.trait_type.definition;
+        }
+        return 1;
+    }
+    /*
+     * Impl headers are lowered before the temporary impl item is bound into
+     * the HIR context.  During that window the reserved record is
+     * authenticated, and state->active_item identifies the same owner,
+     * but cm_lower_bound_item() quite correctly returns NULL.  Permit a bare
+     * Self in the impl's self/trait header; associated projections still
+     * fail closed below because the implemented-trait identity is not bound
+     * until cm_lower_impl_item() finishes the header.
+     */
+    if (parent == NULL && record->kind == CM_AST_ITEM_IMPL
+        && state->active_item != NULL
+        && cm_hir_def_id_equal(state->active_item->definition, owner)) {
+        *out_self_owner = owner;
+        return 1;
+    }
     if (parent == NULL) return 0;
     *out_self_owner = record->definition;
     if (parent->kind == CM_HIR_ITEM_TRAIT) {
@@ -3565,6 +3721,21 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
             CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
             "Self is used outside a trait or impl item");
         return CM_HIR_TYPE_NONE;
+    }
+    /*
+     * In an impl header, Self in the implemented trait's generic
+     * arguments denotes the concrete impl target (e.g. impl Trait<&Self>
+     * for CStr), not the eventual CM_HIR_TYPE_SELF_KIND placeholder used
+     * by methods.  The temporary impl item has already lowered its
+     * self_type before cm_lower_trait_reference() processes those arguments.
+     */
+    if (path->segment_count == 1u
+        && state->active_item != NULL
+        && state->active_item->kind == CM_HIR_ITEM_IMPL
+        && cm_hir_def_id_equal(state->active_item->definition, owner)
+        && state->active_item->data.impl_item.self_type
+            != CM_HIR_TYPE_NONE) {
+        return state->active_item->data.impl_item.self_type;
     }
     if (path->segment_count > 2u) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
@@ -3852,6 +4023,156 @@ static void cm_lower_find_parameter_projection_in_item(
     }
 }
 
+/*
+ * Associated constraints can mention a later generic parameter before that
+ * parameter's own bound has been materialized in the temporary HIR item.
+ * Keep shorthand projection lookup order-independent by consulting the
+ * authenticated AST declaration as a bounded fallback.  This is deliberately
+ * limited to direct type-parameter and where-clause trait bounds; once HIR
+ * predicates exist, the ordinary path above remains authoritative.
+ */
+static int cm_lower_find_parameter_projection_in_ast(
+    CmLowerState *state, const CmLowerItemRecord *record,
+    const CmLowerGenericRecord *generic, CmHirTypeId subject,
+    CmInternId associated_name,
+    CmHirTraitPredicate *out_predicate)
+{
+    const CmAstItem *ast_item;
+    const CmAstGenericParamBound *generic_bound;
+    const CmAstWherePredicate *matching_where_predicate;
+    const CmAstWhereBound *where_bound;
+    uint32_t candidates;
+    uint32_t parameter_index;
+    uint32_t bound_index;
+    uint32_t where_index;
+    int subject_matches;
+
+    if (record == NULL || generic == NULL || out_predicate == NULL
+        || record->ast == NULL) return 0;
+    ast_item = cm_ast_get_item(record->ast, record->ast_id);
+    if (ast_item == NULL) return 0;
+    generic_bound = NULL;
+    matching_where_predicate = NULL;
+    where_bound = NULL;
+    candidates = 0u;
+    for (parameter_index = 0u;
+         parameter_index < ast_item->generic_parameter_count;
+         ++parameter_index) {
+        const CmAstGenericParam *parameter;
+
+        parameter = &ast_item->generic_parameters[parameter_index];
+        if (parameter->kind != CM_AST_PARAM_TYPE
+            || !cm_lower_strings_equal(state, parameter->name,
+                generic->ast_name)) continue;
+        for (bound_index = 0u; bound_index < parameter->bound_count;
+             ++bound_index) {
+            const CmAstGenericParamBound *bound;
+            const CmAstType *trait_ast;
+            const CmAstPath *trait_path;
+            CmLowerTraitTarget trait_target;
+            CmLowerAssociatedTarget associated;
+            uint32_t associated_matches;
+
+            bound = &parameter->bounds[bound_index];
+            if (bound->kind != CM_AST_GENERIC_BOUND_TRAIT
+                || bound->trait_type == CM_AST_TYPE_NONE) continue;
+            trait_ast = cm_ast_get_type(record->ast, bound->trait_type);
+            trait_path = trait_ast == NULL
+                    || trait_ast->kind != CM_AST_TYPE_PATH
+                ? NULL : cm_ast_get_path(record->ast, trait_ast->path);
+            memset(&trait_target, 0, sizeof(trait_target));
+            if (trait_path == NULL
+                || cm_lower_lookup_trait_target(state, trait_path,
+                    record->owner_module, &trait_target)
+                    != CM_LOWER_LOOKUP_TRAIT) continue;
+            cm_lower_find_inherited_associated_type(state,
+                trait_target.definition, associated_name, &associated,
+                &associated_matches);
+            if (associated_matches == 0u) continue;
+            if (candidates == 0u) generic_bound = bound;
+            candidates += 1u;
+        }
+    }
+    for (where_index = 0u;
+         where_index < ast_item->where_predicate_count;
+         ++where_index) {
+        const CmAstType *subject_type;
+        const CmAstPath *subject_path;
+
+        const CmAstWherePredicate *where_predicate;
+
+        where_predicate = &ast_item->where_predicates[where_index];
+        if (where_predicate->kind != CM_AST_WHERE_PREDICATE_TYPE) {
+            continue;
+        }
+        subject_type = cm_ast_get_type(record->ast,
+            where_predicate->subject);
+        subject_path = subject_type == NULL
+                || subject_type->kind != CM_AST_TYPE_PATH
+            ? NULL : cm_ast_get_path(record->ast, subject_type->path);
+        subject_matches = subject_path != NULL
+            && !subject_path->absolute
+            && subject_path->segment_count == 1u
+            && subject_path->segments != NULL
+            && subject_path->segments[0].argument_count == 0u
+            && cm_lower_strings_equal(state,
+                subject_path->segments[0].name, generic->ast_name);
+        if (!subject_matches) continue;
+        for (bound_index = 0u;
+             bound_index < where_predicate->bound_count; ++bound_index) {
+            const CmAstWhereBound *bound;
+            const CmAstType *trait_ast;
+            const CmAstPath *trait_path;
+            CmLowerTraitTarget trait_target;
+            CmLowerAssociatedTarget associated;
+            uint32_t associated_matches;
+
+            bound = &where_predicate->bounds[bound_index];
+            if (bound->kind != CM_AST_WHERE_BOUND_TRAIT
+                || bound->trait_type == CM_AST_TYPE_NONE) continue;
+            trait_ast = cm_ast_get_type(record->ast, bound->trait_type);
+            trait_path = trait_ast == NULL
+                    || trait_ast->kind != CM_AST_TYPE_PATH
+                ? NULL : cm_ast_get_path(record->ast, trait_ast->path);
+            memset(&trait_target, 0, sizeof(trait_target));
+            if (trait_path == NULL
+                || cm_lower_lookup_trait_target(state, trait_path,
+                    record->owner_module, &trait_target)
+                    != CM_LOWER_LOOKUP_TRAIT) continue;
+            cm_lower_find_inherited_associated_type(state,
+                trait_target.definition, associated_name, &associated,
+                &associated_matches);
+            if (associated_matches == 0u) continue;
+            if (candidates == 0u) {
+                where_bound = bound;
+                matching_where_predicate = where_predicate;
+            }
+            candidates += 1u;
+        }
+    }
+    if (candidates != 1u) return candidates == 0u ? 0 : -1;
+    if (generic_bound != NULL) {
+        return cm_lower_one_trait_predicate(state, record->ast_id, record,
+            subject, generic_bound->trait_type,
+            cm_lower_span(state, generic_bound->span), NULL,
+            generic_bound->modifier == CM_AST_GENERIC_BOUND_CONDITIONALLY_CONST
+                ? CM_HIR_PREDICATE_CONST_IF_CONST
+                : CM_HIR_PREDICATE_REQUIRED, out_predicate);
+    }
+    if (where_bound != NULL && matching_where_predicate != NULL) {
+        return cm_lower_one_trait_predicate(state, record->ast_id, record,
+            subject, where_bound->trait_type,
+            cm_lower_span(state, where_bound->span),
+            &matching_where_predicate->binder,
+            where_bound->modifier == CM_AST_WHERE_BOUND_CONDITIONALLY_CONST
+                ? CM_HIR_PREDICATE_CONST_IF_CONST
+                : where_bound->modifier == CM_AST_WHERE_BOUND_CONST
+                    ? CM_HIR_PREDICATE_CONST
+                    : CM_HIR_PREDICATE_REQUIRED, out_predicate);
+    }
+    return 0;
+}
+
 static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     CmAstTypeId ast_type_id, const CmAstPath *path, CmSpan span,
     CmHirDefId owner, const CmLowerGenericRecord *generic)
@@ -3867,6 +4188,8 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     CmHirGenericArg *owned_trait_arguments;
     CmHirDefId defining_trait;
     const CmHirItem *associated_item;
+    CmHirTraitPredicate synthesized_predicate;
+    int synthesized;
     uint32_t projection_argument_count;
     uint32_t projection_matches;
     uint32_t matches;
@@ -3874,6 +4197,8 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     predicate = NULL;
     memset(&associated, 0, sizeof(associated));
     associated.definition = cm_hir_def_id_none();
+    memset(&synthesized_predicate, 0, sizeof(synthesized_predicate));
+    synthesized = 0;
     matches = 0u;
     if (state->active_item != NULL
         && cm_hir_def_id_equal(state->active_item->definition, owner)) {
@@ -3890,6 +4215,29 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
         cm_lower_find_parameter_projection_in_item(state, parent_item,
             generic->hir_id, path->segments[1].name, &predicate,
             &associated, &matches);
+    }
+    if (matches == 0u && predicate == NULL) {
+        int ast_matches;
+
+        ast_matches = cm_lower_find_parameter_projection_in_ast(state,
+            owner_record, generic, CM_HIR_TYPE_NONE,
+            path->segments[1].name,
+            &synthesized_predicate);
+        if (ast_matches < 0) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_TRAIT, span,
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "shorthand associated type is ambiguous across "
+                "declaration predicates");
+            return CM_HIR_TYPE_NONE;
+        }
+        if (ast_matches > 0) {
+            predicate = &synthesized_predicate;
+            cm_lower_find_inherited_associated_type(state,
+                predicate->trait_type.definition, path->segments[1].name,
+                &associated, &matches);
+            synthesized = 1;
+        }
     }
     if (matches == 0u || predicate == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
@@ -3910,7 +4258,14 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     parameter_type.span = span;
     parameter_type.data.parameter_type.parameter = generic->hir_id;
     self_type = cm_lower_add_type(state, &parameter_type, ast_type_id);
-    if (state->failed) return CM_HIR_TYPE_NONE;
+    if (state->failed) {
+        if (synthesized) {
+            cm_free(synthesized_predicate.trait_type.arguments);
+            cm_free(synthesized_predicate.equalities);
+            cm_free(synthesized_predicate.binder.lifetimes);
+        }
+        return CM_HIR_TYPE_NONE;
+    }
     associated_item = associated.item != NULL ? associated.item
         : cm_lower_bound_item(state, associated.definition);
     defining_trait = associated_item != NULL
@@ -4747,6 +5102,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             if (length_generic == NULL) {
                 length_record = cm_lower_named_const_length(state, module,
                     length_text);
+                if (length_record == NULL) {
+                    length_record = cm_lower_associated_const_length(state,
+                        owner, length_text);
+                }
             }
         }
         if (length_generic != NULL) {
@@ -5792,6 +6151,131 @@ static int cm_lower_record_self_type_matches(
         && self_name->len == type_name->len
         && memcmp(self_name->bytes, type_name->bytes,
             self_name->len) == 0;
+}
+
+/* Resolve the `Self::NAME` form used by an array length while lowering an
+ * item owned by an inherent impl (or by the impl's target type).  Array
+ * lengths are intentionally represented as unevaluated const definitions;
+ * this lookup therefore only authenticates the associated-const identity and
+ * does not attempt to evaluate its initializer. */
+static const CmLowerItemRecord *cm_lower_associated_const_length(
+    const CmLowerState *state, CmHirDefId owner,
+    const CmInternedString *text)
+{
+    const CmLowerItemRecord *owner_record;
+    const CmLowerItemRecord *type_record;
+    const CmLowerItemRecord *direct_impl;
+    const CmLowerItemRecord *result;
+    size_t index;
+    size_t position;
+    size_t name_start;
+    size_t name_end;
+    uint32_t matches;
+
+    if (state == NULL || text == NULL || text->bytes == NULL) return NULL;
+    /* The parser stores the array bound as captured source text, so tolerate
+     * whitespace around both path segments and the `::` separator. */
+    position = 0u;
+    while (position < text->len
+        && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
+            || text->bytes[position] == '\r'
+            || text->bytes[position] == '\n')) ++position;
+    if (text->len - position < 4u
+        || memcmp(text->bytes + position, "Self", 4u) != 0) return NULL;
+    position += 4u;
+    if (position < text->len
+        && ((text->bytes[position] >= 'A'
+                && text->bytes[position] <= 'Z')
+            || (text->bytes[position] >= 'a'
+                && text->bytes[position] <= 'z')
+            || (text->bytes[position] >= '0'
+                && text->bytes[position] <= '9')
+            || text->bytes[position] == '_')) return NULL;
+    while (position < text->len
+        && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
+            || text->bytes[position] == '\r'
+            || text->bytes[position] == '\n')) ++position;
+    if (position + 2u > text->len || text->bytes[position] != ':'
+        || text->bytes[position + 1u] != ':') return NULL;
+    position += 2u;
+    while (position < text->len
+        && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
+            || text->bytes[position] == '\r'
+            || text->bytes[position] == '\n')) ++position;
+    if (position >= text->len
+        || !((text->bytes[position] >= 'A'
+                && text->bytes[position] <= 'Z')
+            || (text->bytes[position] >= 'a'
+                && text->bytes[position] <= 'z')
+            || text->bytes[position] == '_')) return NULL;
+    name_start = position++;
+    while (position < text->len
+        && ((text->bytes[position] >= 'A'
+                && text->bytes[position] <= 'Z')
+            || (text->bytes[position] >= 'a'
+                && text->bytes[position] <= 'z')
+            || (text->bytes[position] >= '0'
+                && text->bytes[position] <= '9')
+            || text->bytes[position] == '_')) ++position;
+    name_end = position;
+    while (position < text->len
+        && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
+            || text->bytes[position] == '\r'
+            || text->bytes[position] == '\n')) ++position;
+    if (position != text->len || name_end == name_start) return NULL;
+
+    owner_record = cm_lower_find_record_by_definition(state, owner);
+    if (owner_record == NULL) return NULL;
+    type_record = owner_record;
+    direct_impl = NULL;
+    if (owner_record->kind == CM_AST_ITEM_IMPL) {
+        direct_impl = owner_record;
+        type_record = NULL;
+    } else if (owner_record->parent_kind == CM_LOWER_PARENT_IMPL) {
+        direct_impl = cm_lower_find_record_by_definition(state,
+            owner_record->parent_definition);
+        type_record = NULL;
+    }
+
+    result = NULL;
+    matches = 0u;
+    for (index = 0u; index < state->item_records.len; ++index) {
+        const CmLowerItemRecord *impl_record;
+        size_t associated_index;
+
+        impl_record = (const CmLowerItemRecord *)cm_vec_at_const(
+            &state->item_records, index);
+        if (impl_record == NULL || impl_record->kind != CM_AST_ITEM_IMPL
+            || (direct_impl != NULL
+                && !cm_hir_def_id_equal(impl_record->definition,
+                    direct_impl->definition))
+            || (direct_impl == NULL
+                && !cm_lower_record_self_type_matches(state, impl_record,
+                    type_record))) continue;
+        for (associated_index = 0u;
+             associated_index < state->item_records.len;
+             ++associated_index) {
+            const CmLowerItemRecord *associated;
+            const CmInternedString *associated_name;
+
+            associated = (const CmLowerItemRecord *)cm_vec_at_const(
+                &state->item_records, associated_index);
+            associated_name = associated == NULL ? NULL
+                : cm_interner_get(&state->hir->strings,
+                    associated->hir_name);
+            if (associated != NULL && associated->kind == CM_AST_ITEM_CONST
+                && cm_hir_def_id_equal(associated->parent_definition,
+                    impl_record->definition)
+                && associated_name != NULL
+                && associated_name->len == name_end - name_start
+                && memcmp(associated_name->bytes,
+                    text->bytes + name_start, name_end - name_start) == 0) {
+                result = associated;
+                matches += 1u;
+            }
+        }
+    }
+    return matches == 1u ? result : NULL;
 }
 
 static const CmLowerItemRecord *cm_lower_const_default_definition(
@@ -7124,9 +7608,11 @@ static int cm_lower_enum_item(CmLowerState *state,
         CmSpan variant_span;
         uint32_t variant_matches;
         uint32_t attribute_index;
+        int has_cfg_attribute;
 
         ast_variant = &enumeration->variants[index];
         variant_span = cm_lower_span(state, ast_variant->span);
+        has_cfg_attribute = 0;
         variant_record = cm_lower_find_variant_record(state,
             record->definition, index, &variant_matches);
         if (variant_record == NULL || variant_matches != 1u) {
@@ -7162,9 +7648,26 @@ static int cm_lower_enum_item(CmLowerState *state,
                     CM_HIR_OK, "enum variant attribute is invalid");
                 break;
             }
+            if (cm_lower_attribute_has_head(state,
+                    ast_variant->attributes[attribute_index], "cfg")
+                || cm_lower_attribute_has_head(state,
+                    ast_variant->attributes[attribute_index], "cfg_attr")) {
+                has_cfg_attribute = 1;
+            }
         }
         if (state->failed) break;
-        if (ast_variant->attribute_count != 0u) {
+        /*
+         * Graph-backed crates have already passed item/variant attributes
+         * through cfg expansion.  Stable metadata attributes such as
+         * #[stable] remain attached to core enum variants but have no HIR
+         * semantics here, so discard them after structural validation.  A
+         * source-only lowering still rejects cfg-bearing variant attributes,
+         * because accepting those without effective expansion could retain a
+         * disabled variant; inert metadata such as #[stable] is harmless.
+         */
+        if (ast_variant->attribute_count != 0u
+            && state->graph == NULL
+            && has_cfg_attribute) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, variant_span,
                 ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
                 "enum variant attributes require effective cfg lowering");
@@ -7178,10 +7681,47 @@ static int cm_lower_enum_item(CmLowerState *state,
             break;
         }
         if (ast_variant->discriminant != CM_INTERN_ID_NONE) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
-                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-                "enum discriminants need typed const-expression lowering");
-            break;
+            const CmInternedString *discriminant_text;
+            CmHirType discriminant_type;
+            CmHirTypeId discriminant_type_id;
+            uint64_t discriminant_value;
+            uint64_t negative_magnitude;
+            int negative_discriminant;
+
+            discriminant_text = cm_lower_ast_string(state,
+                ast_variant->discriminant);
+            negative_discriminant = 0;
+            if (!cm_lower_parse_u64(discriminant_text,
+                    &discriminant_value)
+                && !cm_lower_parse_array_length_expression(discriminant_text,
+                    &discriminant_value)) {
+                if (!cm_lower_parse_negative_u64(discriminant_text,
+                        &negative_magnitude)
+                    || negative_magnitude > (UINT64_C(1) << 63)) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                        variant_span, ast_item_id, CM_AST_TYPE_NONE,
+                        CM_AST_PATH_NONE, CM_HIR_OK,
+                        "enum discriminant must be an in-range integer "
+                        "literal");
+                    break;
+                }
+                discriminant_value = 0u - negative_magnitude;
+                negative_discriminant = 1;
+            }
+            memset(&discriminant_type, 0, sizeof(discriminant_type));
+            discriminant_type.kind = CM_HIR_TYPE_INTEGER_KIND;
+            discriminant_type.span = variant_span;
+            discriminant_type.data.integer_type.kind = CM_HIR_INT_ISIZE;
+            discriminant_type_id = cm_lower_add_type(state,
+                &discriminant_type, CM_AST_TYPE_NONE);
+            if (discriminant_type_id == CM_HIR_TYPE_NONE) break;
+            variants[index].has_discriminant = 1;
+            variants[index].discriminant.kind = CM_HIR_CONST_VALUE;
+            variants[index].discriminant.type = discriminant_type_id;
+            variants[index].discriminant.data.value.low_bits =
+                discriminant_value;
+            variants[index].discriminant.data.value.high_bits =
+                negative_discriminant ? UINT64_MAX : 0u;
         }
         variants[index].definition = variant_record->definition;
         variants[index].name = cm_lower_copy_string(state,
@@ -8076,7 +8616,8 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
             return 0;
         }
         if (ast_argument->kind != CM_AST_GENERIC_TYPE
-            && ast_argument->kind != CM_AST_GENERIC_LIFETIME) {
+            && ast_argument->kind != CM_AST_GENERIC_LIFETIME
+            && ast_argument->kind != CM_AST_GENERIC_CONST) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                 cm_lower_span(state, ast_argument->span), ast_item_id,
                 ast_argument->type, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -8130,6 +8671,32 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
                     &arguments[explicit_count])) {
                 break;
             }
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_CONST) {
+            uint64_t value;
+            const CmHirType *declared_type;
+
+            declared_type = cm_hir_get_type(state->hir,
+                parameter->declared_type);
+            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
+                    ast_argument->text), &value)
+                || declared_type == NULL
+                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, ast_argument->span), ast_item_id,
+                    CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "const generic literal is not a supported integer "
+                    "argument");
+                break;
+            }
+            arguments[explicit_count].kind = CM_HIR_GENERIC_ARG_CONST;
+            arguments[explicit_count].data.constant.kind =
+                CM_HIR_CONST_VALUE;
+            arguments[explicit_count].data.constant.type =
+                parameter->declared_type;
+            arguments[explicit_count].data.constant.data.value.low_bits =
+                value;
+            arguments[explicit_count].data.constant.data.value.high_bits = 0u;
         } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
             && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
             const CmHirGenericParam *lifetime_parameter;
@@ -8631,6 +9198,54 @@ static int cm_lower_ast_path_storage_valid(const CmAstPath *path)
     return 1;
 }
 
+static int cm_lower_attribute_has_head(const CmLowerState *state,
+    CmAstAttributeId attribute_id, const char *expected)
+{
+    const CmAstAttribute *attribute;
+    const CmInternedString *text;
+    size_t expected_length;
+    size_t index;
+
+    attribute = cm_ast_get_attribute(state->ast, attribute_id);
+    text = attribute == NULL ? NULL
+        : cm_ast_get_string(state->ast, attribute->text);
+    if (text == NULL || expected == NULL) return 0;
+    index = 0u;
+    while (index < text->len
+        && (text->bytes[index] == ' ' || text->bytes[index] == '\t'
+            || text->bytes[index] == '\r' || text->bytes[index] == '\n')) {
+        ++index;
+    }
+    if (index < text->len && text->bytes[index] == '#') {
+        ++index;
+        if (index < text->len && text->bytes[index] == '!') ++index;
+        while (index < text->len
+            && (text->bytes[index] == ' ' || text->bytes[index] == '\t'
+                || text->bytes[index] == '\r'
+                || text->bytes[index] == '\n')) {
+            ++index;
+        }
+        if (index >= text->len || text->bytes[index] != '[') return 0;
+        ++index;
+        while (index < text->len
+            && (text->bytes[index] == ' ' || text->bytes[index] == '\t'
+                || text->bytes[index] == '\r'
+                || text->bytes[index] == '\n')) {
+            ++index;
+        }
+    }
+    expected_length = strlen(expected);
+    return text->len - index >= expected_length
+        && memcmp(text->bytes + index, expected, expected_length) == 0
+        && (text->len - index == expected_length
+            || text->bytes[index + expected_length] == ' '
+            || text->bytes[index + expected_length] == '\t'
+            || text->bytes[index + expected_length] == '\r'
+            || text->bytes[index + expected_length] == '\n'
+            || text->bytes[index + expected_length] == '('
+            || text->bytes[index + expected_length] == ']');
+}
+
 static int cm_lower_predicate_equalities(CmLowerState *state,
     CmAstItemId ast_item_id, CmAstTypeId trait_ast_type,
     const CmLowerTraitTarget *trait_target, CmHirModuleId module,
@@ -8825,14 +9440,6 @@ static int cm_lower_associated_constraint_count(CmLowerState *state,
                 return 0;
             }
         }
-        if (argument->name_argument_count != 0u) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-                cm_lower_span(state, argument->span), ast_item_id,
-                trait_ast_type, ast_type->path, CM_HIR_OK,
-                "GAT associated-type constraint names are not supported "
-                "in HIR predicates");
-            return 0;
-        }
         for (bound_index = 0u; bound_index < argument->bound_count;
              ++bound_index) {
             const CmAstGenericParamBound *bound;
@@ -9004,6 +9611,10 @@ static int cm_lower_associated_constraint_predicates(
         CmLowerAssociatedTarget associated;
         const CmHirItem *associated_item;
         CmHirDefId defining_trait;
+        CmHirGenericArg *associated_arguments;
+        CmAstPathSegment associated_segment;
+        CmHirGenericParamId associated_parameter_start;
+        uint32_t associated_argument_count;
         uint32_t matches;
         uint32_t bound_index;
 
@@ -9038,14 +9649,6 @@ static int cm_lower_associated_constraint_predicates(
                 "through the supertrait graph");
             break;
         }
-        if (associated.generic_parameter_count != 0u) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-                cm_lower_span(state, argument->span), ast_item_id,
-                trait_ast_type, ast_type->path, CM_HIR_OK,
-                "GAT associated-type constraints require structural "
-                "associated arguments");
-            break;
-        }
         associated_item = associated.item != NULL ? associated.item
             : cm_lower_bound_item(state, associated.definition);
         defining_trait = associated_item != NULL
@@ -9061,6 +9664,57 @@ static int cm_lower_associated_constraint_predicates(
                 "associated-type constraint lost its defining trait");
             break;
         }
+        associated_parameter_start = associated_item != NULL
+            ? associated_item->generic_parameter_start
+            : associated.local_record->generic_parameter_start;
+        memset(&associated_segment, 0, sizeof(associated_segment));
+        associated_segment.arguments = argument->name_arguments;
+        associated_segment.argument_count = argument->name_argument_count;
+        associated_arguments = NULL;
+        associated_argument_count = 0u;
+        if (!cm_lower_generic_arguments(state, &associated_segment,
+                record->owner_module, record->definition,
+                cm_lower_span(state, argument->span), &associated_arguments,
+                &associated_argument_count)) {
+            break;
+        }
+        if (associated_argument_count != associated.generic_parameter_count) {
+            cm_free(associated_arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                cm_lower_span(state, argument->span), ast_item_id,
+                trait_ast_type, ast_type->path, CM_HIR_OK,
+                "associated-type constraint supplies the wrong number of "
+                "GAT arguments");
+            break;
+        }
+        for (bound_index = 0u;
+             bound_index < associated_argument_count; ++bound_index) {
+            const CmHirGenericParam *parameter;
+            CmHirGenericArgKind expected_kind;
+
+            parameter = cm_hir_get_generic_param(state->hir,
+                associated_parameter_start + bound_index);
+            expected_kind = parameter != NULL
+                    && parameter->kind == CM_HIR_GENERIC_LIFETIME
+                ? CM_HIR_GENERIC_ARG_LIFETIME
+                : parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+                    ? CM_HIR_GENERIC_ARG_TYPE
+                    : CM_HIR_GENERIC_ARG_CONST;
+            if (parameter == NULL
+                || parameter->index != bound_index
+                || !cm_hir_def_id_equal(parameter->owner,
+                    associated.definition)
+                || associated_arguments[bound_index].kind != expected_kind) {
+                cm_free(associated_arguments);
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, argument->span), ast_item_id,
+                    trait_ast_type, ast_type->path, CM_HIR_OK,
+                    "associated-type constraint GAT argument kind does not "
+                    "match its parameter");
+                break;
+            }
+        }
+        if (state->failed) break;
         for (bound_index = 0u; bound_index < argument->bound_count
                 && !state->failed;
              ++bound_index) {
@@ -9111,6 +9765,10 @@ static int cm_lower_associated_constraint_predicates(
             projection.data.projection_type.trait_type = projection_trait;
             projection.data.projection_type.associated_type.definition =
                 associated.definition;
+            projection.data.projection_type.associated_type.arguments =
+                associated_arguments;
+            projection.data.projection_type.associated_type.argument_count =
+                associated_argument_count;
             projection_id = cm_lower_add_type(state, &projection,
                 trait_ast_type);
             cm_free(owned_arguments);
@@ -9124,6 +9782,7 @@ static int cm_lower_associated_constraint_predicates(
             }
             *in_out_predicate_count += 1u;
         }
+        cm_free(associated_arguments);
     }
     return !state->failed;
 }
@@ -9340,12 +9999,16 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     if (!(((ast_item->kind == CM_AST_ITEM_TRAIT
                 || ast_item->kind == CM_AST_ITEM_IMPL)
             && record->parent_kind == CM_LOWER_PARENT_NONE)
+        || ((ast_item->kind == CM_AST_ITEM_STRUCT
+                || ast_item->kind == CM_AST_ITEM_UNION
+                || ast_item->kind == CM_AST_ITEM_ENUM))
         || (ast_item->kind == CM_AST_ITEM_FUNCTION
             && (record->parent_kind == CM_LOWER_PARENT_NONE
                 || record->parent_kind == CM_LOWER_PARENT_TRAIT
                 || record->parent_kind == CM_LOWER_PARENT_IMPL))
         || (ast_item->kind == CM_AST_ITEM_TYPE_ALIAS
-            && (record->parent_kind == CM_LOWER_PARENT_TRAIT
+            && (record->parent_kind == CM_LOWER_PARENT_NONE
+                || record->parent_kind == CM_LOWER_PARENT_TRAIT
                 || record->parent_kind == CM_LOWER_PARENT_IMPL)))) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, item_span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
