@@ -2,6 +2,8 @@
 
 #include "cm/hir/type_alias.h"
 
+#include "cm/syntax/parser.h"
+
 #include "cm/alloc.h"
 
 #include <stdarg.h>
@@ -2385,6 +2387,106 @@ static int cm_lower_parse_array_length_expression(
     }
     cm_lower_array_length_skip_space(&parser);
     return parser.position == parser.length;
+}
+
+static int cm_lower_interned_string_is(const CmInternedString *string,
+    const char *text)
+{
+    size_t length;
+
+    if (string == NULL || text == NULL) return 0;
+    length = strlen(text);
+    return string->len == length
+        && memcmp(string->bytes, text, length) == 0;
+}
+
+/*
+ * Array length text is captured before HIR lowering, but the expression
+ * parser remains the authority for grouping and operator precedence.  Parse
+ * into a private AST so failed evaluation cannot append recovery nodes to the
+ * source AST, then admit only checked arithmetic over nonnegative decimal
+ * literals.  Subtraction and left shift retain the earlier bootstrap surface;
+ * division is needed by portable-simd's `($lanes + 7) / 8` expansion.  The
+ * u64 bound is a conservative bootstrap shortcut until the configured target
+ * usize width is carried into HIR lowering.
+ */
+static int cm_lower_eval_array_length_ast(const CmAst *ast,
+    CmAstExprId expression_id, size_t depth, uint64_t *out_value)
+{
+    const CmAstExpr *expression;
+    const CmInternedString *operator_name;
+    uint64_t left;
+    uint64_t right;
+    uint64_t value;
+
+    if (ast == NULL || out_value == NULL
+        || depth >= CM_LOWER_APIT_MAX_DEPTH) return 0;
+    expression = cm_ast_get_expr(ast, expression_id);
+    if (expression == NULL) return 0;
+    if (expression->kind == CM_AST_EXPR_LITERAL) {
+        return cm_lower_parse_u64(cm_ast_get_string(ast,
+            expression->data.literal.text), out_value);
+    }
+    if (expression->kind != CM_AST_EXPR_BINARY) return 0;
+    operator_name = cm_ast_get_string(ast,
+        expression->data.binary.operator_name);
+    if (!cm_lower_interned_string_is(operator_name, "+")
+        && !cm_lower_interned_string_is(operator_name, "-")
+        && !cm_lower_interned_string_is(operator_name, "<<")
+        && !cm_lower_interned_string_is(operator_name, "/")) return 0;
+    if (!cm_lower_eval_array_length_ast(ast,
+            expression->data.binary.left, depth + 1u, &left)
+        || !cm_lower_eval_array_length_ast(ast,
+            expression->data.binary.right, depth + 1u, &right)) return 0;
+    if (cm_lower_interned_string_is(operator_name, "+")) {
+        if (left > UINT64_MAX - right) return 0;
+        value = left + right;
+    } else if (cm_lower_interned_string_is(operator_name, "-")) {
+        if (left < right) return 0;
+        value = left - right;
+    } else if (cm_lower_interned_string_is(operator_name, "<<")) {
+        if (right >= 64u || left > (UINT64_MAX >> right)) return 0;
+        value = left << right;
+    } else {
+        if (right == 0u) return 0;
+        value = left / right;
+    }
+    *out_value = value;
+    return 1;
+}
+
+static enum cm_edition cm_lower_syntax_edition(CmHirEdition edition)
+{
+    switch (edition) {
+    case CM_HIR_EDITION_2015: return CM_EDITION_2015;
+    case CM_HIR_EDITION_2018: return CM_EDITION_2018;
+    case CM_HIR_EDITION_2021: return CM_EDITION_2021;
+    case CM_HIR_EDITION_2024: return CM_EDITION_2024;
+    default: return CM_EDITION_2024;
+    }
+}
+
+static int cm_lower_eval_array_length_expression(
+    const CmInternedString *text, CmHirEdition edition,
+    uint64_t *out_value)
+{
+    CmAst expression_ast;
+    CmExpressionFragment fragment;
+    uint64_t value;
+    int evaluated;
+
+    if (text == NULL || out_value == NULL) return 0;
+    cm_ast_init(&expression_ast);
+    fragment = cm_parse_expression_fragment(&expression_ast,
+        (const char *)text->bytes, text->len,
+        cm_lower_syntax_edition(edition));
+    evaluated = fragment.parse.error_count == 0u
+        && cm_lower_eval_array_length_ast(&expression_ast,
+            fragment.expression, 0u, &value);
+    cm_ast_destroy(&expression_ast);
+    if (!evaluated) return 0;
+    *out_value = value;
+    return 1;
 }
 
 /* Rust 1.90's TypeId storage is expressed in pointer-sized words.  HIR
@@ -5826,8 +5928,8 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         length_parameter_type = NULL;
         has_literal_length = cm_lower_parse_u64(length_text, &length_value);
         if (!has_literal_length) {
-            has_literal_length = cm_lower_parse_array_length_expression(
-                length_text, &length_value);
+            has_literal_length = cm_lower_eval_array_length_expression(
+                length_text, state->options->edition, &length_value);
         }
         if (!has_literal_length) {
             has_literal_length = cm_lower_parse_pointer_storage_length(

@@ -1470,13 +1470,36 @@ static void test_macro_expanded_array_length_expression(void)
         "struct PointerStorage {"
         " values: [*const (); 16 / size_of::<*const ()>()]"
         "}";
+    static const struct {
+        const char *source;
+        uint64_t expected;
+    } evaluated[] = {
+        { "struct Evaluated { values: [u8; (1 + 7) / 8] }", 1u },
+        { "struct Evaluated { values: [u8; (64 + 7) / 8] }", 8u },
+        { "struct Evaluated { values: [u8; 8 + 8 / 8] }", 9u },
+        { "struct Evaluated { values: [u8; 64 / 8 / 2] }", 4u },
+        { "struct Evaluated { values: [u8; 64 / (4 + 4)] }", 8u },
+        { "struct Evaluated { values: [u8; 1 << 2 + 1] }", 8u },
+        { "struct Evaluated { values: [u8; 0 / 8] }", 0u }
+    };
+    static const char *const rejected[] = {
+        "struct Rejected { values: [u8; (1 + 7) / 0] }",
+        ("struct Rejected { values: "
+            "[u8; (18446744073709551615 + 1) / 8] }"),
+        "struct Rejected<const N: usize> { values: [u8; (N + 7) / 8] }",
+        "struct Rejected { values: [u8; 2 * 3] }",
+        "struct Rejected { values: [u8; -1] }",
+        "struct Rejected { values: [u8; 16 / size_of::<u8>()] }"
+    };
     CmHirContext context;
     CmHirLowerResult result;
     const CmHirItem *holder;
     const CmHirItem *pointer_storage;
+    const CmHirItem *evaluated_item;
     const CmHirType *array;
     const CmHirType *pointer_array;
     const CmHirType *length_type;
+    size_t index;
 
     result = lower_source(source, &context, NULL);
     holder = find_item(&context, "Holder");
@@ -1508,13 +1531,32 @@ static void test_macro_expanded_array_length_expression(void)
         && length_type->data.integer_type.kind == CM_HIR_INT_USIZE);
     cm_hir_context_destroy(&context);
 
-    result = lower_source(
-        "struct Unsupported { values: [u8; 16 / size_of::<u8>()] }",
-        &context, NULL);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    cm_hir_context_destroy(&context);
+    for (index = 0u; index < sizeof(evaluated) / sizeof(evaluated[0]);
+         ++index) {
+        result = lower_source(evaluated[index].source, &context, NULL);
+        evaluated_item = find_item(&context, "Evaluated");
+        array = evaluated_item == NULL
+                || evaluated_item->kind != CM_HIR_ITEM_STRUCT
+                || evaluated_item->data.aggregate_item.field_count != 1u
+            ? NULL : cm_hir_get_type(&context,
+                evaluated_item->data.aggregate_item.fields[0].type);
+        assert(result.error_count == 0u && array != NULL
+            && array->kind == CM_HIR_TYPE_ARRAY_KIND
+            && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && array->data.array_type.length.data.value.low_bits
+                == evaluated[index].expected
+            && array->data.array_type.length.data.value.high_bits == 0u);
+        cm_hir_context_destroy(&context);
+    }
 
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+            && find_item(&context, "Rejected") == NULL);
+        cm_hir_context_destroy(&context);
+    }
 }
 
 static void test_const_generic_type_alias_application(void)
