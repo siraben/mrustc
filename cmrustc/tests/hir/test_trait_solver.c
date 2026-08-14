@@ -200,6 +200,64 @@ static CmHirDefId add_impl(CmHirContext *hir, CmHirCrateId crate_id,
     return definition;
 }
 
+static CmHirItem *find_mutable_item(TestFixture *fixture,
+    CmHirDefId definition)
+{
+    size_t index;
+
+    for (index = 0u; index < fixture->hir.items.len; ++index) {
+        CmHirItem *item;
+
+        item = (CmHirItem *)cm_vec_at(&fixture->hir.items, index);
+        if (item != NULL
+            && cm_hir_def_id_equal(item->definition, definition)) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static CmHirDefId add_constrained_bool_impl(TestFixture *fixture,
+    CmHirDefId trait_definition, int with_predicate,
+    int with_outlives)
+{
+    CmHirDefId definition;
+    CmHirTraitPredicate predicate;
+    CmHirOutlivesPredicate outlives;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_IMPL, test_span(1u, 2u),
+        &definition) == CM_HIR_OK);
+    memset(&predicate, 0, sizeof(predicate));
+    predicate.subject = fixture->bool_hir;
+    predicate.trait_type.definition = fixture->exact_trait;
+    predicate.span = test_span(1u, 2u);
+    predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
+    memset(&outlives, 0, sizeof(outlives));
+    outlives.subject_kind = CM_HIR_OUTLIVES_TYPE;
+    outlives.subject.type = fixture->bool_hir;
+    outlives.bound.kind = CM_HIR_REGION_STATIC;
+    outlives.span = test_span(1u, 2u);
+    init_item(&item, CM_HIR_ITEM_IMPL, definition, fixture->root,
+        CM_INTERN_ID_NONE);
+    item.data.impl_item.self_type = fixture->bool_hir;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    if (with_predicate) {
+        item.predicates = &predicate;
+        item.predicate_count = 1u;
+    }
+    if (with_outlives) {
+        item.outlives_predicates = &outlives;
+        item.outlives_predicate_count = 1u;
+    }
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_impl_with_type_argument(CmHirContext *hir,
     CmHirCrateId crate_id, CmHirModuleId module,
     CmHirDefId trait_definition, CmHirTypeId self_type,
@@ -1300,6 +1358,181 @@ static void test_exact_negative_selection(void)
     fixture_destroy(&fixture);
 }
 
+static void test_exact_positive_auto_selection(void)
+{
+    TestFixture fixture;
+    CmHirDefId explicit_auto;
+    CmHirDefId explicit_impl;
+    CmHirDefId duplicate_auto;
+    CmHirDefId empty_auto;
+    CmHirDefId generic_auto;
+    CmHirDefId predicate_auto;
+    CmHirDefId outlives_auto;
+    CmHirDefId child_auto;
+    CmHirDefId child_impl;
+    CmHirDefId unsafe_auto;
+    CmHirDefId unsafe_impl;
+    CmHirDefId foreign_auto;
+    CmHirDefId child_definition;
+    CmHirCrateId foreign_crate;
+    CmHirModuleId foreign_root;
+    CmHirItem child;
+    CmHirItem *item;
+    CmTraitImplIndex index;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckContext typeck;
+    CmTypeckInstantiation selected;
+    CmTypeckNamedType query;
+    CmTraitSelectionResult result;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId u8_type;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    explicit_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "ExplicitPositiveAuto", 1);
+    explicit_impl = add_impl(&fixture.hir, fixture.crate_id,
+        fixture.root, explicit_auto, fixture.bool_hir, 0);
+    duplicate_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "DuplicatePositiveAuto", 1);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        duplicate_auto, fixture.bool_hir, 0);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        duplicate_auto, fixture.bool_hir, 0);
+    empty_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NoStructuralAuto", 1);
+    generic_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "GenericPositiveAuto", 1);
+    (void)add_blanket_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        generic_auto, 0);
+    predicate_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "PredicatePositiveAuto", 1);
+    (void)add_constrained_bool_impl(&fixture, predicate_auto, 1, 0);
+    outlives_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "OutlivesPositiveAuto", 1);
+    (void)add_constrained_bool_impl(&fixture, outlives_auto, 0, 1);
+    child_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "ChildBearingPositiveAuto", 1);
+    child_impl = add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        child_auto, fixture.bool_hir, 0);
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(1u, 2u),
+        &child_definition) == CM_HIR_OK);
+    init_item(&child, CM_HIR_ITEM_FUNCTION, child_definition,
+        fixture.root, cm_hir_intern(&fixture.hir, "forged"));
+    child.parent_definition = child_impl;
+    child.data.function_item.signature.return_type = fixture.bool_hir;
+    assert(cm_vec_push(&fixture.hir.items, &child));
+    unsafe_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "UnsafePositiveAuto", 1);
+    unsafe_impl = add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        unsafe_auto, fixture.bool_hir, 0);
+    item = find_mutable_item(&fixture, unsafe_auto);
+    assert(item != NULL);
+    item->data.trait_item.safety = CM_HIR_UNSAFE;
+    item = find_mutable_item(&fixture, unsafe_impl);
+    assert(item != NULL);
+    item->data.impl_item.safety = CM_HIR_UNSAFE;
+    foreign_auto = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "ForeignHeaderPositiveAuto", 1);
+    assert(cm_hir_create_crate(&fixture.hir,
+        cm_hir_intern(&fixture.hir, "solver_auto_dependency"),
+        CM_HIR_EDITION_2024, test_span(0u, 100u), &foreign_crate,
+        &foreign_root) == CM_HIR_OK);
+    (void)add_impl(&fixture.hir, foreign_crate, foreign_root,
+        foreign_auto, fixture.bool_hir, 0);
+
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir,
+        &bool_type) == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir,
+        &u8_type) == CM_TYPECK_OK);
+    cm_trait_impl_selection_witness_init(&witness);
+
+    query = trait_query(explicit_auto);
+    assert(cm_trait_solver_validate_implemented_goal(&fixture.hir,
+        &typeck, bool_type, &query) == CM_TRAIT_SOLVER_UNSUPPORTED);
+    result = cm_trait_solver_select_with_witness(&index, &typeck,
+        bool_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && cm_hir_def_id_equal(result.impl_definition, explicit_impl)
+        && result.impl_item != CM_HIR_ITEM_NONE
+        && result.supported_match_count == 1u
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 0u
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &selected)
+        && cm_hir_def_id_equal(selected.parameter_owner, explicit_impl)
+        && selected.argument_count == 0u);
+    type_count = cm_typeck_type_count(&typeck);
+    result = cm_trait_solver_select_with_witness(&index, &typeck,
+        u8_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 0u
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && cm_typeck_type_count(&typeck) == type_count);
+
+    query = trait_query(duplicate_auto);
+    result = cm_trait_solver_select_with_witness(&index, &typeck,
+        bool_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.supported_match_count == 2u
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 0u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck));
+
+    query = trait_query(empty_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 0u);
+    query = trait_query(generic_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(predicate_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(outlives_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(child_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(unsafe_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(foreign_auto);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 1u);
+
+    cm_trait_impl_selection_witness_destroy(&witness);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    fixture_destroy(&fixture);
+}
+
 static void test_index_and_selection(void)
 {
     TestFixture fixture;
@@ -1413,8 +1646,9 @@ static void test_index_and_selection(void)
         &typeck, u16_type, &query) == CM_TRAIT_SOLVER_UNSUPPORTED);
     assert(cm_typeck_snapshot(&typeck, &caller_snapshot) == CM_TYPECK_OK);
     result = cm_trait_solver_select(&complete, &typeck, u8_type, &query);
-    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
-        && result.blocking_match_count == 1u
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.supported_match_count == 1u
+        && result.blocking_match_count == 0u
         && result.negative_match_count == 1u
         && cm_typeck_type_count(&typeck) == index);
     assert(cm_typeck_rollback(&typeck, &caller_snapshot) == CM_TYPECK_OK);
@@ -1892,6 +2126,7 @@ int main(void)
     test_impl_selection_witness();
     test_impl_selection_witness_hir_staleness();
     test_exact_negative_selection();
+    test_exact_positive_auto_selection();
     test_projection_overflow_and_invalid_query();
     test_const_scanning();
     test_stale_index_fingerprints();

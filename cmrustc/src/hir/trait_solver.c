@@ -2057,6 +2057,80 @@ static int cm_trait_negative_entry_is_exact(
     return 1;
 }
 
+static int cm_trait_positive_auto_entry_is_exact(
+    const CmTraitImplIndexState *state,
+    const CmTraitImplIndexEntry *entry)
+{
+    const CmHirItem *item;
+    const CmHirItem *trait_item;
+    size_t item_index;
+
+    if (state == NULL || entry == NULL
+        || entry->unsupported_flags
+            != CM_TRAIT_IMPL_UNSUPPORTED_AUTO_TRAIT
+        || entry->impl_definition.crate_id != state->local_crate) {
+        return 0;
+    }
+    item = cm_hir_get_item(state->hir, entry->item);
+    trait_item = cm_trait_find_definition_item(state->hir,
+        entry->trait_definition);
+    if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(item->definition,
+            entry->impl_definition)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->data.impl_item.has_trait != 1
+        || item->data.impl_item.is_negative != 0
+        || item->data.impl_item.safety != CM_HIR_SAFE
+        || !cm_hir_def_id_equal(item->data.impl_item
+            .trait_type.definition, entry->trait_definition)
+        || item->data.impl_item.trait_type.argument_count != 0u
+        || item->data.impl_item.trait_type.arguments != NULL
+        || item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count != 0u
+        || item->predicate_scope_count != 0u
+        || item->predicate_count != 0u || item->predicates != NULL
+        || item->outlives_predicate_count != 0u
+        || item->outlives_predicates != NULL
+        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || !cm_hir_def_id_equal(trait_item->definition,
+            entry->trait_definition)
+        || !cm_hir_def_id_is_none(trait_item->parent_definition)
+        || trait_item->data.trait_item.is_auto != 1
+        || trait_item->data.trait_item.safety != CM_HIR_SAFE
+        || trait_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || trait_item->generic_parameter_count != 0u
+        || trait_item->data.trait_item.supertrait_count != 0u
+        || trait_item->data.trait_item.supertraits != NULL
+        || trait_item->predicate_scope_count != 0u
+        || trait_item->predicate_count != 0u
+        || trait_item->predicates != NULL
+        || trait_item->outlives_predicate_count != 0u
+        || trait_item->outlives_predicates != NULL) {
+        return 0;
+    }
+    /*
+     * Original mrustc searches explicit positive auto-trait impls before
+     * negative impls, then falls back to structural field decomposition
+     * (src/hir_typeck/helpers.cpp). Rust coherence normally prevents an
+     * explicit positive/negative overlap. This bounded slice admits only the
+     * exact explicit header above, treats forged overlap as ambiguity, and
+     * deliberately does not perform structural decomposition.
+     */
+    for (item_index = 0u; item_index < state->hir->items.len;
+         ++item_index) {
+        const CmHirItem *child;
+
+        child = cm_hir_get_item(state->hir,
+            (CmHirItemId)(item_index + 1u));
+        if (child != NULL
+            && (cm_hir_def_id_equal(child->parent_definition,
+                    item->definition)
+                || cm_hir_def_id_equal(child->parent_definition,
+                    trait_item->definition))) return 0;
+    }
+    return 1;
+}
+
 static int cm_trait_nonproof_rank(CmTraitSolverResultKind kind)
 {
     switch (kind) {
@@ -2177,6 +2251,13 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
                     }
                     result.blocking_match_count += 1u;
                     unsupported_blockers += 1u;
+                    continue;
+                }
+                if (match.kind == CM_TRAIT_MATCH_YES && query_is_auto
+                    && cm_trait_positive_auto_entry_is_exact(state,
+                        entry)) {
+                    result.supported_match_count += 1u;
+                    if (winner == NULL) winner = entry;
                     continue;
                 }
             }
@@ -2691,9 +2772,10 @@ cm_trait_solver_solve_implemented_with_evaluator_and_witness(
     if (queried_trait == NULL || queried_trait->kind != CM_HIR_ITEM_TRAIT) {
         return result;
     }
-    /* Positive auto-trait reasoning is not implemented.  Only an exact local
-     * negative header may answer this goal, so environment assumptions cannot
-     * accidentally become positive auto-trait providers. */
+    /* Auto-trait environment and structural inference are not implemented.
+     * Only the exact authenticated local explicit-header slice in the impl
+     * selector may answer this goal, so an environment assumption cannot
+     * accidentally become a positive auto-trait provider. */
     if (queried_trait->data.trait_item.is_auto) {
         return cm_trait_solver_select_inner(index, typeck,
             goal->self_type, &goal->trait_type, goal->owner, evaluator,

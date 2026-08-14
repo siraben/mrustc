@@ -70,6 +70,23 @@ static CmHirDefId add_trait(TestFixture *fixture, const char *name)
     return definition;
 }
 
+static CmHirDefId add_auto_trait(TestFixture *fixture, const char *name)
+{
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->hir,
+        fixture->crate_id, CM_HIR_ITEM_TRAIT, test_span(1u, 20u),
+        &definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TRAIT, definition, fixture->root,
+        cm_hir_intern(&fixture->hir, name));
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    item.data.trait_item.is_auto = 1;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_bool_impl(TestFixture *fixture,
     CmHirDefId trait_definition)
 {
@@ -414,6 +431,74 @@ static void test_session_impl_selection_witness(void)
         typeck, &substitution, &goal, &witness);
     assert_invalid_result(result);
     assert(!cm_trait_impl_selection_witness_is_current(&witness, typeck));
+    cm_trait_impl_selection_witness_destroy(&witness);
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
+static void test_session_positive_auto_impl_witness(void)
+{
+    TestFixture fixture;
+    CmHirDefId auto_trait;
+    CmHirDefId impl_definition;
+    CmSemanticSessionOptions options;
+    CmSemanticSession session;
+    CmTypeckContext *typeck;
+    CmTypeckInstantiation exact;
+    CmTypeckInstantiation selected;
+    CmParamEnvSubstitution substitution;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId u8_type;
+    CmTraitGoal goal;
+    CmTraitSelectionResult result;
+    CmTraitImplSelectionWitness witness;
+
+    fixture_init(&fixture);
+    auto_trait = add_auto_trait(&fixture, "ExplicitAuto");
+    impl_definition = add_bool_impl(&fixture, auto_trait);
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, fixture.owner_trait);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    typeck = cm_semantic_session_typeck(&session);
+    assert(typeck != NULL
+        && cm_typeck_import_hir_type(typeck, fixture.bool_hir, &bool_type)
+            == CM_TYPECK_OK
+        && cm_typeck_import_hir_type(typeck, fixture.u8_hir, &u8_type)
+            == CM_TYPECK_OK);
+    cm_typeck_instantiation_init(typeck, &exact);
+    exact.parameter_owner = fixture.owner_trait;
+    exact.self_owner = fixture.owner_trait;
+    exact.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &exact;
+    cm_trait_impl_selection_witness_init(&witness);
+
+    goal = implemented_goal(fixture.owner_trait, auto_trait, bool_type);
+    result = cm_semantic_session_solve_goal_with_impl_witness(&session,
+        typeck, &substitution, &goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.proof_origin == CM_TRAIT_PROOF_IMPL
+        && cm_hir_def_id_equal(result.impl_definition, impl_definition)
+        && result.impl_item != CM_HIR_ITEM_NONE
+        && result.supported_match_count == 1u
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 0u
+        && cm_trait_impl_selection_witness_instantiation(&witness,
+            typeck, &selected)
+        && cm_hir_def_id_equal(selected.parameter_owner,
+            impl_definition)
+        && selected.argument_count == 0u);
+
+    goal = implemented_goal(fixture.owner_trait, auto_trait, u8_type);
+    result = cm_semantic_session_solve_goal_with_impl_witness(&session,
+        typeck, &substitution, &goal, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE
+        && !cm_trait_impl_selection_witness_is_current(&witness, typeck));
+
     cm_trait_impl_selection_witness_destroy(&witness);
     cm_semantic_session_destroy(&session);
     fixture_destroy(&fixture);
@@ -779,6 +864,7 @@ int main(void)
     test_open_session_solve_and_accessors();
     test_enclosing_owner_and_reinitialization();
     test_session_impl_selection_witness();
+    test_session_positive_auto_impl_witness();
     test_atomic_initialization_failures();
     test_foreign_and_malformed_data_rejected();
     test_append_and_rewind_staleness();

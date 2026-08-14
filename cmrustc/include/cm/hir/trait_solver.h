@@ -178,17 +178,21 @@ size_t cm_trait_impl_index_entry_count(const CmTraitImplIndex *index);
 const CmTraitImplIndexEntry *cm_trait_impl_index_entry(
     const CmTraitImplIndex *index, size_t entry_index);
 
-/* Public ordinary-goal authentication. Auto-trait selection has one narrower
- * internal path used only to discover exact local negative evidence. */
+/* Public ordinary-goal authentication. Auto-trait selection has a narrower
+ * internal path used only for exact local explicit positive/negative headers;
+ * it does not synthesize structural auto-trait implementations. */
 CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
     const CmHirContext *hir, CmTypeckContext *typeck,
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type);
 
 /*
  * Select one positive ordinary impl or refute the goal with one exact local,
- * nongeneric, predicate-free negative impl. Type-only positive impl generics
- * are instantiated with fresh inference variables; every broader negative,
- * generic, predicate, auto-positive, or overlapping shape is an explicit
+ * nongeneric, predicate-free negative impl. One safe, monomorphic, itemless,
+ * predicate-free local positive auto-trait impl may also prove the exact
+ * concrete goal; no structural or blanket auto-trait facts are synthesized.
+ * Type-only positive ordinary impl generics are instantiated with fresh
+ * inference variables; every broader negative, auto-trait generic/predicate,
+ * foreign, malformed, child-bearing, or overlapping shape is an explicit
  * blocker or ambiguity. Every candidate probe is rolled back. Bindings from
  * the unique positive winner are recreated and committed; every non-PROVEN
  * result leaves the typeck session unchanged and publishes no provider.
