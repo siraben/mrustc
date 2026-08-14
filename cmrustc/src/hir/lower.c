@@ -4299,7 +4299,8 @@ static int cm_lower_find_parameter_projection_in_ast(
 
 static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     CmAstTypeId ast_type_id, const CmAstPath *path, CmSpan span,
-    CmHirDefId owner, const CmLowerGenericRecord *generic)
+    CmHirModuleId module, CmHirDefId owner,
+    const CmLowerGenericRecord *generic)
 {
     const CmHirTraitPredicate *predicate;
     CmLowerAssociatedTarget associated;
@@ -4310,10 +4311,14 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     CmHirTypeId self_type;
     CmHirNamedType projection_trait;
     CmHirGenericArg *owned_trait_arguments;
+    CmHirGenericArg *owned_associated_arguments;
+    CmHirGenericParamId associated_parameter_start;
+    uint32_t associated_parameter_count;
     CmHirDefId defining_trait;
     const CmHirItem *associated_item;
     CmHirTraitPredicate synthesized_predicate;
     int synthesized;
+    uint32_t index;
     uint32_t projection_argument_count;
     uint32_t projection_matches;
     uint32_t matches;
@@ -4333,7 +4338,8 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     owner_record = cm_lower_find_record_by_definition(state, owner);
     parent_item = NULL;
     if (owner_record != NULL
-        && owner_record->parent_kind == CM_LOWER_PARENT_TRAIT) {
+        && (owner_record->parent_kind == CM_LOWER_PARENT_TRAIT
+            || owner_record->parent_kind == CM_LOWER_PARENT_IMPL)) {
         parent_item = cm_lower_bound_item(state,
             owner_record->parent_definition);
         cm_lower_find_parameter_projection_in_item(state, parent_item,
@@ -4404,6 +4410,15 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
             "shorthand associated type lost its defining trait");
         return CM_HIR_TYPE_NONE;
     }
+    associated_parameter_start = associated_item != NULL
+        ? associated_item->generic_parameter_start
+        : associated.local_record != NULL
+            ? associated.local_record->generic_parameter_start
+            : CM_HIR_GENERIC_PARAM_NONE;
+    associated_parameter_count = associated_item != NULL
+        ? associated_item->generic_parameter_count
+        : associated.local_record != NULL
+            ? associated.local_record->generic_parameter_count : 0u;
     memset(&projection_trait, 0, sizeof(projection_trait));
     owned_trait_arguments = NULL;
     projection_argument_count = 0u;
@@ -4438,8 +4453,91 @@ static CmHirTypeId cm_lower_parameter_projection_type(CmLowerState *state,
     projection.data.projection_type.trait_type = projection_trait;
     projection.data.projection_type.associated_type.definition =
         associated.definition;
+    owned_associated_arguments = NULL;
+    if (!cm_lower_generic_arguments(state, &path->segments[1], module,
+            owner, span, &owned_associated_arguments,
+            &projection.data.projection_type.associated_type
+                .argument_count)) {
+        cm_free(owned_trait_arguments);
+        if (synthesized) {
+            cm_free(synthesized_predicate.trait_type.arguments);
+            cm_free(synthesized_predicate.equalities);
+            cm_free(synthesized_predicate.binder.lifetimes);
+        }
+        return CM_HIR_TYPE_NONE;
+    }
+    if (associated_parameter_count != 0u
+        && (associated_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+            || associated_parameter_start
+                > UINT32_MAX - (associated_parameter_count - 1u))) {
+        cm_free(owned_associated_arguments);
+        cm_free(owned_trait_arguments);
+        if (synthesized) {
+            cm_free(synthesized_predicate.trait_type.arguments);
+            cm_free(synthesized_predicate.equalities);
+            cm_free(synthesized_predicate.binder.lifetimes);
+        }
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "shorthand associated-type projection generic signature "
+            "overflows");
+        return CM_HIR_TYPE_NONE;
+    }
+    if (projection.data.projection_type.associated_type.argument_count
+            != associated_parameter_count) {
+        cm_free(owned_associated_arguments);
+        cm_free(owned_trait_arguments);
+        if (synthesized) {
+            cm_free(synthesized_predicate.trait_type.arguments);
+            cm_free(synthesized_predicate.equalities);
+            cm_free(synthesized_predicate.binder.lifetimes);
+        }
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "shorthand associated-type projection has the wrong generic "
+            "argument count");
+        return CM_HIR_TYPE_NONE;
+    }
+    for (index = 0u; index < associated_parameter_count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected_kind;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            associated_parameter_start + index);
+        expected_kind = parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_LIFETIME
+            ? CM_HIR_GENERIC_ARG_LIFETIME
+            : parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+                ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                associated.definition)
+            || owned_associated_arguments[index].kind != expected_kind) {
+            cm_free(owned_associated_arguments);
+            cm_free(owned_trait_arguments);
+            if (synthesized) {
+                cm_free(synthesized_predicate.trait_type.arguments);
+                cm_free(synthesized_predicate.equalities);
+                cm_free(synthesized_predicate.binder.lifetimes);
+            }
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "shorthand associated-type projection generic argument "
+                "kind does not match its parameter");
+            return CM_HIR_TYPE_NONE;
+        }
+    }
+    projection.data.projection_type.associated_type.arguments =
+        owned_associated_arguments;
     self_type = cm_lower_add_type(state, &projection, ast_type_id);
+    cm_free(owned_associated_arguments);
     cm_free(owned_trait_arguments);
+    if (synthesized) {
+        cm_free(synthesized_predicate.trait_type.arguments);
+        cm_free(synthesized_predicate.equalities);
+        cm_free(synthesized_predicate.binder.lifetimes);
+    }
     return self_type;
 }
 
@@ -4552,17 +4650,8 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
                 return CM_HIR_TYPE_NONE;
             }
             if (path->segment_count == 2u) {
-                if (path->segments[1].argument_count != 0u) {
-                    cm_lower_fail(state,
-                        CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-                        CM_AST_ITEM_NONE, ast_type_id, ast_type->path,
-                        CM_HIR_OK,
-                        "generic associated type arguments are not "
-                        "supported in shorthand projections");
-                    return CM_HIR_TYPE_NONE;
-                }
                 return cm_lower_parameter_projection_type(state,
-                    ast_type_id, path, span, owner, generic);
+                    ast_type_id, path, span, module, owner, generic);
             }
             type.kind = CM_HIR_TYPE_PARAMETER_KIND;
             type.data.parameter_type.parameter = generic->hir_id;
@@ -4869,7 +4958,11 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
     CmLowerLookupResult lookup;
     CmHirType type;
     CmHirGenericArg *trait_arguments;
+    CmHirGenericArg *associated_arguments;
+    CmHirGenericParamId associated_parameter_start;
+    const CmHirItem *associated_item;
     CmSpan span;
+    uint32_t associated_argument_count;
     uint32_t index;
     uint32_t matches;
     uint32_t trait_argument_count;
@@ -4897,14 +4990,6 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
                 "until trait substitution is structural");
             return CM_HIR_TYPE_NONE;
         }
-    }
-    if (ast_type->projection.associated.argument_count != 0u) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
-            CM_AST_ITEM_NONE, ast_type_id,
-            ast_type->projection.trait_path, CM_HIR_OK,
-            "generic associated-type arguments are not supported until GAT "
-            "declarations are structural");
-        return CM_HIR_TYPE_NONE;
     }
     if (cm_lower_type_path_starts_with_parameter(state, trait_path, owner)) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
@@ -4955,12 +5040,75 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
             CM_HIR_OK, "trait associated-type identity is ambiguous");
         return CM_HIR_TYPE_NONE;
     }
+    associated_item = associated_record.item != NULL
+        ? associated_record.item
+        : cm_lower_bound_item(state, associated_record.definition);
+    associated_parameter_start = associated_item != NULL
+        ? associated_item->generic_parameter_start
+        : associated_record.local_record != NULL
+            ? associated_record.local_record->generic_parameter_start
+            : CM_HIR_GENERIC_PARAM_NONE;
+    associated_arguments = NULL;
+    associated_argument_count = 0u;
+    if (!cm_lower_generic_arguments(state,
+            &ast_type->projection.associated, module, owner, span,
+            &associated_arguments, &associated_argument_count)) {
+        return CM_HIR_TYPE_NONE;
+    }
+    if (associated_record.generic_parameter_count != 0u
+        && (associated_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+            || associated_parameter_start > UINT32_MAX
+                - (associated_record.generic_parameter_count - 1u))) {
+        cm_free(associated_arguments);
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            CM_AST_ITEM_NONE, ast_type_id,
+            ast_type->projection.trait_path,
+            CM_HIR_INVARIANT_VIOLATION,
+            "explicit associated-type projection generic signature "
+            "overflows");
+        return CM_HIR_TYPE_NONE;
+    }
+    if (associated_argument_count
+            != associated_record.generic_parameter_count) {
+        cm_free(associated_arguments);
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+            CM_AST_ITEM_NONE, ast_type_id,
+            ast_type->projection.trait_path, CM_HIR_OK,
+            "explicit associated-type projection has the wrong generic "
+            "argument count");
+        return CM_HIR_TYPE_NONE;
+    }
+    for (index = 0u; index < associated_argument_count; ++index) {
+        const CmHirGenericParam *parameter;
+        CmHirGenericArgKind expected_kind;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            associated_parameter_start + index);
+        expected_kind = parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_LIFETIME
+            ? CM_HIR_GENERIC_ARG_LIFETIME
+            : parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+                ? CM_HIR_GENERIC_ARG_TYPE : CM_HIR_GENERIC_ARG_CONST;
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                associated_record.definition)
+            || associated_arguments[index].kind != expected_kind) {
+            cm_free(associated_arguments);
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                CM_AST_ITEM_NONE, ast_type_id,
+                ast_type->projection.trait_path, CM_HIR_OK,
+                "explicit associated-type projection generic argument "
+                "kind does not match its parameter");
+            return CM_HIR_TYPE_NONE;
+        }
+    }
     trait_arguments = NULL;
     trait_argument_count = 0u;
     if (!cm_lower_trait_positional_arguments(state, CM_AST_ITEM_NONE,
             &trait_path->segments[trait_path->segment_count - 1u],
             &trait_target, module, owner, CM_HIR_TYPE_NONE, 0, 0, 0, span,
             &trait_arguments, &trait_argument_count)) {
+        cm_free(associated_arguments);
         return CM_HIR_TYPE_NONE;
     }
     memset(&type, 0, sizeof(type));
@@ -4969,6 +5117,7 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
     type.data.projection_type.self_type = cm_lower_type(state,
         ast_type->projection.self_type, module, owner);
     if (state->failed) {
+        cm_free(associated_arguments);
         cm_free(trait_arguments);
         return CM_HIR_TYPE_NONE;
     }
@@ -4978,7 +5127,12 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
     type.data.projection_type.trait_type.argument_count = trait_argument_count;
     type.data.projection_type.associated_type.definition =
         associated_record.definition;
+    type.data.projection_type.associated_type.arguments =
+        associated_arguments;
+    type.data.projection_type.associated_type.argument_count =
+        associated_argument_count;
     if (state->failed) {
+        cm_free(associated_arguments);
         cm_free(trait_arguments);
         return CM_HIR_TYPE_NONE;
     }
@@ -4986,6 +5140,7 @@ static CmHirTypeId cm_lower_projection_type(CmLowerState *state,
         CmHirTypeId result;
 
         result = cm_lower_add_type(state, &type, ast_type_id);
+        cm_free(associated_arguments);
         cm_free(trait_arguments);
         return result;
     }

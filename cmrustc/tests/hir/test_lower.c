@@ -1670,6 +1670,250 @@ static void test_shorthand_projection_declaration_order(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_shorthand_gat_projection_arguments(void)
+{
+    static const char source[] =
+        "struct Split<'a, P: Pattern> { matcher: P::Searcher<'a> }"
+        "trait Pattern { type Searcher<'a>; }";
+    static const char *const rejected[] = {
+        "trait Pattern { type Searcher<'a>; } "
+            "struct Split<P: Pattern> { matcher: P::Searcher }",
+        "trait Pattern { type Searcher<'a>; } "
+            "struct Split<'a, P: Pattern> { "
+            "matcher: P::Searcher<'a, 'a> }",
+        "trait Pattern { type Searcher<'a>; } "
+            "struct Split<P: Pattern> { matcher: P::Searcher<u8> }",
+        "trait Pattern { type Searcher; } "
+            "struct Split<'a, P: Pattern> { matcher: P::Searcher<'a> }",
+        "trait Pattern { type Searcher<T>; } "
+            "struct Split<'a, P: Pattern> { matcher: P::Searcher<'a> }"
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *pattern;
+    const CmHirItem *searcher;
+    const CmHirItem *split;
+    const CmHirType *projection;
+    const CmHirType *self_type;
+    const CmHirGenericParam *lifetime_parameter;
+    const CmHirGenericParam *type_parameter;
+    size_t index;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "shorthand GAT projection lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    pattern = find_item(&context, "Pattern");
+    searcher = pattern == NULL ? NULL
+        : find_child(&context, pattern->definition, "Searcher");
+    split = find_item(&context, "Split");
+    projection = split == NULL || split->kind != CM_HIR_ITEM_STRUCT
+            || split->data.aggregate_item.field_count != 1u
+            || split->data.aggregate_item.fields == NULL
+        ? NULL : cm_hir_get_type(&context,
+            split->data.aggregate_item.fields[0].type);
+    self_type = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.self_type);
+    lifetime_parameter = split == NULL
+            || split->generic_parameter_count != 2u
+        ? NULL : cm_hir_get_generic_param(&context,
+            split->generic_parameter_start);
+    type_parameter = lifetime_parameter == NULL ? NULL
+        : cm_hir_get_generic_param(&context,
+            split->generic_parameter_start + 1u);
+    assert(result.error_count == 0u
+        && pattern != NULL && pattern->kind == CM_HIR_ITEM_TRAIT
+        && searcher != NULL && searcher->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && searcher->generic_parameter_count == 1u
+        && split != NULL && split->kind == CM_HIR_ITEM_STRUCT
+        && lifetime_parameter != NULL
+        && lifetime_parameter->kind == CM_HIR_GENERIC_LIFETIME
+        && type_parameter != NULL
+        && type_parameter->kind == CM_HIR_GENERIC_TYPE
+        && projection != NULL
+        && projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            pattern->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            searcher->definition)
+        && projection->data.projection_type.associated_type.argument_count
+            == 1u
+        && projection->data.projection_type.associated_type.arguments
+            != NULL
+        && projection->data.projection_type.associated_type.arguments[0]
+                .kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.data.parameter
+            == split->generic_parameter_start
+        && self_type != NULL
+        && self_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && self_type->data.parameter_type.parameter
+            == split->generic_parameter_start + 1u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC);
+        cm_hir_context_destroy(&context);
+    }
+}
+
+static void test_explicit_gat_projection_arguments(void)
+{
+    static const char source[] =
+        "type Projected<'a, T> = <T as Pattern>::Searcher<'a>;"
+        "trait Pattern { type Searcher<'a>; }";
+    static const char *const rejected[] = {
+        "trait Pattern { type Searcher<'a>; } "
+            "type Projected<T> = <T as Pattern>::Searcher;",
+        "trait Pattern { type Searcher<'a>; } "
+            "type Projected<'a, T> = "
+            "<T as Pattern>::Searcher<'a, 'a>;",
+        "trait Pattern { type Searcher<'a>; } "
+            "type Projected<T> = <T as Pattern>::Searcher<u8>;",
+        "trait Pattern { type Searcher; } "
+            "type Projected<'a, T> = <T as Pattern>::Searcher<'a>;",
+        "trait Pattern { type Searcher<T>; } "
+            "type Projected<'a, T> = <T as Pattern>::Searcher<'a>;"
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *pattern;
+    const CmHirItem *searcher;
+    const CmHirItem *projected;
+    const CmHirType *projection;
+    const CmHirType *self_type;
+    size_t index;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "explicit GAT projection lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    pattern = find_item(&context, "Pattern");
+    searcher = pattern == NULL ? NULL
+        : find_child(&context, pattern->definition, "Searcher");
+    projected = find_item(&context, "Projected");
+    projection = projected == NULL
+        ? NULL : cm_hir_get_type(&context,
+            projected->data.type_alias_item.target);
+    self_type = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.self_type);
+    assert(result.error_count == 0u
+        && pattern != NULL && pattern->kind == CM_HIR_ITEM_TRAIT
+        && searcher != NULL && searcher->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && projected != NULL && projected->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && projected->generic_parameter_count == 2u
+        && projection != NULL
+        && projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            pattern->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            searcher->definition)
+        && projection->data.projection_type.associated_type.argument_count
+            == 1u
+        && projection->data.projection_type.associated_type.arguments
+            != NULL
+        && projection->data.projection_type.associated_type.arguments[0]
+                .kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && projection->data.projection_type.associated_type.arguments[0]
+                .data.lifetime.data.parameter
+            == projected->generic_parameter_start
+        && self_type != NULL
+        && self_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && self_type->data.parameter_type.parameter
+            == projected->generic_parameter_start + 1u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC);
+        cm_hir_context_destroy(&context);
+    }
+}
+
+static void test_impl_associated_shorthand_projection(void)
+{
+    static const char source[] =
+        "trait Fallible { type Error; }"
+        "trait Owner { type Error; }"
+        "struct Wrapper<U>(U);"
+        "impl<U> Owner for Wrapper<U> where U: Fallible {"
+        "type Error = U::Error; }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *fallible;
+    const CmHirItem *fallible_error;
+    const CmHirItem *impl_item;
+    const CmHirItem *impl_error;
+    const CmHirType *projection;
+    const CmHirType *self_type;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "impl shorthand projection lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    fallible = find_item(&context, "Fallible");
+    fallible_error = fallible == NULL ? NULL
+        : find_child(&context, fallible->definition, "Error");
+    impl_item = find_impl(&context);
+    impl_error = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "Error");
+    projection = impl_error == NULL
+        ? NULL : cm_hir_get_type(&context,
+            impl_error->data.type_alias_item.target);
+    self_type = projection == NULL
+            || projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+        ? NULL : cm_hir_get_type(&context,
+            projection->data.projection_type.self_type);
+    assert(result.error_count == 0u
+        && fallible != NULL && fallible->kind == CM_HIR_ITEM_TRAIT
+        && fallible_error != NULL
+        && fallible_error->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->generic_parameter_count == 1u
+        && impl_error != NULL
+        && impl_error->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && projection != NULL
+        && projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .trait_type.definition,
+            fallible->definition)
+        && cm_hir_def_id_equal(projection->data.projection_type
+                .associated_type.definition,
+            fallible_error->definition)
+        && self_type != NULL
+        && self_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && self_type->data.parameter_type.parameter
+            == impl_item->generic_parameter_start);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_impl_header_self_type_projection(void)
 {
     static const char source[] =
@@ -8056,6 +8300,9 @@ int main(void)
     test_generic_parameter_shadows_type_path_prefix();
     test_shorthand_inherited_associated_type_projection();
     test_shorthand_projection_declaration_order();
+    test_shorthand_gat_projection_arguments();
+    test_explicit_gat_projection_arguments();
+    test_impl_associated_shorthand_projection();
     test_impl_header_self_type_projection();
     test_const_literal_adt_argument();
     test_struct_inline_trait_bound();
