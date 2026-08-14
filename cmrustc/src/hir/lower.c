@@ -15170,6 +15170,294 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
     return 0;
 }
 
+/*
+ * Trait arguments in two impl headers use different DefIds for their
+ * parameters.  Compare the supported structural forms after normalizing a
+ * parameter to its positional index within its owning impl.  This is kept
+ * deliberately bounded: the candidate validator only admits a correspond-
+ * ing bounded self-type subset, and unsupported argument shapes do not gain
+ * an invented identity here.
+ */
+static int cm_lower_impl_parameter_index(const CmHirContext *hir,
+    const CmHirItem *impl_item, CmHirGenericParamId parameter_id,
+    uint32_t *out_index)
+{
+    const CmHirGenericParam *parameter;
+    uint32_t offset;
+
+    if (hir == NULL || impl_item == NULL
+        || parameter_id == CM_HIR_GENERIC_PARAM_NONE
+        || impl_item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || parameter_id < impl_item->generic_parameter_start) {
+        return 0;
+    }
+    offset = parameter_id - impl_item->generic_parameter_start;
+    if (offset >= impl_item->generic_parameter_count) return 0;
+    parameter = cm_hir_get_generic_param(hir, parameter_id);
+    if (parameter == NULL || parameter->index != offset
+        || !cm_hir_def_id_equal(parameter->owner, impl_item->definition)) {
+        return 0;
+    }
+    *out_index = offset;
+    return 1;
+}
+
+static int cm_lower_impl_region_equal(const CmHirContext *hir,
+    const CmHirRegion *left, const CmHirItem *left_impl,
+    const CmHirRegion *right, const CmHirItem *right_impl)
+{
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return cm_lower_impl_parameter_index(hir, left_impl,
+                left->data.parameter, &left_index)
+            && cm_lower_impl_parameter_index(hir, right_impl,
+                right->data.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left->data.binder_index == right->data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_lower_impl_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, const CmHirItem *left_impl, CmHirTypeId right_id,
+    const CmHirItem *right_impl, size_t depth);
+
+static int cm_lower_impl_const_equal(const CmHirContext *hir,
+    const CmHirConstArg *left, const CmHirItem *left_impl,
+    const CmHirConstArg *right, const CmHirItem *right_impl, size_t depth)
+{
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (left == NULL || right == NULL || left->kind != right->kind
+        || !cm_lower_impl_type_equal(hir, left->type, left_impl,
+            right->type, right_impl, depth + 1u)) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_CONST_VALUE:
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    case CM_HIR_CONST_PARAMETER:
+        return cm_lower_impl_parameter_index(hir, left_impl,
+                left->data.parameter, &left_index)
+            && cm_lower_impl_parameter_index(hir, right_impl,
+                right->data.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_CONST_UNEVALUATED:
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    case CM_HIR_CONST_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_CONST_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_lower_impl_generic_arg_equal(const CmHirContext *hir,
+    const CmHirGenericArg *left, const CmHirItem *left_impl,
+    const CmHirGenericArg *right, const CmHirItem *right_impl, size_t depth)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_lower_impl_region_equal(hir, &left->data.lifetime,
+            left_impl, &right->data.lifetime, right_impl);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return cm_lower_impl_type_equal(hir, left->data.type, left_impl,
+            right->data.type, right_impl, depth + 1u);
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_lower_impl_const_equal(hir, &left->data.constant,
+            left_impl, &right->data.constant, right_impl, depth + 1u);
+    }
+    return 0;
+}
+
+static int cm_lower_impl_named_type_equal(const CmHirContext *hir,
+    const CmHirNamedType *left, const CmHirItem *left_impl,
+    const CmHirNamedType *right, const CmHirItem *right_impl, size_t depth)
+{
+    uint32_t index;
+
+    if (left == NULL || right == NULL
+        || !cm_hir_def_id_equal(left->definition, right->definition)
+        || left->argument_count != right->argument_count
+        || (left->argument_count != 0u && left->arguments == NULL)
+        || (right->argument_count != 0u && right->arguments == NULL)) {
+        return 0;
+    }
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_lower_impl_generic_arg_equal(hir, &left->arguments[index],
+                left_impl, &right->arguments[index], right_impl,
+                depth + 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_lower_impl_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, const CmHirItem *left_impl, CmHirTypeId right_id,
+    const CmHirItem *right_impl, size_t depth)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+    uint32_t index;
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (left_id == right_id && left_id != CM_HIR_TYPE_NONE) return 1;
+    if (hir == NULL || depth > hir->types.len) return 0;
+    left = cm_hir_get_type(hir, left_id);
+    right = cm_hir_get_type(hir, right_id);
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_SELF_KIND:
+        return cm_hir_def_id_equal(left->data.self_type.owner,
+            left_impl->definition)
+            && cm_hir_def_id_equal(right->data.self_type.owner,
+                right_impl->definition);
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return cm_lower_impl_parameter_index(hir, left_impl,
+                left->data.parameter_type.parameter, &left_index)
+            && cm_lower_impl_parameter_index(hir, right_impl,
+                right->data.parameter_type.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability
+                == right->data.reference_type.mutability
+            && cm_lower_impl_region_equal(hir,
+                &left->data.reference_type.region, left_impl,
+                &right->data.reference_type.region, right_impl)
+            && cm_lower_impl_type_equal(hir,
+                left->data.reference_type.pointee, left_impl,
+                right->data.reference_type.pointee, right_impl,
+                depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return left->data.raw_pointer_type.mutability
+                == right->data.raw_pointer_type.mutability
+            && cm_lower_impl_type_equal(hir,
+                left->data.raw_pointer_type.pointee, left_impl,
+                right->data.raw_pointer_type.pointee, right_impl,
+                depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (left->data.tuple_type.element_count
+                != right->data.tuple_type.element_count
+            || (left->data.tuple_type.element_count != 0u
+                && (left->data.tuple_type.elements == NULL
+                    || right->data.tuple_type.elements == NULL))) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_lower_impl_type_equal(hir,
+                    left->data.tuple_type.elements[index], left_impl,
+                    right->data.tuple_type.elements[index], right_impl,
+                    depth + 1u)) return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_impl_type_equal(hir,
+                left->data.array_type.element, left_impl,
+                right->data.array_type.element, right_impl, depth + 1u)
+            && cm_lower_impl_const_equal(hir, &left->data.array_type.length,
+                left_impl, &right->data.array_type.length, right_impl,
+                depth + 1u);
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_impl_type_equal(hir,
+            left->data.slice_type.element, left_impl,
+            right->data.slice_type.element, right_impl, depth + 1u);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (left->data.fn_pointer_type.parameter_count
+                != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.abi != right->data.fn_pointer_type.abi
+            || left->data.fn_pointer_type.safety
+                != right->data.fn_pointer_type.safety
+            || left->data.fn_pointer_type.is_variadic
+                != right->data.fn_pointer_type.is_variadic) return 0;
+        for (index = 0u;
+             index < left->data.fn_pointer_type.parameter_count; ++index) {
+            if (!cm_lower_impl_type_equal(hir,
+                    left->data.fn_pointer_type.parameters[index], left_impl,
+                    right->data.fn_pointer_type.parameters[index], right_impl,
+                    depth + 1u)) return 0;
+        }
+        return cm_lower_impl_type_equal(hir,
+            left->data.fn_pointer_type.return_type, left_impl,
+            right->data.fn_pointer_type.return_type, right_impl,
+            depth + 1u);
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return cm_lower_impl_named_type_equal(hir, &left->data.named_type,
+            left_impl, &right->data.named_type, right_impl, depth + 1u);
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_lower_impl_trait_arguments_equal(const CmHirContext *hir,
+    const CmHirItem *left_impl, const CmHirItem *right_impl)
+{
+    const CmHirNamedType *left;
+    const CmHirNamedType *right;
+    uint32_t index;
+
+    if (hir == NULL || left_impl == NULL || right_impl == NULL) return 0;
+    left = &left_impl->data.impl_item.trait_type;
+    right = &right_impl->data.impl_item.trait_type;
+    if (left->argument_count != right->argument_count
+        || (left->argument_count != 0u
+            && (left->arguments == NULL || right->arguments == NULL))) {
+        return 0;
+    }
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_lower_impl_generic_arg_equal(hir, &left->arguments[index],
+                left_impl, &right->arguments[index], right_impl, 0u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int cm_lower_validate_impl_candidates(CmLowerState *state)
 {
     size_t index;
@@ -15211,7 +15499,9 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 || prior->definition.crate_id != state->result.crate_id
                 || !cm_hir_def_id_equal(
                     prior->data.impl_item.trait_type.definition,
-                    item->data.impl_item.trait_type.definition)) {
+                    item->data.impl_item.trait_type.definition)
+                || !cm_lower_impl_trait_arguments_equal(state->hir, prior,
+                    item)) {
                 continue;
             }
             prior_class = cm_lower_impl_self_class(state, prior,

@@ -3521,6 +3521,65 @@ static void check_ordered_nominal_generic_impl_result(
             impl_associated->definition));
 }
 
+static void test_trait_argument_coherence(void)
+{
+    static const char source[] =
+        "trait BitOr<Rhs = Self> { type Output; }"
+        "trait BitOrAssign<Rhs = Self> {}"
+        "struct NonZero<T>;"
+        "impl<T> BitOr for NonZero<T> { type Output = Self; }"
+        "impl<T> BitOr<T> for NonZero<T> { type Output = Self; }"
+        "impl<T> BitOrAssign for NonZero<T> {}"
+        "impl<T> BitOrAssign<T> for NonZero<T> {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *first;
+    const CmHirItem *second;
+    const CmHirGenericArg *first_argument;
+    const CmHirGenericArg *second_argument;
+    const CmHirType *first_argument_type;
+    const CmHirType *second_argument_type;
+    size_t index;
+    size_t impl_count;
+
+    result = lower_source(source, &context, NULL);
+    first = NULL;
+    second = NULL;
+    impl_count = 0u;
+    for (index = 0u; index < context.items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&context.items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL) continue;
+        if (impl_count == 0u) first = item;
+        else if (impl_count == 1u) second = item;
+        impl_count += 1u;
+    }
+    first_argument = first == NULL
+        || first->data.impl_item.trait_type.argument_count != 1u
+        || first->data.impl_item.trait_type.arguments == NULL
+        ? NULL : &first->data.impl_item.trait_type.arguments[0];
+    second_argument = second == NULL
+        || second->data.impl_item.trait_type.argument_count != 1u
+        || second->data.impl_item.trait_type.arguments == NULL
+        ? NULL : &second->data.impl_item.trait_type.arguments[0];
+    first_argument_type = first_argument == NULL
+            || first_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context, first_argument->data.type);
+    second_argument_type = second_argument == NULL
+            || second_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context, second_argument->data.type);
+    assert(result.error_count == 0u && impl_count == 4u
+        && first != NULL && second != NULL
+        && first_argument != NULL && second_argument != NULL
+        && first_argument_type != NULL
+        && first_argument_type->kind == CM_HIR_TYPE_ADT_KIND
+        && second_argument_type != NULL
+        && second_argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && first_argument->data.type != second_argument->data.type);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_ordered_nominal_generic_impl_entry_points(void)
 {
     static const char source[] =
@@ -7410,6 +7469,7 @@ int main(void)
     test_self_gat_projection_arguments();
     test_same_trait_generic_self_projection();
     test_transitive_generic_self_projection();
+    test_trait_argument_coherence();
     test_ordered_nominal_generic_impl_entry_points();
     test_method_bearing_trait_impl_entry_points();
     test_lifetime_qualified_receiver();
