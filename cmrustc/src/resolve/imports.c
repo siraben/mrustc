@@ -43,6 +43,7 @@ typedef struct CmImportLeaf {
     int is_glob;
     int is_anonymous;
     int is_public;
+    int is_crate_visible;
     int ever_resolved;
     int saw_ambiguous;
     CmModuleId blocked_module;
@@ -104,6 +105,7 @@ typedef struct CmImportParser {
     CmModuleId module;
     CmResolveItemRef declaration;
     int is_public;
+    int is_crate_visible;
 } CmImportParser;
 
 static CmImportResolverState *cm_import_state(CmImportResolver *resolver)
@@ -348,6 +350,7 @@ static int cm_leaf_binding_equal(const CmResolvedBinding *left,
         cm_item_ref_equal(left->import_declaration,
             right->import_declaration) &&
         left->is_public == right->is_public &&
+        left->is_crate_visible == right->is_crate_visible &&
         left->is_import == right->is_import &&
         left->is_reexport == right->is_reexport &&
         left->is_ambiguous == right->is_ambiguous &&
@@ -422,6 +425,19 @@ static int cm_module_is_ancestor(const CmImportResolverState *state,
     return 0;
 }
 
+static int cm_glob_binding_is_visible(const CmImportResolverState *state,
+    const CmImportLeaf *leaf, CmModuleId source_module,
+    const CmResolvedBinding *binding)
+{
+    if (state == NULL || leaf == NULL || binding == NULL) return 0;
+    if (leaf->is_public) return binding->is_public;
+    if (leaf->is_crate_visible) {
+        return binding->is_public || binding->is_crate_visible;
+    }
+    return binding->is_public || binding->is_crate_visible
+        || cm_module_is_ancestor(state, source_module, leaf->module);
+}
+
 static int cm_add_binding(CmImportModuleState *module,
     const CmResolvedBinding *value, int priority)
 {
@@ -447,6 +463,11 @@ static int cm_add_binding(CmImportModuleState *module,
         }
         if (value->is_public && !existing->value.is_public) {
             existing->value.is_public = 1;
+            changed = 1;
+        }
+        if (value->is_crate_visible
+            && !existing->value.is_crate_visible) {
+            existing->value.is_crate_visible = 1;
             changed = 1;
         }
         if (value->is_reexport && !existing->value.is_reexport) {
@@ -630,6 +651,7 @@ static void cm_import_emit_leaf(CmImportParser *parser, const CmVec *prefix,
     leaf.is_anonymous = alias != CM_RESOLVE_STRING_NONE
         && cm_import_string_is(parser->state, alias, "_");
     leaf.is_public = parser->is_public;
+    leaf.is_crate_visible = parser->is_crate_visible;
     if (alias != CM_RESOLVE_STRING_NONE) {
         leaf.import_name = alias;
     } else if (!is_glob && prefix->len != 0u) {
@@ -749,6 +771,8 @@ static int cm_parse_import(CmImportResolverState *state,
     parser.module = module;
     parser.declaration = import_directive->declaration;
     parser.is_public = import_directive->visibility == CM_AST_VIS_PUBLIC;
+    parser.is_crate_visible = parser.is_public
+        || import_directive->visibility == CM_AST_VIS_CRATE;
     old_leaf_count = state->leaves.len;
     cm_vec_init(&prefix, sizeof(CmResolveStringId));
     cm_import_parse_tree(&parser, &prefix, 0);
@@ -865,6 +889,7 @@ static int cm_builtin_primitive_binding(const CmImportResolverState *state,
     out_binding->namespace_kind = CM_RESOLVE_NAMESPACE_TYPE;
     out_binding->primitive_kind = primitive_kind;
     out_binding->is_public = 1;
+    out_binding->is_crate_visible = 1;
     return 1;
 }
 
@@ -1045,14 +1070,13 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                         &source->namespaces[namespace_index], index);
                     if (source_binding == NULL
                         || source_binding->value.is_ambiguous
-                        || (!source_binding->value.is_public
-                            && (leaf->is_public
-                                || !cm_module_is_ancestor(state,
-                                    scope.module, leaf->module)))) continue;
+                        || !cm_glob_binding_is_visible(state, leaf,
+                            scope.module, &source_binding->value)) continue;
                     imported = source_binding->value;
                     imported.module = leaf->module;
                     imported.import_declaration = leaf->declaration;
                     imported.is_public = leaf->is_public;
+                    imported.is_crate_visible = leaf->is_crate_visible;
                     imported.is_import = 1;
                     imported.is_reexport = leaf->is_public;
                     imported.is_ambiguous = 0;
@@ -1091,6 +1115,7 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                     imported.item_kind = CM_AST_ITEM_ENUM;
                     imported.import_declaration = leaf->declaration;
                     imported.is_public = leaf->is_public;
+                    imported.is_crate_visible = leaf->is_crate_visible;
                     imported.is_import = 1;
                     imported.is_reexport = leaf->is_public;
                     imported.is_anonymous = leaf->is_anonymous;
@@ -1138,6 +1163,7 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                 imported.name = leaf->import_name;
                 imported.import_declaration = leaf->declaration;
                 imported.is_public = leaf->is_public;
+                imported.is_crate_visible = leaf->is_crate_visible;
                 imported.is_import = 1;
                 imported.is_reexport = leaf->is_public;
                 imported.is_ambiguous = 0;
@@ -1191,6 +1217,7 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                     imported.name = leaf->import_name;
                     imported.import_declaration = leaf->declaration;
                     imported.is_public = leaf->is_public;
+                    imported.is_crate_visible = leaf->is_crate_visible;
                     imported.is_import = 1;
                     imported.is_reexport = leaf->is_public;
                     imported.is_ambiguous = 0;
@@ -1232,6 +1259,7 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                         imported.item_kind = CM_AST_ITEM_ENUM;
                         imported.import_declaration = leaf->declaration;
                         imported.is_public = leaf->is_public;
+                        imported.is_crate_visible = leaf->is_crate_visible;
                         imported.is_import = 1;
                         imported.is_reexport = leaf->is_public;
                         imported.is_anonymous = leaf->is_anonymous;
@@ -1558,6 +1586,8 @@ static int cm_mirror_graph(CmImportResolverState *state,
                 binding.declaration = entry.declaration;
                 binding.item_kind = entry.item_kind;
                 binding.is_public = entry.visibility == CM_AST_VIS_PUBLIC;
+                binding.is_crate_visible = binding.is_public
+                    || entry.visibility == CM_AST_VIS_CRATE;
                 if (entry.item_kind == CM_AST_ITEM_MODULE) {
                     binding.target_module = cm_direct_child(state, module_id,
                         binding.name);
@@ -2167,6 +2197,7 @@ CmImportLookupStatus cm_import_resolve_path(
                 out_binding->variant = variant->declaration;
                 out_binding->item_kind = CM_AST_ITEM_ENUM;
                 out_binding->is_public = 1;
+                out_binding->is_crate_visible = 1;
                 return CM_IMPORT_LOOKUP_OK;
             }
             return CM_IMPORT_LOOKUP_NOT_FOUND;

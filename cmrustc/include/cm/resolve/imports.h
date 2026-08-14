@@ -49,6 +49,8 @@ typedef struct CmResolvedBinding {
     CmModuleId target_module;
     CmResolveItemRef import_declaration;
     int is_public;
+    /* Reachable from every module in this crate, including `pub(crate)`. */
+    int is_crate_visible;
     int is_import;
     int is_reexport;
     int is_ambiguous;

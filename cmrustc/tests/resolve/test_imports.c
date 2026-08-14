@@ -932,6 +932,81 @@ static int test_generated_declaration_imports(void)
     return ok;
 }
 
+static int test_generated_crate_visible_glob_imports(void)
+{
+    static const char source[] =
+        "macro_rules! make_types { () => {\n"
+        "    pub(crate) struct i16x8;\n"
+        "    pub struct Public;\n"
+        "    struct Private;\n"
+        "} }\n"
+        "mod simd { make_types!(); }\n"
+        "mod x86 { mod sse2 { use crate::simd::*; } }\n"
+        "mod crate_glob { pub(crate) use crate::simd::*; }\n"
+        "mod public_glob { pub use crate::simd::*; }\n";
+    CmSourceSet sources;
+    CmModuleGraph graph;
+    CmImportResolver resolver;
+    CmModuleGraphResult graph_result;
+    CmImportResult import_result;
+    CmResolvedBinding direct;
+    CmResolvedBinding imported;
+    CmResolvedBinding public_binding;
+    CmModuleId simd;
+    CmModuleId sse2;
+    CmModuleId crate_glob;
+    CmModuleId public_glob;
+    int ok;
+
+    memset(&direct, 0, sizeof(direct));
+    memset(&imported, 0, sizeof(imported));
+    memset(&public_binding, 0, sizeof(public_binding));
+    ok = check(load_memory_and_resolve("crate-visible-glob/lib.rs", source,
+        &sources, &graph, &resolver, &graph_result, &import_result),
+        "could not load crate-visible glob fixture");
+    if (!ok) return 0;
+    simd = find_module(&graph, "crate::simd");
+    sse2 = find_module(&graph, "crate::x86::sse2");
+    crate_glob = find_module(&graph, "crate::crate_glob");
+    public_glob = find_module(&graph, "crate::public_glob");
+    ok &= check(graph_result.error_count == 0u
+        && import_result.error_count == 0u && simd != CM_MODULE_NONE
+        && sse2 != CM_MODULE_NONE && crate_glob != CM_MODULE_NONE
+        && public_glob != CM_MODULE_NONE,
+        "crate-visible glob fixture did not resolve");
+    ok &= check(find_binding(&resolver, simd, CM_RESOLVE_NAMESPACE_TYPE,
+            "i16x8", &direct)
+        && !direct.is_import && !direct.is_public
+        && direct.is_crate_visible
+        && direct.item_kind == CM_AST_ITEM_STRUCT,
+        "generated pub(crate) declaration lost crate visibility");
+    ok &= check(find_binding(&resolver, sse2, CM_RESOLVE_NAMESPACE_TYPE,
+            "i16x8", &imported)
+        && imported.is_import && !imported.is_public
+        && !imported.is_crate_visible
+        && item_ref_equals(imported.declaration, direct.declaration),
+        "private sibling glob did not import a crate-visible declaration");
+    ok &= check(find_binding(&resolver, sse2, CM_RESOLVE_NAMESPACE_TYPE,
+            "Public", &public_binding)
+        && public_binding.is_import
+        && !find_binding(&resolver, sse2, CM_RESOLVE_NAMESPACE_TYPE,
+            "Private", NULL),
+        "sibling glob did not preserve public/private reachability");
+    ok &= check(find_binding(&resolver, crate_glob,
+            CM_RESOLVE_NAMESPACE_TYPE, "i16x8", &imported)
+        && imported.is_import && !imported.is_public
+        && imported.is_crate_visible,
+        "pub(crate) glob did not retain crate-wide reachability");
+    ok &= check(!find_binding(&resolver, public_glob,
+            CM_RESOLVE_NAMESPACE_TYPE, "i16x8", NULL)
+        && find_binding(&resolver, public_glob,
+            CM_RESOLVE_NAMESPACE_TYPE, "Public", &public_binding)
+        && public_binding.is_public && public_binding.is_reexport,
+        "public glob leaked a crate-visible declaration");
+    destroy_all(&sources, &graph, &resolver);
+    return ok;
+}
+
 static int test_declaration_binding_view(void)
 {
     static const char source[] =
@@ -1851,6 +1926,7 @@ int main(void)
     ok &= test_graph_independence();
     ok &= test_revision_invalidation();
     ok &= test_generated_declaration_imports();
+    ok &= test_generated_crate_visible_glob_imports();
     ok &= test_declaration_binding_view();
     ok &= test_enum_variant_imports();
     ok &= test_core_shaped_macro_identity();
