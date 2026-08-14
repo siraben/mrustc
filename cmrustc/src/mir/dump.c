@@ -50,6 +50,11 @@ static int cm_mir_dump_place(FILE *stream, const CmMirPlace *place)
                 || projection->field_index != 0u
                 || fputs(".deref", stream) == EOF) return -1;
         } else if (projection->kind == CM_MIR_PROJECTION_FIELD
+            && cm_hir_def_id_is_none(projection->definition)
+            && fprintf(stream, ".tuple-field(#%u)",
+                (unsigned int)projection->field_index) < 0) {
+            return -1;
+        } else if (projection->kind == CM_MIR_PROJECTION_FIELD
             && fprintf(stream, ".field(%u:%u#%u)",
                 (unsigned int)projection->definition.crate_id,
                 (unsigned int)projection->definition.index,

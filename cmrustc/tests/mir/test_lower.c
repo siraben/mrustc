@@ -3304,14 +3304,17 @@ static void test_reference_lowering_stays_fail_closed(void)
     cm_hir_context_destroy(&hir);
 }
 
-static void test_tuple_parameter_lowering_stays_fail_closed(void)
+static void test_tuple_parameter_lowering(void)
 {
     CmHirContext hir;
     CmHirCrateId crate_id;
     CmHirModuleId root_module;
+    CmHirTypeId i32_type;
     CmHirTypeId u32_type;
     CmHirTypeId tuple_type;
+    CmHirTypeId reference_type;
     CmHirType tuple_value;
+    CmHirType reference_value;
     CmHirTypeId tuple_elements[2];
     CmHirDefId definition;
     CmHirFunctionParameter parameter;
@@ -3323,7 +3326,27 @@ static void test_tuple_parameter_lowering_stays_fail_closed(void)
     CmHirExprId root;
     CmMirContext mir;
     CmMirLowerResult result;
-    size_t count;
+    const CmMirBody *stored;
+    CmMirBody *mutable_stored;
+    CmMirStatement *statements;
+    CmMirPlaceProjection *first_projection;
+    CmMirPlaceProjection *second_projection;
+    CmMirStatement extra_statements[4];
+    CmMirLocalKind saved_kind;
+    CmHirTypeId saved_type;
+    CmHirDefId saved_definition;
+    uint32_t saved_destination;
+    uint32_t saved_field_index;
+    uint32_t saved_statement_count;
+    CmMirStatement *saved_statements;
+    CmHirBody *mutable_source_body;
+    CmHirType *mutable_tuple_type;
+    CmHirTypeId saved_element_type;
+    uint32_t saved_element_count;
+    uint32_t saved_binding_index;
+    FILE *stream;
+    char dump[2048];
+    size_t length;
 
     cm_hir_context_init(&hir);
     assert(cm_hir_create_crate(&hir,
@@ -3331,14 +3354,23 @@ static void test_tuple_parameter_lowering_stays_fail_closed(void)
         CM_HIR_EDITION_2021, test_span(0u, 100u), &crate_id,
         &root_module) == CM_HIR_OK);
     u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    i32_type = add_integer_type(&hir, CM_HIR_INT_I32, 2u);
     tuple_elements[0] = u32_type;
-    tuple_elements[1] = u32_type;
+    tuple_elements[1] = i32_type;
     memset(&tuple_value, 0, sizeof(tuple_value));
     tuple_value.kind = CM_HIR_TYPE_TUPLE_KIND;
     tuple_value.span = test_span(3u, 8u);
     tuple_value.data.tuple_type.elements = tuple_elements;
     tuple_value.data.tuple_type.element_count = 2u;
     assert(cm_hir_add_type(&hir, &tuple_value, &tuple_type) == CM_HIR_OK);
+    memset(&reference_value, 0, sizeof(reference_value));
+    reference_value.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    reference_value.span = test_span(3u, 8u);
+    reference_value.data.reference_type.pointee = i32_type;
+    reference_value.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    reference_value.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&hir, &reference_value, &reference_type)
+        == CM_HIR_OK);
     assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
         CM_HIR_ITEM_FUNCTION, test_span(10u, 80u), &definition)
         == CM_HIR_OK);
@@ -3358,7 +3390,7 @@ static void test_tuple_parameter_lowering_stays_fail_closed(void)
     locals[0].parameter_index = 0u;
     locals[0].parameter_binding_index = 0u;
     locals[1].name = parameter.tuple_bindings[1].name;
-    locals[1].type = u32_type;
+    locals[1].type = i32_type;
     locals[1].span = parameter.tuple_bindings[1].span;
     locals[1].parameter_index = 0u;
     locals[1].parameter_binding_index = 1u;
@@ -3397,14 +3429,162 @@ static void test_tuple_parameter_lowering_stays_fail_closed(void)
         == CM_HIR_OK);
 
     cm_mir_context_init(&mir);
-    count = cm_mir_body_count(&mir);
     result = cm_mir_lower_instance(&mir, &hir, body_id, NULL, 0u);
-    assert(result.error_count == 1u && result.lowered_body_count == 0u
-        && result.body == CM_MIR_BODY_NONE
-        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message, "ABI destructuring prologue")
-            != NULL
-        && cm_mir_body_count(&mir) == count);
+    assert(result.error_count == 0u && result.lowered_body_count == 1u
+        && result.body == 1u && cm_mir_body_count(&mir) == 1u);
+    stored = cm_mir_get_body(&mir, result.body);
+    assert(stored != NULL && stored->owned_storage != NULL
+        && stored->local_count == 4u
+        && stored->locals[0].kind == CM_MIR_LOCAL_RETURN
+        && stored->locals[0].type == u32_type
+        && stored->locals[1].kind == CM_MIR_LOCAL_ARGUMENT
+        && stored->locals[1].type == tuple_type
+        && stored->locals[2].kind == CM_MIR_LOCAL_USER
+        && stored->locals[2].type == u32_type
+        && stored->locals[3].kind == CM_MIR_LOCAL_USER
+        && stored->locals[3].type == i32_type
+        && stored->basic_block_count == 1u
+        && stored->basic_blocks[0].statement_count == 3u
+        && stored->basic_blocks[0].terminator.kind
+            == CM_MIR_TERMINATOR_RETURN);
+    statements = (CmMirStatement *)stored->basic_blocks[0].statements;
+    assert(statements != NULL
+        && statements[0].kind == CM_MIR_STATEMENT_ASSIGN
+        && statements[0].data.assign.destination == 2u
+        && statements[0].data.assign.value.kind == CM_MIR_RVALUE_USE
+        && statements[0].data.assign.value.data.use.kind
+            == CM_MIR_OPERAND_COPY_PLACE
+        && statements[0].data.assign.value.data.use.data.place.base == 1u
+        && statements[0].data.assign.value.data.use.data.place.type
+            == u32_type
+        && statements[0].data.assign.value.data.use.data.place
+            .projection_count == 1u
+        && statements[1].kind == CM_MIR_STATEMENT_ASSIGN
+        && statements[1].data.assign.destination == 3u
+        && statements[1].data.assign.value.kind == CM_MIR_RVALUE_USE
+        && statements[1].data.assign.value.data.use.kind
+            == CM_MIR_OPERAND_COPY_PLACE
+        && statements[1].data.assign.value.data.use.data.place.base == 1u
+        && statements[1].data.assign.value.data.use.data.place.type
+            == i32_type
+        && statements[1].data.assign.value.data.use.data.place
+            .projection_count == 1u
+        && statements[2].data.assign.destination == CM_MIR_RETURN_LOCAL
+        && statements[2].data.assign.value.kind == CM_MIR_RVALUE_USE
+        && statements[2].data.assign.value.data.use.kind
+            == CM_MIR_OPERAND_MOVE
+        && statements[2].data.assign.value.data.use.data.local == 2u);
+    first_projection = statements[0].data.assign.value.data.use.data.place
+        .projections;
+    second_projection = statements[1].data.assign.value.data.use.data.place
+        .projections;
+    assert(first_projection != NULL && second_projection != NULL
+        && first_projection->kind == CM_MIR_PROJECTION_FIELD
+        && cm_hir_def_id_is_none(first_projection->definition)
+        && first_projection->field_index == 0u
+        && second_projection->kind == CM_MIR_PROJECTION_FIELD
+        && cm_hir_def_id_is_none(second_projection->definition)
+        && second_projection->field_index == 1u
+        && cm_mir_validate_place(&hir, stored,
+            &statements[0].data.assign.value.data.use.data.place)
+                == CM_MIR_OK
+        && cm_mir_validate_place(&hir, stored,
+            &statements[1].data.assign.value.data.use.data.place)
+                == CM_MIR_OK
+        && cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+                == CM_MIR_OK);
+
+    stream = tmpfile();
+    assert(stream != NULL && cm_mir_dump(stream, &mir) == 0
+        && fflush(stream) == 0);
+    rewind(stream);
+    length = fread(dump, 1u, sizeof(dump) - 1u, stream);
+    assert(!ferror(stream));
+    dump[length] = '\0';
+    assert(strstr(dump, ".tuple-field(#0)") != NULL
+        && strstr(dump, ".tuple-field(#1)") != NULL);
+    assert(fclose(stream) == 0);
+
+    mutable_stored = (CmMirBody *)stored;
+    saved_kind = mutable_stored->locals[1].kind;
+    mutable_stored->locals[1].kind = CM_MIR_LOCAL_USER;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->locals[1].kind = saved_kind;
+    saved_type = mutable_stored->locals[1].type;
+    mutable_stored->locals[1].type = u32_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->locals[1].type = saved_type;
+
+    saved_destination = statements[0].data.assign.destination;
+    statements[0].data.assign.destination =
+        statements[1].data.assign.destination;
+    statements[1].data.assign.destination = saved_destination;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    saved_destination = statements[0].data.assign.destination;
+    statements[0].data.assign.destination =
+        statements[1].data.assign.destination;
+    statements[1].data.assign.destination = saved_destination;
+
+    saved_field_index = second_projection->field_index;
+    second_projection->field_index = 0u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    second_projection->field_index = saved_field_index;
+    saved_definition = first_projection->definition;
+    first_projection->definition = definition;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    first_projection->definition = saved_definition;
+
+    saved_statement_count = mutable_stored->basic_blocks[0].statement_count;
+    mutable_stored->basic_blocks[0].statement_count = 2u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->basic_blocks[0].statement_count = saved_statement_count;
+    memcpy(extra_statements, statements, sizeof(*statements) * 3u);
+    extra_statements[3] = statements[2];
+    saved_statements = mutable_stored->basic_blocks[0].statements;
+    mutable_stored->basic_blocks[0].statements = extra_statements;
+    mutable_stored->basic_blocks[0].statement_count = 4u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->basic_blocks[0].statements = saved_statements;
+    mutable_stored->basic_blocks[0].statement_count = saved_statement_count;
+
+    saved_type = mutable_stored->locals[2].type;
+    mutable_stored->locals[2].type = i32_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->locals[2].type = saved_type;
+
+    mutable_tuple_type = (CmHirType *)cm_hir_get_type(&hir, tuple_type);
+    mutable_source_body = (CmHirBody *)cm_hir_get_body(&hir, body_id);
+    assert(mutable_tuple_type != NULL && mutable_source_body != NULL);
+    saved_element_count = mutable_tuple_type->data.tuple_type.element_count;
+    mutable_tuple_type->data.tuple_type.element_count = 1u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_tuple_type->data.tuple_type.element_count = saved_element_count;
+    saved_element_type = mutable_tuple_type->data.tuple_type.elements[1];
+    mutable_tuple_type->data.tuple_type.elements[1] = tuple_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_tuple_type->data.tuple_type.elements[1] = reference_type;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_tuple_type->data.tuple_type.elements[1] = saved_element_type;
+    saved_binding_index = mutable_source_body->locals[1]
+        .parameter_binding_index;
+    mutable_source_body->locals[1].parameter_binding_index = 0u;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_source_body->locals[1].parameter_binding_index =
+        saved_binding_index;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_OK);
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);
 }
@@ -3556,8 +3736,7 @@ int main(void)
     test_aggregate_and_field_lowering();
     test_aggregate_call_lowering();
     test_reference_lowering_stays_fail_closed();
-    test_tuple_parameter_lowering_stays_fail_closed();
-
+    test_tuple_parameter_lowering();
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);
     puts("mir lowering tests: ok");

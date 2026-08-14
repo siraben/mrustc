@@ -381,6 +381,29 @@ static int cm_mir_lower_type_target_valid(const CmMirContext *context,
             || cm_mir_context_pointer_bits(context) == 32u
             || cm_mir_context_pointer_bits(context) == 64u;
     }
+    if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
+        if (type->data.tuple_type.element_count
+                != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+            || type->data.tuple_type.elements == NULL) {
+            return 0;
+        }
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            const CmHirType *element;
+
+            element = cm_hir_get_type(hir,
+                type->data.tuple_type.elements[index]);
+            if (element == NULL
+                || element->kind != CM_HIR_TYPE_INTEGER_KIND
+                || !cm_mir_lower_type_is_scalar(hir,
+                    type->data.tuple_type.elements[index])
+                || !cm_mir_lower_type_target_valid(context, hir, function,
+                    type->data.tuple_type.elements[index], depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
     if (type->kind != CM_HIR_TYPE_ADT_KIND) return 1;
     item = type->data.named_type.argument_count != 0u
             || type->data.named_type.arguments != NULL
@@ -438,6 +461,20 @@ static int cm_mir_lower_type(const CmHirContext *hir,
         return 1;
     }
     if (type->kind == CM_HIR_TYPE_BOOL_KIND) {
+        *out_type = declared;
+        return 1;
+    }
+    if (type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count
+            == CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        && type->data.tuple_type.elements != NULL) {
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_mir_lower_type_is_scalar(hir,
+                    type->data.tuple_type.elements[index])) {
+                return 0;
+            }
+        }
         *out_type = declared;
         return 1;
     }
@@ -500,6 +537,210 @@ static int cm_mir_lower_type(const CmHirContext *hir,
     return 1;
 }
 
+typedef struct CmMirLowerParameterLayout {
+    uint32_t hir_parameter_local_count;
+    uint32_t tuple_binding_local_count;
+    uint32_t non_temporary_local_count;
+} CmMirLowerParameterLayout;
+
+/*
+ * HIR names each lexical binding, while MIR must retain one local for each
+ * incoming ABI argument.  A named parameter can therefore use its ABI local
+ * directly, but a tuple-pattern parameter needs two additional lexical
+ * locals populated by the entry-block destructuring prologue.
+ */
+static int cm_mir_lower_parameter_layout(const CmMirContext *context,
+    const CmHirContext *hir, const CmHirItem *item,
+    const CmHirBody *hir_body, const CmHirTypeId *substitutions,
+    uint32_t substitution_count, CmHirTypeId argument_types[2],
+    CmMirLocalId *hir_to_mir, CmMirLowerParameterLayout *out_layout)
+{
+    const CmHirFunctionSignature *signature;
+    uint32_t hir_local_index;
+    uint32_t parameter_index;
+    uint32_t tuple_binding_index;
+    uint32_t user_local_count;
+
+    if (context == NULL || hir == NULL || item == NULL
+        || hir_body == NULL || argument_types == NULL
+        || out_layout == NULL || item->kind != CM_HIR_ITEM_FUNCTION) {
+        return 0;
+    }
+    signature = &item->data.function_item.signature;
+    if (signature->parameter_count > 2u
+        || hir_body->parameter_count != signature->parameter_count
+        || (signature->parameter_count != 0u
+            && signature->parameters == NULL)
+        || (hir_body->local_count != 0u && hir_body->locals == NULL)) {
+        return 0;
+    }
+    memset(out_layout, 0, sizeof(*out_layout));
+    hir_local_index = 0u;
+    tuple_binding_index = 0u;
+    for (parameter_index = 0u;
+         parameter_index < signature->parameter_count; ++parameter_index) {
+        const CmHirFunctionParameter *parameter;
+
+        parameter = &signature->parameters[parameter_index];
+        if (!cm_mir_lower_type(hir, item, substitutions,
+                substitution_count, parameter->type,
+                &argument_types[parameter_index])
+            || !cm_mir_lower_type_target_valid(context, hir, item,
+                argument_types[parameter_index], 0u)
+            || cm_mir_lower_type_is_bool(hir,
+                argument_types[parameter_index])) {
+            return 0;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            const CmHirLocal *local;
+
+            if (hir_local_index >= hir_body->local_count) return 0;
+            local = &hir_body->locals[hir_local_index];
+            if (local->parameter_index != parameter_index
+                || local->parameter_binding_index != 0u
+                || local->name != parameter->name
+                || !cm_mir_hir_type_equal(hir, local->type,
+                    parameter->type)) {
+                return 0;
+            }
+            if (hir_to_mir != NULL) {
+                hir_to_mir[hir_local_index] = parameter_index + 1u;
+            }
+            hir_local_index += 1u;
+            continue;
+        }
+        if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
+            const CmHirType *tuple_type;
+            uint32_t field_index;
+
+            tuple_type = cm_hir_get_type(hir, parameter->type);
+            if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+                || tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count
+                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                || tuple_type->data.tuple_type.elements == NULL) {
+                return 0;
+            }
+            for (field_index = 0u;
+                 field_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++field_index) {
+                const CmHirLocal *local;
+                CmHirTypeId element_type;
+
+                if (hir_local_index >= hir_body->local_count
+                    || !cm_mir_lower_type(hir, item, substitutions,
+                        substitution_count,
+                        tuple_type->data.tuple_type.elements[field_index],
+                        &element_type)
+                    || element_type
+                        != tuple_type->data.tuple_type.elements[field_index]
+                    || !cm_mir_lower_type_is_scalar(hir, element_type)
+                    || !cm_mir_lower_type_target_valid(context, hir, item,
+                        element_type, 0u)) {
+                    return 0;
+                }
+                local = &hir_body->locals[hir_local_index];
+                if (local->parameter_index != parameter_index
+                    || local->parameter_binding_index != field_index
+                    || local->name
+                        != parameter->tuple_bindings[field_index].name
+                    || local->type
+                        != tuple_type->data.tuple_type.elements[field_index]
+                    || local->mutability != CM_HIR_IMMUTABLE
+                    || local->span.source
+                        != parameter->tuple_bindings[field_index].span.source
+                    || local->span.start
+                        != parameter->tuple_bindings[field_index].span.start
+                    || local->span.end
+                        != parameter->tuple_bindings[field_index].span.end) {
+                    return 0;
+                }
+                if (hir_to_mir != NULL) {
+                    hir_to_mir[hir_local_index] = 1u
+                        + signature->parameter_count
+                        + tuple_binding_index;
+                }
+                hir_local_index += 1u;
+                tuple_binding_index += 1u;
+            }
+            continue;
+        }
+        /* Discards and every future pattern form remain outside this slice. */
+        return 0;
+    }
+    user_local_count = hir_body->local_count - hir_local_index;
+    if (signature->parameter_count > UINT32_MAX - 1u
+        || tuple_binding_index
+            > UINT32_MAX - 1u - signature->parameter_count
+        || user_local_count > UINT32_MAX - 1u
+            - signature->parameter_count - tuple_binding_index) {
+        return 0;
+    }
+    if (hir_to_mir != NULL) {
+        uint32_t user_index;
+
+        for (user_index = 0u; user_index < user_local_count; ++user_index) {
+            hir_to_mir[hir_local_index + user_index] = 1u
+                + signature->parameter_count + tuple_binding_index
+                + user_index;
+        }
+    }
+    out_layout->hir_parameter_local_count = hir_local_index;
+    out_layout->tuple_binding_local_count = tuple_binding_index;
+    out_layout->non_temporary_local_count = 1u
+        + signature->parameter_count + tuple_binding_index
+        + user_local_count;
+    return 1;
+}
+
+static int cm_mir_lower_hir_local_id(
+    const CmHirFunctionSignature *signature, const CmHirBody *body,
+    const CmMirLowerParameterLayout *layout, uint32_t hir_local,
+    CmMirLocalId *out_local)
+{
+    uint32_t parameter_index;
+    uint32_t parameter_local;
+    uint32_t tuple_binding;
+
+    if (signature == NULL || body == NULL || layout == NULL
+        || out_local == NULL || hir_local >= body->local_count) return 0;
+    if (hir_local >= layout->hir_parameter_local_count) {
+        *out_local = 1u + signature->parameter_count
+            + layout->tuple_binding_local_count
+            + hir_local - layout->hir_parameter_local_count;
+        return *out_local < layout->non_temporary_local_count;
+    }
+    parameter_local = 0u;
+    tuple_binding = 0u;
+    for (parameter_index = 0u;
+         parameter_index < signature->parameter_count; ++parameter_index) {
+        const CmHirFunctionParameter *parameter;
+
+        parameter = &signature->parameters[parameter_index];
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            if (parameter_local == hir_local) {
+                *out_local = parameter_index + 1u;
+                return 1;
+            }
+            parameter_local += 1u;
+            continue;
+        }
+        if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
+            return 0;
+        }
+        if (hir_local - parameter_local
+                < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT) {
+            *out_local = 1u + signature->parameter_count + tuple_binding
+                + hir_local - parameter_local;
+            return *out_local < layout->non_temporary_local_count;
+        }
+        parameter_local += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+        tuple_binding += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+    }
+    return 0;
+}
+
 typedef enum CmMirFlowError {
     CM_MIR_FLOW_OK = 0,
     CM_MIR_FLOW_INVALID,
@@ -526,6 +767,7 @@ typedef struct CmMirFlowPlan {
     CmMirSemanticEvidenceKind semantic_evidence;
     CmHirTypeId expected_type;
     CmHirExprId allowed_if_expression;
+    CmMirLowerParameterLayout parameter_layout;
     CmVec seen;
     CmVec calls;
     uint32_t binary_count;
@@ -2264,6 +2506,86 @@ static int cm_mir_flow_append_use(CmMirFlowOutput *output,
     return 1;
 }
 
+static int cm_mir_flow_append_tuple_parameter_prologue(
+    CmMirFlowOutput *output)
+{
+    const CmHirFunctionSignature *signature;
+    uint32_t hir_local_index;
+    uint32_t parameter_index;
+
+    if (output == NULL || output->plan == NULL) return 0;
+    signature = &output->plan->item->data.function_item.signature;
+    hir_local_index = 0u;
+    for (parameter_index = 0u;
+         parameter_index < signature->parameter_count; ++parameter_index) {
+        const CmHirFunctionParameter *parameter;
+
+        parameter = &signature->parameters[parameter_index];
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            hir_local_index += 1u;
+            continue;
+        }
+        if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
+            return 0;
+        }
+        {
+            const CmHirType *tuple_type;
+            uint32_t field_index;
+
+            tuple_type = cm_hir_get_type(output->plan->hir,
+                parameter->type);
+            if (tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count
+                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                || tuple_type->data.tuple_type.elements == NULL) {
+                return 0;
+            }
+            for (field_index = 0u;
+                 field_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++field_index) {
+                CmMirPlaceProjection projection;
+                CmMirOperand operand;
+                CmMirLocalId destination;
+                size_t projection_index;
+
+                if (!cm_mir_lower_hir_local_id(signature,
+                        output->plan->body,
+                        &output->plan->parameter_layout,
+                        hir_local_index, &destination)
+                    || output->projections->len
+                        >= output->projections->cap) {
+                    return 0;
+                }
+                memset(&projection, 0, sizeof(projection));
+                projection.kind = CM_MIR_PROJECTION_FIELD;
+                projection.definition = cm_hir_def_id_none();
+                projection.field_index = field_index;
+                projection_index = output->projections->len;
+                (void)cm_vec_push(output->projections, &projection);
+
+                memset(&operand, 0, sizeof(operand));
+                operand.kind = CM_MIR_OPERAND_COPY_PLACE;
+                operand.type = tuple_type->data.tuple_type
+                    .elements[field_index];
+                operand.data.place.base = parameter_index + 1u;
+                operand.data.place.type = operand.type;
+                operand.data.place.projections =
+                    (CmMirPlaceProjection *)output->projections->data
+                        + projection_index;
+                operand.data.place.projection_count = 1u;
+                operand.data.place.span =
+                    parameter->tuple_bindings[field_index].span;
+                if (!cm_mir_flow_append_use(output, destination, &operand)) {
+                    return 0;
+                }
+                hir_local_index += 1u;
+            }
+        }
+    }
+    return 1;
+}
+
 static int cm_mir_flow_temporary(CmMirFlowOutput *output,
     CmHirTypeId type, CmMirLocalId *out_local)
 {
@@ -2328,16 +2650,22 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
                 requested_destination, out_operand);
     }
     if (expression->kind == CM_HIR_EXPR_LOCAL) {
+        CmMirLocalId source_local;
+
         if (!cm_mir_lower_type(output->plan->hir, output->plan->item,
                 output->plan->instance->substitutions,
                 output->plan->instance->substitution_count,
                 output->plan->body->locals[
-                    expression->data.local.local_index].type, &type)) {
+                    expression->data.local.local_index].type, &type)
+            || !cm_mir_lower_hir_local_id(
+                &output->plan->item->data.function_item.signature,
+                output->plan->body, &output->plan->parameter_layout,
+                expression->data.local.local_index, &source_local)) {
             return 0;
         }
         out_operand->kind = CM_MIR_OPERAND_MOVE;
         out_operand->type = type;
-        out_operand->data.local = expression->data.local.local_index + 1u;
+        out_operand->data.local = source_local;
         if (has_destination) {
             CmMirOperand source;
 
@@ -2737,6 +3065,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     CmMirBody body;
     CmHirTypeId return_type;
     CmHirTypeId argument_types[2];
+    CmMirLowerParameterLayout parameter_layout;
     CmMirFlowPlan plan;
     CmMirFlowOutput output;
     CmVec flow_locals;
@@ -2805,39 +3134,16 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
             "and result");
         return result;
     }
-    for (parameter_index = 0u;
-         parameter_index < signature->parameter_count; ++parameter_index) {
-        if (signature->parameters[parameter_index].binding_kind
-                == CM_HIR_BINDING_TUPLE_PATTERN) {
-            cm_mir_lower_fail(&result, CM_MIR_LOWER_UNSUPPORTED_TYPE,
-                body_id, hir_body->root_expression, CM_MIR_OK,
-                "tuple parameter MIR requires an ABI destructuring "
-                "prologue");
-            return result;
-        }
+    if (!cm_mir_lower_parameter_layout(context, hir, item, hir_body,
+            substitutions, substitution_count, argument_types, NULL,
+            &parameter_layout)) {
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_UNSUPPORTED_TYPE,
+            body_id, hir_body->root_expression, CM_MIR_OK,
+            "exact MIR parameter locals do not match the supported ABI "
+            "binding layout");
+        return result;
     }
-    for (parameter_index = 0u;
-         parameter_index < signature->parameter_count; ++parameter_index) {
-        if (hir_body->locals[parameter_index].parameter_index
-                != parameter_index
-            || !cm_mir_lower_type(hir, item, substitutions,
-                substitution_count,
-                signature->parameters[parameter_index].type,
-                &argument_types[parameter_index])
-            || !cm_mir_lower_type_target_valid(context, hir, item,
-                argument_types[parameter_index], 0u)
-            || cm_mir_lower_type_is_bool(hir,
-                argument_types[parameter_index])
-            || !cm_mir_hir_type_equal(hir,
-                hir_body->locals[parameter_index].type,
-                signature->parameters[parameter_index].type)) {
-            cm_mir_lower_fail(&result, CM_MIR_LOWER_UNSUPPORTED_TYPE,
-                body_id, hir_body->root_expression, CM_MIR_OK,
-                "exact MIR parameter locals do not match the u32 signature");
-            return result;
-        }
-    }
-    for (local_index = signature->parameter_count;
+    for (local_index = parameter_layout.hir_parameter_local_count;
          local_index < hir_body->local_count; ++local_index) {
         CmHirTypeId user_type;
 
@@ -2875,7 +3181,8 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     }
     if ((hir_statement_count == 0u) != (hir_statements == NULL)
         || hir_statement_count
-            != hir_body->local_count - signature->parameter_count
+            != hir_body->local_count
+                - parameter_layout.hir_parameter_local_count
         || terminal_id == CM_HIR_EXPR_NONE) {
         cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_HIR, body_id,
             hir_body->root_expression, CM_MIR_OK,
@@ -2908,6 +3215,9 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     plan.semantic_evidence = semantic_evidence;
     plan.expected_type = return_type;
     plan.allowed_if_expression = terminal_id;
+    plan.parameter_layout = parameter_layout;
+    plan.statement_count = parameter_layout.tuple_binding_local_count;
+    plan.projection_count = parameter_layout.tuple_binding_local_count;
     cm_vec_init(&plan.seen, sizeof(CmHirExprId));
     cm_vec_init(&plan.calls, sizeof(CmMirFlowCall));
     for (statement_index = 0u; statement_index < hir_statement_count;
@@ -2915,7 +3225,8 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
         const CmHirStatement *hir_statement;
 
         hir_statement = &hir_statements[statement_index];
-        local_index = signature->parameter_count + statement_index;
+        local_index = parameter_layout.hir_parameter_local_count
+            + statement_index;
         if (hir_statement->kind != CM_HIR_STATEMENT_LET
             || hir_statement->data.let_statement.local_index != local_index
             || hir_statement->data.let_statement.initializer
@@ -2960,9 +3271,8 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     }
     cm_vec_destroy(&plan.seen);
 
-    if ((size_t)hir_body->local_count + 1u > (size_t)UINT32_MAX
-        || (size_t)plan.temporary_count > (size_t)UINT32_MAX
-            - ((size_t)hir_body->local_count + 1u)
+    if ((size_t)plan.temporary_count > (size_t)UINT32_MAX
+            - (size_t)parameter_layout.non_temporary_local_count
         || plan.call_count == UINT32_MAX
         || plan.conditional_count
             > (UINT32_MAX - plan.call_count - 1u) / 3u) {
@@ -2972,7 +3282,7 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
             "u32 statement and expression flow exceeds MIR storage");
         return result;
     }
-    local_count = (size_t)hir_body->local_count + 1u
+    local_count = (size_t)parameter_layout.non_temporary_local_count
         + (size_t)plan.temporary_count;
     planned_block_count = (size_t)plan.call_count + 1u
         + (size_t)plan.conditional_count * 3u;
@@ -2997,28 +3307,63 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     local.kind = CM_MIR_LOCAL_RETURN;
     local.type = return_type;
     (void)cm_vec_push(&flow_locals, &local);
+    for (parameter_index = 0u;
+         parameter_index < signature->parameter_count; ++parameter_index) {
+        memset(&local, 0, sizeof(local));
+        local.kind = CM_MIR_LOCAL_ARGUMENT;
+        local.type = argument_types[parameter_index];
+        (void)cm_vec_push(&flow_locals, &local);
+    }
     for (local_index = 0u; local_index < hir_body->local_count;
          ++local_index) {
+        CmMirLocalId mapped_local;
+
+        if (!cm_mir_lower_hir_local_id(signature, hir_body,
+                &parameter_layout, local_index, &mapped_local)) {
+            break;
+        }
+        if (mapped_local <= signature->parameter_count) {
+            const CmMirLocal *argument_local;
+            CmHirTypeId instantiated_local_type;
+
+            argument_local = (const CmMirLocal *)cm_vec_at_const(
+                &flow_locals, mapped_local);
+            if (argument_local == NULL
+                || !cm_mir_lower_type(hir, item, substitutions,
+                    substitution_count,
+                    hir_body->locals[local_index].type,
+                    &instantiated_local_type)
+                || !cm_mir_hir_type_equal(hir, argument_local->type,
+                    instantiated_local_type)) {
+                break;
+            }
+            continue;
+        }
+        if (mapped_local != (CmMirLocalId)flow_locals.len) break;
         memset(&local, 0, sizeof(local));
-        local.kind = local_index < signature->parameter_count
-            ? CM_MIR_LOCAL_ARGUMENT : CM_MIR_LOCAL_USER;
+        local.kind = CM_MIR_LOCAL_USER;
         if (!cm_mir_lower_type(hir, item, substitutions,
                 substitution_count, hir_body->locals[local_index].type,
                 &local.type)) {
-            cm_vec_destroy(&flow_projections);
-            cm_vec_destroy(&flow_aggregate_fields);
-            cm_vec_destroy(&flow_arguments);
-            cm_vec_destroy(&flow_block_starts);
-            cm_vec_destroy(&flow_blocks);
-            cm_vec_destroy(&flow_statements);
-            cm_vec_destroy(&flow_locals);
-            cm_vec_destroy(&plan.calls);
-            cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_HIR, body_id,
-                terminal_id, CM_MIR_OK,
-                "u32 local types changed during MIR lowering");
-            return result;
+            break;
         }
         (void)cm_vec_push(&flow_locals, &local);
+    }
+    if (local_index != hir_body->local_count
+        || flow_locals.len
+            != (size_t)parameter_layout.non_temporary_local_count) {
+        cm_vec_destroy(&flow_projections);
+        cm_vec_destroy(&flow_aggregate_fields);
+        cm_vec_destroy(&flow_arguments);
+        cm_vec_destroy(&flow_block_starts);
+        cm_vec_destroy(&flow_blocks);
+        cm_vec_destroy(&flow_statements);
+        cm_vec_destroy(&flow_locals);
+        cm_vec_destroy(&plan.calls);
+        cm_mir_lower_fail(&result, CM_MIR_LOWER_INVALID_HIR, body_id,
+            terminal_id, CM_MIR_OK,
+            "MIR local ABI layout changed during lowering");
+        return result;
     }
 
     memset(&output, 0, sizeof(output));
@@ -3030,18 +3375,26 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     output.arguments = &flow_arguments;
     output.aggregate_fields = &flow_aggregate_fields;
     output.projections = &flow_projections;
-    lowering_ok = cm_mir_flow_next_block(&output);
+    lowering_ok = cm_mir_flow_next_block(&output)
+        && cm_mir_flow_append_tuple_parameter_prologue(&output);
     statement_index = 0u;
     if (lowering_ok) {
         for (statement_index = 0u;
              statement_index < hir_statement_count; ++statement_index) {
             const CmHirStatement *hir_statement;
+            CmMirLocalId destination;
 
             hir_statement = &hir_statements[statement_index];
+            if (!cm_mir_lower_hir_local_id(signature, hir_body,
+                    &parameter_layout,
+                    hir_statement->data.let_statement.local_index,
+                    &destination)) {
+                lowering_ok = 0;
+                break;
+            }
             if (!cm_mir_flow_expression(&output,
                     hir_statement->data.let_statement.initializer, 1,
-                    hir_statement->data.let_statement.local_index + 1u,
-                    &root_operand)) {
+                    destination, &root_operand)) {
                 lowering_ok = 0;
                 break;
             }
