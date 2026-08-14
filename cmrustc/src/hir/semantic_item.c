@@ -268,7 +268,7 @@ static CmSemanticItemStatus cm_semantic_item_scan_status(
 }
 
 static CmSemanticItemStatus cm_semantic_item_declaration_shape(
-    const CmHirItem *item)
+    const CmHirItem *item, int allow_impl_predicates)
 {
     uint32_t index;
 
@@ -283,8 +283,16 @@ static CmSemanticItemStatus cm_semantic_item_declaration_shape(
             if (item->predicates[index].equality_count != 0u) {
                 return CM_SEMANTIC_ITEM_PENDING_PROJECTION;
             }
+            if (item->predicates[index].binder.lifetime_count != 0u) {
+                return CM_SEMANTIC_ITEM_PENDING_HIGHER_RANKED;
+            }
+            if (item->predicates[index].modifier
+                    != CM_HIR_PREDICATE_REQUIRED) {
+                return CM_SEMANTIC_ITEM_PENDING_PREDICATE;
+            }
         }
-        return CM_SEMANTIC_ITEM_PENDING_PREDICATE;
+        return allow_impl_predicates ? CM_SEMANTIC_ITEM_OK
+            : CM_SEMANTIC_ITEM_PENDING_PREDICATE;
     }
     return CM_SEMANTIC_ITEM_OK;
 }
@@ -295,7 +303,7 @@ static CmSemanticItemStatus cm_semantic_item_associated_type_shape(
     CmSemanticItemStatus status;
     uint32_t index;
 
-    status = cm_semantic_item_declaration_shape(item);
+    status = cm_semantic_item_declaration_shape(item, 0);
     if (status != CM_SEMANTIC_ITEM_OK) return status;
     if (item->generic_parameter_count != 0u) {
         return CM_SEMANTIC_ITEM_PENDING_GENERIC;
@@ -455,9 +463,9 @@ static CmSemanticItemStatus cm_semantic_item_compare_method(
     CmSemanticItemStatus status;
     uint32_t index;
 
-    status = cm_semantic_item_declaration_shape(trait_method);
+    status = cm_semantic_item_declaration_shape(trait_method, 0);
     if (status != CM_SEMANTIC_ITEM_OK) return status;
-    status = cm_semantic_item_declaration_shape(impl_method);
+    status = cm_semantic_item_declaration_shape(impl_method, 0);
     if (status != CM_SEMANTIC_ITEM_OK) return status;
     if (trait_method->generic_parameter_count != 0u
         || impl_method->generic_parameter_count != 0u) {
@@ -580,7 +588,7 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         result.status = CM_SEMANTIC_ITEM_PENDING_NEGATIVE;
         return result;
     }
-    status = cm_semantic_item_declaration_shape(impl_item);
+    status = cm_semantic_item_declaration_shape(impl_item, 1);
     if (status != CM_SEMANTIC_ITEM_OK) {
         result.status = status;
         return result;
@@ -599,7 +607,7 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         result.status = CM_SEMANTIC_ITEM_UNSUPPORTED;
         return result;
     }
-    status = cm_semantic_item_declaration_shape(trait_item);
+    status = cm_semantic_item_declaration_shape(trait_item, 0);
     if (status != CM_SEMANTIC_ITEM_OK) {
         result.status = status;
         return result;
@@ -620,12 +628,6 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         result.status = CM_SEMANTIC_ITEM_PENDING_GENERIC;
         return result;
     }
-    if (generic_impl && (trait_item->generic_parameter_count != 0u
-            || impl_item->data.impl_item.trait_type.argument_count != 0u)) {
-        result.status = CM_SEMANTIC_ITEM_PENDING_GENERIC;
-        return result;
-    }
-
     memset(&typeck, 0, sizeof(typeck));
     cm_typeck_context_init(&typeck, hir);
     trait_arguments = NULL;
@@ -636,6 +638,18 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
     if (trait_item->generic_parameter_count != 0u) {
         trait_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
             trait_item->generic_parameter_count, sizeof(*trait_arguments));
+    }
+    memset(&impl_owner_frame, 0, sizeof(impl_owner_frame));
+    impl_owner_frame.parameter_owner = impl_item->definition;
+    impl_owner_frame.arguments = impl_arguments;
+    impl_owner_frame.argument_count = impl_item->generic_parameter_count;
+    cm_typeck_scoped_instantiation_init(&typeck, &impl_owner_scoped);
+    impl_owner_scoped.frames = &impl_owner_frame;
+    impl_owner_scoped.frame_count = 1u;
+    if (!cm_typeck_scoped_instantiation_is_valid(&typeck,
+            &impl_owner_scoped)) {
+        result.status = CM_SEMANTIC_ITEM_INVALID;
+        goto cleanup;
     }
     cm_typeck_instantiation_init(&typeck, &trait_instantiation);
     trait_instantiation.parameter_owner = trait_item->definition;
@@ -659,12 +673,13 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
             goto cleanup;
         }
         scan = cm_semantic_item_scan_type(hir, argument->data.type,
-            local_crate, cm_hir_def_id_none(), 0u);
+            local_crate, generic_impl ? impl_item->definition
+                : cm_hir_def_id_none(), 0u);
         result.status = cm_semantic_item_scan_status(scan);
         if (result.status != CM_SEMANTIC_ITEM_OK) goto cleanup;
         trait_arguments[argument_index].kind = CM_HIR_GENERIC_ARG_TYPE;
-        typeck_status = cm_typeck_import_hir_type(&typeck,
-            argument->data.type,
+        typeck_status = cm_typeck_instantiate_hir_type_scoped(&typeck,
+            argument->data.type, &impl_owner_scoped,
             &trait_arguments[argument_index].data.type);
         if (typeck_status != CM_TYPECK_OK) {
             result.status = cm_semantic_item_typeck_failure(typeck_status);
@@ -678,18 +693,6 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         hir, impl_item->data.impl_item.self_type, local_crate,
         generic_impl ? impl_item->definition : cm_hir_def_id_none(), 0u));
     if (result.status != CM_SEMANTIC_ITEM_OK) goto cleanup;
-    memset(&impl_owner_frame, 0, sizeof(impl_owner_frame));
-    impl_owner_frame.parameter_owner = impl_item->definition;
-    impl_owner_frame.arguments = impl_arguments;
-    impl_owner_frame.argument_count = impl_item->generic_parameter_count;
-    cm_typeck_scoped_instantiation_init(&typeck, &impl_owner_scoped);
-    impl_owner_scoped.frames = &impl_owner_frame;
-    impl_owner_scoped.frame_count = 1u;
-    if (!cm_typeck_scoped_instantiation_is_valid(&typeck,
-            &impl_owner_scoped)) {
-        result.status = CM_SEMANTIC_ITEM_INVALID;
-        goto cleanup;
-    }
     typeck_status = cm_typeck_instantiate_hir_type_scoped(&typeck,
         impl_item->data.impl_item.self_type, &impl_owner_scoped, &self_type);
     if (typeck_status != CM_TYPECK_OK) {
@@ -1024,9 +1027,9 @@ static CmSemanticItemStatus cm_semantic_item_compare_finalized_method(
     CmSemanticItemStatus status;
     uint32_t index;
 
-    status = cm_semantic_item_declaration_shape(trait_method);
+    status = cm_semantic_item_declaration_shape(trait_method, 0);
     if (status != CM_SEMANTIC_ITEM_OK) return status;
-    status = cm_semantic_item_declaration_shape(impl_method);
+    status = cm_semantic_item_declaration_shape(impl_method, 0);
     if (status != CM_SEMANTIC_ITEM_OK) return status;
     if (trait_method->generic_parameter_count != 0u
         || impl_method->generic_parameter_count != 0u) {
@@ -1125,15 +1128,22 @@ static CmSemanticItemStatus cm_semantic_item_compare_finalized_method(
          index < impl_item->data.impl_item.trait_type.argument_count;
          ++index) {
         const CmHirGenericArg *argument;
+        CmSemanticItemTypeScan scan;
 
         argument = &impl_item->data.impl_item.trait_type.arguments[index];
         if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
             status = CM_SEMANTIC_ITEM_PENDING_GENERIC;
             goto cleanup;
         }
+        scan = cm_semantic_item_scan_type(hir, argument->data.type,
+            local_crate, impl_item->generic_parameter_count != 0u
+                ? impl_item->definition : cm_hir_def_id_none(), 0u);
+        status = cm_semantic_item_scan_status(scan);
+        if (status != CM_SEMANTIC_ITEM_OK) goto cleanup;
         trait_arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
-        *out_typeck = cm_typeck_import_hir_type(typeck,
-            argument->data.type, &trait_arguments[index].data.type);
+        *out_typeck = cm_typeck_instantiate_hir_type_scoped(typeck,
+            argument->data.type, &impl_owner_scoped,
+            &trait_arguments[index].data.type);
         if (*out_typeck != CM_TYPECK_OK) {
             status = cm_semantic_item_typeck_failure(*out_typeck);
             goto cleanup;

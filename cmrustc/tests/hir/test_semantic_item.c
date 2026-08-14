@@ -630,7 +630,10 @@ static void test_type_generic_impl_method_conformance(void)
     CmHirGenericParamId method_parameter_id;
     CmHirGenericParam trait_parameter;
     CmHirGenericParamId trait_parameter_id;
+    CmHirType trait_parameter_hir_type;
+    CmHirTypeId trait_parameter_type;
     CmHirGenericArg trait_argument;
+    CmHirTraitPredicate impl_predicate;
     CmHirCrateFinalization finalization;
     CmProjectionNormalizeLimits limits;
     CmSemanticItemResult result;
@@ -641,6 +644,19 @@ static void test_type_generic_impl_method_conformance(void)
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
     assert(result.status == CM_SEMANTIC_ITEM_OK);
+
+    memset(&impl_predicate, 0, sizeof(impl_predicate));
+    impl_predicate.subject = parameter_type;
+    impl_predicate.trait_type.definition = fixture.trait_definition;
+    impl_predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
+    mutable_item(&fixture, fixture.impl_definition)->predicates =
+        &impl_predicate;
+    mutable_item(&fixture, fixture.impl_definition)->predicate_count = 1u;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
+    mutable_item(&fixture, fixture.impl_definition)->predicates = NULL;
+    mutable_item(&fixture, fixture.impl_definition)->predicate_count = 0u;
 
     memset(&finalization, 0, sizeof(finalization));
     assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
@@ -720,19 +736,31 @@ static void test_type_generic_impl_method_conformance(void)
     trait_parameter.span = test_span(12u, 13u);
     assert(cm_hir_add_generic_param(&fixture.hir, &trait_parameter,
         &trait_parameter_id) == CM_HIR_OK);
+    memset(&trait_parameter_hir_type, 0, sizeof(trait_parameter_hir_type));
+    trait_parameter_hir_type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    trait_parameter_hir_type.span = test_span(13u, 14u);
+    trait_parameter_hir_type.data.parameter_type.parameter =
+        trait_parameter_id;
+    assert(cm_hir_add_type(&fixture.hir, &trait_parameter_hir_type,
+        &trait_parameter_type) == CM_HIR_OK);
     memset(&trait_argument, 0, sizeof(trait_argument));
     trait_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
     trait_argument.data.type = parameter_type;
     trait_item = mutable_item(&fixture, fixture.trait_definition);
     trait_item->generic_parameter_start = trait_parameter_id;
     trait_item->generic_parameter_count = 1u;
+    trait_item = mutable_item(&fixture, fixture.trait_method);
+    trait_item->data.function_item.signature.parameters[0].type =
+        trait_parameter_type;
+    trait_item->data.function_item.signature.return_type =
+        trait_parameter_type;
     mutable_item(&fixture, fixture.impl_definition)
         ->data.impl_item.trait_type.arguments = &trait_argument;
     mutable_item(&fixture, fixture.impl_definition)
         ->data.impl_item.trait_type.argument_count = 1u;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
-    assert(result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
     fixture_destroy(&fixture);
 
     fixture_init(&fixture, 1, 1);
@@ -976,11 +1004,14 @@ static void test_pending_and_invalid(void)
     impl_item->outlives_predicate_count = 0u;
 
     memset(&predicate, 0, sizeof(predicate));
+    predicate.subject = fixture.u32_type;
+    predicate.trait_type.definition = fixture.trait_definition;
+    predicate.modifier = CM_HIR_PREDICATE_REQUIRED;
     impl_item->predicates = &predicate;
     impl_item->predicate_count = 1u;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
-    assert(result.status == CM_SEMANTIC_ITEM_PENDING_PREDICATE);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
     predicate.equality_count = 1u;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
