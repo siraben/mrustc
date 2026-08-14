@@ -179,6 +179,27 @@ static CmHirDefId add_impl_associated(TestFixture *fixture,
     return definition;
 }
 
+static CmHirDefId add_specializable_impl_associated(TestFixture *fixture,
+    CmHirDefId impl_definition, CmHirDefId trait_associated_definition,
+    const char *name, CmHirTypeId target)
+{
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition(&fixture->hir,
+        fixture->crate_id, test_span(1u, 20u), &definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, fixture->root,
+        cm_hir_intern(&fixture->hir, name));
+    item.parent_definition = impl_definition;
+    item.is_specializable = 1;
+    item.data.type_alias_item.target = target;
+    item.data.type_alias_item.trait_item_definition =
+        trait_associated_definition;
+    assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_owner_equality(TestFixture *fixture,
     CmHirDefId trait_definition, CmHirDefId associated_definition,
     CmHirTypeId value)
@@ -503,6 +524,61 @@ static void test_structural_rebuild_and_siblings(void)
             normalized_reference->data.reference_type.pointee);
     }
     assert_u8(&runtime, normalized->data.tuple_type.elements[1]);
+    cm_projection_normalize_trace_destroy(&trace);
+    runtime_destroy(&runtime);
+    cm_hir_context_destroy(&fixture.hir);
+}
+
+static void test_specializable_impl_is_a_normalization_blocker(void)
+{
+    TestFixture fixture;
+    TestRuntime runtime;
+    CmHirDefId trait_definition;
+    CmHirDefId selected_associated;
+    CmHirDefId specializable_associated;
+    CmHirDefId impl_definition;
+    CmHirTypeId projection_hir;
+    CmTypeckTypeId projection_type;
+    CmProjectionNormalizeResult result;
+    CmProjectionNormalizeTrace trace;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    trait_definition = add_trait(&fixture, "SpecializationBlocked");
+    selected_associated = add_trait_associated(&fixture,
+        trait_definition, "Selected");
+    specializable_associated = add_trait_associated(&fixture,
+        trait_definition, "Specializable");
+    projection_hir = add_projection(&fixture, trait_definition,
+        selected_associated);
+    impl_definition = add_bool_impl(&fixture, trait_definition);
+    (void)add_impl_associated(&fixture, impl_definition,
+        selected_associated, "Selected", fixture.u8_hir);
+    (void)add_specializable_impl_associated(&fixture, impl_definition,
+        specializable_associated, "Specializable", fixture.bool_hir);
+    fixture.owner = add_trait(&fixture, "Owner");
+    runtime_init(&runtime, &fixture);
+    assert(cm_typeck_import_hir_type(&runtime.typeck, projection_hir,
+        &projection_type) == CM_TYPECK_OK);
+    cm_projection_normalize_trace_init(&trace);
+
+    type_count = cm_typeck_type_count(&runtime.typeck);
+    result = normalize_traced(&fixture, &runtime, projection_type, 1u,
+        &trace);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.cause == CM_PROJECTION_NORMALIZE_CAUSE_NONE
+        && result.type == CM_TYPECK_TYPE_NONE
+        && result.projection_step_count == 0u
+        && cm_typeck_type_count(&runtime.typeck) == type_count
+        && cm_projection_normalize_trace_count(&trace) == 0u
+        && cm_projection_normalize_trace_input_type(&trace)
+            == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_normalized_type(&trace)
+            == CM_TYPECK_TYPE_NONE
+        && cm_projection_normalize_trace_term_owner(&trace) == NULL
+        && cm_projection_normalize_trace_term_lifetime(&trace) == 0u
+        && cm_projection_normalize_trace_term_revision(&trace) == 0u);
+
     cm_projection_normalize_trace_destroy(&trace);
     runtime_destroy(&runtime);
     cm_hir_context_destroy(&fixture.hir);
@@ -1008,6 +1084,7 @@ int main(void)
 {
     test_root_environment_and_impl();
     test_structural_rebuild_and_siblings();
+    test_specializable_impl_is_a_normalization_blocker();
     test_chain_fuel_cycle_and_rollback();
     test_authentication_and_node_limit();
     test_adt_array_const_traversal();

@@ -70,7 +70,9 @@ uint64_t cm_projection_normalize_trace_term_revision(
 /*
  * Recursively normalize one typeck term using bounds-first projection target
  * selection. The complete operation is transactional: every non-proof leaves
- * typeck unchanged and returns type NONE.
+ * typeck unchanged and returns type NONE. A matching impl containing any
+ * specialization-default member is propagated as UNSUPPORTED; no trace step
+ * or impl evidence is published for it.
  */
 CmProjectionNormalizeResult cm_projection_normalize_type(
     const CmTraitImplIndex *index, const CmParamEnv *environment,

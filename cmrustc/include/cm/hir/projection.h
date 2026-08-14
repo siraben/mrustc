@@ -44,8 +44,10 @@ typedef struct CmHirProjectionImplTarget {
  * Match one local, positive impl for a qualified projection.  The bounded
  * matcher accepts exact scalar/zero-argument local ADT keys and full ordered
  * generic local ADT templates such as `impl<T> Trait for Wrapper<T>`.  It
- * performs no predicate solving, specialization, trait-argument matching, or
- * recursive projection selection.
+ * performs no predicate solving, specialization selection, trait-argument
+ * matching, or recursive projection selection. An otherwise matching impl
+ * that contains any specialization-default member is an explicit
+ * DEFERRED_ARGUMENTS blocker and never exposes a target or provider.
  *
  * `local_crate` is the crate whose compilation is requesting selection.  A
  * foreign trait or nominal self type returns DEFERRED_CRATE.  A potentially
@@ -75,7 +77,9 @@ CmHirProjectionResult cm_hir_select_projection(
 
 /*
  * Authenticate the associated target attached to one already-selected impl.
- * This performs no impl selection and returns no substitution evidence.
+ * A containing impl with any specialization-default member returns
+ * DEFERRED_ARGUMENTS. This performs no impl selection and returns no
+ * substitution evidence.
  */
 CmHirProjectionImplTarget cm_hir_projection_impl_target(
     const CmHirContext *context, CmHirCrateId local_crate,

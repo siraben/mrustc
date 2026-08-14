@@ -616,6 +616,24 @@ static const CmHirItem *cm_trait_find_definition_item(
     return NULL;
 }
 
+static int cm_trait_impl_contains_specializable_member(
+    const CmHirContext *hir, CmHirDefId impl_definition)
+{
+    size_t index;
+
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = cm_hir_get_item(hir, (CmHirItemId)(index + 1u));
+        if (item != NULL && item->is_specializable
+            && cm_hir_def_id_equal(item->parent_definition,
+                impl_definition)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int cm_trait_definition_is_known_foreign(
     const CmTraitImplIndexState *state, CmHirDefId definition,
     CmHirItemKind expected_kind)
@@ -765,6 +783,11 @@ static CmTraitSolverResultKind cm_trait_impl_index_init_internal(
         }
         if (item->data.impl_item.is_negative) {
             entry.unsupported_flags |= CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE;
+        }
+        if (cm_trait_impl_contains_specializable_member(hir,
+                item->definition)) {
+            entry.unsupported_flags |=
+                CM_TRAIT_IMPL_UNSUPPORTED_SPECIALIZATION;
         }
         trait_item = cm_trait_find_definition_item(hir,
             entry.trait_definition);

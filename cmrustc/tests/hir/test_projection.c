@@ -312,6 +312,26 @@ static CmHirDefId add_impl_associated(CmHirContext *context,
     return definition;
 }
 
+static CmHirDefId add_specializable_impl_associated(CmHirContext *context,
+    CmHirCrateId crate_id, CmHirModuleId module, CmHirDefId impl_definition,
+    CmHirDefId trait_item_definition, const char *name,
+    CmHirTypeId target)
+{
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirDefId definition;
+
+    assert(cm_hir_reserve_item_definition(context, crate_id,
+        test_span(1u, 2u), &definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, module,
+        impl_definition, cm_hir_intern(context, name));
+    item.is_specializable = 1;
+    item.data.type_alias_item.target = target;
+    item.data.type_alias_item.trait_item_definition = trait_item_definition;
+    assert(cm_hir_add_item(context, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_generic_impl_associated(CmHirContext *context,
     CmHirCrateId crate_id, CmHirModuleId module, CmHirDefId impl_definition,
     CmHirDefId trait_item_definition, const char *name)
@@ -1002,6 +1022,64 @@ static void test_symbolic_self_projection(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_specializable_impl_is_a_projection_blocker(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirDefId trait_definition;
+    CmHirDefId selected_associated;
+    CmHirDefId specializable_associated;
+    CmHirDefId impl_definition;
+    CmHirTypeId bool_type;
+    CmHirTypeId u8_type;
+    CmHirTypeId projection_type;
+    CmHirProjectionImplTarget impl_target;
+    size_t type_count;
+    size_t arena_bytes;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "specialization_projection_blocker"),
+        CM_HIR_EDITION_2024, test_span(0u, 100u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    bool_type = add_scalar(&context, CM_HIR_TYPE_BOOL_KIND, 0u);
+    u8_type = add_scalar(&context, CM_HIR_TYPE_INTEGER_KIND,
+        (unsigned int)CM_HIR_INT_U8);
+    trait_definition = add_trait(&context, crate_id, root_module,
+        "SpecializationTrait");
+    selected_associated = add_trait_associated(&context, crate_id,
+        root_module, trait_definition, "Selected");
+    specializable_associated = add_trait_associated(&context, crate_id,
+        root_module, trait_definition, "Specializable");
+    impl_definition = add_impl(&context, crate_id, root_module,
+        trait_definition, bool_type);
+    (void)add_impl_associated(&context, crate_id, root_module,
+        impl_definition, selected_associated, "Selected", u8_type);
+    (void)add_specializable_impl_associated(&context, crate_id, root_module,
+        impl_definition, specializable_associated, "Specializable",
+        bool_type);
+    projection_type = add_projection(&context, bool_type, trait_definition,
+        selected_associated, NULL, 0u, NULL, 0u);
+
+    type_count = context.types.len;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    check_empty_match(cm_hir_match_projection(&context, crate_id,
+        projection_type), CM_HIR_PROJECTION_DEFERRED_ARGUMENTS);
+    check_empty_result(cm_hir_select_projection(&context, crate_id,
+        projection_type), CM_HIR_PROJECTION_DEFERRED_ARGUMENTS);
+    impl_target = cm_hir_projection_impl_target(&context, crate_id,
+        impl_definition, trait_definition, selected_associated);
+    assert(impl_target.status == CM_HIR_PROJECTION_DEFERRED_ARGUMENTS
+        && impl_target.target_template == CM_HIR_TYPE_NONE
+        && cm_hir_def_id_is_none(
+            impl_target.impl_associated_definition));
+    assert(context.types.len == type_count
+        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+
+    cm_hir_context_destroy(&context);
+}
+
 int main(void)
 {
     CmHirContext context;
@@ -1333,5 +1411,6 @@ int main(void)
     test_generic_projection();
     test_cross_crate_projection_boundary();
     test_symbolic_self_projection();
+    test_specializable_impl_is_a_projection_blocker();
     return 0;
 }

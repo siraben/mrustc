@@ -404,6 +404,24 @@ static const CmHirItem *cm_projection_impl_associated_item(
     return result;
 }
 
+static int cm_projection_impl_contains_specializable_member(
+    const CmHirContext *context, CmHirDefId impl_definition)
+{
+    size_t index;
+
+    for (index = 0u; index < context->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&context->items, index);
+        if (item != NULL && item->is_specializable
+            && cm_hir_def_id_equal(item->parent_definition,
+                impl_definition)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 CmHirProjectionImplTarget cm_hir_projection_impl_target(
     const CmHirContext *context, CmHirCrateId local_crate,
     CmHirDefId impl_definition, CmHirDefId trait_definition,
@@ -450,6 +468,11 @@ CmHirProjectionImplTarget cm_hir_projection_impl_target(
         return cm_projection_impl_target_result(
             CM_HIR_PROJECTION_DEFERRED_ARGUMENTS);
     }
+    if (cm_projection_impl_contains_specializable_member(context,
+            impl_definition)) {
+        return cm_projection_impl_target_result(
+            CM_HIR_PROJECTION_DEFERRED_ARGUMENTS);
+    }
     impl_associated = cm_projection_impl_associated_item(context,
         impl_definition, trait_associated_definition, &associated_count);
     if (associated_count != 1u || impl_associated == NULL
@@ -491,6 +514,7 @@ CmHirProjectionMatch cm_hir_match_projection(
     uint32_t associated_count;
     int saw_deferred_crate;
     int saw_deferred;
+    int saw_specialization;
 
     if (context == NULL || cm_hir_get_crate(context, local_crate) == NULL) {
         return cm_projection_match_result(
@@ -547,6 +571,7 @@ CmHirProjectionMatch cm_hir_match_projection(
     candidate_count = 0u;
     saw_deferred_crate = 0;
     saw_deferred = 0;
+    saw_specialization = 0;
     for (index = 0u; index < context->items.len; ++index) {
         const CmHirItem *item;
         CmProjectionCandidateMatch candidate_match;
@@ -570,11 +595,20 @@ CmHirProjectionMatch cm_hir_match_projection(
         candidate_match = cm_projection_match_candidate(context, item,
             self_type, &query, local_crate);
         if (candidate_match == CM_PROJECTION_CANDIDATE_EQUAL) {
-            selected_impl = item;
-            candidate_count += 1u;
+            if (cm_projection_impl_contains_specializable_member(context,
+                    item->definition)) {
+                saw_specialization = 1;
+            } else {
+                selected_impl = item;
+                candidate_count += 1u;
+            }
         } else if (candidate_match == CM_PROJECTION_CANDIDATE_DEFERRED) {
             saw_deferred = 1;
         }
+    }
+    if (saw_specialization) {
+        return cm_projection_match_result(
+            CM_HIR_PROJECTION_DEFERRED_ARGUMENTS);
     }
     if (candidate_count > 1u) {
         return cm_projection_match_result(CM_HIR_PROJECTION_AMBIGUOUS);

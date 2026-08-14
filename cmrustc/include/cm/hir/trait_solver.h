@@ -61,7 +61,9 @@ typedef enum CmTraitImplUnsupportedFlag {
     CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE = 1u << 4,
     CM_TRAIT_IMPL_UNSUPPORTED_PROJECTION = 1u << 5,
     CM_TRAIT_IMPL_UNSUPPORTED_NON_MONOMORPHIC = 1u << 6,
-    CM_TRAIT_IMPL_UNSUPPORTED_TYPE = 1u << 7
+    CM_TRAIT_IMPL_UNSUPPORTED_TYPE = 1u << 7,
+    /* At least one direct impl member is a specialization default. */
+    CM_TRAIT_IMPL_UNSUPPORTED_SPECIALIZATION = 1u << 8
 } CmTraitImplUnsupportedFlag;
 
 typedef struct CmTraitImplIndexEntry {
@@ -192,10 +194,11 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
  * concrete goal; no structural or blanket auto-trait facts are synthesized.
  * Type-only positive ordinary impl generics are instantiated with fresh
  * inference variables; every broader negative, auto-trait generic/predicate,
- * foreign, malformed, child-bearing, or overlapping shape is an explicit
- * blocker or ambiguity. Every candidate probe is rolled back. Bindings from
- * the unique positive winner are recreated and committed; every non-PROVEN
- * result leaves the typeck session unchanged and publishes no provider.
+ * foreign, malformed, specialized, child-bearing, or overlapping shape is an
+ * explicit blocker or ambiguity. Every candidate probe is rolled back.
+ * Bindings from the unique positive winner are recreated and committed; every
+ * non-PROVEN result leaves the typeck session unchanged and publishes no
+ * provider.
  */
 CmTraitSelectionResult cm_trait_solver_select(
     const CmTraitImplIndex *index, CmTypeckContext *typeck,
