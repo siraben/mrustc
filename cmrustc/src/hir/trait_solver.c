@@ -1350,6 +1350,57 @@ static CmTraitMatchResult cm_trait_match_instantiation_status(
     return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE, status);
 }
 
+/*
+ * A fresh trait-query argument is a useful wildcard only while candidates
+ * are being matched.  Do not let a candidate whose own generic argument is
+ * unconstrained turn that wildcard into a false proof: after unification the
+ * query argument must have become concrete.  This check deliberately visits
+ * type arguments only; lifetime and const inference are rejected by the
+ * ordinary goal validator before candidate matching starts.
+ */
+static CmTraitMatchResult cm_trait_query_arguments_proven(
+    const CmTypeckContext *typeck, const CmTypeckNamedType *query_trait)
+{
+    uint32_t index;
+
+    if (typeck == NULL || query_trait == NULL
+        || (query_trait->argument_count != 0u
+            && query_trait->arguments == NULL)) {
+        return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+            CM_TYPECK_INVALID_ARGUMENT);
+    }
+    for (index = 0u; index < query_trait->argument_count; ++index) {
+        const CmTypeckGenericArg *argument;
+        CmTraitTypeScan scan;
+
+        argument = &query_trait->arguments[index];
+        if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
+        scan = cm_trait_scan_typeck_type(typeck, argument->data.type);
+        if (scan == CM_TRAIT_TYPE_SCAN_INFERENCE) {
+            CmTraitMatchResult result;
+
+            result = cm_trait_match_result(CM_TRAIT_MATCH_NONPROVEN,
+                CM_TYPECK_OK);
+            result.solver_kind = CM_TRAIT_SOLVER_DEFERRED_INFERENCE;
+            return result;
+        }
+        if (scan == CM_TRAIT_TYPE_SCAN_PROJECTION
+            || scan == CM_TRAIT_TYPE_SCAN_UNSUPPORTED) {
+            return cm_trait_match_result(CM_TRAIT_MATCH_UNSUPPORTED,
+                CM_TYPECK_OK);
+        }
+        if (scan == CM_TRAIT_TYPE_SCAN_OVERFLOW) {
+            return cm_trait_match_result(CM_TRAIT_MATCH_OVERFLOW,
+                CM_TYPECK_OVERFLOW);
+        }
+        if (scan != CM_TRAIT_TYPE_SCAN_CONCRETE) {
+            return cm_trait_match_result(CM_TRAIT_MATCH_TYPECK_FAILURE,
+                CM_TYPECK_INVALID_ARGUMENT);
+        }
+    }
+    return cm_trait_match_result(CM_TRAIT_MATCH_YES, CM_TYPECK_OK);
+}
+
 static CmTraitMatchResult cm_trait_match_evaluation(
     const CmTraitSelectionResult *selection)
 {
@@ -1741,6 +1792,16 @@ static CmTraitMatchResult cm_trait_match_candidate(
         solver_kind = projection.solver_kind;
         status = projection.typeck_status;
     }
+    if (match == CM_TRAIT_MATCH_YES) {
+        CmTraitMatchResult query_arguments;
+
+        /* Predicates/projection equalities may constrain the query variable. */
+        query_arguments = cm_trait_query_arguments_proven(typeck,
+            query_trait);
+        match = query_arguments.kind;
+        solver_kind = query_arguments.solver_kind;
+        status = query_arguments.typeck_status;
+    }
     if (keep_bindings && match == CM_TRAIT_MATCH_YES) {
         if (witness != NULL && item->generic_parameter_count != 0u) {
             witness_arguments = (CmTypeckGenericArg *)cm_alloc_zeroed(
@@ -1864,7 +1925,28 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
     if (queried_trait->data.trait_item.is_auto) {
         return CM_TRAIT_SOLVER_UNSUPPORTED;
     }
+    /*
+     * The receiver is the selection head and must already be concrete.  A
+     * type argument on the queried trait is different: callers such as a
+     * dot-method expression may not carry the trait arguments in HIR, so the
+     * candidate matcher needs to infer those arguments while matching the
+     * impl header.  Keep these two scans separate instead of treating every
+     * inference variable as an immediately deferred goal.
+     */
     scan = cm_trait_scan_typeck_type(typeck, self_type);
+    if (scan == CM_TRAIT_TYPE_SCAN_INFERENCE) {
+        return CM_TRAIT_SOLVER_DEFERRED_INFERENCE;
+    }
+    if (scan == CM_TRAIT_TYPE_SCAN_PROJECTION
+        || scan == CM_TRAIT_TYPE_SCAN_UNSUPPORTED) {
+        return CM_TRAIT_SOLVER_UNSUPPORTED;
+    }
+    if (scan == CM_TRAIT_TYPE_SCAN_OVERFLOW) {
+        return CM_TRAIT_SOLVER_OVERFLOW;
+    }
+    if (scan != CM_TRAIT_TYPE_SCAN_CONCRETE) {
+        return CM_TRAIT_SOLVER_INVALID;
+    }
     for (argument_index = 0u;
          argument_index < trait_type->argument_count; ++argument_index) {
         const CmTypeckGenericArg *argument;
@@ -1890,20 +1972,26 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
         } else {
             argument_scan = CM_TRAIT_TYPE_SCAN_INVALID;
         }
-        scan = cm_trait_scan_merge(scan, argument_scan);
+        if (argument->kind == CM_HIR_GENERIC_ARG_TYPE
+            && argument_scan == CM_TRAIT_TYPE_SCAN_INFERENCE) {
+            /* Candidate matching is responsible for binding this variable. */
+            continue;
+        }
+        if (argument_scan == CM_TRAIT_TYPE_SCAN_INFERENCE) {
+            return CM_TRAIT_SOLVER_DEFERRED_INFERENCE;
+        }
+        if (argument_scan == CM_TRAIT_TYPE_SCAN_PROJECTION
+            || argument_scan == CM_TRAIT_TYPE_SCAN_UNSUPPORTED) {
+            return CM_TRAIT_SOLVER_UNSUPPORTED;
+        }
+        if (argument_scan == CM_TRAIT_TYPE_SCAN_OVERFLOW) {
+            return CM_TRAIT_SOLVER_OVERFLOW;
+        }
+        if (argument_scan != CM_TRAIT_TYPE_SCAN_CONCRETE) {
+            return CM_TRAIT_SOLVER_INVALID;
+        }
     }
-    if (scan == CM_TRAIT_TYPE_SCAN_INFERENCE) {
-        return CM_TRAIT_SOLVER_DEFERRED_INFERENCE;
-    }
-    if (scan == CM_TRAIT_TYPE_SCAN_PROJECTION
-        || scan == CM_TRAIT_TYPE_SCAN_UNSUPPORTED) {
-        return CM_TRAIT_SOLVER_UNSUPPORTED;
-    }
-    if (scan == CM_TRAIT_TYPE_SCAN_OVERFLOW) {
-        return CM_TRAIT_SOLVER_OVERFLOW;
-    }
-    return scan == CM_TRAIT_TYPE_SCAN_CONCRETE
-        ? CM_TRAIT_SOLVER_PROVEN : CM_TRAIT_SOLVER_INVALID;
+    return CM_TRAIT_SOLVER_PROVEN;
 }
 
 static int cm_trait_nonproof_rank(CmTraitSolverResultKind kind)

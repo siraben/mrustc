@@ -633,6 +633,7 @@ static CmTypeckTypeId add_typeck_static_reference(
 static void test_type_only_generic_selection(void)
 {
     TestFixture fixture;
+    CmHirDefId unconstrained_trait;
     TestFixture reversed_fixture;
     CmTraitImplIndex impl_index;
     CmTraitImplIndex reversed_index;
@@ -644,6 +645,8 @@ static void test_type_only_generic_selection(void)
     CmTypeckTypeId tuple_type;
     CmTypeckTypeId nested_type;
     CmTypeckTypeId variable;
+    CmTypeckTypeId trait_variable;
+    CmTypeckTypeId unconstrained_variable;
     CmTypeckTypeId resolved;
     CmTypeckGenericArg arguments[2];
     CmTypeckNamedType query;
@@ -655,6 +658,10 @@ static void test_type_only_generic_selection(void)
     int saw_lifetime_blocker;
 
     fixture_init(&fixture);
+    unconstrained_trait = add_type_trait(&fixture.hir,
+        fixture.crate_id, fixture.root, "Unconstrained", 1u);
+    (void)add_type_only_generic_impl(&fixture, unconstrained_trait,
+        TEST_GENERIC_SELF_BOOL, TEST_GENERIC_ARGS_PARAMETER, 1u);
     memset(&impl_index, 0, sizeof(impl_index));
     assert(cm_trait_impl_index_init(&impl_index, &fixture.hir,
         fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
@@ -711,6 +718,32 @@ static void test_type_only_generic_selection(void)
             == CM_TRAIT_PROOF_EQUALITY_NONE
         && result.supported_match_count == 1u
         && !cm_hir_def_id_is_none(result.impl_definition));
+
+    /* A concrete receiver can infer an omitted type trait argument. */
+    assert(cm_typeck_new_variable(&typeck, CM_HIR_INFER_GENERAL,
+        test_span(2u, 3u), &trait_variable) == CM_TYPECK_OK);
+    arguments[0].data.type = trait_variable;
+    result = cm_trait_solver_select(&impl_index, &typeck, tuple_type,
+        &query);
+    assert(result.kind == CM_TRAIT_SOLVER_PROVEN
+        && result.supported_match_count == 1u);
+    assert(cm_typeck_resolve(&typeck, trait_variable, &resolved)
+        == CM_TYPECK_OK);
+    assert(resolved == u8_type);
+
+    /* A trait argument with no receiver/predicate constraint must defer. */
+    assert(cm_typeck_new_variable(&typeck, CM_HIR_INFER_GENERAL,
+        test_span(3u, 4u), &unconstrained_variable) == CM_TYPECK_OK);
+    arguments[0].data.type = unconstrained_variable;
+    query = trait_query(unconstrained_trait);
+    query.arguments = arguments;
+    query.argument_count = 1u;
+    result = cm_trait_solver_select(&impl_index, &typeck, bool_type,
+        &query);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_INFERENCE);
+    assert(cm_typeck_resolve(&typeck, unconstrained_variable, &resolved)
+        == CM_TYPECK_OK);
+    assert(resolved == unconstrained_variable);
 
     arguments[0].data.type = bool_type;
     type_count = cm_typeck_type_count(&typeck);
