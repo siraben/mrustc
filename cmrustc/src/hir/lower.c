@@ -122,6 +122,7 @@ typedef struct CmLowerState {
     CmSpan generated_span;
     int use_generated_span;
     int authenticated_external_import_errors_only;
+    const CmHirItem *active_predicate_item;
     int failed;
 } CmLowerState;
 
@@ -3346,6 +3347,36 @@ static int cm_lower_self_context(const CmLowerState *state,
         *out_trait_definition = record->definition;
         return 1;
     }
+    if (parent == NULL && record->kind == CM_AST_ITEM_IMPL
+        && state->active_predicate_item != NULL
+        && cm_hir_def_id_equal(state->active_predicate_item->definition,
+            record->definition)
+        && state->active_predicate_item->owner_module
+            == record->owner_module
+        && state->active_predicate_item->generic_parameter_start
+            == record->generic_parameter_start
+        && state->active_predicate_item->generic_parameter_count
+            == record->generic_parameter_count) {
+        const CmHirDefinition *definition;
+
+        definition = cm_hir_lookup_definition(state->hir,
+            record->definition);
+        if (definition != NULL
+            && definition->kind == CM_HIR_DEFINITION_ITEM
+            && definition->state == CM_HIR_DEFINITION_RESERVED
+            && definition->has_reserved_item_kind
+            && definition->reserved_item_kind == CM_HIR_ITEM_IMPL) {
+            /*
+             * Impl generic predicates are lowered before the temporary impl
+             * header can be bound.  The reserved DefId plus the active
+             * predicate item is the authenticated owner for a bare Self;
+             * the implemented-trait identity is intentionally unavailable at
+             * this point, so Self::Assoc remains fail-closed below.
+             */
+            *out_self_owner = record->definition;
+            return 1;
+        }
+    }
     if (parent == NULL) return 0;
     *out_self_owner = record->definition;
     if (parent->kind == CM_HIR_ITEM_TRAIT) {
@@ -3416,6 +3447,14 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
             CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
             "generic arguments on Self itself are not supported");
+        return CM_HIR_TYPE_NONE;
+    }
+    if (path->segment_count == 2u
+        && cm_hir_def_id_is_none(trait_definition)) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNRESOLVED_PATH, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "Self associated-type projection requires an authenticated "
+            "implemented trait");
         return CM_HIR_TYPE_NONE;
     }
     self_type = cm_lower_self_type(state, ast_type_id, span, self_owner);
@@ -8923,6 +8962,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     size_t apit_index;
     CmSpan item_span;
     const CmHirItem *previous_active_item;
+    const CmHirItem *previous_active_predicate_item;
 
     item_span = cm_lower_span(state, ast_item->span);
     if (!cm_lower_validate_item_where_predicates(state, ast_item_id,
@@ -9146,6 +9186,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     outlives_predicate_count = 0u;
     predicate_scope_count = 0u;
     previous_active_item = state->active_item;
+    previous_active_predicate_item = state->active_predicate_item;
     hir_item->predicates = predicates;
     hir_item->predicate_count = 0u;
     hir_item->outlives_predicates = outlives_predicates;
@@ -9153,6 +9194,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
     hir_item->predicate_scopes = predicate_scopes;
     hir_item->predicate_scope_count = 0u;
     state->active_item = hir_item;
+    state->active_predicate_item = hir_item;
     for (parameter_index = 0u;
          parameter_index < ast_item->generic_parameter_count
             && !state->failed;
@@ -9539,6 +9581,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
         }
     }
     state->active_item = previous_active_item;
+    state->active_predicate_item = previous_active_predicate_item;
     if (state->failed || predicate_count != total_count
         || outlives_predicate_count != outlives_total_count) {
         uint32_t index;

@@ -2797,6 +2797,83 @@ static void test_positive_impl_predicates(void)
     cm_hir_context_destroy(&context);
 }
 
+static void check_impl_owned_self_predicate(const CmHirContext *context)
+{
+    const CmHirItem *bound;
+    const CmHirItem *impl_item;
+    const CmHirItem *output;
+    const CmHirType *subject;
+    const CmHirType *equality_value;
+
+    bound = find_item(context, "Bound");
+    impl_item = find_impl(context);
+    output = bound == NULL ? NULL
+        : find_child(context, bound->definition, "Output");
+    subject = impl_item == NULL || impl_item->predicate_count != 1u
+        ? NULL : cm_hir_get_type(context, impl_item->predicates[0].subject);
+    equality_value = impl_item == NULL || impl_item->predicate_count != 1u
+        || impl_item->predicates[0].equality_count != 1u
+        ? NULL : cm_hir_get_type(context,
+            impl_item->predicates[0].equalities[0].value);
+    assert(bound != NULL && output != NULL && impl_item != NULL
+        && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->generic_parameter_count == 1u
+        && impl_item->predicate_count == 1u
+        && impl_item->predicates != NULL
+        && subject != NULL && subject->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(subject->data.self_type.owner,
+            impl_item->definition)
+        && cm_hir_def_id_equal(
+            impl_item->predicates[0].trait_type.definition,
+            bound->definition)
+        && impl_item->predicates[0].equality_count == 1u
+        && cm_hir_def_id_equal(
+            impl_item->predicates[0].equalities[0].associated_type,
+            output->definition)
+        && equality_value != NULL
+        && equality_value->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(equality_value->data.self_type.owner,
+            impl_item->definition));
+}
+
+static void test_impl_header_self_predicates(void)
+{
+    static const char source[] =
+        "trait Bound { type Output; } trait Trait {} struct Wrapper<T>; "
+        "impl<T> Trait for Wrapper<T> where Self: Bound<Output = Self> {}";
+    static const char rejected[] =
+        "trait Bound {} trait Trait {} struct Wrapper<T>; "
+        "impl<T> Trait for Wrapper<T> where Self::Missing: Bound {}";
+    CmAst ast;
+    CmExpandedAst expanded;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *bound;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 0u);
+    check_impl_owned_self_predicate(&context);
+    cm_hir_context_destroy(&context);
+
+    make_cfg_view(source, &ast, &expanded);
+    result = lower_cfg_view(&context, &ast, &expanded);
+    assert(result.error_count == 0u);
+    check_impl_owned_self_predicate(&context);
+    cm_hir_context_destroy(&context);
+    cm_expanded_ast_destroy(&expanded);
+    cm_ast_destroy(&ast);
+
+    result = lower_source(rejected, &context, NULL);
+    bound = find_item(&context, "Bound");
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNRESOLVED_PATH
+        && strstr(result.first_error.message,
+            "authenticated implemented trait") != NULL
+        && bound != NULL && find_impl(&context) == NULL
+        && context.items.len == 2u && context.types.len == 0u);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_monomorphic_trait_impl_entry_points(void)
 {
     static const char source[] =
@@ -7327,6 +7404,7 @@ int main(void)
     test_cross_trait_projection_default_entry_points();
     test_generic_impl_trait_arguments();
     test_positive_impl_predicates();
+    test_impl_header_self_predicates();
     test_monomorphic_trait_impl_entry_points();
     test_generic_associated_type_entry_points();
     test_self_gat_projection_arguments();
