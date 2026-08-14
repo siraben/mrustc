@@ -1152,23 +1152,31 @@ static void test_unsupported_constructs_are_errors(void)
 
     result = lower_source(
         "fn consume() -> impl FnMut(u8) {}", &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
+    bad = find_item(&context, "consume");
+    alias_type = bad == NULL || bad->kind != CM_HIR_ITEM_FUNCTION
+        ? NULL : cm_hir_get_type(&context,
+            bad->data.function_item.signature.return_type);
+    assert(result.error_count == 0u
+        && alias_type != NULL
+        && alias_type->kind == CM_HIR_TYPE_OPAQUE_KIND
+        && cm_hir_def_id_equal(alias_type->data.named_type.definition,
+            bad->definition));
     cm_hir_context_destroy(&context);
 
     result = lower_source(
         "fn consume() -> impl Error + ?Sized {}", &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     result = lower_source(
         "fn consume() -> impl for<'a> Fn(&'a u8) {}", &context, NULL);
-    assert(result.error_count == 1u);
-    assert(result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
-    assert(strstr(result.first_error.message, "opaque impl trait") != NULL);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "type Opaque = impl Error;", &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
     cm_hir_context_destroy(&context);
 
     result = lower_source("#[repr(C)] struct Bad;", &context, NULL);
@@ -1388,15 +1396,21 @@ static void test_const_generic_trait_method_declaration(void)
 static void test_macro_expanded_array_length_expression(void)
 {
     static const char source[] =
-        "struct Holder<T> { values: [T; ((32 - 1) - 1)] }";
+        "struct Holder<T> { values: [T; ((32 - 1) - 1)] }"
+        "struct PointerStorage {"
+        " values: [*const (); 16 / size_of::<*const ()>()]"
+        "}";
     CmHirContext context;
     CmHirLowerResult result;
     const CmHirItem *holder;
+    const CmHirItem *pointer_storage;
     const CmHirType *array;
+    const CmHirType *pointer_array;
     const CmHirType *length_type;
 
     result = lower_source(source, &context, NULL);
     holder = find_item(&context, "Holder");
+    pointer_storage = find_item(&context, "PointerStorage");
     array = holder == NULL || holder->kind != CM_HIR_ITEM_STRUCT
             || holder->data.aggregate_item.field_count != 1u
         ? NULL : cm_hir_get_type(&context,
@@ -1404,16 +1418,90 @@ static void test_macro_expanded_array_length_expression(void)
     length_type = array == NULL || array->kind != CM_HIR_TYPE_ARRAY_KIND
         ? NULL : cm_hir_get_type(&context,
             array->data.array_type.length.type);
+    pointer_array = pointer_storage == NULL
+            || pointer_storage->kind != CM_HIR_ITEM_STRUCT
+            || pointer_storage->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            pointer_storage->data.aggregate_item.fields[0].type);
     assert(result.error_count == 0u
         && holder != NULL && array != NULL
         && array->kind == CM_HIR_TYPE_ARRAY_KIND
         && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
         && array->data.array_type.length.data.value.low_bits == 30u
+        && pointer_array != NULL
+        && pointer_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && pointer_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && pointer_array->data.array_type.length.data.value.low_bits
+            == 16u / (uint64_t)sizeof(void *)
         && length_type != NULL
         && length_type->kind == CM_HIR_TYPE_INTEGER_KIND
         && length_type->data.integer_type.kind == CM_HIR_INT_USIZE);
     cm_hir_context_destroy(&context);
 
+    result = lower_source(
+        "struct Unsupported { values: [u8; 16 / size_of::<u8>()] }",
+        &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE);
+    cm_hir_context_destroy(&context);
+
+}
+
+static void test_const_generic_type_alias_application(void)
+{
+    static const char source[] =
+        "type ArrayAlias<T, const N: usize> = [T; N];"
+        "struct Uses<T, const N: usize> { value: ArrayAlias<T, N> }"
+        "struct Concrete { value: ArrayAlias<u8, 4> }";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *uses;
+    const CmHirItem *concrete;
+    const CmHirType *uses_array;
+    const CmHirType *uses_element;
+    const CmHirType *concrete_array;
+    const CmHirType *concrete_element;
+
+    result = lower_source(source, &context, NULL);
+    uses = find_item(&context, "Uses");
+    concrete = find_item(&context, "Concrete");
+    uses_array = uses == NULL || uses->kind != CM_HIR_ITEM_STRUCT
+            || uses->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            uses->data.aggregate_item.fields[0].type);
+    uses_element = uses_array == NULL
+            || uses_array->kind != CM_HIR_TYPE_ARRAY_KIND
+        ? NULL : cm_hir_get_type(&context,
+            uses_array->data.array_type.element);
+    concrete_array = concrete == NULL
+            || concrete->kind != CM_HIR_ITEM_STRUCT
+            || concrete->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            concrete->data.aggregate_item.fields[0].type);
+    concrete_element = concrete_array == NULL
+            || concrete_array->kind != CM_HIR_TYPE_ARRAY_KIND
+        ? NULL : cm_hir_get_type(&context,
+            concrete_array->data.array_type.element);
+    assert(result.error_count == 0u
+        && uses != NULL && uses->generic_parameter_count == 2u
+        && uses_array != NULL
+        && uses_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && uses_element != NULL
+        && uses_element->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && uses_element->data.parameter_type.parameter
+            == uses->generic_parameter_start
+        && uses_array->data.array_type.length.kind
+            == CM_HIR_CONST_PARAMETER
+        && uses_array->data.array_type.length.data.parameter
+            == uses->generic_parameter_start + 1u
+        && concrete_array != NULL
+        && concrete_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && concrete_element != NULL
+        && concrete_element->kind == CM_HIR_TYPE_INTEGER_KIND
+        && concrete_element->data.integer_type.kind == CM_HIR_INT_U8
+        && concrete_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && concrete_array->data.array_type.length.data.value.low_bits == 4u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_adt_function_pointer_default_substitution(void)
@@ -7859,6 +7947,7 @@ int main(void)
     test_const_parameter_adt_argument();
     test_const_generic_trait_method_declaration();
     test_macro_expanded_array_length_expression();
+    test_const_generic_type_alias_application();
     test_adt_function_pointer_default_substitution();
     test_generic_parameter_shadows_type_path_prefix();
     test_shorthand_inherited_associated_type_projection();

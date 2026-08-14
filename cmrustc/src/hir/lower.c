@@ -2382,6 +2382,42 @@ static int cm_lower_parse_array_length_expression(
     return parser.position == parser.length;
 }
 
+/* Rust 1.90's TypeId storage is expressed in pointer-sized words.  HIR
+ * lowering does not yet receive the configured target width, so admit only
+ * this exact bootstrap expression and use the bootstrap compiler's pointer
+ * width.  General size_of evaluation remains closed until target properties
+ * are carried into this pass. */
+static int cm_lower_parse_pointer_storage_length(
+    const CmInternedString *text, uint64_t *out_value)
+{
+    static const unsigned char expected[] =
+        "16/size_of::<*const()>()";
+    size_t expected_position;
+    size_t position;
+
+    if (text == NULL || out_value == NULL) return 0;
+    expected_position = 0u;
+    for (position = 0u; position < text->len; ++position) {
+        unsigned char byte;
+
+        byte = text->bytes[position];
+        if (byte == (unsigned char)' '
+            || byte == (unsigned char)'\t'
+            || byte == (unsigned char)'\r'
+            || byte == (unsigned char)'\n') {
+            continue;
+        }
+        if (expected_position + 1u >= sizeof(expected)
+            || byte != expected[expected_position]) {
+            return 0;
+        }
+        expected_position += 1u;
+    }
+    if (expected_position + 1u != sizeof(expected)) return 0;
+    *out_value = 16u / (uint64_t)sizeof(void *);
+    return 1;
+}
+
 static CmHirTypeId cm_lower_add_type(CmLowerState *state,
     const CmHirType *type, CmAstTypeId ast_type_id)
 {
@@ -2901,13 +2937,13 @@ static int cm_lower_alias_arguments(CmLowerState *state,
     CmHirDefId alias_definition, const CmLowerItemRecord *record, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count)
 {
-    CmHirGenericArg *explicit_arguments;
     CmHirGenericArg *arguments;
     CmHirGenericParamId parameter_start;
     uint32_t parameter_count;
     uint32_t lifetime_count;
-    uint32_t explicit_count;
     uint32_t explicit_lifetime_count;
+    uint32_t inferred_lifetime_count;
+    uint32_t argument_count;
     uint32_t parameter_index;
     uint32_t explicit_index;
 
@@ -2929,8 +2965,7 @@ static int cm_lower_alias_arguments(CmLowerState *state,
             parameter_start + parameter_index);
         if (parameter == NULL
             || !cm_hir_def_id_equal(parameter->owner, alias_definition)
-            || parameter->index != parameter_index
-            || parameter->kind == CM_HIR_GENERIC_CONST) {
+            || parameter->index != parameter_index) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_ALIAS, span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK, "type alias has an invalid generic signature");
@@ -2947,37 +2982,42 @@ static int cm_lower_alias_arguments(CmLowerState *state,
             lifetime_count += 1u;
         }
     }
-    explicit_arguments = NULL;
-    explicit_count = 0u;
-    if (!cm_lower_generic_arguments(state, segment, module, owner, span,
-            &explicit_arguments, &explicit_count)) {
+    if ((segment->argument_count == 0u) != (segment->arguments == NULL)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "type alias generic argument count and storage disagree");
         return 0;
     }
     explicit_lifetime_count = 0u;
-    for (explicit_index = 0u; explicit_index < explicit_count;
+    for (explicit_index = 0u; explicit_index < segment->argument_count;
          ++explicit_index) {
-        if (explicit_arguments[explicit_index].kind
-            == CM_HIR_GENERIC_ARG_LIFETIME) {
+        if (segment->arguments[explicit_index].kind
+            == CM_AST_GENERIC_LIFETIME) {
             explicit_lifetime_count += 1u;
         }
     }
-    if (explicit_lifetime_count != 0u) {
-        *out_arguments = explicit_arguments;
-        *out_count = explicit_count;
-        return 1;
-    }
-    if (explicit_count > UINT32_MAX - lifetime_count) {
-        cm_free(explicit_arguments);
+    inferred_lifetime_count = explicit_lifetime_count == 0u
+        ? lifetime_count : 0u;
+    if (segment->argument_count
+            > UINT32_MAX - inferred_lifetime_count) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_ALIAS, span,
             CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
             CM_HIR_ID_EXHAUSTED,
             "type alias generic argument count overflow");
         return 0;
     }
-    arguments = lifetime_count + explicit_count == 0u ? NULL
+    argument_count = inferred_lifetime_count + segment->argument_count;
+    if (argument_count > parameter_count) {
+        cm_lower_fail(state, CM_HIR_LOWER_ALIAS_ARGUMENT_MISMATCH, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "type alias application supplies too many generic arguments");
+        return 0;
+    }
+    arguments = argument_count == 0u ? NULL
         : (CmHirGenericArg *)cm_alloc_zeroed(
-            (size_t)(lifetime_count + explicit_count), sizeof(*arguments));
-    for (parameter_index = 0u; parameter_index < lifetime_count;
+            (size_t)argument_count, sizeof(*arguments));
+    for (parameter_index = 0u;
+         parameter_index < inferred_lifetime_count;
          ++parameter_index) {
         arguments[parameter_index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
         arguments[parameter_index].data.lifetime.kind = CM_HIR_REGION_INFER;
@@ -2985,14 +3025,87 @@ static int cm_lower_alias_arguments(CmLowerState *state,
             state->next_region_inference;
         state->next_region_inference += 1u;
     }
-    for (explicit_index = 0u; explicit_index < explicit_count;
+    for (explicit_index = 0u;
+         explicit_index < segment->argument_count && !state->failed;
          ++explicit_index) {
-        arguments[lifetime_count + explicit_index] =
-            explicit_arguments[explicit_index];
+        const CmAstGenericArg *ast_argument;
+        const CmHirGenericParam *parameter;
+        CmHirGenericArg *argument;
+
+        ast_argument = &segment->arguments[explicit_index];
+        parameter_index = inferred_lifetime_count + explicit_index;
+        parameter = cm_hir_get_generic_param(state->hir,
+            parameter_start + parameter_index);
+        argument = &arguments[parameter_index];
+        if (!cm_lower_validate_generic_constraint(state, CM_AST_ITEM_NONE,
+                CM_AST_PATH_NONE, ast_argument)) {
+            break;
+        }
+        if (parameter == NULL
+            || !cm_hir_def_id_equal(parameter->owner, alias_definition)
+            || parameter->index != parameter_index) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_ALIAS, span,
+                CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "type alias has an invalid authenticated generic signature");
+            break;
+        }
+        if (parameter->kind == CM_HIR_GENERIC_TYPE
+            && ast_argument->kind == CM_AST_GENERIC_TYPE) {
+            argument->kind = CM_HIR_GENERIC_ARG_TYPE;
+            argument->data.type = cm_lower_type(state, ast_argument->type,
+                module, owner);
+        } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
+            && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
+            argument->kind = CM_HIR_GENERIC_ARG_LIFETIME;
+            (void)cm_lower_lifetime(state, ast_argument->text, owner,
+                cm_lower_span(state, ast_argument->span),
+                &argument->data.lifetime);
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_TYPE) {
+            (void)cm_lower_const_path_argument(state, ast_argument, owner,
+                parameter, cm_lower_span(state, ast_argument->span),
+                argument);
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST
+            && ast_argument->kind == CM_AST_GENERIC_CONST) {
+            const CmHirType *declared_type;
+            uint64_t value;
+
+            declared_type = cm_hir_get_type(state->hir,
+                parameter->declared_type);
+            if (!cm_lower_parse_u64(cm_lower_ast_string(state,
+                    ast_argument->text), &value)
+                || declared_type == NULL
+                || declared_type->kind != CM_HIR_TYPE_INTEGER_KIND) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, ast_argument->span),
+                    CM_AST_ITEM_NONE, ast_argument->type,
+                    CM_AST_PATH_NONE, CM_HIR_OK,
+                    "const type-alias argument is not a supported integer "
+                    "literal");
+                break;
+            }
+            argument->kind = CM_HIR_GENERIC_ARG_CONST;
+            argument->data.constant.kind = CM_HIR_CONST_VALUE;
+            argument->data.constant.type = parameter->declared_type;
+            argument->data.constant.data.value.low_bits = value;
+            argument->data.constant.data.value.high_bits = 0u;
+        } else {
+            cm_lower_fail(state, CM_HIR_LOWER_ALIAS_ARGUMENT_MISMATCH,
+                cm_lower_span(state, ast_argument->span),
+                CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "type alias generic argument kind differs from its "
+                "parameter");
+            break;
+        }
     }
-    cm_free(explicit_arguments);
+    if (state->failed) {
+        cm_free(arguments);
+        return 0;
+    }
     *out_arguments = arguments;
-    *out_count = lifetime_count + explicit_count;
+    *out_count = argument_count;
     return 1;
 }
 
@@ -4994,6 +5107,80 @@ static int cm_lower_validate_impl_trait_type(CmLowerState *state,
     return 1;
 }
 
+static int cm_lower_record_identity_arguments(CmLowerState *state,
+    const CmLowerItemRecord *record, CmSpan span,
+    CmHirGenericArg **out_arguments, uint32_t *out_count)
+{
+    CmHirGenericArg *arguments;
+    uint32_t index;
+
+    *out_arguments = NULL;
+    *out_count = 0u;
+    if (record->generic_parameter_count == 0u) return 1;
+    if (record->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+            record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "opaque type owner lost its generic parameter range");
+        return 0;
+    }
+    arguments = (CmHirGenericArg *)cm_alloc_zeroed(
+        (size_t)record->generic_parameter_count, sizeof(*arguments));
+    for (index = 0u; index < record->generic_parameter_count
+            && !state->failed;
+         ++index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            record->generic_parameter_start + index);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner,
+                record->definition)) {
+            cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "opaque type owner has an invalid generic signature");
+            break;
+        }
+        if (parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            arguments[index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+            arguments[index].data.lifetime.kind =
+                CM_HIR_REGION_EARLY_BOUND;
+            arguments[index].data.lifetime.data.parameter =
+                record->generic_parameter_start + index;
+        } else if (parameter->kind == CM_HIR_GENERIC_TYPE) {
+            CmHirType parameter_type;
+
+            memset(&parameter_type, 0, sizeof(parameter_type));
+            parameter_type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+            parameter_type.span = span;
+            parameter_type.data.parameter_type.parameter =
+                record->generic_parameter_start + index;
+            arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
+            arguments[index].data.type = cm_lower_add_type(state,
+                &parameter_type, CM_AST_TYPE_NONE);
+        } else if (parameter->kind == CM_HIR_GENERIC_CONST) {
+            arguments[index].kind = CM_HIR_GENERIC_ARG_CONST;
+            arguments[index].data.constant.kind = CM_HIR_CONST_PARAMETER;
+            arguments[index].data.constant.type = parameter->declared_type;
+            arguments[index].data.constant.data.parameter =
+                record->generic_parameter_start + index;
+        } else {
+            cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "opaque type owner has an invalid generic parameter kind");
+        }
+    }
+    if (state->failed) {
+        cm_free(arguments);
+        return 0;
+    }
+    *out_arguments = arguments;
+    *out_count = record->generic_parameter_count;
+    return 1;
+}
+
 static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
     CmHirModuleId module, CmHirDefId owner)
 {
@@ -5128,6 +5315,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
                 length_text, &length_value);
         }
         if (!has_literal_length) {
+            has_literal_length = cm_lower_parse_pointer_storage_length(
+                length_text, &length_value);
+        }
+        if (!has_literal_length) {
             length_generic = cm_lower_find_generic_in_scope(state, owner,
                 ast_type->text);
             if (length_generic == NULL) {
@@ -5232,7 +5423,11 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
     case CM_AST_TYPE_IMPL_TRAIT:
     {
         const CmLowerApitRecord *apit;
+        const CmLowerItemRecord *owner_record;
         const CmHirGenericParam *parameter;
+        CmHirGenericArg *arguments;
+        CmHirTypeId result;
+        uint32_t argument_count;
 
         if (!cm_lower_validate_impl_trait_type(state, CM_AST_ITEM_NONE,
                 ast_type_id, ast_type, NULL)) {
@@ -5255,10 +5450,31 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
                 "argument impl trait lost its synthetic generic parameter");
             return CM_HIR_TYPE_NONE;
         }
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
-            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-            "opaque impl trait types are not lowered yet");
-        return CM_HIR_TYPE_NONE;
+        owner_record = cm_lower_find_record_by_definition(state, owner);
+        if (owner_record == NULL
+            || owner_record->kind != CM_AST_ITEM_FUNCTION) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                "opaque impl trait is supported only as a function return "
+                "type");
+            return CM_HIR_TYPE_NONE;
+        }
+        arguments = NULL;
+        argument_count = 0u;
+        if (!cm_lower_record_identity_arguments(state, owner_record, span,
+                &arguments, &argument_count)) {
+            return CM_HIR_TYPE_NONE;
+        }
+        /* The owner definition gives one stable opaque identity per function.
+         * Bounds are structurally validated above; a later dedicated opaque
+         * declaration layer will retain them for semantic selection. */
+        type.kind = CM_HIR_TYPE_OPAQUE_KIND;
+        type.data.named_type.definition = owner;
+        type.data.named_type.arguments = arguments;
+        type.data.named_type.argument_count = argument_count;
+        result = cm_lower_add_type(state, &type, ast_type_id);
+        cm_free(arguments);
+        return result;
     }
     case CM_AST_TYPE_DYN_TRAIT:
         return cm_lower_dyn_trait_type(state, ast_type_id, ast_type, module,
