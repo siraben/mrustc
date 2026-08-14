@@ -4111,8 +4111,301 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
     return result;
 }
 
+static int cm_lower_projection_region_equal(const CmHirRegion *left,
+    const CmHirRegion *right)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left->data.binder_index == right->data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_lower_projection_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t depth);
+
+static int cm_lower_projection_const_equal(const CmHirContext *hir,
+    const CmHirConstArg *left, const CmHirConstArg *right, size_t depth)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind
+        || !cm_lower_projection_type_equal(hir, left->type, right->type,
+            depth + 1u)) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_CONST_VALUE:
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    case CM_HIR_CONST_PARAMETER:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_CONST_UNEVALUATED:
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    case CM_HIR_CONST_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_CONST_ERROR:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_lower_projection_generic_arg_equal(const CmHirContext *hir,
+    const CmHirGenericArg *left, const CmHirGenericArg *right, size_t depth)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_lower_projection_region_equal(&left->data.lifetime,
+            &right->data.lifetime);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return cm_lower_projection_type_equal(hir, left->data.type,
+            right->data.type, depth + 1u);
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_lower_projection_const_equal(hir, &left->data.constant,
+            &right->data.constant, depth + 1u);
+    }
+    return 0;
+}
+
+static int cm_lower_projection_named_type_equal(const CmHirContext *hir,
+    const CmHirNamedType *left, const CmHirNamedType *right, size_t depth)
+{
+    uint32_t index;
+
+    if (left == NULL || right == NULL
+        || !cm_hir_def_id_equal(left->definition, right->definition)
+        || left->argument_count != right->argument_count
+        || (left->argument_count != 0u && left->arguments == NULL)
+        || (right->argument_count != 0u && right->arguments == NULL)) {
+        return 0;
+    }
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_lower_projection_generic_arg_equal(hir,
+                &left->arguments[index], &right->arguments[index],
+                depth + 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * Supertrait substitution can allocate a fresh HIR type for each path.
+ * Candidate identity must therefore compare the resulting type trees, not
+ * their arena IDs.  Unsupported or incomplete shapes deliberately compare
+ * unequal so ambiguity is preserved rather than guessed away.
+ */
+static int cm_lower_projection_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t depth)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+    uint32_t index;
+
+    if (hir == NULL || depth > hir->types.len) return 0;
+    left = cm_hir_get_type(hir, left_id);
+    right = cm_hir_get_type(hir, right_id);
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_SELF_KIND:
+        return cm_hir_def_id_equal(left->data.self_type.owner,
+            right->data.self_type.owner);
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return left->data.parameter_type.parameter
+            == right->data.parameter_type.parameter;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability
+                == right->data.reference_type.mutability
+            && cm_lower_projection_region_equal(
+                &left->data.reference_type.region,
+                &right->data.reference_type.region)
+            && cm_lower_projection_type_equal(hir,
+                left->data.reference_type.pointee,
+                right->data.reference_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return left->data.raw_pointer_type.mutability
+                == right->data.raw_pointer_type.mutability
+            && cm_lower_projection_type_equal(hir,
+                left->data.raw_pointer_type.pointee,
+                right->data.raw_pointer_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (left->data.tuple_type.element_count
+                != right->data.tuple_type.element_count
+            || (left->data.tuple_type.element_count != 0u
+                && (left->data.tuple_type.elements == NULL
+                    || right->data.tuple_type.elements == NULL))) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_lower_projection_type_equal(hir,
+                    left->data.tuple_type.elements[index],
+                    right->data.tuple_type.elements[index], depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_projection_type_equal(hir,
+                left->data.array_type.element,
+                right->data.array_type.element, depth + 1u)
+            && cm_lower_projection_const_equal(hir,
+                &left->data.array_type.length,
+                &right->data.array_type.length, depth + 1u);
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_projection_type_equal(hir,
+            left->data.slice_type.element,
+            right->data.slice_type.element, depth + 1u);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (left->data.fn_pointer_type.parameter_count
+                != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.abi
+                != right->data.fn_pointer_type.abi
+            || left->data.fn_pointer_type.safety
+                != right->data.fn_pointer_type.safety
+            || left->data.fn_pointer_type.is_variadic
+                != right->data.fn_pointer_type.is_variadic
+            || (left->data.fn_pointer_type.parameter_count != 0u
+                && (left->data.fn_pointer_type.parameters == NULL
+                    || right->data.fn_pointer_type.parameters == NULL))) {
+            return 0;
+        }
+        for (index = 0u;
+             index < left->data.fn_pointer_type.parameter_count; ++index) {
+            if (!cm_lower_projection_type_equal(hir,
+                    left->data.fn_pointer_type.parameters[index],
+                    right->data.fn_pointer_type.parameters[index],
+                    depth + 1u)) {
+                return 0;
+            }
+        }
+        return cm_lower_projection_type_equal(hir,
+            left->data.fn_pointer_type.return_type,
+            right->data.fn_pointer_type.return_type, depth + 1u);
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return cm_lower_projection_named_type_equal(hir,
+            &left->data.named_type, &right->data.named_type, depth + 1u);
+    case CM_HIR_TYPE_CLOSURE_KIND:
+        return left->data.closure_type.closure
+            == right->data.closure_type.closure;
+    case CM_HIR_TYPE_PROJECTION_KIND:
+        return cm_lower_projection_type_equal(hir,
+                left->data.projection_type.self_type,
+                right->data.projection_type.self_type, depth + 1u)
+            && cm_lower_projection_named_type_equal(hir,
+                &left->data.projection_type.trait_type,
+                &right->data.projection_type.trait_type, depth + 1u)
+            && cm_lower_projection_named_type_equal(hir,
+                &left->data.projection_type.associated_type,
+                &right->data.projection_type.associated_type, depth + 1u);
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+        return 0;
+    }
+    return 0;
+}
+
+static int cm_lower_parameter_projection_defining_trait(
+    CmLowerState *state, const CmHirTraitPredicate *predicate,
+    const CmLowerAssociatedTarget *associated, CmHirNamedType *out_trait,
+    CmHirGenericArg **out_owned_arguments, uint32_t *out_matches)
+{
+    CmHirDefId defining_trait;
+
+    memset(out_trait, 0, sizeof(*out_trait));
+    *out_owned_arguments = NULL;
+    *out_matches = 0u;
+    defining_trait = associated->trait_definition;
+    if (cm_hir_def_id_is_none(defining_trait)) return 1;
+    if (cm_hir_def_id_equal(defining_trait,
+            predicate->trait_type.definition)) {
+        *out_trait = predicate->trait_type;
+        *out_matches = 1u;
+        return 1;
+    }
+    if (!cm_lower_find_instantiated_supertrait(state,
+            &predicate->trait_type, defining_trait, predicate->subject,
+            predicate->span, out_owned_arguments,
+            &out_trait->argument_count, out_matches)) {
+        return 0;
+    }
+    out_trait->definition = defining_trait;
+    out_trait->arguments = *out_owned_arguments;
+    return 1;
+}
+
+static int cm_lower_parameter_projection_candidates_equal(
+    CmLowerState *state, const CmHirTraitPredicate *left_predicate,
+    const CmLowerAssociatedTarget *left_associated,
+    const CmHirTraitPredicate *right_predicate,
+    const CmLowerAssociatedTarget *right_associated)
+{
+    CmHirNamedType left_trait;
+    CmHirNamedType right_trait;
+    CmHirGenericArg *left_owned;
+    CmHirGenericArg *right_owned;
+    uint32_t left_matches;
+    uint32_t right_matches;
+    int equal;
+
+    if (!cm_hir_def_id_equal(left_associated->definition,
+            right_associated->definition)) {
+        return 0;
+    }
+    if (!cm_lower_parameter_projection_defining_trait(state,
+            left_predicate, left_associated, &left_trait, &left_owned,
+            &left_matches)) {
+        return 0;
+    }
+    if (!cm_lower_parameter_projection_defining_trait(state,
+            right_predicate, right_associated, &right_trait, &right_owned,
+            &right_matches)) {
+        cm_free(left_owned);
+        return 0;
+    }
+    equal = left_matches == 1u && right_matches == 1u
+        && cm_lower_projection_named_type_equal(state->hir,
+            &left_trait, &right_trait, 0u);
+    cm_free(right_owned);
+    cm_free(left_owned);
+    return equal;
+}
+
 static void cm_lower_find_parameter_projection_in_item(
-    const CmLowerState *state, const CmHirItem *item,
+    CmLowerState *state, const CmHirItem *item,
     CmHirGenericParamId parameter, CmInternId associated_name,
     const CmHirTraitPredicate **out_predicate,
     CmLowerAssociatedTarget *out_associated, uint32_t *in_out_matches)
@@ -4137,13 +4430,21 @@ static void cm_lower_find_parameter_projection_in_item(
             predicate->trait_type.definition, associated_name,
             &associated, &associated_matches);
         if (associated_matches == 0u) continue;
-        if (associated_matches > UINT32_MAX - *in_out_matches) {
-            *in_out_matches = UINT32_MAX;
+        if (associated_matches != 1u) {
+            *in_out_matches = 2u;
             return;
         }
-        *in_out_matches += associated_matches;
-        *out_predicate = predicate;
-        *out_associated = associated;
+        if (*in_out_matches == 0u || *out_predicate == NULL) {
+            *in_out_matches = 1u;
+            *out_predicate = predicate;
+            *out_associated = associated;
+        } else if (*in_out_matches != 1u
+            || !cm_lower_parameter_projection_candidates_equal(state,
+                *out_predicate, out_associated, predicate, &associated)) {
+            *in_out_matches = 2u;
+            return;
+        }
+        if (state->failed) return;
     }
 }
 
@@ -9113,13 +9414,20 @@ static int cm_lower_find_instantiated_supertrait_inner(CmLowerState *state,
         if (*out_matches == 0u) {
             *out_arguments = child_arguments;
             *out_argument_count = child_argument_count;
+            *out_matches = child_matches > 1u ? 2u : 1u;
+        } else if (*out_matches > 1u || child_matches > 1u) {
+            cm_free(child_arguments);
+            *out_matches = 2u;
+        } else if (*out_argument_count == child_argument_count
+            && cm_lower_projection_named_type_equal(state->hir,
+                &(CmHirNamedType){ target_definition, *out_arguments,
+                    *out_argument_count },
+                &(CmHirNamedType){ target_definition, child_arguments,
+                    child_argument_count }, 0u)) {
+            cm_free(child_arguments);
         } else {
             cm_free(child_arguments);
-        }
-        if (*out_matches > UINT32_MAX - child_matches) {
-            *out_matches = UINT32_MAX;
-        } else {
-            *out_matches += child_matches;
+            *out_matches = 2u;
         }
     }
     return 1;

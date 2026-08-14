@@ -1715,6 +1715,104 @@ static void test_shorthand_inherited_associated_type_projection(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_shorthand_projection_route_coalescing(void)
+{
+    static const char positive[] =
+        "trait Base<T> { type Assoc; }"
+        "trait Left: Base<u8> {}"
+        "trait Right: Base<u8> {}"
+        "trait Diamond: Left + Right {}"
+        "fn direct<P: Left + Right>() -> P::Assoc {}"
+        "fn inherited<P: Diamond>() -> P::Assoc {}";
+    static const char *const ambiguous[] = {
+        ("trait Base<T> { type Assoc; }"
+            "trait Left: Base<u8> {}"
+            "trait Right: Base<u16> {}"
+            "fn mismatch<P: Left + Right>() -> P::Assoc {}"),
+        ("trait First { type Assoc; }"
+            "trait Second { type Assoc; }"
+            "fn mismatch<P: First + Second>() -> P::Assoc {}")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *base;
+    const CmHirItem *direct;
+    const CmHirItem *inherited;
+    const CmHirType *direct_projection;
+    const CmHirType *inherited_projection;
+    const CmHirType *direct_argument;
+    const CmHirType *inherited_argument;
+    size_t index;
+
+    result = lower_source(positive, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "projection route coalescing failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    base = find_item(&context, "Base");
+    direct = find_item(&context, "direct");
+    inherited = find_item(&context, "inherited");
+    direct_projection = direct == NULL
+            || direct->kind != CM_HIR_ITEM_FUNCTION
+        ? NULL : cm_hir_get_type(&context,
+            direct->data.function_item.signature.return_type);
+    inherited_projection = inherited == NULL
+            || inherited->kind != CM_HIR_ITEM_FUNCTION
+        ? NULL : cm_hir_get_type(&context,
+            inherited->data.function_item.signature.return_type);
+    direct_argument = direct_projection == NULL
+            || direct_projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || direct_projection->data.projection_type.trait_type
+                .argument_count != 1u
+            || direct_projection->data.projection_type.trait_type.arguments
+                == NULL
+            || direct_projection->data.projection_type.trait_type.arguments[0]
+                .kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            direct_projection->data.projection_type.trait_type.arguments[0]
+                .data.type);
+    inherited_argument = inherited_projection == NULL
+            || inherited_projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || inherited_projection->data.projection_type.trait_type
+                .argument_count != 1u
+            || inherited_projection->data.projection_type.trait_type.arguments
+                == NULL
+            || inherited_projection->data.projection_type.trait_type
+                .arguments[0].kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            inherited_projection->data.projection_type.trait_type.arguments[0]
+                .data.type);
+    assert(result.error_count == 0u
+        && base != NULL && base->kind == CM_HIR_ITEM_TRAIT
+        && direct_projection != NULL
+        && direct_projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && inherited_projection != NULL
+        && inherited_projection->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(direct_projection->data.projection_type
+                .trait_type.definition,
+            base->definition)
+        && cm_hir_def_id_equal(inherited_projection->data.projection_type
+                .trait_type.definition,
+            base->definition)
+        && direct_argument != NULL
+        && direct_argument->kind == CM_HIR_TYPE_INTEGER_KIND
+        && direct_argument->data.integer_type.kind == CM_HIR_INT_U8
+        && inherited_argument != NULL
+        && inherited_argument->kind == CM_HIR_TYPE_INTEGER_KIND
+        && inherited_argument->data.integer_type.kind == CM_HIR_INT_U8);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(ambiguous) / sizeof(ambiguous[0]);
+         ++index) {
+        result = lower_source(ambiguous[index], &context, NULL);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_TRAIT
+            && strstr(result.first_error.message, "ambiguous") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_shorthand_projection_declaration_order(void)
 {
     static const char source[] =
@@ -5680,6 +5778,14 @@ static void test_associated_type_constraint_predicates(void)
         && derived->equality_count == 0u);
     cm_hir_context_destroy(&context);
 
+    result = lower_source(
+        "trait A {} trait Base { type Item; } trait L: Base {} "
+        "trait R: Base {} trait Both: L + R {} trait Owner { "
+        "fn check<T>() where T: Both<Item: A>; }",
+        &context, NULL);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
     {
         static const struct {
             const char *source;
@@ -5744,13 +5850,6 @@ static void test_associated_type_constraint_predicates(void)
                 "trait Owner { fn check<T>() where T: Both<Item: A>; }",
                 CM_HIR_LOWER_INVALID_TRAIT,
                 "ambiguous through the supertrait graph"
-            },
-            {
-                "trait A {} trait Base { type Item; } trait L: Base {} "
-                "trait R: Base {} trait Both: L + R {} trait Owner { "
-                "fn check<T>() where T: Both<Item: A>; }",
-                CM_HIR_LOWER_INVALID_TRAIT,
-                "no unique instantiated defining supertrait"
             },
             {
                 "trait A<'a> {} trait Try { type Item; } "
@@ -8369,6 +8468,7 @@ int main(void)
     test_adt_function_pointer_default_substitution();
     test_generic_parameter_shadows_type_path_prefix();
     test_shorthand_inherited_associated_type_projection();
+    test_shorthand_projection_route_coalescing();
     test_shorthand_projection_declaration_order();
     test_shorthand_gat_projection_arguments();
     test_explicit_gat_projection_arguments();
