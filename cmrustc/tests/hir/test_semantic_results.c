@@ -784,6 +784,51 @@ static void assert_stage_rejects(CmSemanticSession *session,
     cm_semantic_results_body_stage_destroy(&stage);
 }
 
+typedef struct SharedAdjustmentProbe {
+    CmHirBodyId body;
+    size_t invocation_count;
+} SharedAdjustmentProbe;
+
+static CmSemanticBodyWritebackStatus shared_adjustment_probe_writeback(
+    void *context, CmSemanticSession *session, CmHirBodyId body,
+    const CmSemanticCheckedBodyFacts *facts)
+{
+    SharedAdjustmentProbe *probe;
+    CmSemanticCheckedBodyFacts mutated;
+    CmSemanticCheckedAdjustmentFacts adjustments[2];
+
+    probe = (SharedAdjustmentProbe *)context;
+    assert(probe != NULL && session != NULL && facts != NULL
+        && body == probe->body
+        && facts->callable_count == 1u
+        && facts->callables != NULL
+        && facts->adjustment_count == 1u
+        && facts->adjustments != NULL
+        && facts->adjustments[0].kind
+            == CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED);
+    probe->invocation_count += 1u;
+
+    mutated = *facts;
+    mutated.adjustment_count = 0u;
+    assert_stage_rejects(session, body, &mutated);
+
+    adjustments[0] = facts->adjustments[0];
+    adjustments[0].kind = CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE;
+    mutated = *facts;
+    mutated.adjustments = adjustments;
+    assert_stage_rejects(session, body, &mutated);
+
+    adjustments[0] = facts->adjustments[0];
+    adjustments[1] = facts->adjustments[0];
+    adjustments[1].source_type = adjustments[0].target_type;
+    mutated = *facts;
+    mutated.adjustments = adjustments;
+    mutated.adjustment_count = 2u;
+    assert_stage_rejects(session, body, &mutated);
+
+    return CM_SEMANTIC_BODY_WRITEBACK_OK;
+}
+
 static CmSemanticBodyWritebackStatus malformed_facts_probe_writeback(
     void *context, CmSemanticSession *session, CmHirBodyId body,
     const CmSemanticCheckedBodyFacts *facts)
@@ -801,8 +846,7 @@ static CmSemanticBodyWritebackStatus malformed_facts_probe_writeback(
         && facts->primitive_binaries != NULL
         && facts->field_selection_count == 2u
         && facts->field_selections != NULL
-        && facts->adjustment_count == 0u
-        && facts->adjustments == NULL);
+        && facts->adjustment_count == 0u);
     probe->invocation_count += 1u;
 
     mutated = *facts;
@@ -1607,7 +1651,7 @@ static void test_durable_qualified_callable_recipe(void)
     fixture_destroy(&fixture);
 }
 
-static void test_durable_dot_method_recipe(void)
+static void assert_durable_dot_method_recipe(int shared_receiver)
 {
     Fixture fixture;
     CmSemanticAdmission admission;
@@ -1620,6 +1664,7 @@ static void test_durable_dot_method_recipe(void)
     CmSemanticExpressionView call_view;
     CmSemanticExpressionView receiver_view;
     CmSemanticExpressionView argument_view;
+    CmSemanticAdjustmentView adjustment_view;
     CmSemanticTypeView parameter_type;
     CmHirDefId wrapper_definition;
     const CmHirDefinition *wrapper_record;
@@ -1634,11 +1679,15 @@ static void test_durable_dot_method_recipe(void)
     size_t index;
     int equal;
 
-    fixture_init(&fixture,
-        "trait Value { fn value(self, other: u32) -> u32; } "
-        "impl Value for u32 { "
-        "fn value(self, other: u32) -> u32 { 1u32 } } "
-        "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
+    fixture_init(&fixture, shared_receiver
+        ? "trait Value { fn value(&self, other: u32) -> u32; } "
+          "impl Value for u32 { "
+          "fn value(&self, other: u32) -> u32 { 1u32 } } "
+          "fn wrapper(value: u32) -> u32 { value.value(1u32) }"
+        : "trait Value { fn value(self, other: u32) -> u32; } "
+          "impl Value for u32 { "
+          "fn value(self, other: u32) -> u32 { 1u32 } } "
+          "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
     lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
         &fixture.graph, fixture.graph_result.revision, &fixture.imports,
         &fixture.modules);
@@ -1707,8 +1756,10 @@ static void test_durable_dot_method_recipe(void)
         && cm_semantic_results_expression(results, &admission,
             wrapper->data.function_item.body, argument, &receiver_view)
             == CM_SEMANTIC_RESULTS_OK
+        && receiver_view.adjustment_count == (shared_receiver ? 1u : 0u)
         && cm_semantic_type_view_equal(&selection.requested_self_type,
-            &receiver_view.adjusted_type, &equal)
+            shared_receiver ? &receiver_view.unadjusted_type
+                : &receiver_view.adjusted_type, &equal)
             == CM_SEMANTIC_RESULTS_OK && equal
         && cm_semantic_results_callable_parameter(results, &admission,
             wrapper->data.function_item.body, call_expression, 0u,
@@ -1735,6 +1786,35 @@ static void test_durable_dot_method_recipe(void)
         && cm_semantic_results_callable_argument(results, &admission,
             wrapper->data.function_item.body, call_expression, 2u,
             &argument) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    memset(&adjustment_view, 0, sizeof(adjustment_view));
+    if (shared_receiver) {
+        assert(cm_semantic_results_expression_adjustment(results, &admission,
+                wrapper->data.function_item.body,
+                source_call->data.method_call.receiver, 0u,
+                &adjustment_view) == CM_SEMANTIC_RESULTS_OK
+            && adjustment_view.body
+                == wrapper->data.function_item.body
+            && adjustment_view.expression
+                == source_call->data.method_call.receiver
+            && adjustment_view.index == 0u
+            && adjustment_view.kind
+                == CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+            && !adjustment_view.has_selected_trait
+            && cm_hir_def_id_is_none(adjustment_view.selected_trait)
+            && cm_hir_def_id_is_none(adjustment_view.selected_method)
+            && cm_hir_def_id_is_none(adjustment_view.selected_impl)
+            && cm_semantic_type_view_equal(&adjustment_view.source_type,
+                &receiver_view.unadjusted_type, &equal)
+                == CM_SEMANTIC_RESULTS_OK && equal
+            && cm_semantic_type_view_equal(&adjustment_view.target_type,
+                &receiver_view.adjusted_type, &equal)
+                == CM_SEMANTIC_RESULTS_OK && equal);
+    } else {
+        assert(cm_semantic_results_expression_adjustment(results, &admission,
+                wrapper->data.function_item.body,
+                source_call->data.method_call.receiver, 0u,
+                &adjustment_view) == CM_SEMANTIC_RESULTS_NOT_FOUND);
+    }
     assert_no_callable_generic_arguments(results, &admission,
         wrapper->data.function_item.body, call_expression);
     assert_exact_callable_instance_recipe(&fixture, wrapper_definition,
@@ -1760,6 +1840,9 @@ static void test_durable_dot_method_recipe(void)
     mark_result = cm_hir_semantic_mark_admitted_bodies(&fixture.hir,
         &reachable.body, 1u, &admission);
     assert(mark_result.status == CM_SEMANTIC_MARK_OK
+        && cm_hir_get_expr(&fixture.hir,
+            source_call->data.method_call.receiver)->usage
+            == (shared_receiver ? CM_HIR_USAGE_BORROW : CM_HIR_USAGE_MOVE)
         && !cm_semantic_admission_is_current(&admission));
     cm_semantic_admission_destroy(&admission);
 
@@ -1777,6 +1860,142 @@ static void test_durable_dot_method_recipe(void)
     regions_result = cm_hir_semantic_check_admitted_regions(&fixture.hir,
         &reachable.body, 1u, &admission);
     assert(regions_result.status == CM_SEMANTIC_REGIONS_OK);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
+static void test_durable_dot_method_recipe(void)
+{
+    assert_durable_dot_method_recipe(0);
+    assert_durable_dot_method_recipe(1);
+}
+
+static void test_shared_receiver_adjustments_fail_closed(void)
+{
+    Fixture fixture;
+    CmHirLocalBodiesResult lower_result;
+    CmHirDefId wrapper_definition;
+    const CmHirDefinition *wrapper_record;
+    const CmHirItem *wrapper;
+    CmHirCrateFinalization finalization;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult body_result;
+    SharedAdjustmentProbe probe;
+
+    fixture_init(&fixture,
+        "trait Value { fn value(&self, other: u32) -> u32; } "
+        "impl Value for u32 { "
+        "fn value(&self, other: u32) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value(1u32) }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK);
+    wrapper_definition = find_named_item(&fixture, "wrapper",
+        cm_hir_def_id_none());
+    wrapper_record = cm_hir_lookup_definition(&fixture.hir,
+        wrapper_definition);
+    wrapper = wrapper_record == NULL ? NULL : cm_hir_get_item(&fixture.hir,
+        wrapper_record->entity.item_id);
+    assert(wrapper != NULL && wrapper->kind == CM_HIR_ITEM_FUNCTION);
+
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir, 1u)
+        == CM_HIR_OK);
+    memset(&session, 0, sizeof(session));
+    cm_semantic_session_options_init(&options);
+    options.local_crate = 1u;
+    options.exact_owner = wrapper_definition;
+    options.universe = CM_TRAIT_IMPL_UNIVERSE_SINGLE_LOCAL_CRATE_COMPLETE;
+    options.finalization = &finalization;
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    memset(&probe, 0, sizeof(probe));
+    probe.body = wrapper->data.function_item.body;
+    body_result = cm_semantic_body_check_definition_with_writeback(&session,
+        probe.body, shared_adjustment_probe_writeback, &probe);
+    assert(body_result.status == CM_SEMANTIC_BODY_OK
+        && probe.invocation_count == 1u);
+
+    cm_semantic_session_destroy(&session);
+    cm_hir_crate_finalization_destroy(&finalization);
+    fixture_destroy(&fixture);
+}
+
+static void test_mutable_receiver_remains_unsupported(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableBody reachable;
+    CmHirLocalBodiesResult lower_result;
+    CmHirDefId wrapper_definition;
+    const CmHirDefinition *wrapper_record;
+    const CmHirItem *wrapper;
+
+    fixture_init(&fixture,
+        "trait Value { fn value(&mut self) -> u32; } "
+        "impl Value for u32 { fn value(&mut self) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value() }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK);
+    wrapper_definition = find_named_item(&fixture, "wrapper",
+        cm_hir_def_id_none());
+    wrapper_record = cm_hir_lookup_definition(&fixture.hir,
+        wrapper_definition);
+    wrapper = wrapper_record == NULL ? NULL : cm_hir_get_item(&fixture.hir,
+        wrapper_record->entity.item_id);
+    assert(wrapper != NULL && wrapper->kind == CM_HIR_ITEM_FUNCTION);
+    reachable.owner = wrapper_definition;
+    reachable.body = wrapper->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission,
+        &fixture.hir, 1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_BODY_FAILURE
+        && result.body_result.status == CM_SEMANTIC_BODY_UNSUPPORTED
+        && admission.state == NULL);
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&fixture);
+}
+
+static void test_inferred_receiver_region_remains_unsupported(void)
+{
+    Fixture fixture;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+    CmSemanticReachableBody reachable;
+    CmHirLocalBodiesResult lower_result;
+    CmHirDefId wrapper_definition;
+    const CmHirDefinition *wrapper_record;
+    const CmHirItem *wrapper;
+
+    fixture_init(&fixture,
+        "trait Value { fn value(&'_ self) -> u32; } "
+        "impl Value for u32 { fn value(&'_ self) -> u32 { 1u32 } } "
+        "fn wrapper(value: u32) -> u32 { value.value() }");
+    lower_result = cm_hir_lower_local_bodies(&fixture.hir, 1u,
+        &fixture.graph, fixture.graph_result.revision, &fixture.imports,
+        &fixture.modules);
+    assert(lower_result.status == CM_HIR_LOCAL_BODIES_OK);
+    wrapper_definition = find_named_item(&fixture, "wrapper",
+        cm_hir_def_id_none());
+    wrapper_record = cm_hir_lookup_definition(&fixture.hir,
+        wrapper_definition);
+    wrapper = wrapper_record == NULL ? NULL : cm_hir_get_item(&fixture.hir,
+        wrapper_record->entity.item_id);
+    assert(wrapper != NULL && wrapper->kind == CM_HIR_ITEM_FUNCTION);
+    reachable.owner = wrapper_definition;
+    reachable.body = wrapper->data.function_item.body;
+    memset(&admission, 0, sizeof(admission));
+    result = cm_semantic_admit_typed_reachable_bodies(&admission,
+        &fixture.hir, 1u, &reachable, 1u);
+    assert(result.status == CM_SEMANTIC_ADMISSION_ITEM_FAILURE
+        && result.item_result.status == CM_SEMANTIC_ITEM_PENDING_GENERIC
+        && result.item_result.parameter_index == 0u
+        && admission.state == NULL);
     cm_semantic_admission_destroy(&admission);
     fixture_destroy(&fixture);
 }
@@ -2348,6 +2567,9 @@ int main(void)
     test_durable_projection_trace_definition();
     test_durable_qualified_callable_recipe();
     test_durable_dot_method_recipe();
+    test_shared_receiver_adjustments_fail_closed();
+    test_mutable_receiver_remains_unsupported();
+    test_inferred_receiver_region_remains_unsupported();
     test_durable_generic_impl_callable_recipes();
     test_canonical_parts_function_pointer_abi_parity();
     test_projection_failure_discards_partial_stage();

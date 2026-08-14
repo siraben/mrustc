@@ -5262,17 +5262,40 @@ static void test_method_bearing_trait_impl_entry_points(void)
 static void test_lifetime_qualified_receiver(void)
 {
     static const char source[] =
-        "trait Lending { fn borrow(&'static self); }";
+        "trait Lending {"
+        " fn implicit(&self);"
+        " fn placeholder(&'_ self);"
+        " fn borrow(&'static self);"
+        "}";
     const CmHirItem *trait_item;
+    const CmHirItem *implicit;
+    const CmHirItem *placeholder;
     const CmHirItem *method;
+    const CmHirType *implicit_type;
+    const CmHirType *placeholder_type;
     const CmHirType *receiver_type;
     CmHirContext context;
     CmHirLowerResult result;
 
     result = lower_source(source, &context, NULL);
     trait_item = find_item(&context, "Lending");
+    implicit = trait_item == NULL ? NULL
+        : find_child(&context, trait_item->definition, "implicit");
+    placeholder = trait_item == NULL ? NULL
+        : find_child(&context, trait_item->definition, "placeholder");
     method = trait_item == NULL ? NULL
         : find_child(&context, trait_item->definition, "borrow");
+    implicit_type = implicit == NULL
+            || implicit->data.function_item.signature.parameter_count != 1u
+            || implicit->data.function_item.signature.parameters == NULL
+        ? NULL : cm_hir_get_type(&context,
+            implicit->data.function_item.signature.parameters[0].type);
+    placeholder_type = placeholder == NULL
+            || placeholder->data.function_item.signature.parameter_count
+                != 1u
+            || placeholder->data.function_item.signature.parameters == NULL
+        ? NULL : cm_hir_get_type(&context,
+            placeholder->data.function_item.signature.parameters[0].type);
     receiver_type = method == NULL
             || method->data.function_item.signature.parameter_count != 1u
             || method->data.function_item.signature.parameters == NULL
@@ -5285,6 +5308,21 @@ static void test_lifetime_qualified_receiver(void)
             result.first_error.message);
     }
     assert(result.error_count == 0u
+        && implicit != NULL && implicit->kind == CM_HIR_ITEM_FUNCTION
+        && implicit->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && implicit_type != NULL
+        && implicit_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && implicit_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && placeholder != NULL
+        && placeholder->kind == CM_HIR_ITEM_FUNCTION
+        && placeholder->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && placeholder_type != NULL
+        && placeholder_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && placeholder_type->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
         && method != NULL && method->kind == CM_HIR_ITEM_FUNCTION
         && method->data.function_item.signature.receiver
             == CM_HIR_RECEIVER_REF_SHARED

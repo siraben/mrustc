@@ -1912,7 +1912,8 @@ static void cm_semantic_body_set_method_solver_kind(
 
 static CmSemanticBodyStatus cm_semantic_body_method_impl_callable(
     CmSemanticBodyConstraints *constraints, const CmHirItem *impl_item,
-    CmHirDefId declared_callable, const CmHirItem **out_callable)
+    CmHirDefId declared_callable, CmHirReceiverKind expected_receiver,
+    const CmHirItem **out_callable)
 {
     const CmHirItem *selected;
     size_t index;
@@ -1945,7 +1946,7 @@ static CmSemanticBodyStatus cm_semantic_body_method_impl_callable(
         || selected->outlives_predicate_count != 0u
         || selected->data.function_item.body == CM_HIR_BODY_NONE
         || selected->data.function_item.signature.receiver
-            != CM_HIR_RECEIVER_VALUE) {
+            != expected_receiver) {
         return CM_SEMANTIC_BODY_UNSUPPORTED;
     }
     *out_callable = selected;
@@ -2046,8 +2047,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
             || declared->predicate_count != 0u
             || declared->outlives_predicate_count != 0u
             || declared->data.function_item.body != CM_HIR_BODY_NONE
-            || declared->data.function_item.signature.receiver
-                != CM_HIR_RECEIVER_VALUE
+            || (declared->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_VALUE
+                && declared->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_REF_SHARED)
             || declared->data.function_item.signature.parameter_count
                 != expression->data.method_call.argument_count + 1u) {
             blocking_failure = cm_semantic_body_stronger_method_failure(
@@ -2155,7 +2158,9 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 return CM_SEMANTIC_BODY_INVALID;
             }
             status = cm_semantic_body_method_impl_callable(constraints,
-                impl_item, declared->definition, &selected_callable);
+                impl_item, declared->definition,
+                declared->data.function_item.signature.receiver,
+                &selected_callable);
             if (status != CM_SEMANTIC_BODY_OK) {
                 blocking_failure = blocking_failure
                         == CM_SEMANTIC_BODY_OK
@@ -2249,7 +2254,10 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
         signature = &winner_callable->data.function_item.signature;
         if (signature->parameter_count
                 != expression->data.method_call.argument_count + 1u
-            || signature->receiver != CM_HIR_RECEIVER_VALUE) {
+            || signature->receiver
+                != winner_declared->data.function_item.signature.receiver
+            || (signature->receiver != CM_HIR_RECEIVER_VALUE
+                && signature->receiver != CM_HIR_RECEIVER_REF_SHARED)) {
             status = CM_SEMANTIC_BODY_INVALID;
             goto method_cleanup;
         }
@@ -2329,8 +2337,57 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 parameter_index] = declared_type;
             ((CmTypeckTypeId *)facts->parameter_types)[parameter_index] =
                 declared_type;
-            status = cm_semantic_body_unify_terms(constraints, actual_type,
-                declared_type);
+            if (parameter_index == 0u
+                && signature->receiver == CM_HIR_RECEIVER_REF_SHARED) {
+                CmTypeckTypeId resolved_type;
+                const CmTypeckType *reference_type;
+                CmSemanticCheckedAdjustmentFacts *adjustment;
+
+                constraints->typeck_status = cm_typeck_resolve(
+                    constraints->typeck, declared_type, &resolved_type);
+                reference_type = constraints->typeck_status == CM_TYPECK_OK
+                    ? cm_typeck_get_type(constraints->typeck, resolved_type)
+                    : NULL;
+                if (constraints->typeck_status != CM_TYPECK_OK) {
+                    status = cm_semantic_typeck_status(
+                        constraints->typeck_status);
+                    goto method_cleanup;
+                }
+                if (reference_type == NULL
+                    || reference_type->kind != CM_TYPECK_TYPE_REFERENCE
+                    || reference_type->data.reference_type.mutability
+                        != CM_HIR_IMMUTABLE
+                    || reference_type->data.reference_type.region.kind
+                        != CM_HIR_REGION_ERASED) {
+                    status = CM_SEMANTIC_BODY_UNSUPPORTED;
+                    goto method_cleanup;
+                }
+                status = cm_semantic_body_unify_terms(constraints,
+                    actual_type,
+                    reference_type->data.reference_type.pointee);
+                if (status != CM_SEMANTIC_BODY_OK) goto method_cleanup;
+                if (constraints->checked_facts == NULL
+                    || constraints->checked_facts->adjustments == NULL
+                    || constraints->checked_facts->adjustment_count
+                        >= constraints->expression_term_count) {
+                    status = CM_SEMANTIC_BODY_INVALID;
+                    goto method_cleanup;
+                }
+                adjustment = &((CmSemanticCheckedAdjustmentFacts *)
+                    constraints->checked_facts->adjustments)[
+                        constraints->checked_facts->adjustment_count++];
+                memset(adjustment, 0, sizeof(*adjustment));
+                adjustment->expression = facts->receiver_expression;
+                adjustment->kind = CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED;
+                adjustment->source_type = actual_type;
+                adjustment->target_type = declared_type;
+                adjustment->selected_trait = cm_hir_def_id_none();
+                adjustment->selected_method = cm_hir_def_id_none();
+                adjustment->selected_impl = cm_hir_def_id_none();
+            } else {
+                status = cm_semantic_body_unify_terms(constraints,
+                    actual_type, declared_type);
+            }
             if (status != CM_SEMANTIC_BODY_OK) goto method_cleanup;
         }
         status = CM_SEMANTIC_BODY_OK;
@@ -3736,11 +3793,13 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     CmSemanticCheckedBodyFacts checked_facts;
     CmSemanticCheckedCallFacts *checked_calls;
     CmSemanticCheckedCallableFacts *checked_callables;
+    CmSemanticCheckedAdjustmentFacts *checked_adjustments;
     CmSemanticCheckedPrimitiveBinaryFacts *checked_primitive_binaries;
     CmSemanticCheckedFieldSelectionFacts *checked_field_selections;
     CmTypeckTypeId *signature_parameter_types;
     size_t checked_call_bytes;
     size_t checked_callable_bytes;
+    size_t checked_adjustment_bytes;
     size_t checked_primitive_binary_bytes;
     size_t checked_field_selection_bytes;
     size_t signature_parameter_bytes;
@@ -3941,6 +4000,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     expression_terms = NULL;
     checked_calls = NULL;
     checked_callables = NULL;
+    checked_adjustments = NULL;
     checked_primitive_binaries = NULL;
     checked_field_selections = NULL;
     signature_parameter_types = NULL;
@@ -3973,6 +4033,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         || !cm_size_mul(call_expression_count,
             sizeof(*checked_callables), &checked_callable_bytes)
         || !cm_size_mul(hir->expressions.len,
+            sizeof(*checked_adjustments), &checked_adjustment_bytes)
+        || !cm_size_mul(hir->expressions.len,
             sizeof(*checked_primitive_binaries),
             &checked_primitive_binary_bytes)
         || !cm_size_mul(hir->expressions.len,
@@ -3992,6 +4054,9 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     checked_callables = checked_callable_bytes == 0u ? NULL
         : (CmSemanticCheckedCallableFacts *)cm_alloc_zeroed(1u,
             checked_callable_bytes);
+    checked_adjustments = checked_adjustment_bytes == 0u ? NULL
+        : (CmSemanticCheckedAdjustmentFacts *)cm_alloc_zeroed(1u,
+            checked_adjustment_bytes);
     checked_primitive_binaries = checked_primitive_binary_bytes == 0u ? NULL
         : (CmSemanticCheckedPrimitiveBinaryFacts *)cm_alloc_zeroed(1u,
             checked_primitive_binary_bytes);
@@ -4010,6 +4075,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     checked_facts.call_count = 0u;
     checked_facts.callables = checked_callables;
     checked_facts.callable_count = 0u;
+    checked_facts.adjustments = checked_adjustments;
+    checked_facts.adjustment_count = 0u;
     checked_facts.primitive_binaries = checked_primitive_binaries;
     checked_facts.primitive_binary_count = 0u;
     checked_facts.field_selections = checked_field_selections;
@@ -4023,6 +4090,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         cm_free(expression_terms);
         cm_free(checked_calls);
         cm_free(checked_callables);
+        cm_free(checked_adjustments);
         cm_free(checked_primitive_binaries);
         cm_free(checked_field_selections);
         cm_free(signature_parameter_types);
@@ -4875,6 +4943,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
         }
         cm_free(checked_calls);
         cm_free(checked_callables);
+        cm_free(checked_adjustments);
         cm_free(checked_primitive_binaries);
         cm_free(checked_field_selections);
         cm_free(signature_parameter_types);
@@ -4898,6 +4967,7 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
     }
     cm_free(checked_calls);
     cm_free(checked_callables);
+    cm_free(checked_adjustments);
     cm_free(checked_primitive_binaries);
     cm_free(checked_field_selections);
     cm_free(signature_parameter_types);

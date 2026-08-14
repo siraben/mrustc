@@ -7972,9 +7972,13 @@ static CmHirTypeId cm_lower_receiver_type(CmLowerState *state,
     memset(&reference, 0, sizeof(reference));
     reference.kind = CM_HIR_TYPE_REFERENCE_KIND;
     reference.span = span;
-    if (!cm_lower_lifetime(state, lifetime, owner, span,
-            &reference.data.reference_type.region)) {
-        return CM_HIR_TYPE_NONE;
+    if (lifetime == CM_INTERN_ID_NONE) {
+        reference.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    } else {
+        if (!cm_lower_lifetime(state, lifetime, owner, span,
+                &reference.data.reference_type.region)) {
+            return CM_HIR_TYPE_NONE;
+        }
     }
     reference.data.reference_type.pointee = self_type;
     reference.data.reference_type.mutability =

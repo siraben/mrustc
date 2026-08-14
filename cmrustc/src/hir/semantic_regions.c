@@ -109,16 +109,54 @@ static int cm_semantic_regions_selected_call(
                 != expression->data.qualified_call.receiver_argument)) {
         return 0;
     }
+    if (expression->kind == CM_HIR_EXPR_METHOD_CALL
+        && (selection.receiver_argument != 0u
+            || selection.receiver_expression
+                != expression->data.method_call.receiver)) return 0;
     for (index = 0u; index < argument_count; ++index) {
         CmHirExprId retained;
+        CmHirValueUsage argument_usage;
 
         retained = CM_HIR_EXPR_NONE;
+        argument_usage = CM_HIR_USAGE_MOVE;
+        if (expression->kind == CM_HIR_EXPR_METHOD_CALL && index == 0u) {
+            CmSemanticExpressionView receiver;
+
+            memset(&receiver, 0, sizeof(receiver));
+            if (cm_semantic_results_expression(scratch->results,
+                    scratch->admission, scratch->body, arguments[index],
+                    &receiver) != CM_SEMANTIC_RESULTS_OK
+                || receiver.expression != arguments[index]
+                || receiver.body != scratch->body
+                || receiver.adjustment_count > 1u) return 0;
+            if (receiver.adjustment_count == 1u) {
+                CmSemanticAdjustmentView adjustment;
+
+                memset(&adjustment, 0, sizeof(adjustment));
+                if (cm_semantic_results_expression_adjustment(
+                        scratch->results, scratch->admission, scratch->body,
+                        arguments[index], 0u, &adjustment)
+                        != CM_SEMANTIC_RESULTS_OK
+                    || adjustment.expression != arguments[index]
+                    || adjustment.body != scratch->body
+                    || adjustment.index != 0u
+                    || adjustment.kind
+                        != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED
+                    || adjustment.has_selected_trait
+                    || !cm_hir_def_id_is_none(adjustment.selected_trait)
+                    || !cm_hir_def_id_is_none(adjustment.selected_method)
+                    || !cm_hir_def_id_is_none(adjustment.selected_impl)) {
+                    return 0;
+                }
+                argument_usage = CM_HIR_USAGE_BORROW;
+            }
+        }
         if (cm_semantic_results_callable_argument(scratch->results,
                 scratch->admission, scratch->body, expression_id, index,
                 &retained) != CM_SEMANTIC_RESULTS_OK
             || retained != arguments[index]
             || !cm_semantic_regions_visit_expression(scratch,
-                arguments[index], CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                arguments[index], argument_usage, depth + 1u)) return 0;
     }
     return 1;
 }

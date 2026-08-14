@@ -844,14 +844,16 @@ static int cm_admission_canonical_call_supported(
             || (expression->data.method_call.argument_count != 0u
                 && expression->data.method_call.arguments == NULL)
             || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
-            || selected->data.function_item.signature.receiver
-                != CM_HIR_RECEIVER_VALUE
+            || (selected->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_VALUE
+                && selected->data.function_item.signature.receiver
+                    != CM_HIR_RECEIVER_REF_SHARED)
             || selected->data.function_item.signature.parameter_count
                 != expression->data.method_call.argument_count + 1u
             || declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
             || declared->name != expression->data.method_call.method_name
             || declared->data.function_item.signature.receiver
-                != CM_HIR_RECEIVER_VALUE
+                != selected->data.function_item.signature.receiver
             || !cm_hir_def_id_equal(declared->parent_definition,
                 callee->parts.implemented_trait)
             || !cm_admission_method_trait_in_scope(expression,
