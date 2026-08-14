@@ -47,8 +47,11 @@ typedef struct CmSemanticItemResult {
 #define CM_SEMANTIC_ITEM_PARAMETER_NONE ((uint32_t)UINT32_MAX)
 
 /*
- * Validate the supported local positive trait-impl slice without mutating HIR.
- * Every non-OK result is a hard barrier before body semantics or MIR.
+ * Validate the supported local trait-impl slice without mutating HIR.
+ * Authenticated negative impl headers and explicit positive auto-trait impl
+ * headers are declarations with no associated-item contract; ordinary
+ * positive impls retain the conformance checks below.  Every non-OK result
+ * is a hard barrier before body semantics or MIR.
  */
 CmSemanticItemResult cm_semantic_item_check_local_trait_impls(
     const CmHirContext *hir, CmHirCrateId local_crate);

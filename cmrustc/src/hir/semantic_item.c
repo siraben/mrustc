@@ -584,10 +584,6 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
     result = cm_semantic_item_result(CM_SEMANTIC_ITEM_INVALID);
     result.impl_definition = impl_item->definition;
     result.trait_definition = impl_item->data.impl_item.trait_type.definition;
-    if (impl_item->data.impl_item.is_negative) {
-        result.status = CM_SEMANTIC_ITEM_PENDING_NEGATIVE;
-        return result;
-    }
     status = cm_semantic_item_declaration_shape(impl_item, 1);
     if (status != CM_SEMANTIC_ITEM_OK) {
         result.status = status;
@@ -603,8 +599,82 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         || !cm_hir_def_id_is_none(trait_item->parent_definition)) {
         return result;
     }
+    if (impl_item->data.impl_item.is_negative) {
+        /*
+         * Negative impl headers have no positive trait contract to check:
+         * they neither provide associated items nor inherit required ones.
+         * Lowering and the HIR model have already authenticated the resolved
+         * trait identity, safe polarity, generic header, and itemless shape.
+         * Keep this gate fail-closed for manually forged HIR children while
+         * allowing both ordinary and auto-trait negative facts through the
+         * whole-crate semantic admission barrier.
+         */
+        if (impl_item->data.impl_item.safety != CM_HIR_SAFE) {
+            result.status = CM_SEMANTIC_ITEM_SAFETY_MISMATCH;
+            return result;
+        }
+        for (item_index = 0u; item_index < hir->items.len; ++item_index) {
+            const CmHirItem *impl_member;
+
+            impl_member = (const CmHirItem *)cm_vec_at_const(&hir->items,
+                item_index);
+            if (impl_member != NULL
+                && cm_hir_def_id_equal(impl_member->parent_definition,
+                    impl_item->definition)) {
+                result.impl_member = impl_member->definition;
+                result.status = CM_SEMANTIC_ITEM_WRONG_ASSOCIATION;
+                return result;
+            }
+        }
+        result.status = CM_SEMANTIC_ITEM_OK;
+        return result;
+    }
     if (trait_item->data.trait_item.is_auto) {
-        result.status = CM_SEMANTIC_ITEM_UNSUPPORTED;
+        /*
+         * An explicit positive auto-trait impl is an itemless header, not an
+         * associated-item contract.  HIR construction authenticates the
+         * auto-trait declaration and the impl's generic/self-type shape.
+         * Recheck the invariants that distinguish this narrow semantic slice
+         * so forged children or an unsafe/safe polarity mismatch cannot pass
+         * the admission barrier.
+         */
+        status = cm_semantic_item_declaration_shape(trait_item, 0);
+        if (status != CM_SEMANTIC_ITEM_OK) {
+            result.status = status;
+            return result;
+        }
+        if (trait_item->generic_parameter_count != 0u
+            || trait_item->data.trait_item.supertrait_count != 0u
+            || impl_item->data.impl_item.trait_type.argument_count != 0u
+            || impl_item->data.impl_item.trait_type.arguments != NULL) {
+            result.status = CM_SEMANTIC_ITEM_INVALID;
+            return result;
+        }
+        if (trait_item->data.trait_item.safety
+                != impl_item->data.impl_item.safety) {
+            result.status = CM_SEMANTIC_ITEM_SAFETY_MISMATCH;
+            return result;
+        }
+        for (item_index = 0u; item_index < hir->items.len; ++item_index) {
+            const CmHirItem *associated_item;
+
+            associated_item = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, item_index);
+            if (associated_item == NULL) continue;
+            if (cm_hir_def_id_equal(associated_item->parent_definition,
+                    trait_item->definition)) {
+                result.trait_member = associated_item->definition;
+                result.status = CM_SEMANTIC_ITEM_WRONG_ASSOCIATION;
+                return result;
+            }
+            if (cm_hir_def_id_equal(associated_item->parent_definition,
+                    impl_item->definition)) {
+                result.impl_member = associated_item->definition;
+                result.status = CM_SEMANTIC_ITEM_WRONG_ASSOCIATION;
+                return result;
+            }
+        }
+        result.status = CM_SEMANTIC_ITEM_OK;
         return result;
     }
     status = cm_semantic_item_declaration_shape(trait_item, 0);

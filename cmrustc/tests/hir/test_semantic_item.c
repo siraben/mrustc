@@ -222,6 +222,9 @@ static void add_impl_type(TestFixture *fixture)
     assert(cm_hir_add_item(&fixture->hir, &item, &item_id) == CM_HIR_OK);
 }
 
+static CmHirItem *mutable_item(TestFixture *fixture,
+    CmHirDefId definition);
+
 static void fixture_init(TestFixture *fixture, int method, int assoc_type)
 {
     memset(fixture, 0, sizeof(*fixture));
@@ -238,6 +241,26 @@ static void fixture_init(TestFixture *fixture, int method, int assoc_type)
     add_impl(fixture);
     if (method) add_impl_method(fixture);
     if (assoc_type) add_impl_type(fixture);
+}
+
+static void fixture_init_auto(TestFixture *fixture, CmHirSafety safety)
+{
+    memset(fixture, 0, sizeof(*fixture));
+    cm_hir_context_init(&fixture->hir);
+    assert(cm_hir_create_crate(&fixture->hir,
+        cm_hir_intern(&fixture->hir, "semantic_item_auto"),
+        CM_HIR_EDITION_2024, test_span(0u, 200u), &fixture->crate_id,
+        &fixture->root) == CM_HIR_OK);
+    fixture->u32_type = add_leaf_type(fixture, CM_HIR_TYPE_INTEGER_KIND);
+    fixture->bool_type = add_leaf_type(fixture, CM_HIR_TYPE_BOOL_KIND);
+    add_trait(fixture);
+    add_impl(fixture);
+    mutable_item(fixture, fixture->trait_definition)->data.trait_item
+        .is_auto = 1;
+    mutable_item(fixture, fixture->trait_definition)->data.trait_item
+        .safety = safety;
+    mutable_item(fixture, fixture->impl_definition)->data.impl_item.safety =
+        safety;
 }
 
 static void fixture_destroy(TestFixture *fixture)
@@ -948,6 +971,8 @@ static void test_associated_type_bounds_are_pending(void)
 static void test_pending_and_invalid(void)
 {
     TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmProjectionNormalizeLimits limits;
     CmSemanticItemResult result;
     CmHirItem *impl_item;
     CmHirItem *method;
@@ -956,12 +981,28 @@ static void test_pending_and_invalid(void)
     CmHirPredicateScope scope;
     CmHirType *return_type;
 
-    fixture_init(&fixture, 1, 0);
+    fixture_init(&fixture, 0, 0);
     impl_item = mutable_item(&fixture, fixture.impl_definition);
     impl_item->data.impl_item.is_negative = 1;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
-    assert(result.status == CM_SEMANTIC_ITEM_PENDING_NEGATIVE);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    limits.max_nodes = 4096u;
+    limits.max_projection_steps = 256u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    cm_hir_crate_finalization_destroy(&finalization);
+
+    impl_item->data.impl_item.safety = CM_HIR_UNSAFE;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_SAFETY_MISMATCH);
+    impl_item->data.impl_item.safety = CM_HIR_SAFE;
     impl_item->data.impl_item.is_negative = 0;
     impl_item->data.impl_item.trait_type.definition.crate_id += 10u;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
@@ -970,11 +1011,23 @@ static void test_pending_and_invalid(void)
     fixture_destroy(&fixture);
 
     fixture_init(&fixture, 1, 0);
+    impl_item = mutable_item(&fixture, fixture.impl_definition);
+    impl_item->data.impl_item.is_negative = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_WRONG_ASSOCIATION
+        && cm_hir_def_id_equal(result.impl_member,
+            fixture.impl_method));
+    fixture_destroy(&fixture);
+
+    fixture_init(&fixture, 1, 0);
     mutable_item(&fixture, fixture.trait_definition)->data.trait_item.is_auto
         = 1;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
-    assert(result.status == CM_SEMANTIC_ITEM_UNSUPPORTED);
+    assert(result.status == CM_SEMANTIC_ITEM_WRONG_ASSOCIATION
+        && cm_hir_def_id_equal(result.trait_member,
+            fixture.trait_method));
     fixture_destroy(&fixture);
 
     fixture_init(&fixture, 1, 0);
@@ -1041,6 +1094,60 @@ static void test_pending_and_invalid(void)
         "parameter-type-mismatch") == 0);
 }
 
+static void test_explicit_auto_trait_impl_headers(void)
+{
+    TestFixture fixture;
+    CmHirCrateFinalization finalization;
+    CmProjectionNormalizeLimits limits;
+    CmSemanticItemResult result;
+    CmHirItem *impl_item;
+    CmHirItem *trait_item;
+    CmHirItem forged_member;
+
+    fixture_init_auto(&fixture, CM_HIR_UNSAFE);
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_OK);
+    memset(&finalization, 0, sizeof(finalization));
+    assert(cm_hir_crate_finalization_init(&finalization, &fixture.hir,
+        fixture.crate_id) == CM_HIR_OK);
+    limits.max_nodes = 4096u;
+    limits.max_projection_steps = 256u;
+    result = cm_semantic_item_check_finalized_local_trait_impls(
+        &finalization, limits);
+    assert(result.status == CM_SEMANTIC_ITEM_OK
+        && result.solver_kind == CM_TRAIT_SOLVER_PROVEN);
+    cm_hir_crate_finalization_destroy(&finalization);
+
+    impl_item = mutable_item(&fixture, fixture.impl_definition);
+    impl_item->data.impl_item.safety = CM_HIR_SAFE;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_SAFETY_MISMATCH);
+    impl_item->data.impl_item.safety = CM_HIR_UNSAFE;
+
+    fixture.impl_method = reserve_item(&fixture, CM_HIR_ITEM_FUNCTION,
+        105u);
+    init_item(&fixture, &forged_member, CM_HIR_ITEM_FUNCTION,
+        fixture.impl_method, "forged");
+    forged_member.parent_definition = fixture.impl_definition;
+    assert(cm_vec_push(&fixture.hir.items, &forged_member));
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_WRONG_ASSOCIATION
+        && cm_hir_def_id_equal(result.impl_member,
+            fixture.impl_method));
+    fixture_destroy(&fixture);
+
+    fixture_init_auto(&fixture, CM_HIR_SAFE);
+    trait_item = mutable_item(&fixture, fixture.trait_definition);
+    trait_item->generic_parameter_count = 1u;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_INVALID);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_positive_and_signature_mismatches();
@@ -1054,6 +1161,7 @@ int main(void)
     test_associated_type_default_is_pending();
     test_associated_type_bounds_are_pending();
     test_pending_and_invalid();
+    test_explicit_auto_trait_impl_headers();
     puts("hir semantic item tests passed");
     return 0;
 }

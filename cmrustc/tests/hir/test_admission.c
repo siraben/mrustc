@@ -255,6 +255,52 @@ static void test_success_and_stale(void)
     fixture_destroy(&f);
 }
 
+static void test_negative_impl_headers_are_admitted(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+
+    fixture_init(&f,
+        "trait Ordinary {} "
+        "impl<T: ?Sized> !Ordinary for &mut T {} "
+        "pub unsafe auto trait Send {} "
+        "impl<T: ?Sized> !Send for *mut T {} "
+        "fn value() -> u32 { 1u32 }");
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && result.item_result.status == CM_SEMANTIC_ITEM_OK
+        && result.body_result.status == CM_SEMANTIC_BODY_OK
+        && result.session_status == CM_TRAIT_SOLVER_PROVEN
+        && cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
+static void test_positive_auto_impl_headers_are_admitted(void)
+{
+    Fixture f;
+    CmSemanticAdmission admission;
+    CmSemanticAdmissionResult result;
+
+    fixture_init(&f,
+        "pub unsafe auto trait Send {} "
+        "unsafe impl<T: ?Sized> Send for *mut T where T: Send {} "
+        "pub auto trait Unpin {} "
+        "struct Token; impl Unpin for Token {} "
+        "fn value() -> u32 { 1u32 }");
+    memset(&admission, 0, sizeof(admission));
+    result = admit(&f, &admission);
+    assert(result.status == CM_SEMANTIC_ADMISSION_OK
+        && result.item_result.status == CM_SEMANTIC_ITEM_OK
+        && result.body_result.status == CM_SEMANTIC_BODY_OK
+        && result.session_status == CM_TRAIT_SOLVER_PROVEN
+        && cm_semantic_admission_is_current(&admission));
+    cm_semantic_admission_destroy(&admission);
+    fixture_destroy(&f);
+}
+
 static void test_body_failure_rolls_back(void)
 {
     Fixture f;
@@ -2643,6 +2689,8 @@ static void test_regions_admission_snapshot_invalidation(void)
 int main(void)
 {
     test_success_and_stale();
+    test_negative_impl_headers_are_admitted();
+    test_positive_auto_impl_headers_are_admitted();
     test_body_failure_rolls_back();
     test_semantic_failure_rolls_back();
     test_closed_trait_default_is_admitted_but_not_executable();
