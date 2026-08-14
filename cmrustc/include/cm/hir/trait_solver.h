@@ -6,7 +6,7 @@
 
 typedef enum CmTraitSolverResultKind {
     CM_TRAIT_SOLVER_PROVEN = 0,
-    /* Reserved for a future negative-obligation API; select never emits it. */
+    /* One exact authenticated local negative impl refutes the goal. */
     CM_TRAIT_SOLVER_NEGATIVE,
     CM_TRAIT_SOLVER_NO_SOLUTION,
     CM_TRAIT_SOLVER_AMBIGUOUS,
@@ -178,18 +178,20 @@ size_t cm_trait_impl_index_entry_count(const CmTraitImplIndex *index);
 const CmTraitImplIndexEntry *cm_trait_impl_index_entry(
     const CmTraitImplIndex *index, size_t entry_index);
 
-/* Shared fail-closed goal authentication used by both environment and index. */
+/* Public ordinary-goal authentication. Auto-trait selection has one narrower
+ * internal path used only to discover exact local negative evidence. */
 CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
     const CmHirContext *hir, CmTypeckContext *typeck,
     CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type);
 
 /*
- * Select one positive ordinary impl. Type-only impl generics are instantiated
- * with fresh inference variables; every other generic or predicate shape is
- * an explicit blocker. Negative evidence remains unsupported and is
- * separately counted. Every candidate probe is rolled back. Bindings from the
- * unique winner are recreated and committed; every non-PROVEN result leaves
- * the typeck session unchanged.
+ * Select one positive ordinary impl or refute the goal with one exact local,
+ * nongeneric, predicate-free negative impl. Type-only positive impl generics
+ * are instantiated with fresh inference variables; every broader negative,
+ * generic, predicate, auto-positive, or overlapping shape is an explicit
+ * blocker or ambiguity. Every candidate probe is rolled back. Bindings from
+ * the unique positive winner are recreated and committed; every non-PROVEN
+ * result leaves the typeck session unchanged and publishes no provider.
  */
 CmTraitSelectionResult cm_trait_solver_select(
     const CmTraitImplIndex *index, CmTypeckContext *typeck,

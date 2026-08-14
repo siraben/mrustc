@@ -7140,6 +7140,95 @@ static int cm_lower_pattern_binding(CmLowerState *state,
     return !state->failed;
 }
 
+static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
+    CmAstPatternId pattern_id, CmSpan item_span, CmAstItemId ast_item_id,
+    uint32_t parameter_index, CmHirFunctionParameter *out_parameter,
+    CmHirLocal *out_locals)
+{
+    const CmAstPattern *pattern;
+    const CmHirType *tuple_type;
+    uint32_t binding_index;
+
+    pattern = cm_ast_get_pattern(state->ast, pattern_id);
+    tuple_type = out_parameter == NULL ? NULL
+        : cm_hir_get_type(state->hir, out_parameter->type);
+    if (pattern == NULL || out_parameter == NULL || out_locals == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, item_span,
+            ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "tuple parameter pattern has invalid storage");
+        return 0;
+    }
+    if (pattern->kind != CM_AST_PATTERN_TUPLE
+        || pattern->data.list.has_rest
+        || pattern->data.list.pattern_count
+            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        || pattern->data.list.patterns == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+            cm_lower_span(state, pattern->span), ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple parameter requires exactly two bindings");
+        return 0;
+    }
+    if (tuple_type == NULL || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+        || tuple_type->data.tuple_type.element_count
+            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        || tuple_type->data.tuple_type.elements == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+            cm_lower_span(state, pattern->span), ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple parameter requires a two-element tuple type");
+        return 0;
+    }
+    out_parameter->name = CM_INTERN_ID_NONE;
+    out_parameter->span = cm_lower_span(state, pattern->span);
+    out_parameter->binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
+    out_parameter->binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    for (binding_index = 0u;
+         binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+         ++binding_index) {
+        const CmAstPattern *binding;
+        CmSpan binding_span;
+        CmInternId binding_name;
+
+        binding = cm_ast_get_pattern(state->ast,
+            pattern->data.list.patterns[binding_index]);
+        if (binding == NULL || binding->kind != CM_AST_PATTERN_BINDING
+            || binding->data.binding.subpattern != CM_AST_PATTERN_NONE
+            || binding->data.binding.is_ref
+            || binding->data.binding.is_mutable) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                binding == NULL ? out_parameter->span
+                    : cm_lower_span(state, binding->span),
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "function tuple parameter supports only immutable move "
+                "bindings");
+            return 0;
+        }
+        binding_span = cm_lower_span(state, binding->span);
+        binding_name = cm_lower_copy_string(state,
+            binding->data.binding.name, binding_span, ast_item_id);
+        if (state->failed) return 0;
+        out_parameter->tuple_bindings[binding_index].name = binding_name;
+        out_parameter->tuple_bindings[binding_index].span = binding_span;
+        out_locals[binding_index].name = binding_name;
+        out_locals[binding_index].type =
+            tuple_type->data.tuple_type.elements[binding_index];
+        out_locals[binding_index].mutability = CM_HIR_IMMUTABLE;
+        out_locals[binding_index].span = binding_span;
+        out_locals[binding_index].parameter_index = parameter_index;
+        out_locals[binding_index].parameter_binding_index = binding_index;
+    }
+    if (out_parameter->tuple_bindings[0].name
+            == out_parameter->tuple_bindings[1].name) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+            out_parameter->span, ast_item_id, CM_AST_TYPE_NONE,
+            CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple parameter bindings must have distinct names");
+        return 0;
+    }
+    return 1;
+}
+
 static CmHirTypeId cm_lower_parameter_binding_type(CmLowerState *state,
     CmHirTypeId parameter_type, CmHirParameterBindingMode binding_mode,
     CmSpan span)
@@ -7576,11 +7665,17 @@ static int cm_lower_function_item(CmLowerState *state,
                 "function parameter count has no parameter storage");
             return 0;
         }
+        if (function->parameter_count > UINT32_MAX / 2u) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "function parameter binding count exceeds HIR capacity");
+            return 0;
+        }
         parameters = (CmHirFunctionParameter *)cm_alloc_zeroed(
             (size_t)function->parameter_count,
             sizeof(CmHirFunctionParameter));
         locals = (CmHirLocal *)cm_alloc_zeroed(
-            (size_t)function->parameter_count, sizeof(CmHirLocal));
+            (size_t)function->parameter_count * 2u, sizeof(CmHirLocal));
     }
     for (index = 0u; index < function->parameter_count && !state->failed;
          ++index) {
@@ -7641,6 +7736,8 @@ static int cm_lower_function_item(CmLowerState *state,
                 break;
             }
         } else {
+            const CmAstPattern *ast_pattern;
+
             if (function->parameters[index].receiver_lifetime
                 != CM_INTERN_ID_NONE) {
                 cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
@@ -7657,15 +7754,39 @@ static int cm_lower_function_item(CmLowerState *state,
                     "HIR");
                 break;
             }
+            parameters[index].type = cm_lower_type(state,
+                function->parameters[index].type, record->owner_module,
+                record->definition);
+            if (state->failed) break;
+            ast_pattern = cm_ast_get_pattern(state->ast,
+                function->parameters[index].pattern);
+            if (ast_pattern != NULL
+                && ast_pattern->kind == CM_AST_PATTERN_TUPLE) {
+                if (record->parent_kind != CM_LOWER_PARENT_NONE
+                    || record->is_foreign
+                    || function->body == CM_AST_EXPR_NONE) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                        cm_lower_span(state, ast_pattern->span), ast_item_id,
+                        CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                        "tuple parameter patterns require bodyful free "
+                        "functions");
+                    break;
+                }
+                if (!cm_lower_tuple_parameter_pattern(state,
+                        function->parameters[index].pattern, span,
+                        ast_item_id, index, &parameters[index],
+                        &locals[local_count])) {
+                    break;
+                }
+                local_count += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                continue;
+            }
             if (!cm_lower_pattern_binding(state,
                     function->parameters[index].pattern, span, ast_item_id,
                     &name, &mutability, &parameter_span, &binding_kind,
                     &binding_mode)) {
                 break;
             }
-            parameters[index].type = cm_lower_type(state,
-                function->parameters[index].type, record->owner_module,
-                record->definition);
         }
         parameters[index].name = name;
         parameters[index].span = parameter_span;
@@ -7679,6 +7800,7 @@ static int cm_lower_function_item(CmLowerState *state,
             locals[local_count].mutability = mutability;
             locals[local_count].span = parameter_span;
             locals[local_count].parameter_index = index;
+            locals[local_count].parameter_binding_index = 0u;
             local_count += 1u;
         }
     }

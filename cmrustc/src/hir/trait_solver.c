@@ -1884,9 +1884,11 @@ static CmTraitMatchResult cm_trait_match_candidate(
     }
 }
 
-CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
+static CmTraitSolverResultKind
+cm_trait_solver_validate_implemented_goal_inner(
     const CmHirContext *hir, CmTypeckContext *typeck,
-    CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type)
+    CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type,
+    int allow_auto_trait)
 {
     CmTraitTypeScan scan;
     const CmHirItem *queried_trait;
@@ -1922,7 +1924,7 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
         if (trait_type->arguments[argument_index].kind
                 != expected_kind) return CM_TRAIT_SOLVER_INVALID;
     }
-    if (queried_trait->data.trait_item.is_auto) {
+    if (queried_trait->data.trait_item.is_auto && !allow_auto_trait) {
         return CM_TRAIT_SOLVER_UNSUPPORTED;
     }
     /*
@@ -1994,6 +1996,67 @@ CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
     return CM_TRAIT_SOLVER_PROVEN;
 }
 
+CmTraitSolverResultKind cm_trait_solver_validate_implemented_goal(
+    const CmHirContext *hir, CmTypeckContext *typeck,
+    CmTypeckTypeId self_type, const CmTypeckNamedType *trait_type)
+{
+    return cm_trait_solver_validate_implemented_goal_inner(hir, typeck,
+        self_type, trait_type, 0);
+}
+
+static int cm_trait_negative_entry_is_exact(
+    const CmTraitImplIndexState *state,
+    const CmTraitImplIndexEntry *entry)
+{
+    const CmHirItem *item;
+    const CmHirItem *trait_item;
+    size_t item_index;
+    unsigned int allowed_flags;
+
+    if (state == NULL || entry == NULL
+        || (entry->unsupported_flags
+            & CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE) == 0u
+        || entry->impl_definition.crate_id != state->local_crate) {
+        return 0;
+    }
+    allowed_flags = CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE
+        | CM_TRAIT_IMPL_UNSUPPORTED_AUTO_TRAIT;
+    if ((entry->unsupported_flags & ~allowed_flags) != 0u) return 0;
+    item = cm_hir_get_item(state->hir, entry->item);
+    trait_item = cm_trait_find_definition_item(state->hir,
+        entry->trait_definition);
+    if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(item->definition,
+            entry->impl_definition)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || !item->data.impl_item.has_trait
+        || !item->data.impl_item.is_negative
+        || item->data.impl_item.safety != CM_HIR_SAFE
+        || !cm_hir_def_id_equal(item->data.impl_item
+            .trait_type.definition, entry->trait_definition)
+        || item->generic_parameter_count != 0u
+        || item->predicate_scope_count != 0u
+        || item->predicate_count != 0u
+        || item->outlives_predicate_count != 0u
+        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || trait_item->data.trait_item.is_auto
+            != ((entry->unsupported_flags
+                & CM_TRAIT_IMPL_UNSUPPORTED_AUTO_TRAIT) != 0u)) {
+        return 0;
+    }
+    /* A negative declaration is evidence only, never an item provider. */
+    for (item_index = 0u; item_index < state->hir->items.len;
+         ++item_index) {
+        const CmHirItem *child;
+
+        child = cm_hir_get_item(state->hir,
+            (CmHirItemId)(item_index + 1u));
+        if (child != NULL && cm_hir_def_id_equal(
+                child->parent_definition, item->definition)) return 0;
+    }
+    return 1;
+}
+
 static int cm_trait_nonproof_rank(CmTraitSolverResultKind kind)
 {
     switch (kind) {
@@ -2028,6 +2091,7 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     CmTraitImplSelectionWitness *witness)
 {
     const CmTraitImplIndexState *state;
+    const CmHirItem *queried_trait;
     CmTraitSelectionResult result;
     CmTraitImplHeadKind query_head;
     CmHirDefId query_head_definition;
@@ -2036,7 +2100,9 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     CmTraitSolverResultKind strongest_nonproof;
     size_t entry_index;
     size_t unsupported_blockers;
+    int negative_goal_exact;
     int saw_nonproof;
+    int query_is_auto;
 
     if (out_target != NULL) *out_target = CM_TYPECK_TYPE_NONE;
     result = cm_trait_result(CM_TRAIT_SOLVER_INVALID);
@@ -2046,12 +2112,20 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
     }
     state = cm_trait_index_state_const(index);
     if (!cm_trait_index_is_current(state)) return result;
-    validation = cm_trait_solver_validate_implemented_goal(state->hir,
-        typeck, self_type, trait_type);
+    validation = cm_trait_solver_validate_implemented_goal_inner(state->hir,
+        typeck, self_type, trait_type, 1);
     if (validation != CM_TRAIT_SOLVER_PROVEN) {
         result.kind = validation;
         return result;
     }
+    queried_trait = cm_trait_find_definition_item(state->hir,
+        trait_type->definition);
+    if (queried_trait == NULL || queried_trait->kind != CM_HIR_ITEM_TRAIT) {
+        return result;
+    }
+    query_is_auto = queried_trait->data.trait_item.is_auto;
+    negative_goal_exact = cm_trait_query_arguments_proven(typeck,
+        trait_type).kind == CM_TRAIT_MATCH_YES;
     query_head = cm_trait_typeck_head(typeck, self_type,
         &query_head_definition);
     winner = NULL;
@@ -2096,7 +2170,13 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
                 if (match.kind == CM_TRAIT_MATCH_YES
                     && (entry->unsupported_flags
                         & CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE) != 0u) {
-                    result.negative_match_count += 1u;
+                    if (negative_goal_exact
+                        && cm_trait_negative_entry_is_exact(state, entry)) {
+                        result.negative_match_count += 1u;
+                        continue;
+                    }
+                    result.blocking_match_count += 1u;
+                    unsupported_blockers += 1u;
                     continue;
                 }
             }
@@ -2134,12 +2214,14 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
         result.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
         return result;
     }
-    if (result.negative_match_count != 0u) {
-        result.kind = CM_TRAIT_SOLVER_UNSUPPORTED;
-        return result;
-    }
     if (saw_nonproof) {
         result.kind = strongest_nonproof;
+        return result;
+    }
+    if (result.negative_match_count != 0u) {
+        result.kind = result.negative_match_count == 1u
+                && result.supported_match_count == 0u
+            ? CM_TRAIT_SOLVER_NEGATIVE : CM_TRAIT_SOLVER_AMBIGUOUS;
         return result;
     }
     if (result.supported_match_count > 1u) {
@@ -2176,7 +2258,9 @@ static CmTraitSelectionResult cm_trait_solver_select_inner(
         result.impl_item = winner->item;
         return result;
     }
-    result.kind = CM_TRAIT_SOLVER_DEFERRED_METADATA;
+    result.kind = query_is_auto
+        ? CM_TRAIT_SOLVER_UNSUPPORTED
+        : CM_TRAIT_SOLVER_DEFERRED_METADATA;
     return result;
 }
 
@@ -2561,6 +2645,7 @@ cm_trait_solver_solve_implemented_with_evaluator_and_witness(
     CmTraitImplSelectionWitness *witness)
 {
     const CmTraitImplIndexState *index_state;
+    const CmHirItem *queried_trait;
     const CmParamEnvFact *fact;
     CmTraitSelectionResult result;
     CmTraitSolverResultKind validation;
@@ -2595,11 +2680,24 @@ cm_trait_solver_solve_implemented_with_evaluator_and_witness(
     } else if (substitution->enclosing != NULL) {
         return result;
     }
-    validation = cm_trait_solver_validate_implemented_goal(index_state->hir,
-        typeck, goal->self_type, &goal->trait_type);
+    validation = cm_trait_solver_validate_implemented_goal_inner(
+        index_state->hir, typeck, goal->self_type, &goal->trait_type, 1);
     if (validation != CM_TRAIT_SOLVER_PROVEN) {
         result.kind = validation;
         return result;
+    }
+    queried_trait = cm_trait_find_definition_item(index_state->hir,
+        goal->trait_type.definition);
+    if (queried_trait == NULL || queried_trait->kind != CM_HIR_ITEM_TRAIT) {
+        return result;
+    }
+    /* Positive auto-trait reasoning is not implemented.  Only an exact local
+     * negative header may answer this goal, so environment assumptions cannot
+     * accidentally become positive auto-trait providers. */
+    if (queried_trait->data.trait_item.is_auto) {
+        return cm_trait_solver_select_inner(index, typeck,
+            goal->self_type, &goal->trait_type, goal->owner, evaluator,
+            NULL, NULL, witness);
     }
     result = cm_trait_result(CM_TRAIT_SOLVER_NO_SOLUTION);
     winner_index = (size_t)-1;

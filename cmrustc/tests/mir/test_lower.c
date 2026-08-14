@@ -3304,6 +3304,111 @@ static void test_reference_lowering_stays_fail_closed(void)
     cm_hir_context_destroy(&hir);
 }
 
+static void test_tuple_parameter_lowering_stays_fail_closed(void)
+{
+    CmHirContext hir;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirTypeId u32_type;
+    CmHirTypeId tuple_type;
+    CmHirType tuple_value;
+    CmHirTypeId tuple_elements[2];
+    CmHirDefId definition;
+    CmHirFunctionParameter parameter;
+    CmHirLocal locals[2];
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId root;
+    CmMirContext mir;
+    CmMirLowerResult result;
+    size_t count;
+
+    cm_hir_context_init(&hir);
+    assert(cm_hir_create_crate(&hir,
+        cm_hir_intern(&hir, "mir_tuple_parameter_boundary"),
+        CM_HIR_EDITION_2021, test_span(0u, 100u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    tuple_elements[0] = u32_type;
+    tuple_elements[1] = u32_type;
+    memset(&tuple_value, 0, sizeof(tuple_value));
+    tuple_value.kind = CM_HIR_TYPE_TUPLE_KIND;
+    tuple_value.span = test_span(3u, 8u);
+    tuple_value.data.tuple_type.elements = tuple_elements;
+    tuple_value.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(&hir, &tuple_value, &tuple_type) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(10u, 80u), &definition)
+        == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = tuple_type;
+    parameter.span = test_span(20u, 40u);
+    parameter.binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.tuple_bindings[0].name = cm_hir_intern(&hir, "left");
+    parameter.tuple_bindings[0].span = test_span(21u, 25u);
+    parameter.tuple_bindings[1].name = cm_hir_intern(&hir, "right");
+    parameter.tuple_bindings[1].span = test_span(27u, 32u);
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = parameter.tuple_bindings[0].name;
+    locals[0].type = u32_type;
+    locals[0].span = parameter.tuple_bindings[0].span;
+    locals[0].parameter_index = 0u;
+    locals[0].parameter_binding_index = 0u;
+    locals[1].name = parameter.tuple_bindings[1].name;
+    locals[1].type = u32_type;
+    locals[1].span = parameter.tuple_bindings[1].span;
+    locals[1].parameter_index = 0u;
+    locals[1].parameter_binding_index = 1u;
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = u32_type;
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 10u;
+    body.span = test_span(10u, 80u);
+    assert(cm_hir_add_body(&hir, &body, &body_id) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&hir, "first");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = body.span;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = u32_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+    root = add_test_local_expression(&hir, body_id, u32_type, 0u,
+        50u, 54u);
+    assert(cm_hir_set_body_root_expression(&hir, body_id, root)
+        == CM_HIR_OK);
+
+    cm_mir_context_init(&mir);
+    count = cm_mir_body_count(&mir);
+    result = cm_mir_lower_instance(&mir, &hir, body_id, NULL, 0u);
+    assert(result.error_count == 1u && result.lowered_body_count == 0u
+        && result.body == CM_MIR_BODY_NONE
+        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message, "ABI destructuring prologue")
+            != NULL
+        && cm_mir_body_count(&mir) == count);
+    cm_mir_context_destroy(&mir);
+    cm_hir_context_destroy(&hir);
+}
+
 int main(void)
 {
     CmHirContext hir;
@@ -3451,6 +3556,7 @@ int main(void)
     test_aggregate_and_field_lowering();
     test_aggregate_call_lowering();
     test_reference_lowering_stays_fail_closed();
+    test_tuple_parameter_lowering_stays_fail_closed();
 
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);

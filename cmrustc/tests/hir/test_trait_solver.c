@@ -200,9 +200,37 @@ static CmHirDefId add_impl(CmHirContext *hir, CmHirCrateId crate_id,
     return definition;
 }
 
+static CmHirDefId add_impl_with_type_argument(CmHirContext *hir,
+    CmHirCrateId crate_id, CmHirModuleId module,
+    CmHirDefId trait_definition, CmHirTypeId self_type,
+    CmHirTypeId trait_argument, int is_negative)
+{
+    CmHirGenericArg argument;
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = trait_argument;
+    assert(cm_hir_reserve_item_definition_as(hir, crate_id,
+        CM_HIR_ITEM_IMPL, test_span(1u, 2u), &definition) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_IMPL, definition, module,
+        CM_INTERN_ID_NONE);
+    item.data.impl_item.self_type = self_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = trait_definition;
+    item.data.impl_item.trait_type.arguments = &argument;
+    item.data.impl_item.trait_type.argument_count = 1u;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    item.data.impl_item.is_negative = is_negative;
+    assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
 static CmHirDefId add_blanket_impl(CmHirContext *hir,
     CmHirCrateId crate_id, CmHirModuleId module,
-    CmHirDefId trait_definition)
+    CmHirDefId trait_definition, int is_negative)
 {
     CmHirDefId definition;
     CmHirGenericParam parameter;
@@ -235,6 +263,27 @@ static CmHirDefId add_blanket_impl(CmHirContext *hir,
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = trait_definition;
     item.data.impl_item.safety = CM_HIR_SAFE;
+    item.data.impl_item.is_negative = is_negative;
+    assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
+    return definition;
+}
+
+static CmHirDefId add_associated_declaration(CmHirContext *hir,
+    CmHirCrateId crate_id, CmHirModuleId module,
+    CmHirDefId trait_definition, const char *name)
+{
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+
+    assert(cm_hir_reserve_item_definition_as(hir, crate_id,
+        CM_HIR_ITEM_TYPE_ALIAS, test_span(1u, 2u), &definition)
+        == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_TYPE_ALIAS, definition, module,
+        cm_hir_intern(hir, name));
+    item.parent_definition = trait_definition;
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    item.data.type_alias_item.trait_item_definition = cm_hir_def_id_none();
     assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
     return definition;
 }
@@ -537,7 +586,7 @@ static void fixture_init_ordered(TestFixture *fixture,
     fixture->exact_impl = add_impl(&fixture->hir, fixture->crate_id,
         fixture->root, fixture->exact_trait, fixture->u8_hir, 0);
     (void)add_blanket_impl(&fixture->hir, fixture->crate_id,
-        fixture->root, fixture->generic_trait);
+        fixture->root, fixture->generic_trait, 0);
     (void)add_impl(&fixture->hir, fixture->crate_id, fixture->root,
         fixture->ambiguous_trait, fixture->u16_hir, 0);
     (void)add_impl(&fixture->hir, fixture->crate_id, fixture->root,
@@ -998,7 +1047,7 @@ static void test_impl_selection_witness_hir_staleness(void)
             &typeck, &instantiation)
         && instantiation.argument_count == 1u);
     (void)add_blanket_impl(&fixture.hir, fixture.crate_id, fixture.root,
-        fixture.generic_trait);
+        fixture.generic_trait, 0);
     assert(!cm_trait_impl_selection_witness_is_current(&witness, &typeck)
         && !cm_trait_impl_selection_witness_instantiation(&witness,
             &typeck, &instantiation));
@@ -1031,6 +1080,223 @@ static void test_impl_selection_witness_hir_staleness(void)
     cm_trait_impl_selection_witness_destroy(&witness);
     cm_typeck_context_destroy(&typeck);
     cm_trait_impl_index_destroy(&impl_index);
+    fixture_destroy(&fixture);
+}
+
+static void test_exact_negative_selection(void)
+{
+    TestFixture fixture;
+    CmHirDefId ordinary_trait;
+    CmHirDefId argument_negative_trait;
+    CmHirDefId generic_negative_trait;
+    CmHirDefId duplicate_negative_trait;
+    CmHirDefId overlap_trait;
+    CmHirDefId projection_trait;
+    CmHirDefId associated_type;
+    CmHirDefId foreign_trait;
+    CmHirDefId owner;
+    CmHirCrateId foreign_crate;
+    CmHirModuleId foreign_root;
+    CmTraitImplIndex index;
+    CmTraitImplSelectionWitness witness;
+    CmTypeckContext typeck;
+    CmTypeckInstantiation witness_instantiation;
+    CmTypeckInstantiation owner_instantiation;
+    CmParamEnv environment;
+    CmParamEnvSubstitution substitution;
+    CmImplementedTraitGoal goal;
+    CmProjectionEqualityGoal projection_goal;
+    CmTraitSelectionResult result;
+    CmTypeckGenericArg trait_argument;
+    CmTypeckNamedType query;
+    CmTypeckType projection;
+    CmTypeckTypeId bool_type;
+    CmTypeckTypeId u8_type;
+    CmTypeckTypeId u16_type;
+    CmTypeckTypeId projection_type;
+    CmTypeckTypeId variable;
+    CmTypeckTypeId resolved;
+    size_t type_count;
+
+    fixture_init(&fixture);
+    ordinary_trait = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NegativeOrdinary", 0);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        ordinary_trait, fixture.bool_hir, 1);
+    argument_negative_trait = add_type_trait(&fixture.hir,
+        fixture.crate_id, fixture.root, "NegativeArgument", 1u);
+    (void)add_impl_with_type_argument(&fixture.hir, fixture.crate_id,
+        fixture.root, argument_negative_trait, fixture.bool_hir,
+        fixture.u8_hir, 1);
+    generic_negative_trait = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NegativeGeneric", 0);
+    (void)add_blanket_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        generic_negative_trait, 1);
+    duplicate_negative_trait = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NegativeDuplicate", 0);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        duplicate_negative_trait, fixture.bool_hir, 1);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        duplicate_negative_trait, fixture.bool_hir, 1);
+    overlap_trait = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NegativeOverlap", 0);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        overlap_trait, fixture.bool_hir, 1);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        overlap_trait, fixture.bool_hir, 0);
+    projection_trait = add_trait(&fixture.hir, fixture.crate_id,
+        fixture.root, "NegativeProjection", 0);
+    associated_type = add_associated_declaration(&fixture.hir,
+        fixture.crate_id, fixture.root, projection_trait, "Item");
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        projection_trait, fixture.bool_hir, 1);
+    assert(cm_hir_create_crate(&fixture.hir,
+        cm_hir_intern(&fixture.hir, "solver_dependency"),
+        CM_HIR_EDITION_2024, test_span(0u, 100u), &foreign_crate,
+        &foreign_root) == CM_HIR_OK);
+    foreign_trait = add_trait(&fixture.hir, foreign_crate, foreign_root,
+        "ForeignNegative", 0);
+    (void)add_impl(&fixture.hir, fixture.crate_id, fixture.root,
+        foreign_trait, fixture.bool_hir, 1);
+    owner = add_trait(&fixture.hir, fixture.crate_id, fixture.root,
+        "NegativeGoalOwner", 0);
+
+    memset(&environment, 0, sizeof(environment));
+    assert(cm_param_env_init(&environment, &fixture.hir, owner)
+        == CM_PARAM_ENV_READY);
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.bool_hir,
+        &bool_type) == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir,
+        &u8_type) == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u16_hir,
+        &u16_type) == CM_TYPECK_OK);
+    cm_trait_impl_selection_witness_init(&witness);
+
+    query = trait_query(ordinary_trait);
+    type_count = cm_typeck_type_count(&typeck);
+    result = cm_trait_solver_select_with_witness(&index, &typeck,
+        bool_type, &query, &witness);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 0u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE
+        && cm_hir_def_id_is_none(result.impl_associated_definition)
+        && !cm_trait_impl_selection_witness_is_current(&witness, &typeck)
+        && !cm_trait_impl_selection_witness_instantiation(&witness,
+            &typeck, &witness_instantiation)
+        && cm_typeck_type_count(&typeck) == type_count);
+    result = cm_trait_solver_select(&index, &typeck, u16_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && result.negative_match_count == 0u);
+    query = trait_query(foreign_trait);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition));
+
+    memset(&trait_argument, 0, sizeof(trait_argument));
+    trait_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    trait_argument.data.type = u8_type;
+    query = trait_query(argument_negative_trait);
+    query.arguments = &trait_argument;
+    query.argument_count = 1u;
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u);
+    assert(cm_typeck_new_variable(&typeck, CM_HIR_INFER_GENERAL,
+        test_span(1u, 2u), &variable) == CM_TYPECK_OK);
+    trait_argument.data.type = variable;
+    type_count = cm_typeck_type_count(&typeck);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 1u
+        && cm_typeck_type_count(&typeck) == type_count
+        && cm_typeck_resolve(&typeck, variable, &resolved) == CM_TYPECK_OK
+        && resolved == variable);
+
+    query = trait_query(generic_negative_trait);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
+        && result.negative_match_count == 0u
+        && result.blocking_match_count == 1u);
+    query = trait_query(duplicate_negative_trait);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.negative_match_count == 2u
+        && result.supported_match_count == 0u);
+    query = trait_query(overlap_trait);
+    result = cm_trait_solver_select(&index, &typeck, bool_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.negative_match_count == 1u
+        && result.supported_match_count == 1u);
+
+    cm_typeck_instantiation_init(&typeck, &owner_instantiation);
+    owner_instantiation.parameter_owner = owner;
+    owner_instantiation.self_owner = owner;
+    owner_instantiation.self_type = bool_type;
+    memset(&substitution, 0, sizeof(substitution));
+    substitution.exact = &owner_instantiation;
+    memset(&goal, 0, sizeof(goal));
+    goal.owner = owner;
+    goal.self_type = bool_type;
+    goal.trait_type = trait_query(ordinary_trait);
+    type_count = cm_typeck_type_count(&typeck);
+    result = cm_trait_solver_solve_implemented(&index, &environment,
+        &typeck, &substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && cm_typeck_type_count(&typeck) == type_count);
+
+    goal.self_type = u16_type;
+    goal.trait_type = trait_query(fixture.auto_trait);
+    result = cm_trait_solver_solve_implemented(&index, &environment,
+        &typeck, &substitution, &goal);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition));
+
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_TYPECK_TYPE_PROJECTION;
+    projection.span = test_span(1u, 2u);
+    projection.data.projection_type.self_type = bool_type;
+    projection.data.projection_type.trait_type.definition =
+        projection_trait;
+    projection.data.projection_type.associated_type.definition =
+        associated_type;
+    assert(cm_typeck_add_type(&typeck, &projection, &projection_type)
+        == CM_TYPECK_OK);
+    memset(&projection_goal, 0, sizeof(projection_goal));
+    projection_goal.owner = owner;
+    projection_goal.projection_type = projection_type;
+    projection_goal.expected_type = u8_type;
+    type_count = cm_typeck_type_count(&typeck);
+    result = cm_trait_solver_solve_projection_equality(&index,
+        &environment, &typeck, &substitution, &projection_goal, NULL);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE
+        && cm_hir_def_id_is_none(result.impl_associated_definition)
+        && cm_typeck_type_count(&typeck) == type_count);
+
+    cm_trait_impl_selection_witness_destroy(&witness);
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    cm_param_env_destroy(&environment);
     fixture_destroy(&fixture);
 }
 
@@ -1143,19 +1409,27 @@ static void test_index_and_selection(void)
         && result.blocking_match_count == 0u);
     query = trait_query(fixture.auto_trait);
     index = cm_typeck_type_count(&typeck);
+    assert(cm_trait_solver_validate_implemented_goal(&fixture.hir,
+        &typeck, u16_type, &query) == CM_TRAIT_SOLVER_UNSUPPORTED);
     assert(cm_typeck_snapshot(&typeck, &caller_snapshot) == CM_TYPECK_OK);
     result = cm_trait_solver_select(&complete, &typeck, u8_type, &query);
     assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
-        && result.blocking_match_count == 0u
-        && result.negative_match_count == 0u
+        && result.blocking_match_count == 1u
+        && result.negative_match_count == 1u
         && cm_typeck_type_count(&typeck) == index);
     assert(cm_typeck_rollback(&typeck, &caller_snapshot) == CM_TYPECK_OK);
     result = cm_trait_solver_select(&complete, &typeck, bool_type, &query);
-    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
-        && result.negative_match_count == 0u);
+    assert(result.kind == CM_TRAIT_SOLVER_AMBIGUOUS
+        && result.negative_match_count == 2u
+        && result.blocking_match_count == 0u);
     result = cm_trait_solver_select(&complete, &typeck, u16_type, &query);
-    assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
-        && result.negative_match_count == 0u);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.supported_match_count == 0u
+        && result.blocking_match_count == 0u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE);
     query = trait_query(fixture.empty_auto_trait);
     result = cm_trait_solver_select(&complete, &typeck, u8_type, &query);
     assert(result.kind == CM_TRAIT_SOLVER_UNSUPPORTED
@@ -1486,6 +1760,7 @@ static void test_finalized_complete_index(void)
     CmTraitImplIndex index;
     CmTypeckContext typeck;
     CmTypeckTypeId self_type;
+    CmTypeckTypeId negative_type;
     CmTypeckNamedType query;
     CmTraitSelectionResult result;
     CmHirAttribute attribute;
@@ -1512,6 +1787,8 @@ static void test_finalized_complete_index(void)
     cm_typeck_context_init(&typeck, &fixture.hir);
     assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &self_type)
         == CM_TYPECK_OK);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u16_hir,
+        &negative_type) == CM_TYPECK_OK);
     query = trait_query(fixture.exact_trait);
     result = cm_trait_solver_select(&index, &typeck, self_type, &query);
     assert(result.kind == CM_TRAIT_SOLVER_PROVEN
@@ -1520,6 +1797,13 @@ static void test_finalized_complete_index(void)
     query = trait_query(fixture.empty_trait);
     result = cm_trait_solver_select(&index, &typeck, self_type, &query);
     assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA);
+    query = trait_query(fixture.auto_trait);
+    result = cm_trait_solver_select(&index, &typeck, negative_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_NEGATIVE
+        && result.negative_match_count == 1u
+        && result.proof_origin == CM_TRAIT_PROOF_NONE
+        && cm_hir_def_id_is_none(result.impl_definition)
+        && result.impl_item == CM_HIR_ITEM_NONE);
 
     assert(cm_hir_intern(&fixture.hir, "not-semantic")
         != CM_INTERN_ID_NONE);
@@ -1607,6 +1891,7 @@ int main(void)
     test_type_only_generic_selection();
     test_impl_selection_witness();
     test_impl_selection_witness_hir_staleness();
+    test_exact_negative_selection();
     test_projection_overflow_and_invalid_query();
     test_const_scanning();
     test_stale_index_fingerprints();

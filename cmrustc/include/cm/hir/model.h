@@ -525,7 +525,9 @@ typedef struct CmHirModule {
 typedef enum CmHirBindingKind {
     CM_HIR_BINDING_NAMED = 0,
     /* Positional ABI slot with no name-resolution binding, e.g. `_`. */
-    CM_HIR_BINDING_DISCARD
+    CM_HIR_BINDING_DISCARD,
+    /* One ABI tuple slot destructured into two lexical move bindings. */
+    CM_HIR_BINDING_TUPLE_PATTERN
 } CmHirBindingKind;
 
 /* How a named function-parameter pattern binds its ABI input value. */
@@ -535,12 +537,24 @@ typedef enum CmHirParameterBindingMode {
     CM_HIR_PARAMETER_BINDING_REF_MUTABLE
 } CmHirParameterBindingMode;
 
-typedef struct CmHirFunctionParameter {
+#define CM_HIR_TUPLE_PARAMETER_BINDING_COUNT UINT32_C(2)
+
+typedef struct CmHirTupleParameterBinding {
     CmInternId name;
+    CmSpan span;
+} CmHirTupleParameterBinding;
+
+typedef struct CmHirFunctionParameter {
+    /* Root binding name; none for discard and tuple-pattern parameters. */
+    CmInternId name;
+    /* Exact incoming ABI type, including the tuple before destructuring. */
     CmHirTypeId type;
     CmSpan span;
     CmHirBindingKind binding_kind;
     CmHirParameterBindingMode binding_mode;
+    /* Embedded, bounded lexical leaves for TUPLE_PATTERN only. */
+    CmHirTupleParameterBinding
+        tuple_bindings[CM_HIR_TUPLE_PARAMETER_BINDING_COUNT];
 } CmHirFunctionParameter;
 
 typedef enum CmHirReceiverKind {
@@ -691,8 +705,10 @@ typedef struct CmHirLocal {
     CmHirTypeId type;
     CmHirMutability mutability;
     CmSpan span;
-    /* Signature position, or none for a non-parameter body local. */
+    /* ABI signature position, or none for a non-parameter body local. */
     uint32_t parameter_index;
+    /* Lexical leaf within that ABI slot; zero for ordinary/user locals. */
+    uint32_t parameter_binding_index;
 } CmHirLocal;
 
 #define CM_HIR_PARAMETER_INDEX_NONE ((uint32_t)UINT32_MAX)

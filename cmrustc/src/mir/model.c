@@ -2775,6 +2775,8 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         parameter_count = semantic_signature.parameter_count;
     }
     if (signature->is_variadic
+        || (signature->parameter_count != 0u
+            && signature->parameters == NULL)
         || parameter_count == UINT32_MAX
         || source_body == NULL
         || source_body->parameter_count != parameter_count
@@ -2783,6 +2785,12 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         || body->local_count < source_body->local_count + 1u
         || body->locals == NULL) {
         return 0;
+    }
+    for (index = 0u; index < signature->parameter_count; ++index) {
+        if (signature->parameters[index].binding_kind
+                == CM_HIR_BINDING_TUPLE_PATTERN) {
+            return 0;
+        }
     }
     if (semantic_results == NULL) {
         if (!cm_mir_instantiate_executable_type(hir, item, &body->instance,

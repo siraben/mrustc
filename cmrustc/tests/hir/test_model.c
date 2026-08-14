@@ -1839,11 +1839,185 @@ static void test_discard_parameter_model(void)
         "function-param item#1 index=1 binding=named name=\"value\"")
         != NULL);
     assert(strstr(dump,
-        "body-local body#1 index=0 origin=parameter[1] name=\"value\"")
+        "body-local body#1 index=0 origin=parameter[1].binding[0] "
+        "name=\"value\"")
         != NULL);
     assert(strstr(dump, "body#1 owner=1:2 origin=item-source "
         "definition=1:2 enclosing=1:2 item=1:2 state=unlowered "
         "expected=ty#1 locals=1 params=2") != NULL);
+    free(dump);
+    assert(fclose(dump_file) == 0);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_tuple_parameter_model(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirTypeId unit_type;
+    CmHirTypeId u8_type;
+    CmHirTypeId tuple_type;
+    CmHirType type;
+    CmHirTypeId tuple_elements[2];
+    CmHirDefId definition;
+    CmHirDefId declaration_definition;
+    CmHirBody body;
+    CmHirBody *stored_body;
+    CmHirBodyId body_id;
+    CmHirFunctionParameter parameter;
+    CmHirLocal locals[2];
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmInternId rust_abi;
+    CmInternId left_name;
+    CmInternId right_name;
+    FILE *dump_file;
+    char *dump;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "tuple_parameters"),
+        CM_HIR_EDITION_2024, test_span(0u, 200u), &crate_id, &root_id)
+        == CM_HIR_OK);
+    unit_type = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(1u, 2u));
+    u8_type = add_simple_type(&context, CM_HIR_TYPE_INTEGER_KIND,
+        test_span(2u, 3u));
+    tuple_elements[0] = u8_type;
+    tuple_elements[1] = u8_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(3u, 8u);
+    type.data.tuple_type.elements = tuple_elements;
+    type.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(&context, &type, &tuple_type) == CM_HIR_OK);
+    rust_abi = cm_hir_intern(&context, "Rust");
+    left_name = cm_hir_intern(&context, "left");
+    right_name = cm_hir_intern(&context, "right");
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(10u, 80u), &definition) == CM_HIR_OK);
+
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = left_name;
+    locals[0].type = u8_type;
+    locals[0].span = test_span(21u, 25u);
+    locals[0].parameter_index = 0u;
+    locals[0].parameter_binding_index = 0u;
+    locals[1].name = right_name;
+    locals[1].type = u8_type;
+    locals[1].span = test_span(27u, 32u);
+    locals[1].parameter_index = 0u;
+    locals[1].parameter_binding_index = 1u;
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = unit_type;
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 4u;
+    body.span = test_span(10u, 80u);
+
+    locals[1].parameter_binding_index = 0u;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    locals[0].parameter_binding_index = 1u;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    locals[0].parameter_binding_index = 0u;
+    locals[1].parameter_binding_index = 2u;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    locals[1].parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
+    locals[1].parameter_binding_index = 1u;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    locals[1].parameter_index = 0u;
+    locals[1].parameter_binding_index = 1u;
+    assert(cm_hir_add_body(&context, &body, &body_id) == CM_HIR_OK);
+
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = tuple_type;
+    parameter.span = test_span(20u, 34u);
+    parameter.binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.tuple_bindings[0].name = left_name;
+    parameter.tuple_bindings[0].span = locals[0].span;
+    parameter.tuple_bindings[1].name = right_name;
+    parameter.tuple_bindings[1].span = locals[1].span;
+    init_test_item(&item, CM_HIR_ITEM_FUNCTION, definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "split"),
+        test_span(10u, 80u));
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = unit_type;
+    item.data.function_item.signature.abi = rust_abi;
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+
+    parameter.type = u8_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.type = tuple_type;
+    parameter.name = left_name;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.name = CM_INTERN_ID_NONE;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_REF_SHARED;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.tuple_bindings[1].name = left_name;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.tuple_bindings[1].name = right_name;
+    parameter.tuple_bindings[1].span = test_span(9u, 12u);
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    parameter.tuple_bindings[1].span = locals[1].span;
+
+    stored_body = (CmHirBody *)cm_vec_at(&context.bodies,
+        (size_t)body_id - 1u);
+    assert(stored_body != NULL);
+    stored_body->locals[1].parameter_binding_index = 0u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[1].parameter_binding_index = 1u;
+    stored_body->locals[1].name = left_name;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[1].name = right_name;
+    stored_body->locals[1].type = unit_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[1].type = u8_type;
+    stored_body->locals[1].span = test_span(28u, 32u);
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    stored_body->locals[1].span = locals[1].span;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(81u, 120u), &declaration_definition) == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_FUNCTION, declaration_definition,
+        root_id, cm_hir_def_id_none(),
+        cm_hir_intern(&context, "declaration"), test_span(81u, 120u));
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = unit_type;
+    item.data.function_item.signature.abi = rust_abi;
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+
+    dump_file = tmpfile();
+    assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
+    dump = read_dump(dump_file);
+    assert(strstr(dump,
+        "function-param item#1 index=0 binding=tuple-pattern name=none")
+        != NULL);
+    assert(strstr(dump,
+        "function-param-binding item#1 parameter=0 index=0 name=\"left\"")
+        != NULL);
+    assert(strstr(dump,
+        "function-param-binding item#1 parameter=0 index=1 name=\"right\"")
+        != NULL);
+    assert(strstr(dump,
+        "body-local body#1 index=1 origin=parameter[0].binding[1]")
+        != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
     cm_hir_context_destroy(&context);
@@ -8042,6 +8216,7 @@ int main(void)
     test_scoped_self_and_receiver_invariants();
     test_body_public_invariants();
     test_discard_parameter_model();
+    test_tuple_parameter_model();
     test_supertrait_model_invariants();
     test_trait_alias_model_invariants();
     test_static_supertrait_model_invariants();

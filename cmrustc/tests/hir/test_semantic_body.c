@@ -649,6 +649,128 @@ static CmHirDefId add_trait(TestFixture *fixture, const char *name)
     return definition;
 }
 
+static void test_tuple_parameter_definition_lockstep(void)
+{
+    TestFixture fixture;
+    CmHirDefId definition;
+    CmHirType tuple_value;
+    CmHirTypeId tuple_elements[2];
+    CmHirTypeId tuple_type;
+    CmHirFunctionParameter parameter;
+    CmHirLocal locals[2];
+    CmHirBody body;
+    CmHirBody *stored_body;
+    CmHirBodyId body_id;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId root;
+    CmSemanticSession session;
+    CmSemanticSessionOptions options;
+    CmSemanticBodyResult result;
+    CmInternId saved_name;
+    CmSpan saved_span;
+
+    fixture_init(&fixture);
+    tuple_elements[0] = fixture.u32_type;
+    tuple_elements[1] = fixture.u32_type;
+    memset(&tuple_value, 0, sizeof(tuple_value));
+    tuple_value.kind = CM_HIR_TYPE_TUPLE_KIND;
+    tuple_value.span = test_span(10u, 20u);
+    tuple_value.data.tuple_type.elements = tuple_elements;
+    tuple_value.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(&fixture.hir, &tuple_value, &tuple_type)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+        fixture.crate_id, CM_HIR_ITEM_FUNCTION, test_span(10u, 38u),
+        &definition) == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = tuple_type;
+    parameter.span = test_span(14u, 28u);
+    parameter.binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameter.tuple_bindings[0].name =
+        cm_hir_intern(&fixture.hir, "left");
+    parameter.tuple_bindings[0].span = test_span(15u, 19u);
+    parameter.tuple_bindings[1].name =
+        cm_hir_intern(&fixture.hir, "right");
+    parameter.tuple_bindings[1].span = test_span(21u, 26u);
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = parameter.tuple_bindings[0].name;
+    locals[0].type = tuple_elements[0];
+    locals[0].span = parameter.tuple_bindings[0].span;
+    locals[0].parameter_index = 0u;
+    locals[0].parameter_binding_index = 0u;
+    locals[1].name = parameter.tuple_bindings[1].name;
+    locals[1].type = tuple_elements[1];
+    locals[1].span = parameter.tuple_bindings[1].span;
+    locals[1].parameter_index = 0u;
+    locals[1].parameter_binding_index = 1u;
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = fixture.u32_type;
+    body.locals = locals;
+    body.local_count = 2u;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 10u;
+    body.span = test_span(10u, 38u);
+    assert(cm_hir_add_body(&fixture.hir, &body, &body_id) == CM_HIR_OK);
+    init_item(&item, CM_HIR_ITEM_FUNCTION, definition, fixture.root,
+        "tuple_first", &fixture.hir);
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = fixture.u32_type;
+    item.data.function_item.signature.abi =
+        cm_hir_intern(&fixture.hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK
+        && add_local_expression(&fixture.hir, body_id, 0u,
+            fixture.u32_type, test_span(30u, 34u), &root) == CM_HIR_OK
+        && cm_hir_set_body_root_expression(&fixture.hir, body_id, root)
+            == CM_HIR_OK
+        && cm_hir_body_function_owner_kind(&fixture.hir,
+            cm_hir_get_item(&fixture.hir, item_id))
+            == CM_HIR_BODY_FUNCTION_OWNER_FREE);
+
+    memset(&session, 0, sizeof(session));
+    options = session_options(&fixture, definition);
+    assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+        == CM_TRAIT_SOLVER_PROVEN);
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+
+    stored_body = (CmHirBody *)cm_vec_at(&fixture.hir.bodies,
+        (size_t)body_id - 1u);
+    assert(stored_body != NULL);
+    stored_body->locals[1].parameter_binding_index = 0u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_body->locals[1].parameter_binding_index = 1u;
+    saved_name = stored_body->locals[1].name;
+    stored_body->locals[1].name = stored_body->locals[0].name;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_body->locals[1].name = saved_name;
+    saved_span = stored_body->locals[1].span;
+    stored_body->locals[1].span.start += 1u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_body->locals[1].span = saved_span;
+    stored_body->locals[1].type = fixture.bool_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
+        && result.typeck_status == CM_TYPECK_TYPE_MISMATCH);
+    stored_body->locals[1].type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+
+    cm_semantic_session_destroy(&session);
+    fixture_destroy(&fixture);
+}
+
 static void test_closed_trait_default_definition_mode(void)
 {
     TestFixture fixture;
@@ -2250,7 +2372,9 @@ static void test_dot_method_negative_and_no_solution(void)
             item_index);
         if (impl_item != NULL && cm_hir_def_id_equal(
                 impl_item->definition, fixture.impl_definition)) {
-            /* Exercise negative-candidate propagation directly. */
+            /* This post-construction polarity forgery retains the linked
+             * method, so the solver authority must not authenticate it as
+             * itemless negative evidence. */
             impl_item->data.impl_item.is_negative = 1;
         }
     }
@@ -2261,7 +2385,7 @@ static void test_dot_method_negative_and_no_solution(void)
     probe.expected_body = fixture.caller_body;
     probe.result = CM_SEMANTIC_BODY_WRITEBACK_OK;
     result = method_fixture_check(&fixture, &probe);
-    assert(result.status == CM_SEMANTIC_BODY_NEGATIVE
+    assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
         && probe.invocation_count == 0u);
     fixture_destroy(&fixture.base);
 }
@@ -3902,6 +4026,7 @@ static void test_invalid_api_and_status_names(void)
 
 int main(void)
 {
+    test_tuple_parameter_definition_lockstep();
     test_closed_trait_default_definition_mode();
     test_explicit_qualified_callable_selection();
     test_generic_trait_argument_callable();

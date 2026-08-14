@@ -2165,6 +2165,58 @@ static int cm_hir_parameter_local_type_matches(
         && local->mutability == CM_HIR_IMMUTABLE;
 }
 
+static int cm_hir_parameter_tuple_payload_empty(
+    const CmHirFunctionParameter *parameter)
+{
+    uint32_t index;
+
+    for (index = 0u; index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+         ++index) {
+        if (parameter->tuple_bindings[index].name != CM_INTERN_ID_NONE
+            || parameter->tuple_bindings[index].span.source != 0u
+            || parameter->tuple_bindings[index].span.start != 0u
+            || parameter->tuple_bindings[index].span.end != 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_hir_parameter_tuple_payload_valid(
+    const CmHirContext *context, const CmHirFunctionParameter *parameter)
+{
+    const CmHirType *tuple_type;
+    uint32_t index;
+
+    if (parameter->name != CM_INTERN_ID_NONE
+        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE) {
+        return 0;
+    }
+    tuple_type = cm_hir_get_type(context, parameter->type);
+    if (tuple_type == NULL || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+        || tuple_type->data.tuple_type.element_count
+            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        || tuple_type->data.tuple_type.elements == NULL) {
+        return 0;
+    }
+    for (index = 0u; index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+         ++index) {
+        const CmHirTupleParameterBinding *binding;
+
+        binding = &parameter->tuple_bindings[index];
+        if (!cm_hir_intern_id_nonempty(context, binding->name)
+            || cm_hir_intern_matches(context, binding->name, "_")
+            || !cm_hir_span_is_ordered(binding->span)
+            || binding->span.source != parameter->span.source
+            || binding->span.start < parameter->span.start
+            || binding->span.end > parameter->span.end) {
+            return 0;
+        }
+    }
+    return parameter->tuple_bindings[0].name
+        != parameter->tuple_bindings[1].name;
+}
+
 static int cm_hir_function_body_matches_signature(
     const CmHirContext *context, const CmHirItem *item)
 {
@@ -2186,14 +2238,55 @@ static int cm_hir_function_body_matches_signature(
 
         parameter = &signature->parameters[index];
         if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
-        if (local_index >= body->local_count
-            || body->locals[local_index].parameter_index != index
-            || body->locals[local_index].name != parameter->name
-            || !cm_hir_parameter_local_type_matches(context, parameter,
-                &body->locals[local_index])) {
-            return 0;
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            if (local_index >= body->local_count
+                || body->locals[local_index].parameter_index != index
+                || body->locals[local_index].parameter_binding_index != 0u
+                || body->locals[local_index].name != parameter->name
+                || !cm_hir_parameter_local_type_matches(context, parameter,
+                    &body->locals[local_index])) {
+                return 0;
+            }
+            local_index += 1u;
+            continue;
         }
-        local_index += 1u;
+        if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
+            const CmHirType *tuple_type;
+            uint32_t binding_index;
+
+            tuple_type = cm_hir_get_type(context, parameter->type);
+            if (tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count
+                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                || tuple_type->data.tuple_type.elements == NULL) {
+                return 0;
+            }
+            for (binding_index = 0u;
+                 binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++binding_index) {
+                const CmHirLocal *local;
+                const CmHirTupleParameterBinding *binding;
+
+                if (local_index >= body->local_count) return 0;
+                local = &body->locals[local_index];
+                binding = &parameter->tuple_bindings[binding_index];
+                if (local->parameter_index != index
+                    || local->parameter_binding_index != binding_index
+                    || local->name != binding->name
+                    || local->type
+                        != tuple_type->data.tuple_type.elements[binding_index]
+                    || local->mutability != CM_HIR_IMMUTABLE
+                    || local->span.source != binding->span.source
+                    || local->span.start != binding->span.start
+                    || local->span.end != binding->span.end) {
+                    return 0;
+                }
+                local_index += 1u;
+            }
+            continue;
+        }
+        return 0;
     }
     return local_index == body->local_count
         || body->locals[local_index].parameter_index
@@ -2335,13 +2428,25 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
         int binding_valid;
 
         parameter = &signature->parameters[index];
-        binding_valid = parameter->binding_kind == CM_HIR_BINDING_NAMED
-            ? cm_hir_intern_id_nonempty(context, parameter->name)
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            binding_valid = cm_hir_intern_id_nonempty(context,
+                    parameter->name)
                 && !cm_hir_intern_matches(context, parameter->name, "_")
-            : parameter->binding_kind == CM_HIR_BINDING_DISCARD
-                && parameter->name == CM_INTERN_ID_NONE
-                && parameter->binding_mode
-                    == CM_HIR_PARAMETER_BINDING_MOVE;
+                && cm_hir_parameter_tuple_payload_empty(parameter);
+        } else if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
+            binding_valid = parameter->name == CM_INTERN_ID_NONE
+                && parameter->binding_mode == CM_HIR_PARAMETER_BINDING_MOVE
+                && cm_hir_parameter_tuple_payload_empty(parameter);
+        } else if (parameter->binding_kind
+                == CM_HIR_BINDING_TUPLE_PATTERN) {
+            binding_valid = cm_hir_parameter_tuple_payload_valid(context,
+                    parameter)
+                && cm_hir_def_id_is_none(item->parent_definition)
+                && item->data.function_item.body != CM_HIR_BODY_NONE
+                && signature->receiver == CM_HIR_RECEIVER_NONE;
+        } else {
+            binding_valid = 0;
+        }
         if (!binding_valid
             || (unsigned int)parameter->binding_mode
                 > (unsigned int)CM_HIR_PARAMETER_BINDING_REF_MUTABLE
@@ -4855,24 +4960,37 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     }
     {
         uint32_t previous_parameter;
+        uint32_t previous_binding;
         int saw_parameter;
         int saw_non_parameter;
 
         previous_parameter = 0u;
+        previous_binding = 0u;
         saw_parameter = 0;
         saw_non_parameter = 0;
         for (index = 0u; index < body->local_count; ++index) {
             uint32_t parameter_index;
+            uint32_t binding_index;
 
             parameter_index = body->locals[index].parameter_index;
+            binding_index = body->locals[index].parameter_binding_index;
             if (parameter_index == CM_HIR_PARAMETER_INDEX_NONE) {
+                if (binding_index != 0u) {
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
                 saw_non_parameter = 1;
             } else if (parameter_index >= body->parameter_count
+                || binding_index
+                    >= CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || saw_non_parameter
-                || (saw_parameter && parameter_index <= previous_parameter)) {
+                || (saw_parameter
+                    && (parameter_index < previous_parameter
+                        || (parameter_index == previous_parameter
+                            && binding_index <= previous_binding)))) {
                 return CM_HIR_INVARIANT_VIOLATION;
             } else {
                 previous_parameter = parameter_index;
+                previous_binding = binding_index;
                 saw_parameter = 1;
             }
         }

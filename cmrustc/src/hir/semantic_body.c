@@ -948,7 +948,6 @@ struct CmSemanticBodyConstraints {
     CmProjectionNormalizeLimits normalize_limits;
     CmVec *deferred_equalities;
     unsigned char *defined_locals;
-    unsigned char *seen_parameters;
     CmTypeckTypeId *expression_terms;
     size_t expression_term_count;
     CmSemanticCheckedBodyFacts *checked_facts;
@@ -3211,9 +3210,7 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     CmSemanticBodyStatus status;
     uint32_t initial_local_count;
     uint32_t index;
-    uint32_t previous_parameter_index;
     size_t bitmap_size;
-    size_t parameter_bitmap_size;
 
     if (constraints == NULL || constraints->session == NULL
         || constraints->typeck == NULL || constraints->substitution == NULL
@@ -3234,55 +3231,93 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     if (!cm_size_mul((size_t)(constraints->body->local_count == 0u
                 ? 1u : constraints->body->local_count),
             sizeof(*constraints->defined_locals),
-            &bitmap_size)
-        || !cm_size_mul((size_t)(constraints->body->parameter_count == 0u
-                ? 1u : constraints->body->parameter_count),
-            sizeof(*constraints->seen_parameters), &parameter_bitmap_size)) {
+            &bitmap_size)) {
         return CM_SEMANTIC_BODY_OVERFLOW;
     }
     constraints->defined_locals = (unsigned char *)cm_alloc_zeroed(
         1u, bitmap_size);
-    constraints->seen_parameters = (unsigned char *)cm_alloc_zeroed(
-        1u, parameter_bitmap_size);
-    initial_local_count = constraints->body->local_count;
-    previous_parameter_index = CM_HIR_PARAMETER_INDEX_NONE;
-    for (index = 0u; index < constraints->body->local_count; ++index) {
-        if (constraints->body->locals[index].parameter_index
-                == CM_HIR_PARAMETER_INDEX_NONE) {
-            initial_local_count = index;
-            break;
+    initial_local_count = 0u;
+    for (index = 0u;
+         index < owner_item->data.function_item.signature.parameter_count;
+         ++index) {
+        const CmHirFunctionParameter *parameter;
+
+        parameter = &owner_item->data.function_item.signature
+            .parameters[index];
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
+        if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
+            const CmHirLocal *local;
+
+            if (initial_local_count >= constraints->body->local_count) {
+                status = CM_SEMANTIC_BODY_INVALID;
+                goto finish;
+            }
+            local = &constraints->body->locals[initial_local_count];
+            if (local->parameter_index != index
+                || local->parameter_binding_index != 0u
+                || local->name != parameter->name) {
+                status = CM_SEMANTIC_BODY_INVALID;
+                goto finish;
+            }
+            status = cm_semantic_body_unify_owner_types(constraints,
+                local->type, parameter->type);
+            if (status != CM_SEMANTIC_BODY_OK) goto finish;
+            initial_local_count += 1u;
+            continue;
         }
-        if (constraints->body->locals[index].parameter_index
-                >= constraints->body->parameter_count) {
-            status = CM_SEMANTIC_BODY_INVALID;
-            goto finish;
+        if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
+            const CmHirType *tuple_type;
+            uint32_t binding_index;
+
+            tuple_type = cm_hir_get_type(constraints->hir,
+                parameter->type);
+            if (tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count
+                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                || tuple_type->data.tuple_type.elements == NULL) {
+                status = CM_SEMANTIC_BODY_INVALID;
+                goto finish;
+            }
+            for (binding_index = 0u;
+                 binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++binding_index) {
+                const CmHirLocal *local;
+                const CmHirTupleParameterBinding *binding;
+
+                if (initial_local_count >= constraints->body->local_count) {
+                    status = CM_SEMANTIC_BODY_INVALID;
+                    goto finish;
+                }
+                local = &constraints->body->locals[initial_local_count];
+                binding = &parameter->tuple_bindings[binding_index];
+                if (local->parameter_index != index
+                    || local->parameter_binding_index != binding_index
+                    || local->name != binding->name
+                    || local->mutability != CM_HIR_IMMUTABLE
+                    || local->span.source != binding->span.source
+                    || local->span.start != binding->span.start
+                    || local->span.end != binding->span.end) {
+                    status = CM_SEMANTIC_BODY_INVALID;
+                    goto finish;
+                }
+                status = cm_semantic_body_unify_owner_types(constraints,
+                    local->type,
+                    tuple_type->data.tuple_type.elements[binding_index]);
+                if (status != CM_SEMANTIC_BODY_OK) goto finish;
+                initial_local_count += 1u;
+            }
+            continue;
         }
-        if (previous_parameter_index != CM_HIR_PARAMETER_INDEX_NONE
-            && constraints->body->locals[index].parameter_index
-                <= previous_parameter_index) {
-            status = CM_SEMANTIC_BODY_INVALID;
-            goto finish;
-        }
-        if (constraints->seen_parameters[
-                constraints->body->locals[index].parameter_index]
-                != 0u) {
-            status = CM_SEMANTIC_BODY_INVALID;
-            goto finish;
-        }
-        constraints->seen_parameters[
-            constraints->body->locals[index].parameter_index] = 1u;
-        status = cm_semantic_body_unify_owner_types(constraints,
-            constraints->body->locals[index].type,
-            owner_item->data.function_item.signature.parameters[
-                constraints->body->locals[index].parameter_index].type);
-        if (status != CM_SEMANTIC_BODY_OK) goto finish;
-        previous_parameter_index =
-            constraints->body->locals[index].parameter_index;
+        status = CM_SEMANTIC_BODY_INVALID;
+        goto finish;
     }
     for (index = initial_local_count;
          index < constraints->body->local_count; ++index) {
         if (constraints->body->locals[index].parameter_index
-                != CM_HIR_PARAMETER_INDEX_NONE) {
+                != CM_HIR_PARAMETER_INDEX_NONE
+            || constraints->body->locals[index].parameter_binding_index
+                != 0u) {
             status = CM_SEMANTIC_BODY_INVALID;
             goto finish;
         }
@@ -3315,9 +3350,7 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
     }
 finish:
     cm_free(constraints->defined_locals);
-    cm_free(constraints->seen_parameters);
     constraints->defined_locals = NULL;
-    constraints->seen_parameters = NULL;
     return status;
 }
 

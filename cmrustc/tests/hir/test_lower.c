@@ -6824,8 +6824,8 @@ static void test_unsupported_method_forms_are_errors(void)
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
-        "parameter patterns require typed pattern HIR",
-        "parameter patterns require typed pattern HIR"
+        "tuple parameter patterns require bodyful free functions",
+        "tuple parameter patterns require bodyful free functions"
     };
     CmAst ast;
     CmExpandedAst expanded;
@@ -7014,7 +7014,14 @@ static void test_typed_parameter_patterns_remain_bounded(void)
     static const char *const sources[] = {
         "fn subpattern(value @ _: u8) {}",
         "fn reference(&value: &u8) {}",
-        "fn tuple((left, right): (u8, u8)) {}"
+        "fn nested(((left, right), third): ((u8, u8), u8)) {}",
+        "fn rest((left, ..): (u8, u8)) {}",
+        "fn by_ref((ref left, right): (u8, u8)) {}",
+        "fn mutable((mut left, right): (u8, u8)) {}",
+        "fn wildcard((_, right): (u8, u8)) {}",
+        "fn wrong_type((left, right): u8) {}",
+        "fn wrong_arity((left, middle, right): (u8, u8, u8)) {}",
+        "fn declaration((left, right): (u8, u8));"
     };
     size_t index;
 
@@ -7024,9 +7031,61 @@ static void test_typed_parameter_patterns_remain_bounded(void)
 
         result = lower_source(sources[index], &context, NULL);
         assert(result.error_count == 1u
-            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
-            && strstr(result.first_error.message,
-                "parameter patterns require typed pattern HIR") != NULL);
+            && (result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
+                || result.first_error.kind
+                    == CM_HIR_LOWER_UNSUPPORTED_TYPE));
+        cm_hir_context_destroy(&context);
+    }
+
+    {
+        static const char source[] =
+            "fn first(prefix: u8, (left, right): (u8, u16)) -> u8 { left }";
+        const CmHirItem *function;
+        const CmHirFunctionSignature *signature;
+        const CmHirBody *body;
+        const CmHirType *tuple_type;
+        CmHirContext context;
+        CmHirLowerResult result;
+
+        result = lower_source(source, &context, NULL);
+        function = find_item(&context, "first");
+        signature = function == NULL ? NULL
+            : &function->data.function_item.signature;
+        body = function == NULL ? NULL
+            : cm_hir_get_body(&context,
+                function->data.function_item.body);
+        tuple_type = signature == NULL ? NULL
+            : cm_hir_get_type(&context, signature->parameters[1].type);
+        assert(result.error_count == 0u && signature != NULL
+            && signature->parameter_count == 2u
+            && signature->parameters[1].binding_kind
+                == CM_HIR_BINDING_TUPLE_PATTERN
+            && signature->parameters[1].name == CM_INTERN_ID_NONE
+            && signature->parameters[1].binding_mode
+                == CM_HIR_PARAMETER_BINDING_MOVE
+            && hir_string_is(&context,
+                signature->parameters[1].tuple_bindings[0].name, "left")
+            && hir_string_is(&context,
+                signature->parameters[1].tuple_bindings[1].name, "right")
+            && tuple_type != NULL
+            && tuple_type->kind == CM_HIR_TYPE_TUPLE_KIND
+            && tuple_type->data.tuple_type.element_count == 2u
+            && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+            && body->parameter_count == 2u && body->local_count == 3u
+            && body->locals[0].parameter_index == 0u
+            && body->locals[0].parameter_binding_index == 0u
+            && body->locals[1].parameter_index == 1u
+            && body->locals[1].parameter_binding_index == 0u
+            && body->locals[2].parameter_index == 1u
+            && body->locals[2].parameter_binding_index == 1u
+            && body->locals[1].type
+                == tuple_type->data.tuple_type.elements[0]
+            && body->locals[2].type
+                == tuple_type->data.tuple_type.elements[1]
+            && body->locals[1].name
+                == signature->parameters[1].tuple_bindings[0].name
+            && body->locals[2].name
+                == signature->parameters[1].tuple_bindings[1].name);
         cm_hir_context_destroy(&context);
     }
 
@@ -7036,7 +7095,7 @@ static void test_typed_parameter_patterns_remain_bounded(void)
         size_t type_index;
 
         result = lower_source(
-            "fn rollback(ref shared: u8, (left, right): (u8, u8)) {}",
+            "fn rollback(ref shared: u8, (left, ref right): (u8, u8)) {}",
             &context, NULL);
         assert(result.error_count == 1u && find_item(&context, "rollback")
             == NULL);

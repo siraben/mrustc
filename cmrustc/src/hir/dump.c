@@ -453,7 +453,9 @@ static const char *cm_hir_receiver_name(CmHirReceiverKind kind)
 
 static const char *cm_hir_binding_name(CmHirBindingKind kind)
 {
-    static const char *const names[] = { "named", "discard" };
+    static const char *const names[] = {
+        "named", "discard", "tuple-pattern"
+    };
 
     if ((unsigned int)kind >= (unsigned int)CM_ARRAY_LEN(names)) {
         return "bad-binding";
@@ -1099,8 +1101,9 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
             if (local->parameter_index == CM_HIR_PARAMETER_INDEX_NONE) {
                 fputs("local", stream);
             } else {
-                fprintf(stream, "parameter[%u]",
-                    (unsigned int)local->parameter_index);
+                fprintf(stream, "parameter[%u].binding[%u]",
+                    (unsigned int)local->parameter_index,
+                    (unsigned int)local->parameter_binding_index);
             }
             fputs(" name=", stream);
             cm_hir_dump_string(stream, context, local->name);
@@ -1490,7 +1493,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                     (unsigned int)(index + 1u),
                     (unsigned int)parameter_index,
                     cm_hir_binding_name(parameter->binding_kind));
-                if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
+                if (parameter->binding_kind != CM_HIR_BINDING_NAMED) {
                     fputs("none", stream);
                 } else {
                     cm_hir_dump_string(stream, context, parameter->name);
@@ -1501,6 +1504,28 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                     (unsigned int)parameter->type);
                 cm_hir_dump_span(stream, parameter->span);
                 fputc('\n', stream);
+                if (parameter->binding_kind
+                        == CM_HIR_BINDING_TUPLE_PATTERN) {
+                    uint32_t binding_index;
+
+                    for (binding_index = 0u;
+                         binding_index
+                            < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                         ++binding_index) {
+                        fprintf(stream,
+                            "function-param-binding item#%u parameter=%u "
+                            "index=%u name=",
+                            (unsigned int)(index + 1u),
+                            (unsigned int)parameter_index,
+                            (unsigned int)binding_index);
+                        cm_hir_dump_string(stream, context,
+                            parameter->tuple_bindings[binding_index].name);
+                        fputs(" span=", stream);
+                        cm_hir_dump_span(stream,
+                            parameter->tuple_bindings[binding_index].span);
+                        fputc('\n', stream);
+                    }
+                }
             }
         }
     }

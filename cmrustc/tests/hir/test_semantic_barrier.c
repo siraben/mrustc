@@ -87,6 +87,62 @@ static CmSemanticBarrierResult advance_regions(CmSemanticBarrier *barrier)
     return cm_semantic_barrier_advance_regions(barrier);
 }
 
+static void test_tuple_parameter_fingerprint(void)
+{
+    static const char source[] =
+        "fn first((left, right): (u32, u32)) -> u32 { left }";
+    Fixture fixture;
+    CmSemanticBarrier barrier;
+    CmSemanticBarrierResult result;
+    CmHirItem *item;
+    CmHirBody *body;
+    CmInternId saved_name;
+    uint32_t saved_binding_index;
+
+    fixture_init(&fixture, source);
+    item = (CmHirItem *)cm_vec_at(&fixture.hir.items, 0u);
+    body = item == NULL ? NULL : (CmHirBody *)cm_hir_get_body(
+        &fixture.hir, item->data.function_item.body);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+        && item->data.function_item.signature.parameter_count == 1u
+        && item->data.function_item.signature.parameters[0].binding_kind
+            == CM_HIR_BINDING_TUPLE_PATTERN
+        && body != NULL && body->local_count == 2u);
+    memset(&barrier, 0, sizeof(barrier));
+    result = init_barrier(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && cm_semantic_barrier_is_current(&barrier));
+    result = advance_typed(&fixture, &barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED
+        && cm_semantic_barrier_is_current(&barrier));
+
+    saved_name = item->data.function_item.signature.parameters[0]
+        .tuple_bindings[1].name;
+    item->data.function_item.signature.parameters[0]
+        .tuple_bindings[1].name = cm_hir_intern(&fixture.hir, "changed");
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED);
+    item->data.function_item.signature.parameters[0]
+        .tuple_bindings[1].name = saved_name;
+    assert(cm_semantic_barrier_is_current(&barrier));
+
+    saved_binding_index = body->locals[1].parameter_binding_index;
+    body->locals[1].parameter_binding_index = 0u;
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_INVALID_HIR
+        && result.phase == CM_SEMANTIC_BARRIER_TYPED);
+    body->locals[1].parameter_binding_index = saved_binding_index;
+    assert(cm_semantic_barrier_is_current(&barrier));
+    result = advance_marked(&barrier);
+    assert(result.status == CM_SEMANTIC_BARRIER_OK
+        && result.phase == CM_SEMANTIC_BARRIER_MARKED);
+
+    cm_semantic_barrier_destroy(&barrier);
+    fixture_destroy(&fixture);
+}
+
 static CmHirExpr *mutable_expr(Fixture *fixture, CmHirExprId expression)
 {
     if (expression == CM_HIR_EXPR_NONE
@@ -1373,6 +1429,7 @@ static void test_invalid_api_and_names(void)
 
 int main(void)
 {
+    test_tuple_parameter_fingerprint();
     test_marked_usage_rules_and_dump();
     test_marked_preflight_is_atomic();
     test_regions_closure_and_atomicity();

@@ -2807,6 +2807,17 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
     }
     for (parameter_index = 0u;
          parameter_index < signature->parameter_count; ++parameter_index) {
+        if (signature->parameters[parameter_index].binding_kind
+                == CM_HIR_BINDING_TUPLE_PATTERN) {
+            cm_mir_lower_fail(&result, CM_MIR_LOWER_UNSUPPORTED_TYPE,
+                body_id, hir_body->root_expression, CM_MIR_OK,
+                "tuple parameter MIR requires an ABI destructuring "
+                "prologue");
+            return result;
+        }
+    }
+    for (parameter_index = 0u;
+         parameter_index < signature->parameter_count; ++parameter_index) {
         if (hir_body->locals[parameter_index].parameter_index
                 != parameter_index
             || !cm_mir_lower_type(hir, item, substitutions,
