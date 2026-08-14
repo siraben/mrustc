@@ -260,6 +260,12 @@ static unsigned int cm_param_dependency_type(
             flags |= cm_param_dependency_named(scan,
                 &type->data.dyn_trait_type.auto_traits[index], depth + 1u);
         }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            flags |= cm_param_dependency_type(scan,
+                type->data.dyn_trait_type.equalities[index].value,
+                depth + 1u);
+        }
         return flags;
     case CM_HIR_TYPE_ERROR_KIND:
     case CM_HIR_TYPE_INFER_KIND:

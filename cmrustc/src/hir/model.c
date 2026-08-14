@@ -1204,6 +1204,9 @@ static CmHirNamedType cm_hir_copy_named_type(CmHirContext *context,
 
 static const CmHirItem *cm_hir_bound_definition_item(
     const CmHirContext *context, CmHirDefId id);
+static const CmHirPreboundAssociatedType *cm_hir_find_prebound_associated(
+    const CmHirContext *context, CmHirDefId associated,
+    CmHirDefId parent);
 
 static int cm_hir_def_id_less(CmHirDefId left, CmHirDefId right)
 {
@@ -1221,8 +1224,12 @@ static int cm_hir_dyn_trait_valid(const CmHirContext *context,
             && type->data.dyn_trait_type.has_principal != 1)
         || (type->data.dyn_trait_type.auto_trait_count == 0u)
             != (type->data.dyn_trait_type.auto_traits == NULL)
+        || (type->data.dyn_trait_type.equality_count == 0u)
+            != (type->data.dyn_trait_type.equalities == NULL)
         || (!type->data.dyn_trait_type.has_principal
             && type->data.dyn_trait_type.auto_trait_count == 0u)
+        || (!type->data.dyn_trait_type.has_principal
+            && type->data.dyn_trait_type.equality_count != 0u)
         || !cm_hir_region_valid(context,
             &type->data.dyn_trait_type.region)) {
         return 0;
@@ -1241,6 +1248,50 @@ static int cm_hir_dyn_trait_valid(const CmHirContext *context,
         || type->data.dyn_trait_type.principal_trait.arguments != NULL
         || type->data.dyn_trait_type.principal_trait.argument_count != 0u) {
         return 0;
+    }
+    for (index = 0u; index < type->data.dyn_trait_type.equality_count;
+         ++index) {
+        const CmHirAssociatedTypeEquality *equality;
+        const CmHirDefinition *definition;
+        const CmHirItem *associated;
+
+        equality = &type->data.dyn_trait_type.equalities[index];
+        definition = cm_hir_lookup_definition(context,
+            equality->associated_type);
+        associated = cm_hir_bound_definition_item(context,
+            equality->associated_type);
+        if (definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || !cm_hir_type_id_valid(context, equality->value)
+            || !cm_hir_span_is_ordered(equality->span)
+            || equality->span.source != type->span.source
+            || equality->span.start < type->span.start
+            || equality->span.end > type->span.end
+            || (index != 0u
+                && !cm_hir_def_id_less(
+                    type->data.dyn_trait_type.equalities[index - 1u]
+                        .associated_type,
+                    equality->associated_type))) {
+            return 0;
+        }
+        if (associated != NULL) {
+            if (associated->kind != CM_HIR_ITEM_TYPE_ALIAS
+                || associated->generic_parameter_count != 0u
+                || associated->data.type_alias_item.target
+                    != CM_HIR_TYPE_NONE
+                || !cm_hir_def_id_equal(associated->parent_definition,
+                    type->data.dyn_trait_type.principal_trait.definition)) {
+                return 0;
+            }
+        } else if (definition->state != CM_HIR_DEFINITION_RESERVED
+            || !definition->has_reserved_item_kind
+            || definition->reserved_item_kind != CM_HIR_ITEM_TYPE_ALIAS
+            || cm_hir_find_prebound_associated(context,
+                equality->associated_type,
+                type->data.dyn_trait_type.principal_trait.definition)
+                == NULL) {
+            return 0;
+        }
     }
     for (index = 0u;
          index < type->data.dyn_trait_type.auto_trait_count; ++index) {
@@ -1560,6 +1611,11 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
             copy.data.dyn_trait_type.principal_trait = cm_hir_copy_named_type(
                 context, &type->data.dyn_trait_type.principal_trait);
         }
+        copy.data.dyn_trait_type.equalities =
+            (CmHirAssociatedTypeEquality *)cm_hir_copy_array(context,
+                type->data.dyn_trait_type.equalities,
+                type->data.dyn_trait_type.equality_count,
+                sizeof(*type->data.dyn_trait_type.equalities));
         copy.data.dyn_trait_type.auto_traits = cm_hir_copy_named_types(
             context, type->data.dyn_trait_type.auto_traits,
             type->data.dyn_trait_type.auto_trait_count);
@@ -1775,6 +1831,14 @@ static int cm_hir_type_late_bound_free(const CmHirContext *context,
              index < type->data.dyn_trait_type.auto_trait_count; ++index) {
             if (!cm_hir_named_late_bound_free(context,
                     &type->data.dyn_trait_type.auto_traits[index], depth)) {
+                return 0;
+            }
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_hir_type_late_bound_free(context,
+                    type->data.dyn_trait_type.equalities[index].value,
+                    depth + 1u)) {
                 return 0;
             }
         }
@@ -2023,6 +2087,12 @@ static int cm_hir_type_self_owner_valid(const CmHirContext *context,
             if (!cm_hir_named_self_owner_valid(context,
                     &type->data.dyn_trait_type.auto_traits[index],
                     expected_owner, depth)) return 0;
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_hir_type_self_owner_valid(context,
+                    type->data.dyn_trait_type.equalities[index].value,
+                    expected_owner, depth + 1u)) return 0;
         }
         return 1;
     }
@@ -2534,6 +2604,15 @@ static int cm_hir_predicate_type_in_scope(const CmHirContext *context,
             if (!cm_hir_predicate_named_in_scope(context,
                     &type->data.dyn_trait_type.auto_traits[index],
                     owner_definition, parent_definition, binder, depth)) {
+                return 0;
+            }
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_hir_predicate_type_in_scope(context,
+                    type->data.dyn_trait_type.equalities[index].value,
+                    owner_definition, parent_definition, binder,
+                    depth + 1u)) {
                 return 0;
             }
         }
@@ -4557,6 +4636,15 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
                 return 0;
             }
         }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_hir_default_type_in_scope(context, owner,
+                    parameter_index,
+                    type->data.dyn_trait_type.equalities[index].value,
+                    depth + 1u)) {
+                return 0;
+            }
+        }
         return 1;
     }
     return 0;
@@ -4897,6 +4985,8 @@ CmHirStatus cm_hir_reserve_closure(CmHirContext *context,
     copy.body_expression = CM_HIR_EXPR_NONE;
     copy.visible_local_count = visible_local_count;
     copy.is_move = is_move;
+    copy.capture_state = CM_HIR_CLOSURE_CAPTURES_UNMARKED;
+    copy.callable_class = CM_HIR_CLOSURE_CLASS_UNKNOWN;
     copy.span = span;
     return cm_hir_push(context, &context->closures, &copy, out_id);
 }
@@ -5220,6 +5310,10 @@ CmHirStatus cm_hir_bind_closure_body(CmHirContext *context,
     if (closure == NULL || root == NULL) return CM_HIR_INVALID_ID;
     if (closure->state != CM_HIR_CLOSURE_SIGNATURE_RESERVED
         || closure->body_expression != CM_HIR_EXPR_NONE
+        || closure->capture_state != CM_HIR_CLOSURE_CAPTURES_UNMARKED
+        || closure->captures != NULL || closure->capture_count != 0u
+        || closure->callable_class != CM_HIR_CLOSURE_CLASS_UNKNOWN
+        || closure->is_copy != 0
         || root->owner_body != closure->owner_body
         || !cm_hir_body_type_equal(context, root->type,
             closure->return_type)
@@ -6065,6 +6159,12 @@ CmHirStatus cm_hir_add_expr(CmHirContext *context,
         closure = cm_hir_get_closure(context, expression->data.closure.closure);
         if (body == NULL || closure == NULL
             || closure->state != CM_HIR_CLOSURE_BODY_BOUND
+            || closure->capture_state
+                != CM_HIR_CLOSURE_CAPTURES_UNMARKED
+            || closure->captures != NULL || closure->capture_count != 0u
+            || closure->callable_class
+                != CM_HIR_CLOSURE_CLASS_UNKNOWN
+            || closure->is_copy != 0
             || closure->owner_body != expression->owner_body
             || type->kind != CM_HIR_TYPE_CLOSURE_KIND
             || type->data.closure_type.closure

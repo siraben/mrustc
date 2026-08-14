@@ -7722,6 +7722,9 @@ static void test_bounded_dynamic_trait_lowering(void)
         "trait Error {} fn cause(error: &dyn Error) {}";
     static const char marker_only[] =
         "auto trait Send {} fn transfer(value: &dyn Send) {}";
+    static const char associated_binding[] =
+        "fn check(value: &dyn Iterator<Item = ()>) {} "
+        "trait Iterator { type Item; }";
     static const char reversed[] =
         "trait Error {} auto trait Send {} auto trait Sync {} "
         "fn source(error: &(dyn Error + Send + Sync + 'static)) {}";
@@ -7738,8 +7741,13 @@ static void test_bounded_dynamic_trait_lowering(void)
         "trait Error {} "
             "fn source(error: &(dyn ~const Error + 'static)) {}",
         "struct Error; fn source(error: &(dyn Error + 'static)) {}"
+        ,"trait Base { type Item; } trait Iterator: Base {} "
+            "fn source(error: &dyn Iterator<Item = ()>) {}"
+        ,"trait Iterator { type Item<T>; } "
+            "fn source(error: &dyn Iterator<Item = ()>) {}"
     };
     const CmHirItem *error_trait;
+    const CmHirItem *associated_item;
     const CmHirItem *send_trait;
     const CmHirItem *sync_trait;
     const CmHirItem *source_function;
@@ -7870,6 +7878,41 @@ static void test_bounded_dynamic_trait_lowering(void)
             != 0u);
     cm_hir_context_destroy(&context);
 
+    result = lower_source(associated_binding, &context, NULL);
+    error_trait = find_item(&context, "Iterator");
+    associated_item = find_item(&context, "Item");
+    source_function = find_item(&context, "check");
+    reference_type = source_function == NULL
+            || source_function->kind != CM_HIR_ITEM_FUNCTION
+        ? NULL : cm_hir_get_type(&context,
+            source_function->data.function_item.signature.parameters[0].type);
+    dynamic_type = reference_type == NULL
+            || reference_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            reference_type->data.reference_type.pointee);
+    assert(result.error_count == 0u
+        && error_trait != NULL && error_trait->kind == CM_HIR_ITEM_TRAIT
+        && dynamic_type != NULL
+        && dynamic_type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && dynamic_type->data.dyn_trait_type.has_principal
+        && cm_hir_def_id_equal(dynamic_type->data.dyn_trait_type
+                .principal_trait.definition,
+            error_trait->definition)
+        && associated_item != NULL
+        && associated_item->kind == CM_HIR_ITEM_TYPE_ALIAS
+        && dynamic_type->data.dyn_trait_type.equalities != NULL
+        && dynamic_type->data.dyn_trait_type.equality_count == 1u
+        && cm_hir_def_id_equal(dynamic_type->data.dyn_trait_type
+                .equalities[0].associated_type,
+            associated_item->definition)
+        && dynamic_type->data.dyn_trait_type.equalities[0].span.start
+            < dynamic_type->data.dyn_trait_type.equalities[0].span.end
+        && cm_hir_get_type(&context, dynamic_type->data.dyn_trait_type
+                .equalities[0].value) != NULL
+        && cm_hir_get_type(&context, dynamic_type->data.dyn_trait_type
+                .equalities[0].value)->kind == CM_HIR_TYPE_UNIT_KIND);
+    cm_hir_context_destroy(&context);
+
     for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
          ++index) {
         size_t type_index;
@@ -7878,7 +7921,9 @@ static void test_bounded_dynamic_trait_lowering(void)
         assert(result.error_count == 1u
             && (result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
                 || result.first_error.kind
-                    == CM_HIR_LOWER_WRONG_NAMESPACE));
+                    == CM_HIR_LOWER_WRONG_NAMESPACE
+                || result.first_error.kind
+                    == CM_HIR_LOWER_UNSUPPORTED_GENERIC));
         for (type_index = 0u; type_index < context.types.len; ++type_index) {
             const CmHirType *type;
 

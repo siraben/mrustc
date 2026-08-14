@@ -189,6 +189,44 @@ static int cm_finalization_local_definition_valid(
     return 0;
 }
 
+static int cm_finalization_closure_captures_valid(
+    const CmHirContext *hir, const CmHirBody *body,
+    const CmHirClosure *closure)
+{
+    uint32_t index;
+
+    if (hir == NULL || body == NULL || closure == NULL) return 0;
+    if (closure->capture_state == CM_HIR_CLOSURE_CAPTURES_UNMARKED) {
+        return closure->captures == NULL && closure->capture_count == 0u
+            && closure->callable_class == CM_HIR_CLOSURE_CLASS_UNKNOWN
+            && closure->is_copy == 0;
+    }
+    if (closure->capture_state != CM_HIR_CLOSURE_CAPTURES_MARKED
+        || (closure->capture_count == 0u) != (closure->captures == NULL)
+        || closure->callable_class < CM_HIR_CLOSURE_CLASS_NO_CAPTURE
+        || closure->callable_class > CM_HIR_CLOSURE_CLASS_ONCE
+        || (closure->capture_count == 0u)
+            != (closure->callable_class
+                == CM_HIR_CLOSURE_CLASS_NO_CAPTURE)
+        || (closure->is_copy != 0 && closure->is_copy != 1)) return 0;
+    for (index = 0u; index < closure->capture_count; ++index) {
+        const CmHirClosureCapture *capture;
+
+        capture = &closure->captures[index];
+        if (capture->local_index >= closure->visible_local_count
+            || capture->local_index >= body->local_count
+            || capture->type != body->locals[capture->local_index].type
+            || cm_hir_get_type(hir, capture->type) == NULL
+            || capture->usage < CM_HIR_USAGE_BORROW
+            || capture->usage > CM_HIR_USAGE_MOVE
+            || (index != 0u && closure->captures[index - 1u].local_index
+                >= capture->local_index)
+            || (closure->is_move
+                && capture->usage != CM_HIR_USAGE_MOVE)) return 0;
+    }
+    return 1;
+}
+
 static int cm_finalization_local_crate_valid(const CmHirContext *hir,
     CmHirCrateId local_crate)
 {
@@ -293,7 +331,9 @@ static int cm_finalization_local_crate_valid(const CmHirContext *hir,
             || closure_root->span.end > closure->span.end
             || (closure->parameter_count == 0u)
                 != (closure->parameters == NULL)
-            || (closure->is_move != 0 && closure->is_move != 1)) return 0;
+            || (closure->is_move != 0 && closure->is_move != 1)
+            || !cm_finalization_closure_captures_valid(hir, body,
+                closure)) return 0;
         for (parameter_index = 0u;
              parameter_index < closure->parameter_count;
              ++parameter_index) {

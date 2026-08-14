@@ -6,10 +6,20 @@
 
 #include <string.h>
 
+typedef struct CmSemanticMarkClosureScratch {
+    CmVec captures;
+    CmHirClosureCapture *published_captures;
+    CmHirClosureClass callable_class;
+    int is_copy;
+    int visited;
+} CmSemanticMarkClosureScratch;
+
 typedef struct CmSemanticMarkScratch {
     CmHirContext *hir;
     unsigned char *visit;
     CmHirValueUsage *usage;
+    CmSemanticMarkClosureScratch *closures;
+    size_t closure_count;
     const CmSemanticAdmission *admission;
     const CmSemanticResults *results;
     size_t body_index;
@@ -17,11 +27,19 @@ typedef struct CmSemanticMarkScratch {
     CmSemanticMarkResult result;
 } CmSemanticMarkScratch;
 
+typedef enum CmSemanticMarkCopyEvidence {
+    CM_SEMANTIC_MARK_COPY_NO = 0,
+    CM_SEMANTIC_MARK_COPY_YES,
+    CM_SEMANTIC_MARK_COPY_UNKNOWN
+} CmSemanticMarkCopyEvidence;
+
 static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
-    CmHirExprId expression_id, CmHirValueUsage usage, size_t depth);
+    CmHirExprId expression_id, CmHirValueUsage usage,
+    CmHirClosureId active_closure, size_t depth);
 
 static int cm_semantic_mark_selected_call(CmSemanticMarkScratch *scratch,
-    const CmHirExpr *expression, CmHirExprId expression_id, size_t depth)
+    const CmHirExpr *expression, CmHirExprId expression_id,
+    CmHirClosureId active_closure, size_t depth)
 {
     CmSemanticCallableSelectionView selection;
     CmHirExprId argument_storage[2];
@@ -86,7 +104,7 @@ static int cm_semantic_mark_selected_call(CmSemanticMarkScratch *scratch,
                 &retained) != CM_SEMANTIC_RESULTS_OK
             || retained != arguments[index]
             || !cm_semantic_mark_visit(scratch, arguments[index],
-                CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                CM_HIR_USAGE_MOVE, active_closure, depth + 1u)) return 0;
     }
     return 1;
 }
@@ -129,8 +147,247 @@ static int cm_semantic_mark_builtin_copy(const CmHirContext *hir,
     }
 }
 
+/*
+ * Closure classification cannot equate "not a builtin" with "not Copy".
+ * This structural subset returns UNKNOWN whenever Copy would require trait
+ * or parameter-environment evidence which MARKED does not yet authenticate.
+ */
+static CmSemanticMarkCopyEvidence cm_semantic_mark_copy_evidence(
+    const CmHirContext *hir, CmHirTypeId type_id, size_t depth)
+{
+    const CmHirType *type;
+    uint32_t index;
+
+    if (hir == NULL || depth > hir->types.len) {
+        return CM_SEMANTIC_MARK_COPY_UNKNOWN;
+    }
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return CM_SEMANTIC_MARK_COPY_UNKNOWN;
+    switch (type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_INTEGER_KIND:
+    case CM_HIR_TYPE_FLOAT_KIND:
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+        return CM_SEMANTIC_MARK_COPY_YES;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            ? CM_SEMANTIC_MARK_COPY_YES : CM_SEMANTIC_MARK_COPY_NO;
+    case CM_HIR_TYPE_TUPLE_KIND:
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            CmSemanticMarkCopyEvidence element;
+
+            element = cm_semantic_mark_copy_evidence(hir,
+                type->data.tuple_type.elements[index], depth + 1u);
+            if (element != CM_SEMANTIC_MARK_COPY_YES) return element;
+        }
+        return CM_SEMANTIC_MARK_COPY_YES;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        if (type->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && type->data.array_type.length.data.value.low_bits == 0u
+            && type->data.array_type.length.data.value.high_bits == 0u) {
+            return CM_SEMANTIC_MARK_COPY_YES;
+        }
+        {
+            CmSemanticMarkCopyEvidence element;
+
+            element = cm_semantic_mark_copy_evidence(hir,
+                type->data.array_type.element, depth + 1u);
+            if (element == CM_SEMANTIC_MARK_COPY_YES) return element;
+            if (type->data.array_type.length.kind != CM_HIR_CONST_VALUE) {
+                return CM_SEMANTIC_MARK_COPY_UNKNOWN;
+            }
+            return element;
+        }
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_SLICE_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+        return CM_SEMANTIC_MARK_COPY_NO;
+    case CM_HIR_TYPE_ERROR_KIND:
+    case CM_HIR_TYPE_INFER_KIND:
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_SELF_KIND:
+    case CM_HIR_TYPE_PARAMETER_KIND:
+    case CM_HIR_TYPE_PROJECTION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_CLOSURE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return CM_SEMANTIC_MARK_COPY_UNKNOWN;
+    }
+    return CM_SEMANTIC_MARK_COPY_UNKNOWN;
+}
+
+static CmHirClosureClass cm_semantic_mark_capture_class(
+    CmHirValueUsage usage)
+{
+    if (usage == CM_HIR_USAGE_BORROW) return CM_HIR_CLOSURE_CLASS_SHARED;
+    if (usage == CM_HIR_USAGE_MUTATE) return CM_HIR_CLOSURE_CLASS_MUT;
+    if (usage == CM_HIR_USAGE_MOVE) return CM_HIR_CLOSURE_CLASS_ONCE;
+    return CM_HIR_CLOSURE_CLASS_UNKNOWN;
+}
+
+static int cm_semantic_mark_capture(CmSemanticMarkScratch *scratch,
+    CmHirClosureId closure_id, uint32_t local_index,
+    CmHirValueUsage usage)
+{
+    const CmHirClosure *closure;
+    const CmHirBody *body;
+    const CmHirType *type;
+    CmSemanticMarkClosureScratch *closure_scratch;
+    CmHirClosureCapture capture;
+    CmHirClosureClass callable_class;
+    CmSemanticMarkCopyEvidence copy_evidence;
+    size_t index;
+
+    if (closure_id == CM_HIR_CLOSURE_NONE
+        || (size_t)closure_id > scratch->closure_count
+        || usage <= CM_HIR_USAGE_UNKNOWN || usage > CM_HIR_USAGE_MOVE) {
+        return 0;
+    }
+    closure = cm_hir_get_closure(scratch->hir, closure_id);
+    body = closure == NULL ? NULL
+        : cm_hir_get_body(scratch->hir, closure->owner_body);
+    if (closure == NULL || body == NULL || closure->owner_body != scratch->body
+        || local_index >= body->local_count) return 0;
+    /* Locals created inside this closure are not captures.  For a nested
+     * closure, propagation below naturally stops at the parent closure which
+     * owns such a local. */
+    if (local_index >= closure->visible_local_count) return 1;
+    type = cm_hir_get_type(scratch->hir, body->locals[local_index].type);
+    if (type == NULL) return 0;
+    if (usage == CM_HIR_USAGE_MOVE) {
+        copy_evidence = cm_semantic_mark_copy_evidence(scratch->hir,
+            body->locals[local_index].type, 0u);
+        if (copy_evidence == CM_SEMANTIC_MARK_COPY_YES) {
+            usage = CM_HIR_USAGE_BORROW;
+        } else if (type->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && type->data.reference_type.mutability == CM_HIR_MUTABLE) {
+            usage = CM_HIR_USAGE_MUTATE;
+        } else if (copy_evidence == CM_SEMANTIC_MARK_COPY_UNKNOWN) {
+            scratch->result.status =
+                CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION;
+            return 0;
+        }
+    }
+    closure_scratch = &scratch->closures[(size_t)closure_id - 1u];
+    callable_class = cm_semantic_mark_capture_class(usage);
+    if (callable_class == CM_HIR_CLOSURE_CLASS_UNKNOWN) return 0;
+    if (closure_scratch->callable_class < callable_class)
+        closure_scratch->callable_class = callable_class;
+    for (index = 0u; index < closure_scratch->captures.len; ++index) {
+        CmHirClosureCapture *stored;
+
+        stored = (CmHirClosureCapture *)cm_vec_at(
+            &closure_scratch->captures, index);
+        if (stored->local_index == local_index) {
+            if (stored->type != body->locals[local_index].type) return 0;
+            if (stored->usage < usage) stored->usage = usage;
+            return 1;
+        }
+        if (stored->local_index > local_index) break;
+    }
+    capture.local_index = local_index;
+    capture.type = body->locals[local_index].type;
+    capture.usage = usage;
+    (void)cm_vec_push(&closure_scratch->captures, &capture);
+    index = closure_scratch->captures.len - 1u;
+    while (index != 0u) {
+        CmHirClosureCapture *left;
+        CmHirClosureCapture *right;
+        CmHirClosureCapture swap;
+
+        left = (CmHirClosureCapture *)cm_vec_at(&closure_scratch->captures,
+            index - 1u);
+        right = (CmHirClosureCapture *)cm_vec_at(&closure_scratch->captures,
+            index);
+        if (left->local_index < right->local_index) break;
+        swap = *left;
+        *left = *right;
+        *right = swap;
+        --index;
+    }
+    return 1;
+}
+
+static int cm_semantic_mark_finalize_closure(
+    CmSemanticMarkScratch *scratch, CmHirClosureId closure_id,
+    CmHirClosureId enclosing_closure)
+{
+    const CmHirClosure *closure;
+    CmSemanticMarkClosureScratch *closure_scratch;
+    size_t index;
+
+    closure = cm_hir_get_closure(scratch->hir, closure_id);
+    if (closure == NULL || (size_t)closure_id > scratch->closure_count) {
+        return 0;
+    }
+    closure_scratch = &scratch->closures[(size_t)closure_id - 1u];
+    if (closure_scratch->callable_class == CM_HIR_CLOSURE_CLASS_UNKNOWN) {
+        closure_scratch->callable_class = CM_HIR_CLOSURE_CLASS_NO_CAPTURE;
+    }
+    /* Original mrustc first derives Fn/FnMut/FnOnce from use, then applies
+     * the move-capture override without changing that callable class. */
+    if (closure->is_move) {
+        for (index = 0u; index < closure_scratch->captures.len; ++index) {
+            CmHirClosureCapture *capture;
+
+            capture = (CmHirClosureCapture *)cm_vec_at(
+                &closure_scratch->captures, index);
+            capture->usage = CM_HIR_USAGE_MOVE;
+        }
+    } else {
+        for (index = 0u; index < closure_scratch->captures.len; ++index) {
+            CmHirClosureCapture *capture;
+            const CmHirType *type;
+
+            capture = (CmHirClosureCapture *)cm_vec_at(
+                &closure_scratch->captures, index);
+            type = cm_hir_get_type(scratch->hir, capture->type);
+            if (capture->usage == CM_HIR_USAGE_BORROW && type != NULL
+                && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && type->data.reference_type.mutability
+                    == CM_HIR_IMMUTABLE) {
+                capture->usage = CM_HIR_USAGE_MOVE;
+            }
+        }
+    }
+    closure_scratch->is_copy = 1;
+    for (index = 0u; index < closure_scratch->captures.len; ++index) {
+        const CmHirClosureCapture *capture;
+        CmSemanticMarkCopyEvidence copy_evidence;
+
+        capture = (const CmHirClosureCapture *)cm_vec_at_const(
+            &closure_scratch->captures, index);
+        copy_evidence = capture->usage == CM_HIR_USAGE_MOVE
+            ? cm_semantic_mark_copy_evidence(scratch->hir,
+                capture->type, 0u)
+            : CM_SEMANTIC_MARK_COPY_YES;
+        if (copy_evidence == CM_SEMANTIC_MARK_COPY_UNKNOWN) {
+            scratch->result.status =
+                CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION;
+            return 0;
+        }
+        if (capture->usage == CM_HIR_USAGE_MUTATE
+            || (capture->usage == CM_HIR_USAGE_MOVE
+                && copy_evidence == CM_SEMANTIC_MARK_COPY_NO)) {
+            closure_scratch->is_copy = 0;
+        }
+        if (enclosing_closure != CM_HIR_CLOSURE_NONE
+            && !cm_semantic_mark_capture(scratch, enclosing_closure,
+                capture->local_index, capture->usage)) return 0;
+    }
+    return 1;
+}
+
 static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
-    CmHirExprId expression_id, CmHirValueUsage usage, size_t depth)
+    CmHirExprId expression_id, CmHirValueUsage usage,
+    CmHirClosureId active_closure, size_t depth)
 {
     const CmHirExpr *expression;
     size_t slot;
@@ -159,8 +416,29 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
     scratch->usage[slot] = usage;
     switch (expression->kind) {
     case CM_HIR_EXPR_INTEGER:
-    case CM_HIR_EXPR_LOCAL:
         break;
+    case CM_HIR_EXPR_LOCAL:
+    {
+        const CmHirBody *body;
+
+        body = cm_hir_get_body(scratch->hir, scratch->body);
+        if (body == NULL
+            || expression->data.local.local_index >= body->local_count) {
+            scratch->result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch->result.expression = expression_id;
+            return 0;
+        }
+        if (active_closure != CM_HIR_CLOSURE_NONE
+            && !cm_semantic_mark_capture(scratch, active_closure,
+                expression->data.local.local_index, usage)) {
+            if (scratch->result.status == CM_SEMANTIC_MARK_OK) {
+                scratch->result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            }
+            scratch->result.expression = expression_id;
+            return 0;
+        }
+        break;
+    }
     case CM_HIR_EXPR_BLOCK:
         if ((expression->data.block.statement_count == 0u)
                 != (expression->data.block.statements == NULL)) {
@@ -189,11 +467,12 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
                 ? CM_HIR_USAGE_BORROW : CM_HIR_USAGE_MOVE;
             if (!cm_semantic_mark_visit(scratch,
                     statement->data.let_statement.initializer,
-                    initializer_usage, depth + 1u)) return 0;
+                    initializer_usage, active_closure,
+                    depth + 1u)) return 0;
         }
         if (!cm_semantic_mark_visit(scratch,
                 expression->data.block.tail_expression,
-                CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                CM_HIR_USAGE_MOVE, active_closure, depth + 1u)) return 0;
         break;
     case CM_HIR_EXPR_CALL:
         if ((expression->data.call.type_substitution_count != 0u
@@ -219,7 +498,8 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
              ++index) {
             if (!cm_semantic_mark_visit(scratch,
                     expression->data.call.arguments[index],
-                    CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                    CM_HIR_USAGE_MOVE, active_closure,
+                    depth + 1u)) return 0;
         }
         break;
     case CM_HIR_EXPR_BINARY:
@@ -241,10 +521,11 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
             return 0;
         }
         if (!cm_semantic_mark_visit(scratch,
-                expression->data.binary.left, operand_usage, depth + 1u)
+                expression->data.binary.left, operand_usage,
+                active_closure, depth + 1u)
             || !cm_semantic_mark_visit(scratch,
                 expression->data.binary.right, operand_usage,
-                depth + 1u)) return 0;
+                active_closure, depth + 1u)) return 0;
         break;
     }
     case CM_HIR_EXPR_AGGREGATE:
@@ -258,32 +539,40 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
              ++index) {
             if (!cm_semantic_mark_visit(scratch,
                     expression->data.aggregate.fields[index].value,
-                    CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                    CM_HIR_USAGE_MOVE, active_closure,
+                    depth + 1u)) return 0;
         }
         break;
     case CM_HIR_EXPR_FIELD:
+        if (active_closure != CM_HIR_CLOSURE_NONE) {
+            scratch->result.status =
+                CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION;
+            scratch->result.expression = expression_id;
+            return 0;
+        }
         if (!cm_semantic_mark_visit(scratch, expression->data.field.base,
                 usage == CM_HIR_USAGE_MOVE
                         && cm_semantic_mark_builtin_copy(scratch->hir,
                             expression->type)
                     ? CM_HIR_USAGE_BORROW : usage,
-                depth + 1u)) return 0;
+                active_closure, depth + 1u)) return 0;
         break;
     case CM_HIR_EXPR_IF:
         if (!cm_semantic_mark_visit(scratch,
                 expression->data.if_expr.condition, CM_HIR_USAGE_BORROW,
-                depth + 1u)
+                active_closure, depth + 1u)
             || !cm_semantic_mark_visit(scratch,
                 expression->data.if_expr.then_expression,
-                CM_HIR_USAGE_MOVE, depth + 1u)
+                CM_HIR_USAGE_MOVE, active_closure, depth + 1u)
             || !cm_semantic_mark_visit(scratch,
                 expression->data.if_expr.else_expression,
-                CM_HIR_USAGE_MOVE, depth + 1u)) return 0;
+                CM_HIR_USAGE_MOVE, active_closure,
+                depth + 1u)) return 0;
         break;
     case CM_HIR_EXPR_METHOD_CALL:
     case CM_HIR_EXPR_QUALIFIED_CALL:
         if (!cm_semantic_mark_selected_call(scratch, expression,
-                expression_id, depth)) {
+                expression_id, active_closure, depth)) {
             scratch->result.status = scratch->results == NULL
                 ? CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
                 : CM_SEMANTIC_MARK_INVALID_HIR;
@@ -293,12 +582,72 @@ static int cm_semantic_mark_visit(CmSemanticMarkScratch *scratch,
         break;
     case CM_HIR_EXPR_BORROW_SHARED:
     case CM_HIR_EXPR_DEREFERENCE:
-    case CM_HIR_EXPR_CLOSURE_PARAMETER:
-    case CM_HIR_EXPR_CLOSURE:
         scratch->result.status =
             CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION;
         scratch->result.expression = expression_id;
         return 0;
+    case CM_HIR_EXPR_CLOSURE_PARAMETER:
+    {
+        const CmHirClosure *closure;
+        const CmHirClosureParam *parameter;
+
+        closure = cm_hir_get_closure(scratch->hir, active_closure);
+        parameter = closure != NULL
+                && expression->data.closure_parameter.parameter_index
+                    < closure->parameter_count
+            ? &closure->parameters[
+                expression->data.closure_parameter.parameter_index]
+            : NULL;
+        if (active_closure == CM_HIR_CLOSURE_NONE || closure == NULL
+            || parameter == NULL
+            || expression->data.closure_parameter.closure
+                != active_closure
+            || closure->owner_body != scratch->body
+            || closure->state != CM_HIR_CLOSURE_BODY_BOUND
+            || parameter->binding_kind != CM_HIR_BINDING_NAMED
+            || parameter->type != expression->type) {
+            scratch->result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch->result.expression = expression_id;
+            return 0;
+        }
+        break;
+    }
+    case CM_HIR_EXPR_CLOSURE:
+    {
+        const CmHirClosure *closure;
+        const CmHirType *type;
+        CmHirClosureId closure_id;
+        CmSemanticMarkClosureScratch *closure_scratch;
+
+        closure_id = expression->data.closure.closure;
+        closure = cm_hir_get_closure(scratch->hir, closure_id);
+        type = cm_hir_get_type(scratch->hir, expression->type);
+        closure_scratch = closure_id == CM_HIR_CLOSURE_NONE
+                || (size_t)closure_id > scratch->closure_count
+            ? NULL : &scratch->closures[(size_t)closure_id - 1u];
+        if (closure == NULL || closure_scratch == NULL
+            || closure_scratch->visited
+            || closure->owner_body != scratch->body
+            || closure->state != CM_HIR_CLOSURE_BODY_BOUND
+            || closure->body_expression == CM_HIR_EXPR_NONE
+            || closure->capture_state
+                != CM_HIR_CLOSURE_CAPTURES_UNMARKED
+            || closure->captures != NULL || closure->capture_count != 0u
+            || closure->callable_class != CM_HIR_CLOSURE_CLASS_UNKNOWN
+            || closure->is_copy != 0
+            || type == NULL || type->kind != CM_HIR_TYPE_CLOSURE_KIND
+            || type->data.closure_type.closure != closure_id) {
+            scratch->result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch->result.expression = expression_id;
+            return 0;
+        }
+        closure_scratch->visited = 1;
+        if (!cm_semantic_mark_visit(scratch, closure->body_expression,
+                CM_HIR_USAGE_MOVE, closure_id, depth + 1u)
+            || !cm_semantic_mark_finalize_closure(scratch, closure_id,
+                active_closure)) return 0;
+        break;
+    }
     default:
         scratch->result.status = CM_SEMANTIC_MARK_INVALID_HIR;
         scratch->result.expression = expression_id;
@@ -313,6 +662,7 @@ static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
     const CmSemanticAdmission *admission)
 {
     CmSemanticMarkScratch scratch;
+    size_t closure_count;
     size_t expression_count;
     size_t index;
     size_t body_index;
@@ -330,12 +680,21 @@ static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
     }
     scratch.result = cm_semantic_mark_result(CM_SEMANTIC_MARK_OK);
     expression_count = hir->expressions.len;
+    closure_count = hir->closures.len;
+    scratch.closure_count = closure_count;
     scratch.visit = (unsigned char *)cm_alloc_zeroed(
         expression_count == 0u ? 1u : expression_count,
         sizeof(*scratch.visit));
     scratch.usage = (CmHirValueUsage *)cm_alloc_zeroed(
         expression_count == 0u ? 1u : expression_count,
         sizeof(*scratch.usage));
+    scratch.closures = (CmSemanticMarkClosureScratch *)cm_alloc_zeroed(
+        closure_count == 0u ? 1u : closure_count,
+        sizeof(*scratch.closures));
+    for (index = 0u; index < closure_count; ++index) {
+        cm_vec_init(&scratch.closures[index].captures,
+            sizeof(CmHirClosureCapture));
+    }
     for (body_index = 0u; body_index < body_count; ++body_index) {
         const CmHirBody *body;
         size_t prior;
@@ -354,7 +713,7 @@ static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
         if (body == NULL || body->state != CM_HIR_BODY_TYPED
             || body->root_expression == CM_HIR_EXPR_NONE
             || !cm_semantic_mark_visit(&scratch, body->root_expression,
-                CM_HIR_USAGE_MOVE, 0u)) {
+                CM_HIR_USAGE_MOVE, CM_HIR_CLOSURE_NONE, 0u)) {
             if (scratch.result.status == CM_SEMANTIC_MARK_OK)
                 scratch.result.status = CM_SEMANTIC_MARK_INVALID_HIR;
             goto done;
@@ -383,6 +742,70 @@ static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
             goto done;
         }
     }
+    for (index = 0u; index < closure_count; ++index) {
+        const CmHirClosure *closure;
+        int belongs_to_manifest;
+        size_t capture_bytes;
+
+        closure = (const CmHirClosure *)cm_vec_at_const(
+            &hir->closures, index);
+        belongs_to_manifest = 0;
+        for (body_index = 0u; body_index < body_count; ++body_index) {
+            if (closure != NULL
+                && closure->owner_body == bodies[body_index]) {
+                belongs_to_manifest = 1;
+                break;
+            }
+        }
+        if (closure == NULL
+            || (belongs_to_manifest
+                && (closure->state != CM_HIR_CLOSURE_BODY_BOUND
+                    || closure->capture_state
+                        != CM_HIR_CLOSURE_CAPTURES_UNMARKED
+                    || closure->captures != NULL
+                    || closure->capture_count != 0u
+                    || closure->callable_class
+                        != CM_HIR_CLOSURE_CLASS_UNKNOWN
+                    || closure->is_copy != 0))
+            || belongs_to_manifest != scratch.closures[index].visited) {
+            scratch.result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch.result.body_index = belongs_to_manifest
+                ? body_index : CM_SEMANTIC_MARK_BODY_INDEX_NONE;
+            scratch.result.body = belongs_to_manifest
+                ? closure->owner_body : CM_HIR_BODY_NONE;
+            scratch.result.expression = CM_HIR_EXPR_NONE;
+            goto done;
+        }
+        capture_bytes = 0u;
+        if (belongs_to_manifest
+            && (scratch.closures[index].captures.len > (size_t)UINT32_MAX
+                || !cm_size_mul(scratch.closures[index].captures.len,
+                    sizeof(CmHirClosureCapture), &capture_bytes))) {
+            scratch.result.status = CM_SEMANTIC_MARK_INVALID_HIR;
+            scratch.result.body_index = body_index;
+            scratch.result.body = closure->owner_body;
+            scratch.result.expression = CM_HIR_EXPR_NONE;
+            goto done;
+        }
+    }
+    /* No logical failure is possible beyond this point.  Allocate every
+     * deep capture array first, then publish closure and expression evidence
+     * as one semantic-generation mutation. */
+    for (index = 0u; index < closure_count; ++index) {
+        CmSemanticMarkClosureScratch *closure_scratch;
+        size_t byte_count;
+
+        closure_scratch = &scratch.closures[index];
+        if (!closure_scratch->visited || closure_scratch->captures.len == 0u)
+            continue;
+        (void)cm_size_mul(closure_scratch->captures.len,
+            sizeof(CmHirClosureCapture), &byte_count);
+        closure_scratch->published_captures =
+            (CmHirClosureCapture *)cm_arena_alloc(&hir->storage,
+                byte_count, 16u);
+        memcpy(closure_scratch->published_captures,
+            closure_scratch->captures.data, byte_count);
+    }
     for (index = 0u; index < expression_count; ++index) {
         if (scratch.visit[index] == 2u) {
             CmHirExpr *expression;
@@ -393,12 +816,30 @@ static CmSemanticMarkResult cm_hir_semantic_mark_bodies_impl(
                 CM_HIR_STATIC_BORROW_NOT_PROMOTED;
         }
     }
+    for (index = 0u; index < closure_count; ++index) {
+        CmHirClosure *closure;
+        CmSemanticMarkClosureScratch *closure_scratch;
+
+        closure_scratch = &scratch.closures[index];
+        if (!closure_scratch->visited) continue;
+        closure = (CmHirClosure *)cm_vec_at(&hir->closures, index);
+        closure->capture_state = CM_HIR_CLOSURE_CAPTURES_MARKED;
+        closure->captures = closure_scratch->published_captures;
+        closure->capture_count =
+            (uint32_t)closure_scratch->captures.len;
+        closure->callable_class = closure_scratch->callable_class;
+        closure->is_copy = closure_scratch->is_copy;
+    }
     cm_hir_context_record_semantic_mutation(hir);
     scratch.result.body_index = CM_SEMANTIC_MARK_BODY_INDEX_NONE;
     scratch.result.body = CM_HIR_BODY_NONE;
     scratch.result.expression = CM_HIR_EXPR_NONE;
 
 done:
+    for (index = 0u; index < closure_count; ++index) {
+        cm_vec_destroy(&scratch.closures[index].captures);
+    }
+    cm_free(scratch.closures);
     cm_free(scratch.usage);
     cm_free(scratch.visit);
     return scratch.result;

@@ -482,6 +482,7 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
     CmHirTypeId source_id, const CmHirType *source, CmHirTypeId *out_type)
 {
     CmHirType replacement;
+    CmHirAssociatedTypeEquality *equalities;
     CmHirGenericArg *principal_arguments;
     CmHirNamedType *markers;
     CmHirRegion region;
@@ -544,12 +545,42 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
         cm_free(principal_arguments);
         return 0;
     }
+    equalities = source->data.dyn_trait_type.equality_count == 0u ? NULL
+        : (CmHirAssociatedTypeEquality *)cm_alloc_zeroed(
+            source->data.dyn_trait_type.equality_count,
+            sizeof(*equalities));
+    for (index = 0u;
+         index < source->data.dyn_trait_type.equality_count; ++index) {
+        CmHirTypeId value;
+
+        equalities[index] = source->data.dyn_trait_type.equalities[index];
+        if (!cm_alias_normalize_type(state,
+                source->data.dyn_trait_type.equalities[index].value,
+                &value)) {
+            uint32_t cleanup;
+
+            for (cleanup = 0u;
+                 cleanup < source->data.dyn_trait_type.auto_trait_count;
+                 ++cleanup) {
+                cm_free(markers[cleanup].arguments);
+            }
+            cm_free(equalities);
+            cm_free(markers);
+            cm_free(principal_arguments);
+            return 0;
+        }
+        equalities[index].value = value;
+        if (value != source->data.dyn_trait_type.equalities[index].value) {
+            changed = 1;
+        }
+    }
     if (!changed && cm_alias_region_equal(&region,
             &source->data.dyn_trait_type.region)) {
         for (index = 0u;
              index < source->data.dyn_trait_type.auto_trait_count; ++index) {
             cm_free(markers[index].arguments);
         }
+        cm_free(equalities);
         cm_free(markers);
         cm_free(principal_arguments);
         *out_type = source_id;
@@ -558,6 +589,7 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
     replacement = *source;
     replacement.data.dyn_trait_type.principal_trait.arguments =
         principal_arguments;
+    replacement.data.dyn_trait_type.equalities = equalities;
     replacement.data.dyn_trait_type.auto_traits = markers;
     replacement.data.dyn_trait_type.region = region;
     if (!cm_alias_add_type(state, source_id, &replacement, out_type)) {
@@ -567,6 +599,7 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
          index < source->data.dyn_trait_type.auto_trait_count; ++index) {
         cm_free(markers[index].arguments);
     }
+    cm_free(equalities);
     cm_free(markers);
     cm_free(principal_arguments);
     return *out_type != CM_HIR_TYPE_NONE;

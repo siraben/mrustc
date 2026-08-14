@@ -419,6 +419,8 @@ static int cm_semantic_regions_type_equal(
                 != right->data.dyn_trait_type.has_principal
             || left->data.dyn_trait_type.auto_trait_count
                 != right->data.dyn_trait_type.auto_trait_count
+            || left->data.dyn_trait_type.equality_count
+                != right->data.dyn_trait_type.equality_count
             || !cm_semantic_regions_region_equal(
                 &left->data.dyn_trait_type.region,
                 &right->data.dyn_trait_type.region)
@@ -433,6 +435,20 @@ static int cm_semantic_regions_type_equal(
                     &left->data.dyn_trait_type.auto_traits[index],
                     &right->data.dyn_trait_type.auto_traits[index],
                     depth + 1u)) return 0;
+        }
+        for (index = 0u;
+             index < left->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_hir_def_id_equal(
+                    left->data.dyn_trait_type.equalities[index]
+                        .associated_type,
+                    right->data.dyn_trait_type.equalities[index]
+                        .associated_type)
+                || !cm_semantic_regions_type_equal(hir,
+                    left->data.dyn_trait_type.equalities[index].value,
+                    right->data.dyn_trait_type.equalities[index].value,
+                    depth + 1u)) {
+                return 0;
+            }
         }
         return 1;
     case CM_HIR_TYPE_ERROR_KIND:
@@ -853,8 +869,32 @@ static int cm_semantic_regions_scan_type(
                 &type->data.dyn_trait_type.auto_traits[index], type_id,
                 CM_SEMANTIC_REGIONS_NAMED_TRAIT, depth + 1u);
         }
+        for (index = 0u; ok
+             && index < type->data.dyn_trait_type.equality_count;
+             ++index) {
+            const CmHirAssociatedTypeEquality *equality;
+            const CmHirItem *associated_item;
+
+            equality = &type->data.dyn_trait_type.equalities[index];
+            associated_item = cm_semantic_regions_item(scratch->hir,
+                equality->associated_type);
+            ok = type->data.dyn_trait_type.has_principal
+                && associated_item != NULL
+                && associated_item->kind == CM_HIR_ITEM_TYPE_ALIAS
+                && associated_item->generic_parameter_count == 0u
+                && associated_item->data.type_alias_item.target
+                    == CM_HIR_TYPE_NONE
+                && cm_hir_def_id_equal(associated_item->parent_definition,
+                    type->data.dyn_trait_type.principal_trait.definition)
+                && cm_semantic_regions_scan_type(scratch,
+                    equality->value, depth + 1u);
+        }
         ok = ok && cm_semantic_regions_scan_region(scratch, type_id,
             &type->data.dyn_trait_type.region);
+        if (!ok && scratch->result.status == CM_SEMANTIC_REGIONS_OK) {
+            ok = cm_semantic_regions_fail(scratch,
+                CM_SEMANTIC_REGIONS_INVALID_HIR, type_id);
+        }
         break;
     default:
         ok = cm_semantic_regions_fail(scratch,

@@ -2354,6 +2354,7 @@ static void test_dyn_trait_alias_normalization(void)
     CmHirCrateId crate_id;
     CmHirModuleId root_module;
     CmHirDefId principal_definition;
+    CmHirDefId associated_definition;
     CmHirDefId id_definition;
     CmHirDefId owner_definition;
     CmHirGenericParam parameter;
@@ -2365,6 +2366,7 @@ static void test_dyn_trait_alias_normalization(void)
     CmHirGenericArg argument;
     CmHirGenericArg principal_arguments[2];
     CmHirGenericArg instantiation_arguments[2];
+    CmHirAssociatedTypeEquality equality;
     CmHirItem item;
     CmHirItemId item_id;
     CmHirType type;
@@ -2425,6 +2427,16 @@ static void test_dyn_trait_alias_normalization(void)
     check(principal_type == principal_lifetime + 1u
         && cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK,
         "dyn alias setup could not bind its principal trait");
+
+    check(cm_hir_reserve_item_definition(&hir, crate_id, span,
+            &associated_definition) == CM_HIR_OK,
+        "dyn alias setup could not reserve its associated type");
+    init_projection_test_item(&hir, &item, CM_HIR_ITEM_TYPE_ALIAS,
+        associated_definition, principal_definition, root_module,
+        "Output", span);
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    check(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK,
+        "dyn alias setup could not bind its associated type");
 
     check(cm_hir_reserve_item_definition(&hir, crate_id, span,
             &id_definition) == CM_HIR_OK,
@@ -2505,6 +2517,12 @@ static void test_dyn_trait_alias_normalization(void)
     type.data.dyn_trait_type.principal_trait.arguments =
         principal_arguments;
     type.data.dyn_trait_type.principal_trait.argument_count = 2u;
+    memset(&equality, 0, sizeof(equality));
+    equality.associated_type = associated_definition;
+    equality.value = id_application;
+    equality.span = span;
+    type.data.dyn_trait_type.equalities = &equality;
+    type.data.dyn_trait_type.equality_count = 1u;
     type.data.dyn_trait_type.region.kind = CM_HIR_REGION_EARLY_BOUND;
     type.data.dyn_trait_type.region.data.parameter = owner_lifetime;
     check(cm_hir_add_type(&hir, &type, &dyn_type) == CM_HIR_OK,
@@ -2544,6 +2562,14 @@ static void test_dyn_trait_alias_normalization(void)
             normalized->data.dyn_trait_type.principal_trait.arguments[1]
                 .data.type,
             owner_type)
+        && normalized->data.dyn_trait_type.equalities != NULL
+        && normalized->data.dyn_trait_type.equality_count == 1u
+        && cm_hir_def_id_equal(normalized->data.dyn_trait_type
+                .equalities[0].associated_type,
+            associated_definition)
+        && parameter_type_is(&hir,
+            normalized->data.dyn_trait_type.equalities[0].value,
+            owner_type)
         && normalized->data.dyn_trait_type.region.kind
             == CM_HIR_REGION_EARLY_BOUND
         && normalized->data.dyn_trait_type.region.data.parameter
@@ -2571,6 +2597,10 @@ static void test_dyn_trait_alias_normalization(void)
         && type_is_integer(&hir,
             normalized->data.dyn_trait_type.principal_trait.arguments[1]
                 .data.type,
+            CM_HIR_INT_U16)
+        && normalized->data.dyn_trait_type.equality_count == 1u
+        && type_is_integer(&hir,
+            normalized->data.dyn_trait_type.equalities[0].value,
             CM_HIR_INT_U16)
         && normalized->data.dyn_trait_type.region.kind
             == CM_HIR_REGION_STATIC,

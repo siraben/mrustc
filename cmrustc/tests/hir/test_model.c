@@ -5683,6 +5683,613 @@ static void test_context_transaction_marks(void)
     cm_hir_context_destroy(&context);
 }
 
+static CmHirBodyId add_closure_mark_test_body(CmHirContext *context,
+    CmHirCrateId crate_id, CmHirTypeId initial_expected,
+    const CmHirLocal *locals, uint32_t local_count, uint32_t start)
+{
+    CmHirDefId definition;
+    CmHirBody body;
+    CmHirBodyId body_id;
+
+    assert(cm_hir_reserve_item_definition(context, crate_id,
+        test_span(start, start + 90u), &definition) == CM_HIR_OK);
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = initial_expected;
+    body.locals = (CmHirLocal *)locals;
+    body.local_count = local_count;
+    body.parameter_count = local_count;
+    body.source = 1u;
+    body.source_expression_id = start;
+    body.span = test_span(start, start + 90u);
+    assert(cm_hir_add_body(context, &body, &body_id) == CM_HIR_OK);
+    return body_id;
+}
+
+static CmHirClosureId add_closure_mark_test_shell(CmHirContext *context,
+    CmHirBodyId body_id, CmHirTypeId return_type,
+    uint32_t visible_local_count, int is_move, uint32_t start,
+    CmHirTypeId *out_closure_type)
+{
+    CmHirClosureId closure_id;
+    CmHirType type;
+
+    assert(cm_hir_reserve_closure(context, body_id, start, NULL, 0u,
+        return_type, visible_local_count, is_move,
+        test_span(start, start + 60u), &closure_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_CLOSURE_KIND;
+    type.span = test_span(start, start + 60u);
+    type.data.closure_type.closure = closure_id;
+    assert(cm_hir_add_type(context, &type, out_closure_type) == CM_HIR_OK);
+    return closure_id;
+}
+
+static CmHirExprId finish_closure_mark_test_body(CmHirContext *context,
+    CmHirBodyId body_id, CmHirClosureId closure_id,
+    CmHirTypeId closure_type, CmHirExprId closure_body,
+    uint32_t closure_start)
+{
+    CmHirBody *body;
+    CmHirExpr expression;
+    CmHirExprId closure_expression;
+
+    assert(cm_hir_bind_closure_body(context, closure_id, closure_body)
+        == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE;
+    expression.owner_body = body_id;
+    expression.type = closure_type;
+    expression.span = test_span(closure_start, closure_start + 60u);
+    expression.data.closure.closure = closure_id;
+    assert(cm_hir_add_expr(context, &expression, &closure_expression)
+        == CM_HIR_OK);
+    body = (CmHirBody *)cm_vec_at(&context->bodies,
+        (size_t)body_id - 1u);
+    assert(body != NULL);
+    body->expected_type = closure_type;
+    assert(cm_hir_set_body_root_expression(context, body_id,
+        closure_expression) == CM_HIR_OK);
+    return closure_expression;
+}
+
+static CmHirExprId add_closure_mark_test_local(CmHirContext *context,
+    CmHirBodyId body_id, CmHirTypeId type, uint32_t local_index,
+    uint32_t start)
+{
+    CmHirExpr expression;
+    CmHirExprId expression_id;
+
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_id;
+    expression.type = type;
+    expression.span = test_span(start, start + 1u);
+    expression.data.local.local_index = local_index;
+    assert(cm_hir_add_expr(context, &expression, &expression_id)
+        == CM_HIR_OK);
+    return expression_id;
+}
+
+static void test_closure_capture_semantic_mark(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirType type;
+    CmHirTypeId u32_type;
+    CmHirTypeId shared_u32_type;
+    CmHirTypeId mutable_u32_type;
+    CmHirTypeId tuple_type;
+    CmHirTypeId array_type;
+    CmHirTypeId tuple_elements[2];
+    CmHirBodyId bodies[9];
+    CmHirClosureId closures[9];
+    CmHirClosureId inner_closure;
+    CmHirClosureParam closure_parameter;
+    CmHirTypeId closure_types[9];
+    CmHirTypeId inner_closure_type;
+    CmHirExprId closure_expressions[9];
+    CmHirExprId body_expressions[9];
+    CmHirExprId inner_body_expression;
+    CmHirLocal locals[2];
+    CmHirExpr expression;
+    CmHirExprId reversed_left;
+    CmHirExprId reversed_right;
+    CmSemanticMarkResult result;
+    const CmHirClosure *closure;
+    uint64_t generation;
+    FILE *dump_file;
+    char *dump;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "closure_capture_semantic_mark"),
+        CM_HIR_EDITION_2021, test_span(0u, 1000u), &crate_id,
+        &root_id) == CM_HIR_OK);
+    assert(root_id != CM_HIR_MODULE_NONE);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = test_span(1u, 2u);
+    type.data.integer_type.kind = CM_HIR_INT_U32;
+    assert(cm_hir_add_type(&context, &type, &u32_type) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(3u, 4u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    type.data.reference_type.pointee = u32_type;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&context, &type, &shared_u32_type)
+        == CM_HIR_OK);
+    type.span = test_span(5u, 6u);
+    type.data.reference_type.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_type(&context, &type, &mutable_u32_type)
+        == CM_HIR_OK);
+    tuple_elements[0] = u32_type;
+    tuple_elements[1] = shared_u32_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(7u, 8u);
+    type.data.tuple_type.elements = tuple_elements;
+    type.data.tuple_type.element_count = 2u;
+    assert(cm_hir_add_type(&context, &type, &tuple_type) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ARRAY_KIND;
+    type.span = test_span(9u, 10u);
+    type.data.array_type.element = u32_type;
+    type.data.array_type.length.kind = CM_HIR_CONST_VALUE;
+    type.data.array_type.length.type = u32_type;
+    type.data.array_type.length.data.value.low_bits = 3u;
+    assert(cm_hir_add_type(&context, &type, &array_type) == CM_HIR_OK);
+
+    bodies[0] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        NULL, 0u, 100u);
+    closures[0] = add_closure_mark_test_shell(&context, bodies[0],
+        u32_type, 0u, 0, 110u, &closure_types[0]);
+    body_expressions[0] = add_test_integer_expression(&context, bodies[0],
+        u32_type, test_span(120u, 121u));
+    closure_expressions[0] = finish_closure_mark_test_body(&context,
+        bodies[0], closures[0], closure_types[0], body_expressions[0],
+        110u);
+
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = cm_hir_intern(&context, "first");
+    locals[0].type = u32_type;
+    locals[0].span = test_span(201u, 202u);
+    locals[0].parameter_index = 0u;
+    locals[1].name = cm_hir_intern(&context, "second");
+    locals[1].type = u32_type;
+    locals[1].span = test_span(203u, 204u);
+    locals[1].parameter_index = 1u;
+    bodies[1] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        locals, 2u, 200u);
+    closures[1] = add_closure_mark_test_shell(&context, bodies[1],
+        u32_type, 2u, 0, 210u, &closure_types[1]);
+    reversed_left = add_closure_mark_test_local(&context, bodies[1],
+        u32_type, 1u, 220u);
+    reversed_right = add_closure_mark_test_local(&context, bodies[1],
+        u32_type, 0u, 222u);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_BINARY;
+    expression.owner_body = bodies[1];
+    expression.type = u32_type;
+    expression.span = test_span(218u, 225u);
+    expression.data.binary.operator_kind = CM_HIR_BINARY_ADD;
+    expression.data.binary.left = reversed_left;
+    expression.data.binary.right = reversed_right;
+    assert(cm_hir_add_expr(&context, &expression, &body_expressions[1])
+        == CM_HIR_OK);
+    closure_expressions[1] = finish_closure_mark_test_body(&context,
+        bodies[1], closures[1], closure_types[1], body_expressions[1],
+        210u);
+
+    memset(locals, 0, sizeof(locals));
+    locals[0].name = cm_hir_intern(&context, "moved_copy");
+    locals[0].type = u32_type;
+    locals[0].span = test_span(301u, 302u);
+    locals[0].parameter_index = 0u;
+    bodies[2] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        locals, 1u, 300u);
+    closures[2] = add_closure_mark_test_shell(&context, bodies[2],
+        u32_type, 1u, 1, 310u, &closure_types[2]);
+    body_expressions[2] = add_closure_mark_test_local(&context, bodies[2],
+        u32_type, 0u, 320u);
+    closure_expressions[2] = finish_closure_mark_test_body(&context,
+        bodies[2], closures[2], closure_types[2], body_expressions[2],
+        310u);
+
+    locals[0].name = cm_hir_intern(&context, "shared_reference");
+    locals[0].type = shared_u32_type;
+    locals[0].span = test_span(401u, 402u);
+    bodies[3] = add_closure_mark_test_body(&context, crate_id,
+        shared_u32_type, locals, 1u, 400u);
+    closures[3] = add_closure_mark_test_shell(&context, bodies[3],
+        shared_u32_type, 1u, 0, 410u, &closure_types[3]);
+    body_expressions[3] = add_closure_mark_test_local(&context, bodies[3],
+        shared_u32_type, 0u, 420u);
+    closure_expressions[3] = finish_closure_mark_test_body(&context,
+        bodies[3], closures[3], closure_types[3], body_expressions[3],
+        410u);
+
+    locals[0].name = cm_hir_intern(&context, "mutable_reference");
+    locals[0].type = mutable_u32_type;
+    locals[0].span = test_span(501u, 502u);
+    bodies[4] = add_closure_mark_test_body(&context, crate_id,
+        mutable_u32_type, locals, 1u, 500u);
+    closures[4] = add_closure_mark_test_shell(&context, bodies[4],
+        mutable_u32_type, 1u, 0, 510u, &closure_types[4]);
+    body_expressions[4] = add_closure_mark_test_local(&context, bodies[4],
+        mutable_u32_type, 0u, 520u);
+    closure_expressions[4] = finish_closure_mark_test_body(&context,
+        bodies[4], closures[4], closure_types[4], body_expressions[4],
+        510u);
+
+    locals[0].name = cm_hir_intern(&context, "nested_root");
+    locals[0].type = u32_type;
+    locals[0].span = test_span(601u, 602u);
+    bodies[5] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        locals, 1u, 600u);
+    assert(cm_hir_reserve_closure(&context, bodies[5], 621u, NULL, 0u,
+        u32_type, 1u, 1, test_span(620u, 650u), &inner_closure)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_CLOSURE_KIND;
+    type.span = test_span(620u, 650u);
+    type.data.closure_type.closure = inner_closure;
+    assert(cm_hir_add_type(&context, &type, &inner_closure_type)
+        == CM_HIR_OK);
+    closures[5] = add_closure_mark_test_shell(&context, bodies[5],
+        inner_closure_type, 1u, 0, 610u, &closure_types[5]);
+    inner_body_expression = add_closure_mark_test_local(&context,
+        bodies[5], u32_type, 0u, 630u);
+    assert(cm_hir_bind_closure_body(&context, inner_closure,
+        inner_body_expression) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE;
+    expression.owner_body = bodies[5];
+    expression.type = inner_closure_type;
+    expression.span = test_span(620u, 650u);
+    expression.data.closure.closure = inner_closure;
+    assert(cm_hir_add_expr(&context, &expression, &body_expressions[5])
+        == CM_HIR_OK);
+    closure_expressions[5] = finish_closure_mark_test_body(&context,
+        bodies[5], closures[5], closure_types[5], body_expressions[5],
+        610u);
+
+    locals[0].name = cm_hir_intern(&context, "copy_tuple");
+    locals[0].type = tuple_type;
+    locals[0].span = test_span(701u, 702u);
+    bodies[6] = add_closure_mark_test_body(&context, crate_id, tuple_type,
+        locals, 1u, 700u);
+    closures[6] = add_closure_mark_test_shell(&context, bodies[6],
+        tuple_type, 1u, 0, 710u, &closure_types[6]);
+    body_expressions[6] = add_closure_mark_test_local(&context, bodies[6],
+        tuple_type, 0u, 720u);
+    closure_expressions[6] = finish_closure_mark_test_body(&context,
+        bodies[6], closures[6], closure_types[6], body_expressions[6],
+        710u);
+
+    locals[0].name = cm_hir_intern(&context, "copy_array");
+    locals[0].type = array_type;
+    locals[0].span = test_span(801u, 802u);
+    bodies[7] = add_closure_mark_test_body(&context, crate_id, array_type,
+        locals, 1u, 800u);
+    closures[7] = add_closure_mark_test_shell(&context, bodies[7],
+        array_type, 1u, 0, 810u, &closure_types[7]);
+    body_expressions[7] = add_closure_mark_test_local(&context, bodies[7],
+        array_type, 0u, 820u);
+    closure_expressions[7] = finish_closure_mark_test_body(&context,
+        bodies[7], closures[7], closure_types[7], body_expressions[7],
+        810u);
+
+    bodies[8] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        NULL, 0u, 900u);
+    memset(&closure_parameter, 0, sizeof(closure_parameter));
+    closure_parameter.name = cm_hir_intern(&context, "parameter");
+    closure_parameter.type = u32_type;
+    closure_parameter.span = test_span(920u, 925u);
+    closure_parameter.binding_kind = CM_HIR_BINDING_NAMED;
+    assert(cm_hir_reserve_closure(&context, bodies[8], 910u,
+        &closure_parameter, 1u, u32_type, 0u, 0,
+        test_span(910u, 970u), &closures[8]) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_CLOSURE_KIND;
+    type.span = test_span(910u, 970u);
+    type.data.closure_type.closure = closures[8];
+    assert(cm_hir_add_type(&context, &type, &closure_types[8]) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_CLOSURE_PARAMETER;
+    expression.owner_body = bodies[8];
+    expression.type = u32_type;
+    expression.span = test_span(922u, 923u);
+    expression.data.closure_parameter.closure = closures[8];
+    assert(cm_hir_add_expr(&context, &expression, &body_expressions[8])
+        == CM_HIR_OK);
+    closure_expressions[8] = finish_closure_mark_test_body(&context,
+        bodies[8], closures[8], closure_types[8], body_expressions[8],
+        910u);
+
+    generation = context.semantic_generation;
+    result = cm_hir_semantic_mark_bodies(&context, bodies,
+        CM_ARRAY_LEN(bodies));
+    assert(result.status == CM_SEMANTIC_MARK_OK
+        && context.semantic_generation == generation + UINT64_C(1));
+    closure = cm_hir_get_closure(&context, closures[0]);
+    assert(closure != NULL
+        && closure->capture_state == CM_HIR_CLOSURE_CAPTURES_MARKED
+        && closure->capture_count == 0u && closure->captures == NULL
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_NO_CAPTURE
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[1]);
+    assert(closure != NULL && closure->capture_count == 2u
+        && closure->captures[0].local_index == 0u
+        && closure->captures[1].local_index == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_BORROW
+        && closure->captures[1].usage == CM_HIR_USAGE_BORROW
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[2]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_MOVE
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[3]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_MOVE
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[4]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_MUTATE
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_MUT
+        && closure->is_copy == 0);
+    closure = cm_hir_get_closure(&context, inner_closure);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].local_index == 0u
+        && closure->captures[0].usage == CM_HIR_USAGE_MOVE
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[5]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].local_index == 0u
+        && closure->captures[0].usage == CM_HIR_USAGE_BORROW
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[6]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_BORROW
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[7]);
+    assert(closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_BORROW
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1);
+    closure = cm_hir_get_closure(&context, closures[8]);
+    assert(closure != NULL && closure->capture_count == 0u
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_NO_CAPTURE
+        && closure->is_copy == 1);
+    assert(cm_hir_get_expr(&context, closure_expressions[0])->usage
+            == CM_HIR_USAGE_MOVE
+        && cm_hir_get_expr(&context, closure_expressions[4])->usage
+            == CM_HIR_USAGE_MOVE);
+    dump_file = tmpfile();
+    assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
+    dump = read_dump(dump_file);
+    assert(strstr(dump,
+        "captures=marked class=shared copy=1 capture-values=[capture("
+        "local=0,type=ty#1,usage=borrow)") != NULL
+        && strstr(dump, "captures=marked class=mut copy=0") != NULL);
+    free(dump);
+    assert(fclose(dump_file) == 0);
+    generation = context.semantic_generation;
+    result = cm_hir_semantic_mark_bodies(&context, bodies,
+        CM_ARRAY_LEN(bodies));
+    assert(result.status == CM_SEMANTIC_MARK_INVALID_HIR
+        && context.semantic_generation == generation);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_closure_capture_semantic_mark_failures(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirDefId aggregate_definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirField field;
+    CmHirType type;
+    CmHirTypeId u32_type;
+    CmHirTypeId aggregate_type;
+    CmHirTypeId zero_array_type;
+    CmHirBodyId bodies[2];
+    CmHirBodyId field_body;
+    CmHirBodyId zero_array_body;
+    CmHirClosureId valid_closure;
+    CmHirClosureId unknown_closure;
+    CmHirClosureId field_closure;
+    CmHirClosureId zero_array_closure;
+    CmHirTypeId valid_closure_type;
+    CmHirTypeId unknown_closure_type;
+    CmHirTypeId field_closure_type;
+    CmHirTypeId zero_array_closure_type;
+    CmHirLocal local;
+    CmHirExpr expression;
+    CmHirExprId valid_body_expression;
+    CmHirExprId valid_closure_expression;
+    CmHirExprId unknown_local;
+    CmHirExprId unknown_closure_expression;
+    CmHirExprId field_base;
+    CmHirExprId field_expression;
+    CmHirExprId field_closure_expression;
+    CmHirExprId zero_array_local;
+    CmHirExprId zero_array_closure_expression;
+    CmSemanticMarkResult result;
+    const CmHirClosure *closure;
+    uint64_t generation;
+    size_t arena_bytes;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "closure_capture_failures"),
+        CM_HIR_EDITION_2021, test_span(0u, 500u), &crate_id,
+        &root_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_INTEGER_KIND;
+    type.span = test_span(1u, 2u);
+    type.data.integer_type.kind = CM_HIR_INT_U32;
+    assert(cm_hir_add_type(&context, &type, &u32_type) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(10u, 40u), &aggregate_definition) == CM_HIR_OK);
+    memset(&field, 0, sizeof(field));
+    field.name = cm_hir_intern(&context, "value");
+    field.type = u32_type;
+    field.visibility.kind = CM_HIR_VIS_PRIVATE;
+    field.visibility.restriction = cm_hir_def_id_none();
+    field.span = test_span(20u, 25u);
+    init_test_item(&item, CM_HIR_ITEM_STRUCT, aggregate_definition,
+        root_id, cm_hir_def_id_none(),
+        cm_hir_intern(&context, "Aggregate"), test_span(10u, 40u));
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_NAMED;
+    item.data.aggregate_item.fields = &field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert(item_id != CM_HIR_ITEM_NONE);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(41u, 42u);
+    type.data.named_type.definition = aggregate_definition;
+    assert(cm_hir_add_type(&context, &type, &aggregate_type) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ARRAY_KIND;
+    type.span = test_span(43u, 44u);
+    type.data.array_type.element = aggregate_type;
+    type.data.array_type.length.kind = CM_HIR_CONST_VALUE;
+    type.data.array_type.length.type = u32_type;
+    assert(cm_hir_add_type(&context, &type, &zero_array_type) == CM_HIR_OK);
+
+    bodies[0] = add_closure_mark_test_body(&context, crate_id, u32_type,
+        NULL, 0u, 100u);
+    valid_closure = add_closure_mark_test_shell(&context, bodies[0],
+        u32_type, 0u, 0, 110u, &valid_closure_type);
+    valid_body_expression = add_test_integer_expression(&context, bodies[0],
+        u32_type, test_span(120u, 121u));
+    valid_closure_expression = finish_closure_mark_test_body(&context,
+        bodies[0], valid_closure, valid_closure_type,
+        valid_body_expression, 110u);
+
+    memset(&local, 0, sizeof(local));
+    local.name = cm_hir_intern(&context, "unknown_copy");
+    local.type = aggregate_type;
+    local.span = test_span(201u, 202u);
+    local.parameter_index = 0u;
+    bodies[1] = add_closure_mark_test_body(&context, crate_id,
+        aggregate_type, &local, 1u, 200u);
+    unknown_closure = add_closure_mark_test_shell(&context, bodies[1],
+        aggregate_type, 1u, 0, 210u, &unknown_closure_type);
+    unknown_local = add_closure_mark_test_local(&context, bodies[1],
+        aggregate_type, 0u, 220u);
+    unknown_closure_expression = finish_closure_mark_test_body(&context,
+        bodies[1], unknown_closure, unknown_closure_type, unknown_local,
+        210u);
+
+    generation = context.semantic_generation;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    result = cm_hir_semantic_mark_bodies(&context, bodies,
+        CM_ARRAY_LEN(bodies));
+    closure = cm_hir_get_closure(&context, valid_closure);
+    assert(result.status == CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+        && result.body_index == 1u && result.body == bodies[1]
+        && result.expression == unknown_local
+        && context.semantic_generation == generation
+        && cm_arena_bytes_used(&context.storage) == arena_bytes
+        && closure != NULL
+        && closure->capture_state == CM_HIR_CLOSURE_CAPTURES_UNMARKED
+        && closure->captures == NULL && closure->capture_count == 0u
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_UNKNOWN
+        && cm_hir_get_closure(&context, unknown_closure)->capture_state
+            == CM_HIR_CLOSURE_CAPTURES_UNMARKED
+        && cm_hir_get_expr(&context, valid_body_expression)->usage
+            == CM_HIR_USAGE_UNKNOWN
+        && cm_hir_get_expr(&context, valid_closure_expression)->usage
+            == CM_HIR_USAGE_UNKNOWN
+        && cm_hir_get_expr(&context, unknown_local)->usage
+            == CM_HIR_USAGE_UNKNOWN
+        && cm_hir_get_expr(&context, unknown_closure_expression)->usage
+            == CM_HIR_USAGE_UNKNOWN);
+
+    local.name = cm_hir_intern(&context, "projected");
+    local.span = test_span(301u, 302u);
+    field_body = add_closure_mark_test_body(&context, crate_id, u32_type,
+        &local, 1u, 300u);
+    field_closure = add_closure_mark_test_shell(&context, field_body,
+        u32_type, 1u, 0, 310u, &field_closure_type);
+    field_base = add_closure_mark_test_local(&context, field_body,
+        aggregate_type, 0u, 320u);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_FIELD;
+    expression.owner_body = field_body;
+    expression.type = u32_type;
+    expression.span = test_span(320u, 323u);
+    expression.data.field.base = field_base;
+    expression.data.field.definition = aggregate_definition;
+    expression.data.field.field_index = 0u;
+    assert(cm_hir_add_expr(&context, &expression, &field_expression)
+        == CM_HIR_OK);
+    field_closure_expression = finish_closure_mark_test_body(&context,
+        field_body, field_closure, field_closure_type, field_expression,
+        310u);
+    generation = context.semantic_generation;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    result = cm_hir_semantic_mark_bodies(&context, &field_body, 1u);
+    closure = cm_hir_get_closure(&context, field_closure);
+    assert(result.status == CM_SEMANTIC_MARK_UNSUPPORTED_EXPRESSION
+        && result.body_index == 0u && result.body == field_body
+        && result.expression == field_expression
+        && context.semantic_generation == generation
+        && cm_arena_bytes_used(&context.storage) == arena_bytes
+        && closure != NULL
+        && closure->capture_state == CM_HIR_CLOSURE_CAPTURES_UNMARKED
+        && closure->captures == NULL && closure->capture_count == 0u
+        && cm_hir_get_expr(&context, field_base)->usage
+            == CM_HIR_USAGE_UNKNOWN
+        && cm_hir_get_expr(&context, field_expression)->usage
+            == CM_HIR_USAGE_UNKNOWN
+        && cm_hir_get_expr(&context, field_closure_expression)->usage
+            == CM_HIR_USAGE_UNKNOWN);
+
+    local.name = cm_hir_intern(&context, "zero_array");
+    local.type = zero_array_type;
+    local.span = test_span(401u, 402u);
+    zero_array_body = add_closure_mark_test_body(&context, crate_id,
+        zero_array_type, &local, 1u, 400u);
+    zero_array_closure = add_closure_mark_test_shell(&context,
+        zero_array_body, zero_array_type, 1u, 0, 410u,
+        &zero_array_closure_type);
+    zero_array_local = add_closure_mark_test_local(&context,
+        zero_array_body, zero_array_type, 0u, 420u);
+    zero_array_closure_expression = finish_closure_mark_test_body(&context,
+        zero_array_body, zero_array_closure, zero_array_closure_type,
+        zero_array_local, 410u);
+    generation = context.semantic_generation;
+    result = cm_hir_semantic_mark_bodies(&context, &zero_array_body, 1u);
+    closure = cm_hir_get_closure(&context, zero_array_closure);
+    assert(result.status == CM_SEMANTIC_MARK_OK
+        && context.semantic_generation == generation + UINT64_C(1)
+        && closure != NULL && closure->capture_count == 1u
+        && closure->captures[0].usage == CM_HIR_USAGE_BORROW
+        && closure->callable_class == CM_HIR_CLOSURE_CLASS_SHARED
+        && closure->is_copy == 1
+        && cm_hir_get_expr(&context, zero_array_local)->usage
+            == CM_HIR_USAGE_MOVE
+        && cm_hir_get_expr(&context, zero_array_closure_expression)->usage
+            == CM_HIR_USAGE_MOVE);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_closure_hir_model(void)
 {
     CmHirContext context;
@@ -6236,6 +6843,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     CmHirModuleId root_module;
     CmHirDefId ordinary_definition;
     CmHirDefId auto_definition;
+    CmHirDefId associated_definition;
     CmHirDefId negative_definition;
     CmHirDefId ordinary_negative_definition;
     CmHirDefId positive_definition;
@@ -6246,6 +6854,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     CmHirTypeId dyn_type;
     CmHirTypeId rejected_type;
     CmHirNamedType markers[2];
+    CmHirAssociatedTypeEquality equality;
     CmHirItem item;
     CmHirItemId item_id;
     CmHirSupertrait supertrait;
@@ -6302,21 +6911,43 @@ static void test_auto_trait_and_negative_impl_model(void)
         && stored->data.trait_item.is_auto
         && stored->data.trait_item.safety == CM_HIR_UNSAFE);
 
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_TYPE_ALIAS, test_span(20u, 25u),
+        &associated_definition) == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_TYPE_ALIAS, associated_definition,
+        root_module, ordinary_definition, cm_hir_intern(&context, "Item"),
+        test_span(20u, 25u));
+    item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
     memset(markers, 0, sizeof(markers));
+    memset(&equality, 0, sizeof(equality));
+    equality.associated_type = associated_definition;
+    equality.value = u8_type;
+    equality.span = test_span(40u, 50u);
     markers[0].definition = auto_definition;
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
     type.span = test_span(31u, 60u);
     type.data.dyn_trait_type.has_principal = 1;
     type.data.dyn_trait_type.principal_trait.definition = ordinary_definition;
+    type.data.dyn_trait_type.equalities = &equality;
+    type.data.dyn_trait_type.equality_count = 1u;
     type.data.dyn_trait_type.auto_traits = markers;
     type.data.dyn_trait_type.auto_trait_count = 1u;
     type.data.dyn_trait_type.region.kind = CM_HIR_REGION_STATIC;
     assert(cm_hir_add_type(&context, &type, &dyn_type) == CM_HIR_OK);
     markers[0].definition = ordinary_definition;
+    equality.value = u16_type;
     stored_dyn = cm_hir_get_type(&context, dyn_type);
     assert(stored_dyn != NULL
         && stored_dyn->data.dyn_trait_type.auto_traits != markers
+        && stored_dyn->data.dyn_trait_type.equalities != &equality
+        && stored_dyn->data.dyn_trait_type.equality_count == 1u
+        && cm_hir_def_id_equal(stored_dyn->data.dyn_trait_type
+                .equalities[0].associated_type,
+            associated_definition)
+        && stored_dyn->data.dyn_trait_type.equalities[0].value == u8_type
         && cm_hir_def_id_equal(
             stored_dyn->data.dyn_trait_type.auto_traits[0].definition,
             auto_definition));
@@ -6337,6 +6968,8 @@ static void test_auto_trait_and_negative_impl_model(void)
     type.data.dyn_trait_type.has_principal = 0;
     type.data.dyn_trait_type.principal_trait.definition =
         cm_hir_def_id_none();
+    type.data.dyn_trait_type.equalities = &equality;
+    type.data.dyn_trait_type.equality_count = 1u;
     markers[0].definition = ordinary_definition;
     type.data.dyn_trait_type.auto_traits = markers;
     type.data.dyn_trait_type.auto_trait_count = 1u;
@@ -6350,6 +6983,11 @@ static void test_auto_trait_and_negative_impl_model(void)
     type.data.dyn_trait_type.auto_trait_count = 0u;
     assert(cm_hir_add_type(&context, &type, &rejected_type)
         == CM_HIR_INVALID_ID);
+    type.data.dyn_trait_type.equalities = NULL;
+    type.data.dyn_trait_type.equality_count = 1u;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    type.data.dyn_trait_type.equality_count = 0u;
     assert(rejected_type == CM_HIR_TYPE_NONE
         && context.types.len == type_count
         && cm_arena_bytes_used(&context.storage) == arena_bytes);
@@ -6429,15 +7067,16 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v30\n", strlen("hir-v30\n")) == 0
-        && strstr(dump, "trait-header item#2 safety=unsafe auto=1")
-            != NULL
-        && strstr(dump, "impl-header item#3 safety=safe negative=1")
-            != NULL
-        && strstr(dump, "impl-header item#4 safety=safe negative=1")
-            != NULL
-        && strstr(dump, "impl-header item#5 safety=unsafe negative=0")
-            != NULL);
+    assert(strncmp(dump, "hir-v30\n", strlen("hir-v30\n")) == 0);
+    assert(strstr(dump, "trait-header item#2 safety=unsafe auto=1")
+        != NULL);
+    assert(strstr(dump, "{assoc=1:4,value=ty#1}") != NULL);
+    assert(strstr(dump, "impl-header item#4 safety=safe negative=1")
+        != NULL);
+    assert(strstr(dump, "impl-header item#5 safety=safe negative=1")
+        != NULL);
+    assert(strstr(dump, "impl-header item#6 safety=unsafe negative=0")
+        != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
     cm_hir_context_destroy(&context);
@@ -7418,6 +8057,8 @@ int main(void)
     test_aggregate_expression_model();
     test_context_transaction_marks();
     test_closure_hir_model();
+    test_closure_capture_semantic_mark();
+    test_closure_capture_semantic_mark_failures();
     test_context_generation_exhaustion_boundary();
     test_adt_generic_default_model();
     test_const_generic_default_type_invariants();

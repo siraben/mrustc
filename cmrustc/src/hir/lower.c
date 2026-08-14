@@ -173,6 +173,11 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
     CmHirDefId owner, CmHirTypeId default_self, int allow_bindings,
     int allow_constraints, int allow_synthesized_default_self, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count);
+static int cm_lower_predicate_equalities(CmLowerState *state,
+    CmAstItemId ast_item_id, CmAstTypeId trait_ast_type,
+    const CmLowerTraitTarget *trait_target, CmHirModuleId module,
+    CmHirDefId owner, int allow_constraints,
+    CmHirAssociatedTypeEquality **out_equalities, uint32_t *out_count);
 static int cm_lower_find_instantiated_supertrait(CmLowerState *state,
     const CmHirNamedType *root, CmHirDefId target_definition,
     CmHirTypeId self_type, CmSpan span, CmHirGenericArg **out_arguments,
@@ -6354,6 +6359,15 @@ static int cm_lower_validate_default_type(CmLowerState *state,
                 return 0;
             }
         }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            if (!cm_lower_validate_default_type(state,
+                    type->data.dyn_trait_type.equalities[index].value,
+                    owner, parameter_index, span, item_id, ast_type_id,
+                    depth + 1u)) {
+                return 0;
+            }
+        }
         return 1;
     }
     cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, item_id,
@@ -8248,6 +8262,7 @@ static void cm_lower_trait_default_free_type_temporary(CmHirType *type)
         }
         cm_free(type->data.dyn_trait_type.auto_traits);
         cm_free(type->data.dyn_trait_type.principal_trait.arguments);
+        cm_free(type->data.dyn_trait_type.equalities);
         break;
     }
     default:
@@ -8516,12 +8531,14 @@ static int cm_lower_trait_default_substitute_type(
     }
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
     {
+        CmHirAssociatedTypeEquality *equalities;
         CmHirNamedType *markers;
         int principal_changed;
         int region_changed;
 
         memset(&copy.data.dyn_trait_type.principal_trait, 0,
             sizeof(copy.data.dyn_trait_type.principal_trait));
+        copy.data.dyn_trait_type.equalities = NULL;
         copy.data.dyn_trait_type.auto_traits = NULL;
         principal_changed = 0;
         if ((source.data.dyn_trait_type.has_principal
@@ -8552,6 +8569,26 @@ static int cm_lower_trait_default_substitute_type(
                 return 0;
             }
             if (marker_changed) changed = 1;
+        }
+        equalities = source.data.dyn_trait_type.equality_count == 0u
+            ? NULL : (CmHirAssociatedTypeEquality *)cm_alloc_zeroed(
+                source.data.dyn_trait_type.equality_count,
+                sizeof(*equalities));
+        copy.data.dyn_trait_type.equalities = equalities;
+        for (index = 0u;
+             index < source.data.dyn_trait_type.equality_count; ++index) {
+            equalities[index] =
+                source.data.dyn_trait_type.equalities[index];
+            if (!cm_lower_trait_default_substitute_type(substitution,
+                    source.data.dyn_trait_type.equalities[index].value,
+                    depth + 1u, &equalities[index].value)) {
+                cm_lower_trait_default_free_type_temporary(&copy);
+                return 0;
+            }
+            if (equalities[index].value
+                    != source.data.dyn_trait_type.equalities[index].value) {
+                changed = 1;
+            }
         }
         break;
     }
@@ -9195,10 +9232,12 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
 {
     const CmAstTypeBound *lifetime_bound;
     CmHirNamedType principal_trait;
+    CmHirAssociatedTypeEquality *principal_equalities;
     CmHirNamedType *auto_traits;
     CmHirType type;
     CmSpan span;
     uint32_t auto_trait_count;
+    uint32_t principal_equality_count;
     uint32_t index;
     int has_principal;
 
@@ -9212,6 +9251,8 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
     lifetime_bound = NULL;
     has_principal = 0;
     auto_trait_count = 0u;
+    principal_equalities = NULL;
+    principal_equality_count = 0u;
     auto_traits = (CmHirNamedType *)cm_alloc_zeroed(ast_type->bound_count,
         sizeof(*auto_traits));
     memset(&principal_trait, 0, sizeof(principal_trait));
@@ -9282,7 +9323,9 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
         } else {
             CmLowerTraitTarget trait_target;
             CmHirNamedType trait;
+            CmHirAssociatedTypeEquality *equalities;
             const CmAstItem *target_ast_item;
+            uint32_t equality_count;
             int is_auto;
 
             if (bound->binder.lifetime_count != 0u) {
@@ -9297,7 +9340,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
             memset(&trait_target, 0, sizeof(trait_target));
             if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
                     bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
-                    &trait, &trait_target, 1, 0, 0, 0)) {
+                    &trait, &trait_target, 1, 1, 0, 0)) {
                 goto fail;
             }
             target_ast_item = trait_target.local_record == NULL ? NULL
@@ -9335,6 +9378,77 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                     "principal traits");
                 goto fail;
             }
+            equalities = NULL;
+            equality_count = 0u;
+            if (!cm_lower_predicate_equalities(state, CM_AST_ITEM_NONE,
+                    bound->trait_type, &trait_target, module, owner, 0,
+                    &equalities, &equality_count)) {
+                cm_free(trait.arguments);
+                goto fail;
+            }
+            if (is_auto && equality_count != 0u) {
+                cm_free(equalities);
+                cm_free(trait.arguments);
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                    cm_lower_span(state, bound->span), CM_AST_ITEM_NONE,
+                    ast_type_id, bound_type->path, CM_HIR_OK,
+                    "dynamic auto-trait markers cannot have associated "
+                    "equalities");
+                goto fail;
+            }
+            if (!is_auto) {
+                uint32_t equality_index;
+
+                for (equality_index = 0u;
+                     equality_index < equality_count; ++equality_index) {
+                    const CmHirItem *associated_item;
+                    const CmLowerItemRecord *associated_record;
+                    CmHirDefId parent_definition;
+                    uint32_t generic_parameter_count;
+
+                    associated_item = cm_lower_bound_item(state,
+                        equalities[equality_index].associated_type);
+                    associated_record =
+                        cm_lower_find_record_by_definition(state,
+                            equalities[equality_index].associated_type);
+                    if (associated_item != NULL) {
+                        parent_definition =
+                            associated_item->parent_definition;
+                        generic_parameter_count =
+                            associated_item->generic_parameter_count;
+                    } else if (associated_record != NULL) {
+                        parent_definition =
+                            associated_record->parent_definition;
+                        generic_parameter_count =
+                            associated_record->generic_parameter_count;
+                    } else {
+                        cm_free(equalities);
+                        cm_free(trait.arguments);
+                        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE,
+                            cm_lower_span(state, bound->span),
+                            CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
+                            CM_HIR_INVARIANT_VIOLATION,
+                            "dynamic associated equality lost its "
+                            "authenticated declaration");
+                        goto fail;
+                    }
+                    if (!cm_hir_def_id_equal(parent_definition,
+                            trait.definition)
+                        || generic_parameter_count != 0u) {
+                        cm_free(equalities);
+                        cm_free(trait.arguments);
+                        cm_lower_fail(state,
+                            CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                            cm_lower_span(state, bound->span),
+                            CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
+                            CM_HIR_OK,
+                            "dynamic associated equalities are limited to "
+                            "nongeneric types declared directly by the "
+                            "principal trait");
+                        goto fail;
+                    }
+                }
+            }
             if (is_auto) {
                 uint32_t marker_index;
 
@@ -9356,6 +9470,8 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                 auto_traits[auto_trait_count++] = trait;
             } else {
                 principal_trait = trait;
+                principal_equalities = equalities;
+                principal_equality_count = equality_count;
                 has_principal = 1;
             }
         }
@@ -9384,11 +9500,35 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
         }
         auto_traits[insertion] = marker;
     }
+    for (index = 1u; index < principal_equality_count; ++index) {
+        CmHirAssociatedTypeEquality equality;
+        uint32_t insertion;
+
+        equality = principal_equalities[index];
+        insertion = index;
+        while (insertion != 0u
+            && (principal_equalities[insertion - 1u]
+                    .associated_type.crate_id
+                    > equality.associated_type.crate_id
+                || (principal_equalities[insertion - 1u]
+                        .associated_type.crate_id
+                        == equality.associated_type.crate_id
+                    && principal_equalities[insertion - 1u]
+                        .associated_type.index
+                        > equality.associated_type.index))) {
+            principal_equalities[insertion] =
+                principal_equalities[insertion - 1u];
+            insertion -= 1u;
+        }
+        principal_equalities[insertion] = equality;
+    }
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
     type.span = span;
     type.data.dyn_trait_type.principal_trait = principal_trait;
     type.data.dyn_trait_type.has_principal = has_principal;
+    type.data.dyn_trait_type.equalities = principal_equalities;
+    type.data.dyn_trait_type.equality_count = principal_equality_count;
     type.data.dyn_trait_type.auto_traits = auto_trait_count == 0u
         ? NULL : auto_traits;
     type.data.dyn_trait_type.auto_trait_count = auto_trait_count;
@@ -9408,6 +9548,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
         CmHirTypeId result;
 
         result = cm_lower_add_type(state, &type, ast_type_id);
+        cm_free(principal_equalities);
         cm_free(principal_trait.arguments);
         for (index = 0u; index < auto_trait_count; ++index) {
             cm_free(auto_traits[index].arguments);
@@ -9417,6 +9558,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
     }
 
 fail:
+    cm_free(principal_equalities);
     cm_free(principal_trait.arguments);
     for (index = 0u; index < auto_trait_count; ++index) {
         cm_free(auto_traits[index].arguments);

@@ -322,7 +322,10 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
         if (closure == NULL
             || !cm_semantic_barrier_hash_array(&hash,
                 closure->parameters, (size_t)closure->parameter_count,
-                sizeof(*closure->parameters))) return 0;
+                sizeof(*closure->parameters))
+            || !cm_semantic_barrier_hash_array(&hash,
+                closure->captures, (size_t)closure->capture_count,
+                sizeof(*closure->captures))) return 0;
     }
     for (index = 0u; index < hir->types.len; ++index) {
         const CmHirType *type;
@@ -369,6 +372,12 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
             hash = cm_semantic_barrier_hash_bytes(hash,
                 &type->data.dyn_trait_type.region,
                 sizeof(type->data.dyn_trait_type.region));
+            if (!cm_semantic_barrier_hash_array(&hash,
+                    type->data.dyn_trait_type.equalities,
+                    (size_t)type->data.dyn_trait_type.equality_count,
+                    sizeof(*type->data.dyn_trait_type.equalities))) {
+                return 0;
+            }
             if (type->data.dyn_trait_type.has_principal
                 && !cm_semantic_barrier_hash_named(&hash,
                     &type->data.dyn_trait_type.principal_trait)) return 0;

@@ -48,6 +48,29 @@ static void cm_hir_dump_span(FILE *stream, CmSpan span)
         (unsigned int)span.start, (unsigned int)span.end);
 }
 
+static const char *cm_hir_dump_usage_name(CmHirValueUsage usage)
+{
+    switch (usage) {
+    case CM_HIR_USAGE_UNKNOWN: return "unknown";
+    case CM_HIR_USAGE_BORROW: return "borrow";
+    case CM_HIR_USAGE_MUTATE: return "mutate";
+    case CM_HIR_USAGE_MOVE: return "move";
+    }
+    return "invalid";
+}
+
+static const char *cm_hir_dump_closure_class_name(CmHirClosureClass class_)
+{
+    switch (class_) {
+    case CM_HIR_CLOSURE_CLASS_UNKNOWN: return "unknown";
+    case CM_HIR_CLOSURE_CLASS_NO_CAPTURE: return "no-capture";
+    case CM_HIR_CLOSURE_CLASS_SHARED: return "shared";
+    case CM_HIR_CLOSURE_CLASS_MUT: return "mut";
+    case CM_HIR_CLOSURE_CLASS_ONCE: return "once";
+    }
+    return "invalid";
+}
+
 static void cm_hir_dump_visibility(FILE *stream,
     const CmHirVisibility *visibility)
 {
@@ -364,6 +387,16 @@ static void cm_hir_dump_type(FILE *stream, const CmHirContext *context,
         if (type->data.dyn_trait_type.has_principal) {
             cm_hir_dump_named(stream, context,
                 &type->data.dyn_trait_type.principal_trait);
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index) {
+            fputs("{assoc=", stream);
+            cm_hir_dump_def(stream,
+                type->data.dyn_trait_type.equalities[index]
+                    .associated_type);
+            fprintf(stream, ",value=ty#%u}",
+                (unsigned int)type->data.dyn_trait_type
+                    .equalities[index].value);
         }
         for (index = 0u;
              index < type->data.dyn_trait_type.auto_trait_count; ++index) {
@@ -710,6 +743,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     }
     for (index = 0u; index < context->closures.len; ++index) {
         const CmHirClosure *closure;
+        uint32_t capture_index;
         uint32_t parameter_index;
 
         closure = (const CmHirClosure *)cm_vec_at_const(
@@ -729,8 +763,32 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
             fprintf(stream, "expr#%u",
                 (unsigned int)closure->body_expression);
         }
-        fprintf(stream, " visible-locals=%u move=%d parameters=[",
-            (unsigned int)closure->visible_local_count, closure->is_move);
+        fprintf(stream,
+            " visible-locals=%u move=%d captures=%s class=%s copy=%d "
+            "capture-values=[",
+            (unsigned int)closure->visible_local_count, closure->is_move,
+            closure->capture_state == CM_HIR_CLOSURE_CAPTURES_UNMARKED
+                ? "unmarked"
+                : closure->capture_state == CM_HIR_CLOSURE_CAPTURES_MARKED
+                    ? "marked" : "invalid",
+            cm_hir_dump_closure_class_name(closure->callable_class),
+            closure->is_copy);
+        if (closure->captures == NULL && closure->capture_count != 0u) {
+            fputs("invalid", stream);
+        } else {
+            for (capture_index = 0u;
+                 capture_index < closure->capture_count; ++capture_index) {
+                const CmHirClosureCapture *capture;
+
+                capture = &closure->captures[capture_index];
+                if (capture_index != 0u) fputc(',', stream);
+                fprintf(stream, "capture(local=%u,type=ty#%u,usage=%s)",
+                    (unsigned int)capture->local_index,
+                    (unsigned int)capture->type,
+                    cm_hir_dump_usage_name(capture->usage));
+            }
+        }
+        fputs("] parameters=[", stream);
         for (parameter_index = 0u;
              parameter_index < closure->parameter_count;
              ++parameter_index) {
@@ -979,11 +1037,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         fputs(" span=", stream);
         cm_hir_dump_span(stream, expression->span);
         fprintf(stream, " usage=%s static-borrow=%s",
-            expression->usage == CM_HIR_USAGE_UNKNOWN ? "unknown"
-                : expression->usage == CM_HIR_USAGE_BORROW ? "borrow"
-                : expression->usage == CM_HIR_USAGE_MUTATE ? "mutate"
-                : expression->usage == CM_HIR_USAGE_MOVE ? "move"
-                : "invalid",
+            cm_hir_dump_usage_name(expression->usage),
             expression->static_borrow_state
                     == CM_HIR_STATIC_BORROW_UNKNOWN
                 ? "unknown"

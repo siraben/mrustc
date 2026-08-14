@@ -341,6 +341,13 @@ typedef struct CmHirType {
         struct {
             CmHirNamedType principal_trait;
             int has_principal;
+            /*
+             * Canonical associated DefId order.  Each equality names a
+             * nongeneric associated type declared directly by the principal
+             * trait.  Auto-only objects cannot carry equalities.
+             */
+            CmHirAssociatedTypeEquality *equalities;
+            uint32_t equality_count;
             /* Canonical DefId order; every entry is an authenticated auto trait. */
             CmHirNamedType *auto_traits;
             uint32_t auto_trait_count;
@@ -696,6 +703,43 @@ typedef enum CmHirClosureState {
     CM_HIR_CLOSURE_BODY_BOUND
 } CmHirClosureState;
 
+/*
+ * The incoming value context proven by the pre-region usage pass.  UNKNOWN
+ * is the only state accepted by expression construction; later states are
+ * semantic evidence and are written atomically for a complete body manifest.
+ */
+typedef enum CmHirValueUsage {
+    CM_HIR_USAGE_UNKNOWN = 0,
+    CM_HIR_USAGE_BORROW,
+    CM_HIR_USAGE_MUTATE,
+    CM_HIR_USAGE_MOVE
+} CmHirValueUsage;
+
+typedef enum CmHirClosureCaptureState {
+    CM_HIR_CLOSURE_CAPTURES_UNMARKED = 0,
+    CM_HIR_CLOSURE_CAPTURES_MARKED
+} CmHirClosureCaptureState;
+
+/* Ordered to match the strongest use which selected the callable trait. */
+typedef enum CmHirClosureClass {
+    CM_HIR_CLOSURE_CLASS_UNKNOWN = 0,
+    CM_HIR_CLOSURE_CLASS_NO_CAPTURE,
+    CM_HIR_CLOSURE_CLASS_SHARED,
+    CM_HIR_CLOSURE_CLASS_MUT,
+    CM_HIR_CLOSURE_CLASS_ONCE
+} CmHirClosureClass;
+
+/*
+ * One exact outer item-body local captured by a source closure.  Field and
+ * dereference projections remain a later evidence format; MARKED rejects
+ * those closure-body shapes rather than silently widening this identity.
+ */
+typedef struct CmHirClosureCapture {
+    uint32_t local_index;
+    CmHirTypeId type;
+    CmHirValueUsage usage;
+} CmHirClosureCapture;
+
 /* Closure parameters are lexical bindings, not flat item-body locals. */
 typedef struct CmHirClosureParam {
     CmInternId name;
@@ -704,10 +748,7 @@ typedef struct CmHirClosureParam {
     CmHirBindingKind binding_kind;
 } CmHirClosureParam;
 
-/*
- * Durable source-closure identity. Capture absence is deliberately not
- * represented here: MARKED must later publish authenticated capture evidence.
- */
+/* Durable source-closure identity plus MARKED capture evidence. */
 typedef struct CmHirClosure {
     CmHirClosureState state;
     CmHirBodyId owner_body;
@@ -719,6 +760,12 @@ typedef struct CmHirClosure {
     /* Exact outer-local prefix visible at the closure's source position. */
     uint32_t visible_local_count;
     int is_move;
+    CmHirClosureCaptureState capture_state;
+    CmHirClosureCapture *captures;
+    uint32_t capture_count;
+    CmHirClosureClass callable_class;
+    /* Meaningful only when capture_state is CAPTURES_MARKED. */
+    int is_copy;
     CmSpan span;
 } CmHirClosure;
 
@@ -790,18 +837,6 @@ typedef struct CmHirAggregateFieldValue {
     CmHirExprId value;
     CmSpan span;
 } CmHirAggregateFieldValue;
-
-/*
- * The incoming value context proven by the pre-region usage pass.  UNKNOWN
- * is the only state accepted by expression construction; later states are
- * semantic evidence and are written atomically for a complete body manifest.
- */
-typedef enum CmHirValueUsage {
-    CM_HIR_USAGE_UNKNOWN = 0,
-    CM_HIR_USAGE_BORROW,
-    CM_HIR_USAGE_MUTATE,
-    CM_HIR_USAGE_MOVE
-} CmHirValueUsage;
 
 typedef enum CmHirStaticBorrowState {
     CM_HIR_STATIC_BORROW_UNKNOWN = 0,
