@@ -4178,8 +4178,41 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
     if (defining_trait->generic_parameter_count != 0u
         && cm_hir_def_id_equal(associated_trait_definition,
             trait_definition)) {
-        if (!cm_lower_trait_identity_arguments(state, CM_AST_ITEM_NONE,
-                defining_trait, span, &owned_trait_arguments,
+        const CmHirItem *self_context_item;
+
+        self_context_item = cm_lower_bound_item(state, self_owner);
+        if (self_context_item != NULL
+            && self_context_item->kind == CM_HIR_ITEM_IMPL) {
+            const CmHirNamedType *implemented_trait;
+
+            implemented_trait = &self_context_item->data.impl_item
+                .trait_type;
+            if (!self_context_item->data.impl_item.has_trait
+                || self_context_item->data.impl_item.is_negative
+                || !cm_hir_def_id_equal(implemented_trait->definition,
+                    trait_definition)
+                || implemented_trait->argument_count
+                    != defining_trait->generic_parameter_count
+                || (implemented_trait->argument_count != 0u
+                    && implemented_trait->arguments == NULL)) {
+                cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                    CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                    CM_HIR_INVARIANT_VIOLATION,
+                    "Self associated-type projection has an invalid "
+                    "implemented-trait instantiation");
+                return CM_HIR_TYPE_NONE;
+            }
+            owned_trait_arguments = (CmHirGenericArg *)cm_alloc_zeroed(
+                (size_t)implemented_trait->argument_count,
+                sizeof(*owned_trait_arguments));
+            memcpy(owned_trait_arguments, implemented_trait->arguments,
+                (size_t)implemented_trait->argument_count
+                    * sizeof(*owned_trait_arguments));
+            projection.data.projection_type.trait_type.argument_count =
+                implemented_trait->argument_count;
+        } else if (!cm_lower_trait_identity_arguments(state,
+                CM_AST_ITEM_NONE, defining_trait, span,
+                &owned_trait_arguments,
                 &projection.data.projection_type.trait_type
                     .argument_count)) {
             return CM_HIR_TYPE_NONE;

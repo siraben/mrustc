@@ -5410,6 +5410,174 @@ static void test_method_bearing_trait_impl_entry_points(void)
     cm_ast_destroy(&ast);
 }
 
+static void test_impl_self_projection_uses_trait_instantiation(void)
+{
+    static const char source[] =
+        "trait Bound<T> {}"
+        "struct Wrapper<First, Second>;"
+        "trait Owner<T> {"
+        " type Assoc;"
+        " fn ordinary<U>(&self) where U: Bound<Self::Assoc>;"
+        " fn specialized<U>(&self) where U: Bound<Self::Assoc>;"
+        "}"
+        "impl<First, Second> Owner<Second> for Wrapper<First, Second> {"
+        " type Assoc = First;"
+        " fn ordinary<U>(&self) where U: Bound<Self::Assoc> {}"
+        " default fn specialized<U>(&self) "
+        " where U: Bound<Self::Assoc> {}"
+        "}";
+    static const char *const rejected[] = {
+        ("trait Owner<T> { type Assoc; fn get(&self) -> Self::Assoc; }"
+            "struct Wrapper<T>;"
+            "impl<T> Owner for Wrapper<T> {"
+            " type Assoc = T; fn get(&self) -> Self::Assoc { loop {} }"
+            "}"),
+        ("trait Owner<T> { type Assoc; fn get(&self) -> Self::Assoc; }"
+            "struct Wrapper<A, B>;"
+            "impl<A, B> Owner<A, B> for Wrapper<A, B> {"
+            " type Assoc = A; fn get(&self) -> Self::Assoc { loop {} }"
+            "}")
+    };
+    static const char *const method_names[] = {
+        "ordinary", "specialized"
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *owner_trait;
+    const CmHirItem *impl_item;
+    const CmHirType *impl_trait_argument;
+    size_t index;
+
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "impl Self projection instantiation: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    owner_trait = find_item(&context, "Owner");
+    impl_item = find_impl(&context);
+    impl_trait_argument = impl_item == NULL
+            || !impl_item->data.impl_item.has_trait
+            || impl_item->data.impl_item.trait_type.argument_count != 1u
+            || impl_item->data.impl_item.trait_type.arguments == NULL
+            || impl_item->data.impl_item.trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            impl_item->data.impl_item.trait_type.arguments[0].data.type);
+    assert(result.error_count == 0u
+        && owner_trait != NULL && owner_trait->kind == CM_HIR_ITEM_TRAIT
+        && owner_trait->generic_parameter_count == 1u
+        && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
+        && impl_item->generic_parameter_count == 2u
+        && impl_trait_argument != NULL
+        && impl_trait_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && impl_trait_argument->data.parameter_type.parameter
+            == impl_item->generic_parameter_start + 1u);
+    for (index = 0u;
+         index < sizeof(method_names) / sizeof(method_names[0]); ++index) {
+        const CmHirItem *trait_method;
+        const CmHirItem *impl_method;
+        const CmHirTraitPredicate *trait_predicate;
+        const CmHirTraitPredicate *impl_predicate;
+        const CmHirType *trait_projection;
+        const CmHirType *impl_projection;
+        const CmHirType *trait_projection_argument;
+        const CmHirType *impl_projection_argument;
+        const CmHirType *trait_projection_self;
+        const CmHirType *impl_projection_self;
+
+        trait_method = find_child(&context, owner_trait->definition,
+            method_names[index]);
+        impl_method = find_child(&context, impl_item->definition,
+            method_names[index]);
+        trait_predicate = trait_method == NULL
+                || trait_method->predicate_count != 1u
+                || trait_method->predicates == NULL
+            ? NULL : &trait_method->predicates[0];
+        impl_predicate = impl_method == NULL
+                || impl_method->predicate_count != 1u
+                || impl_method->predicates == NULL
+            ? NULL : &impl_method->predicates[0];
+        trait_projection = trait_predicate == NULL
+                || trait_predicate->trait_type.argument_count != 1u
+                || trait_predicate->trait_type.arguments == NULL
+                || trait_predicate->trait_type.arguments[0].kind
+                    != CM_HIR_GENERIC_ARG_TYPE
+            ? NULL : cm_hir_get_type(&context,
+                trait_predicate->trait_type.arguments[0].data.type);
+        impl_projection = impl_predicate == NULL
+                || impl_predicate->trait_type.argument_count != 1u
+                || impl_predicate->trait_type.arguments == NULL
+                || impl_predicate->trait_type.arguments[0].kind
+                    != CM_HIR_GENERIC_ARG_TYPE
+            ? NULL : cm_hir_get_type(&context,
+                impl_predicate->trait_type.arguments[0].data.type);
+        trait_projection_argument = trait_projection == NULL
+                || trait_projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+                || trait_projection->data.projection_type.trait_type
+                    .argument_count != 1u
+                || trait_projection->data.projection_type.trait_type
+                    .arguments == NULL
+                || trait_projection->data.projection_type.trait_type
+                    .arguments[0].kind != CM_HIR_GENERIC_ARG_TYPE
+            ? NULL : cm_hir_get_type(&context,
+                trait_projection->data.projection_type.trait_type
+                    .arguments[0].data.type);
+        impl_projection_argument = impl_projection == NULL
+                || impl_projection->kind != CM_HIR_TYPE_PROJECTION_KIND
+                || impl_projection->data.projection_type.trait_type
+                    .argument_count != 1u
+                || impl_projection->data.projection_type.trait_type
+                    .arguments == NULL
+                || impl_projection->data.projection_type.trait_type
+                    .arguments[0].kind != CM_HIR_GENERIC_ARG_TYPE
+            ? NULL : cm_hir_get_type(&context,
+                impl_projection->data.projection_type.trait_type
+                    .arguments[0].data.type);
+        trait_projection_self = trait_projection == NULL
+            ? NULL : cm_hir_get_type(&context,
+                trait_projection->data.projection_type.self_type);
+        impl_projection_self = impl_projection == NULL
+            ? NULL : cm_hir_get_type(&context,
+                impl_projection->data.projection_type.self_type);
+        assert(trait_method != NULL && impl_method != NULL
+            && trait_projection != NULL && impl_projection != NULL
+            && trait_projection_argument != NULL
+            && trait_projection_argument->kind
+                == CM_HIR_TYPE_PARAMETER_KIND
+            && trait_projection_argument->data.parameter_type.parameter
+                == owner_trait->generic_parameter_start
+            && impl_projection_argument != NULL
+            && impl_projection_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && impl_projection_argument->data.parameter_type.parameter
+                == impl_item->generic_parameter_start + 1u
+            && impl_projection->data.projection_type.trait_type
+                    .arguments[0].data.type
+                == impl_item->data.impl_item.trait_type.arguments[0]
+                    .data.type
+            && trait_projection_self != NULL
+            && trait_projection_self->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(trait_projection_self->data.self_type
+                    .owner,
+                owner_trait->definition)
+            && impl_projection_self != NULL
+            && impl_projection_self->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(impl_projection_self->data.self_type
+                    .owner,
+                impl_item->definition)
+            && impl_method->is_specializable == (index == 1u));
+    }
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_graph_source(rejected[index], &context);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_lifetime_qualified_receiver(void)
 {
     static const char source[] =
@@ -9007,6 +9175,7 @@ int main(void)
     test_trait_argument_coherence();
     test_ordered_nominal_generic_impl_entry_points();
     test_method_bearing_trait_impl_entry_points();
+    test_impl_self_projection_uses_trait_instantiation();
     test_lifetime_qualified_receiver();
     test_method_completeness_and_identity_errors();
     test_trait_method_self_sized_predicate();
