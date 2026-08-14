@@ -7934,6 +7934,140 @@ static int cm_lower_pattern_binding(CmLowerState *state,
     return !state->failed;
 }
 
+/*
+ * A tuple-struct newtype containing `()` is irrefutable and introduces no
+ * lexical bindings.  Once the constructor and instantiated field type are
+ * authenticated, its runtime effect is exactly the same as an ABI discard.
+ * Keep this deliberately narrow until general typed pattern HIR exists.
+ */
+static int cm_lower_unit_newtype_parameter_pattern(CmLowerState *state,
+    CmAstPatternId pattern_id, CmHirTypeId parameter_type,
+    CmHirModuleId module, CmSpan item_span, CmAstItemId ast_item_id,
+    CmSpan *out_span)
+{
+    const CmAstPattern *pattern;
+    const CmAstPattern *field_pattern;
+    const CmAstPath *path;
+    const CmLowerItemRecord *record;
+    const CmHirType *abi_type;
+    const CmHirType *argument_type;
+    const CmHirType *field_type;
+    const CmHirItem *item;
+    const CmHirGenericParam *generic;
+    CmHirDefId module_definition;
+    CmLowerLookupResult lookup;
+    CmSpan span;
+    uint32_t index;
+
+    pattern = cm_ast_get_pattern(state->ast, pattern_id);
+    span = pattern == NULL ? item_span : cm_lower_span(state, pattern->span);
+    if (pattern == NULL || pattern->kind != CM_AST_PATTERN_STRUCT
+        || !pattern->data.struct_pattern.is_tuple
+        || pattern->data.struct_pattern.has_rest
+        || pattern->data.struct_pattern.field_count != 1u
+        || pattern->data.struct_pattern.fields == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
+            ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple-struct parameter requires one unit field");
+        return 0;
+    }
+    field_pattern = cm_ast_get_pattern(state->ast,
+        pattern->data.struct_pattern.fields[0].pattern);
+    if (field_pattern == NULL || field_pattern->kind != CM_AST_PATTERN_TUPLE
+        || field_pattern->data.list.has_rest
+        || field_pattern->data.list.pattern_count != 0u
+        || field_pattern->data.list.patterns != NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+            field_pattern == NULL ? span
+                : cm_lower_span(state, field_pattern->span),
+            ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple-struct parameter field must be `()`");
+        return 0;
+    }
+    path = cm_ast_get_path(state->ast,
+        pattern->data.struct_pattern.path);
+    if (!cm_lower_ast_path_storage_valid(path)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, pattern->data.struct_pattern.path,
+            CM_HIR_INVALID_ID,
+            "function tuple-struct parameter path storage is invalid");
+        return 0;
+    }
+    for (index = 0u; index < path->segment_count; ++index) {
+        if (path->segments[index].argument_count != 0u) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
+                ast_item_id, CM_AST_TYPE_NONE,
+                pattern->data.struct_pattern.path, CM_HIR_OK,
+                "function tuple-struct parameter constructor cannot have "
+                "generic arguments");
+            return 0;
+        }
+    }
+    lookup = cm_lower_lookup_path(state, path, module,
+        CM_HIR_LOWER_PATH_TYPE, &record, &module_definition);
+    (void)module_definition;
+    if (lookup == CM_LOWER_LOOKUP_STALE_GRAPH) {
+        cm_lower_fail(state, CM_HIR_LOWER_STALE_GRAPH, span, ast_item_id,
+            CM_AST_TYPE_NONE, pattern->data.struct_pattern.path, CM_HIR_OK,
+            "graph or import revision changed during pattern-path lookup");
+        return 0;
+    }
+    if (lookup == CM_LOWER_LOOKUP_RESOLVER_ERROR) {
+        cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+            ast_item_id, CM_AST_TYPE_NONE,
+            pattern->data.struct_pattern.path, CM_HIR_OK,
+            "local-crate pattern-path resolution failed");
+        return 0;
+    }
+    abi_type = cm_hir_get_type(state->hir, parameter_type);
+    item = abi_type == NULL || abi_type->kind != CM_HIR_TYPE_ADT_KIND
+        ? NULL : cm_lower_bound_item(state,
+            abi_type->data.named_type.definition);
+    if (lookup != CM_LOWER_LOOKUP_DEFINITION || record == NULL
+        || item == NULL || item->kind != CM_HIR_ITEM_STRUCT
+        || !cm_hir_def_id_equal(record->definition, item->definition)
+        || !cm_hir_def_id_equal(abi_type->data.named_type.definition,
+            item->definition)
+        || item->data.aggregate_item.form != CM_HIR_AGGREGATE_TUPLE
+        || item->data.aggregate_item.field_count != 1u
+        || item->data.aggregate_item.fields == NULL
+        || item->generic_parameter_count != 1u
+        || abi_type->data.named_type.argument_count != 1u
+        || abi_type->data.named_type.arguments == NULL
+        || abi_type->data.named_type.arguments[0].kind
+            != CM_HIR_GENERIC_ARG_TYPE) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
+            ast_item_id, CM_AST_TYPE_NONE,
+            pattern->data.struct_pattern.path, CM_HIR_OK,
+            "function tuple-struct parameter must match a one-field "
+            "generic newtype");
+        return 0;
+    }
+    generic = cm_hir_get_generic_param(state->hir,
+        item->generic_parameter_start);
+    field_type = cm_hir_get_type(state->hir,
+        item->data.aggregate_item.fields[0].type);
+    argument_type = cm_hir_get_type(state->hir,
+        abi_type->data.named_type.arguments[0].data.type);
+    if (generic == NULL || generic->kind != CM_HIR_GENERIC_TYPE
+        || generic->index != 0u
+        || !cm_hir_def_id_equal(generic->owner, item->definition)
+        || field_type == NULL || field_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || field_type->data.parameter_type.parameter
+            != item->generic_parameter_start
+        || argument_type == NULL
+        || argument_type->kind != CM_HIR_TYPE_UNIT_KIND) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
+            ast_item_id, CM_AST_TYPE_NONE,
+            pattern->data.struct_pattern.path, CM_HIR_OK,
+            "function tuple-struct parameter requires a unit-instantiated "
+            "identity field");
+        return 0;
+    }
+    *out_span = span;
+    return 1;
+}
+
 static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
     CmAstPatternId pattern_id, CmSpan item_span, CmAstItemId ast_item_id,
     uint32_t parameter_index, CmHirFunctionParameter *out_parameter,
@@ -8598,6 +8732,31 @@ static int cm_lower_function_item(CmLowerState *state,
             if (state->failed) break;
             ast_pattern = cm_ast_get_pattern(state->ast,
                 function->parameters[index].pattern);
+            if (ast_pattern != NULL
+                && ast_pattern->kind == CM_AST_PATTERN_STRUCT
+                && ast_pattern->data.struct_pattern.is_tuple) {
+                if (record->is_foreign
+                    || function->body == CM_AST_EXPR_NONE) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                        cm_lower_span(state, ast_pattern->span), ast_item_id,
+                        CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                        "tuple-struct parameter patterns require a bodyful "
+                        "Rust function");
+                    break;
+                }
+                if (!cm_lower_unit_newtype_parameter_pattern(state,
+                        function->parameters[index].pattern,
+                        parameters[index].type, record->owner_module, span,
+                        ast_item_id, &parameter_span)) {
+                    break;
+                }
+                parameters[index].name = CM_INTERN_ID_NONE;
+                parameters[index].span = parameter_span;
+                parameters[index].binding_kind = CM_HIR_BINDING_DISCARD;
+                parameters[index].binding_mode =
+                    CM_HIR_PARAMETER_BINDING_MOVE;
+                continue;
+            }
             if (ast_pattern != NULL
                 && ast_pattern->kind == CM_AST_PATTERN_TUPLE) {
                 if (record->parent_kind != CM_LOWER_PARENT_NONE

@@ -709,6 +709,13 @@ static int cm_mir_lower_parameter_layout(const CmMirContext *context,
             hir_local_index += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
+            if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+                || parameter->name != CM_INTERN_ID_NONE) {
+                return 0;
+            }
+            continue;
+        }
         if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
             const CmHirType *tuple_type;
             uint32_t field_index;
@@ -766,7 +773,7 @@ static int cm_mir_lower_parameter_layout(const CmMirContext *context,
             }
             continue;
         }
-        /* Discards and every future pattern form remain outside this slice. */
+        /* Every future binding form remains outside this exact slice. */
         return 0;
     }
     user_local_count = hir_body->local_count - hir_local_index;
@@ -826,6 +833,7 @@ static int cm_mir_lower_hir_local_id(
             parameter_local += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }
@@ -2873,6 +2881,7 @@ static int cm_mir_flow_append_tuple_parameter_prologue(
             hir_local_index += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }
@@ -3492,7 +3501,6 @@ static CmMirLowerResult cm_mir_lower_instance_impl(CmMirContext *context,
             && signature->parameters == NULL)
         || signature->is_variadic
         || hir_body->parameter_count != signature->parameter_count
-        || hir_body->local_count < signature->parameter_count
         || (hir_body->local_count != 0u && hir_body->locals == NULL)
         || !cm_mir_lower_type(hir, item, substitutions,
             substitution_count, signature->return_type, &return_type)

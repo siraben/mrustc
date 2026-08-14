@@ -3307,6 +3307,100 @@ static void test_reference_lowering_stays_fail_closed(void)
     cm_hir_context_destroy(&hir);
 }
 
+static void test_discard_parameter_lowering(void)
+{
+    CmHirContext hir;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirTypeId u32_type;
+    CmHirDefId definition;
+    CmHirFunctionParameter parameter;
+    CmHirBody body;
+    CmHirBodyId body_id;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExprId root;
+    CmMirContext mir;
+    CmMirLowerResult result;
+    const CmMirBody *stored;
+    CmMirBody *mutable_stored;
+    CmMirLocalKind saved_kind;
+
+    cm_hir_context_init(&hir);
+    assert(cm_hir_create_crate(&hir,
+        cm_hir_intern(&hir, "mir_discard_parameter_boundary"),
+        CM_HIR_EDITION_2021, test_span(0u, 100u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(10u, 80u), &definition)
+        == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.type = u32_type;
+    parameter.span = test_span(20u, 25u);
+    parameter.binding_kind = CM_HIR_BINDING_DISCARD;
+    parameter.binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_item_source(definition);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = u32_type;
+    body.parameter_count = 1u;
+    body.source = 1u;
+    body.source_expression_id = 10u;
+    body.span = test_span(10u, 80u);
+    assert(cm_hir_add_body(&hir, &body, &body_id) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&hir, "discard");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = body.span;
+    item.data.function_item.signature.parameters = &parameter;
+    item.data.function_item.signature.parameter_count = 1u;
+    item.data.function_item.signature.return_type = u32_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&hir, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = body_id;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+    root = add_test_integer_expression(&hir, body_id, u32_type, 7u,
+        40u, 41u);
+    assert(cm_hir_set_body_root_expression(&hir, body_id, root)
+        == CM_HIR_OK);
+
+    cm_mir_context_init(&mir);
+    result = cm_mir_lower_instance(&mir, &hir, body_id, NULL, 0u);
+    stored = cm_mir_get_body(&mir, result.body);
+    assert(result.error_count == 0u && result.lowered_body_count == 1u
+        && stored != NULL && stored->local_count == 2u
+        && stored->locals[0].kind == CM_MIR_LOCAL_RETURN
+        && stored->locals[0].type == u32_type
+        && stored->locals[1].kind == CM_MIR_LOCAL_ARGUMENT
+        && stored->locals[1].type == u32_type
+        && stored->basic_block_count == 1u
+        && stored->basic_blocks[0].statement_count == 1u
+        && stored->basic_blocks[0].statements[0].kind
+            == CM_MIR_STATEMENT_ASSIGN
+        && stored->basic_blocks[0].statements[0].data.assign.destination
+            == CM_MIR_RETURN_LOCAL
+        && cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+            == CM_MIR_OK);
+    mutable_stored = (CmMirBody *)stored;
+    saved_kind = mutable_stored->locals[1].kind;
+    mutable_stored->locals[1].kind = CM_MIR_LOCAL_USER;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_INVARIANT_VIOLATION);
+    mutable_stored->locals[1].kind = saved_kind;
+    assert(cm_mir_validate_monomorphized_body(&mir, &hir, result.body)
+        == CM_MIR_OK);
+    cm_mir_context_destroy(&mir);
+    cm_hir_context_destroy(&hir);
+}
+
 static void test_tuple_parameter_lowering(void)
 {
     CmHirContext hir;
@@ -3739,6 +3833,7 @@ int main(void)
     test_aggregate_and_field_lowering();
     test_aggregate_call_lowering();
     test_reference_lowering_stays_fail_closed();
+    test_discard_parameter_lowering();
     test_tuple_parameter_lowering();
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&hir);

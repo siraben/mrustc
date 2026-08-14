@@ -1264,6 +1264,13 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
             hir_local_index += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
+            if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+                || parameter->name != CM_INTERN_ID_NONE) {
+                return 0;
+            }
+            continue;
+        }
         if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
             const CmHirType *tuple_type;
             uint32_t field_index;
@@ -1358,6 +1365,7 @@ static int cm_mir_hir_local_id(const CmHirFunctionSignature *signature,
             parameter_local += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }
@@ -2423,6 +2431,7 @@ static int cm_mir_tuple_parameter_prologue_matches(CmMirTreeMatch *match,
             hir_local_index += 1u;
             continue;
         }
+        if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) continue;
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }

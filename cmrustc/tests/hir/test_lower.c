@@ -8279,6 +8279,80 @@ static void test_shared_reference_parameter_pattern(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_unit_newtype_parameter_pattern(void)
+{
+    static const char positive[] =
+        "mod ops { pub struct Yeet<T>(pub T); }"
+        "struct Opt<T>(T);"
+        "trait FromResidual<R> { fn from_residual(residual: R); }"
+        "impl<T> FromResidual<ops::Yeet<()>> for Opt<T> {"
+        " fn from_residual(ops::Yeet(()): ops::Yeet<()>) {}"
+        "}";
+    static const char *const negatives[] = {
+        "struct A<T>(T); struct B<T>(T); fn f(A(()): B<()>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(()): Yeet<u8>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(value): Yeet<()>) {}",
+        "struct Yeet<T>(T); fn f(Yeet(..): Yeet<()>) {}",
+        "struct Pair<T>(T, T); fn f(Pair(()): Pair<()>) {}",
+        "enum E<T> { V(T) } fn f(E::V(()): E<()>) {}"
+    };
+    const CmHirItem *impl_item;
+    const CmHirItem *method;
+    const CmHirFunctionSignature *signature;
+    const CmHirBody *body;
+    const CmHirType *parameter_type;
+    const CmHirType *argument_type;
+    CmHirContext context;
+    CmHirLowerResult result;
+    size_t index;
+
+    result = lower_source(positive, &context, NULL);
+    impl_item = find_impl(&context);
+    method = impl_item == NULL ? NULL : find_child(&context,
+        impl_item->definition, "from_residual");
+    signature = method == NULL ? NULL
+        : &method->data.function_item.signature;
+    body = method == NULL ? NULL
+        : cm_hir_get_body(&context, method->data.function_item.body);
+    parameter_type = signature == NULL
+            || signature->parameter_count != 1u
+        ? NULL : cm_hir_get_type(&context, signature->parameters[0].type);
+    argument_type = parameter_type == NULL
+            || parameter_type->kind != CM_HIR_TYPE_ADT_KIND
+            || parameter_type->data.named_type.argument_count != 1u
+            || parameter_type->data.named_type.arguments == NULL
+            || parameter_type->data.named_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            parameter_type->data.named_type.arguments[0].data.type);
+    assert(result.error_count == 0u && method != NULL
+        && signature->receiver == CM_HIR_RECEIVER_NONE
+        && signature->parameters[0].binding_kind == CM_HIR_BINDING_DISCARD
+        && signature->parameters[0].binding_mode
+            == CM_HIR_PARAMETER_BINDING_MOVE
+        && signature->parameters[0].name == CM_INTERN_ID_NONE
+        && parameter_type != NULL
+        && parameter_type->kind == CM_HIR_TYPE_ADT_KIND
+        && argument_type != NULL
+        && argument_type->kind == CM_HIR_TYPE_UNIT_KIND
+        && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+        && body->parameter_count == 1u && body->local_count == 0u
+        && body->locals == NULL);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(negatives) / sizeof(negatives[0]);
+         ++index) {
+        result = lower_source(negatives[index], &context, NULL);
+        assert(result.error_count == 1u && find_item(&context, "f") == NULL
+            && (result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
+                || result.first_error.kind
+                    == CM_HIR_LOWER_UNSUPPORTED_TYPE
+                || result.first_error.kind
+                    == CM_HIR_LOWER_WRONG_NAMESPACE));
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_cfg_sensitive_trait_impl_members(void)
 {
     static const char paired_members[] =
@@ -9274,6 +9348,7 @@ int main(void)
     test_typed_parameter_binding_modes();
     test_partition_in_place_parameter_shape();
     test_shared_reference_parameter_pattern();
+    test_unit_newtype_parameter_pattern();
     test_typed_parameter_patterns_remain_bounded();
     test_unsupported_method_forms_are_errors();
     test_cfg_sensitive_trait_impl_members();
