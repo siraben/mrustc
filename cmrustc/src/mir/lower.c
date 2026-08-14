@@ -40,12 +40,21 @@ static int cm_mir_seen_expression(const CmVec *seen, CmHirExprId id)
     return 0;
 }
 
-static int cm_mir_hir_type_equal(const CmHirContext *hir,
-    CmHirTypeId left_id, CmHirTypeId right_id)
+static CmHirTypeId cm_mir_lower_monomorphic_self_type(
+    const CmHirContext *hir, CmHirTypeId id, size_t depth);
+
+static int cm_mir_hir_type_equal_inner(const CmHirContext *hir,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t depth)
 {
     const CmHirType *left;
     const CmHirType *right;
 
+    if (depth >= CM_MIR_FLOW_RECURSION_LIMIT) return 0;
+    left_id = cm_mir_lower_monomorphic_self_type(hir, left_id, depth);
+    right_id = cm_mir_lower_monomorphic_self_type(hir, right_id, depth);
+    if (left_id == CM_HIR_TYPE_NONE || right_id == CM_HIR_TYPE_NONE) {
+        return 0;
+    }
     if (left_id == right_id) return 1;
     left = cm_hir_get_type(hir, left_id);
     right = cm_hir_get_type(hir, right_id);
@@ -58,6 +67,16 @@ static int cm_mir_hir_type_equal(const CmHirContext *hir,
             == right->data.parameter_type.parameter;
     }
     if (left->kind == CM_HIR_TYPE_BOOL_KIND) return 1;
+    if (left->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        return left->data.reference_type.region.kind
+                == right->data.reference_type.region.kind
+            && left->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+            && left->data.reference_type.mutability
+                == right->data.reference_type.mutability
+            && cm_mir_hir_type_equal_inner(hir,
+                left->data.reference_type.pointee,
+                right->data.reference_type.pointee, depth + 1u);
+    }
     if (left->kind == CM_HIR_TYPE_ADT_KIND) {
         return left->data.named_type.argument_count == 0u
             && left->data.named_type.arguments == NULL
@@ -67,6 +86,12 @@ static int cm_mir_hir_type_equal(const CmHirContext *hir,
                 right->data.named_type.definition);
     }
     return 0;
+}
+
+static int cm_mir_hir_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, CmHirTypeId right_id)
+{
+    return cm_mir_hir_type_equal_inner(hir, left_id, right_id, 0u);
 }
 
 static const CmHirExpr *cm_mir_terminal_expression(
@@ -267,6 +292,37 @@ static const CmHirItem *cm_mir_lower_named_struct(
         ? item : NULL;
 }
 
+static CmHirTypeId cm_mir_lower_monomorphic_self_type(
+    const CmHirContext *hir, CmHirTypeId id, size_t depth)
+{
+    const CmHirType *type;
+    const CmHirDefinition *definition;
+    const CmHirItem *owner;
+
+    if (hir == NULL || id == CM_HIR_TYPE_NONE
+        || depth >= CM_MIR_FLOW_RECURSION_LIMIT) {
+        return CM_HIR_TYPE_NONE;
+    }
+    type = cm_hir_get_type(hir, id);
+    if (type == NULL) return CM_HIR_TYPE_NONE;
+    if (type->kind != CM_HIR_TYPE_SELF_KIND) return id;
+    definition = cm_hir_lookup_definition(hir,
+        type->data.self_type.owner);
+    owner = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(owner->definition,
+            type->data.self_type.owner)
+        || owner->generic_parameter_count != 0u
+        || owner->data.impl_item.self_type == id) {
+        return CM_HIR_TYPE_NONE;
+    }
+    return cm_mir_lower_monomorphic_self_type(hir,
+        owner->data.impl_item.self_type, depth + 1u);
+}
+
 static int cm_mir_lower_type_is_scalar(const CmHirContext *hir,
     CmHirTypeId type_id)
 {
@@ -315,12 +371,24 @@ static int cm_mir_lower_type_is_call_scalar(const CmHirContext *hir,
     CmHirTypeId type_id)
 {
     const CmHirType *type;
+    CmHirTypeId pointee;
 
     type = cm_hir_get_type(hir, type_id);
-    return type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
-        && (type->data.integer_type.kind == CM_HIR_INT_U8
+    if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND) {
+        return type->data.integer_type.kind == CM_HIR_INT_U8
             || type->data.integer_type.kind == CM_HIR_INT_U32
-            || type->data.integer_type.kind == CM_HIR_INT_USIZE);
+            || type->data.integer_type.kind == CM_HIR_INT_USIZE;
+    }
+    if (type == NULL || type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+        || (type->data.reference_type.mutability != CM_HIR_IMMUTABLE
+            && type->data.reference_type.mutability != CM_HIR_MUTABLE)) {
+        return 0;
+    }
+    pointee = cm_mir_lower_monomorphic_self_type(hir,
+        type->data.reference_type.pointee, 0u);
+    return pointee != CM_HIR_TYPE_NONE
+        && cm_mir_lower_type_is_call_scalar(hir, pointee);
 }
 
 static int cm_mir_lower_type_is_usize(const CmHirContext *hir,
@@ -380,6 +448,21 @@ static int cm_mir_lower_type_target_valid(const CmMirContext *context,
         return type->data.integer_type.kind != CM_HIR_INT_USIZE
             || cm_mir_context_pointer_bits(context) == 32u
             || cm_mir_context_pointer_bits(context) == 64u;
+    }
+    if (type->kind == CM_HIR_TYPE_SELF_KIND) {
+        CmHirTypeId concrete;
+
+        concrete = cm_mir_lower_monomorphic_self_type(hir, type_id, depth);
+        return concrete != CM_HIR_TYPE_NONE && concrete != type_id
+            && cm_mir_lower_type_target_valid(context, hir, function,
+                concrete, depth + 1u);
+    }
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        return type->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+            && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+            && cm_mir_lower_type_target_valid(context, hir, function,
+                type->data.reference_type.pointee, depth + 1u);
     }
     if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
         if (type->data.tuple_type.element_count
@@ -461,6 +544,21 @@ static int cm_mir_lower_type(const CmHirContext *hir,
         return 1;
     }
     if (type->kind == CM_HIR_TYPE_BOOL_KIND) {
+        *out_type = declared;
+        return 1;
+    }
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        CmHirTypeId pointee;
+
+        if (type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+            || (type->data.reference_type.mutability != CM_HIR_IMMUTABLE
+                && type->data.reference_type.mutability != CM_HIR_MUTABLE)
+            || !cm_mir_lower_type(hir, item, substitutions,
+                substitution_count, type->data.reference_type.pointee,
+                &pointee)
+            || !cm_mir_lower_type_is_call_scalar(hir, pointee)) {
+            return 0;
+        }
         *out_type = declared;
         return 1;
     }
@@ -593,14 +691,16 @@ static int cm_mir_lower_parameter_layout(const CmMirContext *context,
         }
         if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
             const CmHirLocal *local;
+            CmHirTypeId local_type;
 
             if (hir_local_index >= hir_body->local_count) return 0;
             local = &hir_body->locals[hir_local_index];
             if (local->parameter_index != parameter_index
                 || local->parameter_binding_index != 0u
                 || local->name != parameter->name
-                || !cm_mir_hir_type_equal(hir, local->type,
-                    parameter->type)) {
+                || !cm_mir_lower_type(hir, item, substitutions,
+                    substitution_count, local->type, &local_type)
+                || local_type != argument_types[parameter_index]) {
                 return 0;
             }
             if (hir_to_mir != NULL) {
@@ -1043,6 +1143,44 @@ static CmSemanticResultsStatus cm_mir_flow_semantic_expression_query(
     return cm_semantic_results_canonical_instance_expression(
         plan->semantic_results, plan->admission, &caller, expression,
         out_view);
+}
+
+static CmSemanticResultsStatus cm_mir_flow_semantic_adjustment_query(
+    const CmMirFlowPlan *plan, CmHirExprId expression, uint32_t adjustment,
+    CmSemanticAdjustmentView *out_view)
+{
+    CmHirCanonicalInstance caller;
+    CmMirLowerLegacyInstanceQuery legacy;
+    CmSemanticResultsStatus status;
+
+    if (plan->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_expression_adjustment(
+            plan->semantic_results, plan->admission,
+            plan->item->data.function_item.body, expression, adjustment,
+            out_view);
+    }
+    if (plan->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!cm_mir_lower_instance_is_canonical(plan->instance)) {
+        if (!cm_mir_lower_legacy_instance_query_init(&legacy, plan->hir,
+                plan->instance)) return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+        status = cm_semantic_results_instance_expression_adjustment(
+            plan->semantic_results, plan->admission, &legacy.spec,
+            expression, adjustment, out_view);
+        cm_mir_lower_legacy_instance_query_destroy(&legacy);
+        return status;
+    }
+    cm_hir_canonical_instance_init(&caller);
+    caller.definition = plan->instance->definition;
+    caller.body_definition = plan->instance->body_definition;
+    caller.body = plan->instance->body;
+    caller.bytes = plan->instance->identity_bytes;
+    caller.size = plan->instance->identity_size;
+    return cm_semantic_results_canonical_instance_expression_adjustment(
+        plan->semantic_results, plan->admission, &caller, expression,
+        adjustment, out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_flow_semantic_primitive_query(
@@ -1576,6 +1714,144 @@ static int cm_mir_semantic_types_equal(const CmSemanticTypeView *left,
         && equal;
 }
 
+typedef struct CmMirReceiverAdjustmentPlan {
+    int present;
+    CmMirBorrowKind borrow_kind;
+    CmHirTypeId source_type;
+    CmHirTypeId target_type;
+    CmHirExprId expression;
+    CmSpan span;
+} CmMirReceiverAdjustmentPlan;
+
+static int cm_mir_flow_receiver_adjustment(
+    const CmMirFlowPlan *plan, const CmHirExpr *call,
+    CmHirExprId call_id,
+    const CmSemanticCallableSelectionView *selection,
+    CmMirReceiverAdjustmentPlan *out_adjustment)
+{
+    const CmHirExpr *receiver;
+    const CmHirBody *body;
+    const CmHirItem *declared;
+    const CmHirItem *selected;
+    const CmHirType *target;
+    CmSemanticExpressionView expression_view;
+    CmSemanticAdjustmentView adjustment;
+    CmHirReceiverKind receiver_kind;
+    CmHirMutability mutability;
+    int self_matches;
+
+    if (plan == NULL || call == NULL || selection == NULL
+        || out_adjustment == NULL || call->kind != CM_HIR_EXPR_METHOD_CALL
+        || selection->body != call->owner_body
+        || selection->expression != call_id
+        || selection->syntax != CM_HIR_CALLABLE_DOT_METHOD
+        || selection->receiver_argument != 0u
+        || selection->receiver_expression != call->data.method_call.receiver) {
+        return 0;
+    }
+    memset(out_adjustment, 0, sizeof(*out_adjustment));
+    receiver = cm_hir_get_expr(plan->hir,
+        call->data.method_call.receiver);
+    body = cm_hir_get_body(plan->hir, call->owner_body);
+    declared = cm_mir_flow_definition_item(plan->hir,
+        selection->declared_trait_callable);
+    selected = cm_mir_flow_definition_item(plan->hir,
+        selection->selected_callable);
+    memset(&expression_view, 0, sizeof(expression_view));
+    self_matches = 0;
+    if (receiver == NULL || declared == NULL || selected == NULL
+        || declared->kind != CM_HIR_ITEM_FUNCTION
+        || selected->kind != CM_HIR_ITEM_FUNCTION
+        || receiver->owner_body != call->owner_body
+        || cm_mir_flow_semantic_expression_query(plan,
+            call->data.method_call.receiver, &expression_view)
+                != CM_SEMANTIC_RESULTS_OK
+        || expression_view.body != call->owner_body
+        || expression_view.expression != call->data.method_call.receiver
+        || cm_semantic_type_view_matches_monomorphic_hir(
+            plan->semantic_results, plan->admission,
+            &expression_view.unadjusted_type, receiver->type,
+            &self_matches) != CM_SEMANTIC_RESULTS_OK
+        || !self_matches
+        || !cm_mir_semantic_types_equal(&selection->requested_self_type,
+            &expression_view.unadjusted_type)) {
+        return 0;
+    }
+    receiver_kind = declared->data.function_item.signature.receiver;
+    if (selected->data.function_item.signature.receiver != receiver_kind
+        || declared->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selected->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selection->argument_count == 0u
+        || declared->data.function_item.signature.parameters == NULL
+        || selected->data.function_item.signature.parameters == NULL) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_VALUE) {
+        return expression_view.adjustment_count == 0u
+            && cm_mir_semantic_types_equal(
+                &expression_view.unadjusted_type,
+                &expression_view.adjusted_type);
+    }
+    if ((receiver_kind != CM_HIR_RECEIVER_REF_SHARED
+            && receiver_kind != CM_HIR_RECEIVER_REF_MUTABLE)
+        || expression_view.adjustment_count != 1u || body == NULL
+        || receiver->kind != CM_HIR_EXPR_LOCAL
+        || receiver->data.local.local_index >= body->local_count) {
+        return 0;
+    }
+    memset(&adjustment, 0, sizeof(adjustment));
+    if (cm_mir_flow_semantic_adjustment_query(plan,
+            call->data.method_call.receiver, 0u, &adjustment)
+                != CM_SEMANTIC_RESULTS_OK
+        || adjustment.body != call->owner_body
+        || adjustment.expression != call->data.method_call.receiver
+        || adjustment.index != 0u
+        || adjustment.has_selected_trait
+        || !cm_hir_def_id_is_none(adjustment.selected_trait)
+        || !cm_hir_def_id_is_none(adjustment.selected_method)
+        || !cm_hir_def_id_is_none(adjustment.selected_impl)
+        || !cm_mir_semantic_types_equal(&adjustment.source_type,
+            &expression_view.unadjusted_type)
+        || !cm_mir_semantic_types_equal(&adjustment.target_type,
+            &expression_view.adjusted_type)) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_REF_SHARED) {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED) {
+            return 0;
+        }
+        out_adjustment->borrow_kind = CM_MIR_BORROW_SHARED;
+        mutability = CM_HIR_IMMUTABLE;
+    } else {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+            || body->locals[receiver->data.local.local_index].mutability
+                != CM_HIR_MUTABLE) {
+            return 0;
+        }
+        out_adjustment->borrow_kind = CM_MIR_BORROW_MUTABLE;
+        mutability = CM_HIR_MUTABLE;
+    }
+    out_adjustment->source_type = receiver->type;
+    out_adjustment->target_type =
+        selected->data.function_item.signature.parameters[0].type;
+    out_adjustment->expression = call->data.method_call.receiver;
+    out_adjustment->span = receiver->span;
+    target = cm_hir_get_type(plan->hir, out_adjustment->target_type);
+    if (target == NULL || target->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || target->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+        || target->data.reference_type.mutability != mutability
+        || !cm_mir_hir_type_equal(plan->hir,
+            target->data.reference_type.pointee, receiver->type)
+        || !cm_mir_lower_type_is_call_scalar(plan->hir,
+            out_adjustment->target_type)) {
+        return 0;
+    }
+    out_adjustment->present = 1;
+    return 1;
+}
+
 static int cm_mir_flow_fail(CmMirFlowPlan *plan, CmMirFlowError error,
     CmHirExprId expression, CmMirStatus status)
 {
@@ -1813,7 +2089,13 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         plan->aggregate_field_count +=
             expression->data.aggregate.field_count;
         plan->statement_count += 1u;
-        if (!has_destination) plan->temporary_count += 1u;
+        if (!has_destination) {
+            if (plan->temporary_count == UINT32_MAX) {
+                return cm_mir_flow_fail(plan, CM_MIR_FLOW_INVALID,
+                    expression_id, CM_MIR_ID_EXHAUSTED);
+            }
+            plan->temporary_count += 1u;
+        }
         memset(seen, 0, sizeof(seen));
         ok = 1;
         for (index = 0u; index < expression->data.aggregate.field_count;
@@ -1998,6 +2280,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         CmSemanticFunctionSignatureView semantic_callee_signature;
         CmSemanticExpressionView semantic_expression;
         CmSemanticGenericArgumentView semantic_impl_argument;
+        CmMirReceiverAdjustmentPlan receiver_adjustment;
         int has_aggregate_argument;
         CmMirStatus status;
         uint32_t index;
@@ -2042,6 +2325,7 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
             sizeof(semantic_callee_signature));
         memset(&semantic_impl_argument, 0,
             sizeof(semantic_impl_argument));
+        memset(&receiver_adjustment, 0, sizeof(receiver_adjustment));
         if (selected_call) {
             const CmHirItem *declared;
             const CmHirExpr *receiver;
@@ -2103,8 +2387,6 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         != expression->data.method_call.method_name
                     || !cm_hir_def_id_equal(declared->parent_definition,
                         semantic_callable.requested_trait)
-                    || declared->data.function_item.signature.receiver
-                        != CM_HIR_RECEIVER_VALUE
                     || receiver == NULL
                     || receiver->owner_body != expression->owner_body
                     || cm_semantic_type_view_matches_monomorphic_hir(
@@ -2112,7 +2394,10 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         &semantic_callable.requested_self_type,
                         receiver->type, &self_matches)
                             != CM_SEMANTIC_RESULTS_OK
-                    || !self_matches) {
+                    || !self_matches
+                    || !cm_mir_flow_receiver_adjustment(plan, expression,
+                        expression_id, &semantic_callable,
+                        &receiver_adjustment)) {
                     return cm_mir_flow_fail(plan, CM_MIR_FLOW_ADMISSION,
                         expression_id, CM_MIR_INVALID_ADMISSION);
                 }
@@ -2369,10 +2654,15 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                         call_arguments[index],
                         &semantic_argument) != CM_SEMANTIC_RESULTS_OK
                     || (selected_call
-                        && (semantic_argument.adjustment_count != 0u
-                            || !cm_mir_semantic_types_equal(
-                                &semantic_argument.unadjusted_type,
-                                &semantic_argument.adjusted_type)))
+                        && (index == 0u && receiver_adjustment.present
+                            ? (semantic_argument.adjustment_count != 1u
+                                || !cm_mir_semantic_types_equal(
+                                    &semantic_parameter,
+                                    &semantic_argument.adjusted_type))
+                            : (semantic_argument.adjustment_count != 0u
+                                || !cm_mir_semantic_types_equal(
+                                    &semantic_argument.unadjusted_type,
+                                    &semantic_argument.adjusted_type))))
                     || !cm_mir_semantic_types_equal(&semantic_parameter,
                         &semantic_callee_parameter)
                     || !cm_mir_semantic_types_equal(&semantic_parameter,
@@ -2390,8 +2680,13 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
                     callee_item->data.function_item.signature
                         .parameters[index].type,
                     &parameter_type)
-                || !cm_mir_hir_type_equal(plan->hir, local_type,
-                    parameter_type)
+                || (index == 0u && receiver_adjustment.present
+                    ? (!cm_mir_hir_type_equal(plan->hir, local_type,
+                            receiver_adjustment.source_type)
+                        || !cm_mir_hir_type_equal(plan->hir, parameter_type,
+                            receiver_adjustment.target_type))
+                    : !cm_mir_hir_type_equal(plan->hir, local_type,
+                        parameter_type))
                 || (!cm_mir_lower_type_is_call_scalar(plan->hir,
                         parameter_type)
                     && !cm_mir_lower_type_is_aggregate(plan->hir,
@@ -2430,7 +2725,22 @@ static int cm_mir_flow_preflight(CmMirFlowPlan *plan,
         }
         plan->call_count += 1u;
         plan->call_argument_count += call_argument_count;
-        if (!has_destination) plan->temporary_count += 1u;
+        if (receiver_adjustment.present) {
+            if (plan->temporary_count == UINT32_MAX
+                || plan->statement_count == UINT32_MAX) {
+                return cm_mir_flow_fail(plan, CM_MIR_FLOW_INVALID,
+                    expression_id, CM_MIR_ID_EXHAUSTED);
+            }
+            plan->temporary_count += 1u;
+            plan->statement_count += 1u;
+        }
+        if (!has_destination) {
+            if (plan->temporary_count == UINT32_MAX) {
+                return cm_mir_flow_fail(plan, CM_MIR_FLOW_INVALID,
+                    expression_id, CM_MIR_ID_EXHAUSTED);
+            }
+            plan->temporary_count += 1u;
+        }
         ok = 1;
     } else {
         return cm_mir_flow_fail(plan, CM_MIR_FLOW_UNSUPPORTED,
@@ -2490,6 +2800,9 @@ static int cm_mir_flow_append_binary(CmMirFlowOutput *output,
     return 1;
 }
 
+static int cm_mir_flow_temporary(CmMirFlowOutput *output,
+    CmHirTypeId type, CmMirLocalId *out_local);
+
 static int cm_mir_flow_append_use(CmMirFlowOutput *output,
     CmMirLocalId destination, const CmMirOperand *operand)
 {
@@ -2503,6 +2816,41 @@ static int cm_mir_flow_append_use(CmMirFlowOutput *output,
     statement.data.assign.value.type = operand->type;
     statement.data.assign.value.data.use = *operand;
     (void)cm_vec_push(output->statements, &statement);
+    return 1;
+}
+
+static int cm_mir_flow_append_receiver_borrow(CmMirFlowOutput *output,
+    const CmMirReceiverAdjustmentPlan *adjustment,
+    const CmMirOperand *source, CmMirOperand *out_operand)
+{
+    CmMirStatement statement;
+    CmMirLocalId destination;
+
+    if (output == NULL || adjustment == NULL || !adjustment->present
+        || source == NULL || out_operand == NULL
+        || source->kind != CM_MIR_OPERAND_MOVE
+        || !cm_mir_hir_type_equal(output->plan->hir, source->type,
+            adjustment->source_type)
+        || !cm_mir_flow_temporary(output, adjustment->target_type,
+            &destination)) {
+        return 0;
+    }
+    memset(&statement, 0, sizeof(statement));
+    statement.kind = CM_MIR_STATEMENT_ASSIGN;
+    statement.data.assign.destination = destination;
+    statement.data.assign.value.kind = CM_MIR_RVALUE_BORROW;
+    statement.data.assign.value.type = adjustment->target_type;
+    statement.data.assign.value.span = adjustment->span;
+    statement.data.assign.value.data.borrow.kind = adjustment->borrow_kind;
+    statement.data.assign.value.data.borrow.source.base = source->data.local;
+    statement.data.assign.value.data.borrow.source.type =
+        adjustment->source_type;
+    statement.data.assign.value.data.borrow.source.span = adjustment->span;
+    (void)cm_vec_push(output->statements, &statement);
+    memset(out_operand, 0, sizeof(*out_operand));
+    out_operand->kind = CM_MIR_OPERAND_MOVE;
+    out_operand->type = adjustment->target_type;
+    out_operand->data.local = destination;
     return 1;
 }
 
@@ -2958,6 +3306,9 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
         const CmHirExprId *argument_expressions;
         CmHirExprId argument_storage[2];
         uint32_t argument_count;
+        CmSemanticCallableSelectionView semantic_callable;
+        CmMirReceiverAdjustmentPlan receiver_adjustment;
+        CmMirOperand raw_receiver;
         CmMirLocalId destination;
         CmMirBasicBlock *block;
         size_t argument_start;
@@ -2965,11 +3316,23 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
 
         argument_expressions = NULL;
         argument_count = 0u;
+        memset(&semantic_callable, 0, sizeof(semantic_callable));
+        memset(&receiver_adjustment, 0, sizeof(receiver_adjustment));
+        memset(&raw_receiver, 0, sizeof(raw_receiver));
         if (expression->kind == CM_HIR_EXPR_CALL) {
             argument_expressions = expression->data.call.arguments;
             argument_count = expression->data.call.argument_count;
         } else if (!cm_mir_flow_callable_arguments(expression,
                 argument_storage, &argument_expressions, &argument_count)) {
+            return 0;
+        }
+        if (expression->kind == CM_HIR_EXPR_METHOD_CALL
+            && (cm_mir_flow_semantic_callable_hint_query(output->plan,
+                    expression_id, &semantic_callable)
+                    != CM_SEMANTIC_RESULTS_OK
+                || !cm_mir_flow_receiver_adjustment(output->plan,
+                    expression, expression_id, &semantic_callable,
+                    &receiver_adjustment))) {
             return 0;
         }
 
@@ -2988,6 +3351,14 @@ static int cm_mir_flow_expression(CmMirFlowOutput *output,
                     && call_arguments[index].kind
                         != CM_MIR_CONSTANT_USIZE)) {
                 return 0;
+            }
+            if (index == 0u && receiver_adjustment.present) {
+                raw_receiver = call_arguments[index];
+                if (!cm_mir_flow_append_receiver_borrow(output,
+                        &receiver_adjustment, &raw_receiver,
+                        &call_arguments[0])) {
+                    return 0;
+                }
             }
         }
         planned_call = (const CmMirFlowCall *)cm_vec_at_const(

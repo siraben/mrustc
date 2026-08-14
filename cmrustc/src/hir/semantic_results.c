@@ -7415,8 +7415,16 @@ CmSemanticResultsStatus cm_semantic_type_view_equal(
     return CM_SEMANTIC_RESULTS_OK;
 }
 
-static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
-    CmHirTypeId type_id, size_t depth)
+typedef struct CmResultsMonomorphicSelfBinding {
+    int present;
+    int resolving;
+    CmHirDefId owner;
+    CmHirTypeId type;
+} CmResultsMonomorphicSelfBinding;
+
+static int cm_results_hir_type_is_monomorphic_inner(
+    const CmHirContext *hir, CmHirTypeId type_id, size_t depth,
+    CmResultsMonomorphicSelfBinding *self_binding)
 {
     const CmHirType *type;
     uint32_t index;
@@ -7433,6 +7441,42 @@ static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
     case CM_HIR_TYPE_INTEGER_KIND:
     case CM_HIR_TYPE_FLOAT_KIND:
         return 1;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return (type->data.reference_type.region.kind
+                    == CM_HIR_REGION_STATIC
+                || type->data.reference_type.region.kind
+                    == CM_HIR_REGION_ERASED)
+            && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+            && cm_results_hir_type_is_monomorphic_inner(hir,
+                type->data.reference_type.pointee, depth + 1u,
+                self_binding);
+    case CM_HIR_TYPE_SELF_KIND: {
+        const CmHirItem *owner;
+        int valid;
+
+        owner = cm_results_item(hir, type->data.self_type.owner);
+        if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+            || owner->generic_parameter_count != 0u
+            || owner->data.impl_item.self_type == CM_HIR_TYPE_NONE
+            || owner->data.impl_item.self_type == type_id) {
+            return 0;
+        }
+        if (self_binding->present) {
+            return !self_binding->resolving
+                && cm_hir_def_id_equal(self_binding->owner,
+                    owner->definition)
+                && self_binding->type == owner->data.impl_item.self_type;
+        }
+        self_binding->present = 1;
+        self_binding->resolving = 1;
+        self_binding->owner = owner->definition;
+        self_binding->type = owner->data.impl_item.self_type;
+        valid = cm_results_hir_type_is_monomorphic_inner(hir,
+            self_binding->type, depth + 1u, self_binding);
+        self_binding->resolving = 0;
+        return valid;
+    }
     case CM_HIR_TYPE_ADT_KIND:
         if (cm_hir_def_id_is_none(type->data.named_type.definition)
             || (type->data.named_type.argument_count == 0u)
@@ -7443,16 +7487,18 @@ static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
 
             argument = &type->data.named_type.arguments[index];
             if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
-                if (!cm_results_hir_type_is_monomorphic(hir,
-                        argument->data.type, depth + 1u)) return 0;
+                if (!cm_results_hir_type_is_monomorphic_inner(hir,
+                        argument->data.type, depth + 1u,
+                        self_binding)) return 0;
             } else if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
                 if (argument->data.lifetime.kind != CM_HIR_REGION_STATIC
                     && argument->data.lifetime.kind
                         != CM_HIR_REGION_ERASED) return 0;
             } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
                 if (argument->data.constant.kind != CM_HIR_CONST_VALUE
-                    || !cm_results_hir_type_is_monomorphic(hir,
-                        argument->data.constant.type, depth + 1u)) return 0;
+                    || !cm_results_hir_type_is_monomorphic_inner(hir,
+                        argument->data.constant.type, depth + 1u,
+                        self_binding)) return 0;
             } else {
                 return 0;
             }
@@ -7461,6 +7507,17 @@ static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
     default:
         return 0;
     }
+}
+
+static int cm_results_hir_type_is_monomorphic(const CmHirContext *hir,
+    CmHirTypeId type_id, size_t depth)
+{
+    CmResultsMonomorphicSelfBinding self_binding;
+
+    memset(&self_binding, 0, sizeof(self_binding));
+    self_binding.owner = cm_hir_def_id_none();
+    return cm_results_hir_type_is_monomorphic_inner(hir, type_id, depth,
+        &self_binding);
 }
 
 static int cm_results_type_view_owned(const CmSemanticResults *results,
@@ -7503,7 +7560,10 @@ cm_results_type_view_matches_monomorphic_hir(
     CmHirTypeId type, int *out_equal)
 {
     CmTypeckContext typeck;
+    CmTypeckInstantiation instantiation;
     CmTypeckTypeId imported;
+    CmTypeckTypeId concrete_self;
+    CmResultsMonomorphicSelfBinding self_binding;
     CmResultsBuffer sizing;
     CmResultsBuffer output;
     unsigned char *bytes;
@@ -7513,10 +7573,34 @@ cm_results_type_view_matches_monomorphic_hir(
     memset(&typeck, 0, sizeof(typeck));
     cm_typeck_context_init(&typeck, results->hir);
     cm_typeck_context_track_hir_semantic_generation(&typeck);
-    if (cm_typeck_import_hir_type(&typeck, type, &imported)
-            != CM_TYPECK_OK) {
+    memset(&self_binding, 0, sizeof(self_binding));
+    self_binding.owner = cm_hir_def_id_none();
+    if (!cm_results_hir_type_is_monomorphic_inner(results->hir, type, 0u,
+            &self_binding)) {
         cm_typeck_context_destroy(&typeck);
-        return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    if (!self_binding.present) {
+        if (cm_typeck_import_hir_type(&typeck, type, &imported)
+                != CM_TYPECK_OK) {
+            cm_typeck_context_destroy(&typeck);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+    } else {
+        if (cm_typeck_import_hir_type(&typeck, self_binding.type,
+                &concrete_self) != CM_TYPECK_OK) {
+            cm_typeck_context_destroy(&typeck);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
+        cm_typeck_instantiation_init(&typeck, &instantiation);
+        instantiation.parameter_owner = self_binding.owner;
+        instantiation.self_owner = self_binding.owner;
+        instantiation.self_type = concrete_self;
+        if (cm_typeck_instantiate_hir_type(&typeck, type, &instantiation,
+                &imported) != CM_TYPECK_OK) {
+            cm_typeck_context_destroy(&typeck);
+            return CM_SEMANTIC_RESULTS_INVALID_HIR;
+        }
     }
     memset(&sizing, 0, sizeof(sizing));
     sizing.sizing = 1;

@@ -3057,6 +3057,19 @@ static void assert_borrow_dereference_schema(TestHir *fixture)
     assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
         == CM_MIR_OK);
 
+    borrow.data.borrow.kind = CM_MIR_BORROW_MUTABLE;
+    borrow.type = fixture->mutable_u32_type;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_OK);
+    borrow.data.borrow.kind = CM_MIR_BORROW_SHARED;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.type = fixture->shared_u32_type;
+    borrow.data.borrow.kind = CM_MIR_BORROW_MUTABLE;
+    assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
+        == CM_MIR_INVARIANT_VIOLATION);
+    borrow.data.borrow.kind = CM_MIR_BORROW_SHARED;
+
     borrow.data.borrow.kind = (CmMirBorrowKind)99;
     assert(cm_mir_validate_rvalue(&fixture->context, &body, &borrow, 0u)
         == CM_MIR_INVARIANT_VIOLATION);
@@ -3111,6 +3124,19 @@ static void assert_borrow_dereference_schema(TestHir *fixture)
     assert(!ferror(stream));
     buffer[length] = '\0';
     assert(strstr(buffer, "borrow(shared,place(_3.deref,") != NULL);
+    assert(fclose(stream) == 0);
+
+    locals[2].type = fixture->mutable_u32_type;
+    statement.data.assign.value.type = fixture->mutable_u32_type;
+    statement.data.assign.value.data.borrow.kind = CM_MIR_BORROW_MUTABLE;
+    stream = tmpfile();
+    assert(stream != NULL && cm_mir_dump(stream, &dump_context) == 0);
+    assert(fflush(stream) == 0);
+    rewind(stream);
+    length = fread(buffer, 1u, sizeof(buffer) - 1u, stream);
+    assert(!ferror(stream));
+    buffer[length] = '\0';
+    assert(strstr(buffer, "borrow(mutable,place(_3.deref,") != NULL);
     assert(fclose(stream) == 0);
     dump_context.bodies.len = 0u;
     cm_mir_context_destroy(&dump_context);

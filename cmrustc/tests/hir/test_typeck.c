@@ -54,6 +54,8 @@ static CmHirTypeId add_hir_scalar(CmHirContext *hir, CmHirTypeKind kind,
 static void fixture_init(TestFixture *fixture)
 {
     CmHirGenericParam parameter;
+    CmHirItem trait_item;
+    CmHirItemId trait_item_id;
     uint32_t index;
 
     memset(fixture, 0, sizeof(*fixture));
@@ -70,6 +72,18 @@ static void fixture_init(TestFixture *fixture)
     assert(cm_hir_reserve_item_definition_as(&fixture->hir,
         fixture->crate_id, CM_HIR_ITEM_TRAIT, test_span(6u, 7u),
         &fixture->definitions[5]) == CM_HIR_OK);
+    memset(&trait_item, 0, sizeof(trait_item));
+    trait_item.kind = CM_HIR_ITEM_TRAIT;
+    trait_item.definition = fixture->definitions[5];
+    trait_item.owner_module = fixture->root_module;
+    trait_item.parent_definition = cm_hir_def_id_none();
+    trait_item.name = cm_hir_intern(&fixture->hir, "FixtureTrait");
+    trait_item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    trait_item.visibility.restriction = cm_hir_def_id_none();
+    trait_item.span = test_span(6u, 7u);
+    trait_item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&fixture->hir, &trait_item, &trait_item_id)
+        == CM_HIR_OK);
     memset(&parameter, 0, sizeof(parameter));
     parameter.kind = CM_HIR_GENERIC_TYPE;
     parameter.owner = fixture->definitions[0];
@@ -871,7 +885,7 @@ static CmHirTypeId add_unsupported_hir_type(TestFixture *fixture,
     } else if (kind == CM_HIR_TYPE_DYN_TRAIT_KIND) {
         type.data.dyn_trait_type.has_principal = 1;
         type.data.dyn_trait_type.principal_trait.definition =
-            fixture->definitions[2];
+            fixture->definitions[5];
         type.data.dyn_trait_type.region.kind = CM_HIR_REGION_STATIC;
     }
     assert(cm_hir_add_type(&fixture->hir, &type, &id) == CM_HIR_OK);

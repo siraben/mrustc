@@ -426,18 +426,50 @@ static int cm_c_type_is_aggregate(const CmHirContext *hir,
     return 1;
 }
 
+static CmHirTypeId cm_c_monomorphic_self_type(const CmHirContext *hir,
+    CmHirTypeId id, size_t depth)
+{
+    const CmHirType *type;
+    const CmHirDefinition *definition;
+    const CmHirItem *owner;
+
+    if (hir == NULL || id == CM_HIR_TYPE_NONE || depth > hir->types.len) {
+        return CM_HIR_TYPE_NONE;
+    }
+    type = cm_hir_get_type(hir, id);
+    if (type == NULL) return CM_HIR_TYPE_NONE;
+    if (type->kind != CM_HIR_TYPE_SELF_KIND) return id;
+    definition = cm_hir_lookup_definition(hir,
+        type->data.self_type.owner);
+    owner = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(owner->definition,
+            type->data.self_type.owner)
+        || owner->generic_parameter_count != 0u
+        || owner->data.impl_item.self_type == id) {
+        return CM_HIR_TYPE_NONE;
+    }
+    return cm_c_monomorphic_self_type(hir,
+        owner->data.impl_item.self_type, depth + 1u);
+}
+
 static int cm_c_type_is_supported_inner(const CmHirContext *hir,
     CmHirTypeId id, size_t depth)
 {
     const CmHirType *type;
 
     if (hir == NULL || depth > hir->types.len) return 0;
+    id = cm_c_monomorphic_self_type(hir, id, depth);
     type = cm_hir_get_type(hir, id);
     return cm_c_type_is_i32(hir, id) || cm_c_type_is_u8(hir, id)
         || cm_c_type_is_u32(hir, id) || cm_c_type_is_usize(hir, id)
         || cm_c_type_is_aggregate(hir, id, NULL)
         || (type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
-            && type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                || type->data.reference_type.mutability == CM_HIR_MUTABLE)
             && type->data.reference_type.region.kind
                 == CM_HIR_REGION_ERASED
             && cm_c_type_is_supported_inner(hir,
@@ -456,7 +488,8 @@ static int cm_c_type_is_reference(const CmHirContext *hir,
 
     type = cm_hir_get_type(hir, id);
     return type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
-        && type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            || type->data.reference_type.mutability == CM_HIR_MUTABLE)
         && type->data.reference_type.region.kind == CM_HIR_REGION_ERASED
         && cm_c_type_is_supported(hir, id);
 }
@@ -468,6 +501,11 @@ static int cm_c_type_equal_inner(const CmHirContext *hir,
     const CmHirType *right;
 
     if (hir == NULL || depth > hir->types.len) return 0;
+    left_id = cm_c_monomorphic_self_type(hir, left_id, depth);
+    right_id = cm_c_monomorphic_self_type(hir, right_id, depth);
+    if (left_id == CM_HIR_TYPE_NONE || right_id == CM_HIR_TYPE_NONE) {
+        return 0;
+    }
     if (left_id == right_id) {
         return cm_c_type_is_supported(hir, left_id)
             || cm_c_type_is_bool(hir, left_id);
@@ -486,7 +524,8 @@ static int cm_c_type_equal_inner(const CmHirContext *hir,
                 == right->data.reference_type.region.kind
             && left->data.reference_type.region.kind
                 == CM_HIR_REGION_ERASED
-            && left->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && (left->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                || left->data.reference_type.mutability == CM_HIR_MUTABLE)
             && cm_c_type_equal_inner(hir,
                 left->data.reference_type.pointee,
                 right->data.reference_type.pointee, depth + 1u);
@@ -1421,7 +1460,9 @@ static int cm_c_aggregate_plan_reference_type(CmCAggregatePlan *plan,
     type = cm_hir_get_type(plan->hir, type_id);
     if (type == NULL || type->kind != CM_HIR_TYPE_REFERENCE_KIND
         || !cm_c_type_is_reference(plan->hir, type_id)) return 0;
-    type_id = type->data.reference_type.pointee;
+    type_id = cm_c_monomorphic_self_type(plan->hir,
+        type->data.reference_type.pointee, depth + 1u);
+    if (type_id == CM_HIR_TYPE_NONE) return 0;
     type = cm_hir_get_type(plan->hir, type_id);
     if (type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
         return cm_c_aggregate_plan_reference_type(plan, type_id,
@@ -1449,6 +1490,7 @@ static int cm_c_type_contains_usize(const CmHirContext *hir,
     uint32_t field_index;
 
     if (cm_c_type_is_usize(hir, type_id)) return 1;
+    type_id = cm_c_monomorphic_self_type(hir, type_id, 0u);
     type = cm_hir_get_type(hir, type_id);
     if (type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
         return 1;
@@ -1580,6 +1622,7 @@ static void cm_c_append_type(CmStrBuf *output, const CmHirContext *hir,
     const CmHirType *type;
     char name[CM_C_EXACT_NAME_CAPACITY];
 
+    type_id = cm_c_monomorphic_self_type(hir, type_id, 0u);
     type = cm_hir_get_type(hir, type_id);
     if (cm_c_type_is_i32(hir, type_id)) {
         cm_str_buf_append(output, "int32_t");
@@ -1595,7 +1638,9 @@ static void cm_c_append_type(CmStrBuf *output, const CmHirContext *hir,
         && type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
         cm_c_append_type(output, hir,
             type->data.reference_type.pointee);
-        cm_str_buf_append(output, " const *");
+        cm_str_buf_append(output,
+            type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+                ? " const *" : " *");
     } else {
         (void)cm_c_type_is_aggregate(hir, type_id, &definition);
         (void)cm_c_struct_name(definition, name, sizeof(name));

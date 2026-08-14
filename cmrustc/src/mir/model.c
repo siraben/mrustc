@@ -418,14 +418,53 @@ static int cm_mir_region_equal(const CmHirRegion *left,
     return 0;
 }
 
+/*
+ * Implicit method receivers retain an impl-owned `Self` in HIR.  A local,
+ * nongeneric impl has one authoritative concrete self type, so MIR can keep
+ * the durable HIR type ID while comparing and emitting its concrete shape.
+ */
+static CmHirTypeId cm_mir_monomorphic_self_type(
+    const CmHirContext *hir, CmHirTypeId id, size_t depth)
+{
+    const CmHirType *type;
+    const CmHirDefinition *definition;
+    const CmHirItem *owner;
+
+    if (hir == NULL || id == CM_HIR_TYPE_NONE
+        || depth >= CM_MIR_EXPRESSION_RECURSION_LIMIT) {
+        return CM_HIR_TYPE_NONE;
+    }
+    type = cm_hir_get_type(hir, id);
+    if (type == NULL) return CM_HIR_TYPE_NONE;
+    if (type->kind != CM_HIR_TYPE_SELF_KIND) return id;
+    definition = cm_hir_lookup_definition(hir,
+        type->data.self_type.owner);
+    owner = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(owner->definition,
+            type->data.self_type.owner)
+        || owner->generic_parameter_count != 0u
+        || owner->data.impl_item.self_type == id) {
+        return CM_HIR_TYPE_NONE;
+    }
+    return cm_mir_monomorphic_self_type(hir,
+        owner->data.impl_item.self_type, depth + 1u);
+}
+
 static int cm_mir_type_equal_inner(const CmHirContext *hir,
     CmHirTypeId left, CmHirTypeId right, size_t depth)
 {
     const CmHirType *left_type;
     const CmHirType *right_type;
 
-    if (left == right) return cm_hir_get_type(hir, left) != NULL;
     if (depth >= CM_MIR_EXPRESSION_RECURSION_LIMIT) return 0;
+    left = cm_mir_monomorphic_self_type(hir, left, depth);
+    right = cm_mir_monomorphic_self_type(hir, right, depth);
+    if (left == CM_HIR_TYPE_NONE || right == CM_HIR_TYPE_NONE) return 0;
+    if (left == right) return cm_hir_get_type(hir, left) != NULL;
     if (cm_mir_type_is_u32(hir, left) && cm_mir_type_is_u32(hir, right)) {
         return 1;
     }
@@ -500,6 +539,7 @@ static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
     const CmHirType *type;
     uint32_t index;
 
+    id = cm_mir_monomorphic_self_type(hir, id, 0u);
     type = cm_hir_get_type(hir, id);
     if (type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND) {
         if (type->data.tuple_type.element_count
@@ -545,6 +585,19 @@ static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
                 && cm_mir_type_supported(hir,
                     type->data.reference_type.pointee, pointer_bits))
             || type->kind == CM_HIR_TYPE_BOOL_KIND);
+}
+
+static int cm_mir_type_is_erased_reference(const CmHirContext *hir,
+    CmHirTypeId id, unsigned int pointer_bits)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, id);
+    return type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && type->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+        && cm_mir_type_supported(hir, id, pointer_bits);
 }
 
 static int cm_mir_type_is_checked_aggregate(const CmHirContext *hir,
@@ -594,6 +647,7 @@ static int cm_mir_type_target_valid(const CmHirContext *hir,
     uint32_t index;
 
     if (depth >= CM_MIR_EXPRESSION_RECURSION_LIMIT) return 0;
+    id = cm_mir_monomorphic_self_type(hir, id, depth);
     type = cm_hir_get_type(hir, id);
     if (type == NULL) return 0;
     if (type->kind == CM_HIR_TYPE_INTEGER_KIND) {
@@ -832,6 +886,40 @@ static int cm_mir_instantiate_executable_type(const CmHirContext *hir,
 
     type = cm_hir_get_type(hir, declared);
     if (type == NULL || out_type == NULL) return 0;
+    if (type->kind == CM_HIR_TYPE_SELF_KIND) {
+        definition = cm_hir_lookup_definition(hir,
+            type->data.self_type.owner);
+        owner = definition == NULL
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+                || definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        if (item == NULL || instance == NULL || owner == NULL
+            || owner->kind != CM_HIR_ITEM_IMPL
+            || !cm_hir_def_id_equal(owner->definition,
+                type->data.self_type.owner)
+            || !cm_hir_def_id_equal(item->parent_definition,
+                owner->definition)
+            || owner->data.impl_item.self_type == declared) {
+            return 0;
+        }
+        return cm_mir_instantiate_executable_type(hir, item, instance,
+            owner->data.impl_item.self_type, out_type);
+    }
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+        CmHirTypeId pointee;
+
+        if (type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+            || (type->data.reference_type.mutability != CM_HIR_IMMUTABLE
+                && type->data.reference_type.mutability != CM_HIR_MUTABLE)
+            || !cm_mir_instantiate_executable_type(hir, item, instance,
+                type->data.reference_type.pointee, &pointee)
+            || pointee == CM_HIR_TYPE_NONE
+            || !cm_mir_type_supported(hir, declared, 0u)) {
+            return 0;
+        }
+        *out_type = declared;
+        return 1;
+    }
     if (type->kind == CM_HIR_TYPE_INTEGER_KIND
         && (type->data.integer_type.kind == CM_HIR_INT_I32
             || type->data.integer_type.kind == CM_HIR_INT_U8
@@ -1065,13 +1153,20 @@ static int cm_mir_rvalue_valid(const CmHirContext *hir,
     if (rvalue->kind == CM_MIR_RVALUE_BORROW) {
         const CmHirBody *source_body;
         const CmHirType *reference;
+        CmHirMutability mutability;
 
         source_body = cm_hir_get_body(hir, body->source_body);
         reference = cm_hir_get_type(hir, rvalue->type);
-        return rvalue->data.borrow.kind == CM_MIR_BORROW_SHARED
-            && reference != NULL
+        if (rvalue->data.borrow.kind == CM_MIR_BORROW_SHARED) {
+            mutability = CM_HIR_IMMUTABLE;
+        } else if (rvalue->data.borrow.kind == CM_MIR_BORROW_MUTABLE) {
+            mutability = CM_HIR_MUTABLE;
+        } else {
+            return 0;
+        }
+        return reference != NULL
             && reference->kind == CM_HIR_TYPE_REFERENCE_KIND
-            && reference->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && reference->data.reference_type.mutability == mutability
             /* This model has no static-place proof; never mint 'static. */
             && reference->data.reference_type.region.kind
                 == CM_HIR_REGION_ERASED
@@ -1125,7 +1220,7 @@ typedef struct CmMirParameterLayout {
 
 static int cm_mir_parameter_layout(const CmHirContext *hir,
     const CmHirItem *item, const CmHirBody *source_body,
-    CmMirParameterLayout *out_layout)
+    int require_signature_type_match, CmMirParameterLayout *out_layout)
 {
     const CmHirFunctionSignature *signature;
     uint32_t hir_local_index;
@@ -1161,8 +1256,9 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
             if (local->parameter_index != parameter_index
                 || local->parameter_binding_index != 0u
                 || local->name != parameter->name
-                || !cm_mir_type_equal(hir, local->type,
-                    parameter->type)) {
+                || (require_signature_type_match
+                    && !cm_mir_type_equal(hir, local->type,
+                        parameter->type))) {
                 return 0;
             }
             hir_local_index += 1u;
@@ -1557,6 +1653,30 @@ static CmSemanticResultsStatus cm_mir_semantic_expression_query(
             instance, expression, out_view);
 }
 
+static CmSemanticResultsStatus cm_mir_semantic_adjustment_query(
+    const CmSemanticResults *results,
+    const CmSemanticAdmission *admission, const CmMirBody *body,
+    const CmHirInstanceSpec *instance, CmHirExprId expression,
+    uint32_t adjustment, CmSemanticAdjustmentView *out_view)
+{
+    CmHirCanonicalInstance canonical;
+
+    if (body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_expression_adjustment(results, admission,
+            body->source_body, expression, adjustment, out_view);
+    }
+    if (body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    return cm_mir_canonical_identity(&body->instance, &canonical)
+        ? cm_semantic_results_canonical_instance_expression_adjustment(
+            results, admission, &canonical, expression, adjustment,
+            out_view)
+        : cm_semantic_results_instance_expression_adjustment(results,
+            admission, instance, expression, adjustment, out_view);
+}
+
 static CmSemanticResultsStatus cm_mir_semantic_primitive_binary_query(
     const CmMirTreeMatch *match, CmHirExprId expression,
     CmSemanticPrimitiveBinaryView *out_view)
@@ -1647,6 +1767,31 @@ static CmSemanticResultsStatus cm_mir_semantic_callable_query(
         match->semantic_instance, expression, &target.spec, out_view);
     cm_mir_semantic_instance_query_destroy(&target);
     return status;
+}
+
+/* Definition lookup hint; callee-bound authority is checked after resolve. */
+static CmSemanticResultsStatus cm_mir_semantic_callable_hint_query(
+    const CmMirTreeMatch *match, CmHirExprId expression,
+    CmSemanticCallableSelectionView *out_view)
+{
+    CmHirCanonicalInstance caller;
+
+    if (match->body->semantic_evidence == CM_MIR_SEMANTIC_EVIDENCE_BODY) {
+        return cm_semantic_results_callable_selection(
+            match->semantic_results, match->admission,
+            match->body->source_body, expression, out_view);
+    }
+    if (match->body->semantic_evidence
+            != CM_MIR_SEMANTIC_EVIDENCE_EXACT_INSTANCE) {
+        return CM_SEMANTIC_RESULTS_INVALID_ARGUMENT;
+    }
+    return cm_mir_canonical_identity(&match->body->instance, &caller)
+        ? cm_semantic_results_canonical_instance_callable_selection(
+            match->semantic_results, match->admission, &caller,
+            expression, out_view)
+        : cm_semantic_results_instance_callable_selection(
+            match->semantic_results, match->admission,
+            match->semantic_instance, expression, out_view);
 }
 
 static CmSemanticResultsStatus cm_mir_semantic_callable_argument_query(
@@ -1976,6 +2121,200 @@ static int cm_mir_method_trait_in_scope(const CmHirExpr *expression,
                 trait_definition)) return 1;
     }
     return 0;
+}
+
+typedef struct CmMirAdjustedReceiver {
+    int present;
+    CmMirBorrowKind borrow_kind;
+    CmHirTypeId source_type;
+    CmHirTypeId target_type;
+    CmSemanticTypeView adjusted_type;
+    CmMirLocalId source_local;
+    CmSpan span;
+} CmMirAdjustedReceiver;
+
+static int cm_mir_adjusted_receiver_recipe(const CmMirTreeMatch *match,
+    const CmHirExpr *call, CmHirExprId call_id,
+    const CmSemanticCallableSelectionView *selection,
+    CmMirAdjustedReceiver *out_receiver)
+{
+    const CmHirExpr *receiver;
+    const CmHirBody *source_body;
+    const CmHirItem *declared;
+    const CmHirItem *selected;
+    const CmHirType *target;
+    CmSemanticExpressionView expression_view;
+    CmSemanticAdjustmentView adjustment;
+    CmHirReceiverKind receiver_kind;
+    CmHirMutability mutability;
+
+    if (match == NULL || call == NULL || selection == NULL
+        || out_receiver == NULL || call->kind != CM_HIR_EXPR_METHOD_CALL
+        || selection->body != match->body->source_body
+        || selection->expression != call_id
+        || selection->syntax != CM_HIR_CALLABLE_DOT_METHOD
+        || selection->receiver_argument != 0u
+        || selection->receiver_expression != call->data.method_call.receiver) {
+        return 0;
+    }
+    memset(out_receiver, 0, sizeof(*out_receiver));
+    receiver = cm_hir_get_expr(match->hir,
+        call->data.method_call.receiver);
+    source_body = cm_hir_get_body(match->hir, match->body->source_body);
+    declared = cm_mir_definition_item(match->hir,
+        selection->declared_trait_callable);
+    selected = cm_mir_definition_item(match->hir,
+        selection->selected_callable);
+    memset(&expression_view, 0, sizeof(expression_view));
+    if (receiver == NULL || declared == NULL
+        || selected == NULL || declared->kind != CM_HIR_ITEM_FUNCTION
+        || selected->kind != CM_HIR_ITEM_FUNCTION
+        || receiver->owner_body != match->body->source_body
+        || cm_mir_semantic_expression_query(match->semantic_results,
+            match->admission, match->body, match->semantic_instance,
+            call->data.method_call.receiver, &expression_view)
+                != CM_SEMANTIC_RESULTS_OK
+        || expression_view.body != match->body->source_body
+        || expression_view.expression != call->data.method_call.receiver
+        || !cm_mir_semantic_view_matches_hir(match,
+            &expression_view.unadjusted_type, receiver->type)
+        || !cm_mir_semantic_view_equal(&selection->requested_self_type,
+            &expression_view.unadjusted_type)) {
+        return 0;
+    }
+    receiver_kind = declared->data.function_item.signature.receiver;
+    if (selected->data.function_item.signature.receiver != receiver_kind
+        || declared->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selected->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selection->argument_count == 0u
+        || declared->data.function_item.signature.parameters == NULL
+        || selected->data.function_item.signature.parameters == NULL) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_VALUE) {
+        return expression_view.adjustment_count == 0u
+            && cm_mir_semantic_view_equal(&expression_view.unadjusted_type,
+                &expression_view.adjusted_type);
+    }
+    if ((receiver_kind != CM_HIR_RECEIVER_REF_SHARED
+            && receiver_kind != CM_HIR_RECEIVER_REF_MUTABLE)
+        || expression_view.adjustment_count != 1u
+        || source_body == NULL || receiver->kind != CM_HIR_EXPR_LOCAL
+        || receiver->data.local.local_index >= source_body->local_count
+        || receiver->data.local.local_index >= match->visible_local_count
+        || !cm_mir_hir_local_id(&match->item->data.function_item.signature,
+            source_body, &match->parameter_layout,
+            receiver->data.local.local_index, &out_receiver->source_local)) {
+        return 0;
+    }
+    memset(&adjustment, 0, sizeof(adjustment));
+    if (cm_mir_semantic_adjustment_query(match->semantic_results,
+            match->admission, match->body, match->semantic_instance,
+            call->data.method_call.receiver, 0u, &adjustment)
+                != CM_SEMANTIC_RESULTS_OK
+        || adjustment.body != match->body->source_body
+        || adjustment.expression != call->data.method_call.receiver
+        || adjustment.index != 0u
+        || adjustment.has_selected_trait
+        || !cm_hir_def_id_is_none(adjustment.selected_trait)
+        || !cm_hir_def_id_is_none(adjustment.selected_method)
+        || !cm_hir_def_id_is_none(adjustment.selected_impl)
+        || !cm_mir_semantic_view_equal(&adjustment.source_type,
+            &expression_view.unadjusted_type)
+        || !cm_mir_semantic_view_equal(&adjustment.target_type,
+            &expression_view.adjusted_type)) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_REF_SHARED) {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED) {
+            return 0;
+        }
+        out_receiver->borrow_kind = CM_MIR_BORROW_SHARED;
+        mutability = CM_HIR_IMMUTABLE;
+    } else {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+            || source_body->locals[receiver->data.local.local_index]
+                .mutability != CM_HIR_MUTABLE) {
+            return 0;
+        }
+        out_receiver->borrow_kind = CM_MIR_BORROW_MUTABLE;
+        mutability = CM_HIR_MUTABLE;
+    }
+    out_receiver->source_type = receiver->type;
+    out_receiver->target_type =
+        selected->data.function_item.signature.parameters[0].type;
+    out_receiver->adjusted_type = expression_view.adjusted_type;
+    out_receiver->span = receiver->span;
+    target = cm_hir_get_type(match->hir, out_receiver->target_type);
+    if (target == NULL || target->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || target->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+        || target->data.reference_type.mutability != mutability
+        || !cm_mir_type_equal(match->hir,
+            target->data.reference_type.pointee, receiver->type)
+        || !cm_mir_type_supported(match->hir, out_receiver->target_type,
+            match->pointer_bits)) {
+        return 0;
+    }
+    out_receiver->present = 1;
+    return 1;
+}
+
+static int cm_mir_adjusted_receiver_assignment_matches(
+    CmMirTreeMatch *match, const CmMirAdjustedReceiver *receiver,
+    CmMirOperand *out_operand)
+{
+    const CmMirBasicBlock *block;
+    const CmMirStatement *statement;
+    const CmMirRvalue *rvalue;
+    CmMirLocalId destination;
+
+    if (match == NULL || receiver == NULL || !receiver->present
+        || out_operand == NULL
+        || match->basic_block_index >= match->body->basic_block_count) {
+        return 0;
+    }
+    block = &match->body->basic_blocks[match->basic_block_index];
+    destination = match->next_temporary;
+    if (match->statement_index >= block->statement_count
+        || !cm_mir_local_id_valid(match->body, destination)
+        || match->body->locals[destination].kind != CM_MIR_LOCAL_TEMPORARY
+        || !cm_mir_type_equal(match->hir,
+            match->body->locals[destination].type, receiver->target_type)) {
+        return 0;
+    }
+    statement = &block->statements[match->statement_index];
+    rvalue = &statement->data.assign.value;
+    if (statement->kind != CM_MIR_STATEMENT_ASSIGN
+        || statement->data.assign.destination != destination
+        || cm_mir_place_present(&statement->data.assign.destination_place)
+        || rvalue->kind != CM_MIR_RVALUE_BORROW
+        || rvalue->data.borrow.kind != receiver->borrow_kind
+        || !cm_mir_type_equal(match->hir, rvalue->type,
+            receiver->target_type)
+        || rvalue->span.source != receiver->span.source
+        || rvalue->span.start != receiver->span.start
+        || rvalue->span.end != receiver->span.end
+        || rvalue->data.borrow.source.base != receiver->source_local
+        || !cm_mir_type_equal(match->hir,
+            rvalue->data.borrow.source.type, receiver->source_type)
+        || rvalue->data.borrow.source.projection_count != 0u
+        || rvalue->data.borrow.source.projections != NULL
+        || rvalue->data.borrow.source.span.source != receiver->span.source
+        || rvalue->data.borrow.source.span.start != receiver->span.start
+        || rvalue->data.borrow.source.span.end != receiver->span.end
+        || cm_mir_validate_rvalue(match->hir, match->body, rvalue,
+            match->pointer_bits) != CM_MIR_OK) {
+        return 0;
+    }
+    memset(out_operand, 0, sizeof(*out_operand));
+    out_operand->kind = CM_MIR_OPERAND_MOVE;
+    out_operand->type = receiver->target_type;
+    out_operand->data.local = destination;
+    ++match->statement_index;
+    ++match->next_temporary;
+    return 1;
 }
 
 static int cm_mir_place_equal(const CmHirContext *hir,
@@ -2644,9 +2983,11 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         CmHirDefId callee_definition;
         CmSemanticDirectCallView semantic_call;
         CmSemanticCallableSelectionView semantic_callable;
+        CmSemanticCallableSelectionView semantic_callable_hint;
         CmSemanticFunctionSignatureView semantic_signature;
         CmSemanticExpressionView semantic_expression;
         CmSemanticGenericArgumentView semantic_impl_argument;
+        CmMirAdjustedReceiver adjusted_receiver;
         uint32_t call_argument_count;
         uint32_t call_substitution_count;
         int selected_call;
@@ -2667,10 +3008,12 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             : expression->data.call.callee;
         memset(&semantic_call, 0, sizeof(semantic_call));
         memset(&semantic_callable, 0, sizeof(semantic_callable));
+        memset(&semantic_callable_hint, 0, sizeof(semantic_callable_hint));
         memset(&semantic_signature, 0, sizeof(semantic_signature));
         memset(&semantic_expression, 0, sizeof(semantic_expression));
         memset(&semantic_impl_argument, 0,
             sizeof(semantic_impl_argument));
+        memset(&adjusted_receiver, 0, sizeof(adjusted_receiver));
         if (call_argument_count == 0u
             || call_argument_count > 2u
             || call_arguments == NULL
@@ -2680,7 +3023,23 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
             return 0;
         }
         memset(arguments, 0, sizeof(arguments));
+        if (expression->kind == CM_HIR_EXPR_METHOD_CALL
+            && (match->semantic_results == NULL || match->admission == NULL
+                || cm_mir_semantic_callable_hint_query(match, expression_id,
+                    &semantic_callable_hint) != CM_SEMANTIC_RESULTS_OK
+                || !cm_mir_adjusted_receiver_recipe(match, expression,
+                    expression_id, &semantic_callable_hint,
+                    &adjusted_receiver))) {
+            return 0;
+        }
         for (index = 0u; index < call_argument_count; ++index) {
+            if (index == 0u && adjusted_receiver.present) {
+                if (!cm_mir_adjusted_receiver_assignment_matches(match,
+                        &adjusted_receiver, &arguments[0])) {
+                    return 0;
+                }
+                continue;
+            }
             if (!cm_mir_expression_matches(match,
                     call_arguments[index], 0,
                     CM_MIR_RETURN_LOCAL,
@@ -2763,6 +3122,10 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                 return 0;
             }
             if (expression->kind == CM_HIR_EXPR_METHOD_CALL) {
+                CmMirAdjustedReceiver authenticated_receiver;
+
+                memset(&authenticated_receiver, 0,
+                    sizeof(authenticated_receiver));
                 declared = cm_mir_definition_item(match->hir,
                     semantic_callable.declared_trait_callable);
                 receiver = cm_hir_get_expr(match->hir,
@@ -2781,13 +3144,28 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                         != expression->data.method_call.method_name
                     || !cm_hir_def_id_equal(declared->parent_definition,
                         semantic_callable.requested_trait)
-                    || declared->data.function_item.signature.receiver
-                        != CM_HIR_RECEIVER_VALUE
                     || receiver == NULL
                     || receiver->owner_body != expression->owner_body
                     || !cm_mir_semantic_view_matches_hir(match,
                         &semantic_callable.requested_self_type,
-                        receiver->type)) return 0;
+                        receiver->type)
+                    || !cm_mir_adjusted_receiver_recipe(match, expression,
+                        expression_id, &semantic_callable,
+                        &authenticated_receiver)
+                    || authenticated_receiver.present
+                        != adjusted_receiver.present
+                    || (adjusted_receiver.present
+                        && (authenticated_receiver.borrow_kind
+                                != adjusted_receiver.borrow_kind
+                            || authenticated_receiver.source_type
+                                != adjusted_receiver.source_type
+                            || authenticated_receiver.target_type
+                                != adjusted_receiver.target_type
+                            || authenticated_receiver.source_local
+                                != adjusted_receiver.source_local
+                            || !cm_mir_semantic_view_equal(
+                                &authenticated_receiver.adjusted_type,
+                                &adjusted_receiver.adjusted_type)))) return 0;
             }
             if (semantic_callable.receiver_argument
                     == CM_HIR_CALLABLE_RECEIVER_NONE) {
@@ -2949,9 +3327,15 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
                         &signature_parameter)
                     || !cm_mir_semantic_view_equal(&call_parameter,
                         &argument_expression.adjusted_type)
-                    || !cm_mir_semantic_view_matches_hir(match,
-                        &call_parameter,
-                        terminator->data.call.arguments[index].type)) {
+                    || (index == 0u && adjusted_receiver.present
+                        ? (!cm_mir_semantic_view_equal(&call_parameter,
+                                &adjusted_receiver.adjusted_type)
+                            || !cm_mir_type_equal(match->hir,
+                                terminator->data.call.arguments[index].type,
+                                adjusted_receiver.target_type))
+                        : !cm_mir_semantic_view_matches_hir(match,
+                            &call_parameter,
+                            terminator->data.call.arguments[index].type))) {
                     return 0;
                 }
             }
@@ -3150,6 +3534,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         || source_body->parameter_count != parameter_count
         || source_body->local_count == UINT32_MAX
         || !cm_mir_parameter_layout(hir, item, source_body,
+            semantic_results == NULL,
             &parameter_layout)
         || body->local_count
             < parameter_layout.non_temporary_local_count
@@ -3320,6 +3705,8 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
                 parameter_type = callee->locals[argument_index + 1u].type;
                 if ((!cm_mir_type_is_unsigned_scalar(hir, parameter_type,
                             context->pointer_bits)
+                        && !cm_mir_type_is_erased_reference(hir,
+                            parameter_type, context->pointer_bits)
                         && !cm_mir_type_is_checked_aggregate(hir,
                             parameter_type,
                             callee_item->definition.crate_id))

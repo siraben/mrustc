@@ -403,6 +403,173 @@ static int cm_compile_semantic_types_equal(const CmSemanticTypeView *left,
         && equal;
 }
 
+static CmHirTypeId cm_compile_monomorphic_self_type(
+    const CmHirContext *hir, CmHirTypeId type_id, size_t depth)
+{
+    const CmHirType *type;
+    const CmHirDefinition *definition;
+    const CmHirItem *owner;
+
+    if (hir == NULL || type_id == CM_HIR_TYPE_NONE
+        || depth >= hir->types.len) return CM_HIR_TYPE_NONE;
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return CM_HIR_TYPE_NONE;
+    if (type->kind != CM_HIR_TYPE_SELF_KIND) return type_id;
+    definition = cm_hir_lookup_definition(hir,
+        type->data.self_type.owner);
+    owner = definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+    if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+        || !cm_hir_def_id_equal(owner->definition,
+            type->data.self_type.owner)
+        || owner->generic_parameter_count != 0u
+        || owner->data.impl_item.self_type == type_id) {
+        return CM_HIR_TYPE_NONE;
+    }
+    return cm_compile_monomorphic_self_type(hir,
+        owner->data.impl_item.self_type, depth + 1u);
+}
+
+static int cm_compile_hir_types_equal(const CmHirContext *hir,
+    CmHirTypeId left, CmHirTypeId right)
+{
+    const CmHirType *left_type;
+    const CmHirType *right_type;
+
+    left = cm_compile_monomorphic_self_type(hir, left, 0u);
+    right = cm_compile_monomorphic_self_type(hir, right, 0u);
+    if (left == CM_HIR_TYPE_NONE || right == CM_HIR_TYPE_NONE) return 0;
+    if (left == right) return 1;
+    left_type = cm_hir_get_type(hir, left);
+    right_type = cm_hir_get_type(hir, right);
+    return left_type != NULL && right_type != NULL
+        && left_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && right_type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && left_type->data.integer_type.kind
+            == right_type->data.integer_type.kind;
+}
+
+static int cm_compile_receiver_adjustment(
+    const CmCompileExactState *state, const CmHirExpr *call,
+    const CmSemanticCallableSelectionView *selection,
+    const CmSemanticExpressionView *receiver_view,
+    uint32_t *out_adjustment_count)
+{
+    const CmSemanticResults *results;
+    const CmHirExpr *receiver;
+    const CmHirBody *body;
+    const CmHirItem *declared;
+    const CmHirItem *selected;
+    const CmHirType *target;
+    CmSemanticAdjustmentView adjustment;
+    CmSemanticTypeView parameter;
+    CmHirReceiverKind receiver_kind;
+    CmHirMutability mutability;
+
+    if (state == NULL || call == NULL || selection == NULL
+        || receiver_view == NULL || out_adjustment_count == NULL
+        || call->kind != CM_HIR_EXPR_METHOD_CALL
+        || selection->syntax != CM_HIR_CALLABLE_DOT_METHOD
+        || selection->receiver_argument != 0u
+        || selection->receiver_expression != call->data.method_call.receiver) {
+        return 0;
+    }
+    *out_adjustment_count = 0u;
+    results = cm_semantic_admission_results(state->all_local_admission);
+    receiver = cm_hir_get_expr(state->hir,
+        call->data.method_call.receiver);
+    body = receiver == NULL ? NULL
+        : cm_hir_get_body(state->hir, receiver->owner_body);
+    declared = cm_compile_definition_item(state->hir,
+        selection->declared_trait_callable);
+    selected = cm_compile_definition_item(state->hir,
+        selection->selected_callable);
+    if (results == NULL || receiver == NULL || declared == NULL
+        || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
+        || declared->kind != CM_HIR_ITEM_FUNCTION
+        || receiver_view->body != call->owner_body
+        || receiver_view->expression != call->data.method_call.receiver
+        || !cm_compile_semantic_types_equal(&selection->requested_self_type,
+            &receiver_view->unadjusted_type)) {
+        return 0;
+    }
+    receiver_kind = declared->data.function_item.signature.receiver;
+    if (selected->data.function_item.signature.receiver != receiver_kind
+        || declared->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selected->data.function_item.signature.parameter_count
+            != selection->argument_count
+        || selection->argument_count == 0u
+        || declared->data.function_item.signature.parameters == NULL
+        || selected->data.function_item.signature.parameters == NULL) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_VALUE) {
+        return receiver_view->adjustment_count == 0u
+            && cm_compile_semantic_types_equal(
+                &receiver_view->unadjusted_type,
+                &receiver_view->adjusted_type);
+    }
+    if ((receiver_kind != CM_HIR_RECEIVER_REF_SHARED
+            && receiver_kind != CM_HIR_RECEIVER_REF_MUTABLE)
+        || receiver_view->adjustment_count != 1u || body == NULL
+        || receiver->kind != CM_HIR_EXPR_LOCAL
+        || receiver->data.local.local_index >= body->local_count) {
+        return 0;
+    }
+    memset(&adjustment, 0, sizeof(adjustment));
+    memset(&parameter, 0, sizeof(parameter));
+    if (cm_semantic_results_expression_adjustment(results,
+            state->all_local_admission, receiver->owner_body,
+            call->data.method_call.receiver, 0u, &adjustment)
+                != CM_SEMANTIC_RESULTS_OK
+        || cm_semantic_results_callable_parameter(results,
+            state->all_local_admission, call->owner_body,
+            selection->expression, 0u, &parameter)
+                != CM_SEMANTIC_RESULTS_OK
+        || adjustment.body != call->owner_body
+        || adjustment.expression != call->data.method_call.receiver
+        || adjustment.index != 0u
+        || adjustment.has_selected_trait
+        || !cm_hir_def_id_is_none(adjustment.selected_trait)
+        || !cm_hir_def_id_is_none(adjustment.selected_method)
+        || !cm_hir_def_id_is_none(adjustment.selected_impl)
+        || !cm_compile_semantic_types_equal(&adjustment.source_type,
+            &receiver_view->unadjusted_type)
+        || !cm_compile_semantic_types_equal(&adjustment.target_type,
+            &receiver_view->adjusted_type)
+        || !cm_compile_semantic_types_equal(&adjustment.target_type,
+            &parameter)) {
+        return 0;
+    }
+    if (receiver_kind == CM_HIR_RECEIVER_REF_SHARED) {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_SHARED) {
+            return 0;
+        }
+        mutability = CM_HIR_IMMUTABLE;
+    } else {
+        if (adjustment.kind != CM_SEMANTIC_ADJUSTMENT_BORROW_MUTABLE
+            || body->locals[receiver->data.local.local_index].mutability
+                != CM_HIR_MUTABLE) {
+            return 0;
+        }
+        mutability = CM_HIR_MUTABLE;
+    }
+    target = cm_hir_get_type(state->hir,
+        selected->data.function_item.signature.parameters[0].type);
+    if (target == NULL || target->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || target->data.reference_type.region.kind != CM_HIR_REGION_ERASED
+        || target->data.reference_type.mutability != mutability
+        || !cm_compile_hir_types_equal(state->hir,
+            target->data.reference_type.pointee, receiver->type)) {
+        return 0;
+    }
+    *out_adjustment_count = 1u;
+    return 1;
+}
+
 static int cm_compile_callable_selection(
     const CmCompileExactState *state, const CmHirExpr *expression,
     CmHirExprId expression_id, CmSemanticCallableSelectionView *out_view,
@@ -416,6 +583,7 @@ static int cm_compile_callable_selection(
     CmSemanticExpressionView expression_view;
     CmSemanticExpressionView receiver_view;
     uint32_t argument_count;
+    uint32_t receiver_adjustment_count;
     int self_matches;
     uint32_t index;
 
@@ -425,6 +593,7 @@ static int cm_compile_callable_selection(
     declared = NULL;
     arguments = NULL;
     argument_count = 0u;
+    receiver_adjustment_count = 0u;
     memset(&expression_view, 0, sizeof(expression_view));
     memset(&receiver_view, 0, sizeof(receiver_view));
     self_matches = 0;
@@ -478,23 +647,20 @@ static int cm_compile_callable_selection(
             || declared->name != expression->data.method_call.method_name
             || !cm_hir_def_id_equal(declared->parent_definition,
                 out_view->requested_trait)
-            || declared->data.function_item.signature.receiver
-                != CM_HIR_RECEIVER_VALUE
             || receiver == NULL || receiver->owner_body != expression->owner_body
             || cm_semantic_results_expression(results,
                 state->all_local_admission, expression->owner_body,
                 expression->data.method_call.receiver, &receiver_view)
                     != CM_SEMANTIC_RESULTS_OK
-            || receiver_view.adjustment_count != 0u
-            || !cm_compile_semantic_types_equal(
-                &receiver_view.unadjusted_type, &receiver_view.adjusted_type)
             || !cm_compile_semantic_types_equal(
                 &out_view->requested_self_type,
-                &receiver_view.adjusted_type)
+                &receiver_view.unadjusted_type)
             || cm_semantic_type_view_matches_monomorphic_hir(results,
                 state->all_local_admission, &out_view->requested_self_type,
                 receiver->type, &self_matches) != CM_SEMANTIC_RESULTS_OK
-            || !self_matches) goto invalid;
+            || !self_matches
+            || !cm_compile_receiver_adjustment(state, expression, out_view,
+                &receiver_view, &receiver_adjustment_count)) goto invalid;
     }
     if (out_view->receiver_argument == CM_HIR_CALLABLE_RECEIVER_NONE) {
         if (out_view->receiver_expression != CM_HIR_EXPR_NONE) goto invalid;
@@ -514,10 +680,13 @@ static int cm_compile_callable_selection(
             || cm_semantic_results_expression(results,
                 state->all_local_admission, expression->owner_body,
                 argument, &argument_view) != CM_SEMANTIC_RESULTS_OK
-            || argument_view.adjustment_count != 0u
-            || !cm_compile_semantic_types_equal(
-                &argument_view.unadjusted_type,
-                &argument_view.adjusted_type)) {
+            || (expression->kind == CM_HIR_EXPR_METHOD_CALL && index == 0u
+                ? argument_view.adjustment_count
+                    != receiver_adjustment_count
+                : (argument_view.adjustment_count != 0u
+                    || !cm_compile_semantic_types_equal(
+                        &argument_view.unadjusted_type,
+                        &argument_view.adjusted_type)))) {
             goto invalid;
         }
     }

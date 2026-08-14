@@ -185,8 +185,14 @@ static int cm_mir_dump_rvalue(FILE *stream, const CmMirRvalue *rvalue)
         return 0;
     }
     if (rvalue->kind == CM_MIR_RVALUE_BORROW) {
-        if (rvalue->data.borrow.kind != CM_MIR_BORROW_SHARED
-            || fputs("borrow(shared,", stream) == EOF
+        const char *kind;
+
+        kind = rvalue->data.borrow.kind == CM_MIR_BORROW_SHARED
+            ? "shared"
+            : rvalue->data.borrow.kind == CM_MIR_BORROW_MUTABLE
+                ? "mutable" : NULL;
+        if (kind == NULL
+            || fprintf(stream, "borrow(%s,", kind) < 0
             || cm_mir_dump_place(stream, &rvalue->data.borrow.source) != 0
             || fprintf(stream, ") type=ty#%u span=%u:%u..%u",
                 (unsigned int)rvalue->type,

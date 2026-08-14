@@ -981,10 +981,11 @@ static void init_reference_export_mir(const TestReferenceProgram *program,
     body->basic_block_count = 1u;
 }
 
-static void test_reference_export_and_rejection(void)
+static void test_reference_export_support_and_rejection(void)
 {
     TestReferenceProgram program;
     CmMirContext mir;
+    CmMirContext variant_mir;
     CmMirBody body;
     CmMirLocal locals[3];
     CmMirStatement statement;
@@ -997,18 +998,31 @@ static void test_reference_export_and_rejection(void)
     CmHirBody *source_body;
     CmHirTypeId old_parameter;
     CmHirTypeId old_local;
-    CmHirTypeId rejected_types[4];
+    CmHirTypeId rejected_types[3];
     uint32_t index;
 
     reference_program_init(&program);
     init_reference_export_mir(&program, &body, locals, &statement, &block);
     cm_mir_context_init(&mir);
+    assert(cm_mir_context_set_pointer_bits(&mir, test_target.pointer_bits)
+        == CM_MIR_OK);
     root = CM_MIR_BODY_NONE;
+    assert(cm_c_type_is_supported(&program.hir, program.shared_u32_type));
+    assert(cm_c_type_is_supported(&program.hir, program.mutable_u32_type));
+    assert(!cm_c_type_equal_inner(&program.hir, program.shared_u32_type,
+        program.mutable_u32_type, 0u));
     assert(cm_mir_add_monomorphized_body(&mir, &program.hir, &body, &root)
-        == CM_MIR_INVARIANT_VIOLATION);
-    assert(root == CM_MIR_BODY_NONE);
-    roots[0] = 1u;
+        == CM_MIR_OK);
+    assert(root != CM_MIR_BODY_NONE);
+    roots[0] = root;
     cm_str_buf_init(&output);
+    assert(cm_c_emit_reachable_program(&output, &program.hir, &mir, NULL,
+        roots, 1u, &test_target) == CM_C_EMIT_OK);
+    assert(strstr(cm_str_buf_c_str(&output), "uint32_t const * _1")
+        != NULL);
+
+    cm_str_buf_clear(&output);
+    roots[0] = root + 1u;
     cm_str_buf_append(&output, "sentinel");
     assert(cm_c_emit_reachable_program(&output, &program.hir, &mir, NULL,
         roots,
@@ -1022,20 +1036,33 @@ static void test_reference_export_and_rejection(void)
         == program.export_definition.index && source_body != NULL);
     old_parameter = item->data.function_item.signature.parameters[0].type;
     old_local = source_body->locals[0].type;
-    rejected_types[0] = program.mutable_u32_type;
-    rejected_types[1] = program.static_u32_type;
-    rejected_types[2] = program.raw_u32_type;
-    rejected_types[3] = program.shared_dyn_trait_type;
-    for (index = 0u; index < 4u; ++index) {
+    item->data.function_item.signature.parameters[0].type =
+        program.mutable_u32_type;
+    source_body->locals[0].type = program.mutable_u32_type;
+    body.locals[1].type = program.mutable_u32_type;
+    cm_mir_context_init(&variant_mir);
+    rejected = CM_MIR_BODY_NONE;
+    assert(cm_mir_add_monomorphized_body(&variant_mir, &program.hir, &body,
+        &rejected) == CM_MIR_OK);
+    assert(rejected != CM_MIR_BODY_NONE);
+    cm_mir_context_destroy(&variant_mir);
+
+    rejected_types[0] = program.static_u32_type;
+    rejected_types[1] = program.raw_u32_type;
+    rejected_types[2] = program.shared_dyn_trait_type;
+    for (index = 0u; index < 3u; ++index) {
         assert(!cm_c_type_is_supported(&program.hir,
             rejected_types[index]));
         item->data.function_item.signature.parameters[0].type =
             rejected_types[index];
         source_body->locals[0].type = rejected_types[index];
         body.locals[1].type = rejected_types[index];
-        assert(cm_mir_add_monomorphized_body(&mir, &program.hir, &body,
+        cm_mir_context_init(&variant_mir);
+        rejected = CM_MIR_BODY_NONE;
+        assert(cm_mir_add_monomorphized_body(&variant_mir, &program.hir, &body,
             &rejected) == CM_MIR_INVARIANT_VIOLATION);
         assert(rejected == CM_MIR_BODY_NONE);
+        cm_mir_context_destroy(&variant_mir);
     }
     item->data.function_item.signature.parameters[0].type = old_parameter;
     source_body->locals[0].type = old_local;
@@ -1059,9 +1086,12 @@ static void test_reference_export_and_rejection(void)
     assert(cm_mir_validate_rvalue(&program.hir, &body,
         &body.basic_blocks[0].statements[0].data.assign.value, 64u)
         == CM_MIR_OK);
-    assert(cm_mir_add_monomorphized_body(&mir, &program.hir, &body,
+    cm_mir_context_init(&variant_mir);
+    rejected = CM_MIR_BODY_NONE;
+    assert(cm_mir_add_monomorphized_body(&variant_mir, &program.hir, &body,
         &rejected) == CM_MIR_INVARIANT_VIOLATION);
     assert(rejected == CM_MIR_BODY_NONE);
+    cm_mir_context_destroy(&variant_mir);
 
     cm_str_buf_destroy(&output);
     cm_mir_context_destroy(&mir);
@@ -1077,6 +1107,11 @@ static void test_reference_formatter_shapes(void)
     CmMirPlace field_place;
     CmMirPlace dereference_place;
     CmMirRvalue borrow;
+    CmMirBody mutable_body;
+    CmMirLocal mutable_locals[2];
+    CmMirPlaceProjection mutable_projection;
+    CmMirPlace mutable_place;
+    CmMirRvalue mutable_borrow;
     CmStrBuf text;
     CmStrBuf source;
     char struct_name[CM_C_EXACT_NAME_CAPACITY];
@@ -1135,6 +1170,41 @@ static void test_reference_formatter_shapes(void)
     cm_c_append_rvalue(&text, &program.hir, &borrow, 64u);
     assert(strcmp(cm_str_buf_c_str(&text), "&((*(_1))._f0)") == 0);
 
+    memset(mutable_locals, 0, sizeof(mutable_locals));
+    mutable_locals[0].kind = CM_MIR_LOCAL_RETURN;
+    mutable_locals[0].type = program.u32_type;
+    mutable_locals[1].kind = CM_MIR_LOCAL_ARGUMENT;
+    mutable_locals[1].type = program.mutable_u32_type;
+    memset(&mutable_body, 0, sizeof(mutable_body));
+    mutable_body.owner = program.field_definition;
+    mutable_body.source_body = program.field_body;
+    mutable_body.locals = mutable_locals;
+    mutable_body.local_count = 2u;
+    memset(&mutable_projection, 0, sizeof(mutable_projection));
+    mutable_projection.kind = CM_MIR_PROJECTION_DEREFERENCE;
+    memset(&mutable_place, 0, sizeof(mutable_place));
+    mutable_place.base = 1u;
+    mutable_place.type = program.u32_type;
+    mutable_place.projections = &mutable_projection;
+    mutable_place.projection_count = 1u;
+    mutable_place.span = test_span(174u, 178u);
+    assert(cm_mir_validate_place(&program.hir, &mutable_body,
+        &mutable_place) == CM_MIR_OK);
+    memset(&mutable_borrow, 0, sizeof(mutable_borrow));
+    mutable_borrow.kind = CM_MIR_RVALUE_BORROW;
+    mutable_borrow.type = program.mutable_u32_type;
+    mutable_borrow.span = test_span(173u, 180u);
+    mutable_borrow.data.borrow.kind = CM_MIR_BORROW_MUTABLE;
+    mutable_borrow.data.borrow.source = mutable_place;
+    assert(cm_mir_validate_rvalue(&program.hir, &mutable_body,
+        &mutable_borrow, 64u) == CM_MIR_OK);
+    cm_str_buf_clear(&text);
+    cm_c_append_type(&text, &program.hir, program.mutable_u32_type);
+    assert(strcmp(cm_str_buf_c_str(&text), "uint32_t *") == 0);
+    cm_str_buf_clear(&text);
+    cm_c_append_rvalue(&text, &program.hir, &mutable_borrow, 64u);
+    assert(strcmp(cm_str_buf_c_str(&text), "&((*(_1)))") == 0);
+
     assert(cm_c_struct_name(program.pair_definition, struct_name,
         sizeof(struct_name)));
     cm_str_buf_init(&source);
@@ -1149,11 +1219,22 @@ static void test_reference_formatter_shapes(void)
     cm_c_append_rvalue(&source, &program.hir, &borrow, 64u);
     cm_str_buf_append(&source, ";\n    return ");
     cm_c_append_place(&source, &dereference_place);
+    cm_str_buf_append(&source, ";\n}\nstatic uint32_t touch(");
+    cm_c_append_type(&source, &program.hir, program.mutable_u32_type);
+    cm_str_buf_append(&source, " _1)\n{\n    ");
+    cm_c_append_type(&source, &program.hir, program.mutable_u32_type);
+    cm_str_buf_append(&source, " _2;\n    _2 = ");
+    cm_c_append_rvalue(&source, &program.hir, &mutable_borrow, 64u);
+    cm_str_buf_append(&source, ";\n    (void)_2;\n    return ");
+    cm_c_append_place(&source, &mutable_place);
     cm_str_buf_append(&source,
         ";\n}\nint main(void)\n{\n    uint32_t value = 3u;\n    struct ");
     cm_str_buf_append(&source, struct_name);
     cm_str_buf_append(&source,
-        " pair = { 9u };\n    return probe(&value, &pair) == 9u ? 0 : 1;\n}\n");
+        " pair = { 9u };\n    return probe(&value, &pair) == 9u"
+        " && touch(&value) == 3u ? 0 : 1;\n}\n");
+    assert(strstr(cm_str_buf_c_str(&source), "uint32_t const *") != NULL
+        && strstr(cm_str_buf_c_str(&source), "uint32_t *") != NULL);
     compile_and_run_c(&source);
     cm_str_buf_destroy(&source);
     cm_str_buf_destroy(&text);
@@ -1279,7 +1360,7 @@ int main(void)
 {
     test_exact_output_and_determinism();
     test_rejection_and_rollback();
-    test_reference_export_and_rejection();
+    test_reference_export_support_and_rejection();
     test_reference_formatter_shapes();
     test_canonical_instance_identity_and_name();
     test_admitted_hosted_program_authority();

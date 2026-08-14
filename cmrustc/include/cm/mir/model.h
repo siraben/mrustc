@@ -114,12 +114,13 @@ typedef enum CmMirRvalueKind {
     CM_MIR_RVALUE_EQUAL,
     /* Exact target-usize ordering producing a bool temporary. */
     CM_MIR_RVALUE_LESS,
-    /* Address of one validated place; initially shared references only. */
+    /* Address of one validated place with an explicit borrow capability. */
     CM_MIR_RVALUE_BORROW
 } CmMirRvalueKind;
 
 typedef enum CmMirBorrowKind {
-    CM_MIR_BORROW_SHARED = 0
+    CM_MIR_BORROW_SHARED = 0,
+    CM_MIR_BORROW_MUTABLE
 } CmMirBorrowKind;
 
 typedef struct CmMirRvalue {

@@ -3228,6 +3228,7 @@ static void test_reference_lowering_stays_fail_closed(void)
     CmHirExpr expression;
     CmHirExprId local;
     CmHirExprId borrow;
+    CmHirExprId explicit_borrow;
     CmHirExprId dereference;
     CmMirContext mir;
     CmMirLowerResult result;
@@ -3256,6 +3257,7 @@ static void test_reference_lowering_stays_fail_closed(void)
     expression.span = test_span(59u, 64u);
     expression.data.borrow_shared.operand = local;
     assert(cm_hir_add_expr(&hir, &expression, &borrow) == CM_HIR_OK);
+    explicit_borrow = borrow;
     assert(cm_hir_set_body_root_expression(&hir, borrow_body, borrow)
         == CM_HIR_OK);
 
@@ -3289,8 +3291,9 @@ static void test_reference_lowering_stays_fail_closed(void)
     result = cm_mir_lower_instance(&mir, &hir, borrow_body, NULL, 0u);
     assert(result.error_count == 1u && result.lowered_body_count == 0u
         && result.body == CM_MIR_BODY_NONE
-        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_TYPE
+        && result.first_error.kind == CM_MIR_LOWER_UNSUPPORTED_EXPRESSION
         && result.first_error.hir_body == borrow_body
+        && result.first_error.hir_expression == explicit_borrow
         && cm_mir_body_count(&mir) == count);
     result = cm_mir_lower_instance(&mir, &hir, roundtrip_body, NULL, 0u);
     assert(result.error_count == 1u && result.lowered_body_count == 0u
