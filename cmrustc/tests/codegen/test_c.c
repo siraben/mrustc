@@ -298,6 +298,7 @@ static void reference_program_init(TestReferenceProgram *program)
     assert(cm_hir_add_item(&program->hir, &item, &item_id) == CM_HIR_OK);
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
+    type.data.dyn_trait_type.has_principal = 1;
     type.span = test_span(82u, 84u);
     type.data.dyn_trait_type.principal_trait.definition =
         program->trait_definition;

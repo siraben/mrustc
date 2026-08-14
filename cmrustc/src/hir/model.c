@@ -1175,6 +1175,81 @@ static CmHirNamedType cm_hir_copy_named_type(CmHirContext *context,
 }
 
 static const CmHirItem *cm_hir_bound_definition_item(
+    const CmHirContext *context, CmHirDefId id);
+
+static int cm_hir_def_id_less(CmHirDefId left, CmHirDefId right)
+{
+    return left.crate_id < right.crate_id
+        || (left.crate_id == right.crate_id && left.index < right.index);
+}
+
+static int cm_hir_dyn_trait_valid(const CmHirContext *context,
+    const CmHirType *type)
+{
+    const CmHirItem *item;
+    uint32_t index;
+
+    if ((type->data.dyn_trait_type.has_principal != 0
+            && type->data.dyn_trait_type.has_principal != 1)
+        || (type->data.dyn_trait_type.auto_trait_count == 0u)
+            != (type->data.dyn_trait_type.auto_traits == NULL)
+        || (!type->data.dyn_trait_type.has_principal
+            && type->data.dyn_trait_type.auto_trait_count == 0u)
+        || !cm_hir_region_valid(context,
+            &type->data.dyn_trait_type.region)) {
+        return 0;
+    }
+    if (type->data.dyn_trait_type.has_principal) {
+        if (!cm_hir_named_type_valid(context,
+                &type->data.dyn_trait_type.principal_trait)) return 0;
+        item = cm_hir_bound_definition_item(context,
+            type->data.dyn_trait_type.principal_trait.definition);
+        if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT
+            || item->data.trait_item.is_auto
+            || !cm_hir_named_type_matches_item_parameters(context,
+                &type->data.dyn_trait_type.principal_trait, item)) return 0;
+    } else if (!cm_hir_def_id_is_none(
+            type->data.dyn_trait_type.principal_trait.definition)
+        || type->data.dyn_trait_type.principal_trait.arguments != NULL
+        || type->data.dyn_trait_type.principal_trait.argument_count != 0u) {
+        return 0;
+    }
+    for (index = 0u;
+         index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+        const CmHirNamedType *marker;
+
+        marker = &type->data.dyn_trait_type.auto_traits[index];
+        if (!cm_hir_named_type_valid(context, marker)) return 0;
+        item = cm_hir_bound_definition_item(context, marker->definition);
+        if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT
+            || !item->data.trait_item.is_auto
+            || !cm_hir_named_type_matches_item_parameters(context,
+                marker, item)
+            || (index != 0u && !cm_hir_def_id_less(
+                type->data.dyn_trait_type.auto_traits[index - 1u].definition,
+                marker->definition))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static CmHirNamedType *cm_hir_copy_named_types(CmHirContext *context,
+    const CmHirNamedType *named, uint32_t count)
+{
+    CmHirNamedType *copy;
+    uint32_t index;
+
+    copy = (CmHirNamedType *)cm_hir_copy_array(context, named, count,
+        sizeof(*copy));
+    if (copy == NULL) return NULL;
+    for (index = 0u; index < count; ++index) {
+        copy[index] = cm_hir_copy_named_type(context, &named[index]);
+    }
+    return copy;
+}
+
+static const CmHirItem *cm_hir_bound_definition_item(
     const CmHirContext *context, CmHirDefId id)
 {
     const CmHirDefinition *definition;
@@ -1415,10 +1490,7 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
         valid = cm_hir_projection_valid(context, type);
         break;
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        valid = cm_hir_named_type_valid(context,
-            &type->data.dyn_trait_type.principal_trait)
-            && cm_hir_region_valid(context,
-                &type->data.dyn_trait_type.region);
+        valid = cm_hir_dyn_trait_valid(context, type);
         break;
     default:
         valid = 0;
@@ -1456,8 +1528,13 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
             context, &type->data.projection_type.associated_type);
         break;
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        copy.data.dyn_trait_type.principal_trait = cm_hir_copy_named_type(
-            context, &type->data.dyn_trait_type.principal_trait);
+        if (type->data.dyn_trait_type.has_principal) {
+            copy.data.dyn_trait_type.principal_trait = cm_hir_copy_named_type(
+                context, &type->data.dyn_trait_type.principal_trait);
+        }
+        copy.data.dyn_trait_type.auto_traits = cm_hir_copy_named_types(
+            context, type->data.dyn_trait_type.auto_traits,
+            type->data.dyn_trait_type.auto_trait_count);
         break;
     default:
         break;
@@ -1659,10 +1736,21 @@ static int cm_hir_type_late_bound_free(const CmHirContext *context,
             && cm_hir_named_late_bound_free(context,
                 &type->data.projection_type.associated_type, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return type->data.dyn_trait_type.region.kind
-                != CM_HIR_REGION_LATE_BOUND
-            && cm_hir_named_late_bound_free(context,
-                &type->data.dyn_trait_type.principal_trait, depth);
+        if (type->data.dyn_trait_type.region.kind
+                == CM_HIR_REGION_LATE_BOUND
+            || (type->data.dyn_trait_type.has_principal
+                && !cm_hir_named_late_bound_free(context,
+                    &type->data.dyn_trait_type.principal_trait, depth))) {
+            return 0;
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_hir_named_late_bound_free(context,
+                    &type->data.dyn_trait_type.auto_traits[index], depth)) {
+                return 0;
+            }
+        }
+        return 1;
     }
     return 0;
 }
@@ -1893,9 +1981,17 @@ static int cm_hir_type_self_owner_valid(const CmHirContext *context,
                 &type->data.projection_type.associated_type, expected_owner,
                 depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_hir_named_self_owner_valid(context,
-            &type->data.dyn_trait_type.principal_trait, expected_owner,
-            depth);
+        if (type->data.dyn_trait_type.has_principal
+            && !cm_hir_named_self_owner_valid(context,
+                &type->data.dyn_trait_type.principal_trait,
+                expected_owner, depth)) return 0;
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_hir_named_self_owner_valid(context,
+                    &type->data.dyn_trait_type.auto_traits[index],
+                    expected_owner, depth)) return 0;
+        }
+        return 1;
     }
     return 0;
 }
@@ -2393,12 +2489,22 @@ static int cm_hir_predicate_type_in_scope(const CmHirContext *context,
                 &type->data.projection_type.associated_type,
                 owner_definition, parent_definition, binder, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_hir_predicate_named_in_scope(context,
-                &type->data.dyn_trait_type.principal_trait,
-                owner_definition, parent_definition, binder, depth)
-            && cm_hir_predicate_region_in_scope(context,
+        if ((type->data.dyn_trait_type.has_principal
+                && !cm_hir_predicate_named_in_scope(context,
+                    &type->data.dyn_trait_type.principal_trait,
+                    owner_definition, parent_definition, binder, depth))
+            || !cm_hir_predicate_region_in_scope(context,
                 &type->data.dyn_trait_type.region, owner_definition,
-                parent_definition, binder);
+                parent_definition, binder)) return 0;
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_hir_predicate_named_in_scope(context,
+                    &type->data.dyn_trait_type.auto_traits[index],
+                    owner_definition, parent_definition, binder, depth)) {
+                return 0;
+            }
+        }
+        return 1;
     }
     return 0;
 }
@@ -4402,11 +4508,23 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
                 parameter_index,
                 &type->data.projection_type.associated_type, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_hir_default_named_in_scope(context, owner,
-                parameter_index,
-                &type->data.dyn_trait_type.principal_trait, depth)
-            && cm_hir_default_region_in_scope(context, owner,
-                parameter_index, &type->data.dyn_trait_type.region);
+        if ((type->data.dyn_trait_type.has_principal
+                && !cm_hir_default_named_in_scope(context, owner,
+                    parameter_index,
+                    &type->data.dyn_trait_type.principal_trait, depth))
+            || !cm_hir_default_region_in_scope(context, owner,
+                parameter_index, &type->data.dyn_trait_type.region)) {
+            return 0;
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_hir_default_named_in_scope(context, owner,
+                    parameter_index,
+                    &type->data.dyn_trait_type.auto_traits[index], depth)) {
+                return 0;
+            }
+        }
+        return 1;
     }
     return 0;
 }

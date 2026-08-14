@@ -6212,10 +6212,16 @@ static void test_auto_trait_and_negative_impl_model(void)
     CmHirType type;
     CmHirTypeId u8_type;
     CmHirTypeId u16_type;
+    CmHirTypeId dyn_type;
+    CmHirTypeId rejected_type;
+    CmHirNamedType markers[2];
     CmHirItem item;
     CmHirItemId item_id;
     CmHirSupertrait supertrait;
     const CmHirItem *stored;
+    const CmHirType *stored_dyn;
+    size_t arena_bytes;
+    size_t type_count;
     FILE *dump_file;
     char *dump;
 
@@ -6264,6 +6270,69 @@ static void test_auto_trait_and_negative_impl_model(void)
     assert(stored != NULL && stored->kind == CM_HIR_ITEM_TRAIT
         && stored->data.trait_item.is_auto
         && stored->data.trait_item.safety == CM_HIR_UNSAFE);
+
+    memset(markers, 0, sizeof(markers));
+    markers[0].definition = auto_definition;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
+    type.span = test_span(31u, 60u);
+    type.data.dyn_trait_type.has_principal = 1;
+    type.data.dyn_trait_type.principal_trait.definition = ordinary_definition;
+    type.data.dyn_trait_type.auto_traits = markers;
+    type.data.dyn_trait_type.auto_trait_count = 1u;
+    type.data.dyn_trait_type.region.kind = CM_HIR_REGION_STATIC;
+    assert(cm_hir_add_type(&context, &type, &dyn_type) == CM_HIR_OK);
+    markers[0].definition = ordinary_definition;
+    stored_dyn = cm_hir_get_type(&context, dyn_type);
+    assert(stored_dyn != NULL
+        && stored_dyn->data.dyn_trait_type.auto_traits != markers
+        && cm_hir_def_id_equal(
+            stored_dyn->data.dyn_trait_type.auto_traits[0].definition,
+            auto_definition));
+
+    type_count = context.types.len;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    rejected_type = CM_HIR_TYPE_NONE;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
+    type.span = test_span(31u, 60u);
+    type.data.dyn_trait_type.region.kind = CM_HIR_REGION_STATIC;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    type.data.dyn_trait_type.has_principal = 1;
+    type.data.dyn_trait_type.principal_trait.definition = auto_definition;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    type.data.dyn_trait_type.has_principal = 0;
+    type.data.dyn_trait_type.principal_trait.definition =
+        cm_hir_def_id_none();
+    markers[0].definition = ordinary_definition;
+    type.data.dyn_trait_type.auto_traits = markers;
+    type.data.dyn_trait_type.auto_trait_count = 1u;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    markers[0].definition = auto_definition;
+    markers[1].definition = auto_definition;
+    type.data.dyn_trait_type.auto_trait_count = 2u;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    type.data.dyn_trait_type.auto_trait_count = 0u;
+    assert(cm_hir_add_type(&context, &type, &rejected_type)
+        == CM_HIR_INVALID_ID);
+    assert(rejected_type == CM_HIR_TYPE_NONE
+        && context.types.len == type_count
+        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+
+    type.data.dyn_trait_type.auto_traits = markers;
+    type.data.dyn_trait_type.auto_trait_count = 1u;
+    assert(cm_hir_add_type(&context, &type, &dyn_type) == CM_HIR_OK);
+    stored_dyn = cm_hir_get_type(&context, dyn_type);
+    assert(stored_dyn != NULL
+        && !stored_dyn->data.dyn_trait_type.has_principal
+        && stored_dyn->data.dyn_trait_type.auto_trait_count == 1u
+        && cm_hir_def_id_equal(
+            stored_dyn->data.dyn_trait_type.auto_traits[0].definition,
+            auto_definition));
 
     assert(cm_hir_reserve_item_definition_as(&context, crate_id,
         CM_HIR_ITEM_TYPE_ALIAS, test_span(45u, 50u), &child_definition)

@@ -340,6 +340,10 @@ typedef struct CmHirType {
         } projection_type;
         struct {
             CmHirNamedType principal_trait;
+            int has_principal;
+            /* Canonical DefId order; every entry is an authenticated auto trait. */
+            CmHirNamedType *auto_traits;
+            uint32_t auto_trait_count;
             CmHirRegion region;
         } dyn_trait_type;
     } data;

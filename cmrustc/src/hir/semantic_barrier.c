@@ -358,8 +358,27 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
                 || !cm_semantic_barrier_hash_named(&hash,
                     &type->data.projection_type.associated_type)) return 0;
         } else if (type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND) {
-            if (!cm_semantic_barrier_hash_named(&hash,
+            uint32_t marker_index;
+
+            hash = cm_semantic_barrier_hash_bytes(hash,
+                &type->data.dyn_trait_type.has_principal,
+                sizeof(type->data.dyn_trait_type.has_principal));
+            hash = cm_semantic_barrier_hash_bytes(hash,
+                &type->data.dyn_trait_type.auto_trait_count,
+                sizeof(type->data.dyn_trait_type.auto_trait_count));
+            hash = cm_semantic_barrier_hash_bytes(hash,
+                &type->data.dyn_trait_type.region,
+                sizeof(type->data.dyn_trait_type.region));
+            if (type->data.dyn_trait_type.has_principal
+                && !cm_semantic_barrier_hash_named(&hash,
                     &type->data.dyn_trait_type.principal_trait)) return 0;
+            for (marker_index = 0u;
+                 marker_index < type->data.dyn_trait_type.auto_trait_count;
+                 ++marker_index) {
+                if (!cm_semantic_barrier_hash_named(&hash,
+                        &type->data.dyn_trait_type
+                            .auto_traits[marker_index])) return 0;
+            }
         }
     }
     for (index = 0u; index < hir->expressions.len; ++index) {

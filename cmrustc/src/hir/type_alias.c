@@ -362,42 +362,94 @@ static int cm_alias_normalize_dyn_trait(CmAliasNormalizeState *state,
     CmHirTypeId source_id, const CmHirType *source, CmHirTypeId *out_type)
 {
     CmHirType replacement;
-    CmHirGenericArg *arguments;
+    CmHirGenericArg *principal_arguments;
+    CmHirNamedType *markers;
     CmHirRegion region;
-    int arguments_changed;
+    uint32_t index;
+    int changed;
 
-    if (cm_alias_def_is_none(
-            source->data.dyn_trait_type.principal_trait.definition)) {
+    if ((source->data.dyn_trait_type.has_principal
+            && cm_alias_def_is_none(
+                source->data.dyn_trait_type.principal_trait.definition))
+        || (!source->data.dyn_trait_type.has_principal
+            && source->data.dyn_trait_type.auto_trait_count == 0u)) {
         return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
             source_id,
             source->data.dyn_trait_type.principal_trait.definition,
             CM_HIR_GENERIC_PARAM_NONE, CM_HIR_INVALID_ID);
     }
-    if (!cm_alias_normalize_named_arguments(state, source_id,
-            &source->data.dyn_trait_type.principal_trait, &arguments,
-            &arguments_changed)) {
-        return 0;
+    principal_arguments = NULL;
+    changed = 0;
+    if (source->data.dyn_trait_type.has_principal
+        && !cm_alias_normalize_named_arguments(state, source_id,
+            &source->data.dyn_trait_type.principal_trait,
+            &principal_arguments, &changed)) return 0;
+    markers = source->data.dyn_trait_type.auto_trait_count == 0u ? NULL
+        : (CmHirNamedType *)cm_alloc_zeroed(
+            source->data.dyn_trait_type.auto_trait_count, sizeof(*markers));
+    for (index = 0u;
+         index < source->data.dyn_trait_type.auto_trait_count; ++index) {
+        int marker_changed;
+
+        markers[index] = source->data.dyn_trait_type.auto_traits[index];
+        if (cm_alias_def_is_none(markers[index].definition)
+            || !cm_alias_normalize_named_arguments(state, source_id,
+                &source->data.dyn_trait_type.auto_traits[index],
+                &markers[index].arguments, &marker_changed)) {
+            CmHirDefId failed_definition;
+            uint32_t cleanup;
+
+            failed_definition = markers[index].definition;
+            for (cleanup = 0u; cleanup < index; ++cleanup) {
+                cm_free(markers[cleanup].arguments);
+            }
+            cm_free(markers);
+            cm_free(principal_arguments);
+            if (state->result.status == CM_HIR_TYPE_ALIAS_OK) {
+                return cm_alias_fail(state, CM_HIR_TYPE_ALIAS_INVALID_TYPE,
+                    source_id, failed_definition,
+                    CM_HIR_GENERIC_PARAM_NONE, CM_HIR_INVALID_ID);
+            }
+            return 0;
+        }
+        if (marker_changed) changed = 1;
     }
     if (!cm_alias_normalize_region(state, source_id,
             &source->data.dyn_trait_type.region, &region)) {
-        cm_free(arguments);
+        for (index = 0u;
+             index < source->data.dyn_trait_type.auto_trait_count; ++index) {
+            cm_free(markers[index].arguments);
+        }
+        cm_free(markers);
+        cm_free(principal_arguments);
         return 0;
     }
-    if (!arguments_changed && cm_alias_region_equal(&region,
+    if (!changed && cm_alias_region_equal(&region,
             &source->data.dyn_trait_type.region)) {
-        cm_free(arguments);
+        for (index = 0u;
+             index < source->data.dyn_trait_type.auto_trait_count; ++index) {
+            cm_free(markers[index].arguments);
+        }
+        cm_free(markers);
+        cm_free(principal_arguments);
         *out_type = source_id;
         return 1;
     }
     replacement = *source;
-    replacement.data.dyn_trait_type.principal_trait.arguments = arguments;
+    replacement.data.dyn_trait_type.principal_trait.arguments =
+        principal_arguments;
+    replacement.data.dyn_trait_type.auto_traits = markers;
     replacement.data.dyn_trait_type.region = region;
     if (!cm_alias_add_type(state, source_id, &replacement, out_type)) {
-        cm_free(arguments);
-        return 0;
+        *out_type = CM_HIR_TYPE_NONE;
     }
-    cm_free(arguments);
-    return 1;
+    for (index = 0u;
+         index < source->data.dyn_trait_type.auto_trait_count; ++index) {
+        cm_free(markers[index].arguments);
+    }
+    cm_free(markers);
+    cm_free(principal_arguments);
+    return *out_type != CM_HIR_TYPE_NONE;
 }
 
 static int cm_alias_validate_projection(CmAliasNormalizeState *state,

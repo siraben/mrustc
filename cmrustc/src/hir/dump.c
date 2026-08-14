@@ -361,8 +361,18 @@ static void cm_hir_dump_type(FILE *stream, const CmHirContext *context,
         break;
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
         fputs("dyn ", stream);
-        cm_hir_dump_named(stream, context,
-            &type->data.dyn_trait_type.principal_trait);
+        if (type->data.dyn_trait_type.has_principal) {
+            cm_hir_dump_named(stream, context,
+                &type->data.dyn_trait_type.principal_trait);
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (type->data.dyn_trait_type.has_principal || index != 0u) {
+                fputc('+', stream);
+            }
+            cm_hir_dump_named(stream, context,
+                &type->data.dyn_trait_type.auto_traits[index]);
+        }
         fputc('+', stream);
         cm_hir_dump_region(stream, context,
             &type->data.dyn_trait_type.region);

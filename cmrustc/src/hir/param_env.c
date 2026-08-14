@@ -249,10 +249,18 @@ static unsigned int cm_param_dependency_type(
             | cm_param_dependency_named(scan,
                 &type->data.projection_type.associated_type, depth + 1u);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_param_dependency_named(scan,
-                &type->data.dyn_trait_type.principal_trait, depth + 1u)
-            | cm_param_dependency_region(scan,
-                &type->data.dyn_trait_type.region);
+        flags = cm_param_dependency_region(scan,
+            &type->data.dyn_trait_type.region);
+        if (type->data.dyn_trait_type.has_principal) {
+            flags |= cm_param_dependency_named(scan,
+                &type->data.dyn_trait_type.principal_trait, depth + 1u);
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            flags |= cm_param_dependency_named(scan,
+                &type->data.dyn_trait_type.auto_traits[index], depth + 1u);
+        }
+        return flags;
     case CM_HIR_TYPE_ERROR_KIND:
     case CM_HIR_TYPE_INFER_KIND:
     case CM_HIR_TYPE_NEVER_KIND:

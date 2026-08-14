@@ -869,6 +869,7 @@ static CmHirTypeId add_unsupported_hir_type(TestFixture *fixture,
     } else if (kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND) {
         type.data.named_type.definition = fixture->definitions[2];
     } else if (kind == CM_HIR_TYPE_DYN_TRAIT_KIND) {
+        type.data.dyn_trait_type.has_principal = 1;
         type.data.dyn_trait_type.principal_trait.definition =
             fixture->definitions[2];
         type.data.dyn_trait_type.region.kind = CM_HIR_REGION_STATIC;

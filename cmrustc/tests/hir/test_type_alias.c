@@ -374,8 +374,19 @@ static int type_root_is_alias_free(const CmHirContext *hir,
             && named_type_is_alias_free(hir,
                 &type->data.projection_type.associated_type, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return named_type_is_alias_free(hir,
-            &type->data.dyn_trait_type.principal_trait, depth);
+        if (type->data.dyn_trait_type.has_principal
+            && !named_type_is_alias_free(hir,
+                &type->data.dyn_trait_type.principal_trait, depth)) {
+            return 0;
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!named_type_is_alias_free(hir,
+                    &type->data.dyn_trait_type.auto_traits[index], depth)) {
+                return 0;
+            }
+        }
+        return 1;
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
         return 0;
     case CM_HIR_TYPE_ERROR_KIND:
@@ -2488,6 +2499,7 @@ static void test_dyn_trait_alias_normalization(void)
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
     type.span = span;
+    type.data.dyn_trait_type.has_principal = 1;
     type.data.dyn_trait_type.principal_trait.definition =
         principal_definition;
     type.data.dyn_trait_type.principal_trait.arguments =

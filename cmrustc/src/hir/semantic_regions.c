@@ -415,12 +415,26 @@ static int cm_semantic_regions_type_equal(
                 &left->data.projection_type.associated_type,
                 &right->data.projection_type.associated_type, depth + 1u);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_semantic_regions_named_equal(hir,
-                &left->data.dyn_trait_type.principal_trait,
-                &right->data.dyn_trait_type.principal_trait, depth + 1u)
-            && cm_semantic_regions_region_equal(
+        if (left->data.dyn_trait_type.has_principal
+                != right->data.dyn_trait_type.has_principal
+            || left->data.dyn_trait_type.auto_trait_count
+                != right->data.dyn_trait_type.auto_trait_count
+            || !cm_semantic_regions_region_equal(
                 &left->data.dyn_trait_type.region,
-                &right->data.dyn_trait_type.region);
+                &right->data.dyn_trait_type.region)
+            || (left->data.dyn_trait_type.has_principal
+                && !cm_semantic_regions_named_equal(hir,
+                    &left->data.dyn_trait_type.principal_trait,
+                    &right->data.dyn_trait_type.principal_trait,
+                    depth + 1u))) return 0;
+        for (index = 0u;
+             index < left->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_semantic_regions_named_equal(hir,
+                    &left->data.dyn_trait_type.auto_traits[index],
+                    &right->data.dyn_trait_type.auto_traits[index],
+                    depth + 1u)) return 0;
+        }
+        return 1;
     case CM_HIR_TYPE_ERROR_KIND:
     case CM_HIR_TYPE_INFER_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
@@ -828,11 +842,19 @@ static int cm_semantic_regions_scan_type(
         break;
     }
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        ok = cm_semantic_regions_scan_named(scratch,
+        ok = !type->data.dyn_trait_type.has_principal
+            || cm_semantic_regions_scan_named(scratch,
                 &type->data.dyn_trait_type.principal_trait, type_id,
-                CM_SEMANTIC_REGIONS_NAMED_TRAIT, depth + 1u)
-            && cm_semantic_regions_scan_region(scratch, type_id,
-                &type->data.dyn_trait_type.region);
+                CM_SEMANTIC_REGIONS_NAMED_TRAIT, depth + 1u);
+        for (index = 0u; ok
+             && index < type->data.dyn_trait_type.auto_trait_count;
+             ++index) {
+            ok = cm_semantic_regions_scan_named(scratch,
+                &type->data.dyn_trait_type.auto_traits[index], type_id,
+                CM_SEMANTIC_REGIONS_NAMED_TRAIT, depth + 1u);
+        }
+        ok = ok && cm_semantic_regions_scan_region(scratch, type_id,
+            &type->data.dyn_trait_type.region);
         break;
     default:
         ok = cm_semantic_regions_fail(scratch,

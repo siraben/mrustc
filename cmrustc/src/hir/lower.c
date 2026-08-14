@@ -5510,12 +5510,22 @@ static int cm_lower_validate_default_type(CmLowerState *state,
                 &type->data.projection_type.associated_type, owner,
                 parameter_index, span, item_id, ast_type_id, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        return cm_lower_validate_default_named(state,
-                &type->data.dyn_trait_type.principal_trait, owner,
-                parameter_index, span, item_id, ast_type_id, depth)
-            && cm_lower_validate_default_region(state,
+        if ((type->data.dyn_trait_type.has_principal
+                && !cm_lower_validate_default_named(state,
+                    &type->data.dyn_trait_type.principal_trait, owner,
+                    parameter_index, span, item_id, ast_type_id, depth))
+            || !cm_lower_validate_default_region(state,
                 &type->data.dyn_trait_type.region, owner, parameter_index,
-                span, item_id, ast_type_id);
+                span, item_id, ast_type_id)) return 0;
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_lower_validate_default_named(state,
+                    &type->data.dyn_trait_type.auto_traits[index], owner,
+                    parameter_index, span, item_id, ast_type_id, depth)) {
+                return 0;
+            }
+        }
+        return 1;
     }
     cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, item_id,
         ast_type_id, CM_AST_PATH_NONE, CM_HIR_INVALID_ARGUMENT,
@@ -7217,8 +7227,19 @@ static void cm_lower_trait_default_free_type_temporary(CmHirType *type)
         cm_free(type->data.projection_type.associated_type.arguments);
         break;
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
+    {
+        uint32_t marker_index;
+
+        for (marker_index = 0u;
+             marker_index < type->data.dyn_trait_type.auto_trait_count;
+             ++marker_index) {
+            cm_free(type->data.dyn_trait_type
+                .auto_traits[marker_index].arguments);
+        }
+        cm_free(type->data.dyn_trait_type.auto_traits);
         cm_free(type->data.dyn_trait_type.principal_trait.arguments);
         break;
+    }
     default:
         break;
     }
@@ -7485,21 +7506,43 @@ static int cm_lower_trait_default_substitute_type(
     }
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
     {
-        int named_changed;
+        CmHirNamedType *markers;
+        int principal_changed;
         int region_changed;
 
         memset(&copy.data.dyn_trait_type.principal_trait, 0,
             sizeof(copy.data.dyn_trait_type.principal_trait));
-        if (!cm_lower_trait_default_substitute_named(substitution,
-                &source.data.dyn_trait_type.principal_trait, depth,
-                &copy.data.dyn_trait_type.principal_trait, &named_changed)
+        copy.data.dyn_trait_type.auto_traits = NULL;
+        principal_changed = 0;
+        if ((source.data.dyn_trait_type.has_principal
+                && !cm_lower_trait_default_substitute_named(substitution,
+                    &source.data.dyn_trait_type.principal_trait, depth,
+                    &copy.data.dyn_trait_type.principal_trait,
+                    &principal_changed))
             || !cm_lower_trait_default_substitute_region(substitution,
                 &source.data.dyn_trait_type.region,
                 &copy.data.dyn_trait_type.region, &region_changed)) {
             cm_lower_trait_default_free_type_temporary(&copy);
             return 0;
         }
-        changed = named_changed || region_changed;
+        markers = source.data.dyn_trait_type.auto_trait_count == 0u ? NULL
+            : (CmHirNamedType *)cm_alloc_zeroed(
+                source.data.dyn_trait_type.auto_trait_count,
+                sizeof(*markers));
+        copy.data.dyn_trait_type.auto_traits = markers;
+        changed = principal_changed || region_changed;
+        for (index = 0u;
+             index < source.data.dyn_trait_type.auto_trait_count; ++index) {
+            int marker_changed;
+
+            if (!cm_lower_trait_default_substitute_named(substitution,
+                    &source.data.dyn_trait_type.auto_traits[index], depth,
+                    &markers[index], &marker_changed)) {
+                cm_lower_trait_default_free_type_temporary(&copy);
+                return 0;
+            }
+            if (marker_changed) changed = 1;
+        }
         break;
     }
     case CM_HIR_TYPE_SELF_KIND:
@@ -8148,13 +8191,14 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
     CmAstTypeId ast_type_id, const CmAstType *ast_type,
     CmHirModuleId module, CmHirDefId owner)
 {
-    const CmAstTypeBound *principal_bound;
     const CmAstTypeBound *lifetime_bound;
-    CmLowerTraitTarget trait_target;
     CmHirNamedType principal_trait;
+    CmHirNamedType *auto_traits;
     CmHirType type;
     CmSpan span;
+    uint32_t auto_trait_count;
     uint32_t index;
+    int has_principal;
 
     span = cm_lower_span(state, ast_type->span);
     if (ast_type->bound_count == 0u || ast_type->bounds == NULL) {
@@ -8163,8 +8207,12 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
             "dynamic trait type has no bound storage");
         return CM_HIR_TYPE_NONE;
     }
-    principal_bound = NULL;
     lifetime_bound = NULL;
+    has_principal = 0;
+    auto_trait_count = 0u;
+    auto_traits = (CmHirNamedType *)cm_alloc_zeroed(ast_type->bound_count,
+        sizeof(*auto_traits));
+    memset(&principal_trait, 0, sizeof(principal_trait));
     for (index = 0u; index < ast_type->bound_count; ++index) {
         const CmAstTypeBound *bound;
         const CmAstType *bound_type;
@@ -8207,7 +8255,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                 CM_AST_ITEM_NONE, ast_type_id,
                 bound_type == NULL ? CM_AST_PATH_NONE : bound_type->path,
                 CM_HIR_OK, "dynamic trait bound storage is invalid");
-            return CM_HIR_TYPE_NONE;
+            goto fail;
         }
         if (bound->modifier != CM_AST_TYPE_BOUND_REQUIRED) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
@@ -8217,7 +8265,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                 CM_HIR_OK,
                 "dynamic trait bounds with relaxed or const modifiers are "
                 "not representable in HIR");
-            return CM_HIR_TYPE_NONE;
+            goto fail;
         }
         if (has_lifetime) {
             if (lifetime_bound != NULL) {
@@ -8226,78 +8274,122 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                     CM_HIR_OK,
                     "dynamic trait HIR requires exactly one explicit "
                     "lifetime bound");
-                return CM_HIR_TYPE_NONE;
+                goto fail;
             }
             lifetime_bound = bound;
         } else {
+            CmLowerTraitTarget trait_target;
+            CmHirNamedType trait;
+            const CmAstItem *target_ast_item;
+            int is_auto;
+
             if (bound->binder.lifetime_count != 0u) {
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
                     cm_lower_span(state, bound->span), CM_AST_ITEM_NONE,
                     ast_type_id, bound_type->path, CM_HIR_OK,
                     "higher-ranked dynamic trait bounds are not "
                     "representable in HIR");
-                return CM_HIR_TYPE_NONE;
+                goto fail;
             }
-            if (principal_bound != NULL) {
+            memset(&trait, 0, sizeof(trait));
+            memset(&trait_target, 0, sizeof(trait_target));
+            if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
+                    bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
+                    &trait, &trait_target, 1, 0, 0, 0)) {
+                goto fail;
+            }
+            target_ast_item = trait_target.local_record == NULL ? NULL
+                : cm_ast_get_item(trait_target.local_record->ast,
+                    trait_target.local_record->ast_id);
+            if (trait_target.item != NULL) {
+                if (trait_target.item->kind != CM_HIR_ITEM_TRAIT) {
+                    cm_free(trait.arguments);
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                        cm_lower_span(state, bound->span),
+                        CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                        CM_HIR_OK, "dynamic trait bound must name an "
+                        "authenticated trait");
+                    goto fail;
+                }
+                is_auto = trait_target.item->data.trait_item.is_auto;
+            } else if (target_ast_item != NULL
+                && target_ast_item->kind == CM_AST_ITEM_TRAIT
+                && !target_ast_item->data.trait_item.is_alias) {
+                is_auto = target_ast_item->data.trait_item.is_auto;
+            } else {
+                cm_free(trait.arguments);
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                    cm_lower_span(state, bound->span), CM_AST_ITEM_NONE,
+                    ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+                    "dynamic trait bound must name an authenticated trait");
+                goto fail;
+            }
+            if (!is_auto && has_principal) {
+                cm_free(trait.arguments);
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
                     CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
                     CM_HIR_OK,
-                    "dynamic trait HIR cannot represent additional trait "
-                    "bounds");
-                return CM_HIR_TYPE_NONE;
+                    "dynamic trait HIR cannot represent multiple ordinary "
+                    "principal traits");
+                goto fail;
             }
-            principal_bound = bound;
+            if (is_auto) {
+                uint32_t marker_index;
+
+                for (marker_index = 0u; marker_index < auto_trait_count;
+                     ++marker_index) {
+                    if (cm_hir_def_id_equal(
+                            auto_traits[marker_index].definition,
+                            trait.definition)) {
+                        cm_free(trait.arguments);
+                        cm_lower_fail(state,
+                            CM_HIR_LOWER_UNSUPPORTED_TYPE,
+                            cm_lower_span(state, bound->span),
+                            CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
+                            CM_HIR_OK, "dynamic trait HIR rejects duplicate "
+                            "auto-trait markers");
+                        goto fail;
+                    }
+                }
+                auto_traits[auto_trait_count++] = trait;
+            } else {
+                principal_trait = trait;
+                has_principal = 1;
+            }
         }
     }
-    if (principal_bound == NULL
-        || ast_type->bound_count != (lifetime_bound == NULL ? 1u : 2u)) {
+    if (!has_principal && auto_trait_count == 0u) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
             CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-            "dynamic trait HIR requires exactly one principal trait and "
-            "at most one explicit lifetime bound");
-        return CM_HIR_TYPE_NONE;
+            "dynamic trait HIR requires a principal or auto-trait marker");
+        goto fail;
     }
-    memset(&principal_trait, 0, sizeof(principal_trait));
-    memset(&trait_target, 0, sizeof(trait_target));
-    if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
-            principal_bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
-            &principal_trait, &trait_target, 1, 0, 0, 0)) {
-        return CM_HIR_TYPE_NONE;
-    }
-    if (trait_target.item != NULL) {
-        if (trait_target.item->kind != CM_HIR_ITEM_TRAIT
-            || trait_target.item->data.trait_item.is_auto) {
-            cm_free(principal_trait.arguments);
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
-                cm_lower_span(state, principal_bound->span),
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "dynamic trait principal must be an authenticated "
-                "non-auto trait");
-            return CM_HIR_TYPE_NONE;
-        }
-    } else {
-        const CmAstItem *target_ast_item;
+    for (index = 1u; index < auto_trait_count; ++index) {
+        CmHirNamedType marker;
+        uint32_t insertion;
 
-        target_ast_item = trait_target.local_record == NULL ? NULL
-            : cm_ast_get_item(trait_target.local_record->ast,
-                trait_target.local_record->ast_id);
-        if (target_ast_item == NULL
-            || target_ast_item->kind != CM_AST_ITEM_TRAIT
-            || target_ast_item->data.trait_item.is_alias
-            || target_ast_item->data.trait_item.is_auto) {
-            cm_free(principal_trait.arguments);
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
-                cm_lower_span(state, principal_bound->span),
-                CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
-                "dynamic trait principal must be an authenticated "
-                "non-auto trait");
-            return CM_HIR_TYPE_NONE;
+        marker = auto_traits[index];
+        insertion = index;
+        while (insertion != 0u
+            && (auto_traits[insertion - 1u].definition.crate_id
+                    > marker.definition.crate_id
+                || (auto_traits[insertion - 1u].definition.crate_id
+                        == marker.definition.crate_id
+                    && auto_traits[insertion - 1u].definition.index
+                        > marker.definition.index))) {
+            auto_traits[insertion] = auto_traits[insertion - 1u];
+            insertion -= 1u;
         }
+        auto_traits[insertion] = marker;
     }
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_DYN_TRAIT_KIND;
     type.span = span;
     type.data.dyn_trait_type.principal_trait = principal_trait;
+    type.data.dyn_trait_type.has_principal = has_principal;
+    type.data.dyn_trait_type.auto_traits = auto_trait_count == 0u
+        ? NULL : auto_traits;
+    type.data.dyn_trait_type.auto_trait_count = auto_trait_count;
     if (lifetime_bound == NULL) {
         type.data.dyn_trait_type.region.kind = CM_HIR_REGION_INFER;
         type.data.dyn_trait_type.region.data.inference_variable =
@@ -8307,8 +8399,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
         if (!cm_lower_lifetime(state, lifetime_bound->lifetime, owner,
                 cm_lower_span(state, lifetime_bound->span),
                 &type.data.dyn_trait_type.region)) {
-            cm_free(principal_trait.arguments);
-            return CM_HIR_TYPE_NONE;
+            goto fail;
         }
     }
     {
@@ -8316,8 +8407,20 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
 
         result = cm_lower_add_type(state, &type, ast_type_id);
         cm_free(principal_trait.arguments);
+        for (index = 0u; index < auto_trait_count; ++index) {
+            cm_free(auto_traits[index].arguments);
+        }
+        cm_free(auto_traits);
         return result;
     }
+
+fail:
+    cm_free(principal_trait.arguments);
+    for (index = 0u; index < auto_trait_count; ++index) {
+        cm_free(auto_traits[index].arguments);
+    }
+    cm_free(auto_traits);
+    return CM_HIR_TYPE_NONE;
 }
 
 static int cm_lower_ast_path_storage_valid(const CmAstPath *path)

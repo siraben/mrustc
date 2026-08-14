@@ -6684,13 +6684,20 @@ static void test_relaxed_sized_generic_parameter(void)
 static void test_bounded_dynamic_trait_lowering(void)
 {
     static const char accepted[] =
-        "trait Error {} "
-        "fn source(error: &(dyn Error + 'static)) {}";
+        "trait Error {} auto trait Send {} auto trait Sync {} "
+        "fn source(error: &(dyn Error + Sync + Send + 'static)) {}";
     static const char inferred[] =
         "trait Error {} fn cause(error: &dyn Error) {}";
+    static const char marker_only[] =
+        "auto trait Send {} fn transfer(value: &dyn Send) {}";
+    static const char reversed[] =
+        "trait Error {} auto trait Send {} auto trait Sync {} "
+        "fn source(error: &(dyn Error + Send + Sync + 'static)) {}";
     static const char *const rejected[] = {
         "trait Error {} trait Send {} "
             "fn source(error: &(dyn Error + Send + 'static)) {}",
+        "trait Error {} auto trait Send {} "
+            "fn source(error: &(dyn Error + Send + Send)) {}",
         "trait Error {} "
             "fn source(error: &(dyn Error + 'static + 'static)) {}",
         "trait Error {} "
@@ -6701,6 +6708,8 @@ static void test_bounded_dynamic_trait_lowering(void)
         "struct Error; fn source(error: &(dyn Error + 'static)) {}"
     };
     const CmHirItem *error_trait;
+    const CmHirItem *send_trait;
+    const CmHirItem *sync_trait;
     const CmHirItem *source_function;
     const CmHirType *reference_type;
     const CmHirType *dynamic_type;
@@ -6710,6 +6719,8 @@ static void test_bounded_dynamic_trait_lowering(void)
 
     result = lower_source(accepted, &context, NULL);
     error_trait = find_item(&context, "Error");
+    send_trait = find_item(&context, "Send");
+    sync_trait = find_item(&context, "Sync");
     source_function = find_item(&context, "source");
     reference_type = source_function == NULL
             || source_function->kind != CM_HIR_ITEM_FUNCTION
@@ -6725,18 +6736,72 @@ static void test_bounded_dynamic_trait_lowering(void)
             reference_type->data.reference_type.pointee);
     assert(result.error_count == 0u
         && error_trait != NULL && error_trait->kind == CM_HIR_ITEM_TRAIT
+        && send_trait != NULL && send_trait->data.trait_item.is_auto
+        && sync_trait != NULL && sync_trait->data.trait_item.is_auto
         && source_function != NULL
         && reference_type != NULL
         && dynamic_type != NULL
         && dynamic_type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && dynamic_type->data.dyn_trait_type.has_principal
         && cm_hir_def_id_equal(
             dynamic_type->data.dyn_trait_type.principal_trait.definition,
             error_trait->definition)
         && dynamic_type->data.dyn_trait_type.principal_trait.argument_count
             == 0u
         && dynamic_type->data.dyn_trait_type.principal_trait.arguments == NULL
+        && dynamic_type->data.dyn_trait_type.auto_trait_count == 2u
+        && dynamic_type->data.dyn_trait_type.auto_traits != NULL
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.auto_traits[0].definition,
+            send_trait->definition)
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.auto_traits[1].definition,
+            sync_trait->definition)
         && dynamic_type->data.dyn_trait_type.region.kind
             == CM_HIR_REGION_STATIC);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(reversed, &context, NULL);
+    send_trait = find_item(&context, "Send");
+    sync_trait = find_item(&context, "Sync");
+    source_function = find_item(&context, "source");
+    reference_type = source_function == NULL
+        ? NULL : cm_hir_get_type(&context,
+            source_function->data.function_item.signature.parameters[0].type);
+    dynamic_type = reference_type == NULL
+            || reference_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            reference_type->data.reference_type.pointee);
+    assert(result.error_count == 0u && dynamic_type != NULL
+        && dynamic_type->data.dyn_trait_type.auto_trait_count == 2u
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.auto_traits[0].definition,
+            send_trait->definition)
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.auto_traits[1].definition,
+            sync_trait->definition));
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(marker_only, &context, NULL);
+    send_trait = find_item(&context, "Send");
+    source_function = find_item(&context, "transfer");
+    reference_type = source_function == NULL
+        ? NULL : cm_hir_get_type(&context,
+            source_function->data.function_item.signature.parameters[0].type);
+    dynamic_type = reference_type == NULL
+            || reference_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            reference_type->data.reference_type.pointee);
+    assert(result.error_count == 0u && dynamic_type != NULL
+        && !dynamic_type->data.dyn_trait_type.has_principal
+        && cm_hir_def_id_is_none(
+            dynamic_type->data.dyn_trait_type.principal_trait.definition)
+        && dynamic_type->data.dyn_trait_type.auto_trait_count == 1u
+        && cm_hir_def_id_equal(
+            dynamic_type->data.dyn_trait_type.auto_traits[0].definition,
+            send_trait->definition)
+        && dynamic_type->data.dyn_trait_type.region.kind
+            == CM_HIR_REGION_INFER);
     cm_hir_context_destroy(&context);
 
     result = lower_source(inferred, &context, NULL);
@@ -6760,6 +6825,7 @@ static void test_bounded_dynamic_trait_lowering(void)
         && reference_type != NULL
         && dynamic_type != NULL
         && dynamic_type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND
+        && dynamic_type->data.dyn_trait_type.has_principal
         && cm_hir_def_id_equal(
             dynamic_type->data.dyn_trait_type.principal_trait.definition,
             error_trait->definition)
