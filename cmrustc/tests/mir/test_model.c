@@ -3877,6 +3877,204 @@ static void test_canonical_blanket_impl_materialization(TestHir *fixture)
     cm_hir_canonical_instance_destroy(&canonical_u32);
 }
 
+static void test_generic_tuple_place_model(void)
+{
+    CmHirContext hir;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirTypeId u32_type;
+    CmHirTypeId i32_type;
+    CmHirTypeId i32_reference_type;
+    CmHirDefId impl_definition;
+    CmHirDefId definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId generic_id;
+    CmHirType type;
+    CmHirTypeId generic_type;
+    CmHirTypeId self_type;
+    CmHirTypeId tuple_element;
+    CmHirTypeId tuple_type;
+    CmHirFunctionParameter parameters[2];
+    CmHirLocal source_locals[2];
+    CmHirBody source_body;
+    CmHirBodyId source_body_id;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirExpr expression;
+    CmHirExprId root;
+    CmMirLocal mir_locals[4];
+    CmMirBody mir_body;
+    CmMirPlaceProjection projection;
+    CmMirPlace place;
+    CmHirType *stored_tuple;
+
+    cm_hir_context_init(&hir);
+    assert(cm_hir_create_crate(&hir,
+        cm_hir_intern(&hir, "mir_generic_tuple_place_model"),
+        CM_HIR_EDITION_2021, test_span(0u, 100u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    u32_type = add_integer_type(&hir, CM_HIR_INT_U32, 1u);
+    i32_type = add_integer_type(&hir, CM_HIR_INT_I32, 2u);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(3u, 6u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_ERASED;
+    type.data.reference_type.pointee = i32_type;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&hir, &type, &i32_reference_type) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_IMPL, test_span(5u, 95u), &impl_definition)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_IMPL;
+    item.definition = impl_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(5u, 95u);
+    item.data.impl_item.self_type = u32_type;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_SELF_KIND;
+    type.span = test_span(7u, 11u);
+    type.data.self_type.owner = impl_definition;
+    assert(cm_hir_add_type(&hir, &type, &self_type) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&hir, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(10u, 90u), &definition)
+        == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = definition;
+    generic.name = cm_hir_intern(&hir, "T");
+    generic.span = test_span(14u, 15u);
+    assert(cm_hir_add_generic_param(&hir, &generic, &generic_id)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = generic.span;
+    type.data.parameter_type.parameter = generic_id;
+    assert(cm_hir_add_type(&hir, &type, &generic_type) == CM_HIR_OK);
+    tuple_element = generic_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(25u, 30u);
+    type.data.tuple_type.elements = &tuple_element;
+    type.data.tuple_type.element_count = 1u;
+    assert(cm_hir_add_type(&hir, &type, &tuple_type) == CM_HIR_OK);
+    memset(parameters, 0, sizeof(parameters));
+    parameters[0].name = cm_hir_intern(&hir, "self");
+    parameters[0].type = self_type;
+    parameters[0].span = test_span(20u, 24u);
+    parameters[0].binding_kind = CM_HIR_BINDING_NAMED;
+    parameters[1].type = tuple_type;
+    parameters[1].span = test_span(25u, 40u);
+    parameters[1].binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
+    parameters[1].binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    parameters[1].tuple_bindings[0].name = cm_hir_intern(&hir, "value");
+    parameters[1].tuple_bindings[0].span = test_span(27u, 32u);
+    memset(source_locals, 0, sizeof(source_locals));
+    source_locals[0].name = parameters[0].name;
+    source_locals[0].type = self_type;
+    source_locals[0].span = parameters[0].span;
+    source_locals[0].parameter_index = 0u;
+    source_locals[1].name = parameters[1].tuple_bindings[0].name;
+    source_locals[1].type = generic_type;
+    source_locals[1].span = parameters[1].tuple_bindings[0].span;
+    source_locals[1].parameter_index = 1u;
+    memset(&source_body, 0, sizeof(source_body));
+    source_body.owner = definition;
+    source_body.origin = cm_hir_body_origin_item_source(definition);
+    source_body.state = CM_HIR_BODY_UNLOWERED;
+    source_body.expected_type = generic_type;
+    source_body.locals = source_locals;
+    source_body.local_count = 2u;
+    source_body.parameter_count = 2u;
+    source_body.source = 1u;
+    source_body.source_expression_id = 10u;
+    source_body.span = test_span(10u, 90u);
+    assert(cm_hir_add_body(&hir, &source_body, &source_body_id)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = definition;
+    item.owner_module = root_module;
+    item.parent_definition = impl_definition;
+    item.name = cm_hir_intern(&hir, "call_once");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = source_body.span;
+    item.generic_parameter_start = generic_id;
+    item.generic_parameter_count = 1u;
+    item.data.function_item.signature.parameters = parameters;
+    item.data.function_item.signature.parameter_count = 2u;
+    item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+    item.data.function_item.signature.return_type = generic_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&hir, "rust-call");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.body = source_body_id;
+    item.data.function_item.trait_item_definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&hir, &item, &item_id) == CM_HIR_OK);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = source_body_id;
+    expression.type = generic_type;
+    expression.span = test_span(50u, 55u);
+    expression.data.local.local_index = 1u;
+    assert(cm_hir_add_expr(&hir, &expression, &root) == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&hir, source_body_id, root)
+        == CM_HIR_OK);
+
+    memset(mir_locals, 0, sizeof(mir_locals));
+    mir_locals[0].kind = CM_MIR_LOCAL_RETURN;
+    mir_locals[0].type = u32_type;
+    mir_locals[1].kind = CM_MIR_LOCAL_ARGUMENT;
+    mir_locals[1].type = u32_type;
+    mir_locals[2].kind = CM_MIR_LOCAL_ARGUMENT;
+    mir_locals[2].type = tuple_type;
+    mir_locals[3].kind = CM_MIR_LOCAL_USER;
+    mir_locals[3].type = u32_type;
+    memset(&mir_body, 0, sizeof(mir_body));
+    mir_body.instance.definition = definition;
+    mir_body.instance.body_definition = definition;
+    mir_body.instance.substitutions = &u32_type;
+    mir_body.instance.substitution_count = 1u;
+    mir_body.owner = definition;
+    mir_body.source_body = source_body_id;
+    mir_body.locals = mir_locals;
+    mir_body.local_count = 4u;
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_MIR_PROJECTION_FIELD;
+    projection.definition = cm_hir_def_id_none();
+    memset(&place, 0, sizeof(place));
+    place.base = 2u;
+    place.type = u32_type;
+    place.projections = &projection;
+    place.projection_count = 1u;
+    place.span = parameters[1].tuple_bindings[0].span;
+    assert(cm_mir_validate_place(&hir, &mir_body, &place) == CM_MIR_OK);
+    place.type = generic_type;
+    assert(cm_mir_validate_place(&hir, &mir_body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    place.type = u32_type;
+    projection.field_index = 1u;
+    assert(cm_mir_validate_place(&hir, &mir_body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    projection.field_index = 0u;
+    place.base = 1u;
+    assert(cm_mir_validate_place(&hir, &mir_body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    place.base = 2u;
+    place.type = i32_reference_type;
+    stored_tuple = (CmHirType *)cm_hir_get_type(&hir, tuple_type);
+    assert(stored_tuple != NULL);
+    stored_tuple->data.tuple_type.elements[0] = i32_reference_type;
+    assert(cm_mir_validate_place(&hir, &mir_body, &place)
+        == CM_MIR_INVARIANT_VIOLATION);
+    cm_hir_context_destroy(&hir);
+}
+
 int main(void)
 {
     TestHir fixture;
@@ -4240,6 +4438,7 @@ int main(void)
     assert_let_model(&mir, &fixture, add_id);
     assert_place_aggregate_model(&mir, &fixture);
     assert_borrow_dereference_schema(&fixture);
+    test_generic_tuple_place_model();
 
     cm_mir_context_destroy(&mir);
     cm_hir_context_destroy(&fixture.context);

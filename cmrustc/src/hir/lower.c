@@ -8136,48 +8136,52 @@ static int cm_lower_newtype_parameter_pattern(CmLowerState *state,
 static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
     CmAstPatternId pattern_id, CmSpan item_span, CmAstItemId ast_item_id,
     uint32_t parameter_index, CmHirFunctionParameter *out_parameter,
-    CmHirLocal *out_locals)
+    CmHirLocal *out_locals, uint32_t *out_binding_count)
 {
     const CmAstPattern *pattern;
     const CmHirType *tuple_type;
+    uint32_t binding_count;
     uint32_t binding_index;
 
     pattern = cm_ast_get_pattern(state->ast, pattern_id);
     tuple_type = out_parameter == NULL ? NULL
         : cm_hir_get_type(state->hir, out_parameter->type);
-    if (pattern == NULL || out_parameter == NULL || out_locals == NULL) {
+    if (pattern == NULL || out_parameter == NULL || out_locals == NULL
+        || out_binding_count == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, item_span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "tuple parameter pattern has invalid storage");
         return 0;
     }
-    if (pattern->kind != CM_AST_PATTERN_TUPLE
-        || pattern->data.list.has_rest
-        || pattern->data.list.pattern_count
-            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
-        || pattern->data.list.patterns == NULL) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
-            cm_lower_span(state, pattern->span), ast_item_id,
-            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "function tuple parameter requires exactly two bindings");
-        return 0;
-    }
     if (tuple_type == NULL || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+        || tuple_type->data.tuple_type.element_count == 0u
         || tuple_type->data.tuple_type.element_count
-            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+            > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
         || tuple_type->data.tuple_type.elements == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
             cm_lower_span(state, pattern->span), ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "function tuple parameter requires a two-element tuple type");
+            "function tuple parameter requires a supported tuple type");
         return 0;
     }
+    binding_count = tuple_type->data.tuple_type.element_count;
+    if (pattern->kind != CM_AST_PATTERN_TUPLE
+        || pattern->data.list.has_rest
+        || pattern->data.list.pattern_count != binding_count
+        || pattern->data.list.patterns == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+            cm_lower_span(state, pattern->span), ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "function tuple parameter pattern must match its tuple arity");
+        return 0;
+    }
+    memset(out_parameter->tuple_bindings, 0,
+        sizeof(out_parameter->tuple_bindings));
     out_parameter->name = CM_INTERN_ID_NONE;
     out_parameter->span = cm_lower_span(state, pattern->span);
     out_parameter->binding_kind = CM_HIR_BINDING_TUPLE_PATTERN;
     out_parameter->binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
-    for (binding_index = 0u;
-         binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+    for (binding_index = 0u; binding_index < binding_count;
          ++binding_index) {
         const CmAstPattern *binding;
         CmSpan binding_span;
@@ -8211,7 +8215,8 @@ static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
         out_locals[binding_index].parameter_index = parameter_index;
         out_locals[binding_index].parameter_binding_index = binding_index;
     }
-    if (out_parameter->tuple_bindings[0].name
+    if (binding_count == CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        && out_parameter->tuple_bindings[0].name
             == out_parameter->tuple_bindings[1].name) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
             out_parameter->span, ast_item_id, CM_AST_TYPE_NONE,
@@ -8219,6 +8224,7 @@ static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
             "function tuple parameter bindings must have distinct names");
         return 0;
     }
+    *out_binding_count = binding_count;
     return 1;
 }
 
@@ -8823,7 +8829,21 @@ static int cm_lower_function_item(CmLowerState *state,
             }
             if (ast_pattern != NULL
                 && ast_pattern->kind == CM_AST_PATTERN_TUPLE) {
-                if (record->parent_kind != CM_LOWER_PARENT_NONE
+                int is_binary_free_function;
+                int is_unary_rust_call_impl_method;
+                uint32_t tuple_binding_count;
+
+                is_binary_free_function =
+                    record->parent_kind == CM_LOWER_PARENT_NONE;
+                is_unary_rust_call_impl_method =
+                    record->parent_kind == CM_LOWER_PARENT_IMPL
+                    && index == 1u && function->parameter_count == 2u
+                    && receiver != CM_HIR_RECEIVER_NONE
+                    && function->abi != CM_INTERN_ID_NONE
+                    && cm_lower_string_is(state, function->abi,
+                        "rust-call");
+                if ((!is_binary_free_function
+                        && !is_unary_rust_call_impl_method)
                     || record->is_foreign
                     || function->body == CM_AST_EXPR_NONE) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -8836,10 +8856,25 @@ static int cm_lower_function_item(CmLowerState *state,
                 if (!cm_lower_tuple_parameter_pattern(state,
                         function->parameters[index].pattern, span,
                         ast_item_id, index, &parameters[index],
-                        &locals[local_count])) {
+                        &locals[local_count], &tuple_binding_count)) {
                     break;
                 }
-                local_count += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                if ((is_binary_free_function
+                        && tuple_binding_count
+                            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT)
+                    || (is_unary_rust_call_impl_method
+                        && tuple_binding_count != 1u)) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
+                        cm_lower_span(state, ast_pattern->span), ast_item_id,
+                        CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                        is_binary_free_function
+                            ? "free-function tuple parameter requires "
+                              "exactly two bindings"
+                            : "rust-call impl method tuple parameter "
+                              "requires exactly one binding");
+                    break;
+                }
+                local_count += tuple_binding_count;
                 continue;
             }
             if (!cm_lower_pattern_binding(state,

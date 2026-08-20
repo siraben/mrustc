@@ -2231,7 +2231,9 @@ static int cm_hir_parameter_tuple_payload_valid(
     const CmHirContext *context, const CmHirFunctionParameter *parameter)
 {
     const CmHirType *tuple_type;
+    uint32_t binding_count;
     uint32_t index;
+    uint32_t other_index;
 
     if (parameter->name != CM_INTERN_ID_NONE
         || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
@@ -2240,13 +2242,14 @@ static int cm_hir_parameter_tuple_payload_valid(
     }
     tuple_type = cm_hir_get_type(context, parameter->type);
     if (tuple_type == NULL || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+        || tuple_type->data.tuple_type.element_count == 0u
         || tuple_type->data.tuple_type.element_count
-            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+            > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
         || tuple_type->data.tuple_type.elements == NULL) {
         return 0;
     }
-    for (index = 0u; index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
-         ++index) {
+    binding_count = tuple_type->data.tuple_type.element_count;
+    for (index = 0u; index < binding_count; ++index) {
         const CmHirTupleParameterBinding *binding;
 
         binding = &parameter->tuple_bindings[index];
@@ -2258,9 +2261,25 @@ static int cm_hir_parameter_tuple_payload_valid(
             || binding->span.end > parameter->span.end) {
             return 0;
         }
+        for (other_index = 0u; other_index < index; ++other_index) {
+            if (binding->name
+                == parameter->tuple_bindings[other_index].name) {
+                return 0;
+            }
+        }
     }
-    return parameter->tuple_bindings[0].name
-        != parameter->tuple_bindings[1].name;
+    for (; index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT; ++index) {
+        const CmHirTupleParameterBinding *binding;
+
+        binding = &parameter->tuple_bindings[index];
+        if (binding->name != CM_INTERN_ID_NONE
+            || binding->span.source != 0u
+            || binding->span.start != 0u
+            || binding->span.end != 0u) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int cm_hir_parameter_newtype_payload_valid(
@@ -2361,18 +2380,21 @@ static int cm_hir_function_body_matches_signature(
         }
         if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
             const CmHirType *tuple_type;
+            uint32_t binding_count;
             uint32_t binding_index;
 
             tuple_type = cm_hir_get_type(context, parameter->type);
             if (tuple_type == NULL
                 || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count == 0u
                 || tuple_type->data.tuple_type.element_count
-                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || tuple_type->data.tuple_type.elements == NULL) {
                 return 0;
             }
+            binding_count = tuple_type->data.tuple_type.element_count;
             for (binding_index = 0u;
-                 binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 binding_index < binding_count;
                  ++binding_index) {
                 const CmHirLocal *local;
                 const CmHirTupleParameterBinding *binding;
@@ -2425,6 +2447,39 @@ static int cm_hir_function_body_matches_signature(
     return local_index == body->local_count
         || body->locals[local_index].parameter_index
             == CM_HIR_PARAMETER_INDEX_NONE;
+}
+
+static int cm_hir_tuple_parameter_placement_valid(
+    const CmHirContext *context, const CmHirItem *item,
+    uint32_t parameter_index)
+{
+    const CmHirFunctionSignature *signature;
+    const CmHirFunctionParameter *parameter;
+    const CmHirType *tuple_type;
+    const CmHirItem *parent;
+
+    signature = &item->data.function_item.signature;
+    parameter = &signature->parameters[parameter_index];
+    tuple_type = cm_hir_get_type(context, parameter->type);
+    if (tuple_type == NULL || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND) {
+        return 0;
+    }
+    if (tuple_type->data.tuple_type.element_count == 2u) {
+        return cm_hir_def_id_is_none(item->parent_definition)
+            && item->data.function_item.body != CM_HIR_BODY_NONE
+            && signature->receiver == CM_HIR_RECEIVER_NONE;
+    }
+    if (tuple_type->data.tuple_type.element_count != 1u
+        || item->data.function_item.body == CM_HIR_BODY_NONE
+        || !cm_hir_intern_matches(context, signature->abi, "rust-call")
+        || signature->receiver == CM_HIR_RECEIVER_NONE
+        || signature->parameter_count != 2u
+        || parameter_index != 1u) {
+        return 0;
+    }
+    parent = cm_hir_bound_definition_item(context,
+        item->parent_definition);
+    return parent != NULL && parent->kind == CM_HIR_ITEM_IMPL;
 }
 
 static int cm_hir_receiver_shape_valid(const CmHirContext *context,
@@ -2575,9 +2630,8 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
                 == CM_HIR_BINDING_TUPLE_PATTERN) {
             binding_valid = cm_hir_parameter_tuple_payload_valid(context,
                     parameter)
-                && cm_hir_def_id_is_none(item->parent_definition)
-                && item->data.function_item.body != CM_HIR_BODY_NONE
-                && signature->receiver == CM_HIR_RECEIVER_NONE;
+                && cm_hir_tuple_parameter_placement_valid(context, item,
+                    index);
         } else if (parameter->binding_kind
                 == CM_HIR_BINDING_NEWTYPE_PATTERN) {
             binding_valid = cm_hir_parameter_newtype_payload_valid(context,

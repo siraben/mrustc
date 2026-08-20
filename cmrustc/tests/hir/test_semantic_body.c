@@ -663,12 +663,16 @@ static void test_tuple_parameter_definition_lockstep(void)
     CmHirBodyId body_id;
     CmHirItem item;
     CmHirItemId item_id;
+    CmHirItem *stored_item;
+    CmHirType *stored_tuple;
+    CmHirFunctionParameter *stored_parameter;
     CmHirExprId root;
     CmSemanticSession session;
     CmSemanticSessionOptions options;
     CmSemanticBodyResult result;
     CmInternId saved_name;
     CmSpan saved_span;
+    CmHirTupleParameterBinding saved_binding;
 
     fixture_init(&fixture);
     tuple_elements[0] = fixture.u32_type;
@@ -764,6 +768,29 @@ static void test_tuple_parameter_definition_lockstep(void)
     assert(result.status == CM_SEMANTIC_BODY_TYPECK_FAILURE
         && result.typeck_status == CM_TYPECK_TYPE_MISMATCH);
     stored_body->locals[1].type = fixture.u32_type;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+
+    stored_item = (CmHirItem *)cm_hir_get_item(&fixture.hir, item_id);
+    stored_tuple = (CmHirType *)cm_hir_get_type(&fixture.hir, tuple_type);
+    assert(stored_item != NULL && stored_tuple != NULL
+        && stored_item->data.function_item.signature.parameters != NULL);
+    stored_parameter = &stored_item->data.function_item.signature.parameters[0];
+    saved_binding = stored_parameter->tuple_bindings[1];
+    stored_tuple->data.tuple_type.element_count = 1u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    memset(&stored_parameter->tuple_bindings[1], 0,
+        sizeof(stored_parameter->tuple_bindings[1]));
+    stored_body->local_count = 1u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_OK);
+    stored_tuple->data.tuple_type.element_count = 0u;
+    result = cm_semantic_body_check_definition(&session, body_id);
+    assert(result.status == CM_SEMANTIC_BODY_INVALID);
+    stored_tuple->data.tuple_type.element_count = 2u;
+    stored_parameter->tuple_bindings[1] = saved_binding;
+    stored_body->local_count = 2u;
     result = cm_semantic_body_check_definition(&session, body_id);
     assert(result.status == CM_SEMANTIC_BODY_OK);
 

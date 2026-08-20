@@ -500,21 +500,18 @@ static int cm_mir_type_equal_inner(const CmHirContext *hir,
     if (left_type->kind == CM_HIR_TYPE_TUPLE_KIND) {
         uint32_t index;
 
-        if (left_type->data.tuple_type.element_count
-                != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        if (left_type->data.tuple_type.element_count == 0u
+            || left_type->data.tuple_type.element_count
+                > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
             || right_type->data.tuple_type.element_count
-                != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                != left_type->data.tuple_type.element_count
             || left_type->data.tuple_type.elements == NULL
             || right_type->data.tuple_type.elements == NULL) {
             return 0;
         }
         for (index = 0u;
-             index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT; ++index) {
-            if (!cm_mir_type_is_parameter_scalar(hir,
-                    left_type->data.tuple_type.elements[index])
-                || !cm_mir_type_is_parameter_scalar(hir,
-                    right_type->data.tuple_type.elements[index])
-                || !cm_mir_type_equal_inner(hir,
+             index < left_type->data.tuple_type.element_count; ++index) {
+            if (!cm_mir_type_equal_inner(hir,
                     left_type->data.tuple_type.elements[index],
                     right_type->data.tuple_type.elements[index],
                     depth + 1u)) {
@@ -554,6 +551,54 @@ static int cm_mir_type_equal(const CmHirContext *hir, CmHirTypeId left,
     return cm_mir_type_equal_inner(hir, left, right, 0u);
 }
 
+static int cm_mir_type_is_call_scalar_inner(const CmHirContext *hir,
+    CmHirTypeId id, size_t depth)
+{
+    const CmHirType *type;
+
+    if (depth >= CM_MIR_EXPRESSION_RECURSION_LIMIT) return 0;
+    id = cm_mir_monomorphic_self_type(hir, id, depth);
+    type = cm_hir_get_type(hir, id);
+    if (type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND) {
+        return type->data.integer_type.kind == CM_HIR_INT_U8
+            || type->data.integer_type.kind == CM_HIR_INT_U32
+            || type->data.integer_type.kind == CM_HIR_INT_USIZE;
+    }
+    return type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && type->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+        && cm_mir_type_is_call_scalar_inner(hir,
+            type->data.reference_type.pointee, depth + 1u);
+}
+
+static int cm_mir_type_is_tuple_element(const CmHirContext *hir,
+    CmHirTypeId id)
+{
+    const CmHirType *type;
+
+    if (cm_mir_type_is_parameter_scalar(hir, id)) return 1;
+    type = cm_hir_get_type(hir, id);
+    if (type != NULL && type->kind == CM_HIR_TYPE_PARAMETER_KIND) return 1;
+    return type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && type->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && (type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            || type->data.reference_type.mutability == CM_HIR_MUTABLE)
+        && cm_mir_type_is_call_scalar_inner(hir,
+            type->data.reference_type.pointee, 0u);
+}
+
+static int cm_mir_type_is_unary_tuple(const CmHirContext *hir,
+    CmHirTypeId id)
+{
+    const CmHirType *type;
+
+    type = cm_hir_get_type(hir, id);
+    return type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count == 1u
+        && type->data.tuple_type.elements != NULL;
+}
+
 static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
     unsigned int pointer_bits)
 {
@@ -563,15 +608,20 @@ static int cm_mir_type_supported(const CmHirContext *hir, CmHirTypeId id,
     id = cm_mir_monomorphic_self_type(hir, id, 0u);
     type = cm_hir_get_type(hir, id);
     if (type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND) {
-        if (type->data.tuple_type.element_count
-                != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        if (type->data.tuple_type.element_count == 0u
+            || type->data.tuple_type.element_count
+                > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
             || type->data.tuple_type.elements == NULL) {
             return 0;
         }
         for (index = 0u;
-             index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT; ++index) {
-            if (!cm_mir_type_is_parameter_scalar(hir,
-                    type->data.tuple_type.elements[index])
+             index < type->data.tuple_type.element_count; ++index) {
+            if ((type->data.tuple_type.element_count == 2u
+                    && !cm_mir_type_is_parameter_scalar(hir,
+                        type->data.tuple_type.elements[index]))
+                || (type->data.tuple_type.element_count == 1u
+                    && !cm_mir_type_is_tuple_element(hir,
+                        type->data.tuple_type.elements[index]))
                 || !cm_mir_type_supported(hir,
                     type->data.tuple_type.elements[index], pointer_bits)) {
                 return 0;
@@ -775,15 +825,17 @@ static int cm_mir_type_target_valid(const CmHirContext *hir,
                 depth + 1u);
     }
     if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
-        if (type->data.tuple_type.element_count
-                != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        if (type->data.tuple_type.element_count == 0u
+            || type->data.tuple_type.element_count
+                > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
             || type->data.tuple_type.elements == NULL) {
             return 0;
         }
         for (index = 0u;
-             index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT; ++index) {
-            if (!cm_mir_type_is_parameter_scalar(hir,
-                    type->data.tuple_type.elements[index])
+             index < type->data.tuple_type.element_count; ++index) {
+            if ((type->data.tuple_type.element_count == 2u
+                    && !cm_mir_type_is_parameter_scalar(hir,
+                        type->data.tuple_type.elements[index]))
                 || !cm_mir_type_target_valid(hir,
                     type->data.tuple_type.elements[index], pointer_bits,
                     depth + 1u)) {
@@ -875,20 +927,37 @@ static int cm_mir_place_valid(const CmHirContext *hir,
         }
         if (projection->kind != CM_MIR_PROJECTION_FIELD) return 0;
         if (type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND) {
+            const CmHirItem *function;
+            CmHirTypeId element_type;
+
             if (index != 0u
                 || !cm_hir_def_id_is_none(projection->definition)
+                || type->data.tuple_type.element_count == 0u
                 || type->data.tuple_type.element_count
-                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || type->data.tuple_type.elements == NULL
                 || projection->field_index
-                    >= CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
-                || !cm_mir_type_is_parameter_scalar(hir,
-                    type->data.tuple_type
-                        .elements[projection->field_index])) {
+                    >= type->data.tuple_type.element_count) {
                 return 0;
             }
-            current_type = type->data.tuple_type
-                .elements[projection->field_index];
+            function = body_owner->state != CM_HIR_DEFINITION_BOUND
+                ? NULL : cm_hir_get_item(hir, body_owner->entity.item_id);
+            if (function == NULL || function->kind != CM_HIR_ITEM_FUNCTION
+                || !cm_mir_instantiate_executable_type(hir, function,
+                    &body->instance,
+                    type->data.tuple_type.elements[projection->field_index],
+                    &element_type)
+                || (type->data.tuple_type.element_count == 2u
+                    && (element_type
+                        != type->data.tuple_type
+                            .elements[projection->field_index]
+                        || !cm_mir_type_is_parameter_scalar(hir,
+                            element_type)))
+                || (type->data.tuple_type.element_count == 1u
+                    && !cm_mir_type_is_tuple_element(hir, element_type))) {
+                return 0;
+            }
+            current_type = element_type;
             continue;
         }
         if (type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
@@ -1053,8 +1122,7 @@ static int cm_mir_instantiate_executable_type(const CmHirContext *hir,
                 && type->data.reference_type.mutability != CM_HIR_MUTABLE)
             || !cm_mir_instantiate_executable_type(hir, item, instance,
                 type->data.reference_type.pointee, &pointee)
-            || pointee == CM_HIR_TYPE_NONE
-            || !cm_mir_type_supported(hir, declared, 0u)) {
+            || pointee == CM_HIR_TYPE_NONE) {
             return 0;
         }
         *out_type = declared;
@@ -1073,13 +1141,21 @@ static int cm_mir_instantiate_executable_type(const CmHirContext *hir,
         return 1;
     }
     if (type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count != 0u
         && type->data.tuple_type.element_count
-            == CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+            <= CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
         && type->data.tuple_type.elements != NULL) {
         for (index = 0u;
-             index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT; ++index) {
-            if (!cm_mir_type_is_parameter_scalar(hir,
-                    type->data.tuple_type.elements[index])) {
+             index < type->data.tuple_type.element_count; ++index) {
+            CmHirTypeId element;
+
+            if (!cm_mir_instantiate_executable_type(hir, item, instance,
+                    type->data.tuple_type.elements[index], &element)
+                || (type->data.tuple_type.element_count == 2u
+                    && (element != type->data.tuple_type.elements[index]
+                        || !cm_mir_type_is_parameter_scalar(hir, element)))
+                || (type->data.tuple_type.element_count == 1u
+                    && !cm_mir_type_is_tuple_element(hir, element))) {
                 return 0;
             }
         }
@@ -1147,8 +1223,37 @@ static int cm_mir_instance_type_supported(const CmHirContext *hir,
     const CmHirItem *item, const CmMirInstance *instance,
     CmHirTypeId type_id, unsigned int pointer_bits)
 {
+    const CmHirType *type;
     CmHirTypeId field_type;
     CmHirTypeId instantiated_field;
+    uint32_t index;
+
+    type = cm_hir_get_type(hir, type_id);
+    if (type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count != 0u
+        && type->data.tuple_type.element_count
+            <= CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+        && type->data.tuple_type.elements != NULL) {
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_mir_instantiate_executable_type(hir, item, instance,
+                    type->data.tuple_type.elements[index],
+                    &instantiated_field)
+                || (type->data.tuple_type.element_count == 2u
+                    && (instantiated_field
+                        != type->data.tuple_type.elements[index]
+                        || !cm_mir_type_is_parameter_scalar(hir,
+                            instantiated_field)))
+                || (type->data.tuple_type.element_count == 1u
+                    && !cm_mir_type_is_tuple_element(hir,
+                        instantiated_field))
+                || !cm_mir_type_supported(hir, instantiated_field,
+                    pointer_bits)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
 
     if (cm_mir_applied_newtype(hir, type_id, &field_type) == NULL) {
         return cm_mir_type_supported(hir, type_id, pointer_bits);
@@ -1423,7 +1528,8 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
         if (parameter->binding_kind == CM_HIR_BINDING_NAMED) {
             const CmHirLocal *local;
 
-            if (hir_local_index >= source_body->local_count) return 0;
+            if (cm_mir_type_is_unary_tuple(hir, parameter->type)
+                || hir_local_index >= source_body->local_count) return 0;
             local = &source_body->locals[hir_local_index];
             if (local->parameter_index != parameter_index
                 || local->parameter_binding_index != 0u
@@ -1438,32 +1544,42 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
         }
         if (parameter->binding_kind == CM_HIR_BINDING_DISCARD) {
             if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
-                || parameter->name != CM_INTERN_ID_NONE) {
+                || parameter->name != CM_INTERN_ID_NONE
+                || cm_mir_type_is_unary_tuple(hir, parameter->type)) {
                 return 0;
             }
             continue;
         }
         if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
             const CmHirType *tuple_type;
+            uint32_t binding_count;
             uint32_t field_index;
 
             tuple_type = cm_hir_get_type(hir, parameter->type);
             if (parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
                 || tuple_type == NULL
                 || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count == 0u
                 || tuple_type->data.tuple_type.element_count
-                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || tuple_type->data.tuple_type.elements == NULL) {
                 return 0;
             }
+            binding_count = tuple_type->data.tuple_type.element_count;
             for (field_index = 0u;
-                 field_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 field_index < binding_count;
                  ++field_index) {
                 const CmHirLocal *local;
 
                 if (hir_local_index >= source_body->local_count
-                    || !cm_mir_type_is_parameter_scalar(hir,
-                        tuple_type->data.tuple_type.elements[field_index])) {
+                    || (binding_count == 2u
+                        && !cm_mir_type_is_parameter_scalar(hir,
+                            tuple_type->data.tuple_type
+                                .elements[field_index]))
+                    || (binding_count == 1u
+                        && !cm_mir_type_is_tuple_element(hir,
+                            tuple_type->data.tuple_type
+                                .elements[field_index]))) {
                     return 0;
                 }
                 local = &source_body->locals[hir_local_index];
@@ -1484,6 +1600,18 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
                 }
                 hir_local_index += 1u;
                 tuple_binding_count += 1u;
+            }
+            for (; field_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++field_index) {
+                const CmHirTupleParameterBinding *binding;
+
+                binding = &parameter->tuple_bindings[field_index];
+                if (binding->name != CM_INTERN_ID_NONE
+                    || binding->span.source != 0u
+                    || binding->span.start != 0u
+                    || binding->span.end != 0u) {
+                    return 0;
+                }
             }
             continue;
         }
@@ -1533,7 +1661,8 @@ static int cm_mir_parameter_layout(const CmHirContext *hir,
     return 1;
 }
 
-static int cm_mir_hir_local_id(const CmHirFunctionSignature *signature,
+static int cm_mir_hir_local_id(const CmHirContext *hir,
+    const CmHirFunctionSignature *signature,
     const CmHirBody *source_body, const CmMirParameterLayout *layout,
     uint32_t hir_local, CmMirLocalId *out_local)
 {
@@ -1541,7 +1670,8 @@ static int cm_mir_hir_local_id(const CmHirFunctionSignature *signature,
     uint32_t parameter_local;
     uint32_t tuple_binding;
 
-    if (signature == NULL || source_body == NULL || layout == NULL
+    if (hir == NULL || signature == NULL || source_body == NULL
+        || layout == NULL
         || out_local == NULL || hir_local >= source_body->local_count) {
         return 0;
     }
@@ -1580,14 +1710,27 @@ static int cm_mir_hir_local_id(const CmHirFunctionSignature *signature,
         if (parameter->binding_kind != CM_HIR_BINDING_TUPLE_PATTERN) {
             return 0;
         }
-        if (hir_local - parameter_local
-                < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT) {
-            *out_local = 1u + signature->parameter_count + tuple_binding
-                + hir_local - parameter_local;
-            return *out_local < layout->non_temporary_local_count;
+        {
+            const CmHirType *tuple_type;
+            uint32_t binding_count;
+
+            tuple_type = cm_hir_get_type(hir, parameter->type);
+            if (tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count == 0u
+                || tuple_type->data.tuple_type.element_count
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT) {
+                return 0;
+            }
+            binding_count = tuple_type->data.tuple_type.element_count;
+            if (hir_local - parameter_local < binding_count) {
+                *out_local = 1u + signature->parameter_count + tuple_binding
+                    + hir_local - parameter_local;
+                return *out_local < layout->non_temporary_local_count;
+            }
+            parameter_local += binding_count;
+            tuple_binding += binding_count;
         }
-        parameter_local += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
-        tuple_binding += CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
     }
     return 0;
 }
@@ -2423,7 +2566,8 @@ static int cm_mir_adjusted_receiver_recipe(const CmMirTreeMatch *match,
         || source_body == NULL || receiver->kind != CM_HIR_EXPR_LOCAL
         || receiver->data.local.local_index >= source_body->local_count
         || receiver->data.local.local_index >= match->visible_local_count
-        || !cm_mir_hir_local_id(&match->item->data.function_item.signature,
+        || !cm_mir_hir_local_id(match->hir,
+            &match->item->data.function_item.signature,
             source_body, &match->parameter_layout,
             receiver->data.local.local_index, &out_receiver->source_local)) {
         return 0;
@@ -2658,7 +2802,7 @@ static int cm_mir_tuple_parameter_prologue_matches(CmMirTreeMatch *match,
                 || !cm_mir_instantiate_executable_type(match->hir,
                     match->item, &match->body->instance, declared_field,
                     &field_type)
-                || !cm_mir_hir_local_id(signature, source_body,
+                || !cm_mir_hir_local_id(match->hir, signature, source_body,
                     &match->parameter_layout, hir_local_index,
                     &destination)) {
                 return 0;
@@ -2688,24 +2832,27 @@ static int cm_mir_tuple_parameter_prologue_matches(CmMirTreeMatch *match,
         }
         {
             const CmHirType *tuple_type;
+            uint32_t binding_count;
             uint32_t field_index;
 
             tuple_type = cm_hir_get_type(match->hir, parameter->type);
             if (tuple_type == NULL
                 || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count == 0u
                 || tuple_type->data.tuple_type.element_count
-                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || tuple_type->data.tuple_type.elements == NULL) {
                 return 0;
             }
+            binding_count = tuple_type->data.tuple_type.element_count;
             for (field_index = 0u;
-                 field_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 field_index < binding_count;
                  ++field_index) {
                 CmMirPlaceProjection projection;
                 CmMirOperand operand;
                 CmMirLocalId destination;
 
-                if (!cm_mir_hir_local_id(signature, source_body,
+                if (!cm_mir_hir_local_id(match->hir, signature, source_body,
                         &match->parameter_layout, hir_local_index,
                         &destination)) {
                     return 0;
@@ -2715,9 +2862,24 @@ static int cm_mir_tuple_parameter_prologue_matches(CmMirTreeMatch *match,
                 projection.definition = cm_hir_def_id_none();
                 projection.field_index = field_index;
                 memset(&operand, 0, sizeof(operand));
-                operand.kind = CM_MIR_OPERAND_COPY_PLACE;
-                operand.type = tuple_type->data.tuple_type
-                    .elements[field_index];
+                operand.kind = binding_count == 1u
+                    ? CM_MIR_OPERAND_MOVE_PLACE
+                    : CM_MIR_OPERAND_COPY_PLACE;
+                if (!cm_mir_instantiate_executable_type(match->hir,
+                        match->item, &match->body->instance,
+                        tuple_type->data.tuple_type.elements[field_index],
+                        &operand.type)
+                    || (binding_count == 2u
+                        && (operand.type
+                            != tuple_type->data.tuple_type
+                                .elements[field_index]
+                            || !cm_mir_type_is_parameter_scalar(match->hir,
+                                operand.type)))
+                    || (binding_count == 1u
+                        && !cm_mir_type_is_tuple_element(match->hir,
+                            operand.type))) {
+                    return 0;
+                }
                 operand.data.place.base = parameter_index + 1u;
                 operand.data.place.type = operand.type;
                 operand.data.place.projections = &projection;
@@ -2793,7 +2955,7 @@ static int cm_mir_expression_matches(CmMirTreeMatch *match,
         if (expression->data.local.local_index == UINT32_MAX
             || expression->data.local.local_index
                 >= match->visible_local_count
-            || !cm_mir_hir_local_id(
+            || !cm_mir_hir_local_id(match->hir,
                 &match->item->data.function_item.signature,
                 cm_hir_get_body(match->hir, match->body->source_body),
                 &match->parameter_layout,
@@ -3685,7 +3847,7 @@ static int cm_mir_root_shape_valid(const CmMirContext *context,
             CmMirLocalId destination;
 
             statement = &root->data.block.statements[statement_index];
-            if (!cm_mir_hir_local_id(
+            if (!cm_mir_hir_local_id(hir,
                     &item->data.function_item.signature, source_body,
                     parameter_layout,
                     parameter_layout->hir_parameter_local_count
@@ -3793,6 +3955,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         || source_body == NULL
         || source_body->parameter_count != parameter_count
         || source_body->local_count == UINT32_MAX
+        || cm_mir_type_is_unary_tuple(hir, signature->return_type)
         || !cm_mir_parameter_layout(hir, item, source_body,
             semantic_results == NULL,
             &parameter_layout)
@@ -3852,7 +4015,7 @@ static int cm_mir_exact_body_shape_valid_impl(const CmMirContext *context,
         CmMirLocalId mapped_local;
         CmMirLocalKind expected_kind;
 
-        if (!cm_mir_hir_local_id(signature, source_body,
+        if (!cm_mir_hir_local_id(hir, signature, source_body,
                 &parameter_layout, index, &mapped_local)
             || (index >= parameter_layout.hir_parameter_local_count
                 && (source_body->locals[index].parameter_index

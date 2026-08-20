@@ -3475,20 +3475,23 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
         }
         if (parameter->binding_kind == CM_HIR_BINDING_TUPLE_PATTERN) {
             const CmHirType *tuple_type;
+            uint32_t binding_count;
             uint32_t binding_index;
 
             tuple_type = cm_hir_get_type(constraints->hir,
                 parameter->type);
             if (tuple_type == NULL
                 || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count == 0u
                 || tuple_type->data.tuple_type.element_count
-                    != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
+                    > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT
                 || tuple_type->data.tuple_type.elements == NULL) {
                 status = CM_SEMANTIC_BODY_INVALID;
                 goto finish;
             }
+            binding_count = tuple_type->data.tuple_type.element_count;
             for (binding_index = 0u;
-                 binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 binding_index < binding_count;
                  ++binding_index) {
                 const CmHirLocal *local;
                 const CmHirTupleParameterBinding *binding;
@@ -3514,6 +3517,19 @@ static CmSemanticBodyStatus cm_semantic_body_constrain(
                     tuple_type->data.tuple_type.elements[binding_index]);
                 if (status != CM_SEMANTIC_BODY_OK) goto finish;
                 initial_local_count += 1u;
+            }
+            for (; binding_index < CM_HIR_TUPLE_PARAMETER_BINDING_COUNT;
+                 ++binding_index) {
+                const CmHirTupleParameterBinding *binding;
+
+                binding = &parameter->tuple_bindings[binding_index];
+                if (binding->name != CM_INTERN_ID_NONE
+                    || binding->span.source != 0u
+                    || binding->span.start != 0u
+                    || binding->span.end != 0u) {
+                    status = CM_SEMANTIC_BODY_INVALID;
+                    goto finish;
+                }
             }
             continue;
         }

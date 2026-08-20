@@ -7998,6 +7998,171 @@ static void test_unsupported_method_forms_are_errors(void)
     }
 }
 
+static void test_rust_call_impl_unary_tuple_parameters(void)
+{
+    static const char *const positives[] = {
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (&u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, (value,): (&u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&mut self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&mut self, (value,): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(self, (value,): (u8,)) {}"
+         "}")
+    };
+    static const CmHirReceiverKind receiver_kinds[] = {
+        CM_HIR_RECEIVER_REF_SHARED,
+        CM_HIR_RECEIVER_REF_MUTABLE,
+        CM_HIR_RECEIVER_VALUE
+    };
+    static const char *const negatives[] = {
+        "extern \"rust-call\" fn free((value,): (u8,)) {}",
+        ("struct Z; trait T { fn call(&self, args: (u8,)); }"
+         "impl T for Z { fn call(&self, (value,): (u8,)) {} }"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call((value,): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, prefix: u8, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, prefix: u8, "
+         " (value,): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (u8, u8));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, "
+         " (left, right): (u8, u8)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, (value, ..): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: ((u8,),));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, "
+         " ((value,),): ((u8,),)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, (ref value,): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, (mut value,): (u8,)) {}"
+         "}"),
+        ("struct Z; trait T {"
+         " extern \"rust-call\" fn call(&self, args: (u8,));"
+         "} impl T for Z {"
+         " extern \"rust-call\" fn call(&self, (_,): (u8,)) {}"
+         "}")
+    };
+    size_t index;
+
+    for (index = 0u; index < sizeof(positives) / sizeof(positives[0]);
+         ++index) {
+        const CmHirItem *impl_item;
+        const CmHirItem *method;
+        const CmHirFunctionSignature *signature;
+        const CmHirBody *body;
+        const CmHirType *tuple_type;
+        const CmHirType *leaf_type;
+        CmHirContext context;
+        CmHirLowerResult result;
+
+        result = lower_source(positives[index], &context, NULL);
+        impl_item = find_impl(&context);
+        method = impl_item == NULL ? NULL : find_child(&context,
+            impl_item->definition, "call");
+        signature = method == NULL ? NULL
+            : &method->data.function_item.signature;
+        body = method == NULL ? NULL
+            : cm_hir_get_body(&context, method->data.function_item.body);
+        tuple_type = signature == NULL
+                || signature->parameter_count != 2u
+            ? NULL : cm_hir_get_type(&context,
+                signature->parameters[1].type);
+        leaf_type = tuple_type == NULL
+                || tuple_type->kind != CM_HIR_TYPE_TUPLE_KIND
+                || tuple_type->data.tuple_type.element_count != 1u
+                || tuple_type->data.tuple_type.elements == NULL
+            ? NULL : cm_hir_get_type(&context,
+                tuple_type->data.tuple_type.elements[0]);
+        if (result.error_count != 0u || method == NULL) {
+            fprintf(stderr,
+                "rust-call unary tuple positive %lu failed: count=%lu "
+                "kind=%s message=%s\n",
+                (unsigned long)index, (unsigned long)result.error_count,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 0u && method != NULL
+            && signature->receiver == receiver_kinds[index]
+            && hir_string_is(&context, signature->abi, "rust-call")
+            && signature->parameter_count == 2u
+            && signature->parameters[0].binding_kind
+                == CM_HIR_BINDING_NAMED
+            && signature->parameters[1].binding_kind
+                == CM_HIR_BINDING_TUPLE_PATTERN
+            && signature->parameters[1].binding_mode
+                == CM_HIR_PARAMETER_BINDING_MOVE
+            && signature->parameters[1].name == CM_INTERN_ID_NONE
+            && hir_string_is(&context,
+                signature->parameters[1].tuple_bindings[0].name, "value")
+            && signature->parameters[1].tuple_bindings[1].name
+                == CM_INTERN_ID_NONE
+            && signature->parameters[1].tuple_bindings[1].span.source == 0u
+            && signature->parameters[1].tuple_bindings[1].span.start == 0u
+            && signature->parameters[1].tuple_bindings[1].span.end == 0u
+            && tuple_type != NULL
+            && tuple_type->kind == CM_HIR_TYPE_TUPLE_KIND
+            && tuple_type->data.tuple_type.element_count == 1u
+            && tuple_type->data.tuple_type.elements != NULL
+            && leaf_type != NULL
+            && (index != 0u
+                || leaf_type->kind == CM_HIR_TYPE_REFERENCE_KIND)
+            && body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+            && body->parameter_count == 2u && body->local_count == 2u
+            && body->locals != NULL
+            && body->locals[0].parameter_index == 0u
+            && body->locals[0].parameter_binding_index == 0u
+            && body->locals[1].parameter_index == 1u
+            && body->locals[1].parameter_binding_index == 0u
+            && body->locals[1].name
+                == signature->parameters[1].tuple_bindings[0].name
+            && body->locals[1].type
+                == tuple_type->data.tuple_type.elements[0]
+            && body->locals[1].mutability == CM_HIR_IMMUTABLE);
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u; index < sizeof(negatives) / sizeof(negatives[0]);
+         ++index) {
+        CmHirContext context;
+        CmHirLowerResult result;
+
+        result = lower_source(negatives[index], &context, NULL);
+        assert(result.error_count == 1u
+            && (result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
+                || result.first_error.kind
+                    == CM_HIR_LOWER_UNSUPPORTED_TYPE));
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_typed_parameter_binding_modes(void)
 {
     static const char source[] =
@@ -9488,6 +9653,7 @@ int main(void)
     test_newtype_parameter_forged_ast();
     test_typed_parameter_patterns_remain_bounded();
     test_unsupported_method_forms_are_errors();
+    test_rust_call_impl_unary_tuple_parameters();
     test_cfg_sensitive_trait_impl_members();
     test_cfg_active_tree_drives_lowering();
     test_effective_attribute_is_not_discarded();

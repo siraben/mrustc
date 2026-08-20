@@ -526,7 +526,7 @@ typedef enum CmHirBindingKind {
     CM_HIR_BINDING_NAMED = 0,
     /* Positional ABI slot with no name-resolution binding, e.g. `_`. */
     CM_HIR_BINDING_DISCARD,
-    /* One ABI tuple slot destructured into two lexical move bindings. */
+    /* One ABI tuple slot destructured into one or two lexical move bindings. */
     CM_HIR_BINDING_TUPLE_PATTERN,
     /* One applied tuple-newtype ABI slot destructured into one move binding. */
     CM_HIR_BINDING_NEWTYPE_PATTERN
@@ -541,6 +541,7 @@ typedef enum CmHirParameterBindingMode {
     CM_HIR_PARAMETER_BINDING_DEREF_SHARED
 } CmHirParameterBindingMode;
 
+/* Inline capacity; active arity comes from the parameter's tuple type. */
 #define CM_HIR_TUPLE_PARAMETER_BINDING_COUNT UINT32_C(2)
 
 typedef struct CmHirTupleParameterBinding {
