@@ -7564,6 +7564,141 @@ static void test_argument_impl_trait_method_parity(void)
 
 }
 
+static void check_impl_elided_lifetime_alias(const CmHirContext *context,
+    int has_gat_output)
+{
+    const CmHirItem *trait_item;
+    const CmHirItem *impl_item;
+    const CmHirItem *trait_method;
+    const CmHirItem *impl_method;
+    const CmHirType *parameter;
+    const CmHirType *output;
+    const CmHirRegion *output_region;
+
+    trait_item = find_item(context, has_gat_output ? "Pattern" : "Input");
+    impl_item = find_impl(context);
+    trait_method = trait_item == NULL ? NULL
+        : find_child(context, trait_item->definition,
+            has_gat_output ? "into_searcher" : "inspect");
+    impl_method = impl_item == NULL ? NULL
+        : find_child(context, impl_item->definition,
+            has_gat_output ? "into_searcher" : "inspect");
+    parameter = impl_method == NULL
+            || impl_method->data.function_item.signature.parameter_count != 2u
+            || impl_method->data.function_item.signature.parameters == NULL
+        ? NULL : cm_hir_get_type(context,
+            impl_method->data.function_item.signature.parameters[1].type);
+    output = impl_method == NULL ? NULL : cm_hir_get_type(context,
+        impl_method->data.function_item.signature.return_type);
+    output_region = output == NULL || !has_gat_output
+            || output->kind != CM_HIR_TYPE_PROJECTION_KIND
+            || output->data.projection_type.associated_type.argument_count
+                != 1u
+            || output->data.projection_type.associated_type.arguments == NULL
+            || output->data.projection_type.associated_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_LIFETIME
+        ? NULL : &output->data.projection_type.associated_type.arguments[0]
+            .data.lifetime;
+    assert(trait_method != NULL && impl_method != NULL
+        && trait_method->generic_parameter_count == 0u
+        && impl_method->generic_parameter_count == 0u
+        && cm_hir_def_id_equal(
+            impl_method->data.function_item.trait_item_definition,
+            trait_method->definition)
+        && parameter != NULL && parameter->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && parameter->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && parameter->data.reference_type.region.data.inference_variable != 0u
+        && (!has_gat_output
+            || (output_region != NULL
+                && output_region->kind == CM_HIR_REGION_INFER
+                && output_region->data.inference_variable
+                    == parameter->data.reference_type.region
+                        .data.inference_variable)));
+}
+
+static void test_impl_elided_lifetime_alias(void)
+{
+    static const char gat_source[] =
+        "struct Value;"
+        "trait Pattern { type Searcher<'a>;"
+        " fn into_searcher(self, haystack: &Value) -> Self::Searcher<'_>; }"
+        "impl Pattern for Value { type Searcher<'a> = &'a Value;"
+        " fn into_searcher<'a>(self, haystack: &'a Value)"
+        " -> Self::Searcher<'a> {} }";
+    static const char input_source[] =
+        "trait Input { fn inspect(self, value: &u8) -> bool; }"
+        "impl Input for u8 {"
+        " fn inspect<'a>(self, value: &'a u8) -> bool {} }";
+    static const char *const rejected[] = {
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 { fn inspect<'a>(self, value: &u8) {} }"),
+        ("trait Input { fn inspect(self, left: &u8, right: &u8); }"
+            "impl Input for u8 { fn inspect<'a>(self, left: &'a u8,"
+            " right: &'a u8) {} }"),
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 {"
+            " fn inspect<'a: 'static>(self, value: &'a u8) {} }"),
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 { fn inspect<'a>(self, value: &'a u8)"
+            " where 'a: 'static {} }"),
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 {"
+            " fn inspect<'a>(self, value: &'static u8) {} }"),
+        ("trait Input<T> { fn inspect(self, value: &u8); }"
+            "struct Value; impl<T> Input<T> for Value {"
+            " fn inspect<'a>(self, value: &'a u8) {} }"),
+        ("struct Value; impl Input<u8> for Value {"
+            " fn inspect<'a>(self, value: &'a u8) {} }"
+            "trait Input<T> { fn inspect(self, value: &u8); }"),
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 {"
+            " fn inspect<'static>(self, value: &'static u8) {} }"),
+        ("trait Input { fn inspect(self, value: &u8); }"
+            "impl Input for u8 { fn inspect<'_>(self, value: &'_ u8) {} }")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    size_t index;
+
+    result = lower_source(gat_source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "GAT lifetime alias lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    check_impl_elided_lifetime_alias(&context, 1);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(gat_source, &context);
+    assert(result.error_count == 0u);
+    check_impl_elided_lifetime_alias(&context, 1);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(input_source, &context, NULL);
+    assert(result.error_count == 0u);
+    check_impl_elided_lifetime_alias(&context, 0);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_source(rejected[index], &context, NULL);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+            || strstr(result.first_error.message, "generic arity differs")
+                == NULL) {
+            fprintf(stderr, "lifetime alias rejection mismatch: %s: %s\n",
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message, "generic arity differs")
+                != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_argument_impl_trait_foreign_rejected(void)
 {
     static const char source[] = "extern \"C\" { fn consume(value: impl Send); } trait Send {}";
@@ -9572,6 +9707,7 @@ static void test_conditionally_const_generic_parameter_bound(void)
 int main(void)
 {
     test_argument_impl_trait_method_parity();
+    test_impl_elided_lifetime_alias();
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
