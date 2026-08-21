@@ -8229,6 +8229,19 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* The never type is a supported monomorphic self. */
+    result = lower_graph_source(
+        "trait Fill { fn fill(&mut self, value: u8); }"
+        "impl Fill for ! { fn fill(&mut self, value: u8) {} }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "never self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)

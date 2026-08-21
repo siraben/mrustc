@@ -19484,6 +19484,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         if (type->kind == CM_HIR_TYPE_BOOL_KIND
             || type->kind == CM_HIR_TYPE_CHAR_KIND
             || type->kind == CM_HIR_TYPE_STR_KIND
+            || type->kind == CM_HIR_TYPE_NEVER_KIND
             || type->kind == CM_HIR_TYPE_INTEGER_KIND
             || type->kind == CM_HIR_TYPE_FLOAT_KIND) {
             return CM_LOWER_IMPL_SELF_MONOMORPHIC;
@@ -19552,7 +19553,8 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
     }
     if (left->kind == CM_HIR_TYPE_BOOL_KIND
         || left->kind == CM_HIR_TYPE_CHAR_KIND
-        || left->kind == CM_HIR_TYPE_STR_KIND) {
+        || left->kind == CM_HIR_TYPE_STR_KIND
+        || left->kind == CM_HIR_TYPE_NEVER_KIND) {
         return 1;
     }
     if (left->kind == CM_HIR_TYPE_INTEGER_KIND) {
