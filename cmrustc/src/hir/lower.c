@@ -19626,6 +19626,16 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
                                 pointee->data.array_type.length.data
                                     .parameter,
                                 CM_HIR_GENERIC_CONST)));
+            } else {
+                /*
+                 * Assertion helpers wrap referenced parameters in local
+                 * types (`&Wrapper<&E>`).
+                 */
+                CmHirDefId pointee_definition;
+
+                pointee_supported = cm_lower_impl_self_ordered_generic_adt(
+                    state, impl_item, pointee, &pointee_definition)
+                    == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT;
             }
             if (pointee_supported) {
                 return type->kind == CM_HIR_TYPE_RAW_POINTER_KIND

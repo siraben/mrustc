@@ -8072,7 +8072,7 @@ static void test_concrete_reference_impl_self_class(void)
             "duplicate exact impl candidate") != NULL);
     cm_hir_context_destroy(&context);
 
-    /* A type-parameterized ADT pointee stays outside the subset. */
+    /* A type-parameterized ADT pointee is an ordered generic blanket. */
     result = lower_graph_source(
         "struct Wrap5<T> { value: T }"
         "trait Neg { type Output; fn neg(self) -> Self::Output; }"
@@ -8081,10 +8081,12 @@ static void test_concrete_reference_impl_self_class(void)
         " fn neg(self) -> Wrap5<T> { Wrap5 { value: *self.value } }"
         "}",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "wrapper pointee blanket failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* A non-concrete pointee (projection) stays outside the subset. */
@@ -8662,6 +8664,40 @@ static void test_concrete_reference_impl_self_class(void)
             result.first_error.message);
     }
     assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Blanket references admit ordered generic wrapper pointees. */
+    result = lower_graph_source(
+        "trait Cap3<E, M> { fn cap3(&self, to: &M); }"
+        "struct Wrap9<E> { v: E }"
+        "struct Mode3;"
+        "impl<E> Cap3<E, Mode3> for &Wrap9<&E> {"
+        " fn cap3(&self, to: &Mode3) {}"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "wrapper reference blanket failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Cap3<E, M> { fn cap3(&self, to: &M); }"
+        "struct WrapA<E> { v: E }"
+        "struct Mode3;"
+        "impl<E> Cap3<E, Mode3> for &WrapA<&E> {"
+        " fn cap3(&self, to: &Mode3) {}"
+        "}"
+        "impl<F> Cap3<F, Mode3> for &WrapA<&F> {"
+        " fn cap3(&self, to: &Mode3) {}"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
     cm_hir_context_destroy(&context);
 }
 
