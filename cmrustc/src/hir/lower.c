@@ -19018,6 +19018,26 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
         return cm_lower_impl_self_concrete_equal(hir, left_element,
             right_element, depth + 1u);
     }
+    case CM_HIR_TYPE_TUPLE_KIND: {
+        if (left->data.tuple_type.element_count
+            != right->data.tuple_type.element_count) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            const CmHirType *left_element = cm_hir_get_type(hir,
+                left->data.tuple_type.elements[index]);
+            const CmHirType *right_element = cm_hir_get_type(hir,
+                right->data.tuple_type.elements[index]);
+
+            if (left_element == NULL || right_element == NULL) return 0;
+            if (!cm_lower_impl_self_concrete_equal(hir, left_element,
+                    right_element, depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
     case CM_HIR_TYPE_REFERENCE_KIND: {
         const CmHirType *left_pointee;
         const CmHirType *right_pointee;
@@ -19752,6 +19772,26 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             }
             return CM_LOWER_IMPL_SELF_MONOMORPHIC;
         }
+        /*
+         * Core indexes byte strings through tuple selves
+         * (`impl SliceIndex<ByteStr> for (Bound<usize>, Bound<usize>)`);
+         * every element must stay within the concrete subset.
+         */
+        if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
+            uint32_t element_index;
+
+            for (element_index = 0u;
+                 element_index < type->data.tuple_type.element_count;
+                 ++element_index) {
+                if (!cm_lower_impl_self_concrete_supported(state,
+                        cm_hir_get_type(state->hir,
+                            type->data.tuple_type.elements[element_index]),
+                        0u)) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            }
+            return CM_LOWER_IMPL_SELF_MONOMORPHIC;
+        }
         if (type->kind != CM_HIR_TYPE_ADT_KIND
             || type->data.named_type.definition.crate_id
                 != state->result.crate_id) {
@@ -19870,7 +19910,8 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
         return left->data.float_type.kind == right->data.float_type.kind;
     }
     if (left->kind == CM_HIR_TYPE_ADT_KIND
-        || left->kind == CM_HIR_TYPE_SLICE_KIND) {
+        || left->kind == CM_HIR_TYPE_SLICE_KIND
+        || left->kind == CM_HIR_TYPE_TUPLE_KIND) {
         return cm_lower_impl_self_concrete_equal(hir, left, right, 0u);
     }
     if (left->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {

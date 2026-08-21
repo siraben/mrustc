@@ -4275,7 +4275,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
             "trait T { type A; } "
             "impl T for AliasOne { type A = u8; } "
             "impl T for AliasTwo { type A = u16; }",
-        "trait T { type A; } impl T for (u8, u16) { type A = u8; }",
         "unsafe trait T { type A; } impl T for u8 { type A = u8; }",
         "trait T { type A; } unsafe impl T for u8 { type A = u8; }"
     };
@@ -4291,7 +4290,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         CM_HIR_LOWER_DUPLICATE_NAME,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
@@ -4307,7 +4305,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         "duplicate associated definition",
         "duplicate exact impl candidate",
         "duplicate exact impl candidate",
-        "full ordered generic local ADT subset",
         "impl safety does not match",
         "impl safety does not match"
     };
@@ -8753,6 +8750,39 @@ static void test_concrete_reference_impl_self_class(void)
             result.first_error.message);
     }
     assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Tuples of concrete local ADTs are monomorphic selves. */
+    result = lower_graph_source(
+        "trait Index4<Out> { fn index4(&self) -> Out; }"
+        "struct Bound8 { v: u8 }"
+        "struct Bytes8(pub [u8]);"
+        "impl Index4<Bytes8> for (Bound8, Bound8) {"
+        " fn index4(&self) -> Bytes8 { Bytes8([]) }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "concrete tuple self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Index4<Out> { fn index4(&self) -> Out; }"
+        "struct Bound9 { v: u8 }"
+        "impl Index4<u8> for (Bound9, Bound9) {"
+        " fn index4(&self) -> u8 { 0 }"
+        "}"
+        "impl Index4<u8> for (Bound9, Bound9) {"
+        " fn index4(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
     cm_hir_context_destroy(&context);
 }
 
