@@ -19255,8 +19255,6 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
     uint32_t index;
 
     if (type->kind != CM_HIR_TYPE_ADT_KIND
-        || type->data.named_type.argument_count
-            > impl_item->generic_parameter_count
         || type->data.named_type.arguments == NULL
         || type->data.named_type.definition.crate_id
             != state->result.crate_id) {
@@ -19288,32 +19286,46 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
         case CM_HIR_GENERIC_TYPE:
             argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
                 ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
-            if (argument_type == NULL
-                || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
-                || !cm_lower_impl_owned_parameter(state->hir, impl_item,
-                    argument_type->data.parameter_type.parameter,
-                    CM_HIR_GENERIC_TYPE)) {
+            if (argument_type == NULL) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
-            /* Each consumed parameter binds exactly one ADT argument. */
-            for (uint32_t prior_index = 0u; prior_index < index;
-                 ++prior_index) {
-                const CmHirGenericArg *prior_argument;
-                const CmHirType *prior_type;
-
-                prior_argument
-                    = &type->data.named_type.arguments[prior_index];
-                if (prior_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
-                    continue;
-                }
-                prior_type = cm_hir_get_type(state->hir,
-                    prior_argument->data.type);
-                if (prior_type != NULL
-                    && prior_type->kind == CM_HIR_TYPE_PARAMETER_KIND
-                    && prior_type->data.parameter_type.parameter
-                        == argument_type->data.parameter_type.parameter) {
+            if (argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+                if (!cm_lower_impl_owned_parameter(state->hir, impl_item,
+                    argument_type->data.parameter_type.parameter,
+                    CM_HIR_GENERIC_TYPE)) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
+                /* Each consumed parameter binds exactly one argument. */
+                for (uint32_t prior_index = 0u; prior_index < index;
+                     ++prior_index) {
+                    const CmHirGenericArg *prior_argument;
+                    const CmHirType *prior_type;
+
+                    prior_argument
+                        = &type->data.named_type.arguments[prior_index];
+                    if (prior_argument->kind
+                        != CM_HIR_GENERIC_ARG_TYPE) {
+                        continue;
+                    }
+                    prior_type = cm_hir_get_type(state->hir,
+                        prior_argument->data.type);
+                    if (prior_type != NULL
+                        && prior_type->kind
+                            == CM_HIR_TYPE_PARAMETER_KIND
+                        && prior_type->data.parameter_type.parameter
+                            == argument_type->data.parameter_type
+                                .parameter) {
+                        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                    }
+                }
+            } else if (!cm_lower_impl_self_concrete_supported(state,
+                    argument_type, 0u)) {
+                /*
+                 * Residual-style impls pin one argument to a concrete
+                 * local type (`ControlFlow<B, Infallible>`); anything
+                 * outside the concrete subset stays rejected.
+                 */
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
             break;
         case CM_HIR_GENERIC_CONST:

@@ -4986,14 +4986,8 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         "struct Inner<T>; struct Wrapper<T>; "
             "trait Trait { type Assoc; } "
             "impl<T> Trait for Wrapper<Inner<T>> { type Assoc = T; }",
-        "struct Pair<T, U>; trait Trait { type Assoc; } "
-            "impl<T> Trait for Pair<T, u8> { type Assoc = T; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<T, U> Trait for Wrapper<T> { type Assoc = T; }",
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<'a> Trait for Wrapper<u8> { type Assoc = u8; }",
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<const N: usize> Trait for Wrapper<u8> { type Assoc = u8; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<T> Trait for Wrapper<T> { type Assoc = T; } "
             "impl<U> Trait for Wrapper<U> { type Assoc = U; }",
@@ -5006,16 +5000,10 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
     static const char *const rejected_messages[] = {
-        "full ordered generic local ADT subset",
-        "full ordered generic local ADT subset",
-        "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
@@ -5060,6 +5048,45 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         &context, NULL);
     if (result.error_count != 0u) {
         fprintf(stderr, "coercion self subset failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Pinned concrete arguments mix with owned parameters; stray region
+     * and const parameters are outside the bounded constraint model but
+     * do not affect any class key. */
+    result = lower_source(
+        "struct Pair3<T, U>; trait Trait { type Assoc; } "
+        "impl<T> Trait for Pair3<T, u8> { type Assoc = T; }",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "pinned scalar argument failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "struct Wrapper3<T>; trait Trait { type Assoc; } "
+        "impl<'a> Trait for Wrapper3<u8> { type Assoc = u8; }",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "region parameter impl failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(
+        "struct Wrapper4<T>; trait Trait { type Assoc; } "
+        "impl<const N: usize> Trait for Wrapper4<u8> { type Assoc = u8; }",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "const parameter impl failed: %s: %s\n",
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }
@@ -8343,6 +8370,33 @@ static void test_concrete_reference_impl_self_class(void)
         && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
         && strstr(result.first_error.message,
             "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* Residual-style selves pin one argument to a concrete local type. */
+    result = lower_graph_source(
+        "trait Res4<X> { type Try2; }"
+        "struct Flow5<A, B> { a: A, b: B }"
+        "struct Always5;"
+        "impl<B, C> Res4<C> for Flow5<B, Always5> { type Try2 = u8; }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "pinned concrete argument failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Res4<X> { type Try2; }"
+        "struct Flow6<A, B> { a: A, b: B }"
+        "struct Wrap6<T> { v: T }"
+        "impl<B, C> Res4<C> for Flow6<B, Wrap6<B>> { type Try2 = u8; }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
     cm_hir_context_destroy(&context);
 }
 
