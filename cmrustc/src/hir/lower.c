@@ -19368,6 +19368,40 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                         CM_HIR_GENERIC_TYPE)) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
+            } else if (argument_type->kind == CM_HIR_TYPE_ARRAY_KIND) {
+                /*
+                 * Iterator-state impls wrap arrays of wrappers
+                 * (`PolymorphicIter<[MaybeUninit<T>; N]>`); the element
+                 * must root at one of the impl's own parameters and the
+                 * length must be a literal or the impl's own const.
+                 */
+                const CmHirType *element = cm_hir_get_type(state->hir,
+                    argument_type->data.array_type.element);
+                int element_supported = 0;
+
+                if (element != NULL
+                    && element->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+                    element_supported = cm_lower_impl_owned_parameter(
+                        state->hir, impl_item,
+                        element->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE);
+                } else if (element != NULL) {
+                    element_supported = cm_lower_impl_self_ordered_generic_adt(
+                        state, impl_item, element, out_adt_definition)
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT;
+                }
+                if (!element_supported
+                    || (argument_type->data.array_type.length.kind
+                        != CM_HIR_CONST_VALUE
+                        && (argument_type->data.array_type.length.kind
+                            != CM_HIR_CONST_PARAMETER
+                            || !cm_lower_impl_owned_parameter(state->hir,
+                                impl_item,
+                                argument_type->data.array_type.length.data
+                                    .parameter,
+                                CM_HIR_GENERIC_CONST)))) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
             } else if (!cm_lower_impl_self_concrete_supported(state,
                     argument_type, 0u)) {
                 /*

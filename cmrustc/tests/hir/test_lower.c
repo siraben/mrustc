@@ -8628,6 +8628,24 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "duplicate exact impl candidate") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Ordered generic ADTs admit array-of-wrapper arguments. */
+    result = lower_graph_source(
+        "trait Clone6 { fn clone6(&self) -> Self; }"
+        "struct Maybe7<T> { v: T }"
+        "struct Poly7<T, const N: usize> { data: [Maybe7<T>; N] }"
+        "impl<T: Clone6, const N: usize> Clone6"
+        " for Poly7<[Maybe7<T>; N], N> {"
+        " fn clone6(&self) -> Self { *self }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "array argument ADT self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
