@@ -19699,7 +19699,31 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             }
         }
     }
-    if (impl_item->generic_parameter_count == 0u) {
+    {
+        int regions_only = 1;
+        uint32_t mono_parameter_index;
+
+        /*
+         * Byte-string helpers attach an unused region to concrete
+         * monomorphic selves (`impl<'a> PartialEq<ByteStr> for [u8]`);
+         * regions are not part of any class key, so they do not disqualify
+         * a monomorphic shape.
+         */
+        for (mono_parameter_index = 0u;
+             mono_parameter_index < impl_item->generic_parameter_count;
+             ++mono_parameter_index) {
+            const CmHirGenericParam *mono_parameter
+                = cm_hir_get_generic_param(state->hir,
+                    impl_item->generic_parameter_start
+                        + mono_parameter_index);
+
+            if (mono_parameter == NULL
+                || mono_parameter->kind != CM_HIR_GENERIC_LIFETIME) {
+                regions_only = 0;
+                break;
+            }
+        }
+        if (regions_only) {
         if (type->kind == CM_HIR_TYPE_BOOL_KIND
             || type->kind == CM_HIR_TYPE_CHAR_KIND
             || type->kind == CM_HIR_TYPE_STR_KIND
@@ -19743,6 +19767,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         }
         *out_adt_definition = type->data.named_type.definition;
         return CM_LOWER_IMPL_SELF_MONOMORPHIC;
+        }
     }
     if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
         /*
