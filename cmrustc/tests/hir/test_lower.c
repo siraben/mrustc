@@ -8646,6 +8646,23 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Ordered generic ADTs admit slice-of-wrapper arguments. */
+    result = lower_graph_source(
+        "trait Fmt6 { fn fmt6(&self) -> u8; }"
+        "struct Maybe8<T> { v: T }"
+        "struct Poly8<T> { data: [Maybe8<T>] }"
+        "impl<T: Fmt6> Fmt6 for Poly8<[Maybe8<T>]> {"
+        " fn fmt6(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "slice argument ADT self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
