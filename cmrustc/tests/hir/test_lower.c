@@ -8281,6 +8281,30 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Blankets over one parameter admit extra parameters constrained by
+     * the implemented-trait arguments. */
+    result = lower_graph_source(
+        "trait Into2<U> { fn into(self) -> Self; }"
+        "impl<T, U> Into2<U> for T { fn into(self) -> T { self } }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "multi-parameter blanket failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Into3 { fn into(self) -> u8; }"
+        "impl<T, U> Into3 for T { fn into(self) -> u8 { 0 } }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)

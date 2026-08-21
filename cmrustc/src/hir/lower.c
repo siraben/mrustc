@@ -19176,6 +19176,11 @@ static int cm_lower_impl_parameters_constrained(const CmLowerState *state,
         if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE) {
             continue;
         }
+        if (self_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && self_type->data.parameter_type.parameter
+                == impl_item->generic_parameter_start + index) {
+            continue;
+        }
         for (argument_index = 0u;
              self_type->kind == CM_HIR_TYPE_ADT_KIND
              && self_type->data.named_type.arguments != NULL
@@ -19345,22 +19350,19 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     type = cm_hir_get_type(state->hir, impl_item->data.impl_item.self_type);
     if (type == NULL) return CM_LOWER_IMPL_SELF_UNSUPPORTED;
     if (type->kind == CM_HIR_TYPE_PARAMETER_KIND
-        && impl_item->generic_parameter_count == 1u
-        && impl_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
-        && type->data.parameter_type.parameter
-            == impl_item->generic_parameter_start) {
-        const CmHirGenericParam *parameter;
-
-        parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start);
-        if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
-            && !parameter->has_default && parameter->index == 0u
-            && cm_hir_def_id_equal(parameter->owner,
-                impl_item->definition)
-            && cm_lower_impl_has_supported_members(state,
-                impl_item->definition)) {
-            return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER;
-        }
+        && impl_item->generic_parameter_count != 0u
+        && cm_lower_impl_owned_parameter(state->hir, impl_item,
+            type->data.parameter_type.parameter, CM_HIR_GENERIC_TYPE)
+        && cm_lower_impl_has_supported_members(state,
+            impl_item->definition)
+        && cm_lower_impl_parameters_constrained(state, impl_item, type)) {
+        /*
+         * A blanket over one owned parameter stays in this class even
+         * when coercion-style impls carry extra parameters constrained
+         * by the implemented-trait arguments
+         * (`impl<T, U> Into<U> for T where U: From<T>`).
+         */
+        return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER;
     }
     /*
      * Core clones unsized elements through slice blankets
