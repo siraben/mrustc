@@ -19272,6 +19272,16 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
                     != impl_item->generic_parameter_start + index) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
+        } else if (impl_parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            /*
+             * Drop guards and similar wrappers pass their own region
+             * through positionally (`impl<'a, T> Drop for Guard<'a, T>`).
+             * Regions are not part of any class key, so only the argument
+             * kind is required here.
+             */
+            if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
         } else {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
