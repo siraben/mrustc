@@ -19393,11 +19393,13 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     }
     /*
      * Core compares fixed-size arrays bytewise through per-length impls
-     * (`impl<T: BytewiseEq<U>, U> BytewiseEq<[U; $n]> for [T; $n]`).
+     * (`impl<T: BytewiseEq<U>, U> BytewiseEq<[U; $n]> for [T; $n]`) and
+     * marks structural arrays generically (`{T, const N: usize} [T; N]`).
      * Admit an array whose element is one of the impl's own type
-     * parameters and whose length is a literal constant; the remaining
-     * parameters are constrained through the trait arguments, and the
-     * cross-impl comparator distinguishes lengths there.
+     * parameters and whose length is a literal constant or the impl's own
+     * const parameter; the remaining parameters are constrained through
+     * the trait arguments, and the cross-impl comparator distinguishes
+     * lengths there.
      */
     if (type->kind == CM_HIR_TYPE_ARRAY_KIND
         && impl_item->generic_parameter_count != 0u) {
@@ -19410,7 +19412,12 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             && cm_lower_impl_owned_parameter(state->hir, impl_item,
                 element->data.parameter_type.parameter,
                 CM_HIR_GENERIC_TYPE)
-            && type->data.array_type.length.kind == CM_HIR_CONST_VALUE) {
+            && (type->data.array_type.length.kind == CM_HIR_CONST_VALUE
+                || (type->data.array_type.length.kind
+                    == CM_HIR_CONST_PARAMETER
+                    && cm_lower_impl_owned_parameter(state->hir, impl_item,
+                        type->data.array_type.length.data.parameter,
+                        CM_HIR_GENERIC_CONST)))) {
             return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY;
         }
     }
