@@ -18917,6 +18917,7 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE,
+    CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
@@ -19389,6 +19390,29 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         }
     }
     /*
+     * Core compares fixed-size arrays bytewise through per-length impls
+     * (`impl<T: BytewiseEq<U>, U> BytewiseEq<[U; $n]> for [T; $n]`).
+     * Admit an array whose element is one of the impl's own type
+     * parameters and whose length is a literal constant; the remaining
+     * parameters are constrained through the trait arguments, and the
+     * cross-impl comparator distinguishes lengths there.
+     */
+    if (type->kind == CM_HIR_TYPE_ARRAY_KIND
+        && impl_item->generic_parameter_count != 0u) {
+        const CmHirType *element;
+
+        element = cm_hir_get_type(state->hir,
+            type->data.array_type.element);
+        if (element != NULL
+            && element->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && cm_lower_impl_owned_parameter(state->hir, impl_item,
+                element->data.parameter_type.parameter,
+                CM_HIR_GENERIC_TYPE)
+            && type->data.array_type.length.kind == CM_HIR_CONST_VALUE) {
+            return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY;
+        }
+    }
+    /*
      * Core blanket impls over raw pointers and references carry extra
      * region and type parameters beside the pointee parameter
      * (`impl<'a, T, U> ChangePointee<U> for &'a mut T`).  Admit a blanket
@@ -19615,6 +19639,12 @@ static int cm_lower_impl_self_candidates_may_overlap(
     if (left_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE
         && right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE) {
         /* Any two single-parameter slice selves are shape-identical. */
+        return 1;
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY
+        && right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY) {
+        /* Lengths differ through the trait arguments, which the
+         * cross-impl comparator resolves after this gate. */
         return 1;
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
