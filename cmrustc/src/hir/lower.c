@@ -18916,6 +18916,7 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_MONOMORPHIC,
     CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
+    CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
@@ -19361,6 +19362,33 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         }
     }
     /*
+     * Core clones unsized elements through slice blankets
+     * (`impl<T: Clone> CloneToUninit for [T]`).  Admit a slice over the
+     * impl's single owned type parameter.  Unlike a bare parameter self,
+     * such a slice does not overlap every other class, so overlap stays
+     * same-class only.
+     */
+    if (type->kind == CM_HIR_TYPE_SLICE_KIND
+        && impl_item->generic_parameter_count == 1u) {
+        const CmHirGenericParam *parameter;
+        const CmHirType *element;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            impl_item->generic_parameter_start);
+        element = cm_hir_get_type(state->hir,
+            type->data.slice_type.element);
+        if (parameter != NULL && element != NULL
+            && parameter->kind == CM_HIR_GENERIC_TYPE
+            && !parameter->has_default && parameter->index == 0u
+            && cm_hir_def_id_equal(parameter->owner,
+                impl_item->definition)
+            && element->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && element->data.parameter_type.parameter
+                == impl_item->generic_parameter_start) {
+            return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE;
+        }
+    }
+    /*
      * Core blanket impls over raw pointers and references carry extra
      * region and type parameters beside the pointee parameter
      * (`impl<'a, T, U> ChangePointee<U> for &'a mut T`).  Admit a blanket
@@ -19579,6 +19607,11 @@ static int cm_lower_impl_self_candidates_may_overlap(
         right = cm_hir_get_type(hir, right_self_type);
         if (left == NULL || right == NULL) return 0;
         return cm_lower_impl_self_concrete_equal(hir, left, right, 0u);
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE
+        && right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE) {
+        /* Any two single-parameter slice selves are shape-identical. */
+        return 1;
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
         && right_class
@@ -19931,10 +19964,10 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                "impl self type is outside the bounded scalar, concrete "
-                "reference, single-type parameter, generic "
-                "reference/raw-pointer, zero-argument "
-                "local ADT, or full ordered generic local ADT subset");
+                "impl self type outside the bounded scalar, concrete "
+                "reference, single-type parameter or slice, generic "
+                "reference/raw-pointer, zero-argument local ADT, or full "
+                "ordered generic local ADT subset");
             cm_free(adt_definitions);
             cm_free(classes);
             return 0;
