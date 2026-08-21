@@ -19608,6 +19608,13 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                 if (!supported) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
+            } else if (cm_lower_impl_self_ordered_generic_adt(state,
+                    impl_item, argument_type, out_adt_definition)
+                == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT) {
+                /*
+                 * Nested wrappers recurse (`Take<Repeat<T>>`); the final
+                 * head assignment below overwrites any inner write.
+                 */
             } else if (!cm_lower_impl_self_concrete_supported(state,
                     argument_type, 0u)) {
                 /*

@@ -4980,9 +4980,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
     static const char *const rejected[] = {
         "struct Pair<T, U>; trait Trait { type Assoc; } "
             "impl<T, U> Trait for Pair<T, T> { type Assoc = T; }",
-        "struct Inner<T>; struct Wrapper<T>; "
-            "trait Trait { type Assoc; } "
-            "impl<T> Trait for Wrapper<Inner<T>> { type Assoc = T; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<T, U> Trait for Wrapper<T> { type Assoc = T; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
@@ -4996,12 +4993,10 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
     static const char *const rejected_messages[] = {
-        "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "overlapping ordered generic impl candidates",
@@ -8394,6 +8389,19 @@ static void test_concrete_reference_impl_self_class(void)
         "struct Flow6<A, B> { a: A, b: B }"
         "struct Wrap6<T> { v: T }"
         "impl<B, C> Res4<C> for Flow6<B, Wrap6<B>> { type Try2 = u8; }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "nested wrapper self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* A tuple element inside an array stays outside every class. */
+    result = lower_graph_source(
+        "trait Fill { fn fill(&mut self, value: u8); }"
+        "impl<T> Fill for [(T, T)] { fn fill(&mut self, value: u8) {} }",
         &context);
     assert(result.error_count == 1u
         && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
