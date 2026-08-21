@@ -19905,6 +19905,24 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
                 break;
             }
         }
+        /*
+         * Non-region parameters also pass when the trait arguments or
+         * where-clauses constrain them (`impl<T> SliceIndex<[T]> for
+         * usize`).  Composite kinds keep their dedicated classes below,
+         * so the fallback applies only to scalar-like heads.
+         */
+        if (!regions_only
+            && (type->kind == CM_HIR_TYPE_BOOL_KIND
+                || type->kind == CM_HIR_TYPE_CHAR_KIND
+                || type->kind == CM_HIR_TYPE_STR_KIND
+                || type->kind == CM_HIR_TYPE_NEVER_KIND
+                || type->kind == CM_HIR_TYPE_UNIT_KIND
+                || type->kind == CM_HIR_TYPE_INTEGER_KIND
+                || type->kind == CM_HIR_TYPE_FLOAT_KIND)
+            && cm_lower_impl_parameters_constrained(state, impl_item,
+                type)) {
+            regions_only = 1;
+        }
         if (regions_only) {
         if (type->kind == CM_HIR_TYPE_BOOL_KIND
             || type->kind == CM_HIR_TYPE_CHAR_KIND
