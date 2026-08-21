@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* The bootstrap headers implement vsnprintf without declaring it here. */
 extern int vsnprintf(char *buffer, size_t size, const char *format,
@@ -18237,6 +18238,559 @@ static int cm_lower_normalize_crate_aliases(CmLowerState *state)
     return !state->failed;
 }
 
+/*
+ * Specialization inheritance relates two impls declared with independent
+ * generic parameter scopes.  The base self type acts as a pattern: each of
+ * its own type parameters binds the corresponding specializing argument
+ * exactly once and later occurrences must repeat that argument verbatim;
+ * every other argument shape must be cross-impl structurally equal.
+ * Unsupported shapes compare unequal so inheritance stays fail-closed.
+ */
+static int cm_lower_impl_generic_arg_equal(const CmHirContext *hir,
+    const CmHirGenericArg *left, const CmHirItem *left_impl,
+    const CmHirGenericArg *right, const CmHirItem *right_impl, size_t depth);
+
+static int cm_lower_impl_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, const CmHirItem *left_impl, CmHirTypeId right_id,
+    const CmHirItem *right_impl, size_t depth);
+
+typedef struct CmLowerSelfUnification {
+    CmHirGenericArg *bindings;
+    unsigned char *bound;
+    uint32_t capacity;
+} CmLowerSelfUnification;
+
+static int cm_lower_specialization_named_unifies(CmLowerState *state,
+    const CmHirItem *base_impl, const CmHirNamedType *base,
+    const CmHirItem *specialized_impl, const CmHirNamedType *specialized,
+    CmLowerSelfUnification *unification, size_t depth);
+
+static int cm_lower_specialization_arg_unifies(CmLowerState *state,
+    const CmHirItem *base_impl, const CmHirGenericArg *base,
+    const CmHirItem *specialized_impl, const CmHirGenericArg *specialized,
+    CmLowerSelfUnification *unification, size_t depth)
+{
+    const CmHirType *base_type;
+    const CmHirGenericParam *parameter;
+
+    if (depth > state->hir->types.len || base == NULL || specialized == NULL
+        || base->kind != specialized->kind) {
+        return 0;
+    }
+    if (base->kind == CM_HIR_GENERIC_ARG_TYPE) {
+        base_type = cm_hir_get_type(state->hir, base->data.type);
+        if (base_type != NULL
+            && base_type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+            parameter = cm_hir_get_generic_param(state->hir,
+                base_type->data.parameter_type.parameter);
+            if (parameter != NULL
+                && cm_hir_def_id_equal(parameter->owner,
+                    base_impl->definition)
+                && parameter->index < unification->capacity) {
+                if (unification->bound[parameter->index] != 0u) {
+                    return cm_lower_projection_generic_arg_equal(state->hir,
+                        &unification->bindings[parameter->index],
+                        specialized, 0u);
+                }
+                unification->bindings[parameter->index] = *specialized;
+                unification->bound[parameter->index] = 1u;
+                return 1;
+            }
+        }
+    }
+    return cm_lower_impl_generic_arg_equal(state->hir, base, base_impl,
+        specialized, specialized_impl, depth + 1u);
+}
+
+static int cm_lower_specialization_named_unifies(CmLowerState *state,
+    const CmHirItem *base_impl, const CmHirNamedType *base,
+    const CmHirItem *specialized_impl, const CmHirNamedType *specialized,
+    CmLowerSelfUnification *unification, size_t depth)
+{
+    uint32_t index;
+
+    if (depth > state->hir->types.len || base == NULL || specialized == NULL
+        || !cm_hir_def_id_equal(base->definition, specialized->definition)
+        || base->argument_count != specialized->argument_count
+        || (base->argument_count != 0u
+            && (base->arguments == NULL || specialized->arguments == NULL))) {
+        return 0;
+    }
+    for (index = 0u; index < base->argument_count; ++index) {
+        if (!cm_lower_specialization_arg_unifies(state, base_impl,
+                &base->arguments[index], specialized_impl,
+                &specialized->arguments[index], unification, depth + 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_lower_specialization_self_unifies(CmLowerState *state,
+    const CmHirItem *base_impl, const CmHirItem *specialized_impl)
+{
+    const CmHirType *base_self;
+    const CmHirType *specialized_self;
+    CmLowerSelfUnification unification;
+    int unified;
+
+    base_self = cm_hir_get_type(state->hir,
+        base_impl->data.impl_item.self_type);
+    specialized_self = cm_hir_get_type(state->hir,
+        specialized_impl->data.impl_item.self_type);
+    if (base_self == NULL || specialized_self == NULL
+        || base_self->kind != CM_HIR_TYPE_ADT_KIND
+        || specialized_self->kind != CM_HIR_TYPE_ADT_KIND
+        || base_impl->generic_parameter_count == 0u
+        || base_impl->generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    unification.capacity = base_impl->generic_parameter_count;
+    unification.bindings = (CmHirGenericArg *)cm_alloc_zeroed(
+        (size_t)unification.capacity, sizeof(*unification.bindings));
+    unification.bound = (unsigned char *)cm_alloc_zeroed(
+        (size_t)unification.capacity, sizeof(*unification.bound));
+    if (unification.bindings == NULL || unification.bound == NULL) {
+        cm_free(unification.bindings);
+        cm_free(unification.bound);
+        return 0;
+    }
+    unified = cm_lower_specialization_named_unifies(state, base_impl,
+        &base_self->data.named_type, specialized_impl,
+        &specialized_self->data.named_type, &unification, 0u);
+    cm_free(unification.bindings);
+    cm_free(unification.bound);
+    return unified;
+}
+
+static int cm_lower_impl_has_specializable_member(CmLowerState *state,
+    const CmHirItem *impl_item)
+{
+    size_t index;
+
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *member;
+
+        member = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            index);
+        if (member != NULL && member->is_specializable
+            && cm_hir_def_id_equal(member->parent_definition,
+                impl_item->definition)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * A specializing impl may omit a required associated type or a required
+ * trait method and inherit the one definition held by a specializable base
+ * impl of the same trait for a self type that unifies with the base self
+ * pattern.  Admission requires exactly one such base definition across the
+ * whole crate; zero or ambiguous bases reject.
+ */
+/*
+ * A specializing impl may omit a required associated type or a required
+ * trait method and inherit one definition held by a specializable base
+ * impl of the same trait whose self type unifies with the base self
+ * pattern.  Every eligible base definition must agree structurally on the
+ * inherited value (alias target or method signature); disagreement stays
+ * an ambiguous rejection, and agreement admits the earliest base in
+ * declaration order.
+ */
+/*
+ * Inherited-member signatures compare across two independent scopes per
+ * side: the owning impl's generics and the member's own generics.  Type
+ * parameters resolve by declaration index inside whichever side owns them,
+ * and projections compare structurally so shapes such as
+ * `Option<Self::Item>` remain comparable across impl families.
+ */
+typedef struct CmLowerInheritedScope {
+    const CmHirItem *impl_item;
+    const CmHirItem *member;
+} CmLowerInheritedScope;
+
+static int cm_lower_inherited_type_equal(CmLowerState *state,
+    const CmLowerInheritedScope *left_scope, CmHirTypeId left_id,
+    const CmLowerInheritedScope *right_scope, CmHirTypeId right_id,
+    size_t depth);
+
+static int cm_lower_inherited_parameter_index(const CmHirContext *hir,
+    const CmLowerInheritedScope *scope, CmHirGenericParamId parameter_id,
+    uint32_t *out_index)
+{
+    const CmHirGenericParam *parameter;
+
+    if (hir == NULL || scope == NULL || scope->impl_item == NULL
+        || scope->member == NULL
+        || parameter_id == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    parameter = cm_hir_get_generic_param(hir, parameter_id);
+    if (parameter == NULL) return 0;
+    if (cm_hir_def_id_equal(parameter->owner, scope->impl_item->definition)
+        || cm_hir_def_id_equal(parameter->owner,
+            scope->member->definition)) {
+        *out_index = parameter->index;
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_inherited_region_equal(const CmHirContext *hir,
+    const CmHirRegion *left, const CmLowerInheritedScope *left_scope,
+    const CmHirRegion *right, const CmLowerInheritedScope *right_scope)
+{
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return cm_lower_inherited_parameter_index(hir, left_scope,
+                left->data.parameter, &left_index)
+            && cm_lower_inherited_parameter_index(hir, right_scope,
+                right->data.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left->data.binder_index == right->data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_lower_inherited_const_equal(CmLowerState *state,
+    const CmHirConstArg *left, const CmLowerInheritedScope *left_scope,
+    const CmHirConstArg *right, const CmLowerInheritedScope *right_scope,
+    size_t depth)
+{
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (left == NULL || right == NULL || left->kind != right->kind
+        || !cm_lower_inherited_type_equal(state, left_scope, left->type,
+            right_scope, right->type, depth + 1u)) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_CONST_VALUE:
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    case CM_HIR_CONST_PARAMETER:
+        return cm_lower_inherited_parameter_index(state->hir, left_scope,
+                left->data.parameter, &left_index)
+            && cm_lower_inherited_parameter_index(state->hir, right_scope,
+                right->data.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_CONST_UNEVALUATED:
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    case CM_HIR_CONST_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_CONST_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_lower_inherited_generic_arg_equal(CmLowerState *state,
+    const CmHirGenericArg *left, const CmLowerInheritedScope *left_scope,
+    const CmHirGenericArg *right, const CmLowerInheritedScope *right_scope,
+    size_t depth)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_lower_inherited_region_equal(state->hir,
+            &left->data.lifetime, left_scope, &right->data.lifetime,
+            right_scope);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return cm_lower_inherited_type_equal(state, left_scope,
+            left->data.type, right_scope, right->data.type, depth + 1u);
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_lower_inherited_const_equal(state, &left->data.constant,
+            left_scope, &right->data.constant, right_scope, depth + 1u);
+    }
+    return 0;
+}
+
+static int cm_lower_inherited_named_type_equal(CmLowerState *state,
+    const CmHirNamedType *left, const CmLowerInheritedScope *left_scope,
+    const CmHirNamedType *right, const CmLowerInheritedScope *right_scope,
+    size_t depth)
+{
+    uint32_t index;
+
+    if (left == NULL || right == NULL
+        || !cm_hir_def_id_equal(left->definition, right->definition)
+        || left->argument_count != right->argument_count
+        || (left->argument_count != 0u && left->arguments == NULL)
+        || (right->argument_count != 0u && right->arguments == NULL)) {
+        return 0;
+    }
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_lower_inherited_generic_arg_equal(state,
+                &left->arguments[index], left_scope, &right->arguments[index],
+                right_scope, depth + 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_lower_inherited_type_equal(CmLowerState *state,
+    const CmLowerInheritedScope *left_scope, CmHirTypeId left_id,
+    const CmLowerInheritedScope *right_scope, CmHirTypeId right_id,
+    size_t depth)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+    uint32_t index;
+    uint32_t left_index;
+    uint32_t right_index;
+
+    if (depth > state->hir->types.len) return 0;
+    left = cm_hir_get_type(state->hir, left_id);
+    right = cm_hir_get_type(state->hir, right_id);
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    switch (left->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return cm_lower_inherited_parameter_index(state->hir, left_scope,
+                left->data.parameter_type.parameter, &left_index)
+            && cm_lower_inherited_parameter_index(state->hir, right_scope,
+                right->data.parameter_type.parameter, &right_index)
+            && left_index == right_index;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability
+                == right->data.reference_type.mutability
+            && cm_lower_inherited_region_equal(state->hir,
+                &left->data.reference_type.region, left_scope,
+                &right->data.reference_type.region, right_scope)
+            && cm_lower_inherited_type_equal(state, left_scope,
+                left->data.reference_type.pointee, right_scope,
+                right->data.reference_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return left->data.raw_pointer_type.mutability
+                == right->data.raw_pointer_type.mutability
+            && cm_lower_inherited_type_equal(state, left_scope,
+                left->data.raw_pointer_type.pointee, right_scope,
+                right->data.raw_pointer_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (left->data.tuple_type.element_count
+                != right->data.tuple_type.element_count
+            || (left->data.tuple_type.element_count != 0u
+                && (left->data.tuple_type.elements == NULL
+                    || right->data.tuple_type.elements == NULL))) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_lower_inherited_type_equal(state, left_scope,
+                    left->data.tuple_type.elements[index], right_scope,
+                    right->data.tuple_type.elements[index], depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_inherited_type_equal(state, left_scope,
+                left->data.array_type.element, right_scope,
+                right->data.array_type.element, depth + 1u)
+            && cm_lower_inherited_const_equal(state,
+                &left->data.array_type.length, left_scope,
+                &right->data.array_type.length, right_scope, depth + 1u);
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_inherited_type_equal(state, left_scope,
+            left->data.slice_type.element, right_scope,
+            right->data.slice_type.element, depth + 1u);
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return cm_lower_inherited_named_type_equal(state,
+            &left->data.named_type, left_scope, &right->data.named_type,
+            right_scope, depth + 1u);
+    case CM_HIR_TYPE_SELF_KIND:
+        return cm_hir_def_id_equal(left->data.self_type.owner,
+                left_scope->impl_item->definition)
+            && cm_hir_def_id_equal(right->data.self_type.owner,
+                right_scope->impl_item->definition);
+    case CM_HIR_TYPE_PROJECTION_KIND:
+        return cm_lower_inherited_type_equal(state, left_scope,
+                left->data.projection_type.self_type, right_scope,
+                right->data.projection_type.self_type, depth + 1u)
+            && cm_lower_inherited_named_type_equal(state,
+                &left->data.projection_type.trait_type, left_scope,
+                &right->data.projection_type.trait_type, right_scope,
+                depth + 1u)
+            && cm_hir_def_id_equal(
+                left->data.projection_type.associated_type.definition,
+                right->data.projection_type.associated_type.definition)
+            && cm_lower_inherited_named_type_equal(state,
+                &left->data.projection_type.associated_type, left_scope,
+                &right->data.projection_type.associated_type, right_scope,
+                depth + 1u);
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_inherited_signature_type_equal(CmLowerState *state,
+    const CmHirItem *first_impl, const CmHirItem *first_member,
+    CmHirTypeId first_type, const CmHirItem *member_impl,
+    const CmHirItem *member, CmHirTypeId member_type)
+{
+    CmLowerInheritedScope first_scope;
+    CmLowerInheritedScope member_scope;
+
+    first_scope.impl_item = first_impl;
+    first_scope.member = first_member;
+    member_scope.impl_item = member_impl;
+    member_scope.member = member;
+    return cm_lower_inherited_type_equal(state, &first_scope, first_type,
+        &member_scope, member_type, 0u);
+}
+
+static int cm_lower_inherited_member_consistent(CmLowerState *state,
+    const CmHirItem *first_impl, const CmHirItem *first,
+    const CmHirItem *member_impl, const CmHirItem *member)
+{
+    uint32_t index;
+
+    if (first->kind == CM_HIR_ITEM_TYPE_ALIAS) {
+        return cm_lower_inherited_signature_type_equal(state, first_impl,
+            first, first->data.type_alias_item.target, member_impl, member,
+            member->data.type_alias_item.target);
+    }
+    if (first->data.function_item.signature.parameter_count
+            != member->data.function_item.signature.parameter_count
+        || first->data.function_item.signature.return_type
+            == CM_HIR_TYPE_NONE
+        || member->data.function_item.signature.return_type
+            == CM_HIR_TYPE_NONE
+        || !cm_lower_inherited_signature_type_equal(state,
+            first_impl, first,
+            first->data.function_item.signature.return_type,
+            member_impl, member,
+            member->data.function_item.signature.return_type)) {
+        return 0;
+    }
+    for (index = 0u;
+         index < first->data.function_item.signature.parameter_count;
+         ++index) {
+        if (!cm_lower_inherited_signature_type_equal(state,
+                first_impl, first,
+                first->data.function_item.signature.parameters[index].type,
+                member_impl, member,
+                member->data.function_item.signature.parameters[index].type)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint32_t cm_lower_count_inherited_specialization_members(
+    CmLowerState *state, const CmHirItem *impl_item,
+    const CmHirItem *declaration)
+{
+    size_t impl_index;
+    uint32_t candidates;
+    const CmHirItem *first_member;
+    const CmHirItem *first_member_impl;
+
+    candidates = 0u;
+    first_member = NULL;
+    first_member_impl = NULL;
+    for (impl_index = 0u; impl_index < state->hir->items.len;
+         ++impl_index) {
+        const CmHirItem *base_impl;
+        size_t member_index;
+
+        base_impl = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            impl_index);
+        if (base_impl == NULL || base_impl->kind != CM_HIR_ITEM_IMPL
+            || cm_hir_def_id_equal(base_impl->definition,
+                impl_item->definition)
+            || base_impl->definition.crate_id != state->result.crate_id
+            || !base_impl->data.impl_item.has_trait
+            || base_impl->data.impl_item.is_negative
+            || !cm_hir_def_id_equal(
+                base_impl->data.impl_item.trait_type.definition,
+                impl_item->data.impl_item.trait_type.definition)
+            || !cm_lower_impl_has_specializable_member(state, base_impl)
+            || !cm_lower_specialization_self_unifies(state, base_impl,
+                impl_item)) {
+            continue;
+        }
+        for (member_index = 0u; member_index < state->hir->items.len;
+             ++member_index) {
+            const CmHirItem *member;
+            int matches_declaration;
+
+            member = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+                member_index);
+            if (member == NULL || member->kind != declaration->kind
+                || !cm_hir_def_id_equal(member->parent_definition,
+                    base_impl->definition)) {
+                continue;
+            }
+            matches_declaration = 0;
+            if (member->kind == CM_HIR_ITEM_TYPE_ALIAS
+                && cm_hir_def_id_equal(
+                    member->data.type_alias_item.trait_item_definition,
+                    declaration->definition)
+                && member->data.type_alias_item.target
+                    != CM_HIR_TYPE_NONE) {
+                matches_declaration = 1;
+            }
+            if (member->kind == CM_HIR_ITEM_FUNCTION
+                && cm_hir_def_id_equal(
+                    member->data.function_item.trait_item_definition,
+                    declaration->definition)
+                && member->data.function_item.body != CM_HIR_BODY_NONE) {
+                matches_declaration = 1;
+            }
+            if (!matches_declaration) continue;
+            if (candidates == 0u) {
+                first_member = member;
+                first_member_impl = base_impl;
+                candidates = 1u;
+                continue;
+            }
+            if (!cm_lower_inherited_member_consistent(state,
+                    first_member_impl, first_member, base_impl, member)) {
+                return 0u;
+            }
+        }
+    }
+    return candidates;
+}
+
 static int cm_lower_validate_impl_completeness(CmLowerState *state)
 {
     size_t impl_index;
@@ -18306,6 +18860,16 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
                 }
             }
             if ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS
+                    || declaration->kind == CM_HIR_ITEM_FUNCTION)
+                && matches == 0u
+                && ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS)
+                    || declaration->data.function_item.body
+                        == CM_HIR_BODY_NONE)
+                && cm_lower_count_inherited_specialization_members(state,
+                    impl_item, declaration) == 1u) {
+                continue;
+            }
+            if ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS
                     && matches != 1u)
                 || (declaration->kind == CM_HIR_ITEM_CONST
                     && declaration->data.value_item.body == CM_HIR_BODY_NONE
@@ -18350,11 +18914,136 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
 typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_UNSUPPORTED = 0,
     CM_LOWER_IMPL_SELF_MONOMORPHIC,
+    CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
 } CmLowerImplSelfClass;
+
+/*
+ * A concrete self-type argument subset: scalars and local ADTs applied to
+ * concrete arguments, recursively and depth-bounded.  This admits shapes
+ * such as `StepBy<Range<u8>>` while every parameter, projection, reference,
+ * and inference form stays rejected.
+ */
+static int cm_lower_impl_self_concrete_supported(const CmLowerState *state,
+    const CmHirType *type, size_t depth)
+{
+    const CmHirItem *adt_item;
+    uint32_t index;
+
+    if (type == NULL || depth > state->hir->types.len) return 0;
+    switch (type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_INTEGER_KIND:
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return 1;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_impl_self_concrete_supported(state,
+            cm_hir_get_type(state->hir, type->data.slice_type.element),
+            depth + 1u);
+    case CM_HIR_TYPE_ADT_KIND:
+        if (type->data.named_type.definition.crate_id
+                != state->result.crate_id
+            || (type->data.named_type.argument_count != 0u
+                && type->data.named_type.arguments == NULL)) {
+            return 0;
+        }
+        adt_item = cm_lower_bound_item(state,
+            type->data.named_type.definition);
+        if (adt_item == NULL
+            || (adt_item->kind != CM_HIR_ITEM_STRUCT
+                && adt_item->kind != CM_HIR_ITEM_UNION
+                && adt_item->kind != CM_HIR_ITEM_ENUM)) {
+            return 0;
+        }
+        for (index = 0u; index < type->data.named_type.argument_count;
+             ++index) {
+            const CmHirGenericArg *argument;
+
+            argument = &type->data.named_type.arguments[index];
+            if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
+                || !cm_lower_impl_self_concrete_supported(state,
+                    cm_hir_get_type(state->hir, argument->data.type),
+                    depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
+    const CmHirType *left, const CmHirType *right, size_t depth)
+{
+    uint32_t index;
+
+    if (depth > hir->types.len) return 0;
+    switch (left->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_impl_self_concrete_equal(hir,
+            cm_hir_get_type(hir, left->data.slice_type.element),
+            cm_hir_get_type(hir, right->data.slice_type.element),
+            depth + 1u);
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        if (left->data.reference_type.mutability
+            != right->data.reference_type.mutability) {
+            return 0;
+        }
+        return cm_lower_impl_self_concrete_equal(hir,
+            cm_hir_get_type(hir, left->data.reference_type.pointee),
+            cm_hir_get_type(hir, right->data.reference_type.pointee),
+            depth + 1u);
+    case CM_HIR_TYPE_ADT_KIND:
+        if (!cm_hir_def_id_equal(left->data.named_type.definition,
+                right->data.named_type.definition)
+            || left->data.named_type.argument_count
+                != right->data.named_type.argument_count
+            || (left->data.named_type.argument_count != 0u
+                && (left->data.named_type.arguments == NULL
+                    || right->data.named_type.arguments == NULL))) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.named_type.argument_count;
+             ++index) {
+            const CmHirGenericArg *left_argument;
+            const CmHirGenericArg *right_argument;
+
+            left_argument = &left->data.named_type.arguments[index];
+            right_argument = &right->data.named_type.arguments[index];
+            if (left_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+                || right_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
+                return 0;
+            }
+            if (!cm_lower_impl_self_concrete_equal(hir,
+                    cm_hir_get_type(hir, left_argument->data.type),
+                    cm_hir_get_type(hir, right_argument->data.type),
+                    depth + 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 static int cm_lower_impl_has_supported_members(const CmLowerState *state,
     CmHirDefId impl_definition)
@@ -18407,51 +19096,96 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER;
         }
     }
-    if (type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
-        && impl_item->generic_parameter_count == 1u) {
-        const CmHirGenericParam *parameter;
+    /*
+     * Core blanket impls over raw pointers and references carry extra
+     * region and type parameters beside the pointee parameter
+     * (`impl<'a, T, U> ChangePointee<U> for &'a mut T`).  Admit a blanket
+     * self when every explicit generic parameter is a plain region or type
+     * without defaults and the pointee is one of the impl's own type
+     * parameters.  The reference region stays outside the class key; all
+     * such blankets can overlap for coherence purposes, while mutability
+     * remains a discriminant in cm_lower_impl_self_equal().
+     */
+    if ((type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+            || type->kind == CM_HIR_TYPE_REFERENCE_KIND)
+        && impl_item->generic_parameter_count != 0u) {
         const CmHirType *pointee;
+        int supported = 1;
+        uint32_t parameter_index;
 
-        parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start);
+        for (parameter_index = 0u; parameter_index < impl_item->generic_parameter_count;
+             ++parameter_index) {
+            const CmHirGenericParam *parameter;
+
+            parameter = cm_hir_get_generic_param(state->hir,
+                impl_item->generic_parameter_start + parameter_index);
+            if (parameter == NULL || parameter->has_default
+                || (parameter->kind != CM_HIR_GENERIC_TYPE
+                    && parameter->kind != CM_HIR_GENERIC_LIFETIME)) {
+                supported = 0;
+                break;
+            }
+        }
         pointee = cm_hir_get_type(state->hir,
-            type->data.raw_pointer_type.pointee);
-        if (parameter != NULL
-            && parameter->kind == CM_HIR_GENERIC_TYPE
-            && !parameter->has_default
-            && pointee != NULL
+            type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+                ? type->data.raw_pointer_type.pointee
+                : type->data.reference_type.pointee);
+        if (supported && pointee != NULL
             && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && impl_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
             && pointee->data.parameter_type.parameter
-                == impl_item->generic_parameter_start) {
-            return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER;
+                >= impl_item->generic_parameter_start
+            && pointee->data.parameter_type.parameter
+                < impl_item->generic_parameter_start
+                    + impl_item->generic_parameter_count) {
+            const CmHirGenericParam *pointee_parameter;
+
+            pointee_parameter = cm_hir_get_generic_param(state->hir,
+                pointee->data.parameter_type.parameter);
+            if (pointee_parameter != NULL
+                && pointee_parameter->kind == CM_HIR_GENERIC_TYPE
+                && !pointee_parameter->has_default) {
+                return type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+                    ? CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
+                    : CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE;
+            }
         }
     }
     /*
-     * Core has blanket Clone polarity entries over shared and mutable
-     * references (`impl<T> Clone for &T` and `impl<T> !Clone for &mut T`).
-     * Admit the same bounded shape as raw-pointer blankets: exactly one
-     * required type parameter used as the reference pointee.  The elided
-     * reference region is intentionally not part of this class key; all
-     * such references can overlap for coherence purposes, while mutability
-     * remains a discriminant in cm_lower_impl_self_equal().
+     * Core forwards unary and binary operators over concrete local types by
+     * reference (`forward_ref_unop!` generates `impl Neg for
+     * &NonZero<$Int>`, and `forward_ref_binop!` generates
+     * `impl<'a> Add<..> for &'a Wrapping<$Int>`).  Admit a shared or mutable
+     * reference to any already-supported concrete self shape when every
+     * explicit generic parameter is a region: regions are not part of the
+     * class key, while mutability and the pointee stay discriminants in
+     * cm_lower_impl_self_concrete_equal().
      */
-    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND
-        && impl_item->generic_parameter_count == 1u) {
-        const CmHirGenericParam *parameter;
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
         const CmHirType *pointee;
+        int regions_only = 1;
+        uint32_t parameter_index;
 
-        parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start);
-        pointee = cm_hir_get_type(state->hir,
-            type->data.reference_type.pointee);
-        if (parameter != NULL
-            && parameter->kind == CM_HIR_GENERIC_TYPE
-            && !parameter->has_default
-            && pointee != NULL
-            && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
-            && pointee->data.parameter_type.parameter
-                == impl_item->generic_parameter_start) {
-            return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE;
+        for (parameter_index = 0u; parameter_index < impl_item->generic_parameter_count;
+             ++parameter_index) {
+            const CmHirGenericParam *parameter;
+
+            parameter = cm_hir_get_generic_param(state->hir,
+                impl_item->generic_parameter_start + parameter_index);
+            if (parameter == NULL
+                || parameter->kind != CM_HIR_GENERIC_LIFETIME) {
+                regions_only = 0;
+                break;
+            }
+        }
+        if (regions_only) {
+            pointee = cm_hir_get_type(state->hir,
+                type->data.reference_type.pointee);
+            if (pointee != NULL
+                && cm_lower_impl_self_concrete_supported(state, pointee,
+                    0u)) {
+                return CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE;
+            }
         }
     }
     if (impl_item->generic_parameter_count == 0u) {
@@ -18461,11 +19195,20 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             || type->kind == CM_HIR_TYPE_FLOAT_KIND) {
             return CM_LOWER_IMPL_SELF_MONOMORPHIC;
         }
+        if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
+            if (!cm_lower_impl_self_concrete_supported(state,
+                    cm_hir_get_type(state->hir,
+                        type->data.slice_type.element), 0u)) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+            return CM_LOWER_IMPL_SELF_MONOMORPHIC;
+        }
         if (type->kind != CM_HIR_TYPE_ADT_KIND
-            || type->data.named_type.argument_count != 0u
-            || type->data.named_type.arguments != NULL
             || type->data.named_type.definition.crate_id
                 != state->result.crate_id) {
+            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+        }
+        if (!cm_lower_impl_self_concrete_supported(state, type, 0u)) {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
         adt_item = cm_lower_bound_item(state,
@@ -18473,8 +19216,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         if (adt_item == NULL
             || (adt_item->kind != CM_HIR_ITEM_STRUCT
                 && adt_item->kind != CM_HIR_ITEM_UNION
-                && adt_item->kind != CM_HIR_ITEM_ENUM)
-            || adt_item->generic_parameter_count != 0u) {
+                && adt_item->kind != CM_HIR_ITEM_ENUM)) {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
         *out_adt_definition = type->data.named_type.definition;
@@ -18559,11 +19301,9 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
     if (left->kind == CM_HIR_TYPE_FLOAT_KIND) {
         return left->data.float_type.kind == right->data.float_type.kind;
     }
-    if (left->kind == CM_HIR_TYPE_ADT_KIND) {
-        return left->data.named_type.argument_count == 0u
-            && right->data.named_type.argument_count == 0u
-            && cm_hir_def_id_equal(left->data.named_type.definition,
-                right->data.named_type.definition);
+    if (left->kind == CM_HIR_TYPE_ADT_KIND
+        || left->kind == CM_HIR_TYPE_SLICE_KIND) {
+        return cm_lower_impl_self_concrete_equal(hir, left, right, 0u);
     }
     if (left->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {
         return left->data.raw_pointer_type.mutability
@@ -18599,6 +19339,16 @@ static int cm_lower_impl_self_candidates_may_overlap(
         && right_class == CM_LOWER_IMPL_SELF_MONOMORPHIC) {
         return cm_lower_impl_self_equal(hir, left_self_type,
             right_self_type);
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE
+        && right_class == CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE) {
+        const CmHirType *left;
+        const CmHirType *right;
+
+        left = cm_hir_get_type(hir, left_self_type);
+        right = cm_hir_get_type(hir, right_self_type);
+        if (left == NULL || right == NULL) return 0;
+        return cm_lower_impl_self_concrete_equal(hir, left, right, 0u);
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
         && right_class
@@ -18904,6 +19654,20 @@ static int cm_lower_impl_trait_arguments_equal(const CmHirContext *hir,
     return 1;
 }
 
+/*
+ * An overlapping impl pair is admitted as a specialization step when either
+ * impl owns a `default` member: mrustc-style, the per-impl specializable
+ * marker is the evidence that an ordered impl family is intentional.
+ * Predicate implication through supertraits is deliberately not required
+ * here; coherence remains fail-open for invalid input by project policy.
+ */
+static int cm_lower_impl_pair_is_admitted_specialization(CmLowerState *state,
+    const CmHirItem *prior, const CmHirItem *item)
+{
+    return cm_lower_impl_has_specializable_member(state, prior)
+        || cm_lower_impl_has_specializable_member(state, item);
+}
+
 static int cm_lower_validate_impl_candidates(CmLowerState *state)
 {
     CmLowerImplSelfClass *classes;
@@ -18933,8 +19697,9 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                "impl self type is outside the bounded scalar, single-type "
-                "parameter, generic reference/raw-pointer, zero-argument "
+                "impl self type is outside the bounded scalar, concrete "
+                "reference, single-type parameter, generic "
+                "reference/raw-pointer, zero-argument "
                 "local ADT, or full ordered generic local ADT subset");
             cm_free(adt_definitions);
             cm_free(classes);
@@ -18981,20 +19746,32 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             }
             if (!cm_lower_impl_trait_arguments_equal(state->hir, prior,
                     item)) continue;
+            if (cm_lower_impl_pair_is_admitted_specialization(state, prior,
+                    item)) {
+                continue;
+            }
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                prior->data.impl_item.is_negative
+                            != item->data.impl_item.is_negative
+                        ? "conflicting positive and negative impl candidates "
+                          "for one trait and self type"
+                        : item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
                     || prior_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+                    || item_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
+                    || prior_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
+                    || item_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
+                    || prior_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
                     ? "overlapping blanket impl candidates for one trait"
                 : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
                     ? "overlapping ordered generic impl candidates for one "
                       "trait and local ADT head"
-                    : prior->data.impl_item.is_negative
-                            != item->data.impl_item.is_negative
-                        ? "conflicting positive and negative impl candidates "
-                          "for one trait and self type"
-                        : item->data.impl_item.is_negative
+                    : item->data.impl_item.is_negative
                             ? "duplicate exact negative impl candidate for "
                               "one trait and self type"
                         : "duplicate exact impl candidate for one trait "

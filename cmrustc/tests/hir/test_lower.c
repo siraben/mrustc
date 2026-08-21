@@ -1099,7 +1099,7 @@ static void test_generic_reference_impl_entry_points(void)
     assert(result.error_count == 1u
         && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
         && strstr(result.first_error.message,
-            "duplicate exact impl candidate") != NULL);
+            "overlapping blanket impl candidates") != NULL);
     cm_hir_context_destroy(&context);
 
     result = lower_source(overlap_source, &context, NULL);
@@ -4276,8 +4276,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
             "impl T for AliasOne { type A = u8; } "
             "impl T for AliasTwo { type A = u16; }",
         "trait T { type A; } impl T for (u8, u16) { type A = u8; }",
-        "struct S<X> { x: X } trait T { type A; } "
-            "impl T for S<u8> { type A = u8; }",
         "unsafe trait T { type A; } impl T for u8 { type A = u8; }",
         "trait T { type A; } unsafe impl T for u8 { type A = u8; }"
     };
@@ -4293,7 +4291,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         CM_HIR_LOWER_DUPLICATE_NAME,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
@@ -4311,10 +4308,13 @@ static void test_monomorphic_trait_impl_entry_points(void)
         "duplicate exact impl candidate",
         "duplicate exact impl candidate",
         "full ordered generic local ADT subset",
-        "full ordered generic local ADT subset",
         "impl safety does not match",
         "impl safety does not match"
     };
+    static const char concrete_source[] =
+        "struct S<X> { x: X } struct O;"
+        "trait T { type A; }"
+        "impl T for S<u8> { type A = O; }";
     CmAst ast;
     CmExpandedAst expanded;
     CmHirContext context;
@@ -4362,6 +4362,16 @@ static void test_monomorphic_trait_impl_entry_points(void)
         && self_type->kind == CM_HIR_TYPE_ADT_KIND
         && cm_hir_def_id_equal(self_type->data.named_type.definition,
             s_item->definition));
+    cm_hir_context_destroy(&context);
+
+    /* A concrete-parameterized local ADT self is inside the bounded subset. */
+    result = lower_source(concrete_source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "concrete impl lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
@@ -7897,6 +7907,321 @@ static void test_generated_impl_elided_lifetime_alias(void)
     }
 }
 
+static const CmHirItem *find_impl_for_trait(const CmHirContext *context,
+    CmHirDefId trait_definition, size_t occurrence)
+{
+    size_t index;
+
+    for (index = 0u; index < context->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&context->items, index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
+            || !item->data.impl_item.has_trait
+            || !cm_hir_def_id_equal(
+                item->data.impl_item.trait_type.definition,
+                trait_definition)) {
+            continue;
+        }
+        if (occurrence == 0u) return item;
+        occurrence -= 1u;
+    }
+    return NULL;
+}
+
+static void test_concrete_reference_impl_self_class(void)
+{
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    /* forward_ref_unop! shape: elided region over a local ADT. */
+    result = lower_graph_source(
+        "struct NonZero2 { value: i8 }"
+        "trait Neg { type Output; fn neg(self) -> Self::Output; }"
+        "impl Neg for &NonZero2 {"
+        " type Output = NonZero2;"
+        " fn neg(self) -> NonZero2 { NonZero2 { value: 0 } }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "concrete reference impl failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Mutability is a discriminant: shared and mutable refs coexist. */
+    result = lower_graph_source(
+        "struct Wrap2<T> { value: T }"
+        "trait Neg { type Output; fn neg(self) -> Self::Output; }"
+        "impl Neg for &Wrap2<u8> {"
+        " type Output = Wrap2<u8>;"
+        " fn neg(self) -> Wrap2<u8> { Wrap2 { value: 0 } }"
+        "}"
+        "impl Neg for &mut Wrap2<u8> {"
+        " type Output = Wrap2<u8>;"
+        " fn neg(self) -> Wrap2<u8> { Wrap2 { value: 0 } }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "mutable concrete reference impl failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* forward_ref_binop! shape: one explicit region parameter. */
+    result = lower_graph_source(
+        "struct Wrap3<T> { value: T }"
+        "trait Add2<Rhs> { type Output; fn add(self, rhs: Rhs) -> Self::Output; }"
+        "impl<'a> Add2<&'a Wrap3<u8>> for &'a Wrap3<u8> {"
+        " type Output = Wrap3<u8>;"
+        " fn add(self, rhs: &'a Wrap3<u8>) -> Wrap3<u8> { Wrap3 { value: 0 } }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "region generic reference impl failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Slice pointees stay within the concrete subset. */
+    result = lower_graph_source(
+        "trait Clone3 { fn clone(&self) -> Self; }"
+        "impl Clone3 for &[u8] { fn clone(&self) -> &[u8] { self } }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "slice reference impl failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Duplicate exact concrete-reference candidates still conflict. */
+    result = lower_graph_source(
+        "struct Wrap4<T> { value: T }"
+        "trait Neg { type Output; fn neg(self) -> Self::Output; }"
+        "impl Neg for &Wrap4<u8> {"
+        " type Output = Wrap4<u8>;"
+        " fn neg(self) -> Wrap4<u8> { Wrap4 { value: 0 } }"
+        "}"
+        "impl Neg for &Wrap4<u8> {"
+        " type Output = Wrap4<u16>;"
+        " fn neg(self) -> Wrap4<u8> { Wrap4 { value: 0 } }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* A type-parameterized ADT pointee stays outside the subset. */
+    result = lower_graph_source(
+        "struct Wrap5<T> { value: T }"
+        "trait Neg { type Output; fn neg(self) -> Self::Output; }"
+        "impl<T> Neg for &Wrap5<T> {"
+        " type Output = Wrap5<T>;"
+        " fn neg(self) -> Wrap5<T> { Wrap5 { value: *self.value } }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* A non-concrete pointee (projection) stays outside the subset. */
+    result = lower_graph_source(
+        "trait Source { type Item; }"
+        "struct Iter2<I> { inner: I }"
+        "trait Neg { type Output; fn neg(self) -> Self::Output; }"
+        "impl<I: Source> Neg for &Iter2<I::Item> {"
+        " type Output = u8;"
+        " fn neg(self) -> u8 { 0 }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* Blanket references admit extra region/type parameters beside the
+     * pointee parameter, and mutability separates candidates. */
+    result = lower_graph_source(
+        "trait Conv { type Out; }"
+        "trait Conv2 { type Out; }"
+        "impl<'a, T, U> Conv for &'a mut T { type Out = u8; }"
+        "impl<'a, T, U> Conv for &'a T { type Out = u8; }"
+        "impl<T, U> Conv2 for *mut T { type Out = u8; }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "blanket extra parameters failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Duplicate blanket shapes still conflict. */
+    result = lower_graph_source(
+        "trait Conv { type Out; }"
+        "impl<T> Conv for &T { type Out = u8; }"
+        "impl<U> Conv for &U { type Out = u16; }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* A foreign concrete pointee is not a blanket parameter. */
+    result = lower_graph_source(
+        "struct Dst2;"
+        "trait Conv { type Out; }"
+        "impl<T> Conv for &Dst2 { type Out = u8; }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_specialization_inherits_associated_type(void)
+{
+    static const char source[] =
+        "struct Option<T>; struct Box2<T> { value: T }"
+        "trait Stream { type Item; fn next(&mut self) -> Option<u8>; }"
+        "trait Fast {}"
+        "impl<T> Stream for Box2<T> {"
+        " default fn next(&mut self) -> Option<u8> {}"
+        " type Item = u8;"
+        "}"
+        "impl<T> Stream for Box2<T> where T: Fast {"
+        " fn next(&mut self) -> Option<u8> {}"
+        "}";
+    static const char *const rejected[] = {
+        /* No specializable base member: omission stays incomplete. */
+        ("struct Option<T>; struct Box2<T> { value: T }"
+            "trait Stream { type Item; fn next(&mut self) -> Option<u8>; }"
+            "trait Fast {}"
+            "impl<T> Stream for Box2<T> {"
+            " fn next(&mut self) -> Option<u8> {}"
+            " type Item = u8;"
+            "}"
+            "impl<T> Stream for Box2<T> where T: Fast {"
+            " fn next(&mut self) -> Option<u8> {}"
+            "}"),
+        /* Two specializable bases with distinct targets: ambiguous. */
+        ("struct Option<T>; struct Box2<T> { value: T }"
+            "trait Stream { type Item; fn next(&mut self) -> Option<u8>; }"
+            "trait Fast {} trait Slow {}"
+            "impl<T> Stream for Box2<T> {"
+            " default fn next(&mut self) -> Option<u8> {}"
+            " type Item = u8;"
+            "}"
+            "impl<T> Stream for Box2<T> where T: Fast {"
+            " default fn next(&mut self) -> Option<u8> {}"
+            " type Item = u16;"
+            "}"
+            "impl<T> Stream for Box2<T> where T: Fast + Slow {"
+            " fn next(&mut self) -> Option<u8> {}"
+            "}"),
+        /* One pattern parameter bound to two different arguments. */
+        ("struct Option<T>; struct Range2; struct Range3; struct Pair<A, B> { a: A, b: B }"
+            "trait Stream { type Item; fn next(&mut self) -> Option<u8>; }"
+            "impl<T> Stream for Pair<T, T> {"
+            " default fn next(&mut self) -> Option<u8> {}"
+            " type Item = u8;"
+            "}"
+            "impl Stream for Pair<Range2, Range3> {"
+            " fn next(&mut self) -> Option<u8> {}"
+            "}")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *stream;
+    const CmHirItem *base_impl;
+    const CmHirItem *specialized_impl;
+    const CmHirItem *base_next;
+    const CmHirItem *base_item;
+    size_t index;
+
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "specialization inheritance failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    stream = find_item(&context, "Stream");
+    base_impl = stream == NULL ? NULL
+        : find_impl_for_trait(&context, stream->definition, 0u);
+    specialized_impl = stream == NULL ? NULL
+        : find_impl_for_trait(&context, stream->definition, 1u);
+    base_next = base_impl == NULL ? NULL
+        : find_child(&context, base_impl->definition, "next");
+    base_item = base_impl == NULL ? NULL
+        : find_child(&context, base_impl->definition, "Item");
+    assert(result.error_count == 0u
+        && stream != NULL && base_impl != NULL && specialized_impl != NULL
+        && !cm_hir_def_id_equal(base_impl->definition,
+            specialized_impl->definition)
+        && base_next != NULL && base_next->is_specializable == 1
+        && base_item != NULL
+        && base_item->data.type_alias_item.target != CM_HIR_TYPE_NONE
+        && find_child(&context, specialized_impl->definition, "next")
+            != NULL
+        && find_child(&context, specialized_impl->definition, "Item")
+            == NULL);
+    cm_hir_context_destroy(&context);
+
+    /* A substitution-instance self type also inherits through the pattern. */
+    result = lower_graph_source(
+        "struct Option<T>; struct Range2; struct Step2<I> { inner: I }"
+        "trait Walk { type Item; fn step(&mut self) -> Option<u8>; }"
+        "impl<I> Walk for Step2<I> {"
+        " default fn step(&mut self) -> Option<u8> {}"
+        " type Item = u8;"
+        "}"
+        "impl Walk for Step2<Range2> {"
+        " fn step(&mut self) -> Option<u8> {}"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr,
+            "specialization instance inheritance failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_graph_source(rejected[index], &context);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+            || strstr(result.first_error.message,
+                "missing a required associated type") == NULL) {
+            fprintf(stderr, "specialization rejection mismatch: %s: %s\n",
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "missing a required associated type") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_argument_impl_trait_foreign_rejected(void)
 {
     static const char source[] = "extern \"C\" { fn consume(value: impl Send); } trait Send {}";
@@ -9907,6 +10232,8 @@ int main(void)
     test_argument_impl_trait_method_parity();
     test_impl_elided_lifetime_alias();
     test_generated_impl_elided_lifetime_alias();
+    test_concrete_reference_impl_self_class();
+    test_specialization_inherits_associated_type();
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
