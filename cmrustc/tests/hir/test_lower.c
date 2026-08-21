@@ -4983,8 +4983,6 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
     static const char *const rejected[] = {
         "struct Pair<T, U>; trait Trait { type Assoc; } "
             "impl<T, U> Trait for Pair<T, T> { type Assoc = T; }",
-        "struct Pair<T, U>; trait Trait { type Assoc; } "
-            "impl<T, U> Trait for Pair<U, T> { type Assoc = T; }",
         "struct Inner<T>; struct Wrapper<T>; "
             "trait Trait { type Assoc; } "
             "impl<T> Trait for Wrapper<Inner<T>> { type Assoc = T; }",
@@ -5011,12 +5009,10 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
     static const char *const rejected_messages[] = {
-        "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
         "full ordered generic local ADT subset",
@@ -5040,6 +5036,34 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
     }
     assert(result.error_count == 0u && result.lowered_item_count == 7u);
     check_ordered_nominal_generic_impl_result(&context);
+    cm_hir_context_destroy(&context);
+
+    /* Argument order inside the self type is free as long as each
+     * consumed parameter binds exactly one argument. */
+    result = lower_source(
+        "struct Pair<T, U>; trait Trait { type Assoc; } "
+        "impl<T, U> Trait for Pair<U, T> { type Assoc = T; }",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "swapped self arguments failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* A self-type subset is admitted when the remaining parameters are
+     * constrained by implemented-trait arguments. */
+    result = lower_source(
+        "struct NonNull2<T>; trait Coerce<X> {} "
+        "impl<T, U> Coerce<NonNull2<U>> for NonNull2<T> {}",
+        &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "coercion self subset failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     make_cfg_view(source, &ast, &expanded);

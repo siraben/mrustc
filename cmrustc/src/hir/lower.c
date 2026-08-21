@@ -19066,11 +19066,168 @@ static int cm_lower_impl_has_supported_members(const CmLowerState *state,
 }
 
 /*
- * Validate an ordered generic local ADT self head: the ADT is local, every
- * impl parameter maps positionally onto the ADT's parameter of the same
- * kind, and type/const arguments are exactly the impl's own parameter at
- * that position.  Region arguments pass through unchecked because regions
- * are not part of any class key.
+ * Decide whether the given generic parameter id names one of the impl's
+ * own parameters of the expected kind without defaults.
+ */
+static int cm_lower_impl_owned_parameter(const CmHirContext *hir,
+    const CmHirItem *impl_item, CmHirGenericParamId parameter_id,
+    CmHirGenericParamKind kind)
+{
+    const CmHirGenericParam *parameter;
+    uint32_t offset;
+
+    if (hir == NULL || impl_item == NULL
+        || impl_item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || parameter_id == CM_HIR_GENERIC_PARAM_NONE
+        || parameter_id < impl_item->generic_parameter_start) {
+        return 0;
+    }
+    offset = parameter_id - impl_item->generic_parameter_start;
+    if (offset >= impl_item->generic_parameter_count) return 0;
+    parameter = cm_hir_get_generic_param(hir, parameter_id);
+    return parameter != NULL
+        && parameter->kind == kind
+        && !parameter->has_default
+        && parameter->index == offset
+        && cm_hir_def_id_equal(parameter->owner, impl_item->definition);
+}
+
+/*
+ * Bounded recursive walk deciding whether a type mentions the given impl
+ * type parameter.  Unsupported shapes report "no" so that an otherwise
+ * unconstrained parameter stays rejected (fail closed).
+ */
+static int cm_lower_type_references_parameter(const CmHirContext *hir,
+    const CmHirType *type, CmHirGenericParamId parameter_id, size_t depth)
+{
+    uint32_t index;
+
+    if (type == NULL || depth > hir->types.len) return 0;
+    switch (type->kind) {
+    case CM_HIR_TYPE_PARAMETER_KIND:
+        return type->data.parameter_type.parameter == parameter_id;
+    case CM_HIR_TYPE_ADT_KIND:
+        for (index = 0u; type->data.named_type.arguments != NULL
+             && index < type->data.named_type.argument_count; ++index) {
+            const CmHirGenericArg *argument;
+
+            argument = &type->data.named_type.arguments[index];
+            if (argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                && cm_lower_type_references_parameter(hir,
+                    cm_hir_get_type(hir, argument->data.type),
+                    parameter_id, depth + 1u)) {
+                return 1;
+            }
+        }
+        return 0;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_type_references_parameter(hir,
+            cm_hir_get_type(hir, type->data.slice_type.element),
+            parameter_id, depth + 1u);
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_type_references_parameter(hir,
+            cm_hir_get_type(hir, type->data.array_type.element),
+            parameter_id, depth + 1u);
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return cm_lower_type_references_parameter(hir,
+            cm_hir_get_type(hir, type->data.reference_type.pointee),
+            parameter_id, depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return cm_lower_type_references_parameter(hir,
+            cm_hir_get_type(hir, type->data.raw_pointer_type.pointee),
+            parameter_id, depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            if (cm_lower_type_references_parameter(hir,
+                    cm_hir_get_type(hir,
+                        type->data.tuple_type.elements[index]),
+                    parameter_id, depth + 1u)) {
+                return 1;
+            }
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Every impl type parameter must be constrained by the self type or the
+ * implemented-trait arguments, mirroring the core language rule that keeps
+ * coercion impls (`impl<T, U> CoerceUnsized<NonNull<U>> for NonNull<T>`)
+ * well-formed while bare unused parameters stay rejected.
+ */
+static int cm_lower_impl_parameters_constrained(const CmLowerState *state,
+    const CmHirItem *impl_item, const CmHirType *self_type)
+{
+    uint32_t index;
+
+    for (index = 0u; index < impl_item->generic_parameter_count;
+         ++index) {
+        const CmHirGenericParam *parameter;
+        int referenced = 0;
+        uint32_t argument_index;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            impl_item->generic_parameter_start + index);
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE) {
+            continue;
+        }
+        for (argument_index = 0u;
+             self_type->kind == CM_HIR_TYPE_ADT_KIND
+             && self_type->data.named_type.arguments != NULL
+             && argument_index < self_type->data.named_type.argument_count;
+             ++argument_index) {
+            const CmHirGenericArg *argument;
+            const CmHirType *argument_type;
+
+            argument = &self_type->data.named_type
+                .arguments[argument_index];
+            if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
+            argument_type = cm_hir_get_type(state->hir,
+                argument->data.type);
+            if (argument_type != NULL
+                && argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                && argument_type->data.parameter_type.parameter
+                    == impl_item->generic_parameter_start + index) {
+                referenced = 1;
+                break;
+            }
+        }
+        if (referenced) continue;
+        if (impl_item->data.impl_item.has_trait) {
+            const CmHirNamedType *trait_type
+                = &impl_item->data.impl_item.trait_type;
+
+            for (argument_index = 0u; trait_type->arguments != NULL
+                 && argument_index < trait_type->argument_count;
+                 ++argument_index) {
+                const CmHirGenericArg *argument;
+
+                argument = &trait_type->arguments[argument_index];
+                if (argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                    && cm_lower_type_references_parameter(state->hir,
+                        cm_hir_get_type(state->hir, argument->data.type),
+                        impl_item->generic_parameter_start + index, 0u)) {
+                    referenced = 1;
+                    break;
+                }
+            }
+        }
+        if (!referenced) return 0;
+    }
+    return 1;
+}
+
+/*
+ * Validate an ordered generic local ADT self head: the ADT is local and
+ * each of its arguments is one of the impl's own parameters of the same
+ * kind.  The ADT may consume a subset of the impl's parameters because
+ * coercion-style impls carry extra parameters in their trait arguments
+ * (`impl<T, U> CoerceUnsized<NonNull<U>> for NonNull<T>`).  Region
+ * arguments pass through unchecked because regions are not part of any
+ * class key.
  */
 static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
     const CmLowerState *state, const CmHirItem *impl_item,
@@ -19081,7 +19238,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
 
     if (type->kind != CM_HIR_TYPE_ADT_KIND
         || type->data.named_type.argument_count
-            != impl_item->generic_parameter_count
+            > impl_item->generic_parameter_count
         || type->data.named_type.arguments == NULL
         || type->data.named_type.definition.crate_id
             != state->result.crate_id) {
@@ -19094,43 +19251,63 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
             && adt_item->kind != CM_HIR_ITEM_UNION
             && adt_item->kind != CM_HIR_ITEM_ENUM)
         || adt_item->generic_parameter_count
-            != impl_item->generic_parameter_count) {
+            != type->data.named_type.argument_count) {
         return CM_LOWER_IMPL_SELF_UNSUPPORTED;
     }
-    for (index = 0u; index < impl_item->generic_parameter_count;
+    for (index = 0u; index < type->data.named_type.argument_count;
          ++index) {
-        const CmHirGenericParam *impl_parameter;
         const CmHirGenericParam *adt_parameter;
         const CmHirGenericArg *argument;
         const CmHirType *argument_type;
 
-        impl_parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start + index);
         adt_parameter = cm_hir_get_generic_param(state->hir,
             adt_item->generic_parameter_start + index);
         argument = &type->data.named_type.arguments[index];
-        if (impl_parameter == NULL || adt_parameter == NULL
-            || impl_parameter->has_default
-            || impl_parameter->kind != adt_parameter->kind) {
+        if (adt_parameter == NULL) {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
-        if (impl_parameter->kind == CM_HIR_GENERIC_TYPE) {
+        switch (adt_parameter->kind) {
+        case CM_HIR_GENERIC_TYPE:
             argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
                 ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
             if (argument_type == NULL
                 || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
-                || argument_type->data.parameter_type.parameter
-                    != impl_item->generic_parameter_start + index) {
+                || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+                    argument_type->data.parameter_type.parameter,
+                    CM_HIR_GENERIC_TYPE)) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
-        } else if (impl_parameter->kind == CM_HIR_GENERIC_CONST) {
+            /* Each consumed parameter binds exactly one ADT argument. */
+            for (uint32_t prior_index = 0u; prior_index < index;
+                 ++prior_index) {
+                const CmHirGenericArg *prior_argument;
+                const CmHirType *prior_type;
+
+                prior_argument
+                    = &type->data.named_type.arguments[prior_index];
+                if (prior_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
+                    continue;
+                }
+                prior_type = cm_hir_get_type(state->hir,
+                    prior_argument->data.type);
+                if (prior_type != NULL
+                    && prior_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                    && prior_type->data.parameter_type.parameter
+                        == argument_type->data.parameter_type.parameter) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            }
+            break;
+        case CM_HIR_GENERIC_CONST:
             if (argument->kind != CM_HIR_GENERIC_ARG_CONST
                 || argument->data.constant.kind != CM_HIR_CONST_PARAMETER
-                || argument->data.constant.data.parameter
-                    != impl_item->generic_parameter_start + index) {
+                || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+                    argument->data.constant.data.parameter,
+                    CM_HIR_GENERIC_CONST)) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
-        } else if (impl_parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            break;
+        case CM_HIR_GENERIC_LIFETIME:
             /*
              * Drop guards and similar wrappers pass their own region
              * through positionally (`impl<'a, T> Drop for Guard<'a, T>`).
@@ -19140,9 +19317,13 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
             if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;
             }
-        } else {
+            break;
+        default:
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
+    }
+    if (!cm_lower_impl_parameters_constrained(state, impl_item, type)) {
+        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
     }
     *out_adt_definition = type->data.named_type.definition;
     return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT;
