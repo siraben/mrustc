@@ -8087,6 +8087,7 @@ static void test_concrete_reference_impl_self_class(void)
     cm_hir_context_destroy(&context);
 
     /* A non-concrete pointee (projection) stays outside the subset. */
+    /* A projection over an owned parameter is a blanket pointee. */
     result = lower_graph_source(
         "trait Source { type Item; }"
         "struct Iter2<I> { inner: I }"
@@ -8096,10 +8097,12 @@ static void test_concrete_reference_impl_self_class(void)
         " fn neg(self) -> u8 { 0 }"
         "}",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "projection pointee blanket failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Blanket references admit extra region/type parameters beside the
@@ -8795,6 +8798,23 @@ static void test_concrete_reference_impl_self_class(void)
         &context);
     if (result.error_count != 0u) {
         fprintf(stderr, "omitted default parameter failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* Projections over owned parameters are admissible arguments. */
+    result = lower_graph_source(
+        "trait IntoIter2 { type It2; }"
+        "trait Len3 {}"
+        "struct Flat4<I, J> { i: I, j: J }"
+        "impl<const N: usize, I: Len3, T> Len3"
+        " for Flat4<I, <[T; N] as IntoIter2>::It2> {"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "projection argument failed: %s: %s\n",
             cm_hir_lower_error_kind_name(result.first_error.kind),
             result.first_error.message);
     }

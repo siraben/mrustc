@@ -19178,6 +19178,32 @@ static int cm_lower_type_references_parameter(const CmHirContext *hir,
         return cm_lower_type_references_parameter(hir,
             cm_hir_get_type(hir, type->data.slice_type.element),
             parameter_id, depth + 1u);
+    case CM_HIR_TYPE_PROJECTION_KIND: {
+        const CmHirNamedType *projected_trait
+            = &type->data.projection_type.trait_type;
+        uint32_t projected_index;
+
+        if (cm_lower_type_references_parameter(hir,
+                cm_hir_get_type(hir,
+                    type->data.projection_type.self_type),
+                parameter_id, depth + 1u)) {
+            return 1;
+        }
+        for (projected_index = 0u; projected_trait->arguments != NULL
+             && projected_index < projected_trait->argument_count;
+             ++projected_index) {
+            if (projected_trait->arguments[projected_index].kind
+                == CM_HIR_GENERIC_ARG_TYPE
+                && cm_lower_type_references_parameter(hir,
+                    cm_hir_get_type(hir,
+                        projected_trait->arguments[projected_index]
+                            .data.type),
+                    parameter_id, depth + 1u)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
     case CM_HIR_TYPE_ARRAY_KIND:
         return cm_lower_type_references_parameter(hir,
             cm_hir_get_type(hir, type->data.array_type.element),
@@ -19471,13 +19497,59 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                                 CM_HIR_GENERIC_CONST)))) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
-            } else if (argument_type->kind == CM_HIR_TYPE_FN_POINTER_KIND) {
+            } else if (argument_type->kind == CM_HIR_TYPE_PROJECTION_KIND) {
                 /*
-                 * Materialized defaults surface as function pointers
-                 * (`LazyCell<T, F = fn() -> T>` written `LazyCell<T>`).
-                 * Every referenced type must root at an owned parameter
-                 * or a supported concrete shape.
+                 * Iterator adapters project through qualified paths
+                 * (`FlattenCompat<I, <[T; N] as IntoIterator>::IntoIter>`).
+                 * Every generic argument of the projected trait must root
+                 * at an owned parameter or a supported concrete shape.
                  */
+                const CmHirType *projected_self = cm_hir_get_type(
+                    state->hir,
+                    argument_type->data.projection_type.self_type);
+                int projected_supported = 0;
+
+                if (projected_self != NULL) {
+                    if (projected_self->kind
+                        == CM_HIR_TYPE_PARAMETER_KIND) {
+                        projected_supported = cm_lower_impl_owned_parameter(
+                            state->hir, impl_item,
+                            projected_self->data.parameter_type.parameter,
+                            CM_HIR_GENERIC_TYPE);
+                    } else if (projected_self->kind
+                        == CM_HIR_TYPE_ARRAY_KIND) {
+                        const CmHirType *projected_element = cm_hir_get_type(
+                            state->hir,
+                            projected_self->data.array_type.element);
+                        projected_supported = projected_element != NULL
+                            && ((projected_element->kind
+                                == CM_HIR_TYPE_PARAMETER_KIND
+                                && cm_lower_impl_owned_parameter(
+                                    state->hir, impl_item,
+                                    projected_element->data.parameter_type
+                                        .parameter,
+                                    CM_HIR_GENERIC_TYPE))
+                                || cm_lower_impl_self_concrete_supported(
+                                    state, projected_element, 0u))
+                            && (projected_self->data.array_type.length.kind
+                                == CM_HIR_CONST_VALUE
+                                || (projected_self->data.array_type.length
+                                    .kind == CM_HIR_CONST_PARAMETER
+                                    && cm_lower_impl_owned_parameter(
+                                        state->hir, impl_item,
+                                        projected_self->data.array_type
+                                            .length.data.parameter,
+                                        CM_HIR_GENERIC_CONST)));
+                    } else {
+                        projected_supported =
+                            cm_lower_impl_self_concrete_supported(state,
+                                projected_self, 0u);
+                    }
+                }
+                if (!projected_supported) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            } else if (argument_type->kind == CM_HIR_TYPE_FN_POINTER_KIND) {
                 const CmHirType *result_type = cm_hir_get_type(state->hir,
                     argument_type->data.fn_pointer_type.return_type);
                 int supported = result_type != NULL
