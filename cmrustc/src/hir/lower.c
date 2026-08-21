@@ -19316,7 +19316,8 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
     uint32_t index;
 
     if (type->kind != CM_HIR_TYPE_ADT_KIND
-        || type->data.named_type.arguments == NULL
+        || (type->data.named_type.argument_count != 0u
+            && type->data.named_type.arguments == NULL)
         || type->data.named_type.definition.crate_id
             != state->result.crate_id) {
         return CM_LOWER_IMPL_SELF_UNSUPPORTED;
