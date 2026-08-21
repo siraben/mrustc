@@ -18920,6 +18920,7 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE,
+    CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
 } CmLowerImplSelfClass;
@@ -19672,6 +19673,55 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         }
         return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE;
     }
+    if (type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count != 0u) {
+        /*
+         * Core bounds ranges through tuple selves
+         * (`impl<T> RangeBounds<T> for (Bound<T>, Bound<T>)`).  Each
+         * element follows the ordered-generic argument rules: an owned
+         * parameter, a reference over one, or a supported concrete shape.
+         */
+        uint32_t element_index;
+
+        for (element_index = 0u;
+             element_index < type->data.tuple_type.element_count;
+             ++element_index) {
+            const CmHirType *element = cm_hir_get_type(state->hir,
+                type->data.tuple_type.elements[element_index]);
+
+            if (element == NULL) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+            if (element->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+                if (!cm_lower_impl_owned_parameter(state->hir, impl_item,
+                    element->data.parameter_type.parameter,
+                    CM_HIR_GENERIC_TYPE)) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            } else if (element->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+                const CmHirType *pointee = cm_hir_get_type(state->hir,
+                    element->data.reference_type.pointee);
+
+                if (pointee == NULL
+                    || pointee->kind != CM_HIR_TYPE_PARAMETER_KIND
+                    || !cm_lower_impl_owned_parameter(state->hir,
+                        impl_item, pointee->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE)) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            } else if (!cm_lower_impl_self_concrete_supported(state,
+                    element, 0u)
+                && cm_lower_impl_self_ordered_generic_adt(state, impl_item,
+                    element, out_adt_definition)
+                    != CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        }
+        if (!cm_lower_impl_parameters_constrained(state, impl_item, type)) {
+            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+        }
+        return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE;
+    }
     return cm_lower_impl_self_ordered_generic_adt(state, impl_item, type,
         out_adt_definition);
 }
@@ -19758,6 +19808,12 @@ static int cm_lower_impl_self_candidates_may_overlap(
         && right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY) {
         /* Lengths differ through the trait arguments, which the
          * cross-impl comparator resolves after this gate. */
+        return 1;
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE
+        && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE) {
+        /* Element shapes are not a stable key; the trait arguments
+         * decide after this gate. */
         return 1;
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
@@ -20185,6 +20241,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
                     || item_class
                         == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE
+                    || item_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE
                     ? "overlapping ordered generic impl candidates for one "
                       "trait and local ADT head"
                     : item->data.impl_item.is_negative

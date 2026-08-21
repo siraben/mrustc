@@ -8477,6 +8477,38 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "overlapping ordered generic impl candidates") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Tuples of ordered-generic shapes form their own class. */
+    result = lower_graph_source(
+        "trait Bounds4<T> { fn bounds4(&self) -> u8; }"
+        "struct Bound5<T> { v: T }"
+        "impl<T> Bounds4<T> for (Bound5<T>, Bound5<T>) {"
+        " fn bounds4(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "tuple self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Bounds4<T> { fn bounds4(&self) -> u8; }"
+        "struct Bound6<T> { v: T }"
+        "impl<T> Bounds4<T> for (Bound6<T>, Bound6<T>) {"
+        " fn bounds4(&self) -> u8 { 0 }"
+        "}"
+        "impl<U> Bounds4<U> for (Bound6<U>, Bound6<U>) {"
+        " fn bounds4(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping ordered generic impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
