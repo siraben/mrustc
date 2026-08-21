@@ -18917,6 +18917,7 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
+    CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
 } CmLowerImplSelfClass;
@@ -19064,13 +19065,95 @@ static int cm_lower_impl_has_supported_members(const CmLowerState *state,
     return 1;
 }
 
+/*
+ * Validate an ordered generic local ADT self head: the ADT is local, every
+ * impl parameter maps positionally onto the ADT's parameter of the same
+ * kind, and type/const arguments are exactly the impl's own parameter at
+ * that position.  Region arguments pass through unchecked because regions
+ * are not part of any class key.
+ */
+static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
+    const CmLowerState *state, const CmHirItem *impl_item,
+    const CmHirType *type, CmHirDefId *out_adt_definition)
+{
+    const CmHirItem *adt_item;
+    uint32_t index;
+
+    if (type->kind != CM_HIR_TYPE_ADT_KIND
+        || type->data.named_type.argument_count
+            != impl_item->generic_parameter_count
+        || type->data.named_type.arguments == NULL
+        || type->data.named_type.definition.crate_id
+            != state->result.crate_id) {
+        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+    }
+    adt_item = cm_lower_bound_item(state,
+        type->data.named_type.definition);
+    if (adt_item == NULL
+        || (adt_item->kind != CM_HIR_ITEM_STRUCT
+            && adt_item->kind != CM_HIR_ITEM_UNION
+            && adt_item->kind != CM_HIR_ITEM_ENUM)
+        || adt_item->generic_parameter_count
+            != impl_item->generic_parameter_count) {
+        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+    }
+    for (index = 0u; index < impl_item->generic_parameter_count;
+         ++index) {
+        const CmHirGenericParam *impl_parameter;
+        const CmHirGenericParam *adt_parameter;
+        const CmHirGenericArg *argument;
+        const CmHirType *argument_type;
+
+        impl_parameter = cm_hir_get_generic_param(state->hir,
+            impl_item->generic_parameter_start + index);
+        adt_parameter = cm_hir_get_generic_param(state->hir,
+            adt_item->generic_parameter_start + index);
+        argument = &type->data.named_type.arguments[index];
+        if (impl_parameter == NULL || adt_parameter == NULL
+            || impl_parameter->has_default
+            || impl_parameter->kind != adt_parameter->kind) {
+            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+        }
+        if (impl_parameter->kind == CM_HIR_GENERIC_TYPE) {
+            argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
+            if (argument_type == NULL
+                || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+                || argument_type->data.parameter_type.parameter
+                    != impl_item->generic_parameter_start + index) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        } else if (impl_parameter->kind == CM_HIR_GENERIC_CONST) {
+            if (argument->kind != CM_HIR_GENERIC_ARG_CONST
+                || argument->data.constant.kind != CM_HIR_CONST_PARAMETER
+                || argument->data.constant.data.parameter
+                    != impl_item->generic_parameter_start + index) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        } else if (impl_parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            /*
+             * Drop guards and similar wrappers pass their own region
+             * through positionally (`impl<'a, T> Drop for Guard<'a, T>`).
+             * Regions are not part of any class key, so only the argument
+             * kind is required here.
+             */
+            if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+        } else {
+            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+        }
+    }
+    *out_adt_definition = type->data.named_type.definition;
+    return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT;
+}
+
 static CmLowerImplSelfClass cm_lower_impl_self_class(
     const CmLowerState *state, const CmHirItem *impl_item,
     CmHirDefId *out_adt_definition)
 {
     const CmHirType *type;
     const CmHirItem *adt_item;
-    uint32_t index;
 
     *out_adt_definition = cm_hir_def_id_none();
     if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL) {
@@ -19222,72 +19305,28 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
         *out_adt_definition = type->data.named_type.definition;
         return CM_LOWER_IMPL_SELF_MONOMORPHIC;
     }
-    if (type->kind != CM_HIR_TYPE_ADT_KIND
-        || type->data.named_type.argument_count
-            != impl_item->generic_parameter_count
-        || type->data.named_type.arguments == NULL
-        || type->data.named_type.definition.crate_id
-            != state->result.crate_id) {
-        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-    }
-    adt_item = cm_lower_bound_item(state,
-        type->data.named_type.definition);
-    if (adt_item == NULL
-        || (adt_item->kind != CM_HIR_ITEM_STRUCT
-            && adt_item->kind != CM_HIR_ITEM_UNION
-            && adt_item->kind != CM_HIR_ITEM_ENUM)
-        || adt_item->generic_parameter_count
-            != impl_item->generic_parameter_count) {
-        return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-    }
-    for (index = 0u; index < impl_item->generic_parameter_count; ++index) {
-        const CmHirGenericParam *impl_parameter;
-        const CmHirGenericParam *adt_parameter;
-        const CmHirGenericArg *argument;
-        const CmHirType *argument_type;
+    if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
+        /*
+         * Core fills slices of generic local wrappers through specialized
+         * impls (`impl<T: Clone> SpecFill<T> for [MaybeUninit<T>]`).  The
+         * element must itself be an ordered generic local ADT; a distinct
+         * class keeps slice selves from colliding with plain-ADT selves
+         * that share the same head definition.
+         */
+        const CmHirType *element;
 
-        impl_parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start + index);
-        adt_parameter = cm_hir_get_generic_param(state->hir,
-            adt_item->generic_parameter_start + index);
-        argument = &type->data.named_type.arguments[index];
-        if (impl_parameter == NULL || adt_parameter == NULL
-            || impl_parameter->has_default
-            || impl_parameter->kind != adt_parameter->kind) {
+        element = cm_hir_get_type(state->hir,
+            type->data.slice_type.element);
+        if (element == NULL
+            || cm_lower_impl_self_ordered_generic_adt(state, impl_item,
+                element, out_adt_definition)
+                != CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT) {
             return CM_LOWER_IMPL_SELF_UNSUPPORTED;
         }
-        if (impl_parameter->kind == CM_HIR_GENERIC_TYPE) {
-            argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
-                ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
-            if (argument_type == NULL
-                || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
-                || argument_type->data.parameter_type.parameter
-                    != impl_item->generic_parameter_start + index) {
-                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-            }
-        } else if (impl_parameter->kind == CM_HIR_GENERIC_CONST) {
-            if (argument->kind != CM_HIR_GENERIC_ARG_CONST
-                || argument->data.constant.kind != CM_HIR_CONST_PARAMETER
-                || argument->data.constant.data.parameter
-                    != impl_item->generic_parameter_start + index) {
-                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-            }
-        } else if (impl_parameter->kind == CM_HIR_GENERIC_LIFETIME) {
-            /*
-             * Drop guards and similar wrappers pass their own region
-             * through positionally (`impl<'a, T> Drop for Guard<'a, T>`).
-             * Regions are not part of any class key, so only the argument
-             * kind is required here.
-             */
-            if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
-                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-            }
-        } else {
-            return CM_LOWER_IMPL_SELF_UNSUPPORTED;
-        }
+        return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE;
     }
-    *out_adt_definition = type->data.named_type.definition;
-    return CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT;
+    return cm_lower_impl_self_ordered_generic_adt(state, impl_item, type,
+        out_adt_definition);
 }
 
 static int cm_lower_impl_self_equal(const CmHirContext *hir,
@@ -19371,9 +19410,13 @@ static int cm_lower_impl_self_candidates_may_overlap(
         return cm_lower_impl_self_equal(hir, left_self_type,
             right_self_type);
     }
-    return left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
-        && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
-        && cm_hir_def_id_equal(left_adt_definition, right_adt_definition);
+    if ((left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+            && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT)
+        || (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE
+            && right_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE)) {
+        return cm_hir_def_id_equal(left_adt_definition, right_adt_definition);
+    }
+    return 0;
 }
 
 /*
@@ -19779,6 +19822,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                         == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
                     ? "overlapping blanket impl candidates for one trait"
                 : item_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT
+                    || item_class
+                        == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE
                     ? "overlapping ordered generic impl candidates for one "
                       "trait and local ADT head"
                     : item->data.impl_item.is_negative
