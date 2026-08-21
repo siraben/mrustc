@@ -19464,13 +19464,13 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     }
     /*
      * Core compares fixed-size arrays bytewise through per-length impls
-     * (`impl<T: BytewiseEq<U>, U> BytewiseEq<[U; $n]> for [T; $n]`) and
-     * marks structural arrays generically (`{T, const N: usize} [T; N]`).
+     * (`impl<T: BytewiseEq<U>, U> BytewiseEq<[U; $n]> for [T; $n]`),
+     * marks structural arrays generically (`{T, const N: usize} [T; N]`),
+     * and drops partial arrays of wrappers
+     * (`impl<T, const N: usize> PartialDrop for [MaybeUninit<T>; N]`).
      * Admit an array whose element is one of the impl's own type
-     * parameters and whose length is a literal constant or the impl's own
-     * const parameter; the remaining parameters are constrained through
-     * the trait arguments, and the cross-impl comparator distinguishes
-     * lengths there.
+     * parameters or an ordered generic local ADT over them, and whose
+     * length is a literal constant or the impl's own const parameter.
      */
     if (type->kind == CM_HIR_TYPE_ARRAY_KIND
         && impl_item->generic_parameter_count != 0u) {
@@ -19478,6 +19478,12 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
 
         element = cm_hir_get_type(state->hir,
             type->data.array_type.element);
+        if (element != NULL
+            && (cm_lower_impl_self_ordered_generic_adt(state, impl_item,
+                    element, out_adt_definition)
+                == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT)) {
+            return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY;
+        }
         if (element != NULL
             && element->kind == CM_HIR_TYPE_PARAMETER_KIND
             && cm_lower_impl_owned_parameter(state->hir, impl_item,

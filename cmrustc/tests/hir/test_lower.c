@@ -8596,6 +8596,38 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "outside the bounded") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Arrays of ordered generic wrappers stay within the array class. */
+    result = lower_graph_source(
+        "trait Drop4 { fn drop4(&mut self); }"
+        "struct Maybe4<T> { v: T }"
+        "impl<T, const N: usize> Drop4 for [Maybe4<T>; N] {"
+        " fn drop4(&mut self) {}"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "wrapper array self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Drop4 { fn drop4(&mut self); }"
+        "struct Maybe5<T> { v: T }"
+        "impl<T, const N: usize> Drop4 for [Maybe5<T>; N] {"
+        " fn drop4(&mut self) {}"
+        "}"
+        "impl<T, const N: usize> Drop4 for [Maybe5<T>; N] {"
+        " fn drop4(&mut self) {}"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
