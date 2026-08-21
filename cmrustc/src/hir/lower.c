@@ -19500,27 +19500,37 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
             } else if (argument_type->kind == CM_HIR_TYPE_PROJECTION_KIND) {
                 /*
                  * Iterator adapters project through qualified paths
-                 * (`FlattenCompat<I, <[T; N] as IntoIterator>::IntoIter>`).
-                 * Every generic argument of the projected trait must root
-                 * at an owned parameter or a supported concrete shape.
+                 * (`FlattenCompat<I, <[T; N] as IntoIterator>::IntoIter>`
+                 * and `FlattenCompat<I, <&'a [T; N] as
+                 * IntoIterator>::IntoIter>`).  The projected self type
+                 * must root at an owned parameter or a bounded array,
+                 * optionally behind one reference level.
                  */
                 const CmHirType *projected_self = cm_hir_get_type(
                     state->hir,
                     argument_type->data.projection_type.self_type);
+                const CmHirType *projected_array;
+                int peeled = 0;
                 int projected_supported = 0;
 
-                if (projected_self != NULL) {
-                    if (projected_self->kind
+                projected_array = projected_self;
+                while (projected_array != NULL) {
+                    if (projected_array->kind
                         == CM_HIR_TYPE_PARAMETER_KIND) {
-                        projected_supported = cm_lower_impl_owned_parameter(
-                            state->hir, impl_item,
-                            projected_self->data.parameter_type.parameter,
-                            CM_HIR_GENERIC_TYPE);
-                    } else if (projected_self->kind
+                        projected_supported =
+                            cm_lower_impl_owned_parameter(state->hir,
+                                impl_item,
+                                projected_array->data.parameter_type
+                                    .parameter,
+                                CM_HIR_GENERIC_TYPE);
+                        break;
+                    }
+                    if (projected_array->kind
                         == CM_HIR_TYPE_ARRAY_KIND) {
-                        const CmHirType *projected_element = cm_hir_get_type(
-                            state->hir,
-                            projected_self->data.array_type.element);
+                        const CmHirType *projected_element =
+                            cm_hir_get_type(state->hir,
+                                projected_array->data.array_type.element);
+
                         projected_supported = projected_element != NULL
                             && ((projected_element->kind
                                 == CM_HIR_TYPE_PARAMETER_KIND
@@ -19531,20 +19541,28 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                                     CM_HIR_GENERIC_TYPE))
                                 || cm_lower_impl_self_concrete_supported(
                                     state, projected_element, 0u))
-                            && (projected_self->data.array_type.length.kind
+                            && (projected_array->data.array_type.length.kind
                                 == CM_HIR_CONST_VALUE
-                                || (projected_self->data.array_type.length
+                                || (projected_array->data.array_type.length
                                     .kind == CM_HIR_CONST_PARAMETER
                                     && cm_lower_impl_owned_parameter(
                                         state->hir, impl_item,
-                                        projected_self->data.array_type
+                                        projected_array->data.array_type
                                             .length.data.parameter,
                                         CM_HIR_GENERIC_CONST)));
-                    } else {
-                        projected_supported =
-                            cm_lower_impl_self_concrete_supported(state,
-                                projected_self, 0u);
+                        break;
                     }
+                    if (projected_array->kind
+                        == CM_HIR_TYPE_REFERENCE_KIND && !peeled) {
+                        peeled = 1;
+                        projected_array = cm_hir_get_type(state->hir,
+                            projected_array->data.reference_type.pointee);
+                        continue;
+                    }
+                    projected_supported =
+                        cm_lower_impl_self_concrete_supported(state,
+                            projected_array, 0u);
+                    break;
                 }
                 if (!projected_supported) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
