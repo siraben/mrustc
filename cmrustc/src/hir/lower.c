@@ -18921,6 +18921,7 @@ typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_ADT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_SLICE,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE,
+    CM_LOWER_IMPL_SELF_DYN_TRAIT,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER,
     CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE
 } CmLowerImplSelfClass;
@@ -19626,6 +19627,14 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             || type->kind == CM_HIR_TYPE_FLOAT_KIND) {
             return CM_LOWER_IMPL_SELF_MONOMORPHIC;
         }
+        /*
+         * Core extends method tables for trait objects
+         * (`impl fmt::Debug for dyn Any`).  The principal trait is the
+         * class key; regions and auto-trait lists stay outside it.
+         */
+        if (type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND) {
+            return CM_LOWER_IMPL_SELF_DYN_TRAIT;
+        }
         if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
             if (!cm_lower_impl_self_concrete_supported(state,
                     cm_hir_get_type(state->hir,
@@ -19815,6 +19824,19 @@ static int cm_lower_impl_self_candidates_may_overlap(
         /* Element shapes are not a stable key; the trait arguments
          * decide after this gate. */
         return 1;
+    }
+    if (left_class == CM_LOWER_IMPL_SELF_DYN_TRAIT
+        && right_class == CM_LOWER_IMPL_SELF_DYN_TRAIT) {
+        const CmHirType *left = cm_hir_get_type(hir, left_self_type);
+        const CmHirType *right = cm_hir_get_type(hir, right_self_type);
+
+        if (left == NULL || right == NULL || !left->data.dyn_trait_type.has_principal
+            || !right->data.dyn_trait_type.has_principal) {
+            return 0;
+        }
+        return cm_hir_def_id_equal(
+            left->data.dyn_trait_type.principal_trait.definition,
+            right->data.dyn_trait_type.principal_trait.definition);
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
         && right_class
