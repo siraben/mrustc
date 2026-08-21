@@ -19008,20 +19008,32 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
         return left->data.integer_type.kind == right->data.integer_type.kind;
     case CM_HIR_TYPE_FLOAT_KIND:
         return left->data.float_type.kind == right->data.float_type.kind;
-    case CM_HIR_TYPE_SLICE_KIND:
-        return cm_lower_impl_self_concrete_equal(hir,
-            cm_hir_get_type(hir, left->data.slice_type.element),
-            cm_hir_get_type(hir, right->data.slice_type.element),
-            depth + 1u);
-    case CM_HIR_TYPE_REFERENCE_KIND:
+    case CM_HIR_TYPE_SLICE_KIND: {
+        const CmHirType *left_element = cm_hir_get_type(hir,
+            left->data.slice_type.element);
+        const CmHirType *right_element = cm_hir_get_type(hir,
+            right->data.slice_type.element);
+
+        if (left_element == NULL || right_element == NULL) return 0;
+        return cm_lower_impl_self_concrete_equal(hir, left_element,
+            right_element, depth + 1u);
+    }
+    case CM_HIR_TYPE_REFERENCE_KIND: {
+        const CmHirType *left_pointee;
+        const CmHirType *right_pointee;
+
         if (left->data.reference_type.mutability
             != right->data.reference_type.mutability) {
             return 0;
         }
-        return cm_lower_impl_self_concrete_equal(hir,
-            cm_hir_get_type(hir, left->data.reference_type.pointee),
-            cm_hir_get_type(hir, right->data.reference_type.pointee),
-            depth + 1u);
+        left_pointee = cm_hir_get_type(hir,
+            left->data.reference_type.pointee);
+        right_pointee = cm_hir_get_type(hir,
+            right->data.reference_type.pointee);
+        if (left_pointee == NULL || right_pointee == NULL) return 0;
+        return cm_lower_impl_self_concrete_equal(hir, left_pointee,
+            right_pointee, depth + 1u);
+    }
     case CM_HIR_TYPE_ADT_KIND:
         if (!cm_hir_def_id_equal(left->data.named_type.definition,
                 right->data.named_type.definition)
@@ -19036,6 +19048,8 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
              ++index) {
             const CmHirGenericArg *left_argument;
             const CmHirGenericArg *right_argument;
+            const CmHirType *left_argument_type;
+            const CmHirType *right_argument_type;
 
             left_argument = &left->data.named_type.arguments[index];
             right_argument = &right->data.named_type.arguments[index];
@@ -19048,10 +19062,15 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
                 || right_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
                 return 0;
             }
-            if (!cm_lower_impl_self_concrete_equal(hir,
-                    cm_hir_get_type(hir, left_argument->data.type),
-                    cm_hir_get_type(hir, right_argument->data.type),
-                    depth + 1u)) {
+            left_argument_type = cm_hir_get_type(hir,
+                left_argument->data.type);
+            right_argument_type = cm_hir_get_type(hir,
+                right_argument->data.type);
+            if (left_argument_type == NULL || right_argument_type == NULL) {
+                return 0;
+            }
+            if (!cm_lower_impl_self_concrete_equal(hir, left_argument_type,
+                    right_argument_type, depth + 1u)) {
                 return 0;
             }
         }
