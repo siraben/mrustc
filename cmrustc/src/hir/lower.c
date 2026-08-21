@@ -19619,9 +19619,18 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
             }
             break;
         case CM_HIR_GENERIC_CONST:
+            /*
+             * Const arguments are the impl's own const parameters
+             * (`[T; N]`) or literal values (`array::IntoIter<T, 1>`).
+             */
             if (argument->kind != CM_HIR_GENERIC_ARG_CONST
-                || argument->data.constant.kind != CM_HIR_CONST_PARAMETER
-                || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+                || (argument->data.constant.kind != CM_HIR_CONST_PARAMETER
+                    && argument->data.constant.kind
+                        != CM_HIR_CONST_VALUE)) {
+                return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+            }
+            if (argument->data.constant.kind == CM_HIR_CONST_PARAMETER
+                && !cm_lower_impl_owned_parameter(state->hir, impl_item,
                     argument->data.constant.data.parameter,
                     CM_HIR_GENERIC_CONST)) {
                 return CM_LOWER_IMPL_SELF_UNSUPPORTED;

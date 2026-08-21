@@ -8820,6 +8820,22 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Literal const arguments join parameter arguments. */
+    result = lower_graph_source(
+        "trait Shot4 {}"
+        "struct OnceIter5<T, const N: usize> { v: [T; N] }"
+        "struct OptIter5<T> { v: T }"
+        "impl<T> Shot4 for OnceIter5<T, 1> {}"
+        "impl<'a, T> Shot4 for OptIter5<&'a T> {}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "literal const argument failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
