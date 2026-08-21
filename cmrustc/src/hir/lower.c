@@ -6587,7 +6587,8 @@ static int cm_lower_predeclare_apit_type(CmLowerState *state,
 
 typedef enum CmLowerLifetimeAliasPosition {
     CM_LOWER_ALIAS_INPUT = 0,
-    CM_LOWER_ALIAS_OUTPUT
+    CM_LOWER_ALIAS_OUTPUT,
+    CM_LOWER_ALIAS_ASSOCIATED_TARGET
 } CmLowerLifetimeAliasPosition;
 
 static int cm_lower_cross_ast_string_equal(const CmAst *left_ast,
@@ -6626,6 +6627,7 @@ static int cm_lower_ast_lifetime_is_alias(const CmAst *ast,
 static int cm_lower_lifetime_alias_type_equal(const CmAst *trait_ast,
     CmAstTypeId trait_type_id, const CmAst *impl_ast,
     CmAstTypeId impl_type_id, CmInternId alias_name,
+    CmInternId trait_alias_name,
     CmLowerLifetimeAliasPosition position, uint32_t *input_alias_sites,
     size_t depth);
 
@@ -6633,7 +6635,8 @@ static int cm_lower_lifetime_alias_generic_arguments_equal(
     const CmAst *trait_ast, const CmAstGenericArg *trait_arguments,
     uint32_t trait_count, const CmAst *impl_ast,
     const CmAstGenericArg *impl_arguments, uint32_t impl_count,
-    CmInternId alias_name, CmLowerLifetimeAliasPosition position,
+    CmInternId alias_name, CmInternId trait_alias_name,
+    CmLowerLifetimeAliasPosition position,
     uint32_t *input_alias_sites, size_t depth)
 {
     uint32_t index;
@@ -6663,15 +6666,26 @@ static int cm_lower_lifetime_alias_generic_arguments_equal(
         if (trait_argument->kind == CM_AST_GENERIC_TYPE) {
             if (!cm_lower_lifetime_alias_type_equal(trait_ast,
                     trait_argument->type, impl_ast, impl_argument->type,
-                    alias_name, position, input_alias_sites, depth + 1u)) {
+                    alias_name, trait_alias_name, position,
+                    input_alias_sites, depth + 1u)) {
                 return 0;
             }
         } else if (trait_argument->kind == CM_AST_GENERIC_LIFETIME) {
-            if (position != CM_LOWER_ALIAS_OUTPUT
-                || !cm_lower_ast_lifetime_is_elided(trait_ast,
-                    trait_argument->text)
-                || !cm_lower_ast_lifetime_is_alias(impl_ast,
+            int maps_alias;
+
+            maps_alias = position == CM_LOWER_ALIAS_OUTPUT
+                    && cm_lower_ast_lifetime_is_elided(trait_ast,
+                        trait_argument->text)
+                    && cm_lower_ast_lifetime_is_alias(impl_ast,
+                        impl_argument->text, alias_name);
+            if (position == CM_LOWER_ALIAS_ASSOCIATED_TARGET
+                && cm_lower_ast_lifetime_is_alias(trait_ast,
+                    trait_argument->text, trait_alias_name)
+                && cm_lower_ast_lifetime_is_alias(impl_ast,
                     impl_argument->text, alias_name)) {
+                maps_alias = 1;
+            }
+            if (!maps_alias) {
                 if (!cm_lower_cross_ast_string_equal(trait_ast,
                         trait_argument->text, impl_ast,
                         impl_argument->text)) {
@@ -6693,6 +6707,7 @@ static int cm_lower_lifetime_alias_generic_arguments_equal(
 static int cm_lower_lifetime_alias_path_equal(const CmAst *trait_ast,
     const CmAstPath *trait_path, const CmAst *impl_ast,
     const CmAstPath *impl_path, CmInternId alias_name,
+    CmInternId trait_alias_name,
     CmLowerLifetimeAliasPosition position, uint32_t *input_alias_sites,
     size_t depth)
 {
@@ -6716,8 +6731,8 @@ static int cm_lower_lifetime_alias_path_equal(const CmAst *trait_ast,
             || !cm_lower_lifetime_alias_generic_arguments_equal(trait_ast,
                 trait_segment->arguments, trait_segment->argument_count,
                 impl_ast, impl_segment->arguments,
-                impl_segment->argument_count, alias_name, position,
-                input_alias_sites, depth + 1u)) {
+                impl_segment->argument_count, alias_name, trait_alias_name,
+                position, input_alias_sites, depth + 1u)) {
             return 0;
         }
     }
@@ -6727,6 +6742,7 @@ static int cm_lower_lifetime_alias_path_equal(const CmAst *trait_ast,
 static int cm_lower_lifetime_alias_type_equal(const CmAst *trait_ast,
     CmAstTypeId trait_type_id, const CmAst *impl_ast,
     CmAstTypeId impl_type_id, CmInternId alias_name,
+    CmInternId trait_alias_name,
     CmLowerLifetimeAliasPosition position, uint32_t *input_alias_sites,
     size_t depth)
 {
@@ -6744,11 +6760,19 @@ static int cm_lower_lifetime_alias_type_equal(const CmAst *trait_ast,
         return cm_lower_lifetime_alias_path_equal(trait_ast,
             cm_ast_get_path(trait_ast, trait_type->path), impl_ast,
             cm_ast_get_path(impl_ast, impl_type->path), alias_name,
-            position, input_alias_sites, depth + 1u);
+            trait_alias_name, position, input_alias_sites, depth + 1u);
     }
     if (trait_type->kind == CM_AST_TYPE_REFERENCE) {
         if (trait_type->is_mutable != impl_type->is_mutable) return 0;
-        if (cm_lower_ast_lifetime_is_elided(trait_ast,
+        if (position == CM_LOWER_ALIAS_ASSOCIATED_TARGET
+            && cm_lower_ast_lifetime_is_alias(trait_ast,
+                trait_type->lifetime, trait_alias_name)) {
+            if (!cm_lower_ast_lifetime_is_alias(impl_ast,
+                    impl_type->lifetime, alias_name)) {
+                return 0;
+            }
+        } else if (position != CM_LOWER_ALIAS_ASSOCIATED_TARGET
+            && cm_lower_ast_lifetime_is_elided(trait_ast,
                 trait_type->lifetime)) {
             if (!cm_lower_ast_lifetime_is_alias(impl_ast,
                     impl_type->lifetime, alias_name)) {
@@ -6764,19 +6788,19 @@ static int cm_lower_lifetime_alias_type_equal(const CmAst *trait_ast,
         }
         return cm_lower_lifetime_alias_type_equal(trait_ast,
             trait_type->child, impl_ast, impl_type->child, alias_name,
-            position, input_alias_sites, depth + 1u);
+            trait_alias_name, position, input_alias_sites, depth + 1u);
     }
     if (trait_type->kind == CM_AST_TYPE_PROJECTION) {
         if (!cm_lower_lifetime_alias_type_equal(trait_ast,
                 trait_type->projection.self_type, impl_ast,
-                impl_type->projection.self_type, alias_name, position,
-                input_alias_sites, depth + 1u)
+                impl_type->projection.self_type, alias_name,
+                trait_alias_name, position, input_alias_sites, depth + 1u)
             || !cm_lower_lifetime_alias_path_equal(trait_ast,
                 cm_ast_get_path(trait_ast,
                     trait_type->projection.trait_path), impl_ast,
                 cm_ast_get_path(impl_ast,
                     impl_type->projection.trait_path), alias_name,
-                position, input_alias_sites, depth + 1u)
+                trait_alias_name, position, input_alias_sites, depth + 1u)
             || !cm_lower_cross_ast_string_equal(trait_ast,
                 trait_type->projection.associated.name, impl_ast,
                 impl_type->projection.associated.name)) {
@@ -6787,7 +6811,7 @@ static int cm_lower_lifetime_alias_type_equal(const CmAst *trait_ast,
             trait_type->projection.associated.argument_count, impl_ast,
             impl_type->projection.associated.arguments,
             impl_type->projection.associated.argument_count, alias_name,
-            position, input_alias_sites, depth + 1u);
+            trait_alias_name, position, input_alias_sites, depth + 1u);
     }
     return 0;
 }
@@ -6821,8 +6845,370 @@ static const CmLowerItemRecord *cm_lower_find_local_trait_method_record(
     return matched;
 }
 
+static int cm_lower_hir_name_matches_other_ast(const CmLowerState *state,
+    CmInternId hir_name, const CmAst *ast, CmInternId ast_name)
+{
+    const CmInternedString *hir_string;
+    const CmInternedString *ast_string;
+
+    hir_string = cm_interner_get(&state->hir->strings, hir_name);
+    ast_string = cm_ast_get_string(ast, ast_name);
+    return hir_string != NULL && ast_string != NULL
+        && hir_string->len == ast_string->len
+        && memcmp(hir_string->bytes, ast_string->bytes,
+            hir_string->len) == 0;
+}
+
+static const CmLowerItemRecord *cm_lower_find_associated_record(
+    const CmLowerState *state, CmHirDefId parent, CmAstItemKind kind,
+    const CmAst *name_ast, CmInternId name, uint32_t *out_matches)
+{
+    const CmLowerItemRecord *matched;
+    size_t index;
+    uint32_t matches;
+
+    matched = NULL;
+    matches = 0u;
+    for (index = 0u; index < state->item_records.len; ++index) {
+        const CmLowerItemRecord *candidate;
+
+        candidate = (const CmLowerItemRecord *)cm_vec_at_const(
+            &state->item_records, index);
+        if (candidate != NULL && candidate->kind == kind
+            && cm_hir_def_id_equal(candidate->parent_definition, parent)
+            && cm_lower_hir_name_matches_other_ast(state,
+                candidate->hir_name, name_ast, name)) {
+            matched = candidate;
+            matches += 1u;
+        }
+    }
+    *out_matches = matches;
+    return matched;
+}
+
+static int cm_lower_item_reference_equal(CmResolveItemRef left,
+    CmResolveItemRef right)
+{
+    return left.source == right.source && left.item == right.item;
+}
+
+static int cm_lower_generated_provenance_equal(
+    const CmResolveItemProvenance *left,
+    const CmResolveItemProvenance *right)
+{
+    return left != NULL && right != NULL
+        && cm_lower_item_reference_equal(left->source_item,
+            right->source_item)
+        && cm_lower_item_reference_equal(left->macro_invocation,
+            right->macro_invocation)
+        && cm_lower_item_reference_equal(left->macro_definition,
+            right->macro_definition)
+        && left->dependency_macro_definition.consumer_graph
+            == right->dependency_macro_definition.consumer_graph
+        && left->dependency_macro_definition.consumer_revision
+            == right->dependency_macro_definition.consumer_revision
+        && left->dependency_macro_definition.certificate
+            == right->dependency_macro_definition.certificate
+        && left->dependency_macro_definition.dependency
+            == right->dependency_macro_definition.dependency
+        && left->dependency_macro_definition.dependency_revision
+            == right->dependency_macro_definition.dependency_revision
+        && cm_lower_item_reference_equal(
+            left->dependency_macro_definition.declaration,
+            right->dependency_macro_definition.declaration)
+        && left->expansion_depth == right->expansion_depth;
+}
+
+static int cm_lower_bare_lifetime_parameter(const CmAstGenericParam *parameter)
+{
+    return parameter != NULL
+        && parameter->kind == CM_AST_PARAM_LIFETIME
+        && parameter->name != CM_INTERN_ID_NONE
+        && parameter->attribute_count == 0u
+        && parameter->attributes == NULL
+        && parameter->bound_count == 0u
+        && parameter->bounds == NULL
+        && parameter->constraint == CM_INTERN_ID_NONE
+        && parameter->declared_type == CM_AST_TYPE_NONE
+        && parameter->default_const == CM_INTERN_ID_NONE
+        && parameter->default_const_expr == CM_AST_EXPR_NONE
+        && parameter->default_type == CM_AST_TYPE_NONE;
+}
+
+static int cm_lower_other_ast_string_is(const CmAst *ast, CmInternId id,
+    const char *text)
+{
+    const CmInternedString *string;
+    size_t length;
+
+    string = cm_ast_get_string(ast, id);
+    length = strlen(text);
+    return string != NULL && string->len == length
+        && memcmp(string->bytes, text, length) == 0;
+}
+
+static int cm_lower_trait_alias_projection(const CmAst *ast,
+    CmAstTypeId type_id, CmInternId *out_associated_name)
+{
+    const CmAstType *type;
+    const CmAstPath *path;
+    const CmAstPathSegment *self_segment;
+    const CmAstPathSegment *associated_segment;
+    const CmAstGenericArg *argument;
+
+    *out_associated_name = CM_INTERN_ID_NONE;
+    type = cm_ast_get_type(ast, type_id);
+    path = type == NULL || type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_ast_get_path(ast, type->path);
+    if (path == NULL || !cm_lower_ast_path_storage_valid(path)
+        || path->absolute || path->segment_count != 2u) {
+        return 0;
+    }
+    self_segment = &path->segments[0];
+    associated_segment = &path->segments[1];
+    if (!cm_lower_other_ast_string_is(ast, self_segment->name, "Self")
+        || self_segment->argument_count != 0u
+        || self_segment->arguments != NULL
+        || associated_segment->argument_count != 1u
+        || associated_segment->arguments == NULL) {
+        return 0;
+    }
+    argument = &associated_segment->arguments[0];
+    if (argument->kind != CM_AST_GENERIC_LIFETIME
+        || argument->name_argument_count != 0u
+        || argument->name_arguments != NULL
+        || argument->bound_count != 0u || argument->bounds != NULL
+        || !cm_lower_ast_lifetime_is_elided(ast, argument->text)) {
+        return 0;
+    }
+    *out_associated_name = associated_segment->name;
+    return 1;
+}
+
+static int cm_lower_generated_associated_return_equal(CmLowerState *state,
+    const CmLowerItemRecord *trait_method_record,
+    const CmAstItem *trait_method_ast,
+    const CmLowerItemRecord *impl_record,
+    const CmLowerItemRecord *method_record,
+    const CmAstItem *impl_method_ast, CmHirDefId trait_definition,
+    CmInternId method_alias_name, int require_bound_associated)
+{
+    const CmLowerItemRecord *trait_associated_record;
+    const CmLowerItemRecord *impl_associated_record;
+    const CmAstItem *trait_associated_ast;
+    const CmAstItem *impl_associated_ast;
+    const CmAstGenericParam *trait_parameter;
+    const CmAstGenericParam *impl_parameter;
+    const CmHirItem *bound_impl_associated;
+    CmInternId associated_name;
+    uint32_t trait_matches;
+    uint32_t impl_matches;
+    uint32_t alias_sites;
+
+    if (state == NULL || trait_method_record == NULL
+        || trait_method_ast == NULL || impl_record == NULL
+        || method_record == NULL || impl_method_ast == NULL
+        || !method_record->is_generated || method_record->is_foreign
+        || impl_record->is_generated || impl_record->is_foreign
+        || !cm_lower_trait_alias_projection(trait_method_record->ast,
+            trait_method_ast->data.function_item.return_type,
+            &associated_name)) {
+        return 0;
+    }
+    trait_associated_record = cm_lower_find_associated_record(state,
+        trait_definition, CM_AST_ITEM_TYPE_ALIAS, trait_method_record->ast,
+        associated_name, &trait_matches);
+    impl_associated_record = cm_lower_find_associated_record(state,
+        method_record->parent_definition, CM_AST_ITEM_TYPE_ALIAS,
+        trait_method_record->ast, associated_name, &impl_matches);
+    if (trait_matches != 1u || impl_matches != 1u
+        || trait_associated_record == NULL || impl_associated_record == NULL
+        || trait_associated_record->is_generated
+        || trait_associated_record->is_foreign
+        || !impl_associated_record->is_generated
+        || impl_associated_record->is_foreign
+        || !cm_hir_def_id_equal(impl_associated_record->parent_definition,
+            impl_record->definition)
+        || !cm_lower_generated_provenance_equal(
+            &impl_associated_record->provenance,
+            &method_record->provenance)) {
+        return 0;
+    }
+    trait_associated_ast = cm_ast_get_item(trait_associated_record->ast,
+        trait_associated_record->ast_id);
+    impl_associated_ast = cm_ast_get_item(impl_associated_record->ast,
+        impl_associated_record->ast_id);
+    if (trait_associated_ast == NULL
+        || trait_associated_ast->kind != CM_AST_ITEM_TYPE_ALIAS
+        || trait_associated_ast->generic_parameter_count != 1u
+        || trait_associated_ast->generic_parameters == NULL
+        || trait_associated_ast->where_clause != CM_INTERN_ID_NONE
+        || trait_associated_ast->where_predicate_count != 0u
+        || trait_associated_ast->where_predicates != NULL
+        || trait_associated_ast->data.value_item.has_value
+        || trait_associated_ast->data.value_item.type != CM_AST_TYPE_NONE
+        || (trait_associated_ast->data.value_item.bound_count != 0u
+            && trait_associated_ast->data.value_item.bounds == NULL)
+        || (trait_associated_ast->data.value_item.bound_count == 0u
+            && trait_associated_ast->data.value_item.bounds != NULL)
+        || impl_associated_ast == NULL
+        || impl_associated_ast->kind != CM_AST_ITEM_TYPE_ALIAS
+        || impl_associated_ast->generic_parameter_count != 1u
+        || impl_associated_ast->generic_parameters == NULL
+        || impl_associated_ast->where_clause != CM_INTERN_ID_NONE
+        || impl_associated_ast->where_predicate_count != 0u
+        || impl_associated_ast->where_predicates != NULL
+        || !impl_associated_ast->data.value_item.has_value
+        || impl_associated_ast->data.value_item.type == CM_AST_TYPE_NONE
+        || impl_associated_ast->data.value_item.bound_count != 0u
+        || impl_associated_ast->data.value_item.bounds != NULL) {
+        return 0;
+    }
+    trait_parameter = &trait_associated_ast->generic_parameters[0];
+    impl_parameter = &impl_associated_ast->generic_parameters[0];
+    if (!cm_lower_bare_lifetime_parameter(trait_parameter)
+        || !cm_lower_bare_lifetime_parameter(impl_parameter)
+        || cm_ast_get_string(trait_associated_record->ast,
+            trait_parameter->name) == NULL
+        || cm_ast_get_string(impl_associated_record->ast,
+            impl_parameter->name) == NULL
+        || cm_lower_other_ast_string_is(trait_associated_record->ast,
+            trait_parameter->name, "'static")
+        || cm_lower_other_ast_string_is(trait_associated_record->ast,
+            trait_parameter->name, "'_")
+        || cm_lower_other_ast_string_is(impl_associated_record->ast,
+            impl_parameter->name, "'static")
+        || cm_lower_other_ast_string_is(impl_associated_record->ast,
+            impl_parameter->name, "'_")) {
+        return 0;
+    }
+    alias_sites = 0u;
+    if (!cm_lower_lifetime_alias_type_equal(impl_associated_record->ast,
+            impl_associated_ast->data.value_item.type,
+            method_record->ast,
+            impl_method_ast->data.function_item.return_type,
+            method_alias_name, impl_parameter->name,
+            CM_LOWER_ALIAS_ASSOCIATED_TARGET, &alias_sites, 0u)) {
+        return 0;
+    }
+    bound_impl_associated = cm_lower_bound_item(state,
+        impl_associated_record->definition);
+    if ((require_bound_associated && bound_impl_associated == NULL)
+        || (bound_impl_associated != NULL
+            && (bound_impl_associated->kind != CM_HIR_ITEM_TYPE_ALIAS
+            || !cm_hir_def_id_equal(bound_impl_associated->data
+                    .type_alias_item.trait_item_definition,
+                trait_associated_record->definition)))) {
+        return 0;
+    }
+    return 1;
+}
+
+static int cm_lower_name_matches_impl_generic(const CmAst *ast,
+    const CmAstItem *impl_ast, CmInternId name)
+{
+    uint32_t index;
+
+    if (name == CM_INTERN_ID_NONE || impl_ast == NULL
+        || impl_ast->generic_parameters == NULL) {
+        return 0;
+    }
+    for (index = 0u; index < impl_ast->generic_parameter_count; ++index) {
+        if (cm_lower_cross_ast_string_equal(ast, name, ast,
+                impl_ast->generic_parameters[index].name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cm_lower_type_mentions_impl_generic(const CmAst *ast,
+    CmAstTypeId type_id, const CmAstItem *impl_ast, size_t depth);
+
+static int cm_lower_arguments_mention_impl_generic(const CmAst *ast,
+    const CmAstGenericArg *arguments, uint32_t count,
+    const CmAstItem *impl_ast, size_t depth)
+{
+    uint32_t index;
+
+    if (count != 0u && arguments == NULL) return 1;
+    for (index = 0u; index < count; ++index) {
+        const CmAstGenericArg *argument;
+
+        argument = &arguments[index];
+        if (argument->kind == CM_AST_GENERIC_TYPE
+            && cm_lower_type_mentions_impl_generic(ast, argument->type,
+                impl_ast, depth + 1u)) {
+            return 1;
+        }
+        if ((argument->kind == CM_AST_GENERIC_LIFETIME
+                || argument->kind == CM_AST_GENERIC_CONST)
+            && cm_lower_name_matches_impl_generic(ast, impl_ast,
+                argument->text)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cm_lower_path_mentions_impl_generic(const CmAst *ast,
+    const CmAstPath *path, const CmAstItem *impl_ast, size_t depth)
+{
+    uint32_t segment_index;
+
+    if (depth > CM_LOWER_APIT_MAX_DEPTH || path == NULL
+        || !cm_lower_ast_path_storage_valid(path)) {
+        return 1;
+    }
+    for (segment_index = 0u; segment_index < path->segment_count;
+         ++segment_index) {
+        const CmAstPathSegment *segment;
+
+        segment = &path->segments[segment_index];
+        if (cm_lower_name_matches_impl_generic(ast, impl_ast,
+                segment->name)
+            || cm_lower_arguments_mention_impl_generic(ast,
+                segment->arguments, segment->argument_count, impl_ast,
+                depth + 1u)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cm_lower_type_mentions_impl_generic(const CmAst *ast,
+    CmAstTypeId type_id, const CmAstItem *impl_ast, size_t depth)
+{
+    const CmAstType *type;
+
+    if (depth > CM_LOWER_APIT_MAX_DEPTH) return 1;
+    type = cm_ast_get_type(ast, type_id);
+    if (type == NULL) return 1;
+    if (type->kind == CM_AST_TYPE_REFERENCE) {
+        return cm_lower_name_matches_impl_generic(ast, impl_ast,
+                type->lifetime)
+            || cm_lower_type_mentions_impl_generic(ast, type->child,
+                impl_ast, depth + 1u);
+    }
+    if (type->kind == CM_AST_TYPE_PROJECTION) {
+        return cm_lower_type_mentions_impl_generic(ast,
+                type->projection.self_type, impl_ast, depth + 1u)
+            || cm_lower_path_mentions_impl_generic(ast,
+                cm_ast_get_path(ast, type->projection.trait_path), impl_ast,
+                depth + 1u)
+            || cm_lower_arguments_mention_impl_generic(ast,
+                type->projection.associated.arguments,
+                type->projection.associated.argument_count, impl_ast,
+                depth + 1u);
+    }
+    if (type->kind != CM_AST_TYPE_PATH) return 0;
+    return cm_lower_path_mentions_impl_generic(ast,
+        cm_ast_get_path(ast, type->path), impl_ast, depth + 1u);
+}
+
 static int cm_lower_authenticate_lifetime_alias(CmLowerState *state,
     const CmAstItem *impl_method_ast, const CmLowerItemRecord *record,
+    int require_bound_associated,
     CmHirDefId *out_trait_method_definition)
 {
     const CmLowerItemRecord *impl_record;
@@ -6840,13 +7226,10 @@ static int cm_lower_authenticate_lifetime_alias(CmLowerState *state,
     uint32_t index;
 
     *out_trait_method_definition = cm_hir_def_id_none();
-    /* Keep this alias strictly source-authenticated.  Generated methods can
-     * change the return spelling (for example, macro `$t` substitutions),
-     * and require a separate semantic-equivalence checkpoint. */
     if (impl_method_ast == NULL || record == NULL
         || record->kind != CM_AST_ITEM_FUNCTION
         || record->parent_kind != CM_LOWER_PARENT_IMPL
-        || record->is_generated || record->is_foreign
+        || record->is_foreign
         || impl_method_ast->generic_parameter_count != 1u
         || impl_method_ast->generic_parameters == NULL
         || impl_method_ast->where_clause != CM_INTERN_ID_NONE
@@ -6886,8 +7269,12 @@ static int cm_lower_authenticate_lifetime_alias(CmLowerState *state,
         ? NULL : cm_ast_get_path(impl_record->ast, impl_trait_type->path);
     if (impl_record == NULL || impl_record->ast != record->ast
         || impl_ast == NULL || impl_ast->kind != CM_AST_ITEM_IMPL
-        || impl_ast->generic_parameter_count != 0u
-        || impl_ast->generic_parameters != NULL
+        || (impl_ast->generic_parameter_count != 0u
+            && impl_ast->generic_parameters == NULL)
+        || (impl_ast->generic_parameter_count == 0u
+            && impl_ast->generic_parameters != NULL)
+        || (!record->is_generated
+            && impl_ast->generic_parameter_count != 0u)
         || impl_trait_path == NULL
         || !cm_lower_ast_path_storage_valid(impl_trait_path)
         || impl_trait_path->segment_count == 0u) {
@@ -6953,9 +7340,14 @@ static int cm_lower_authenticate_lifetime_alias(CmLowerState *state,
         if (trait_parameter->is_self || impl_parameter->is_self
             || trait_parameter->type == CM_AST_TYPE_NONE
             || impl_parameter->type == CM_AST_TYPE_NONE
+            || (record->is_generated
+                && impl_ast->generic_parameter_count != 0u
+                && cm_lower_type_mentions_impl_generic(record->ast,
+                    impl_parameter->type, impl_ast, 0u))
             || !cm_lower_lifetime_alias_type_equal(trait_method_record->ast,
                 trait_parameter->type, record->ast, impl_parameter->type,
-                alias_parameter->name, CM_LOWER_ALIAS_INPUT,
+                alias_parameter->name, CM_INTERN_ID_NONE,
+                CM_LOWER_ALIAS_INPUT,
                 &input_alias_sites, 0u)) {
             return 0;
         }
@@ -6968,13 +7360,29 @@ static int cm_lower_authenticate_lifetime_alias(CmLowerState *state,
         return 0;
     }
     if (trait_method_ast->data.function_item.return_type
-            != CM_AST_TYPE_NONE
-        && !cm_lower_lifetime_alias_type_equal(trait_method_record->ast,
+            != CM_AST_TYPE_NONE) {
+        int return_matches;
+
+        return_matches = cm_lower_lifetime_alias_type_equal(
+            trait_method_record->ast,
             trait_method_ast->data.function_item.return_type, record->ast,
             impl_method_ast->data.function_item.return_type,
-            alias_parameter->name, CM_LOWER_ALIAS_OUTPUT,
-            &input_alias_sites, 0u)) {
-        return 0;
+            alias_parameter->name, CM_INTERN_ID_NONE,
+            CM_LOWER_ALIAS_OUTPUT, &input_alias_sites, 0u);
+        if (return_matches && record->is_generated
+            && impl_ast->generic_parameter_count != 0u
+            && cm_lower_type_mentions_impl_generic(record->ast,
+                impl_method_ast->data.function_item.return_type,
+                impl_ast, 0u)) {
+            return_matches = 0;
+        }
+        if (!return_matches
+            && !cm_lower_generated_associated_return_equal(state,
+                trait_method_record, trait_method_ast, impl_record, record,
+                impl_method_ast, trait_target.definition,
+                alias_parameter->name, require_bound_associated)) {
+            return 0;
+        }
     }
     *out_trait_method_definition = trait_method_record->definition;
     return 1;
@@ -7073,7 +7481,7 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
         return 0;
     }
     has_lifetime_alias = cm_lower_authenticate_lifetime_alias(state,
-        ast_item, record, &alias_trait_method);
+        ast_item, record, 0, &alias_trait_method);
     retained_explicit_count = ast_item->generic_parameter_count;
     if (has_lifetime_alias) {
         CmLowerLifetimeAlias alias;
@@ -9488,7 +9896,7 @@ static int cm_lower_function_item(CmLowerState *state,
                         lifetime_alias->trait_method_definition,
                         trait_method->definition)
                     && cm_lower_authenticate_lifetime_alias(state, ast_item,
-                        record, &authenticated_trait_method)
+                        record, 1, &authenticated_trait_method)
                     && cm_hir_def_id_equal(authenticated_trait_method,
                         trait_method->definition)) {
                     impl_explicit_count -= 1u;

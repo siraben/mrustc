@@ -7699,6 +7699,204 @@ static void test_impl_elided_lifetime_alias(void)
     }
 }
 
+static const CmHirType *generic_argument_type(const CmHirContext *context,
+    const CmHirType *type, uint32_t index)
+{
+    if (type == NULL || type->kind != CM_HIR_TYPE_ADT_KIND
+        || index >= type->data.named_type.argument_count
+        || type->data.named_type.arguments == NULL
+        || type->data.named_type.arguments[index].kind
+            != CM_HIR_GENERIC_ARG_TYPE) {
+        return NULL;
+    }
+    return cm_hir_get_type(context,
+        type->data.named_type.arguments[index].data.type);
+}
+
+static void test_generated_impl_elided_lifetime_alias(void)
+{
+    static const char source[] =
+        "struct Option<T>; struct Wrapper<T>;"
+        "trait Searcher<'a> {}"
+        "trait Pattern {"
+        " type Searcher<'a>: Searcher<'a>;"
+        " fn into_searcher(self, haystack: &str) -> Self::Searcher<'_>;"
+        " fn is_contained_in(self, haystack: &str) -> bool;"
+        " fn strip_prefix_of(self, haystack: &str) -> Option<&str>;"
+        " fn is_suffix_of<'a>(self, haystack: &'a str) -> bool;"
+        "}"
+        "macro_rules! pattern_methods { ($t:ty) => {"
+        " fn into_searcher<'a>(self, haystack: &'a str) -> $t {}"
+        " fn is_contained_in<'a>(self, haystack: &'a str) -> bool {}"
+        " fn strip_prefix_of<'a>(self, haystack: &'a str)"
+        " -> Option<&'a str> {}"
+        " fn is_suffix_of<'a>(self, haystack: &'a str) -> bool {}"
+        " type Searcher<'a> = $t;"
+        "}; }"
+        "impl<T> Pattern for Wrapper<T> {"
+        " pattern_methods!(Option<&'a T>); }";
+    static const char *const rejected[] = {
+        ("struct Token; struct Wrapper<T>;"
+            "trait Pattern { type Searcher<'a>;"
+            " fn inspect(self, value: &Token) -> bool; }"
+            "macro_rules! make { () => { type Searcher<'a> = bool;"
+            " fn inspect<'a>(self, value: &'a Token) -> bool {} }; }"
+            "impl<Token> Pattern for Wrapper<Token> { make!(); }"),
+        ("struct Option<T>; struct Wrapper<T>;"
+            "trait Pattern { type Searcher<'a>;"
+            " fn into_searcher(self, value: &str) -> Self::Searcher<'_>; }"
+            "macro_rules! make { () => {"
+            " type Searcher<'b> = Option<&'static T>;"
+            " fn into_searcher<'a>(self, value: &'a str)"
+            " -> Option<&'a T> {} }; }"
+            "impl<T> Pattern for Wrapper<T> { make!(); }"),
+        ("struct Option<T>; struct Wrapper<T>;"
+            "trait Pattern { type Searcher<'a>;"
+            " fn into_searcher(self, value: &str) -> Self::Searcher<'_>; }"
+            "macro_rules! make_type { () => {"
+            " type Searcher<'b> = Option<&'b T>; }; }"
+            "macro_rules! make_method { () => {"
+            " fn into_searcher<'a>(self, value: &'a str)"
+            " -> Option<&'a T> {} }; }"
+            "impl<T> Pattern for Wrapper<T> {"
+            " make_type!(); make_method!(); }"),
+        ("struct Option<T>; struct Wrapper<T>;"
+            "trait Pattern { type Searcher<'a>;"
+            " fn inspect(self, value: &str) -> bool; }"
+            "macro_rules! make { () => { type Searcher<'a> = bool;"
+            " fn inspect<'a>(self, value: &'a str) -> u8 {} }; }"
+            "impl<T> Pattern for Wrapper<T> { make!(); }")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *pattern;
+    const CmHirItem *impl_item;
+    const CmHirItem *associated;
+    const CmHirItem *trait_associated;
+    const CmHirItem *into;
+    const CmHirItem *contained;
+    const CmHirItem *prefix;
+    const CmHirItem *suffix;
+    const CmHirType *into_input;
+    const CmHirType *into_output;
+    const CmHirType *into_output_reference;
+    const CmHirType *associated_target;
+    const CmHirType *associated_reference;
+    const CmHirType *associated_pointee;
+    const CmHirType *prefix_input;
+    const CmHirType *prefix_output;
+    const CmHirType *prefix_output_reference;
+    const CmHirType *suffix_input;
+    size_t index;
+
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "generated lifetime alias lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    pattern = find_item(&context, "Pattern");
+    impl_item = find_impl(&context);
+    trait_associated = pattern == NULL ? NULL
+        : find_child(&context, pattern->definition, "Searcher");
+    associated = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "Searcher");
+    into = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "into_searcher");
+    contained = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "is_contained_in");
+    prefix = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "strip_prefix_of");
+    suffix = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "is_suffix_of");
+    into_input = into == NULL ? NULL : cm_hir_get_type(&context,
+        into->data.function_item.signature.parameters[1].type);
+    into_output = into == NULL ? NULL : cm_hir_get_type(&context,
+        into->data.function_item.signature.return_type);
+    into_output_reference = generic_argument_type(&context, into_output, 0u);
+    associated_target = associated == NULL ? NULL : cm_hir_get_type(&context,
+        associated->data.type_alias_item.target);
+    associated_reference = generic_argument_type(&context,
+        associated_target, 0u);
+    associated_pointee = associated_reference == NULL
+            || associated_reference->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            associated_reference->data.reference_type.pointee);
+    prefix_input = prefix == NULL ? NULL : cm_hir_get_type(&context,
+        prefix->data.function_item.signature.parameters[1].type);
+    prefix_output = prefix == NULL ? NULL : cm_hir_get_type(&context,
+        prefix->data.function_item.signature.return_type);
+    prefix_output_reference = generic_argument_type(&context,
+        prefix_output, 0u);
+    suffix_input = suffix == NULL ? NULL : cm_hir_get_type(&context,
+        suffix->data.function_item.signature.parameters[1].type);
+    assert(result.error_count == 0u
+        && pattern != NULL && impl_item != NULL
+        && impl_item->generic_parameter_count == 1u
+        && trait_associated != NULL && associated != NULL
+        && trait_associated->generic_parameter_count == 1u
+        && associated->generic_parameter_count == 1u
+        && cm_hir_def_id_equal(associated->data.type_alias_item
+                .trait_item_definition,
+            trait_associated->definition)
+        && associated_reference != NULL
+        && associated_reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && associated_reference->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && associated_reference->data.reference_type.region.data.parameter
+            == associated->generic_parameter_start
+        && associated_pointee != NULL
+        && associated_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && associated_pointee->data.parameter_type.parameter
+            == impl_item->generic_parameter_start
+        && into != NULL && into->generic_parameter_count == 0u
+        && contained != NULL && contained->generic_parameter_count == 0u
+        && prefix != NULL && prefix->generic_parameter_count == 0u
+        && suffix != NULL && suffix->generic_parameter_count == 1u
+        && into_input != NULL
+        && into_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && into_output_reference != NULL
+        && into_output_reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && into_input->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && into_output_reference->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && into_input->data.reference_type.region.data.inference_variable
+            == into_output_reference->data.reference_type.region
+                .data.inference_variable
+        && prefix_input != NULL
+        && prefix_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && prefix_output_reference != NULL
+        && prefix_output_reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && prefix_input->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && prefix_input->data.reference_type.region.data.inference_variable
+            == prefix_output_reference->data.reference_type.region
+                .data.inference_variable
+        && suffix_input != NULL
+        && suffix_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && suffix_input->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_graph_source(rejected[index], &context);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+            || strstr(result.first_error.message, "generic arity differs")
+                == NULL) {
+            fprintf(stderr, "generated alias rejection mismatch: %s: %s\n",
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message, "generic arity differs")
+                != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_argument_impl_trait_foreign_rejected(void)
 {
     static const char source[] = "extern \"C\" { fn consume(value: impl Send); } trait Send {}";
@@ -9708,6 +9906,7 @@ int main(void)
 {
     test_argument_impl_trait_method_parity();
     test_impl_elided_lifetime_alias();
+    test_generated_impl_elided_lifetime_alias();
     test_complete_declarations();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
