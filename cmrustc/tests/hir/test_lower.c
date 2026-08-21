@@ -8424,6 +8424,33 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "overlapping ordered generic impl candidates") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Where-clause bindings constrain blanket parameters. */
+    result = lower_graph_source(
+        "trait Recv2 { type Tgt2; }"
+        "trait Deref3 { type Tg3; }"
+        "impl<P: Deref3<Tg3 = T>, T> Recv2 for P {"
+        " type Tgt2 = T;"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "where-bound constraint failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Recv2 { type Tgt2; }"
+        "struct Unused2;"
+        "impl<P, T> Recv2 for P { type Tgt2 = T; }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && strstr(result.first_error.message,
+            "outside the bounded") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)

@@ -19246,6 +19246,54 @@ static int cm_lower_impl_parameters_constrained(const CmLowerState *state,
                 }
             }
         }
+        if (!referenced && impl_item->predicates != NULL) {
+            /*
+             * Where-clause predicates constrain parameters through their
+             * bound arguments and associated-type equalities
+             * (`where P: Deref<Target = T>`).
+             */
+            uint32_t predicate_index;
+
+            for (predicate_index = 0u;
+                 predicate_index < impl_item->predicate_count;
+                 ++predicate_index) {
+                const CmHirTraitPredicate *predicate
+                    = &impl_item->predicates[predicate_index];
+                uint32_t entry_index;
+
+                for (entry_index = 0u; predicate->trait_type.arguments
+                         != NULL
+                     && entry_index < predicate->trait_type.argument_count;
+                     ++entry_index) {
+                    const CmHirGenericArg *argument
+                        = &predicate->trait_type.arguments[entry_index];
+
+                    if (argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                        && cm_lower_type_references_parameter(state->hir,
+                            cm_hir_get_type(state->hir,
+                                argument->data.type),
+                            impl_item->generic_parameter_start + index,
+                            0u)) {
+                        referenced = 1;
+                        break;
+                    }
+                }
+                if (referenced) break;
+                for (entry_index = 0u; predicate->equalities != NULL
+                     && entry_index < predicate->equality_count;
+                     ++entry_index) {
+                    if (cm_lower_type_references_parameter(state->hir,
+                            cm_hir_get_type(state->hir,
+                                predicate->equalities[entry_index].value),
+                            impl_item->generic_parameter_start + index,
+                            0u)) {
+                        referenced = 1;
+                        break;
+                    }
+                }
+                if (referenced) break;
+            }
+        }
         if (!referenced) return 0;
     }
     return 1;
