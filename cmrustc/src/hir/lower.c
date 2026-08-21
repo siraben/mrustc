@@ -18970,6 +18970,12 @@ static int cm_lower_impl_self_concrete_supported(const CmLowerState *state,
             const CmHirGenericArg *argument;
 
             argument = &type->data.named_type.arguments[index];
+            /*
+             * Phantom lifetime markers pass regions through positionally
+             * (`impl Variance for Covariant<'_>`); regions are not part
+             * of any class key.
+             */
+            if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) continue;
             if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
                 || !cm_lower_impl_self_concrete_supported(state,
                     cm_hir_get_type(state->hir, argument->data.type),
@@ -19031,6 +19037,11 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
 
             left_argument = &left->data.named_type.arguments[index];
             right_argument = &right->data.named_type.arguments[index];
+            if (left_argument->kind == CM_HIR_GENERIC_ARG_LIFETIME
+                && right_argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
+                /* Regions are not part of any class key. */
+                continue;
+            }
             if (left_argument->kind != CM_HIR_GENERIC_ARG_TYPE
                 || right_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
                 return 0;

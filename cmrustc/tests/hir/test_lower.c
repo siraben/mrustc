@@ -8318,6 +8318,32 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Phantom lifetime markers admit elided regions on local ADTs. */
+    result = lower_graph_source(
+        "trait Sealed3 {}"
+        "struct Cov3<'a> { inner: &'a u8 }"
+        "impl Sealed3 for Cov3<'_> {}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "elided region ADT self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Sealed3 {}"
+        "struct Cov4<'a> { inner: &'a u8 }"
+        "impl Sealed3 for Cov4<'_> {}"
+        "impl Sealed3 for Cov4<'static> {}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
