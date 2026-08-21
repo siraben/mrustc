@@ -8784,6 +8784,22 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "duplicate exact impl candidate") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Defaulted trailing parameters may be omitted in the self type. */
+    result = lower_graph_source(
+        "trait Rep7 { fn rep7(&self) -> u8; }"
+        "struct Lazy6<T, F = fn() -> T> { v: T, f: F }"
+        "impl<T> Rep7 for Lazy6<T> {"
+        " fn rep7(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "omitted default parameter failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)

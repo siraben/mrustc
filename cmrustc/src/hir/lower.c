@@ -19334,12 +19334,18 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
     }
     adt_item = cm_lower_bound_item(state,
         type->data.named_type.definition);
+
     if (adt_item == NULL
         || (adt_item->kind != CM_HIR_ITEM_STRUCT
             && adt_item->kind != CM_HIR_ITEM_UNION
             && adt_item->kind != CM_HIR_ITEM_ENUM)
         || adt_item->generic_parameter_count
-            != type->data.named_type.argument_count) {
+            < type->data.named_type.argument_count) {
+        /*
+         * Defaults let impls omit trailing parameters
+         * (`impl<T: Default> Default for LazyCell<T>`); supplying more
+         * arguments than the ADT declares stays unsupported.
+         */
         return CM_LOWER_IMPL_SELF_UNSUPPORTED;
     }
     for (index = 0u; index < type->data.named_type.argument_count;
@@ -19463,6 +19469,53 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                                 argument_type->data.array_type.length.data
                                     .parameter,
                                 CM_HIR_GENERIC_CONST)))) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
+            } else if (argument_type->kind == CM_HIR_TYPE_FN_POINTER_KIND) {
+                /*
+                 * Materialized defaults surface as function pointers
+                 * (`LazyCell<T, F = fn() -> T>` written `LazyCell<T>`).
+                 * Every referenced type must root at an owned parameter
+                 * or a supported concrete shape.
+                 */
+                const CmHirType *result_type = cm_hir_get_type(state->hir,
+                    argument_type->data.fn_pointer_type.return_type);
+                int supported = result_type != NULL
+                    && ((result_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                        && cm_lower_impl_owned_parameter(state->hir,
+                            impl_item,
+                            result_type->data.parameter_type.parameter,
+                            CM_HIR_GENERIC_TYPE))
+                        || cm_lower_impl_self_concrete_supported(state,
+                            result_type, 0u));
+                uint32_t fn_parameter_index;
+
+                for (fn_parameter_index = 0u; supported
+                     && fn_parameter_index
+                         < argument_type->data.fn_pointer_type
+                             .parameter_count;
+                     ++fn_parameter_index) {
+                    const CmHirType *parameter_type = cm_hir_get_type(
+                        state->hir,
+                        argument_type->data.fn_pointer_type
+                            .parameters[fn_parameter_index]);
+
+                    if (parameter_type == NULL) {
+                        supported = 0;
+                        break;
+                    }
+                    if (parameter_type->kind
+                        == CM_HIR_TYPE_PARAMETER_KIND) {
+                        supported = cm_lower_impl_owned_parameter(
+                            state->hir, impl_item,
+                            parameter_type->data.parameter_type.parameter,
+                            CM_HIR_GENERIC_TYPE);
+                    } else {
+                        supported = cm_lower_impl_self_concrete_supported(
+                            state, parameter_type, 0u);
+                    }
+                }
+                if (!supported) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
             } else if (!cm_lower_impl_self_concrete_supported(state,
