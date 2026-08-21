@@ -8742,6 +8742,9 @@ static void test_concrete_reference_impl_self_class(void)
         "struct Bytes7(pub [u8]);"
         "impl<'a> Partia7<Bytes7> for [u8] {"
         " fn eq7(&self, other: &Bytes7) -> bool { true }"
+        "}"
+        "impl<const N: usize> Partia7<Bytes7> for &[u8; N] {"
+        " fn eq7(&self, other: &Bytes7) -> bool { true }"
         "}",
         &context);
     if (result.error_count != 0u) {

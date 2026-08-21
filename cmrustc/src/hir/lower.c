@@ -19631,10 +19631,13 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
                     pointee->data.array_type.element);
 
                 pointee_supported = element != NULL
-                    && element->kind == CM_HIR_TYPE_PARAMETER_KIND
-                    && cm_lower_impl_owned_parameter(state->hir, impl_item,
-                        element->data.parameter_type.parameter,
-                        CM_HIR_GENERIC_TYPE)
+                    && (element->kind == CM_HIR_TYPE_PARAMETER_KIND
+                        ? cm_lower_impl_owned_parameter(state->hir,
+                            impl_item,
+                            element->data.parameter_type.parameter,
+                            CM_HIR_GENERIC_TYPE)
+                        : cm_lower_impl_self_concrete_supported(state,
+                            element, 0u))
                     && (pointee->data.array_type.length.kind
                         == CM_HIR_CONST_VALUE
                         || (pointee->data.array_type.length.kind
