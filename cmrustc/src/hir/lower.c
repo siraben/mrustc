@@ -19205,12 +19205,25 @@ static int cm_lower_impl_parameters_constrained(const CmLowerState *state,
             if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
             argument_type = cm_hir_get_type(state->hir,
                 argument->data.type);
-            if (argument_type != NULL
-                && argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+            if (argument_type == NULL) continue;
+            if (argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
                 && argument_type->data.parameter_type.parameter
                     == impl_item->generic_parameter_start + index) {
                 referenced = 1;
                 break;
+            }
+            if (argument_type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+                const CmHirType *pointee;
+
+                pointee = cm_hir_get_type(state->hir,
+                    argument_type->data.reference_type.pointee);
+                if (pointee != NULL
+                    && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+                    && pointee->data.parameter_type.parameter
+                        == impl_item->generic_parameter_start + index) {
+                    referenced = 1;
+                    break;
+                }
             }
         }
         if (referenced) continue;
@@ -19317,6 +19330,23 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                                 .parameter) {
                         return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                     }
+                }
+            } else if (argument_type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+                /*
+                 * Coroutine-style impls wrap a referenced parameter
+                 * (`Pin<&mut G>`); the pointee must be one of the impl's
+                 * own type parameters.
+                 */
+                const CmHirType *pointee;
+
+                pointee = cm_hir_get_type(state->hir,
+                    argument_type->data.reference_type.pointee);
+                if (pointee == NULL
+                    || pointee->kind != CM_HIR_TYPE_PARAMETER_KIND
+                    || !cm_lower_impl_owned_parameter(state->hir,
+                        impl_item, pointee->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE)) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
             } else if (!cm_lower_impl_self_concrete_supported(state,
                     argument_type, 0u)) {

@@ -8398,6 +8398,32 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "outside the bounded") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Coroutine-style selves wrap a referenced parameter. */
+    result = lower_graph_source(
+        "trait Coro2<R> { type Y2; }"
+        "struct Pin3<G> { p: G }"
+        "impl<G: Coro2<R>, R> Coro2<R> for Pin3<&mut G> { type Y2 = u8; }",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "referenced parameter argument failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Coro2<R> { type Y2; }"
+        "struct Pin4<G> { p: G }"
+        "impl<G: Coro2<R>, R> Coro2<R> for Pin4<&mut G> { type Y2 = u8; }"
+        "impl<G: Coro2<R>, R> Coro2<R> for Pin4<&mut G> { type Y2 = u16; }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping ordered generic impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
