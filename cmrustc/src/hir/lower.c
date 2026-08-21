@@ -19527,13 +19527,15 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     }
     /*
      * Core blanket impls over raw pointers and references carry extra
-     * region and type parameters beside the pointee parameter
-     * (`impl<'a, T, U> ChangePointee<U> for &'a mut T`).  Admit a blanket
-     * self when every explicit generic parameter is a plain region or type
-     * without defaults and the pointee is one of the impl's own type
-     * parameters.  The reference region stays outside the class key; all
-     * such blankets can overlap for coherence purposes, while mutability
-     * remains a discriminant in cm_lower_impl_self_equal().
+     * region, type, and const parameters beside the pointee
+     * (`impl<'a, T, U> ChangePointee<U> for &'a mut T`,
+     * `impl<'a, T, const N: usize> TryFrom<&'a [T]> for &'a [T; N]`).
+     * Admit a blanket self when every explicit generic parameter is a
+     * plain region, type, or const without defaults and the pointee is an
+     * ordered generic shape rooted at one of the impl's own parameters.
+     * The reference region stays outside the class key; all such blankets
+     * can overlap for coherence purposes, while mutability remains a
+     * discriminant in cm_lower_impl_self_equal().
      */
     if ((type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
             || type->kind == CM_HIR_TYPE_REFERENCE_KIND)
@@ -19548,9 +19550,7 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
 
             parameter = cm_hir_get_generic_param(state->hir,
                 impl_item->generic_parameter_start + parameter_index);
-            if (parameter == NULL || parameter->has_default
-                || (parameter->kind != CM_HIR_GENERIC_TYPE
-                    && parameter->kind != CM_HIR_GENERIC_LIFETIME)) {
+            if (parameter == NULL || parameter->has_default) {
                 supported = 0;
                 break;
             }
@@ -19560,20 +19560,43 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
                 ? type->data.raw_pointer_type.pointee
                 : type->data.reference_type.pointee);
         if (supported && pointee != NULL
-            && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
-            && impl_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
-            && pointee->data.parameter_type.parameter
-                >= impl_item->generic_parameter_start
-            && pointee->data.parameter_type.parameter
-                < impl_item->generic_parameter_start
-                    + impl_item->generic_parameter_count) {
-            const CmHirGenericParam *pointee_parameter;
+            && impl_item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE) {
+            int pointee_supported = 0;
 
-            pointee_parameter = cm_hir_get_generic_param(state->hir,
-                pointee->data.parameter_type.parameter);
-            if (pointee_parameter != NULL
-                && pointee_parameter->kind == CM_HIR_GENERIC_TYPE
-                && !pointee_parameter->has_default) {
+            if (pointee->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+                pointee_supported = cm_lower_impl_owned_parameter(
+                    state->hir, impl_item,
+                    pointee->data.parameter_type.parameter,
+                    CM_HIR_GENERIC_TYPE);
+            } else if (pointee->kind == CM_HIR_TYPE_SLICE_KIND) {
+                const CmHirType *element = cm_hir_get_type(state->hir,
+                    pointee->data.slice_type.element);
+
+                pointee_supported = element != NULL
+                    && element->kind == CM_HIR_TYPE_PARAMETER_KIND
+                    && cm_lower_impl_owned_parameter(state->hir, impl_item,
+                        element->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE);
+            } else if (pointee->kind == CM_HIR_TYPE_ARRAY_KIND) {
+                const CmHirType *element = cm_hir_get_type(state->hir,
+                    pointee->data.array_type.element);
+
+                pointee_supported = element != NULL
+                    && element->kind == CM_HIR_TYPE_PARAMETER_KIND
+                    && cm_lower_impl_owned_parameter(state->hir, impl_item,
+                        element->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE)
+                    && (pointee->data.array_type.length.kind
+                        == CM_HIR_CONST_VALUE
+                        || (pointee->data.array_type.length.kind
+                            == CM_HIR_CONST_PARAMETER
+                            && cm_lower_impl_owned_parameter(state->hir,
+                                impl_item,
+                                pointee->data.array_type.length.data
+                                    .parameter,
+                                CM_HIR_GENERIC_CONST)));
+            }
+            if (pointee_supported) {
                 return type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
                     ? CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
                     : CM_LOWER_IMPL_SELF_ORDERED_GENERIC_REFERENCE;
