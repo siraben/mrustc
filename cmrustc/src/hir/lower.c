@@ -19194,41 +19194,10 @@ static int cm_lower_impl_parameters_constrained(const CmLowerState *state,
                 == impl_item->generic_parameter_start + index) {
             continue;
         }
-        for (argument_index = 0u;
-             self_type->kind == CM_HIR_TYPE_ADT_KIND
-             && self_type->data.named_type.arguments != NULL
-             && argument_index < self_type->data.named_type.argument_count;
-             ++argument_index) {
-            const CmHirGenericArg *argument;
-            const CmHirType *argument_type;
-
-            argument = &self_type->data.named_type
-                .arguments[argument_index];
-            if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
-            argument_type = cm_hir_get_type(state->hir,
-                argument->data.type);
-            if (argument_type == NULL) continue;
-            if (argument_type->kind == CM_HIR_TYPE_PARAMETER_KIND
-                && argument_type->data.parameter_type.parameter
-                    == impl_item->generic_parameter_start + index) {
-                referenced = 1;
-                break;
-            }
-            if (argument_type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
-                const CmHirType *pointee;
-
-                pointee = cm_hir_get_type(state->hir,
-                    argument_type->data.reference_type.pointee);
-                if (pointee != NULL
-                    && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
-                    && pointee->data.parameter_type.parameter
-                        == impl_item->generic_parameter_start + index) {
-                    referenced = 1;
-                    break;
-                }
-            }
+        if (cm_lower_type_references_parameter(state->hir, self_type,
+                impl_item->generic_parameter_start + index, 0u)) {
+            continue;
         }
-        if (referenced) continue;
         if (impl_item->data.impl_item.has_trait) {
             const CmHirNamedType *trait_type
                 = &impl_item->data.impl_item.trait_type;
@@ -19470,28 +19439,26 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
     }
     /*
      * Core clones unsized elements through slice blankets
-     * (`impl<T: Clone> CloneToUninit for [T]`).  Admit a slice over the
-     * impl's single owned type parameter.  Unlike a bare parameter self,
-     * such a slice does not overlap every other class, so overlap stays
-     * same-class only.
+     * (`impl<T: Clone> CloneToUninit for [T]`) and compares slices
+     * against arrays (`impl<T, U, const N: usize> PartialEq<[U; N]> for
+     * [T]`).  Admit a slice over one of the impl's owned type parameters
+     * when the remaining parameters are constrained.  Unlike a bare
+     * parameter self, such a slice does not overlap every other class,
+     * so overlap stays same-class only.
      */
     if (type->kind == CM_HIR_TYPE_SLICE_KIND
-        && impl_item->generic_parameter_count == 1u) {
-        const CmHirGenericParam *parameter;
+        && impl_item->generic_parameter_count != 0u) {
         const CmHirType *element;
 
-        parameter = cm_hir_get_generic_param(state->hir,
-            impl_item->generic_parameter_start);
         element = cm_hir_get_type(state->hir,
             type->data.slice_type.element);
-        if (parameter != NULL && element != NULL
-            && parameter->kind == CM_HIR_GENERIC_TYPE
-            && !parameter->has_default && parameter->index == 0u
-            && cm_hir_def_id_equal(parameter->owner,
-                impl_item->definition)
+        if (element != NULL
             && element->kind == CM_HIR_TYPE_PARAMETER_KIND
-            && element->data.parameter_type.parameter
-                == impl_item->generic_parameter_start) {
+            && cm_lower_impl_owned_parameter(state->hir, impl_item,
+                element->data.parameter_type.parameter,
+                CM_HIR_GENERIC_TYPE)
+            && cm_lower_impl_parameters_constrained(state, impl_item,
+                type)) {
             return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_SLICE;
         }
     }
