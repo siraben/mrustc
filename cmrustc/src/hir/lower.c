@@ -19543,10 +19543,9 @@ static CmLowerImplSelfClass cm_lower_impl_self_class(
             return CM_LOWER_IMPL_SELF_SINGLE_PARAMETER_ARRAY;
         }
         if (element != NULL
-            && element->kind == CM_HIR_TYPE_PARAMETER_KIND
-            && cm_lower_impl_owned_parameter(state->hir, impl_item,
-                element->data.parameter_type.parameter,
-                CM_HIR_GENERIC_TYPE)
+            && (element->kind == CM_HIR_TYPE_PARAMETER_KIND
+                || cm_lower_impl_self_concrete_supported(state, element,
+                    0u))
             && (type->data.array_type.length.kind == CM_HIR_CONST_VALUE
                 || (type->data.array_type.length.kind
                     == CM_HIR_CONST_PARAMETER

@@ -8699,6 +8699,42 @@ static void test_concrete_reference_impl_self_class(void)
         && strstr(result.first_error.message,
             "overlapping blanket impl candidates") != NULL);
     cm_hir_context_destroy(&context);
+
+    /* Concrete arrays with const-parameter lengths stay in the array
+     * class. */
+    result = lower_graph_source(
+        "trait Partia5<Rhs> { fn eq5(&self, other: &Rhs) -> bool; }"
+        "struct Bytes5(pub [u8]);"
+        "impl<const N: usize> Partia5<[u8; N]> for Bytes5 {"
+        " fn eq5(&self, other: &[u8; N]) -> bool { true }"
+        "}"
+        "impl<const N: usize> Partia5<Bytes5> for [u8; N] {"
+        " fn eq5(&self, other: &Bytes5) -> bool { true }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "concrete const array self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Partia5<Rhs> { fn eq5(&self, other: &Rhs) -> bool; }"
+        "struct Bytes6(pub [u8]);"
+        "impl<const N: usize> Partia5<[u8; N]> for Bytes6 {"
+        " fn eq5(&self, other: &[u8; N]) -> bool { true }"
+        "}"
+        "impl<const N: usize> Partia5<[u8; N]> for Bytes6 {"
+        " fn eq5(&self, other: &[u8; N]) -> bool { true }"
+        "}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping ordered generic impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)
