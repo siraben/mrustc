@@ -18983,9 +18983,16 @@ static int cm_lower_impl_self_concrete_supported(const CmLowerState *state,
             /*
              * Phantom lifetime markers pass regions through positionally
              * (`impl Variance for Covariant<'_>`); regions are not part
-             * of any class key.
+             * of any class key.  Literal const arguments are concrete
+             * (`impl SupportedLaneCount for LaneCount<1>`).
              */
             if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) continue;
+            if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+                if (argument->data.constant.kind == CM_HIR_CONST_VALUE) {
+                    continue;
+                }
+                return 0;
+            }
             if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
                 || !cm_lower_impl_self_concrete_supported(state,
                     cm_hir_get_type(state->hir, argument->data.type),
@@ -19085,6 +19092,32 @@ static int cm_lower_impl_self_concrete_equal(const CmHirContext *hir,
                 && right_argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
                 /* Regions are not part of any class key. */
                 continue;
+            }
+            if (left_argument->kind == CM_HIR_GENERIC_ARG_CONST
+                && right_argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+                    if (left_argument->data.constant.kind
+                    != right_argument->data.constant.kind) {
+                    return 0;
+                }
+                if (left_argument->data.constant.kind
+                    == CM_HIR_CONST_VALUE) {
+                    if (left_argument->data.constant.data.value.low_bits
+                        != right_argument->data.constant.data.value.low_bits
+                        || left_argument->data.constant.data.value.high_bits
+                        != right_argument->data.constant.data.value
+                            .high_bits) {
+                        return 0;
+                    }
+                    continue;
+                }
+                if (left_argument->data.constant.kind
+                    == CM_HIR_CONST_UNEVALUATED) {
+                    return cm_hir_def_id_equal(
+                        left_argument->data.constant.data.definition,
+                        right_argument->data.constant.data.definition);
+                }
+                return left_argument->data.constant.data.parameter
+                    == right_argument->data.constant.data.parameter;
             }
             if (left_argument->kind != CM_HIR_GENERIC_ARG_TYPE
                 || right_argument->kind != CM_HIR_GENERIC_ARG_TYPE) {
