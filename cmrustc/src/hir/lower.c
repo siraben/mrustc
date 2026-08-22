@@ -19480,6 +19480,23 @@ static CmLowerImplSelfClass cm_lower_impl_self_ordered_generic_adt(
                         CM_HIR_GENERIC_TYPE)) {
                     return CM_LOWER_IMPL_SELF_UNSUPPORTED;
                 }
+            } else if (argument_type->kind
+                == CM_HIR_TYPE_RAW_POINTER_KIND) {
+                /*
+                 * SIMD vectors wrap raw-pointer elements
+                 * (`Simd<*const T, N>`); the pointee must be one of the
+                 * impl's own type parameters.
+                 */
+                const CmHirType *pointee = cm_hir_get_type(state->hir,
+                    argument_type->data.raw_pointer_type.pointee);
+
+                if (pointee == NULL
+                    || pointee->kind != CM_HIR_TYPE_PARAMETER_KIND
+                    || !cm_lower_impl_owned_parameter(state->hir,
+                        impl_item, pointee->data.parameter_type.parameter,
+                        CM_HIR_GENERIC_TYPE)) {
+                    return CM_LOWER_IMPL_SELF_UNSUPPORTED;
+                }
             } else if (argument_type->kind == CM_HIR_TYPE_SLICE_KIND) {
                 /*
                  * Iterator-state impls also wrap unsized runs of
