@@ -20508,28 +20508,341 @@ static int cm_lower_impl_type_equal(const CmHirContext *hir,
     return 0;
 }
 
-static int cm_lower_impl_trait_arguments_equal(const CmHirContext *hir,
-    const CmHirItem *left_impl, const CmHirItem *right_impl)
+/*
+ * Overlap needs joint reasoning over both impl headers: two impls overlap
+ * when one substitution makes the self types and every implemented-trait
+ * argument coincide simultaneously.  A small first-order unifier with an
+ * occurs check decides that; it rejects cyclic candidates such as
+ * `impl<T> BitOr<T> for NonZero<T>` versus `impl<U> BitOr<NonZero<U>> for
+ * U`, where naive positional comparison would wrongly report equality.
+ * Regions are not part of any class key and always compare equal.
+ */
+typedef struct CmLowerUnifyBinding {
+    CmHirGenericParamId parameter;
+    CmHirTypeId type;
+} CmLowerUnifyBinding;
+
+static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t budget);
+static int cm_lower_unify_occurs(const CmHirContext *hir, CmVec *bindings,
+    CmHirGenericParamId parameter, CmHirTypeId type_id, size_t budget);
+
+static CmHirTypeId cm_lower_unify_resolve(const CmHirContext *hir,
+    const CmVec *bindings, CmHirTypeId id)
 {
-    const CmHirNamedType *left;
-    const CmHirNamedType *right;
+    uint32_t remaining;
+
+    if (hir == NULL) return id;
+    remaining = (uint32_t)hir->types.len + 1u;
+    while (remaining != 0u) {
+        const CmHirType *type = cm_hir_get_type(hir, id);
+        uint32_t index;
+        CmHirTypeId next = CM_HIR_TYPE_NONE;
+
+        --remaining;
+        if (type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND) {
+            return id;
+        }
+        for (index = 0u; index < bindings->len; ++index) {
+            const CmLowerUnifyBinding *binding
+                = (const CmLowerUnifyBinding *)cm_vec_at_const(bindings,
+                    index);
+
+            if (binding->parameter == type->data.parameter_type.parameter) {
+                next = binding->type;
+                break;
+            }
+        }
+        if (next == CM_HIR_TYPE_NONE || next == id) return id;
+        id = next;
+    }
+    return id;
+}
+
+static int cm_lower_unify_occurs(const CmHirContext *hir, CmVec *bindings,
+    CmHirGenericParamId parameter, CmHirTypeId type_id, size_t budget);
+
+static int cm_lower_unify_const(const CmHirConstArg *left,
+    const CmHirConstArg *right)
+{
+    if (left == NULL || right == NULL
+        || left->kind != right->kind) {
+        return 0;
+    }
+    if (left->kind == CM_HIR_CONST_VALUE) {
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    }
+    if (left->kind == CM_HIR_CONST_UNEVALUATED) {
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    }
+    if (left->kind == CM_HIR_CONST_PARAMETER) {
+        /*
+         * Two const parameters make the array shapes potentially equal
+         * for any instantiation; distinguishing them positionally is the
+         * cross-impl comparator's job, and blanket overlap stays
+         * fail-open here.
+         */
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_unify_generic_arg(const CmHirContext *hir,
+    CmVec *bindings, const CmHirGenericArg *left, const CmHirGenericArg *right,
+    size_t budget)
+{
+    if (left == NULL || right == NULL || left->kind != right->kind) {
+        return 0;
+    }
+    if (left->kind == CM_HIR_GENERIC_ARG_TYPE) {
+        return cm_lower_unify_type(hir, bindings, left->data.type,
+            right->data.type, budget + 1u);
+    }
+    if (left->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
+        return 1;
+    }
+    if (left->kind == CM_HIR_GENERIC_ARG_CONST) {
+        return cm_lower_unify_const(&left->data.constant,
+            &right->data.constant);
+    }
+    return 0;
+}
+
+static int cm_lower_unify_named_type(const CmHirContext *hir, CmVec *bindings,
+    const CmHirNamedType *left, const CmHirNamedType *right, size_t budget)
+{
     uint32_t index;
 
-    if (hir == NULL || left_impl == NULL || right_impl == NULL) return 0;
-    left = &left_impl->data.impl_item.trait_type;
-    right = &right_impl->data.impl_item.trait_type;
-    if (left->argument_count != right->argument_count
+    if (!cm_hir_def_id_equal(left->definition, right->definition)
+        || left->argument_count != right->argument_count
         || (left->argument_count != 0u
             && (left->arguments == NULL || right->arguments == NULL))) {
         return 0;
     }
     for (index = 0u; index < left->argument_count; ++index) {
-        if (!cm_lower_impl_generic_arg_equal(hir, &left->arguments[index],
-                left_impl, &right->arguments[index], right_impl, 0u)) {
+        if (!cm_lower_unify_generic_arg(hir, bindings, &left->arguments[index],
+                &right->arguments[index], budget)) {
             return 0;
         }
     }
     return 1;
+}
+
+static int cm_lower_unify_occurs(const CmHirContext *hir, CmVec *bindings,
+    CmHirGenericParamId parameter, CmHirTypeId type_id, size_t budget)
+{
+    const CmHirType *type;
+    uint32_t index;
+
+    type_id = cm_lower_unify_resolve(hir, bindings, type_id);
+    if (hir == NULL || budget == 0u) return 0;
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return 0;
+    if (type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+        return type->data.parameter_type.parameter == parameter;
+    }
+    switch (type->kind) {
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+        for (index = 0u; type->data.named_type.arguments != NULL
+             && index < type->data.named_type.argument_count; ++index) {
+            if (type->data.named_type.arguments[index].kind
+                == CM_HIR_GENERIC_ARG_TYPE
+                && cm_lower_unify_occurs(hir, bindings, parameter,
+                    type->data.named_type.arguments[index].data.type,
+                    budget - 1u)) {
+                return 1;
+            }
+        }
+        return 0;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.slice_type.element, budget - 1u);
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.array_type.element, budget - 1u);
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.reference_type.pointee, budget - 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.raw_pointer_type.pointee, budget - 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        for (index = 0u; type->data.tuple_type.elements != NULL
+             && index < type->data.tuple_type.element_count; ++index) {
+            if (cm_lower_unify_occurs(hir, bindings, parameter,
+                    type->data.tuple_type.elements[index], budget - 1u)) {
+                return 1;
+            }
+        }
+        return 0;
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        for (index = 0u; type->data.fn_pointer_type.parameters != NULL
+             && index < type->data.fn_pointer_type.parameter_count;
+             ++index) {
+            if (cm_lower_unify_occurs(hir, bindings, parameter,
+                    type->data.fn_pointer_type.parameters[index],
+                    budget - 1u)) {
+                return 1;
+            }
+        }
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.fn_pointer_type.return_type, budget - 1u);
+    case CM_HIR_TYPE_PROJECTION_KIND:
+        return cm_lower_unify_occurs(hir, bindings, parameter,
+            type->data.projection_type.self_type, budget - 1u);
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t budget)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+    uint32_t index;
+
+    left_id = cm_lower_unify_resolve(hir, bindings, left_id);
+    right_id = cm_lower_unify_resolve(hir, bindings, right_id);
+    if (hir == NULL || budget == 0u) return 0;
+    left = cm_hir_get_type(hir, left_id);
+    right = cm_hir_get_type(hir, right_id);
+    if (left == NULL || right == NULL) return 0;
+    /*
+     * Type ids are interned without distinguishing which parameter a
+     * reference names, so an equal id proves identity only for
+     * non-parameter shapes.
+     */
+    if (left_id == right_id
+        && left->kind != CM_HIR_TYPE_PARAMETER_KIND) {
+        return 1;
+    }
+    if (left->kind != right->kind) {
+        return 0;
+    }
+    if (left->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+        CmLowerUnifyBinding binding;
+
+        if (right->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && left->data.parameter_type.parameter
+                == right->data.parameter_type.parameter) {
+            /* Both sides name the same substituted variable. */
+            return 1;
+        }
+        if (cm_lower_unify_occurs(hir, bindings,
+                left->data.parameter_type.parameter, right_id, budget)) {
+            return 0;
+        }
+        binding.parameter = left->data.parameter_type.parameter;
+        binding.type = right_id;
+        return cm_vec_push(bindings, &binding) != NULL;
+    }
+    switch (left->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_SELF_KIND:
+        return cm_hir_def_id_equal(left->data.self_type.owner,
+            right->data.self_type.owner);
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability
+            == right->data.reference_type.mutability
+            && cm_lower_unify_type(hir, bindings,
+                left->data.reference_type.pointee,
+                right->data.reference_type.pointee, budget - 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return left->data.raw_pointer_type.mutability
+            == right->data.raw_pointer_type.mutability
+            && cm_lower_unify_type(hir, bindings,
+                left->data.raw_pointer_type.pointee,
+                right->data.raw_pointer_type.pointee, budget - 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (left->data.tuple_type.element_count
+            != right->data.tuple_type.element_count) {
+            return 0;
+        }
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_lower_unify_type(hir, bindings,
+                    left->data.tuple_type.elements[index],
+                    right->data.tuple_type.elements[index], budget - 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_unify_type(hir, bindings,
+            left->data.slice_type.element, right->data.slice_type.element,
+            budget - 1u);
+    case CM_HIR_TYPE_ARRAY_KIND:
+        return cm_lower_unify_type(hir, bindings,
+                left->data.array_type.element,
+                right->data.array_type.element, budget - 1u)
+            && cm_lower_unify_const(&left->data.array_type.length,
+                &right->data.array_type.length);
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        return cm_lower_unify_named_type(hir, bindings,
+            &left->data.named_type, &right->data.named_type, budget - 1u);
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+        if (!left->data.dyn_trait_type.has_principal
+            || !right->data.dyn_trait_type.has_principal) {
+            return 0;
+        }
+        return cm_hir_def_id_equal(
+            left->data.dyn_trait_type.principal_trait.definition,
+            right->data.dyn_trait_type.principal_trait.definition);
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_impl_headers_unify(const CmHirContext *hir,
+    const CmHirItem *left_impl, const CmHirItem *right_impl)
+{
+    CmVec bindings;
+    const CmHirNamedType *left;
+    const CmHirNamedType *right;
+    uint32_t index;
+    int unified;
+
+    if (hir == NULL || left_impl == NULL || right_impl == NULL) return 0;
+    cm_vec_init(&bindings, sizeof(CmLowerUnifyBinding));
+    unified = cm_lower_unify_type(hir, &bindings,
+        left_impl->data.impl_item.self_type,
+        right_impl->data.impl_item.self_type,
+        (size_t)hir->types.len + 1u);
+    left = &left_impl->data.impl_item.trait_type;
+    right = &right_impl->data.impl_item.trait_type;
+    if (unified
+        && (left->argument_count != right->argument_count
+            || (left->argument_count != 0u
+                && (left->arguments == NULL || right->arguments == NULL)))) {
+        unified = 0;
+    }
+    for (index = 0u; unified && index < left->argument_count; ++index) {
+        if (!cm_lower_unify_generic_arg(hir, &bindings,
+                &left->arguments[index], &right->arguments[index],
+                (size_t)hir->types.len + 1u)) {
+            unified = 0;
+        }
+    }
+    cm_vec_destroy(&bindings);
+    return unified;
 }
 
 /*
@@ -20622,7 +20935,7 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     item_adt_definition, item->data.impl_item.self_type)) {
                 continue;
             }
-            if (!cm_lower_impl_trait_arguments_equal(state->hir, prior,
+            if (!cm_lower_impl_headers_unify(state->hir, prior,
                     item)) continue;
             if (cm_lower_impl_pair_is_admitted_specialization(state, prior,
                     item)) {
