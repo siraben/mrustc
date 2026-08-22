@@ -1037,20 +1037,28 @@ static int cm_meta_collect_items(const CmHirLibraryArtifactIdentity *identity,
                 || item->kind == CM_HIR_ITEM_STATIC)) continue;
         if (semantic && (item->kind == CM_HIR_ITEM_TRAIT
                 || item->kind == CM_HIR_ITEM_IMPL)) continue;
+        if (item->kind == CM_HIR_ITEM_TRAIT_ALIAS) continue;
+        /*
+         * Associated items ride with their owning trait rather than being
+         * captured separately; attributes and where-clause predicates are
+         * outside the declaration slice and stay unconsumed here.
+         */
+        if (!cm_hir_def_id_is_none(item->parent_definition)) continue;
         memset(&collected, 0, sizeof(collected));
         collected.kind = cm_meta_item_kind_to_wire(item->kind);
         owner = cm_hir_get_module(identity->context, item->owner_module);
-        if (collected.kind == 0u || owner == NULL
-            || !cm_hir_def_id_is_none(item->parent_definition)
-            || item->attribute_count != 0u
-            || item->predicate_scope_count != 0u
-            || item->predicate_count != 0u
-            || item->outlives_predicate_count != 0u) return 0;
+        /*
+         * Trait- and value-bearing kinds require the semantic or
+         * declaration-v2 boundaries; plain cmhir-meta-v1 rejects them so
+         * a consumer never mistakes an omitted family for completeness.
+         */
+        if (collected.kind == 0u || owner == NULL) return 0;
         if (item->kind == CM_HIR_ITEM_TYPE_ALIAS
             && (item->data.type_alias_item.target == CM_HIR_TYPE_NONE
                 || !cm_hir_def_id_is_none(
-                    item->data.type_alias_item.trait_item_definition)
-                || item->data.type_alias_item.bound_count != 0u)) return 0;
+                    item->data.type_alias_item.trait_item_definition))) {
+            return 0;
+        }
         collected.definition = item->definition;
         collected.item = item;
         collected.owner = cm_meta_module_local(modules, owner->definition);
@@ -1074,6 +1082,7 @@ static int cm_meta_collect_items(const CmHirLibraryArtifactIdentity *identity,
             item_index);
         if (prior == NULL || item == NULL
             || (prior->owner == item->owner
+                && prior->kind == item->kind
                 && cm_meta_name_compare(prior->name, item->name) == 0)) {
             return 0;
         }
