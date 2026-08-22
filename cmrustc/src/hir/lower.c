@@ -20169,6 +20169,44 @@ static int cm_lower_impl_self_equal(const CmHirContext *hir,
  * arguments.  A mismatch here is definitive for the bounded candidate
  * subset, so it is safe to use this as a cheap pair gate.
  */
+/*
+ * Two trait-object shapes are the same type when their principal traits
+ * match and their canonical-order auto-trait lists agree; equalities stay
+ * fail-closed.
+ */
+static int cm_lower_dyn_shape_equal(const CmHirType *left,
+    const CmHirType *right)
+{
+    uint32_t index;
+
+    if (!left->data.dyn_trait_type.has_principal
+        || !right->data.dyn_trait_type.has_principal) {
+        return 0;
+    }
+    if (!cm_hir_def_id_equal(
+            left->data.dyn_trait_type.principal_trait.definition,
+            right->data.dyn_trait_type.principal_trait.definition)) {
+        return 0;
+    }
+    if (left->data.dyn_trait_type.auto_trait_count
+        != right->data.dyn_trait_type.auto_trait_count) {
+        return 0;
+    }
+    if (left->data.dyn_trait_type.equality_count != 0u
+        || right->data.dyn_trait_type.equality_count != 0u) {
+        return left == right;
+    }
+    for (index = 0u; index < left->data.dyn_trait_type.auto_trait_count;
+         ++index) {
+        if (!cm_hir_def_id_equal(
+                left->data.dyn_trait_type.auto_traits[index].definition,
+                right->data.dyn_trait_type.auto_traits[index].definition)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int cm_lower_impl_self_candidates_may_overlap(
     const CmHirContext *hir, CmLowerImplSelfClass left_class,
     CmHirDefId left_adt_definition, CmHirTypeId left_self_type,
@@ -20216,13 +20254,10 @@ static int cm_lower_impl_self_candidates_may_overlap(
         const CmHirType *left = cm_hir_get_type(hir, left_self_type);
         const CmHirType *right = cm_hir_get_type(hir, right_self_type);
 
-        if (left == NULL || right == NULL || !left->data.dyn_trait_type.has_principal
-            || !right->data.dyn_trait_type.has_principal) {
+        if (left == NULL || right == NULL) {
             return 0;
         }
-        return cm_hir_def_id_equal(
-            left->data.dyn_trait_type.principal_trait.definition,
-            right->data.dyn_trait_type.principal_trait.definition);
+        return cm_lower_dyn_shape_equal(left, right);
     }
     if (left_class == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_RAW_POINTER
         && right_class
@@ -20799,13 +20834,7 @@ static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
         return cm_lower_unify_named_type(hir, bindings,
             &left->data.named_type, &right->data.named_type, budget - 1u);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        if (!left->data.dyn_trait_type.has_principal
-            || !right->data.dyn_trait_type.has_principal) {
-            return 0;
-        }
-        return cm_hir_def_id_equal(
-            left->data.dyn_trait_type.principal_trait.definition,
-            right->data.dyn_trait_type.principal_trait.definition);
+        return cm_lower_dyn_shape_equal(left, right);
     default:
         return 0;
     }
