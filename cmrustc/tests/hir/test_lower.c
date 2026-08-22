@@ -8844,6 +8844,21 @@ static void test_concrete_reference_impl_self_class(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Nested references stay within the concrete reference subset. */
+    result = lower_graph_source(
+        "trait Pattern4 { fn pattern4(&self) -> u8; }"
+        "impl<'b, 'c> Pattern4 for &'c &'b str {"
+        " fn pattern4(&self) -> u8 { 0 }"
+        "}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "nested reference self failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_specialization_inherits_associated_type(void)

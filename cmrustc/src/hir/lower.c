@@ -18952,6 +18952,14 @@ static int cm_lower_impl_self_concrete_supported(const CmLowerState *state,
         return cm_lower_impl_self_concrete_supported(state,
             cm_hir_get_type(state->hir, type->data.slice_type.element),
             depth + 1u);
+    case CM_HIR_TYPE_REFERENCE_KIND: {
+        const CmHirType *pointee = cm_hir_get_type(state->hir,
+            type->data.reference_type.pointee);
+
+        return pointee != NULL
+            && cm_lower_impl_self_concrete_supported(state, pointee,
+                depth + 1u);
+    }
     case CM_HIR_TYPE_ADT_KIND:
         if (type->data.named_type.definition.crate_id
                 != state->result.crate_id
