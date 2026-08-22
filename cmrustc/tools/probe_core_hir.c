@@ -1,5 +1,7 @@
 #include "cm/driver/cfg.h"
+#include "cm/hir/library.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/metadata.h"
 
 #include <stdio.h>
 
@@ -121,6 +123,35 @@ int main(int argc, char **argv)
             (unsigned long)generic_count,
             (unsigned long)const_generic_count,
             (unsigned long)lifetime_generic_count);
+        {
+            CmHirLibraryArtifact artifact;
+            CmHirLibraryArtifactResult library_result;
+            CmByteBuf encoded;
+            CmHirMetadataArtifactResult metadata_result;
+
+            cm_hir_library_artifact_init(&artifact);
+            library_result = cm_hir_library_artifact_build(&artifact, &hir,
+                lower_result.crate_id, &graph, graph_result.revision,
+                &modules, "core");
+            printf("library status=%s modules=%lu types=%lu values=%lu\n",
+                cm_hir_library_status_name(library_result.status),
+                (unsigned long)library_result.module_count,
+                (unsigned long)library_result.public_type_entry_count,
+                (unsigned long)library_result.public_value_entry_count);
+            if (library_result.status == CM_HIR_LIBRARY_OK) {
+                cm_byte_buf_init(&encoded);
+                metadata_result = cm_hir_metadata_encode_artifact(&encoded,
+                    &artifact);
+                printf("metadata status=%s bytes=%lu\n",
+                    cm_hir_metadata_artifact_status_name(
+                        metadata_result.status),
+                    metadata_result.status
+                        == CM_HIR_METADATA_ARTIFACT_OK
+                        ? (unsigned long)encoded.len : 0ul);
+                cm_byte_buf_destroy(&encoded);
+            }
+            cm_hir_library_artifact_destroy(&artifact);
+        }
         status = 0;
         goto cleanup;
     }

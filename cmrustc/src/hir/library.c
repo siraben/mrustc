@@ -422,6 +422,7 @@ static int cm_hir_library_item_binding_kind(CmHirItemKind item_kind,
         *out_type_kind = CM_HIR_TYPE_FOREIGN_KIND;
         return 1;
     case CM_HIR_ITEM_TRAIT:
+    case CM_HIR_ITEM_TRAIT_ALIAS:
         *out_binding_kind = CM_HIR_LIBRARY_BINDING_TRAIT;
         *out_type_kind = CM_HIR_TYPE_ERROR_KIND;
         return 1;
@@ -1070,18 +1071,21 @@ static int cm_hir_library_add_direct_entry(
         size_t item_index;
         size_t matches;
 
+        CmHirItemKind scan_kind;
+
         if (!cm_hir_library_ast_item_binding_kind(entry->item_kind,
                 &hir_item_kind, &binding_kind, &type_kind,
                 &value_kind)) return 1;
         matched_item = NULL;
         matches = 0u;
+        scan_kind = hir_item_kind;
         for (item_index = 0u; item_index < state->context->items.len;
                 ++item_index) {
             const CmHirItem *item;
 
             item = (const CmHirItem *)cm_vec_at_const(
                 &state->context->items, item_index);
-            if (item != NULL && item->kind == hir_item_kind
+            if (item != NULL && item->kind == scan_kind
                 && item->owner_module == artifact_module->capture_hir_module
                 && cm_hir_def_id_is_none(item->parent_definition)
                 && item->definition.crate_id == state->crate_id
@@ -1090,6 +1094,31 @@ static int cm_hir_library_add_direct_entry(
                     state->context, item->name)) {
                 matched_item = item;
                 matches += 1u;
+            }
+        }
+        if (matches == 0u && hir_item_kind == CM_HIR_ITEM_TRAIT) {
+            /*
+             * `trait Alias = Bound;` lowers under its own item kind while
+             * the module graph records it as a trait declaration.
+             */
+            scan_kind = CM_HIR_ITEM_TRAIT_ALIAS;
+            for (item_index = 0u; item_index < state->context->items.len;
+                    ++item_index) {
+                const CmHirItem *item;
+
+                item = (const CmHirItem *)cm_vec_at_const(
+                    &state->context->items, item_index);
+                if (item != NULL && item->kind == scan_kind
+                    && item->owner_module
+                        == artifact_module->capture_hir_module
+                    && cm_hir_def_id_is_none(item->parent_definition)
+                    && item->definition.crate_id == state->crate_id
+                    && item->visibility.kind == CM_HIR_VIS_PUBLIC
+                    && cm_hir_library_names_equal(state, name,
+                        state->context, item->name)) {
+                    matched_item = item;
+                    matches += 1u;
+                }
             }
         }
         if (matches != 1u || matched_item == NULL

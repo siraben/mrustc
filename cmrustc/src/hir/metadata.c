@@ -3,9 +3,10 @@
 #include "library_internal.h"
 #include "metadata_codec.h"
 
+#include <stdlib.h>
+
 #include "cm/alloc.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #define CM_META_MAX_MODULES UINT32_C(4096)
