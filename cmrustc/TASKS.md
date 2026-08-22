@@ -1925,7 +1925,7 @@ same-generation authorization ABA while barrier-derived admission is built.
 | M6-02 | TODO | Dependency scheduler and artifact cache | Deterministic parallel/serial builds agree |
 | M6-03 | TODO | Build scripts and override mechanism | Rust 1.90 overrides reproduce oracle outputs |
 | M6-04 | TODO | Native/proc-macro dependency handling | Proc macros and native libraries load |
-| M6-05 | ACTIVE | Complete target-configured Rust 1.90 core HIR | 363-source/451-module core lowers with zero graph, import, or HIR errors |
+| M6-05 | DONE | Complete target-configured Rust 1.90 core HIR | `make check-core-hir`: 363-source/451-module core lowers with zero graph, import, and HIR errors (38176 items, 22524 bodies) |
 | M6-06 | TODO | Emit consumable core metadata and `.rlib` | Nonempty artifacts load in a dependent compile |
 | M6-07 | TODO | Build alloc against core artifacts | alloc consumes core macro/metadata artifacts and emits a nonempty `.rlib` |
 | M6-08 | TODO | Run a core/alloc-linked executable | Linked probe has the expected status and output |

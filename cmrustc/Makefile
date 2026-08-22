@@ -172,6 +172,7 @@ MIR_LOWER_TEST_PROGRAM := $(BUILD_DIR)/test_mir_lower
 CODEGEN_C_TEST_PROGRAM := $(BUILD_DIR)/test_codegen_c
 CODEGEN_PRODUCTION_BARRIER_SCRIPT := tests/codegen/run_production_barrier.sh
 CORE_HIR_PROBE_PROGRAM := $(BUILD_DIR)/probe_core_hir
+CORE_HIR_PROBE_SOURCE ?= /tmp/cmrustc-rust190-source/rustc-1.90.0-src/library/core/src/lib.rs
 AST_DUMP_PROGRAM := $(BUILD_DIR)/dump_ast
 AST_DIFFERENTIAL_SCRIPT := tests/syntax/run_ast_differential.sh
 ABI_PROBE_SCRIPT := tests/abi/run.sh
@@ -408,7 +409,10 @@ strict:
 tcc:
 	$(MAKE) BUILD_DIR=build/tcc CC="$(TCC)" CFLAGS="$(TCC_CFLAGS)" CM_REQUIRE_TCC=1 test
 
-check-all: strict tcc
+check-core-hir: $(CORE_HIR_PROBE_PROGRAM)
+	$(CORE_HIR_PROBE_PROGRAM) $(CORE_HIR_PROBE_SOURCE)
+
+check-all: strict tcc check-core-hir
 
 check-ast-differential:
 	CC="$(CC)" CXX="$(CXX)" $(AST_DIFFERENTIAL_SCRIPT)
