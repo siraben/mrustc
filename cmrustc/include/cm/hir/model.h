@@ -1143,6 +1143,10 @@ CmHirStatus cm_hir_prebind_trait_associated_type_declaration(
 CmHirStatus cm_hir_add_generic_param(CmHirContext *context,
     const CmHirGenericParam *parameter, CmHirGenericParamId *out_id);
 /* Assign exactly one validated default while the owner remains reserved. */
+CmHirStatus cm_hir_set_generic_param_declared_type(
+    CmHirContext *context, CmHirGenericParamId parameter_id,
+    CmHirTypeId type);
+
 CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     CmHirGenericParamId parameter_id, const CmHirGenericArg *argument);
 /* Construct the only body origin admitted by this additive checkpoint. */

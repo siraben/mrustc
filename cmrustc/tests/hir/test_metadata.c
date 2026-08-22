@@ -10,7 +10,6 @@
 
 #include <assert.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 #define TEST_METADATA_CRC_OFFSET 32u
@@ -2029,8 +2028,6 @@ static void test_unsupported_hir_rejected(void)
     CmHirItem item;
     CmHirItemId item_id;
     CmHirTypeId u32_type;
-    CmHirGenericParam parameter;
-    CmHirGenericParamId parameter_id;
     CmHirType type;
     CmHirTypeId array_type;
     CmHirField field;
@@ -2064,31 +2061,33 @@ static void test_unsupported_hir_rejected(void)
         CM_HIR_EDITION_2021, test_span(1u, 2u), &crate_id, &root)
         == CM_HIR_OK);
     assert(cm_hir_reserve_item_definition_as(&context, crate_id,
-        CM_HIR_ITEM_EXTERN_TYPE, test_span(2u, 3u), &definition)
-        == CM_HIR_OK);
-    u32_type = add_integer_type(&context, CM_HIR_INT_U32, 3u);
-    memset(&parameter, 0, sizeof(parameter));
-    parameter.kind = CM_HIR_GENERIC_CONST;
-    parameter.owner = definition;
-    parameter.index = 0u;
-    parameter.name = cm_hir_intern(&context, "N");
-    parameter.span = test_span(3u, 4u);
-    parameter.declared_type = u32_type;
-    assert(cm_hir_add_generic_param(&context, &parameter, &parameter_id)
+        CM_HIR_ITEM_TRAIT_ALIAS, test_span(2u, 3u), &definition)
         == CM_HIR_OK);
     memset(&item, 0, sizeof(item));
-    item.kind = CM_HIR_ITEM_EXTERN_TYPE;
+    item.kind = CM_HIR_ITEM_TRAIT_ALIAS;
     item.definition = definition;
     item.owner_module = root;
     item.parent_definition = cm_hir_def_id_none();
-    item.name = cm_hir_intern(&context, "ArrayLike");
+    item.name = cm_hir_intern(&context, "Alias");
     item.visibility.kind = CM_HIR_VIS_PUBLIC;
     item.visibility.restriction = cm_hir_def_id_none();
-    item.span = test_span(2u, 5u);
-    item.generic_parameter_start = parameter_id;
-    item.generic_parameter_count = 1u;
+    item.span = test_span(2u, 3u);
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
-    assert_encode_unsupported(&context, crate_id, root);
+    {
+        CmHirLibraryArtifact alias_artifact;
+        CmByteBuf alias_encoded;
+        CmHirMetadataArtifactResult alias_result;
+
+        init_empty_artifact(&context, crate_id, root, &alias_artifact);
+        cm_byte_buf_init(&alias_encoded);
+        alias_result = cm_hir_metadata_encode_declaration_artifact(
+            &alias_encoded, &alias_artifact);
+        assert(alias_result.status
+            == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR);
+        assert(alias_encoded.len == 0u);
+        cm_byte_buf_destroy(&alias_encoded);
+        cm_hir_library_artifact_destroy(&alias_artifact);
+    }
     cm_hir_context_destroy(&context);
 
     cm_hir_context_init(&context);
@@ -2709,6 +2708,145 @@ static int consume_process_artifact(const char *path)
     return ok;
 }
 
+static void test_declaration_v2_const_generic_round_trip(void)
+{
+    CmHirContext producer;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    const CmHirModule *module;
+    CmHirDefId struct_definition;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirType declared;
+    CmHirTypeId usize_type;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirLibraryOwnedData owned;
+    size_t root_index;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactResult restored;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+    CmHirContext consumer;
+    CmHirLibraryArtifact consumer_artifact;
+    size_t item_index;
+    const CmHirItem *decoded = NULL;
+    CmHirGenericParamId decoded_start;
+
+    cm_hir_context_init(&producer);
+    assert(cm_hir_create_crate(&producer,
+        cm_hir_intern(&producer, "const_wire"), CM_HIR_EDITION_2024,
+        test_span(1u, 40u), &crate_id, &root_module) == CM_HIR_OK);
+    module = cm_hir_get_module(&producer, root_module);
+    assert(module != NULL);
+    assert(cm_hir_reserve_item_definition_as(&producer, crate_id,
+        CM_HIR_ITEM_STRUCT, test_span(10u, 14u), &struct_definition)
+        == CM_HIR_OK);
+    memset(&declared, 0, sizeof(declared));
+    declared.kind = CM_HIR_TYPE_INTEGER_KIND;
+    declared.span = test_span(11u, 13u);
+    declared.data.integer_type.kind = CM_HIR_INT_USIZE;
+    assert(cm_hir_add_type(&producer, &declared, &usize_type)
+        == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_CONST;
+    parameter.owner = struct_definition;
+    parameter.name = cm_hir_intern(&producer, "N");
+    parameter.declared_type = usize_type;
+    parameter.span = test_span(11u, 12u);
+    assert(cm_hir_add_generic_param(&producer, &parameter, &parameter_id)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_STRUCT;
+    item.definition = struct_definition;
+    item.owner_module = root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&producer, "Cap");
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(10u, 14u);
+    item.generic_parameter_start = parameter_id;
+    item.generic_parameter_count = 1u;
+    assert(cm_hir_add_item(&producer, &item, &item_id) == CM_HIR_OK);
+
+    cm_hir_library_owned_data_init(&owned);
+    assert(cm_hir_library_owned_data_add_module(&owned,
+        module->definition, &root_index) == CM_HIR_LIBRARY_OK);
+    add_entry(&owned, root_index, "Cap", type_binding(struct_definition,
+        CM_HIR_TYPE_ADT_KIND));
+    cm_hir_library_artifact_init(&artifact);
+    restored = cm_hir_library_artifact_restore_owned(&artifact, &producer,
+        crate_id, module->definition, "producer", &owned);
+    assert(restored.status == CM_HIR_LIBRARY_OK);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &artifact);
+    if (result.status != CM_HIR_METADATA_ARTIFACT_OK) {
+        fprintf(stderr, "const-generic encode got %s\n",
+            cm_hir_metadata_artifact_status_name(result.status));
+    }
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&consumer_artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &consumer_artifact, encoded.data, encoded.len, "dep", 90u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    for (item_index = 0u; item_index < consumer.items.len; ++item_index) {
+        const CmHirItem *candidate = (const CmHirItem *)cm_vec_at_const(
+            &consumer.items, item_index);
+        const CmInternedString *name;
+
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_STRUCT) {
+            continue;
+        }
+        name = cm_interner_get(&consumer.strings, candidate->name);
+        if (name != NULL && name->len == 3u
+            && memcmp(name->bytes, "Cap", 3u) == 0) {
+            decoded = candidate;
+            break;
+        }
+    }
+    assert(decoded != NULL
+        && decoded->generic_parameter_count == 1u
+        && decoded->generic_parameter_start
+            != CM_HIR_GENERIC_PARAM_NONE);
+    decoded_start = decoded->generic_parameter_start;
+    {
+        const CmHirGenericParam *decoded_parameter = cm_hir_get_generic_param(
+            &consumer, decoded_start);
+        const CmInternedString *parameter_name = decoded_parameter == NULL
+            ? NULL : cm_interner_get(&consumer.strings,
+                decoded_parameter->name);
+
+        {
+            const CmHirType *decoded_declared = decoded_parameter == NULL
+                ? NULL : cm_hir_get_type(&consumer,
+                    decoded_parameter->declared_type);
+
+            assert(decoded_parameter != NULL
+                && decoded_parameter->kind == CM_HIR_GENERIC_CONST
+                && decoded_parameter->index == 0u
+                && !decoded_parameter->has_default
+                && parameter_name != NULL
+                && parameter_name->len == 1u
+                && parameter_name->bytes[0] == (unsigned char)'N'
+                && decoded_declared != NULL
+                && decoded_declared->kind == CM_HIR_TYPE_INTEGER_KIND
+                && decoded_declared->data.integer_type.kind
+                    == CM_HIR_INT_USIZE);
+        }
+    }
+
+    cm_byte_buf_destroy(&encoded);
+    cm_hir_library_artifact_destroy(&consumer_artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&producer);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "produce-forward") == 0) {
@@ -2739,6 +2877,7 @@ int main(int argc, char **argv)
     test_parsed_unsupported_hir_rejected();
     test_semantic_round_trip();
     test_declaration_v2_value_round_trip();
+    test_declaration_v2_const_generic_round_trip();
     test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(
         CM_HIR_METADATA_ARTIFACT_OK), "ok") == 0);

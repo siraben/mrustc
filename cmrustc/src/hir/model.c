@@ -4988,7 +4988,14 @@ CmHirStatus cm_hir_add_generic_param(CmHirContext *context,
     }
     *out_id = CM_HIR_GENERIC_PARAM_NONE;
     if (parameter->kind == CM_HIR_GENERIC_CONST) {
-        if (!cm_hir_type_id_valid(context, parameter->declared_type)) {
+        /*
+         * The declared type may arrive after the fact when a decoder
+         * restores types following parameters; it must be attached with
+         * cm_hir_set_generic_param_declared_type before the parameter is
+         * used.
+         */
+        if (parameter->declared_type != CM_HIR_TYPE_NONE
+            && !cm_hir_type_id_valid(context, parameter->declared_type)) {
             return CM_HIR_INVALID_ID;
         }
     } else {
@@ -5012,6 +5019,30 @@ CmHirStatus cm_hir_add_generic_param(CmHirContext *context,
     }
     return cm_hir_push(context, &context->generic_parameters, parameter,
         out_id);
+}
+
+CmHirStatus cm_hir_set_generic_param_declared_type(
+    CmHirContext *context, CmHirGenericParamId parameter_id,
+    CmHirTypeId type)
+{
+    CmHirGenericParam *parameter;
+
+    if (context == NULL || parameter_id == CM_HIR_GENERIC_PARAM_NONE
+        || type == CM_HIR_TYPE_NONE) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    if (!cm_hir_type_id_valid(context, type)) return CM_HIR_INVALID_ID;
+    parameter = (CmHirGenericParam *)cm_vec_at(&context->generic_parameters,
+        (size_t)parameter_id - 1u);
+    if (parameter == NULL) return CM_HIR_INVALID_ID;
+    if (parameter->kind != CM_HIR_GENERIC_CONST) {
+        return CM_HIR_INVALID_ARGUMENT;
+    }
+    if (parameter->declared_type != CM_HIR_TYPE_NONE) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    parameter->declared_type = type;
+    return CM_HIR_OK;
 }
 
 CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,

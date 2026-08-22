@@ -39,6 +39,7 @@
 
 #define CM_META_GENERIC_LIFETIME UINT8_C(1)
 #define CM_META_GENERIC_TYPE UINT8_C(2)
+#define CM_META_GENERIC_CONST UINT8_C(3)
 
 #define CM_META_TYPE_NEVER UINT8_C(1)
 #define CM_META_TYPE_UNIT UINT8_C(2)
@@ -369,6 +370,9 @@ static int cm_meta_generic_name_bytes_valid(const unsigned char *bytes,
         return bytes != NULL && length > 1u
             && bytes[0] == (unsigned char)'\''
             && cm_meta_identifier_bytes_valid(bytes + 1u, length - 1u);
+    }
+    if (kind == CM_META_GENERIC_CONST) {
+        return cm_meta_identifier_bytes_valid(bytes, length);
     }
     return kind == CM_META_GENERIC_TYPE
         && cm_meta_identifier_bytes_valid(bytes, length);
@@ -1037,7 +1041,6 @@ static int cm_meta_collect_items(const CmHirLibraryArtifactIdentity *identity,
                 || item->kind == CM_HIR_ITEM_STATIC)) continue;
         if (semantic && (item->kind == CM_HIR_ITEM_TRAIT
                 || item->kind == CM_HIR_ITEM_IMPL)) continue;
-        if (item->kind == CM_HIR_ITEM_TRAIT_ALIAS) continue;
         /*
          * Associated items ride with their owning trait rather than being
          * captured separately; attributes and where-clause predicates are
@@ -1451,15 +1454,20 @@ static int cm_meta_collect_generics(
                 || !cm_hir_def_id_equal(parameter->owner,
                     item->definition)
                 || parameter->index != parameter_index
-                || parameter->declared_type != CM_HIR_TYPE_NONE
+                || (parameter->kind == CM_HIR_GENERIC_CONST
+                    ? parameter->declared_type == CM_HIR_TYPE_NONE
+                    : parameter->declared_type != CM_HIR_TYPE_NONE)
                 || (parameter->kind != CM_HIR_GENERIC_LIFETIME
-                    && parameter->kind != CM_HIR_GENERIC_TYPE)
+                    && parameter->kind != CM_HIR_GENERIC_TYPE
+                    && parameter->kind != CM_HIR_GENERIC_CONST)
                 || (parameter->kind == CM_HIR_GENERIC_LIFETIME
                     && (parameter->is_relaxed_sized
                         || parameter->has_default))
                 || (parameter->has_default
                     && parameter->default_argument.kind
-                        != CM_HIR_GENERIC_ARG_TYPE)) return 0;
+                        != CM_HIR_GENERIC_ARG_TYPE)
+                || (parameter->kind == CM_HIR_GENERIC_CONST
+                    && parameter->has_default)) return 0;
             memset(&encoded, 0, sizeof(encoded));
             encoded.id = id;
             encoded.parameter = parameter;
@@ -1667,6 +1675,9 @@ static int cm_meta_collect_types(
         else if (generic->parameter->has_default) {
             valid = cm_meta_collect_type(identity, items, generics, types,
                 states, generic->parameter->default_argument.data.type);
+        } else if (generic->parameter->kind == CM_HIR_GENERIC_CONST) {
+            valid = cm_meta_collect_type(identity, items, generics, types,
+                states, generic->parameter->declared_type);
         }
     }
     for (index = 0u; valid && index < items->len; ++index) {
@@ -2431,12 +2442,21 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
             &identity.context->strings, parameter->name);
         kind = parameter == NULL ? UINT8_C(0)
             : (parameter->kind == CM_HIR_GENERIC_LIFETIME
-                ? CM_META_GENERIC_LIFETIME : CM_META_GENERIC_TYPE);
+                ? CM_META_GENERIC_LIFETIME
+                : (parameter->kind == CM_HIR_GENERIC_CONST
+                    ? CM_META_GENERIC_CONST : CM_META_GENERIC_TYPE));
         default_type = parameter != NULL && parameter->has_default
             ? cm_meta_type_local(&types,
-                parameter->default_argument.data.type) : UINT32_C(0);
+                parameter->default_argument.data.type)
+            : (parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_CONST
+                ? cm_meta_type_local(&types, parameter->declared_type)
+                : UINT32_C(0));
         if (generic == NULL || kind == 0u || name == NULL
             || (parameter->has_default && default_type == 0u)
+            || (parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_CONST
+                && default_type == 0u)
             || cm_hir_metadata_write_u32(&writer, generic->owner)
                 != CM_HIR_METADATA_OK
             || cm_hir_metadata_write_u32(&writer, parameter->index)
@@ -2870,7 +2890,8 @@ static int cm_meta_decode_generics(const CmHirMetadataSection *section,
             || cm_hir_metadata_read_u8(&reader, &generic.kind)
                 != CM_HIR_METADATA_OK
             || (generic.kind != CM_META_GENERIC_LIFETIME
-                && generic.kind != CM_META_GENERIC_TYPE)
+                && generic.kind != CM_META_GENERIC_TYPE
+                && generic.kind != CM_META_GENERIC_CONST)
             || !cm_meta_read_generic_name(&reader, generic.kind,
                 &generic.name)
             || cm_hir_metadata_read_u8(&reader, &relaxed)
@@ -2885,7 +2906,11 @@ static int cm_meta_decode_generics(const CmHirMetadataSection *section,
         generic.has_default = has_default != 0u;
         if ((generic.kind == CM_META_GENERIC_LIFETIME
                 && (generic.is_relaxed_sized || generic.has_default))
-            || (!generic.has_default && generic.default_type != 0u)) return 0;
+            || (generic.kind != CM_META_GENERIC_CONST
+                && !generic.has_default && generic.default_type != 0u)
+            || (generic.kind == CM_META_GENERIC_CONST
+                && (generic.has_default || generic.default_type == 0u)))
+            return 0;
         (void)cm_vec_push(generics, &generic);
     }
     return cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK;
@@ -4245,7 +4270,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         codec_status = cm_hir_metadata_read_section(&section_reader,
             &sections[index]);
         if (codec_status != CM_HIR_METADATA_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
             return result;
         }
     }
@@ -4264,7 +4289,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                 cm_meta_tag_namespace)))
         || (semantic && !cm_meta_section_tag_is(&sections[6],
             cm_meta_tag_trait_universe))) {
-        result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+        do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
         return result;
     }
 
@@ -4305,7 +4330,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             declaration ? &values : NULL, &entries)
         || (semantic && !cm_meta_wire_trait_universe_canonical(&traits,
             &impls))) {
-        result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+        do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
         goto cleanup_wire;
     }
     {
@@ -4315,7 +4340,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             (size_t)(root_local - 1u));
         if (root_wire == NULL
             || !cm_meta_name_equal(crate_name, root_wire->name)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
             goto cleanup_wire;
         }
     }
@@ -4345,14 +4370,14 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     span.start = 0u;
     span.end = 0u;
     if (cm_hir_context_mark(context, &mark) != CM_HIR_OK) {
-        result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+        do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
         goto cleanup_runtime;
     }
     mark_active = 1;
     if (cm_hir_create_crate(context, cm_meta_intern_name(context,
             crate_name), edition, span, &crate_id, &root_module)
             != CM_HIR_OK) {
-        result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+        do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
         goto rollback;
     }
     runtime_modules[root_local - 1u] = root_module;
@@ -4377,14 +4402,14 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                         runtime_modules[module->parent - 1u],
                         cm_meta_intern_name(context, module->name), span,
                         &runtime_modules[index]) != CM_HIR_OK) {
-                    result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                    do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
                     goto rollback;
                 }
                 module_created[index] = UINT8_C(1);
                 remaining -= 1u;
             }
             if (remaining == before) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
                 goto rollback;
             }
         }
@@ -4400,7 +4425,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             || cm_hir_reserve_item_definition_as(context, crate_id,
                 item_kind, span, &runtime_items[index])
                 != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
         if (wire_item->kind == CM_META_ITEM_ENUM) {
@@ -4417,7 +4442,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                         crate_id, span,
                         &mutable_item->data.enum_item.variants[variant]
                             .runtime_definition) != CM_HIR_OK) {
-                    result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                    do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
                     goto rollback;
                 }
             }
@@ -4434,7 +4459,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_value == NULL
             || !cm_meta_value_kind_from_wire(wire_value->kind,
                 &value_kind)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
             goto rollback;
         }
         item_kind = value_kind == CM_HIR_LIBRARY_VALUE_FUNCTION
@@ -4443,7 +4468,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                 ? CM_HIR_ITEM_CONST : CM_HIR_ITEM_STATIC);
         if (cm_hir_reserve_item_definition_as(context, crate_id,
                 item_kind, span, &runtime_values[index]) != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4452,7 +4477,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (cm_hir_reserve_item_definition_as(context, crate_id,
                 CM_HIR_ITEM_TRAIT, span, &runtime_traits[index])
                 != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4460,7 +4485,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (cm_hir_reserve_item_definition_as(context, crate_id,
                 CM_HIR_ITEM_IMPL, span, &runtime_impls[index])
                 != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4472,12 +4497,14 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         wire_generic = (const CmMetaWireGeneric *)cm_vec_at_const(&generics,
             index);
         if (wire_generic == NULL) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
         memset(&parameter, 0, sizeof(parameter));
         parameter.kind = wire_generic->kind == CM_META_GENERIC_LIFETIME
-            ? CM_HIR_GENERIC_LIFETIME : CM_HIR_GENERIC_TYPE;
+            ? CM_HIR_GENERIC_LIFETIME
+            : (wire_generic->kind == CM_META_GENERIC_CONST
+                ? CM_HIR_GENERIC_CONST : CM_HIR_GENERIC_TYPE);
         parameter.owner = runtime_items[wire_generic->owner - 1u];
         parameter.index = wire_generic->index;
         parameter.name = cm_meta_intern_name(context, wire_generic->name);
@@ -4486,7 +4513,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         parameter.is_relaxed_sized = wire_generic->is_relaxed_sized;
         if (cm_hir_add_generic_param(context, &parameter,
                 &runtime_generics[index]) != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4498,6 +4525,22 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_type == NULL || !cm_meta_add_runtime_type(context, wire_type,
                 runtime_items, runtime_generics, runtime_types, span,
                 &runtime_types[index])) {
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
+            goto rollback;
+        }
+    }
+
+    for (index = 0u; index < (uint32_t)generics.len; ++index) {
+        const CmMetaWireGeneric *wire_generic;
+
+        wire_generic = (const CmMetaWireGeneric *)cm_vec_at_const(&generics,
+            index);
+        if (wire_generic == NULL
+            || wire_generic->kind != CM_META_GENERIC_CONST) continue;
+        if (cm_hir_set_generic_param_declared_type(context,
+                runtime_generics[index],
+                runtime_types[wire_generic->default_type - 1u])
+            != CM_HIR_OK) {
             result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
             goto rollback;
         }
@@ -4515,7 +4558,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         argument.data.type = runtime_types[wire_generic->default_type - 1u];
         if (cm_hir_set_generic_param_default(context,
                 runtime_generics[index], &argument) != CM_HIR_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4527,7 +4570,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_item == NULL || !cm_meta_bind_runtime_item(context,
                 wire_item, index + 1u, runtime_modules, runtime_items,
                 runtime_generics, runtime_types, span)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4540,7 +4583,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_trait == NULL || !cm_meta_bind_runtime_trait(context,
                 wire_trait, index + 1u, runtime_modules, runtime_traits,
                 span)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4551,7 +4594,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_impl == NULL || !cm_meta_bind_runtime_impl(context,
                 wire_impl, index + 1u, runtime_modules, runtime_traits,
                 runtime_impls, runtime_types, span)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4567,7 +4610,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             || cm_hir_library_owned_data_add_module(&owned,
                 module->definition, &owned_index) != CM_HIR_LIBRARY_OK
             || owned_index != (size_t)index) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4585,7 +4628,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (wire_value == NULL
             || !cm_meta_value_kind_from_wire(wire_value->kind,
                 &value.kind)) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
             goto rollback;
         }
         value.definition = runtime_values[index];
@@ -4624,7 +4667,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (cm_hir_library_owned_data_add_value(&owned, &value)
                 != CM_HIR_LIBRARY_OK) {
             cm_free(parameter_types);
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
         cm_free(parameter_types);
@@ -4639,7 +4682,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         wire_entry = (const CmMetaWireEntry *)cm_vec_at_const(&entries,
             index);
         if (wire_entry == NULL) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
         memset(&binding, 0, sizeof(binding));
@@ -4652,7 +4695,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             target_module = cm_hir_get_module(context,
                 runtime_modules[wire_entry->target - 1u]);
             if (target_module == NULL) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
                 goto rollback;
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_MODULE;
@@ -4663,7 +4706,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             target_item = (const CmMetaWireItem *)cm_vec_at_const(&items,
                 (size_t)(wire_entry->target - 1u));
             if (target_item == NULL) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
                 goto rollback;
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
@@ -4672,7 +4715,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             public_entry_count += 1u;
         } else if (wire_entry->kind == CM_META_BINDING_TRAIT) {
             if ((size_t)wire_entry->target > traits.len) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
                 goto rollback;
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_TRAIT;
@@ -4686,7 +4729,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             if (target_value == NULL
                 || !cm_meta_value_kind_from_wire(target_value->kind,
                     &binding.value_kind)) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
                 goto rollback;
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
@@ -4695,7 +4738,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         } else {
             if (!cm_meta_primitive_from_wire(wire_entry->target,
                     &primitive)) {
-                result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT;
+                do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT; } while(0);
                 goto rollback;
             }
             binding.kind = CM_HIR_LIBRARY_BINDING_PRIMITIVE;
@@ -4706,7 +4749,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         if (cm_hir_library_owned_data_add_entry(&owned,
                 (size_t)(wire_entry->module - 1u), wire_entry->name.bytes,
                 wire_entry->name.length, &binding) != CM_HIR_LIBRARY_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
@@ -4719,19 +4762,19 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
 
         root_value = cm_hir_get_module(context, root_module);
         if (root_value == NULL) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
         restore_result = cm_hir_library_artifact_restore_owned(
             &candidate_artifact, context, crate_id, root_value->definition,
             extern_name, &owned);
         if (restore_result.status != CM_HIR_LIBRARY_OK) {
-            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
             goto rollback;
         }
     }
     if (cm_hir_context_commit(context, &mark) != CM_HIR_OK) {
-        result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+        do { result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR; } while(0);
         goto rollback;
     }
     mark_active = 0;
