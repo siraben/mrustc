@@ -75,9 +75,52 @@ int main(int argc, char **argv)
     lower_result = cm_hir_lower_module_graph(&hir, &graph,
         graph_result.revision, &imports, &modules, &lower_options);
     if (lower_result.error_count == 0u) {
+        /* Census the declaration surface the metadata boundary must grow
+         * to cover for M6-06: item kinds, generic parameters, and the
+         * trait/impl families that stay outside cmhir-meta today. */
+        size_t census_index;
+        size_t trait_count = 0u;
+        size_t impl_count = 0u;
+        size_t generic_count = 0u;
+        size_t const_generic_count = 0u;
+        size_t lifetime_generic_count = 0u;
+
+        for (census_index = 0u; census_index < hir.generic_parameters.len;
+             ++census_index) {
+            const CmHirGenericParam *census_parameter
+                = (const CmHirGenericParam *)cm_vec_at_const(
+                    &hir.generic_parameters, census_index);
+
+            if (census_parameter == NULL) continue;
+            generic_count += 1u;
+            if (census_parameter->kind == CM_HIR_GENERIC_CONST) {
+                const_generic_count += 1u;
+            } else if (census_parameter->kind
+                == CM_HIR_GENERIC_LIFETIME) {
+                lifetime_generic_count += 1u;
+            }
+        }
+        for (census_index = 0u; census_index < hir.items.len;
+             ++census_index) {
+            const CmHirItem *census_item = (const CmHirItem *)
+                cm_vec_at_const(&hir.items, census_index);
+
+            if (census_item == NULL) continue;
+            if (census_item->kind == CM_HIR_ITEM_TRAIT) {
+                trait_count += 1u;
+            } else if (census_item->kind == CM_HIR_ITEM_IMPL) {
+                impl_count += 1u;
+            }
+        }
         printf("hir errors=0 items=%lu bodies=%lu types=%lu\n",
             (unsigned long)hir.items.len, (unsigned long)hir.bodies.len,
             (unsigned long)hir.types.len);
+        printf("census traits=%lu impls=%lu generics=%lu "
+            "const_generics=%lu lifetime_generics=%lu\n",
+            (unsigned long)trait_count, (unsigned long)impl_count,
+            (unsigned long)generic_count,
+            (unsigned long)const_generic_count,
+            (unsigned long)lifetime_generic_count);
         status = 0;
         goto cleanup;
     }
