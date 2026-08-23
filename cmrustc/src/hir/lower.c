@@ -133,6 +133,11 @@ typedef struct CmLowerState {
     CmVec expected_module_bindings;
     const CmHirItem *active_item;
     const CmAstLifetimeBinder *active_lifetime_binder;
+    CmHirLifetimeBinder *active_callable_predicate_binder;
+    CmSpan active_callable_predicate_span;
+    uint32_t callable_input_depth;
+    int reject_callable_input_elision;
+    int reject_callable_output_elision;
     uint32_t next_type_inference;
     uint32_t next_region_inference;
     CmSpan generated_span;
@@ -2907,6 +2912,7 @@ static int cm_lower_hir_primitive(CmHirPrimitiveKind source,
 static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
     CmHirDefId owner, CmSpan span, CmHirRegion *out_region)
 {
+    CmHirLifetimeBinder *callable_binder;
     const CmLowerGenericRecord *generic;
     CmLowerLifetimeAlias *alias;
     uint32_t binder_index;
@@ -2914,6 +2920,70 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
     memset(out_region, 0, sizeof(*out_region));
     if (lifetime == CM_INTERN_ID_NONE
         || cm_lower_string_is(state, lifetime, "'_")) {
+        callable_binder = state->active_callable_predicate_binder;
+        if (state->callable_input_depth != 0u && callable_binder != NULL) {
+            CmInternId synthesized;
+            char name[32];
+            int length;
+
+            if (callable_binder->lifetime_count == UINT32_MAX
+#if SIZE_MAX <= UINT32_MAX
+                || callable_binder->lifetime_count
+                    >= (uint32_t)(SIZE_MAX / sizeof(CmInternId))
+#endif
+                ) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                    CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                    CM_HIR_ID_EXHAUSTED,
+                    "callable predicate lifetime binder is exhausted");
+                return 0;
+            }
+            binder_index = callable_binder->lifetime_count;
+            length = snprintf(name, sizeof(name), "elided#%u",
+                (unsigned int)binder_index);
+            if (length <= 0 || (size_t)length >= sizeof(name)) {
+                cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                    CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                    CM_HIR_ID_EXHAUSTED,
+                    "callable predicate lifetime name is exhausted");
+                return 0;
+            }
+            synthesized = cm_hir_intern(state->hir, name);
+            if (synthesized == CM_INTERN_ID_NONE) {
+                cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                    CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                    CM_HIR_ID_EXHAUSTED,
+                    "cannot intern callable predicate lifetime");
+                return 0;
+            }
+            callable_binder->lifetimes = (CmInternId *)cm_realloc(
+                callable_binder->lifetimes,
+                (size_t)(binder_index + 1u) * sizeof(CmInternId));
+            callable_binder->lifetimes[binder_index] = synthesized;
+            callable_binder->lifetime_count = binder_index + 1u;
+            if (binder_index == 0u) {
+                callable_binder->span = state->active_callable_predicate_span;
+            }
+            out_region->kind = CM_HIR_REGION_LATE_BOUND;
+            out_region->data.binder_index = binder_index;
+            return 1;
+        }
+        if (state->callable_input_depth != 0u
+            && state->reject_callable_input_elision) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "elided callable input lifetime cannot be combined with a "
+                "predicate-prefix binder");
+            return 0;
+        }
+        if (state->reject_callable_output_elision) {
+            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "elided lifetime in callable trait output is not supported");
+            return 0;
+        }
         out_region->kind = CM_HIR_REGION_INFER;
         out_region->data.inference_variable = state->next_region_inference;
         state->next_region_inference += 1u;
@@ -6094,6 +6164,9 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         return state->failed ? CM_HIR_TYPE_NONE
             : cm_lower_add_type(state, &type, ast_type_id);
     case CM_AST_TYPE_TUPLE:
+        {
+        int callable_inputs;
+
         if (ast_type->tuple_provenance != CM_AST_TUPLE_SOURCE
             && ast_type->tuple_provenance
                 != CM_AST_TUPLE_CALLABLE_INPUTS) {
@@ -6114,11 +6187,17 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         }
         elements = (CmHirTypeId *)cm_alloc_zeroed(
             (size_t)ast_type->element_count, sizeof(CmHirTypeId));
+        callable_inputs = ast_type->tuple_provenance
+                == CM_AST_TUPLE_CALLABLE_INPUTS
+            && (state->active_callable_predicate_binder != NULL
+                || state->reject_callable_input_elision);
+        if (callable_inputs) state->callable_input_depth += 1u;
         for (index = 0u; index < ast_type->element_count && !state->failed;
              ++index) {
             elements[index] = cm_lower_type(state, ast_type->elements[index],
                 module, owner);
         }
+        if (callable_inputs) state->callable_input_depth -= 1u;
         type.kind = CM_HIR_TYPE_TUPLE_KIND;
         type.data.tuple_type.elements = elements;
         type.data.tuple_type.element_count = ast_type->element_count;
@@ -6132,6 +6211,7 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             result = cm_lower_add_type(state, &type, ast_type_id);
             cm_free(elements);
             return result;
+        }
         }
     case CM_AST_TYPE_SLICE:
         type.kind = CM_HIR_TYPE_SLICE_KIND;
@@ -12073,6 +12153,35 @@ static int cm_lower_copy_lifetime_binder(CmLowerState *state,
     return 1;
 }
 
+static int cm_lower_trait_uses_callable_inputs(const CmLowerState *state,
+    CmAstTypeId trait_ast_type)
+{
+    const CmAstType *ast_type;
+    const CmAstPath *path;
+    const CmAstPathSegment *segment;
+    const CmAstType *argument_type;
+    uint32_t index;
+
+    ast_type = cm_ast_get_type(state->ast, trait_ast_type);
+    path = ast_type == NULL || ast_type->kind != CM_AST_TYPE_PATH ? NULL
+        : cm_ast_get_path(state->ast, ast_type->path);
+    if (path == NULL || path->segment_count == 0u || path->segments == NULL) {
+        return 0;
+    }
+    segment = &path->segments[path->segment_count - 1u];
+    if (segment->argument_count != 0u && segment->arguments == NULL) return 0;
+    for (index = 0u; index < segment->argument_count; ++index) {
+        if (segment->arguments[index].kind != CM_AST_GENERIC_TYPE) continue;
+        argument_type = cm_ast_get_type(state->ast,
+            segment->arguments[index].type);
+        if (argument_type != NULL
+            && argument_type->kind == CM_AST_TYPE_TUPLE
+            && argument_type->tuple_provenance
+                == CM_AST_TUPLE_CALLABLE_INPUTS) return 1;
+    }
+    return 0;
+}
+
 static int cm_lower_one_trait_predicate(CmLowerState *state,
     CmAstItemId ast_item_id, const CmLowerItemRecord *record,
     CmHirTypeId subject, CmAstTypeId trait_ast_type, CmSpan predicate_span,
@@ -12082,6 +12191,12 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
 {
     CmLowerTraitTarget trait_target;
     const CmAstLifetimeBinder *previous_binder;
+    CmHirLifetimeBinder *previous_callable_binder;
+    CmSpan previous_callable_span;
+    uint32_t previous_callable_depth;
+    int previous_input_rejection;
+    int previous_output_rejection;
+    int callable_inputs;
 
     memset(out_predicate, 0, sizeof(*out_predicate));
     out_predicate->scope = CM_HIR_PREDICATE_SCOPE_NONE;
@@ -12090,18 +12205,55 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     out_predicate->modifier = modifier;
     if (!cm_lower_copy_lifetime_binder(state, ast_item_id, ast_binder,
             &out_predicate->binder)) return 0;
+    callable_inputs = cm_lower_trait_uses_callable_inputs(state,
+        trait_ast_type);
     previous_binder = state->active_lifetime_binder;
+    previous_callable_binder = state->active_callable_predicate_binder;
+    previous_callable_span = state->active_callable_predicate_span;
+    previous_callable_depth = state->callable_input_depth;
+    previous_input_rejection = state->reject_callable_input_elision;
+    previous_output_rejection = state->reject_callable_output_elision;
     if (ast_binder != NULL && ast_binder->lifetime_count != 0u) {
         state->active_lifetime_binder = ast_binder;
     }
+    if (callable_inputs) {
+        state->active_callable_predicate_binder = previous_binder == NULL
+            ? &out_predicate->binder : NULL;
+        state->active_callable_predicate_span = predicate_span;
+        state->callable_input_depth = 0u;
+        state->reject_callable_input_elision = previous_input_rejection
+            || previous_binder != NULL;
+    }
     if (!cm_lower_trait_reference(state, ast_item_id, trait_ast_type,
             record->owner_module, record->definition, subject,
-            &out_predicate->trait_type, &trait_target, 1, 1, 1, 1)
-        || !cm_lower_predicate_equalities(state, ast_item_id,
+            &out_predicate->trait_type, &trait_target, 1, 1, 1, 1)) {
+        state->active_lifetime_binder = previous_binder;
+        state->active_callable_predicate_binder = previous_callable_binder;
+        state->active_callable_predicate_span = previous_callable_span;
+        state->callable_input_depth = previous_callable_depth;
+        state->reject_callable_input_elision = previous_input_rejection;
+        state->reject_callable_output_elision = previous_output_rejection;
+        cm_free(out_predicate->trait_type.arguments);
+        cm_free(out_predicate->binder.lifetimes);
+        memset(out_predicate, 0, sizeof(*out_predicate));
+        return 0;
+    }
+    state->active_callable_predicate_binder = previous_callable_binder;
+    state->active_callable_predicate_span = previous_callable_span;
+    state->callable_input_depth = previous_callable_depth;
+    state->reject_callable_input_elision = previous_input_rejection;
+    state->reject_callable_output_elision = previous_output_rejection
+        || callable_inputs;
+    if (!cm_lower_predicate_equalities(state, ast_item_id,
             trait_ast_type, &trait_target, record->owner_module,
             record->definition, 1, &out_predicate->equalities,
             &out_predicate->equality_count)) {
         state->active_lifetime_binder = previous_binder;
+        state->active_callable_predicate_binder = previous_callable_binder;
+        state->active_callable_predicate_span = previous_callable_span;
+        state->callable_input_depth = previous_callable_depth;
+        state->reject_callable_input_elision = previous_input_rejection;
+        state->reject_callable_output_elision = previous_output_rejection;
         cm_free(out_predicate->trait_type.arguments);
         cm_free(out_predicate->equalities);
         cm_free(out_predicate->binder.lifetimes);
@@ -12109,6 +12261,11 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
         return 0;
     }
     state->active_lifetime_binder = previous_binder;
+    state->active_callable_predicate_binder = previous_callable_binder;
+    state->active_callable_predicate_span = previous_callable_span;
+    state->callable_input_depth = previous_callable_depth;
+    state->reject_callable_input_elision = previous_input_rejection;
+    state->reject_callable_output_elision = previous_output_rejection;
     return 1;
 }
 

@@ -6207,6 +6207,193 @@ static void test_callable_tuple_provenance(void)
     cm_ast_destroy(&ast);
 }
 
+static void test_callable_predicate_lifetime_elision(void)
+{
+    static const char multiple_source[] =
+        "trait Fn<Args> { type Output; } "
+        "fn multiple<T, F>() where F: Fn(&T, &mut T) -> bool {}";
+    static const char explicit_bound_source[] =
+        "trait Fn<Args> { type Output; } "
+        "fn explicit<T, F>() where "
+        "F: for<'a> Fn(&'a T, &T) -> &'a T {}";
+    static const char explicit_prefix_source[] =
+        "trait Fn<Args> { type Output; } "
+        "fn explicit<T, F>() where for<'a> F: Fn(&'a T) -> bool {}";
+    static const char inferred_source[] =
+        "trait Bound<T> {} "
+        "fn angle<T, F>() where F: Bound<&T> {} "
+        "fn ordinary<T>(value: &T) {}";
+    static const char output_elision[] =
+        "trait Fn<Args> { type Output; } "
+        "fn output<T, F>() where F: Fn(&T) -> (&T,) {}";
+    static const char mixed_prefix_elision[] =
+        "trait Fn<Args> { type Output; } "
+        "fn mixed<T, F>() where for<'a> F: Fn(&T) -> bool {}";
+    const CmHirItem *function;
+    const CmHirTraitPredicate *predicate;
+    const CmHirType *tuple;
+    const CmHirType *first;
+    const CmHirType *second;
+    const CmHirType *output;
+    const CmInternedString *first_name;
+    const CmInternedString *second_name;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_source(multiple_source, &context, NULL);
+    function = find_item(&context, "multiple");
+    predicate = function == NULL || function->predicate_count != 1u
+            || function->predicates == NULL
+        ? NULL : &function->predicates[0];
+    tuple = predicate == NULL
+            || predicate->trait_type.argument_count != 1u
+            || predicate->trait_type.arguments == NULL
+            || predicate->trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            predicate->trait_type.arguments[0].data.type);
+    first = tuple == NULL || tuple->kind != CM_HIR_TYPE_TUPLE_KIND
+            || tuple->data.tuple_type.element_count != 2u
+            || tuple->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            tuple->data.tuple_type.elements[0]);
+    second = first == NULL ? NULL : cm_hir_get_type(&context,
+        tuple->data.tuple_type.elements[1]);
+    first_name = predicate == NULL
+            || predicate->binder.lifetime_count != 2u
+            || predicate->binder.lifetimes == NULL
+        ? NULL : cm_interner_get(&context.strings,
+            predicate->binder.lifetimes[0]);
+    second_name = first_name == NULL ? NULL : cm_interner_get(&context.strings,
+        predicate->binder.lifetimes[1]);
+    assert(result.error_count == 0u && predicate != NULL
+        && predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && predicate->binder.lifetime_count == 2u
+        && first_name != NULL && first_name->len == strlen("elided#0")
+        && memcmp(first_name->bytes, "elided#0", first_name->len) == 0
+        && second_name != NULL && second_name->len == strlen("elided#1")
+        && memcmp(second_name->bytes, "elided#1", second_name->len) == 0
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index == 0u
+        && second != NULL && second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && second->data.reference_type.mutability == CM_HIR_MUTABLE
+        && second->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && second->data.reference_type.region.data.binder_index == 1u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(explicit_bound_source, &context, NULL);
+    function = find_item(&context, "explicit");
+    predicate = function == NULL || function->predicate_count != 1u
+            || function->predicates == NULL
+        ? NULL : &function->predicates[0];
+    tuple = predicate == NULL || predicate->trait_type.arguments == NULL
+        ? NULL : cm_hir_get_type(&context,
+            predicate->trait_type.arguments[0].data.type);
+    first = tuple == NULL || tuple->kind != CM_HIR_TYPE_TUPLE_KIND
+            || tuple->data.tuple_type.element_count != 2u
+            || tuple->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            tuple->data.tuple_type.elements[0]);
+    second = first == NULL ? NULL : cm_hir_get_type(&context,
+        tuple->data.tuple_type.elements[1]);
+    output = predicate == NULL || predicate->equality_count != 1u
+            || predicate->equalities == NULL
+        ? NULL : cm_hir_get_type(&context, predicate->equalities[0].value);
+    first_name = predicate == NULL
+            || predicate->binder.lifetime_count != 2u
+            || predicate->binder.lifetimes == NULL
+        ? NULL : cm_interner_get(&context.strings,
+            predicate->binder.lifetimes[0]);
+    second_name = first_name == NULL ? NULL : cm_interner_get(&context.strings,
+        predicate->binder.lifetimes[1]);
+    assert(result.error_count == 0u && predicate != NULL
+        && predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && predicate->binder.lifetime_count == 2u
+        && first_name != NULL && first_name->len == strlen("'a")
+        && memcmp(first_name->bytes, "'a", first_name->len) == 0
+        && second_name != NULL && second_name->len == strlen("elided#1")
+        && memcmp(second_name->bytes, "elided#1", second_name->len) == 0
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index == 0u
+        && second != NULL && second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && second->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && second->data.reference_type.region.data.binder_index == 1u
+        && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && output->data.reference_type.region.data.binder_index == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(explicit_prefix_source, &context, NULL);
+    function = find_item(&context, "explicit");
+    predicate = function == NULL || function->predicate_count != 1u
+            || function->predicates == NULL
+        ? NULL : &function->predicates[0];
+    tuple = predicate == NULL || predicate->trait_type.arguments == NULL
+        ? NULL : cm_hir_get_type(&context,
+            predicate->trait_type.arguments[0].data.type);
+    first = tuple == NULL || tuple->kind != CM_HIR_TYPE_TUPLE_KIND
+            || tuple->data.tuple_type.element_count != 1u
+            || tuple->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            tuple->data.tuple_type.elements[0]);
+    assert(result.error_count == 0u && function != NULL
+        && function->predicate_scope_count == 1u
+        && function->predicate_scopes != NULL
+        && function->predicate_scopes[0].binder.lifetime_count == 1u
+        && predicate != NULL && predicate->scope == 1u
+        && predicate->binder.lifetime_count == 0u
+        && predicate->binder.lifetimes == NULL
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(inferred_source, &context, NULL);
+    function = find_item(&context, "angle");
+    predicate = function == NULL || function->predicate_count != 1u
+            || function->predicates == NULL
+        ? NULL : &function->predicates[0];
+    first = predicate == NULL || predicate->trait_type.argument_count != 1u
+            || predicate->trait_type.arguments == NULL
+        ? NULL : cm_hir_get_type(&context,
+            predicate->trait_type.arguments[0].data.type);
+    function = find_item(&context, "ordinary");
+    second = function == NULL
+            || function->data.function_item.signature.parameter_count != 1u
+            || function->data.function_item.signature.parameters == NULL
+        ? NULL : cm_hir_get_type(&context,
+            function->data.function_item.signature.parameters[0].type);
+    assert(result.error_count == 0u && predicate != NULL
+        && predicate->binder.lifetime_count == 0u
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && second != NULL && second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && second->data.reference_type.region.kind == CM_HIR_REGION_INFER);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(output_elision, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "elided lifetime in callable trait output") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(mixed_prefix_elision, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "predicate-prefix binder") != NULL);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_parenthesized_and_singleton_tuple_types(void)
 {
     static const char source[] =
@@ -6941,8 +7128,20 @@ static void test_lifetime_where_predicates_retained(void)
     const CmHirItem *method;
     const CmHirItem *lifetime_method;
     const CmHirItem *function;
+    const CmHirItem *copy_trait;
+    const CmHirItem *fn_trait;
+    const CmHirItem *output_type;
+    const CmHirTraitPredicate *fn_predicate;
+    const CmHirTraitPredicate *copy_predicate;
     const CmHirType *subject;
+    const CmHirType *predicate_subject;
+    const CmHirType *signature_parameter;
+    const CmHirType *call_tuple;
+    const CmHirType *call_reference;
+    const CmHirType *call_pointee;
+    const CmHirType *output_value;
     const CmHirGenericParam *parameter;
+    const CmInternedString *binder_name;
 
     result = lower_source(lifetime_bound, &context, NULL);
     owner = find_item(&context, "Owner");
@@ -7047,14 +7246,99 @@ static void test_lifetime_where_predicates_retained(void)
 
     result = lower_source(contracts_shape, &context, NULL);
     function = find_item(&context, "build_check_ensures");
+    copy_trait = find_item(&context, "Copy");
+    fn_trait = find_item(&context, "Fn");
+    output_type = fn_trait == NULL ? NULL
+        : find_child(&context, fn_trait->definition, "Output");
+    fn_predicate = function == NULL || function->predicate_count != 2u
+        || function->predicates == NULL ? NULL : &function->predicates[0];
+    copy_predicate = fn_predicate == NULL ? NULL : &function->predicates[1];
+    call_tuple = fn_predicate == NULL
+            || fn_predicate->trait_type.argument_count != 1u
+            || fn_predicate->trait_type.arguments == NULL
+            || fn_predicate->trait_type.arguments[0].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            fn_predicate->trait_type.arguments[0].data.type);
+    call_reference = call_tuple == NULL
+            || call_tuple->kind != CM_HIR_TYPE_TUPLE_KIND
+            || call_tuple->data.tuple_type.element_count != 1u
+            || call_tuple->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            call_tuple->data.tuple_type.elements[0]);
+    output_value = fn_predicate == NULL
+            || fn_predicate->equality_count != 1u
+            || fn_predicate->equalities == NULL
+        ? NULL : cm_hir_get_type(&context,
+            fn_predicate->equalities[0].value);
+    predicate_subject = fn_predicate == NULL ? NULL
+        : cm_hir_get_type(&context, fn_predicate->subject);
+    signature_parameter = function == NULL
+            || function->data.function_item.signature.parameter_count != 1u
+            || function->data.function_item.signature.parameters == NULL
+        ? NULL : cm_hir_get_type(&context,
+            function->data.function_item.signature.parameters[0].type);
+    call_pointee = call_reference == NULL ? NULL : cm_hir_get_type(&context,
+        call_reference->data.reference_type.pointee);
+    binder_name = fn_predicate == NULL
+            || fn_predicate->binder.lifetime_count != 1u
+            || fn_predicate->binder.lifetimes == NULL
+        ? NULL : cm_interner_get(&context.strings,
+            fn_predicate->binder.lifetimes[0]);
     assert(result.error_count == 0u && function != NULL
         && function->kind == CM_HIR_ITEM_FUNCTION
+        && function->generic_parameter_count == 2u
+        && function->data.function_item.signature.parameter_count == 1u
+        && function->data.function_item.signature.parameters != NULL
+        && function->predicate_scope_count == 0u
         && function->predicate_count == 2u
         && function->predicates != NULL
+        && fn_trait != NULL && copy_trait != NULL && output_type != NULL
+        && fn_predicate != NULL && copy_predicate != NULL
+        && fn_predicate->modifier == CM_HIR_PREDICATE_REQUIRED
+        && fn_predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && predicate_subject != NULL
+        && predicate_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && predicate_subject->data.parameter_type.parameter
+            == function->generic_parameter_start + 1u
+        && signature_parameter != NULL
+        && signature_parameter->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && signature_parameter->data.parameter_type.parameter
+            == function->generic_parameter_start + 1u
+        && cm_hir_def_id_equal(fn_predicate->trait_type.definition,
+            fn_trait->definition)
+        && fn_predicate->binder.lifetime_count == 1u
+        && binder_name != NULL && binder_name->len == strlen("elided#0")
+        && memcmp(binder_name->bytes, "elided#0", binder_name->len) == 0
+        && call_reference != NULL
+        && call_reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && call_reference->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && call_reference->data.reference_type.region.data.binder_index == 0u
+        && call_pointee != NULL
+        && call_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && call_pointee->data.parameter_type.parameter
+            == function->generic_parameter_start
+        && fn_predicate->equality_count == 1u
+        && cm_hir_def_id_equal(fn_predicate->equalities[0].associated_type,
+            output_type->definition)
+        && output_value != NULL && output_value->kind == CM_HIR_TYPE_BOOL_KIND
+        && copy_predicate->modifier == CM_HIR_PREDICATE_REQUIRED
+        && copy_predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && copy_predicate->subject == fn_predicate->subject
+        && cm_hir_def_id_equal(copy_predicate->trait_type.definition,
+            copy_trait->definition)
+        && copy_predicate->trait_type.argument_count == 0u
+        && copy_predicate->equality_count == 0u
+        && copy_predicate->binder.lifetime_count == 0u
         && function->outlives_predicate_count == 1u
         && function->outlives_predicates != NULL
         && function->outlives_predicates[0].subject_kind
             == CM_HIR_OUTLIVES_TYPE
+        && function->outlives_predicates[0].subject.type
+            == fn_predicate->subject
+        && function->outlives_predicates[0].scope
+            == CM_HIR_PREDICATE_SCOPE_NONE
         && function->outlives_predicates[0].bound.kind
             == CM_HIR_REGION_STATIC);
     cm_hir_context_destroy(&context);
@@ -11097,6 +11381,7 @@ int main(void)
     test_trait_method_predicate_boundaries();
     test_arbitrary_trait_predicate_subjects();
     test_callable_tuple_provenance();
+    test_callable_predicate_lifetime_elision();
     test_parenthesized_and_singleton_tuple_types();
     test_trait_method_predicate_storage_mismatch();
     test_post_value_where_predicate_storage_mismatch();

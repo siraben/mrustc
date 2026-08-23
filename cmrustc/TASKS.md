@@ -1945,11 +1945,17 @@ library capture and declaration-v2 metadata encoding, requires the metadata
 boundary to succeed, and remains red until M6-06 closes.
 The 2026-08-23 post-v2.3 gate reaches the complete M6-05 census, then
 value-aware library capture still returns `invalid HIR` and publishes zero
-entries before metadata encoding. Declaration metadata v2.3 accepts
-predicate-free generic public free functions and transports their
-lifetime/type/const parameters, while predicate-bearing declarations remain
-fail-closed. Add precise capture-failure provenance before the next full-core
-run, then transport the rejected declaration instead of omitting it.
+entries before metadata encoding. Temporary tracing identifies the first
+rejection as `core/src/contracts.rs:19`'s
+`build_check_ensures<Ret, C>(cond: C) -> C`, whose `C: Fn(&Ret) -> bool + Copy
++ 'static` clause lowers to two trait predicates and one outlives predicate.
+Declaration metadata v2.3 accepts predicate-free generic public functions;
+the next boundary must transport these predicate facts and the referenced
+trait declarations instead of omitting them.
+Parenthesized callable-trait input elision is now canonical HIR: omitted input
+lifetimes become deterministic predicate-owned late-bound parameters. Elided
+callable outputs and predicate-prefix binders combined with additional elided
+inputs remain fail-closed until their semantics have an explicit HIR shape.
 
 ## M7: Bootstrap and current stable
 

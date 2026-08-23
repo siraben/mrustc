@@ -29,10 +29,16 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
   census after v2.3, then still fails library capture with `invalid HIR`
-  before encoding and publishes zero artifact entries. Generic free functions
-  were therefore necessary but not sufficient; core still exposes
-  predicate-bearing values or another unsupported value shape that must be
-  identified precisely and transported rather than omitted.
+  before encoding and publishes zero artifact entries. Temporary fail-closed
+  tracing identifies the first rejected declaration as
+  `core/src/contracts.rs:19`'s `build_check_ensures<Ret, C>`: its `C: Fn(&Ret)
+  -> bool + Copy + 'static` clause lowers to two trait predicates and one
+  outlives predicate. Those facts and their referenced trait declarations
+  must be transported rather than omitted.
+- Parenthesized callable-trait input elision is normalized before metadata:
+  omitted input lifetimes become deterministic predicate-owned late-bound
+  parameters. Elided callable outputs and unrepresentable mixed binders reject
+  rather than publishing inference variables across a crate boundary.
 - The working directory contains roughly 17 GiB of untracked experimental
   build directories. They are evidence/debug debris, not source; do not use
   their presence as a passing gate or delete them without a separate cleanup
