@@ -1980,9 +1980,18 @@ rather than equality-occurrence counts. Declaration v2.4 still returns
 `unsupported HIR` and zero bytes. The next bounded encoder frontier is the
 first unsupported core predicate form. A temporary encoder-policy trace
 identifies function DefId `1:9087` with a scope-free `CONST_IF_CONST`
-(`~const`) predicate before the known direct `Thin` alias predicate. Its direct
-nominal lookup is also absent, so the next slice must authenticate that capture
-edge as well as version the modifier; the trace was removed after measurement.
+(`~const`) predicate before the known direct `Thin` alias predicate. Its
+`direct=0` trace field is the authenticated ordinary-trait enum tag, not a
+missing reference, so the modifier is the sole policy rejection. The trace was
+removed after measurement.
+Declaration v2.5 now preserves the complete closed predicate-modifier enum as
+stable wire tags, restores exact modifiers in fresh contexts, and upgrades
+modifierless v2.4 predicates as REQUIRED. Unknown and truncated current-version
+records reject atomically without legacy fallback. These modifiers remain
+opaque declaration facts: const-trait capability, selection, and associated
+projection semantics are still deferred. The next whole-core gate determines
+whether the direct `Thin` trait-alias predicate becomes the first unsupported
+shape.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

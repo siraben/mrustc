@@ -64,18 +64,22 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     CmSourceId metadata_source);
 
 /*
- * Exact cmhir-meta-v2.4 declaration encoder, with strict v2.4 then legacy
+ * Exact cmhir-meta-v2.5 declaration encoder, with strict v2.5, v2.4, then
  * v2.3 decoder dispatch. In addition to v2.3 values, v2.4 transports the
- * bounded predicate shape used by generic public free functions: required
- * scope-free trait predicates on direct function type parameters with type
+ * bounded predicate shape used by generic public free functions: scope-free
+ * trait predicates on direct function type parameters with type
  * arguments, zero-GAT associated-type
  * equalities, predicate-owned late-bound input regions, and type-subject
  * `'static` outlives predicates whose subjects are direct function type
- * parameters. Referenced traits, trait aliases, and
+ * parameters. v2.5 preserves the complete closed trait-predicate modifier
+ * enum; modifierless v2.4 records decode as REQUIRED. Referenced traits,
+ * trait aliases, and
  * associated types are restored as opaque REFERENCE_ONLY identities with
  * schemas and ownership facts; no fake item or namespace binding is created.
- * Solving, projection, trait-alias expansion, scoped HRTBs, bodies, MIR,
- * evaluated constants, and link objects remain deferred or unsupported.
+ * Predicate modifiers are structural declaration facts only: const-trait
+ * eligibility, solving, projection, trait-alias expansion, scoped HRTBs,
+ * bodies, MIR, evaluated constants, and link objects remain deferred or
+ * unsupported.
  * Unsupported shapes reject the complete transaction, and output/context/
  * artifact sentinels remain unchanged on failure.
  */

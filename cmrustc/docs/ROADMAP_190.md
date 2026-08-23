@@ -20,13 +20,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
   declaration metadata for that surface.
-- This audit extends declaration metadata through v2.4. Version 2.3 transports authenticated
+- This audit extends declaration metadata through v2.5. Version 2.3 transports authenticated
   literal and parameter const uses in named generic arguments and array
   lengths, plus predicate-free public free functions with lifetime, type, and
   const parameters. Version 2.4 adds a bounded public-function predicate
-  section and opaque reference-only trait/associated identities. Strict v2.4
-  decode falls back to exact legacy v2.3 only on an unsupported-version result;
-  legacy v1.0/v1.1 bytes remain unchanged.
+  section and opaque reference-only trait/associated identities. Version 2.5
+  preserves REQUIRED, CONST_IF_CONST, and CONST predicate modifiers as
+  structural facts. Strict decode tries exact v2.5, v2.4, then v2.3 only on an
+  unsupported-version result; legacy v1.0/v1.1 bytes remain unchanged.
 - No current `.rlib`, compiler-built `core`, `alloc`, `std`, `rustc`, or
   `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
@@ -70,8 +71,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   slice must cover the first unsupported real-core predicate shape. An
   encoder-policy trace identifies function DefId `1:9087` with a scope-free
   `CONST_IF_CONST` (`~const`) predicate before the already known direct `Thin`
-  trait-alias bound; its direct nominal lookup is also absent and must be
-  explained rather than bypassed.
+  trait-alias bound. The trace's `direct=0` is the authenticated ordinary-trait
+  enum tag, not a missing reference; the modifier is the sole policy rejection.
+- Declaration v2.5 transports that complete closed modifier enum using stable
+  wire constants. Fresh decode restores the exact modifier and re-encodes
+  byte-identically; v2.4 predicate records default to REQUIRED. Const-trait
+  capability is not yet a transported trait fact, so solving and projection
+  remain deferred. The next whole-core probe determines whether the direct
+  `Thin` alias predicate is now the first unsupported shape.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

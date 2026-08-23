@@ -52,6 +52,15 @@ static const unsigned char duplicate_const_callable_source[] =
         "where G: FnOnce<ARG, Output = RET>, "
         "F: const FnOnce<ARG, Output = RET> { loop {} }\n";
 
+static const unsigned char carrying_mul_add_source[] =
+    "trait Sized {}\n"
+    "trait Clone: Sized {}\n"
+    "trait Copy: Clone {}\n"
+    "trait CarryingMulAdd: Copy { type Unsigned; }\n"
+    "pub const fn carrying_mul_add<T, U>(_lhs: T, _rhs: T, _carry: U) "
+        "-> (U, T) where T: ~const CarryingMulAdd<Unsigned = U> "
+        "{ loop {} }\n";
+
 static const unsigned char multi_predicate_source_a[] =
     "trait Pair<A, B> { type First; type Second; }\n"
     "trait Left { type Item; }\n"
@@ -131,6 +140,8 @@ typedef enum SemanticMetadataCorruption {
 } SemanticMetadataCorruption;
 
 static void recompute_metadata_crc(CmByteBuf *encoded);
+static void replace_v24_section(CmByteBuf *encoded,
+    const unsigned char tag[4], const CmByteBuf *replacement_contents);
 static void corrupt_trait_universe(CmByteBuf *encoded,
     SemanticMetadataCorruption corruption);
 static void assert_sentinel_preserved(const CmHirContext *context,
@@ -1515,6 +1526,102 @@ static void corrupt_v24_section_byte(CmByteBuf *encoded,
     recompute_metadata_crc(encoded);
 }
 
+static void corrupt_first_predicate_modifier(CmByteBuf *encoded,
+    unsigned char modifier)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    CmHirMetadataReader reader;
+    uint32_t count;
+    uint32_t ignored;
+    uint32_t index;
+    size_t modifier_offset;
+
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    for (index = 0u; index < 9u; ++index)
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    assert(memcmp(section.tag, "PRED", 4u) == 0);
+    cm_hir_metadata_reader_init(&reader, section.data, section.length);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK
+        && count != 0u
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK);
+    for (index = 0u; index < count; ++index)
+        assert(cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK);
+    for (index = 0u; index < count * 2u; ++index)
+        assert(cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK
+        && count != 0u
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    modifier_offset = reader.cursor;
+    assert(modifier_offset < section.length);
+    encoded->data[(size_t)(section.data - encoded->data) + modifier_offset]
+        = modifier;
+    recompute_metadata_crc(encoded);
+}
+
+static void truncate_first_predicate_at_modifier(CmByteBuf *encoded)
+{
+    static const unsigned char pred_tag[4] = {
+        (unsigned char)'P', (unsigned char)'R',
+        (unsigned char)'E', (unsigned char)'D'
+    };
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    CmHirMetadataReader reader;
+    CmByteBuf contents;
+    uint32_t count;
+    uint32_t ignored;
+    uint32_t index;
+
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    for (index = 0u; index < 9u; ++index)
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    assert(memcmp(section.tag, pred_tag, 4u) == 0);
+    cm_hir_metadata_reader_init(&reader, section.data, section.length);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK
+        && count != 0u
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK);
+    for (index = 0u; index < count; ++index)
+        assert(cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK);
+    for (index = 0u; index < count * 2u; ++index)
+        assert(cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK
+        && count != 0u
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_u32(&reader, &ignored)
+            == CM_HIR_METADATA_OK);
+    cm_byte_buf_init(&contents);
+    cm_byte_buf_append(&contents, section.data, reader.cursor);
+    replace_v24_section(encoded, pred_tag, &contents);
+    cm_byte_buf_destroy(&contents);
+}
+
 static void replace_v24_section(CmByteBuf *encoded,
     const unsigned char tag[4], const CmByteBuf *replacement_contents)
 {
@@ -1757,6 +1864,131 @@ static void derive_legacy_declaration_v23(const CmByteBuf *current,
         CM_HIR_METADATA_DECLARATION_MAJOR,
         CM_HIR_METADATA_DECLARATION_LEGACY_MINOR, UINT32_C(0),
         envelope.payload, reader.cursor) == CM_HIR_METADATA_OK);
+}
+
+static void derive_legacy_declaration_v24(const CmByteBuf *current,
+    CmByteBuf *legacy)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader section_reader;
+    CmHirMetadataSection sections[9];
+    CmHirMetadataReader predicate_reader;
+    CmHirMetadataWriter writer;
+    CmByteBuf predicates;
+    CmByteBuf payload;
+    size_t modifier_offsets[64];
+    size_t modifier_count;
+    size_t copy_start;
+    size_t offset_index;
+    uint32_t group_count;
+    uint32_t group;
+    uint32_t count;
+    uint32_t index;
+    uint32_t ignored;
+    uint8_t modifier;
+    const unsigned char *bytes;
+
+    assert(cm_hir_metadata_decode_envelope_version(current->data,
+        current->len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&section_reader, envelope.payload,
+        envelope.payload_length);
+    for (index = 0u; index < 9u; ++index)
+        assert(cm_hir_metadata_read_section(&section_reader, &sections[index])
+            == CM_HIR_METADATA_OK);
+    assert(cm_hir_metadata_read_section(&section_reader, &sections[0])
+            == CM_HIR_METADATA_DONE
+        && memcmp(sections[8].tag, "PRED", 4u) == 0);
+    cm_hir_metadata_reader_init(&predicate_reader, sections[8].data,
+        sections[8].length);
+    assert(cm_hir_metadata_read_u32(&predicate_reader, &group_count)
+        == CM_HIR_METADATA_OK);
+    modifier_count = 0u;
+    for (group = 0u; group < group_count; ++group) {
+        assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&predicate_reader, &count)
+                == CM_HIR_METADATA_OK);
+        for (index = 0u; index < count; ++index)
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                == CM_HIR_METADATA_OK);
+        assert(cm_hir_metadata_read_u32(&predicate_reader, &count)
+            == CM_HIR_METADATA_OK);
+        for (index = 0u; index < count * 2u; ++index)
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                == CM_HIR_METADATA_OK);
+        assert(cm_hir_metadata_read_u32(&predicate_reader, &count)
+            == CM_HIR_METADATA_OK);
+        for (index = 0u; index < count; ++index) {
+            uint32_t child_count;
+            uint32_t child;
+
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                    == CM_HIR_METADATA_OK
+                && cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                    == CM_HIR_METADATA_OK
+                && modifier_count < sizeof(modifier_offsets)
+                    / sizeof(modifier_offsets[0]));
+            modifier_offsets[modifier_count++] = predicate_reader.cursor;
+            assert(cm_hir_metadata_read_u8(&predicate_reader, &modifier)
+                    == CM_HIR_METADATA_OK
+                && modifier <= (uint8_t)CM_HIR_PREDICATE_CONST
+                && cm_hir_metadata_read_u32(&predicate_reader, &child_count)
+                    == CM_HIR_METADATA_OK);
+            for (child = 0u; child < child_count; ++child) {
+                uint32_t length;
+
+                assert(cm_hir_metadata_read_u32(&predicate_reader, &length)
+                        == CM_HIR_METADATA_OK
+                    && cm_hir_metadata_read_bytes(&predicate_reader, length,
+                        &bytes) == CM_HIR_METADATA_OK);
+                (void)bytes;
+            }
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &child_count)
+                == CM_HIR_METADATA_OK);
+            for (child = 0u; child < child_count; ++child)
+                assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                    == CM_HIR_METADATA_OK);
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &child_count)
+                == CM_HIR_METADATA_OK);
+            for (child = 0u; child < child_count * 2u; ++child)
+                assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                    == CM_HIR_METADATA_OK);
+        }
+        assert(cm_hir_metadata_read_u32(&predicate_reader, &count)
+            == CM_HIR_METADATA_OK);
+        for (index = 0u; index < count; ++index)
+            assert(cm_hir_metadata_read_u32(&predicate_reader, &ignored)
+                == CM_HIR_METADATA_OK);
+    }
+    assert(cm_hir_metadata_reader_finish(&predicate_reader)
+            == CM_HIR_METADATA_OK
+        && modifier_count != 0u);
+    cm_byte_buf_init(&predicates);
+    copy_start = 0u;
+    for (offset_index = 0u; offset_index < modifier_count; ++offset_index) {
+        assert(modifier_offsets[offset_index] >= copy_start);
+        cm_byte_buf_append(&predicates, sections[8].data + copy_start,
+            modifier_offsets[offset_index] - copy_start);
+        copy_start = modifier_offsets[offset_index] + 1u;
+    }
+    cm_byte_buf_append(&predicates, sections[8].data + copy_start,
+        sections[8].length - copy_start);
+    cm_byte_buf_init(&payload);
+    cm_hir_metadata_writer_init(&writer, &payload,
+        CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
+    for (index = 0u; index < 9u; ++index)
+        assert(cm_hir_metadata_write_section(&writer, sections[index].tag,
+            index == 8u ? predicates.data : sections[index].data,
+            index == 8u ? predicates.len : sections[index].length)
+                == CM_HIR_METADATA_OK);
+    cm_byte_buf_init(legacy);
+    assert(cm_hir_metadata_encode_envelope_version(legacy,
+        CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_PREDICATE_MINOR, UINT32_C(0),
+        payload.data, payload.len) == CM_HIR_METADATA_OK);
+    cm_byte_buf_destroy(&payload);
+    cm_byte_buf_destroy(&predicates);
 }
 
 static void corrupt_trait_universe(CmByteBuf *encoded,
@@ -3175,6 +3407,81 @@ static int consume_predicate_function_process_artifact(const char *path)
     return ok;
 }
 
+static int produce_modifier_function_process_artifact(const char *path)
+{
+    ParsedProducerFixture producer;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+    int ok;
+
+    if (!parsed_producer_build(&producer, carrying_mul_add_source,
+            sizeof(carrying_mul_add_source) - 1u, 1u, 0u, 1u, 1)) {
+        return 0;
+    }
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && write_metadata_file(path, &encoded);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+    return ok;
+}
+
+static int consume_modifier_function_process_artifact(const char *path)
+{
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirMetadataArtifactResult result;
+    CmHirLibraryValue value;
+    const CmHirLibraryNominalReference *carrying;
+    const CmHirLibraryNominalReference *unsigned_type;
+    int ok;
+
+    if (!read_metadata_file(path, &encoded)) return 0;
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&context,
+        &artifact, encoded.data, encoded.len, "dep", 112u);
+    value = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        ? lookup_value(&artifact, "dep", "carrying_mul_add")
+        : (CmHirLibraryValue){0};
+    carrying = value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        ? find_nominal_reference(&value, "CarryingMulAdd",
+            CM_HIR_LIBRARY_NOMINAL_TRAIT) : NULL;
+    unsigned_type = value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        ? find_nominal_reference(&value, "Unsigned",
+            CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) : NULL;
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.predicate_count == 1u
+        && value.data.function.predicates[0].modifier
+            == CM_HIR_PREDICATE_CONST_IF_CONST
+        && value.data.function.predicates[0].equality_count == 1u
+        && carrying != NULL && unsigned_type != NULL
+        && cm_hir_def_id_equal(value.data.function.predicates[0]
+            .trait_type.definition, carrying->definition)
+        && cm_hir_def_id_equal(value.data.function.predicates[0]
+            .equalities[0].associated_type, unsigned_type->definition);
+    cm_byte_buf_init(&reencoded);
+    if (ok) {
+        result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+            &artifact);
+        ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+            && reencoded.len == encoded.len
+            && memcmp(reencoded.data, encoded.data, encoded.len) == 0;
+    }
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_byte_buf_destroy(&encoded);
+    return ok;
+}
+
 static int consume_process_artifact(const char *path)
 {
     CmByteBuf encoded;
@@ -4283,6 +4590,7 @@ static void test_declaration_v24_predicate_function_round_trip(void)
     CmHirContext consumer;
     CmHirLibraryArtifact artifact;
     CmByteBuf encoded;
+    CmByteBuf legacy_v24;
     CmByteBuf reencoded;
     CmByteBuf corrupted;
     CmHirMetadataArtifactResult result;
@@ -4327,6 +4635,30 @@ static void test_declaration_v24_predicate_function_round_trip(void)
         &producer.artifact);
     assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
         && encoded.len != 0u);
+
+    derive_legacy_declaration_v24(&encoded, &legacy_v24);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, legacy_v24.data, legacy_v24.len, "legacy", 105u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    value = lookup_value(&artifact, "legacy", "constrained");
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.predicate_count == 2u
+        && value.data.function.predicates[0].modifier
+            == CM_HIR_PREDICATE_REQUIRED
+        && value.data.function.predicates[1].modifier
+            == CM_HIR_PREDICATE_REQUIRED);
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&legacy_v24);
 
     consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
         &sentinel_module);
@@ -4671,10 +5003,167 @@ static void test_declaration_v24_multi_fact_canonical_order(void)
     parsed_producer_destroy(&first);
 }
 
+static void test_carrying_mul_add_modifier_round_trip(void)
+{
+    ParsedProducerFixture producer;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryValue value;
+    const CmHirLibraryNominalReference *carrying;
+    const CmHirLibraryNominalReference *copy;
+    const CmHirLibraryNominalReference *clone;
+    const CmHirLibraryNominalReference *sized;
+    const CmHirLibraryNominalReference *unsigned_type;
+    const CmHirTraitPredicate *predicate;
+    const CmHirType *subject;
+    const CmHirType *equality;
+    const CmHirGenericParam *t_parameter;
+    const CmHirGenericParam *u_parameter;
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmByteBuf malformed;
+    CmByteBuf unsupported_version;
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataEnvelope unsupported_envelope;
+    CmHirMetadataArtifactResult result;
+    ContextLengths before;
+    CmHirLibraryArtifactIdentity sentinel_identity;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_module;
+
+    assert(parsed_producer_build(&producer, carrying_mul_add_source,
+        sizeof(carrying_mul_add_source) - 1u, 1u, 0u, 1u, 1));
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u && encoded.len != 0u);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 110u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u);
+    value = lookup_value(&artifact, "dep", "carrying_mul_add");
+    carrying = find_nominal_reference(&value, "CarryingMulAdd",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    copy = find_nominal_reference(&value, "Copy",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    clone = find_nominal_reference(&value, "Clone",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    sized = find_nominal_reference(&value, "Sized",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    unsigned_type = find_nominal_reference(&value, "Unsigned",
+        CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE);
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.generic_parameter_count == 2u
+        && value.data.function.predicate_count == 1u
+        && value.data.function.outlives_predicate_count == 0u
+        && value.data.function.nominal_reference_count == 5u
+        && value.data.function.associated_availability_count == 1u
+        && carrying != NULL && copy != NULL && clone != NULL
+        && sized != NULL && unsigned_type != NULL
+        && cm_hir_def_id_equal(unsigned_type->declaring_trait,
+            carrying->definition)
+        && cm_hir_def_id_equal(value.data.function
+            .associated_availability[0].direct_trait, carrying->definition)
+        && cm_hir_def_id_equal(value.data.function
+            .associated_availability[0].associated_type,
+            unsigned_type->definition));
+    predicate = &value.data.function.predicates[0];
+    subject = cm_hir_get_type(&consumer, predicate->subject);
+    equality = predicate->equality_count == 1u
+        ? cm_hir_get_type(&consumer, predicate->equalities[0].value) : NULL;
+    t_parameter = cm_hir_get_generic_param(&consumer,
+        value.data.function.generic_parameter_start);
+    u_parameter = cm_hir_get_generic_param(&consumer,
+        value.data.function.generic_parameter_start + 1u);
+    assert(predicate->modifier == CM_HIR_PREDICATE_CONST_IF_CONST
+        && predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && predicate->binder.lifetime_count == 0u
+        && predicate->trait_type.argument_count == 0u
+        && predicate->equality_count == 1u
+        && cm_hir_def_id_equal(predicate->trait_type.definition,
+            carrying->definition)
+        && cm_hir_def_id_equal(predicate->equalities[0].associated_type,
+            unsigned_type->definition)
+        && subject != NULL && subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && equality != NULL && equality->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && subject->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start
+        && equality->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start + 1u
+        && t_parameter != NULL && t_parameter->index == 0u
+        && cm_hir_def_id_equal(t_parameter->owner, value.definition)
+        && u_parameter != NULL && u_parameter->index == 1u
+        && cm_hir_def_id_equal(u_parameter->owner, value.definition));
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+
+    consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
+        &sentinel_module);
+    before = context_lengths(&consumer);
+    assert(cm_hir_library_artifact_identity(&artifact,
+        &sentinel_identity));
+    cm_byte_buf_init(&malformed);
+    cm_byte_buf_append(&malformed, encoded.data, encoded.len);
+    corrupt_first_predicate_modifier(&malformed, UINT8_C(3));
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, malformed.data, malformed.len, "broken", 111u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&malformed);
+
+    cm_byte_buf_init(&malformed);
+    cm_byte_buf_append(&malformed, encoded.data, encoded.len);
+    truncate_first_predicate_at_modifier(&malformed);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, malformed.data, malformed.len, "truncated", 111u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&malformed);
+
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(encoded.data, encoded.len,
+        CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_byte_buf_init(&unsupported_version);
+    assert(cm_hir_metadata_encode_envelope_version(&unsupported_version,
+        CM_HIR_METADATA_DECLARATION_MAJOR,
+        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 1u), UINT32_C(0),
+        envelope.payload, envelope.payload_length) == CM_HIR_METADATA_OK);
+    memset(&unsupported_envelope, 0, sizeof(unsupported_envelope));
+    assert(cm_hir_metadata_decode_envelope_version(unsupported_version.data,
+        unsupported_version.len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 1u),
+        &unsupported_envelope) == CM_HIR_METADATA_OK);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, unsupported_version.data, unsupported_version.len,
+        "future", 111u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&unsupported_version);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+}
+
 static void test_duplicate_const_callable_library_capture(void)
 {
-    static const unsigned char sentinel[] = { 0xd1u, 0x24u, 0x5au };
     ParsedProducerFixture producer;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
     CmHirLibraryValue value;
     const CmHirLibraryNominalReference *fn_once;
     const CmHirLibraryNominalReference *output;
@@ -4683,7 +5172,7 @@ static void test_duplicate_const_callable_library_capture(void)
     uint32_t index;
     uint32_t const_count;
     CmByteBuf encoded;
-    unsigned char *sentinel_data;
+    CmByteBuf reencoded;
     CmHirMetadataArtifactResult result;
 
     assert(parsed_producer_build(&producer, duplicate_const_callable_source,
@@ -4732,13 +5221,39 @@ static void test_duplicate_const_callable_library_capture(void)
     assert(subjects[0] != subjects[1] && const_count == 1u);
 
     cm_byte_buf_init(&encoded);
-    cm_byte_buf_append(&encoded, sentinel, sizeof(sentinel));
-    sentinel_data = encoded.data;
     result = cm_hir_metadata_encode_declaration_artifact(&encoded,
         &producer.artifact);
-    assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
-        && encoded.data == sentinel_data && encoded.len == sizeof(sentinel)
-        && memcmp(encoded.data, sentinel, sizeof(sentinel)) == 0);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u && encoded.len != 0u);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 109u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u);
+    value = lookup_value(&artifact, "dep", "const_eval_select");
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.predicate_count == 2u
+        && value.data.function.associated_availability_count == 1u);
+    const_count = 0u;
+    for (index = 0u; index < value.data.function.predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+
+        predicate = &value.data.function.predicates[index];
+        assert(predicate->equality_count == 1u);
+        if (predicate->modifier == CM_HIR_PREDICATE_CONST) const_count += 1u;
+        else assert(predicate->modifier == CM_HIR_PREDICATE_REQUIRED);
+    }
+    assert(const_count == 1u);
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
     cm_byte_buf_destroy(&encoded);
     parsed_producer_destroy(&producer);
 }
@@ -4772,12 +5287,19 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "consume-predicate-function") == 0) {
         return consume_predicate_function_process_artifact(argv[2]) ? 0 : 1;
     }
+    if (argc == 3 && strcmp(argv[1], "produce-modifier-function") == 0) {
+        return produce_modifier_function_process_artifact(argv[2]) ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "consume-modifier-function") == 0) {
+        return consume_modifier_function_process_artifact(argv[2]) ? 0 : 1;
+    }
     if (argc != 1) {
         fputs("usage: test_hir_metadata "
             "[produce-forward|produce-reverse|consume|produce-declaration|"
             "consume-declaration|produce-generic-function|"
             "consume-generic-function|produce-predicate-function|"
-            "consume-predicate-function FILE]\n", stderr);
+            "consume-predicate-function|produce-modifier-function|"
+            "consume-modifier-function FILE]\n", stderr);
         return 2;
     }
     test_primitive_only_round_trip();
@@ -4792,6 +5314,7 @@ int main(int argc, char **argv)
     test_declaration_v2_generic_function_round_trip();
     test_declaration_v24_predicate_function_round_trip();
     test_declaration_v24_multi_fact_canonical_order();
+    test_carrying_mul_add_modifier_round_trip();
     test_duplicate_const_callable_library_capture();
     test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(

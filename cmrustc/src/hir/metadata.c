@@ -70,6 +70,9 @@
 #define CM_META_REGION_STATIC UINT8_C(1)
 #define CM_META_REGION_EARLY_BOUND UINT8_C(2)
 #define CM_META_REGION_LATE_BOUND UINT8_C(3)
+#define CM_META_PREDICATE_REQUIRED UINT8_C(0)
+#define CM_META_PREDICATE_CONST_IF_CONST UINT8_C(1)
+#define CM_META_PREDICATE_CONST UINT8_C(2)
 
 #define CM_META_NOMINAL_TRAIT UINT8_C(1)
 #define CM_META_NOMINAL_TRAIT_ALIAS UINT8_C(2)
@@ -406,6 +409,7 @@ typedef struct CmMetaWireNominal {
 typedef struct CmMetaWirePredicate {
     uint32_t subject;
     uint32_t trait_reference;
+    uint8_t modifier;
     CmMetaWireName *binder_names;
     uint32_t binder_count;
     uint32_t *arguments;
@@ -427,6 +431,38 @@ typedef struct CmMetaWireValuePredicates {
     uint32_t *outlives_subjects;
     uint32_t outlives_count;
 } CmMetaWireValuePredicates;
+
+static int cm_meta_predicate_modifier_to_wire(
+    CmHirTraitPredicateModifier modifier, uint8_t *wire)
+{
+    uint8_t value;
+
+    if (modifier == CM_HIR_PREDICATE_REQUIRED)
+        value = CM_META_PREDICATE_REQUIRED;
+    else if (modifier == CM_HIR_PREDICATE_CONST_IF_CONST)
+        value = CM_META_PREDICATE_CONST_IF_CONST;
+    else if (modifier == CM_HIR_PREDICATE_CONST)
+        value = CM_META_PREDICATE_CONST;
+    else return 0;
+    if (wire != NULL) *wire = value;
+    return 1;
+}
+
+static int cm_meta_predicate_modifier_from_wire(uint8_t wire,
+    CmHirTraitPredicateModifier *modifier)
+{
+    CmHirTraitPredicateModifier value;
+
+    if (wire == CM_META_PREDICATE_REQUIRED)
+        value = CM_HIR_PREDICATE_REQUIRED;
+    else if (wire == CM_META_PREDICATE_CONST_IF_CONST)
+        value = CM_HIR_PREDICATE_CONST_IF_CONST;
+    else if (wire == CM_META_PREDICATE_CONST)
+        value = CM_HIR_PREDICATE_CONST;
+    else return 0;
+    if (modifier != NULL) *modifier = value;
+    return 1;
+}
 
 static CmHirMetadataArtifactResult cm_meta_result(
     CmHirMetadataArtifactStatus status)
@@ -1710,7 +1746,8 @@ static int cm_meta_collect_nominals(const CmVec *values,
             if (direct == NULL
                 || direct->kind != CM_HIR_LIBRARY_NOMINAL_TRAIT
                 || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
-                || predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+                || !cm_meta_predicate_modifier_to_wire(
+                    predicate->modifier, NULL)
                 || predicate->trait_type.argument_count
                     != direct->generic_parameter_count) return 0;
             for (child = 0u; child < direct->generic_parameter_count;
@@ -2728,7 +2765,8 @@ static int cm_meta_collect_types(
                             &predicates[parameter - 1u],
                             &predicates[parameter]) >= 0)
                     || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
-                    || predicate->modifier != CM_HIR_PREDICATE_REQUIRED) {
+                    || !cm_meta_predicate_modifier_to_wire(
+                        predicate->modifier, NULL)) {
                     valid = 0;
                     break;
                 }
@@ -3811,6 +3849,7 @@ static int cm_meta_write_value_predicates(CmHirMetadataWriter *writer,
             uint32_t child;
             uint32_t local;
             uint32_t trait_local;
+            uint8_t modifier;
 
             predicate = predicates[index].predicate;
             local = cm_meta_type_local(type_locals, type_local_count,
@@ -3821,10 +3860,13 @@ static int cm_meta_write_value_predicates(CmHirMetadataWriter *writer,
                 || (index != 0u && cm_meta_encode_predicate_compare(
                     &predicates[index - 1u], &predicates[index]) >= 0)
                 || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
-                || predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+                || !cm_meta_predicate_modifier_to_wire(
+                    predicate->modifier, &modifier)
                 || cm_hir_metadata_write_u32(writer, local)
                     != CM_HIR_METADATA_OK
                 || cm_hir_metadata_write_u32(writer, trait_local)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_write_u8(writer, modifier)
                     != CM_HIR_METADATA_OK
                 || cm_hir_metadata_write_u32(writer,
                     predicate->binder.lifetime_count)
@@ -3990,7 +4032,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         || owned->modules.len > (size_t)CM_META_MAX_MODULES
         || (crate_value = cm_hir_get_crate(identity.context,
             identity.crate_id)) == NULL) return result;
-    /* The current declaration encoder always emits the exact v2.4 family. */
+    /* The current declaration encoder always emits the exact v2.5 family. */
     declaration_v24 = declaration;
     if (semantic) {
         size_t item_index;
@@ -5987,7 +6029,9 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
             }
             direct = (const CmMetaWireNominal *)cm_vec_at_const(nominals,
                 predicate->trait_reference - 1u);
-            if ((index != 0u
+            if (!cm_meta_predicate_modifier_from_wire(predicate->modifier,
+                    NULL)
+                || (index != 0u
                     && (payload->predicates[index - 1u].trait_reference
                             > predicate->trait_reference
                         || (payload->predicates[index - 1u]
@@ -6095,7 +6139,8 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
 
 static int cm_meta_decode_value_predicates(
     const CmHirMetadataSection *section, const CmVec *values,
-    const CmVec *nominals, uint32_t type_count, CmVec *payloads)
+    const CmVec *nominals, uint32_t type_count, int has_modifiers,
+    CmVec *payloads)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -6214,6 +6259,13 @@ static int cm_meta_decode_value_predicates(
             direct = (const CmMetaWireNominal *)cm_vec_at_const(nominals,
                 predicate->trait_reference - 1u);
             if (direct == NULL || direct->kind != CM_META_NOMINAL_TRAIT)
+                goto invalid;
+            predicate->modifier = CM_META_PREDICATE_REQUIRED;
+            if (has_modifiers
+                && (cm_hir_metadata_read_u8(&reader, &predicate->modifier)
+                        != CM_HIR_METADATA_OK
+                    || !cm_meta_predicate_modifier_from_wire(
+                        predicate->modifier, NULL)))
                 goto invalid;
             if (!CM_META_READ_COUNT(predicate->binder_count,
                     CM_META_MAX_GENERICS)
@@ -7370,8 +7422,10 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     }
     cm_hir_metadata_reader_init(&section_reader, envelope.payload,
         envelope.payload_length);
-    declaration_v24 = declaration && declaration_minor
-        == CM_HIR_METADATA_DECLARATION_MINOR;
+    declaration_v24 = declaration
+        && (declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
+            || declaration_minor
+                == CM_HIR_METADATA_DECLARATION_PREDICATE_MINOR);
     for (index = 0u; index < (declaration_v24 ? 9u
             : ((semantic || declaration) ? 7u : 6u));
             ++index) {
@@ -7444,7 +7498,9 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         || (declaration_v24 && !cm_meta_decode_nominals(&sections[7],
             (uint32_t)modules.len, &nominals))
         || (declaration_v24 && !cm_meta_decode_value_predicates(&sections[8],
-            &values, &nominals, type_count, &value_predicates))
+            &values, &nominals, type_count,
+            declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR,
+            &value_predicates))
         || (declaration_v24 && !cm_meta_wire_predicates_canonical(&generics,
             &types, &items, &values, &nominals, &value_predicates))
         || (semantic && !cm_meta_decode_trait_universe(&sections[6],
@@ -7995,8 +8051,9 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                         CM_HIR_PREDICATE_SCOPE_NONE;
                     predicates[parameter].span = span;
                     predicates[parameter].span.end = 1u;
-                    predicates[parameter].modifier =
-                        CM_HIR_PREDICATE_REQUIRED;
+                    (void)cm_meta_predicate_modifier_from_wire(
+                        wire_predicate->modifier,
+                        &predicates[parameter].modifier);
                 }
                 outlives = wire_predicates->outlives_count == 0u ? NULL
                     : (CmHirOutlivesPredicate *)cm_alloc_zeroed(
@@ -8257,6 +8314,12 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
         CM_HIR_METADATA_DECLARATION_MAJOR,
         CM_HIR_METADATA_DECLARATION_MINOR, &envelope);
     minor = CM_HIR_METADATA_DECLARATION_MINOR;
+    if (status == CM_HIR_METADATA_UNSUPPORTED_VERSION) {
+        status = cm_hir_metadata_decode_envelope_version(encoded,
+            encoded_length, CM_HIR_METADATA_DECLARATION_MAJOR,
+            CM_HIR_METADATA_DECLARATION_PREDICATE_MINOR, &envelope);
+        minor = CM_HIR_METADATA_DECLARATION_PREDICATE_MINOR;
+    }
     if (status == CM_HIR_METADATA_UNSUPPORTED_VERSION) {
         status = cm_hir_metadata_decode_envelope_version(encoded,
             encoded_length, CM_HIR_METADATA_DECLARATION_MAJOR,

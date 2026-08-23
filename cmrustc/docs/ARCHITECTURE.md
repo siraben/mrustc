@@ -79,16 +79,19 @@ free functions (including lifetime/type/const parameters), public consts and
 statics, const generic parameters, and literal/parameter const uses in named
 arguments and array lengths. Version 2.4 appends canonical `NREF` and sparse
 `PRED` sections for a bounded scope-free public-function predicate shape.
+Version 2.5 adds a stable modifier byte and preserves REQUIRED,
+CONST_IF_CONST, and CONST without treating them as const-trait eligibility.
 Referenced traits and associated types remain opaque RESERVED identities with
 authenticated names, owners, generic schemas, declaring parents, and explicit
 associated-availability witnesses; they create no item or namespace binding.
 Predicate-owned late-bound input regions are accepted only beneath their
 authenticating binder. Decoder preflight checks canonical ordering, aggregate
 resource limits, type reachability and nesting, generic provenance, and all
-cross-section references before reserving runtime definitions. Exact v2.4
-decode falls back to exact v2.3 only for an unsupported version. Neither format
+cross-section references before reserving runtime definitions. Exact v2.5
+decode falls back through exact v2.4 and v2.3 only for an unsupported version;
+malformed current-version payloads never fall through. None of these formats
 yet carries the complete core trait/alias/impl, body, instantiation,
-dependency-archive, or link-input surface, and neither is yet a consumable core
+dependency-archive, or link-input surface, and none is yet a consumable core
 `.rmeta` or `.rlib`.
 
 The preceding Haskell `hrustc` experiment is useful negative evidence. Its

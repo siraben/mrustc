@@ -2123,6 +2123,14 @@ static int cm_hir_library_type_parameters_owned_cached(
     return 1;
 }
 
+static int cm_hir_library_predicate_modifier_valid(
+    CmHirTraitPredicateModifier modifier)
+{
+    return modifier == CM_HIR_PREDICATE_REQUIRED
+        || modifier == CM_HIR_PREDICATE_CONST_IF_CONST
+        || modifier == CM_HIR_PREDICATE_CONST;
+}
+
 static int cm_hir_library_reserved_function_predicates_valid_cached(
     const CmHirContext *context,
     CmHirDefId function_definition,
@@ -2173,7 +2181,7 @@ static int cm_hir_library_reserved_function_predicates_valid_cached(
             predicate->trait_type.definition,
             CM_HIR_LIBRARY_NOMINAL_TRAIT);
         if (direct == NULL || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
-            || predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+            || !cm_hir_library_predicate_modifier_valid(predicate->modifier)
             || subject_type == NULL
             || subject_type->kind != CM_HIR_TYPE_PARAMETER_KIND
             || predicate->trait_type.argument_count
