@@ -4,6 +4,7 @@
 #include "cm/hir/metadata.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static size_t source_line(const CmSourceFile *source, size_t offset)
 {
@@ -35,13 +36,17 @@ int main(int argc, char **argv)
     CmHirLowerResult lower_result;
     const CmSourceFile *error_source;
     size_t line;
+    int require_metadata;
     int status;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s /path/to/library/core/src/lib.rs\n",
+    if (argc != 2 && (argc != 3
+            || strcmp(argv[2], "--require-metadata") != 0)) {
+        fprintf(stderr, "usage: %s /path/to/library/core/src/lib.rs "
+            "[--require-metadata]\n",
             argc == 0 ? "probe_core_hir" : argv[0]);
         return 2;
     }
+    require_metadata = argc == 3;
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
     cm_import_resolver_init(&imports);
@@ -123,6 +128,7 @@ int main(int argc, char **argv)
             (unsigned long)generic_count,
             (unsigned long)const_generic_count,
             (unsigned long)lifetime_generic_count);
+        (void)fflush(stdout);
         {
             CmHirLibraryArtifact artifact;
             CmHirLibraryArtifactResult library_result;
@@ -130,29 +136,38 @@ int main(int argc, char **argv)
             CmHirMetadataArtifactResult metadata_result;
 
             cm_hir_library_artifact_init(&artifact);
-            library_result = cm_hir_library_artifact_build(&artifact, &hir,
-                lower_result.crate_id, &graph, graph_result.revision,
-                &modules, "core");
+            library_result = cm_hir_library_declaration_artifact_build(
+                &artifact, &hir, lower_result.crate_id, &graph,
+                graph_result.revision, &modules, "core");
             printf("library status=%s modules=%lu types=%lu values=%lu\n",
                 cm_hir_library_status_name(library_result.status),
                 (unsigned long)library_result.module_count,
                 (unsigned long)library_result.public_type_entry_count,
                 (unsigned long)library_result.public_value_entry_count);
+            (void)fflush(stdout);
             if (library_result.status == CM_HIR_LIBRARY_OK) {
                 cm_byte_buf_init(&encoded);
-                metadata_result = cm_hir_metadata_encode_artifact(&encoded,
-                    &artifact);
-                printf("metadata status=%s bytes=%lu\n",
+                metadata_result =
+                    cm_hir_metadata_encode_declaration_artifact(&encoded,
+                        &artifact);
+                printf("metadata-v2.3 status=%s bytes=%lu\n",
                     cm_hir_metadata_artifact_status_name(
                         metadata_result.status),
                     metadata_result.status
                         == CM_HIR_METADATA_ARTIFACT_OK
                         ? (unsigned long)encoded.len : 0ul);
                 cm_byte_buf_destroy(&encoded);
+                if (require_metadata
+                    && metadata_result.status
+                        != CM_HIR_METADATA_ARTIFACT_OK) {
+                    status = 1;
+                }
+            } else if (require_metadata) {
+                status = 1;
             }
             cm_hir_library_artifact_destroy(&artifact);
         }
-        status = 0;
+        if (!require_metadata || status != 1) status = 0;
         goto cleanup;
     }
     error_source = cm_source_get(&sources,

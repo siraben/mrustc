@@ -28,8 +28,9 @@ source
 Cross-crate metadata and build orchestration are first-class parts of the
 compiler, not deferred packaging work.
 
-An August 2026 audit measured 65,183 production C/header lines and 55,452
-test/tool lines against 154,268 lines in the original compiler.
+The 2026-08-23 audit measured 129,227 production C/header lines and 101,804
+C/header/shell test and tool lines against 154,268 lines in the original
+compiler.
 The implemented weight is concentrated in syntax, macros, resolution, and
 declaration HIR. A narrow no-core path genuinely lowers exact typed bodies to
 MIR, computes reachable direct instances, emits C99, and executes GCC/TinyCC
@@ -44,8 +45,8 @@ generic value/trait implementation carried across a crate boundary through
 metadata, MIR, monomorphization, linking, and execution.
 
 The current target-configured Rust 1.90 core probe resolves a real inherited
-implicit prelude across all 363 sources and 451 modules and reports zero graph
-or import errors. It has crossed positional and associated-equality
+implicit prelude across all 363 sources and 451 modules and reports zero graph,
+import, and HIR errors. It has crossed positional and associated-equality
 supertraits, including `ops::Shr<u32, Output = Self>`, and structural
 `Self: 'static` lifetime supertraits. Trait aliases retain their ordered trait
 and lifetime RHS bounds, including generic arguments and associated
@@ -62,11 +63,10 @@ authenticated `<Self as Trait>::Associated` projection. Trait defaults that do
 not mention their bounded `Self` remain separate from associated equalities.
 Trait defaults such as `PartialEq<Rhs = Self>` now substitute the exact
 authenticated associated projection rather than the enclosing trait's
-`Self`, clearing `DiscriminantKind::Discriminant` in `marker.rs`. The current
-declaration frontier is `core/src/ops/async_function.rs:28` (item 0, span
-`1247..1259`), where inherited `Self::Output` must carry the defining generic
-supertrait's arguments. This is a precise declaration frontier, not evidence
-that general trait obligations or method bodies are executable.
+`Self`, clearing `DiscriminantKind::Discriminant` in `marker.rs`. Whole-core
+declaration HIR is complete; the active frontier is M6-06's consumable core
+metadata and `.rlib`. This is declaration coverage, not evidence that general
+trait obligations or method bodies are executable.
 
 The canonical metadata producer is likewise a real parsed-source vertical:
 source graph, imports, HIR lowering, public artifact capture, deterministic
@@ -74,9 +74,12 @@ encoding, fresh-process decode, and runtime-ID remapping. Its boundary remains
 declaration-only raw `cmhir` bytes. The private driver switches
 `--emit-cmhir SOURCE --crate-name NAME -o FILE` and repeated
 `--extern-cmhir NAME FILE` provide real producer and dependent-load paths with
-atomic publication. The format does not yet carry dependency-backed type
-edges, traits, impls, bodies, instantiations, dependency archives, or link
-inputs, and it is not `.rmeta` or `.rlib`.
+atomic publication. The v2.3 declaration format carries predicate-free public
+free functions (including lifetime/type/const parameters), public consts and
+statics, const generic parameters, and literal/parameter const uses in named
+arguments and array lengths. It does not yet carry the complete core
+trait/impl/predicate, body, instantiation, dependency-archive, or link-input
+surface, and it is not yet a consumable core `.rmeta` or `.rlib`.
 
 The preceding Haskell `hrustc` experiment is useful negative evidence. Its
 last session reached a rustc-like binary that accepted `hello.rs` and exited

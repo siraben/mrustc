@@ -1242,8 +1242,9 @@ byte-identical after source-side graph/import state is destroyed; a fresh
 prepopulated consumer proves ID remapping, alias normalization, and exact
 rollback for prevalidation and post-mark semantic corruption. Lifetime generic
 names such as `'a` are validated without broadening item or module identifiers.
-Traits, associated declarations, projections, impls, bodies, const generics,
-unevaluated constants, and dependency-backed type edges remain mandatory
+Traits, associated declarations, projections, impls, bodies, const-generic
+arguments/defaults, unevaluated constants, and dependency-backed type edges
+remain mandatory
 before M3-04's acceptance is met, so M3-04 stays `ACTIVE`. The private driver
 now provides `--emit-cmhir SOURCE --crate-name NAME -o FILE` and repeated
 `--extern-cmhir NAME FILE`. Separate processes prove parsed-source production,
@@ -1939,6 +1940,16 @@ vertical gates preventing that substitution. `tools/probe_core_hir.c` and the
 `$(BUILD_DIR)/probe_core_hir` Make target make the M6-05 diagnostic
 reproducible against an explicit Rust `library/core/src/lib.rs`; the probe
 returns nonzero until the HIR gate actually closes.
+`make check-core-metadata` runs the same real-core path through value-aware
+library capture and declaration-v2 metadata encoding, requires the metadata
+boundary to succeed, and remains red until M6-06 closes.
+The 2026-08-23 post-v2.3 gate reaches the complete M6-05 census, then
+value-aware library capture still returns `invalid HIR` and publishes zero
+entries before metadata encoding. Declaration metadata v2.3 accepts
+predicate-free generic public free functions and transports their
+lifetime/type/const parameters, while predicate-bearing declarations remain
+fail-closed. Add precise capture-failure provenance before the next full-core
+run, then transport the rejected declaration instead of omitting it.
 
 ## M7: Bootstrap and current stable
 

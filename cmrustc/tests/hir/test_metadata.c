@@ -14,6 +14,13 @@
 
 #define TEST_METADATA_CRC_OFFSET 32u
 
+static const unsigned char generic_function_source[] =
+    "pub fn select<'a, T, const N: usize>(value: &'a T, "
+        "bytes: [u8; N]) -> &'a T { let _ = bytes; value }\n";
+
+static const unsigned char predicate_function_source[] =
+    "pub fn constrained<T>(value: T) -> T where T: 'static { value }\n";
+
 typedef struct ProducerFixture {
     CmHirContext context;
     CmHirCrateId crate_id;
@@ -1076,6 +1083,83 @@ static CmHirLibraryValue lookup_value(
     return value;
 }
 
+static int generic_function_valid(const CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, const char *extern_name)
+{
+    CmHirLibraryValue value;
+    const CmHirGenericParam *lifetime;
+    const CmHirGenericParam *type_parameter;
+    const CmHirGenericParam *constant;
+    const CmHirType *first_parameter;
+    const CmHirType *first_pointee;
+    const CmHirType *second_parameter;
+    const CmHirType *return_type;
+    const CmHirType *return_pointee;
+    const CmHirType *const_type;
+
+    value = lookup_value(artifact, extern_name, "select");
+    if (value.kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || value.data.function.generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE
+        || value.data.function.generic_parameter_count != 3u
+        || value.data.function.parameter_count != 2u) return 0;
+    lifetime = cm_hir_get_generic_param(context,
+        value.data.function.generic_parameter_start);
+    type_parameter = cm_hir_get_generic_param(context,
+        value.data.function.generic_parameter_start + 1u);
+    constant = cm_hir_get_generic_param(context,
+        value.data.function.generic_parameter_start + 2u);
+    if (lifetime == NULL || lifetime->kind != CM_HIR_GENERIC_LIFETIME
+        || lifetime->index != 0u
+        || !cm_hir_def_id_equal(lifetime->owner, value.definition)
+        || type_parameter == NULL
+        || type_parameter->kind != CM_HIR_GENERIC_TYPE
+        || type_parameter->index != 1u
+        || !cm_hir_def_id_equal(type_parameter->owner, value.definition)
+        || constant == NULL || constant->kind != CM_HIR_GENERIC_CONST
+        || constant->index != 2u
+        || !cm_hir_def_id_equal(constant->owner, value.definition)) return 0;
+    const_type = cm_hir_get_type(context, constant->declared_type);
+    first_parameter = cm_hir_get_type(context,
+        value.data.function.parameter_types[0]);
+    second_parameter = cm_hir_get_type(context,
+        value.data.function.parameter_types[1]);
+    return_type = cm_hir_get_type(context,
+        value.data.function.return_type);
+    if (const_type == NULL || const_type->kind != CM_HIR_TYPE_INTEGER_KIND
+        || const_type->data.integer_type.kind != CM_HIR_INT_USIZE
+        || first_parameter == NULL
+        || first_parameter->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || first_parameter->data.reference_type.region.kind
+            != CM_HIR_REGION_EARLY_BOUND
+        || first_parameter->data.reference_type.region.data.parameter
+            != value.data.function.generic_parameter_start
+        || second_parameter == NULL
+        || second_parameter->kind != CM_HIR_TYPE_ARRAY_KIND
+        || second_parameter->data.array_type.length.kind
+            != CM_HIR_CONST_PARAMETER
+        || second_parameter->data.array_type.length.data.parameter
+            != value.data.function.generic_parameter_start + 2u
+        || return_type == NULL
+        || return_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || return_type->data.reference_type.region.kind
+            != CM_HIR_REGION_EARLY_BOUND
+        || return_type->data.reference_type.region.data.parameter
+            != value.data.function.generic_parameter_start) return 0;
+    first_pointee = cm_hir_get_type(context,
+        first_parameter->data.reference_type.pointee);
+    return_pointee = cm_hir_get_type(context,
+        return_type->data.reference_type.pointee);
+    return first_pointee != NULL
+        && first_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && first_pointee->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start + 1u
+        && return_pointee != NULL
+        && return_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && return_pointee->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start + 1u;
+}
+
 static const CmHirItem *binding_item(const CmHirContext *context,
     CmHirLibraryBinding binding)
 {
@@ -1866,6 +1950,7 @@ static void test_semantic_trait_universe_round_trip(void)
     CmHirLibraryArtifact producer_artifact;
     CmHirLibraryArtifactResult restored;
     CmByteBuf encoded;
+    CmByteBuf reencoded;
     CmByteBuf corrupted;
     CmHirMetadataArtifactResult metadata_result;
     CmHirContext consumer;
@@ -1996,6 +2081,13 @@ static void test_semantic_trait_universe_round_trip(void)
     }
     assert(positive_count == 1u && negative_count == 1u);
     cm_trait_impl_index_destroy(&impl_index);
+    cm_byte_buf_init(&reencoded);
+    metadata_result = cm_hir_metadata_encode_semantic_artifact(&reencoded,
+        &consumer_artifact);
+    assert(metadata_result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
     cm_hir_library_artifact_destroy(&consumer_artifact);
     cm_hir_context_destroy(&consumer);
     cm_byte_buf_destroy(&encoded);
@@ -2013,6 +2105,10 @@ static void assert_encode_unsupported(CmHirContext *context,
     init_empty_artifact(context, crate_id, root_module, &artifact);
     cm_byte_buf_init(&encoded);
     result = cm_hir_metadata_encode_artifact(&encoded, &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR);
+    assert(encoded.len == 0u);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &artifact);
     assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR);
     assert(encoded.len == 0u);
     cm_byte_buf_destroy(&encoded);
@@ -2587,6 +2683,62 @@ static int consume_declaration_process_artifact(const char *path)
     return ok;
 }
 
+static int produce_generic_function_process_artifact(const char *path)
+{
+    ParsedProducerFixture producer;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+    int ok;
+
+    if (!parsed_producer_build(&producer, generic_function_source,
+            sizeof(generic_function_source) - 1u, 1u, 0u, 1u, 1)) {
+        return 0;
+    }
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && generic_function_valid(&producer.context, &producer.artifact,
+            "producer")
+        && write_metadata_file(path, &encoded);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+    return ok;
+}
+
+static int consume_generic_function_process_artifact(const char *path)
+{
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirMetadataArtifactResult result;
+    int ok;
+
+    if (!read_metadata_file(path, &encoded)) return 0;
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&context,
+        &artifact, encoded.data, encoded.len, "dep", 102u);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && generic_function_valid(&context, &artifact, "dep");
+    cm_byte_buf_init(&reencoded);
+    if (ok) {
+        result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+            &artifact);
+        ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+            && reencoded.len == encoded.len
+            && memcmp(reencoded.data, encoded.data, encoded.len) == 0;
+    }
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_byte_buf_destroy(&encoded);
+    return ok;
+}
+
 static int consume_process_artifact(const char *path)
 {
     CmByteBuf encoded;
@@ -2847,6 +2999,271 @@ static void test_declaration_v2_const_generic_round_trip(void)
     cm_hir_context_destroy(&producer);
 }
 
+static void corrupt_first_const_parameter(CmByteBuf *encoded,
+    int corrupt_kind)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    uint32_t section_index;
+    size_t index;
+    int changed;
+
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, (uint16_t)CM_HIR_METADATA_DECLARATION_MAJOR,
+        (uint16_t)CM_HIR_METADATA_DECLARATION_MINOR, &envelope)
+        == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    memset(&section, 0, sizeof(section));
+    for (section_index = 0u; section_index < 4u; ++section_index) {
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    }
+    assert(memcmp(section.tag, "TYPE", 4u) == 0);
+    changed = 0;
+    for (index = 0u; index + 10u <= section.length; ++index) {
+        unsigned char *bytes;
+
+        bytes = (unsigned char *)section.data;
+        if (bytes[index] != UINT8_C(3)
+            || bytes[index + 1u] != UINT8_C(2)) continue;
+        if (corrupt_kind) {
+            bytes[index + 1u] = UINT8_C(0);
+        } else {
+            bytes[index + 6u] = UINT8_C(0);
+            bytes[index + 7u] = UINT8_C(0);
+            bytes[index + 8u] = UINT8_C(0);
+            bytes[index + 9u] = UINT8_C(0);
+        }
+        changed = 1;
+        break;
+    }
+    assert(changed);
+    recompute_metadata_crc(encoded);
+}
+
+static void test_declaration_v2_const_terms_round_trip(void)
+{
+    static const unsigned char source[] =
+        "pub struct Buffer<const N: usize> { pub bytes: [u8; N] }\n"
+        "pub struct Wrap<const N: usize>(pub Buffer<N>);\n"
+        "pub type Four = Buffer<4>;\n";
+    ParsedProducerFixture producer;
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmByteBuf corrupted;
+    CmHirMetadataArtifactResult result;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryBinding buffer_binding;
+    CmHirLibraryBinding wrap_binding;
+    CmHirLibraryBinding four_binding;
+    const CmHirItem *buffer;
+    const CmHirItem *wrap;
+    const CmHirItem *four;
+    const CmHirType *type;
+    const CmHirGenericParam *parameter;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_module;
+    ContextLengths before;
+    CmHirLibraryArtifactIdentity sentinel_identity;
+
+    assert(parsed_producer_build(&producer, source, sizeof(source) - 1u,
+        1u, 3u, 0u, 0));
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && encoded.len != 0u);
+
+    consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
+        &sentinel_module);
+    before = context_lengths(&consumer);
+    assert(cm_hir_library_artifact_identity(&artifact, &sentinel_identity));
+    cm_byte_buf_init(&corrupted);
+    cm_byte_buf_append(&corrupted, encoded.data, encoded.len);
+    corrupt_first_const_parameter(&corrupted, 0);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, corrupted.data, corrupted.len, "broken", 91u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&corrupted);
+
+    cm_byte_buf_init(&corrupted);
+    cm_byte_buf_append(&corrupted, encoded.data, encoded.len);
+    corrupt_first_const_parameter(&corrupted, 1);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, corrupted.data, corrupted.len, "broken", 91u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&corrupted);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 92u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    buffer_binding = lookup(&artifact, "dep", "Buffer", NULL);
+    wrap_binding = lookup(&artifact, "dep", "Wrap", NULL);
+    four_binding = lookup(&artifact, "dep", "Four", NULL);
+    buffer = binding_item(&consumer, buffer_binding);
+    wrap = binding_item(&consumer, wrap_binding);
+    four = binding_item(&consumer, four_binding);
+    assert(buffer != NULL && buffer->kind == CM_HIR_ITEM_STRUCT
+        && buffer->generic_parameter_count == 1u
+        && buffer->data.aggregate_item.field_count == 1u);
+    parameter = cm_hir_get_generic_param(&consumer,
+        buffer->generic_parameter_start);
+    assert(parameter != NULL && parameter->kind == CM_HIR_GENERIC_CONST);
+    type = cm_hir_get_type(&consumer,
+        buffer->data.aggregate_item.fields[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ARRAY_KIND
+        && type->data.array_type.length.kind == CM_HIR_CONST_PARAMETER
+        && type->data.array_type.length.data.parameter
+            == buffer->generic_parameter_start);
+    assert(wrap != NULL && wrap->kind == CM_HIR_ITEM_STRUCT
+        && wrap->generic_parameter_count == 1u
+        && wrap->data.aggregate_item.field_count == 1u);
+    type = cm_hir_get_type(&consumer,
+        wrap->data.aggregate_item.fields[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type->data.named_type.definition,
+            buffer->definition)
+        && type->data.named_type.argument_count == 1u
+        && type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && type->data.named_type.arguments[0].data.constant.kind
+            == CM_HIR_CONST_PARAMETER
+        && type->data.named_type.arguments[0].data.constant.data.parameter
+            == wrap->generic_parameter_start);
+    assert(four != NULL && four->kind == CM_HIR_ITEM_TYPE_ALIAS);
+    type = cm_hir_get_type(&consumer, four->data.type_alias_item.target);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type->data.named_type.definition,
+            buffer->definition)
+        && type->data.named_type.argument_count == 1u
+        && type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_CONST
+        && type->data.named_type.arguments[0].data.constant.kind
+            == CM_HIR_CONST_VALUE
+        && type->data.named_type.arguments[0].data.constant.data.value.low_bits
+            == UINT64_C(4)
+        && type->data.named_type.arguments[0].data.constant.data.value.high_bits
+            == UINT64_C(0));
+
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+    (void)sentinel_crate;
+    (void)sentinel_module;
+}
+
+static void corrupt_first_generic_owner_kind(CmByteBuf *encoded)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    uint32_t index;
+    unsigned char *bytes;
+
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, (uint16_t)CM_HIR_METADATA_DECLARATION_MAJOR,
+        (uint16_t)CM_HIR_METADATA_DECLARATION_MINOR, &envelope)
+        == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    memset(&section, 0, sizeof(section));
+    for (index = 0u; index < 3u; ++index) {
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    }
+    assert(memcmp(section.tag, "GPAR", 4u) == 0 && section.length > 4u);
+    bytes = (unsigned char *)section.data;
+    bytes[4] = UINT8_C(0);
+    recompute_metadata_crc(encoded);
+}
+
+static void test_declaration_v2_generic_function_round_trip(void)
+{
+    ParsedProducerFixture producer;
+    ParsedProducerFixture rejected;
+    CmByteBuf encoded;
+    CmByteBuf corrupted;
+    CmByteBuf reencoded;
+    CmHirMetadataArtifactResult result;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_module;
+    ContextLengths before;
+    CmHirLibraryArtifactIdentity sentinel_identity;
+
+    assert(parsed_producer_build(&producer, generic_function_source,
+        sizeof(generic_function_source) - 1u, 1u, 0u, 1u, 1));
+    assert(generic_function_valid(&producer.context, &producer.artifact,
+        "producer"));
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u && encoded.len != 0u);
+
+    consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
+        &sentinel_module);
+    before = context_lengths(&consumer);
+    assert(cm_hir_library_artifact_identity(&artifact,
+        &sentinel_identity));
+    cm_byte_buf_init(&corrupted);
+    cm_byte_buf_append(&corrupted, encoded.data, encoded.len);
+    corrupt_first_generic_owner_kind(&corrupted);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, corrupted.data, corrupted.len, "broken", 103u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&corrupted);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 104u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && generic_function_valid(&consumer, &artifact, "dep"));
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+
+    assert(!parsed_producer_build(&rejected, predicate_function_source,
+        sizeof(predicate_function_source) - 1u, 1u, 0u, 1u, 1));
+
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+    (void)sentinel_crate;
+    (void)sentinel_module;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "produce-forward") == 0) {
@@ -2864,10 +3281,17 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "consume-declaration") == 0) {
         return consume_declaration_process_artifact(argv[2]) ? 0 : 1;
     }
+    if (argc == 3 && strcmp(argv[1], "produce-generic-function") == 0) {
+        return produce_generic_function_process_artifact(argv[2]) ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "consume-generic-function") == 0) {
+        return consume_generic_function_process_artifact(argv[2]) ? 0 : 1;
+    }
     if (argc != 1) {
         fputs("usage: test_hir_metadata "
             "[produce-forward|produce-reverse|consume|produce-declaration|"
-            "consume-declaration FILE]\n", stderr);
+            "consume-declaration|produce-generic-function|"
+            "consume-generic-function FILE]\n", stderr);
         return 2;
     }
     test_primitive_only_round_trip();
@@ -2878,6 +3302,8 @@ int main(int argc, char **argv)
     test_semantic_round_trip();
     test_declaration_v2_value_round_trip();
     test_declaration_v2_const_generic_round_trip();
+    test_declaration_v2_const_terms_round_trip();
+    test_declaration_v2_generic_function_round_trip();
     test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(
         CM_HIR_METADATA_ARTIFACT_OK), "ok") == 0);

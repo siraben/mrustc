@@ -40,6 +40,8 @@
 #define CM_META_GENERIC_LIFETIME UINT8_C(1)
 #define CM_META_GENERIC_TYPE UINT8_C(2)
 #define CM_META_GENERIC_CONST UINT8_C(3)
+#define CM_META_GENERIC_OWNER_ITEM UINT8_C(1)
+#define CM_META_GENERIC_OWNER_VALUE UINT8_C(2)
 
 #define CM_META_TYPE_NEVER UINT8_C(1)
 #define CM_META_TYPE_UNIT UINT8_C(2)
@@ -60,6 +62,9 @@
 
 #define CM_META_ARG_LIFETIME UINT8_C(1)
 #define CM_META_ARG_TYPE UINT8_C(2)
+#define CM_META_ARG_CONST UINT8_C(3)
+#define CM_META_CONST_VALUE UINT8_C(1)
+#define CM_META_CONST_PARAMETER UINT8_C(2)
 #define CM_META_REGION_STATIC UINT8_C(1)
 #define CM_META_REGION_EARLY_BOUND UINT8_C(2)
 
@@ -125,6 +130,7 @@ typedef struct CmMetaEncodeItem {
 typedef struct CmMetaEncodeGeneric {
     CmHirGenericParamId id;
     const CmHirGenericParam *parameter;
+    uint8_t owner_kind;
     uint32_t owner;
 } CmMetaEncodeGeneric;
 
@@ -177,11 +183,24 @@ typedef struct CmMetaWireRegion {
     uint32_t parameter;
 } CmMetaWireRegion;
 
+typedef struct CmMetaWireConst {
+    uint8_t kind;
+    uint32_t type;
+    union {
+        struct {
+            uint64_t low_bits;
+            uint64_t high_bits;
+        } value;
+        uint32_t parameter;
+    } data;
+} CmMetaWireConst;
+
 typedef struct CmMetaWireArg {
     uint8_t kind;
     union {
         CmMetaWireRegion lifetime;
         uint32_t type;
+        CmMetaWireConst constant;
     } data;
 } CmMetaWireArg;
 
@@ -192,6 +211,7 @@ typedef struct CmMetaWireNamed {
 } CmMetaWireNamed;
 
 typedef struct CmMetaWireGeneric {
+    uint8_t owner_kind;
     uint32_t owner;
     uint32_t index;
     uint8_t kind;
@@ -220,9 +240,7 @@ typedef struct CmMetaWireType {
         } tuple_type;
         struct {
             uint32_t element;
-            uint32_t constant_type;
-            uint64_t low_bits;
-            uint64_t high_bits;
+            CmMetaWireConst length;
         } array_type;
         struct {
             uint32_t element;
@@ -310,6 +328,8 @@ typedef struct CmMetaWireValue {
             uint32_t *parameter_types;
             uint32_t parameter_count;
             uint32_t return_type;
+            uint32_t generic_start;
+            uint32_t generic_count;
             CmMetaWireName abi;
             uint8_t safety;
             int is_const;
@@ -1416,65 +1436,97 @@ static uint32_t cm_meta_type_local(const CmVec *types, CmHirTypeId id)
     return UINT32_C(0);
 }
 
+static int cm_meta_collect_generic_range(
+    const CmHirLibraryArtifactIdentity *identity, CmVec *generics,
+    CmHirDefId owner_definition, CmHirGenericParamId start, uint32_t count,
+    uint8_t owner_kind, uint32_t owner_local)
+{
+    uint32_t parameter_index;
+
+    if ((count == 0u && start != CM_HIR_GENERIC_PARAM_NONE)
+        || (count != 0u && start == CM_HIR_GENERIC_PARAM_NONE)
+        || (owner_kind != CM_META_GENERIC_OWNER_ITEM
+            && owner_kind != CM_META_GENERIC_OWNER_VALUE)
+        || owner_local == 0u) return 0;
+    for (parameter_index = 0u; parameter_index < count;
+            ++parameter_index) {
+        CmHirGenericParamId id;
+        const CmHirGenericParam *parameter;
+        const CmInternedString *name;
+        CmMetaEncodeGeneric encoded;
+
+        id = start + parameter_index;
+        if (id < start) return 0;
+        parameter = cm_hir_get_generic_param(identity->context, id);
+        name = parameter == NULL ? NULL : cm_interner_get(
+            &identity->context->strings, parameter->name);
+        if (parameter == NULL || name == NULL
+            || !cm_meta_generic_name_bytes_valid(name->bytes, name->len,
+                parameter->kind == CM_HIR_GENERIC_LIFETIME
+                    ? CM_META_GENERIC_LIFETIME : CM_META_GENERIC_TYPE)
+            || !cm_hir_def_id_equal(parameter->owner, owner_definition)
+            || parameter->index != parameter_index
+            || (parameter->kind == CM_HIR_GENERIC_CONST
+                ? parameter->declared_type == CM_HIR_TYPE_NONE
+                : parameter->declared_type != CM_HIR_TYPE_NONE)
+            || (parameter->kind != CM_HIR_GENERIC_LIFETIME
+                && parameter->kind != CM_HIR_GENERIC_TYPE
+                && parameter->kind != CM_HIR_GENERIC_CONST)
+            || (parameter->kind == CM_HIR_GENERIC_LIFETIME
+                && (parameter->is_relaxed_sized || parameter->has_default))
+            || (parameter->has_default
+                && parameter->default_argument.kind
+                    != CM_HIR_GENERIC_ARG_TYPE)
+            || (parameter->kind == CM_HIR_GENERIC_CONST
+                && parameter->has_default)) return 0;
+        memset(&encoded, 0, sizeof(encoded));
+        encoded.id = id;
+        encoded.parameter = parameter;
+        encoded.owner_kind = owner_kind;
+        encoded.owner = owner_local;
+        (void)cm_vec_push(generics, &encoded);
+        if (generics->len > (size_t)CM_META_MAX_GENERICS) return 0;
+    }
+    return 1;
+}
+
 static int cm_meta_collect_generics(
     const CmHirLibraryArtifactIdentity *identity, const CmVec *items,
-    CmVec *generics)
+    const CmVec *values, CmVec *generics)
 {
-    size_t item_index;
+    size_t owner_index;
 
-    for (item_index = 0u; item_index < items->len; ++item_index) {
+    for (owner_index = 0u; owner_index < items->len; ++owner_index) {
         const CmMetaEncodeItem *encoded_item;
         const CmHirItem *item;
-        uint32_t parameter_index;
 
         encoded_item = (const CmMetaEncodeItem *)cm_vec_at_const(items,
-            item_index);
+            owner_index);
         item = encoded_item == NULL ? NULL : encoded_item->item;
-        if (item == NULL
-            || (item->generic_parameter_count != 0u
-                && item->generic_parameter_start
-                    == CM_HIR_GENERIC_PARAM_NONE)) return 0;
-        for (parameter_index = 0u;
-                parameter_index < item->generic_parameter_count;
-                ++parameter_index) {
-            CmHirGenericParamId id;
-            const CmHirGenericParam *parameter;
-            const CmInternedString *name;
-            CmMetaEncodeGeneric encoded;
+        if (item == NULL || !cm_meta_collect_generic_range(identity,
+                generics, item->definition, item->generic_parameter_start,
+                item->generic_parameter_count, CM_META_GENERIC_OWNER_ITEM,
+                (uint32_t)(owner_index + 1u))) return 0;
+    }
+    if (values == NULL) return 1;
+    for (owner_index = 0u; owner_index < values->len; ++owner_index) {
+        const CmMetaEncodeValue *encoded_value;
+        const CmHirLibraryValue *value;
 
-            id = item->generic_parameter_start + parameter_index;
-            if (id < item->generic_parameter_start) return 0;
-            parameter = cm_hir_get_generic_param(identity->context, id);
-            name = parameter == NULL ? NULL : cm_interner_get(
-                &identity->context->strings, parameter->name);
-            if (parameter == NULL || name == NULL
-                || !cm_meta_generic_name_bytes_valid(name->bytes, name->len,
-                    parameter->kind == CM_HIR_GENERIC_LIFETIME
-                        ? CM_META_GENERIC_LIFETIME : CM_META_GENERIC_TYPE)
-                || !cm_hir_def_id_equal(parameter->owner,
-                    item->definition)
-                || parameter->index != parameter_index
-                || (parameter->kind == CM_HIR_GENERIC_CONST
-                    ? parameter->declared_type == CM_HIR_TYPE_NONE
-                    : parameter->declared_type != CM_HIR_TYPE_NONE)
-                || (parameter->kind != CM_HIR_GENERIC_LIFETIME
-                    && parameter->kind != CM_HIR_GENERIC_TYPE
-                    && parameter->kind != CM_HIR_GENERIC_CONST)
-                || (parameter->kind == CM_HIR_GENERIC_LIFETIME
-                    && (parameter->is_relaxed_sized
-                        || parameter->has_default))
-                || (parameter->has_default
-                    && parameter->default_argument.kind
-                        != CM_HIR_GENERIC_ARG_TYPE)
-                || (parameter->kind == CM_HIR_GENERIC_CONST
-                    && parameter->has_default)) return 0;
-            memset(&encoded, 0, sizeof(encoded));
-            encoded.id = id;
-            encoded.parameter = parameter;
-            encoded.owner = (uint32_t)(item_index + 1u);
-            (void)cm_vec_push(generics, &encoded);
-            if (generics->len > (size_t)CM_META_MAX_GENERICS) return 0;
+        encoded_value = (const CmMetaEncodeValue *)cm_vec_at_const(values,
+            owner_index);
+        value = encoded_value == NULL || encoded_value->value == NULL ? NULL
+            : &encoded_value->value->declaration;
+        if (value == NULL) return 0;
+        if (value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION) {
+            continue;
         }
+        if (!cm_meta_collect_generic_range(identity, generics,
+                value->definition,
+                value->data.function.generic_parameter_start,
+                value->data.function.generic_parameter_count,
+                CM_META_GENERIC_OWNER_VALUE,
+                (uint32_t)(owner_index + 1u))) return 0;
     }
     return 1;
 }
@@ -1498,6 +1550,44 @@ static int cm_meta_region_supported(const CmHirRegion *region,
 static int cm_meta_collect_type(const CmHirLibraryArtifactIdentity *identity,
     const CmVec *items, const CmVec *generics, CmVec *types,
     unsigned char *states, CmHirTypeId id);
+
+static int cm_meta_scalar_const_type_equal(const CmHirContext *context,
+    CmHirTypeId left_id, CmHirTypeId right_id)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+
+    left = cm_hir_get_type(context, left_id);
+    right = cm_hir_get_type(context, right_id);
+    if (left == NULL || right == NULL || left->kind != right->kind) return 0;
+    if (left->kind == CM_HIR_TYPE_BOOL_KIND
+        || left->kind == CM_HIR_TYPE_CHAR_KIND) return 1;
+    return left->kind == CM_HIR_TYPE_INTEGER_KIND
+        && left->data.integer_type.kind == right->data.integer_type.kind;
+}
+
+static int cm_meta_collect_const(
+    const CmHirLibraryArtifactIdentity *identity, const CmVec *items,
+    const CmVec *generics, CmVec *types, unsigned char *states,
+    const CmHirConstArg *constant, CmHirTypeId expected_type)
+{
+    const CmHirGenericParam *parameter;
+
+    if (constant == NULL
+        || (constant->kind != CM_HIR_CONST_VALUE
+            && constant->kind != CM_HIR_CONST_PARAMETER)
+        || !cm_meta_scalar_const_type_equal(identity->context,
+            constant->type, expected_type)
+        || !cm_meta_collect_type(identity, items, generics, types, states,
+            constant->type)) return 0;
+    if (constant->kind == CM_HIR_CONST_VALUE) return 1;
+    parameter = cm_hir_get_generic_param(identity->context,
+        constant->data.parameter);
+    return parameter != NULL && parameter->kind == CM_HIR_GENERIC_CONST
+        && cm_meta_generic_local(generics, constant->data.parameter) != 0u
+        && cm_meta_scalar_const_type_equal(identity->context,
+            constant->type, parameter->declared_type);
+}
 
 static int cm_meta_collect_named(
     const CmHirLibraryArtifactIdentity *identity, const CmVec *items,
@@ -1531,6 +1621,11 @@ static int cm_meta_collect_named(
             if (parameter->kind != CM_HIR_GENERIC_TYPE
                 || !cm_meta_collect_type(identity, items, generics, types,
                     states, argument->data.type)) return 0;
+        } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+            if (parameter->kind != CM_HIR_GENERIC_CONST
+                || !cm_meta_collect_const(identity, items, generics, types,
+                    states, &argument->data.constant,
+                    parameter->declared_type)) return 0;
         } else {
             return 0;
         }
@@ -1595,10 +1690,10 @@ static int cm_meta_collect_type(const CmHirLibraryArtifactIdentity *identity,
         }
         break;
     case CM_HIR_TYPE_ARRAY_KIND:
-        if (type->data.array_type.length.kind != CM_HIR_CONST_VALUE
-            || !cm_meta_collect_type(identity, items, generics, types, states,
+        if (!cm_meta_collect_type(identity, items, generics, types, states,
                 type->data.array_type.element)
-            || !cm_meta_collect_type(identity, items, generics, types, states,
+            || !cm_meta_collect_const(identity, items, generics, types,
+                states, &type->data.array_type.length,
                 type->data.array_type.length.type)) return 0;
         break;
     case CM_HIR_TYPE_SLICE_KIND:
@@ -1924,6 +2019,40 @@ static int cm_meta_write_region(CmHirMetadataWriter *writer,
             == CM_HIR_METADATA_OK;
 }
 
+static int cm_meta_write_const(CmHirMetadataWriter *writer,
+    const CmHirConstArg *constant, const CmVec *generics,
+    const CmVec *types)
+{
+    uint8_t kind;
+    uint32_t type;
+    uint32_t parameter;
+
+    if (constant->kind == CM_HIR_CONST_VALUE) {
+        kind = CM_META_CONST_VALUE;
+    } else if (constant->kind == CM_HIR_CONST_PARAMETER) {
+        kind = CM_META_CONST_PARAMETER;
+    } else {
+        return 0;
+    }
+    type = cm_meta_type_local(types, constant->type);
+    if (type == 0u
+        || cm_hir_metadata_write_u8(writer, kind) != CM_HIR_METADATA_OK
+        || cm_hir_metadata_write_u32(writer, type) != CM_HIR_METADATA_OK) {
+        return 0;
+    }
+    if (constant->kind == CM_HIR_CONST_VALUE) {
+        return cm_hir_metadata_write_u64(writer,
+                    constant->data.value.low_bits) == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u64(writer,
+                    constant->data.value.high_bits) == CM_HIR_METADATA_OK;
+    }
+    parameter = cm_meta_generic_local(generics,
+        constant->data.parameter);
+    return parameter != 0u
+        && cm_hir_metadata_write_u32(writer, parameter)
+            == CM_HIR_METADATA_OK;
+}
+
 static int cm_meta_write_named(CmHirMetadataWriter *writer,
     const CmHirNamedType *named, const CmVec *items, const CmVec *generics,
     const CmVec *types)
@@ -1954,6 +2083,11 @@ static int cm_meta_write_named(CmHirMetadataWriter *writer,
                     != CM_HIR_METADATA_OK
                 || cm_hir_metadata_write_u32(writer, type)
                     != CM_HIR_METADATA_OK) return 0;
+        } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+            if (cm_hir_metadata_write_u8(writer, CM_META_ARG_CONST)
+                    != CM_HIR_METADATA_OK
+                || !cm_meta_write_const(writer, &argument->data.constant,
+                    generics, types)) return 0;
         } else {
             return 0;
         }
@@ -2056,16 +2190,8 @@ static int cm_meta_write_type(CmHirMetadataWriter *writer,
         if (local == 0u
             || cm_hir_metadata_write_u32(writer, local)
                 != CM_HIR_METADATA_OK) return 0;
-        local = cm_meta_type_local(types, type->data.array_type.length.type);
-        return local != 0u
-            && cm_hir_metadata_write_u32(writer, local)
-                == CM_HIR_METADATA_OK
-            && cm_hir_metadata_write_u64(writer,
-                type->data.array_type.length.data.value.low_bits)
-                == CM_HIR_METADATA_OK
-            && cm_hir_metadata_write_u64(writer,
-                type->data.array_type.length.data.value.high_bits)
-                == CM_HIR_METADATA_OK;
+        return cm_meta_write_const(writer, &type->data.array_type.length,
+            generics, types);
     case CM_HIR_TYPE_SLICE_KIND:
         local = cm_meta_type_local(types, type->data.slice_type.element);
         return local != 0u
@@ -2209,7 +2335,8 @@ static int cm_meta_write_item(CmHirMetadataWriter *writer,
 
 static int cm_meta_write_value(CmHirMetadataWriter *writer,
     const CmHirLibraryArtifactIdentity *identity,
-    const CmMetaEncodeValue *encoded, const CmVec *types)
+    const CmMetaEncodeValue *encoded, const CmVec *generics,
+    const CmVec *types)
 {
     const CmHirLibraryValue *value;
 
@@ -2221,6 +2348,7 @@ static int cm_meta_write_value(CmHirMetadataWriter *writer,
     if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         uint32_t index;
         uint32_t local;
+        uint32_t generic_start;
 
         if (cm_hir_metadata_write_u32(writer,
                 value->data.function.parameter_count)
@@ -2233,8 +2361,18 @@ static int cm_meta_write_value(CmHirMetadataWriter *writer,
                     != CM_HIR_METADATA_OK) return 0;
         }
         local = cm_meta_type_local(types, value->data.function.return_type);
+        generic_start = value->data.function.generic_parameter_count == 0u
+            ? UINT32_C(0) : cm_meta_generic_local(generics,
+                value->data.function.generic_parameter_start);
         return local != 0u
             && cm_hir_metadata_write_u32(writer, local)
+                == CM_HIR_METADATA_OK
+            && (value->data.function.generic_parameter_count == 0u
+                || generic_start != 0u)
+            && cm_hir_metadata_write_u32(writer, generic_start)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_write_u32(writer,
+                value->data.function.generic_parameter_count)
                 == CM_HIR_METADATA_OK
             && cm_meta_write_string(writer, cm_interner_get(
                 &identity->context->strings, value->data.function.abi))
@@ -2347,7 +2485,8 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
             &modules, &traits, &impls))
         || (declaration && !cm_meta_collect_values(owned, &modules,
             &values))
-        || !cm_meta_collect_generics(&identity, &items, &generics)
+        || !cm_meta_collect_generics(&identity, &items,
+            declaration ? &values : NULL, &generics)
         || !cm_meta_collect_types(&identity, &items, &generics,
             semantic ? &impls : NULL, declaration ? &values : NULL, &types)
         || !cm_meta_encode_aliases_acyclic(&identity, &items)) {
@@ -2457,6 +2596,9 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
             || (parameter != NULL
                 && parameter->kind == CM_HIR_GENERIC_CONST
                 && default_type == 0u)
+            || (declaration
+                && cm_hir_metadata_write_u8(&writer,
+                    generic->owner_kind) != CM_HIR_METADATA_OK)
             || cm_hir_metadata_write_u32(&writer, generic->owner)
                 != CM_HIR_METADATA_OK
             || cm_hir_metadata_write_u32(&writer, parameter->index)
@@ -2519,7 +2661,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
             value = (const CmMetaEncodeValue *)cm_vec_at_const(&values,
                 module_index);
             if (value == NULL || !cm_meta_write_value(&writer, &identity,
-                    value, &types)) {
+                    value, &generics, &types)) {
                 result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
                 goto cleanup_encode;
             }
@@ -2867,7 +3009,8 @@ static int cm_meta_read_visibility(CmHirMetadataReader *reader,
 }
 
 static int cm_meta_decode_generics(const CmHirMetadataSection *section,
-    uint32_t item_count, CmVec *generics)
+    uint32_t item_count, uint32_t value_count, int declaration,
+    CmVec *generics)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -2882,9 +3025,18 @@ static int cm_meta_decode_generics(const CmHirMetadataSection *section,
         uint8_t has_default;
 
         memset(&generic, 0, sizeof(generic));
-        if (cm_hir_metadata_read_u32(&reader, &generic.owner)
+        generic.owner_kind = CM_META_GENERIC_OWNER_ITEM;
+        if ((declaration
+                && (cm_hir_metadata_read_u8(&reader, &generic.owner_kind)
+                        != CM_HIR_METADATA_OK
+                    || (generic.owner_kind != CM_META_GENERIC_OWNER_ITEM
+                        && generic.owner_kind
+                            != CM_META_GENERIC_OWNER_VALUE)))
+            || cm_hir_metadata_read_u32(&reader, &generic.owner)
                 != CM_HIR_METADATA_OK
-            || generic.owner == 0u || generic.owner > item_count
+            || generic.owner == 0u
+            || (generic.owner_kind == CM_META_GENERIC_OWNER_ITEM
+                ? generic.owner > item_count : generic.owner > value_count)
             || cm_hir_metadata_read_u32(&reader, &generic.index)
                 != CM_HIR_METADATA_OK
             || cm_hir_metadata_read_u8(&reader, &generic.kind)
@@ -2935,6 +3087,36 @@ static int cm_meta_read_region(CmHirMetadataReader *reader,
     return generic != NULL && generic->kind == CM_META_GENERIC_LIFETIME;
 }
 
+static int cm_meta_read_const(CmHirMetadataReader *reader,
+    const CmVec *generics, uint32_t current_type,
+    CmMetaWireConst *out_constant)
+{
+    const CmMetaWireGeneric *generic;
+
+    if (cm_hir_metadata_read_u8(reader, &out_constant->kind)
+            != CM_HIR_METADATA_OK
+        || (out_constant->kind != CM_META_CONST_VALUE
+            && out_constant->kind != CM_META_CONST_PARAMETER)
+        || cm_hir_metadata_read_u32(reader, &out_constant->type)
+            != CM_HIR_METADATA_OK
+        || out_constant->type == 0u
+        || out_constant->type >= current_type) return 0;
+    if (out_constant->kind == CM_META_CONST_VALUE) {
+        return cm_hir_metadata_read_u64(reader,
+                    &out_constant->data.value.low_bits) == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u64(reader,
+                    &out_constant->data.value.high_bits)
+                == CM_HIR_METADATA_OK;
+    }
+    if (cm_hir_metadata_read_u32(reader, &out_constant->data.parameter)
+            != CM_HIR_METADATA_OK
+        || out_constant->data.parameter == 0u
+        || (size_t)out_constant->data.parameter > generics->len) return 0;
+    generic = (const CmMetaWireGeneric *)cm_vec_at_const(generics,
+        (size_t)(out_constant->data.parameter - 1u));
+    return generic != NULL && generic->kind == CM_META_GENERIC_CONST;
+}
+
 static int cm_meta_read_named(CmHirMetadataReader *reader,
     uint32_t item_count, const CmVec *generics, uint32_t current_type,
     CmMetaWireNamed *out_named)
@@ -2954,20 +3136,29 @@ static int cm_meta_read_named(CmHirMetadataReader *reader,
 
         argument = &out_named->arguments[index];
         if (cm_hir_metadata_read_u8(reader, &argument->kind)
-                != CM_HIR_METADATA_OK) return 0;
+                != CM_HIR_METADATA_OK) goto invalid;
         if (argument->kind == CM_META_ARG_LIFETIME) {
             if (!cm_meta_read_region(reader, generics,
-                    &argument->data.lifetime)) return 0;
+                    &argument->data.lifetime)) goto invalid;
         } else if (argument->kind == CM_META_ARG_TYPE) {
             if (cm_hir_metadata_read_u32(reader, &argument->data.type)
                     != CM_HIR_METADATA_OK
                 || argument->data.type == 0u
-                || argument->data.type >= current_type) return 0;
+                || argument->data.type >= current_type) goto invalid;
+        } else if (argument->kind == CM_META_ARG_CONST) {
+            if (!cm_meta_read_const(reader, generics, current_type,
+                    &argument->data.constant)) goto invalid;
         } else {
-            return 0;
+            goto invalid;
         }
     }
     return 1;
+
+invalid:
+    cm_free(out_named->arguments);
+    out_named->arguments = NULL;
+    out_named->argument_count = UINT32_C(0);
+    return 0;
 }
 
 static void cm_meta_wire_types_destroy(CmVec *types)
@@ -3079,8 +3270,10 @@ static int cm_meta_decode_types(const CmHirMetadataSection *section,
                         &type.data.tuple_type.elements[child])
                         != CM_HIR_METADATA_OK
                     || type.data.tuple_type.elements[child] == 0u
-                    || type.data.tuple_type.elements[child] >= current)
+                    || type.data.tuple_type.elements[child] >= current) {
+                    cm_free(type.data.tuple_type.elements);
                     return 0;
+                }
             }
             break;
         case CM_META_TYPE_ARRAY:
@@ -3088,15 +3281,8 @@ static int cm_meta_decode_types(const CmHirMetadataSection *section,
                     &type.data.array_type.element) != CM_HIR_METADATA_OK
                 || type.data.array_type.element == 0u
                 || type.data.array_type.element >= current
-                || cm_hir_metadata_read_u32(&reader,
-                    &type.data.array_type.constant_type)
-                    != CM_HIR_METADATA_OK
-                || type.data.array_type.constant_type == 0u
-                || type.data.array_type.constant_type >= current
-                || cm_hir_metadata_read_u64(&reader,
-                    &type.data.array_type.low_bits) != CM_HIR_METADATA_OK
-                || cm_hir_metadata_read_u64(&reader,
-                    &type.data.array_type.high_bits) != CM_HIR_METADATA_OK)
+                || !cm_meta_read_const(&reader, generics, current,
+                    &type.data.array_type.length))
                 return 0;
             break;
         case CM_META_TYPE_SLICE:
@@ -3310,7 +3496,7 @@ static void cm_meta_wire_values_destroy(CmVec *values)
 }
 
 static int cm_meta_decode_values(const CmHirMetadataSection *section,
-    uint32_t type_count, CmVec *values)
+    uint32_t type_count, uint32_t generic_count, CmVec *values)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -3360,6 +3546,19 @@ static int cm_meta_decode_values(const CmHirMetadataSection *section,
                     != CM_HIR_METADATA_OK
                 || value.data.function.return_type == 0u
                 || value.data.function.return_type > type_count
+                || cm_hir_metadata_read_u32(&reader,
+                    &value.data.function.generic_start)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u32(&reader,
+                    &value.data.function.generic_count)
+                    != CM_HIR_METADATA_OK
+                || (value.data.function.generic_count == 0u
+                    ? value.data.function.generic_start != 0u
+                    : (value.data.function.generic_start == 0u
+                        || value.data.function.generic_start > generic_count
+                        || value.data.function.generic_count
+                            > generic_count
+                                - value.data.function.generic_start + 1u))
                 || !cm_meta_read_string(&reader,
                     &value.data.function.abi)
                 || cm_hir_metadata_read_u8(&reader, &safety)
@@ -3527,8 +3726,48 @@ static int cm_meta_decode_trait_universe(
     return cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK;
 }
 
+static int cm_meta_wire_scalar_type_equal(const CmVec *types,
+    uint32_t left_local, uint32_t right_local)
+{
+    const CmMetaWireType *left;
+    const CmMetaWireType *right;
+
+    left = left_local == 0u || (size_t)left_local > types->len ? NULL
+        : (const CmMetaWireType *)cm_vec_at_const(types,
+            (size_t)(left_local - 1u));
+    right = right_local == 0u || (size_t)right_local > types->len ? NULL
+        : (const CmMetaWireType *)cm_vec_at_const(types,
+            (size_t)(right_local - 1u));
+    if (left == NULL || right == NULL || left->kind != right->kind) return 0;
+    if (left->kind == CM_META_TYPE_BOOL
+        || left->kind == CM_META_TYPE_CHAR) return 1;
+    return left->kind == CM_META_TYPE_INTEGER
+        && left->data.scalar_kind == right->data.scalar_kind;
+}
+
+static int cm_meta_wire_const_valid(const CmMetaWireConst *constant,
+    uint32_t expected_type, const CmVec *generics, const CmVec *types)
+{
+    const CmMetaWireGeneric *parameter;
+
+    if (constant == NULL
+        || (constant->kind != CM_META_CONST_VALUE
+            && constant->kind != CM_META_CONST_PARAMETER)
+        || !cm_meta_wire_scalar_type_equal(types, constant->type,
+            expected_type)) return 0;
+    if (constant->kind == CM_META_CONST_VALUE) return 1;
+    parameter = constant->data.parameter == 0u
+            || (size_t)constant->data.parameter > generics->len ? NULL
+        : (const CmMetaWireGeneric *)cm_vec_at_const(generics,
+            (size_t)(constant->data.parameter - 1u));
+    return parameter != NULL && parameter->kind == CM_META_GENERIC_CONST
+        && cm_meta_wire_scalar_type_equal(types, constant->type,
+            parameter->default_type);
+}
+
 static int cm_meta_wire_named_valid(const CmMetaWireNamed *named,
-    uint8_t type_kind, const CmVec *items, const CmVec *generics)
+    uint8_t type_kind, const CmVec *items, const CmVec *generics,
+    const CmVec *types)
 {
     const CmMetaWireItem *item;
     uint32_t index;
@@ -3557,7 +3796,11 @@ static int cm_meta_wire_named_valid(const CmMetaWireNamed *named,
             || (generic->kind == CM_META_GENERIC_LIFETIME
                 && argument->kind != CM_META_ARG_LIFETIME)
             || (generic->kind == CM_META_GENERIC_TYPE
-                && argument->kind != CM_META_ARG_TYPE)) return 0;
+                && argument->kind != CM_META_ARG_TYPE)
+            || (generic->kind == CM_META_GENERIC_CONST
+                && (argument->kind != CM_META_ARG_CONST
+                    || !cm_meta_wire_const_valid(&argument->data.constant,
+                        generic->default_type, generics, types)))) return 0;
     }
     return 1;
 }
@@ -3594,7 +3837,7 @@ static int cm_meta_alias_type_acyclic(uint32_t type_local,
         return cm_meta_alias_type_acyclic(type->data.array_type.element,
                 items, types, states)
             && cm_meta_alias_type_acyclic(
-                type->data.array_type.constant_type, items, types, states);
+                type->data.array_type.length.type, items, types, states);
     case CM_META_TYPE_SLICE:
         return cm_meta_alias_type_acyclic(type->data.slice_type.element,
             items, types, states);
@@ -3609,6 +3852,11 @@ static int cm_meta_alias_type_acyclic(uint32_t type_local,
             if (argument->kind == CM_META_ARG_TYPE
                 && !cm_meta_alias_type_acyclic(argument->data.type, items,
                     types, states)) return 0;
+            if (argument->kind == CM_META_ARG_CONST
+                && !cm_meta_alias_type_acyclic(
+                    argument->data.constant.type, items, types, states)) {
+                return 0;
+            }
         }
         return type->kind != CM_META_TYPE_ALIAS
             || cm_meta_alias_acyclic(type->data.named_type.item, items,
@@ -3742,25 +3990,75 @@ static int cm_meta_wire_valid(const CmVec *modules, const CmVec *generics,
 
             generic = (const CmMetaWireGeneric *)cm_vec_at_const(generics,
                 (size_t)(item->generic_start - 1u + parameter));
-            if (generic == NULL || generic->owner != index + 1u
+            if (generic == NULL
+                || generic->owner_kind != CM_META_GENERIC_OWNER_ITEM
+                || generic->owner != index + 1u
                 || generic->index != parameter) return 0;
+        }
+    }
+    if (values != NULL) {
+        for (index = 0u; index < values->len; ++index) {
+            const CmMetaWireValue *value;
+            uint32_t parameter;
+
+            value = (const CmMetaWireValue *)cm_vec_at_const(values,
+                index);
+            if (value == NULL) return 0;
+            if (value->kind != CM_META_VALUE_FUNCTION) continue;
+            for (parameter = 0u;
+                    parameter < value->data.function.generic_count;
+                    ++parameter) {
+                const CmMetaWireGeneric *generic;
+
+                generic = (const CmMetaWireGeneric *)cm_vec_at_const(
+                    generics, (size_t)(value->data.function.generic_start
+                        - 1u + parameter));
+                if (generic == NULL
+                    || generic->owner_kind != CM_META_GENERIC_OWNER_VALUE
+                    || generic->owner != index + 1u
+                    || generic->index != parameter) return 0;
+            }
         }
     }
     for (index = 0u; index < generics->len; ++index) {
         const CmMetaWireGeneric *generic;
-        const CmMetaWireItem *owner;
+        uint32_t owner_start;
+        uint32_t owner_count;
 
         generic = (const CmMetaWireGeneric *)cm_vec_at_const(generics,
             index);
-        owner = generic == NULL || generic->owner == 0u
-            || (size_t)generic->owner > items->len ? NULL
-            : (const CmMetaWireItem *)cm_vec_at_const(items,
+        owner_start = UINT32_C(0);
+        owner_count = UINT32_C(0);
+        if (generic != NULL
+            && generic->owner_kind == CM_META_GENERIC_OWNER_ITEM
+            && generic->owner != 0u
+            && (size_t)generic->owner <= items->len) {
+            const CmMetaWireItem *owner;
+
+            owner = (const CmMetaWireItem *)cm_vec_at_const(items,
                 (size_t)(generic->owner - 1u));
-        if (owner == NULL || owner->generic_start == 0u
-            || index + 1u < (size_t)owner->generic_start
-            || index + 1u >= (size_t)owner->generic_start
-                + (size_t)owner->generic_count
-            || (generic->has_default
+            if (owner != NULL) {
+                owner_start = owner->generic_start;
+                owner_count = owner->generic_count;
+            }
+        } else if (generic != NULL
+            && generic->owner_kind == CM_META_GENERIC_OWNER_VALUE
+            && values != NULL && generic->owner != 0u
+            && (size_t)generic->owner <= values->len) {
+            const CmMetaWireValue *owner;
+
+            owner = (const CmMetaWireValue *)cm_vec_at_const(values,
+                (size_t)(generic->owner - 1u));
+            if (owner != NULL && owner->kind == CM_META_VALUE_FUNCTION) {
+                owner_start = owner->data.function.generic_start;
+                owner_count = owner->data.function.generic_count;
+            }
+        }
+        if (owner_start == 0u
+            || index + 1u < (size_t)owner_start
+            || index + 1u >= (size_t)owner_start + (size_t)owner_count
+            || ((generic->has_default
+                    || generic->kind == CM_META_GENERIC_CONST)
                 && (generic->default_type == 0u
                     || (size_t)generic->default_type > types->len))) return 0;
     }
@@ -3773,7 +4071,12 @@ static int cm_meta_wire_valid(const CmVec *modules, const CmVec *generics,
                 || type->kind == CM_META_TYPE_ALIAS
                 || type->kind == CM_META_TYPE_FOREIGN)
             && !cm_meta_wire_named_valid(&type->data.named_type, type->kind,
-                items, generics)) return 0;
+                items, generics, types)) return 0;
+        if (type->kind == CM_META_TYPE_ARRAY
+            && !cm_meta_wire_const_valid(&type->data.array_type.length,
+                type->data.array_type.length.type, generics, types)) {
+            return 0;
+        }
     }
     for (index = 1u; index < entries->len; ++index) {
         const CmMetaWireEntry *prior;
@@ -3888,6 +4191,27 @@ static int cm_meta_region_from_wire(const CmMetaWireRegion *wire,
     return out_region->data.parameter != CM_HIR_GENERIC_PARAM_NONE;
 }
 
+static int cm_meta_const_from_wire(const CmMetaWireConst *wire,
+    const CmHirGenericParamId *runtime_generics,
+    const CmHirTypeId *runtime_types, CmHirConstArg *out_constant)
+{
+    memset(out_constant, 0, sizeof(*out_constant));
+    out_constant->type = runtime_types[wire->type - 1u];
+    if (out_constant->type == CM_HIR_TYPE_NONE) return 0;
+    if (wire->kind == CM_META_CONST_VALUE) {
+        out_constant->kind = CM_HIR_CONST_VALUE;
+        out_constant->data.value.low_bits = wire->data.value.low_bits;
+        out_constant->data.value.high_bits = wire->data.value.high_bits;
+        return 1;
+    }
+    if (wire->kind != CM_META_CONST_PARAMETER
+        || wire->data.parameter == 0u) return 0;
+    out_constant->kind = CM_HIR_CONST_PARAMETER;
+    out_constant->data.parameter =
+        runtime_generics[wire->data.parameter - 1u];
+    return out_constant->data.parameter != CM_HIR_GENERIC_PARAM_NONE;
+}
+
 static int cm_meta_named_from_wire(const CmMetaWireNamed *wire,
     const CmHirDefId *runtime_items,
     const CmHirGenericParamId *runtime_generics,
@@ -3914,6 +4238,11 @@ static int cm_meta_named_from_wire(const CmMetaWireNamed *wire,
             runtime->kind = CM_HIR_GENERIC_ARG_TYPE;
             runtime->data.type = runtime_types[argument->data.type - 1u];
             if (runtime->data.type == CM_HIR_TYPE_NONE) return 0;
+        } else if (argument->kind == CM_META_ARG_CONST) {
+            runtime->kind = CM_HIR_GENERIC_ARG_CONST;
+            if (!cm_meta_const_from_wire(&argument->data.constant,
+                    runtime_generics, runtime_types,
+                    &runtime->data.constant)) return 0;
         } else {
             return 0;
         }
@@ -3992,13 +4321,9 @@ static int cm_meta_add_runtime_type(CmHirContext *context,
         type.kind = CM_HIR_TYPE_ARRAY_KIND;
         type.data.array_type.element =
             runtime_types[wire->data.array_type.element - 1u];
-        type.data.array_type.length.kind = CM_HIR_CONST_VALUE;
-        type.data.array_type.length.type =
-            runtime_types[wire->data.array_type.constant_type - 1u];
-        type.data.array_type.length.data.value.low_bits =
-            wire->data.array_type.low_bits;
-        type.data.array_type.length.data.value.high_bits =
-            wire->data.array_type.high_bits;
+        valid = cm_meta_const_from_wire(&wire->data.array_type.length,
+            runtime_generics, runtime_types,
+            &type.data.array_type.length);
         break;
     case CM_META_TYPE_SLICE:
         type.kind = CM_HIR_TYPE_SLICE_KIND;
@@ -4225,6 +4550,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     CmVec values;
     uint32_t item_count;
     uint32_t type_count;
+    uint32_t value_count;
     uint32_t root_local;
     CmHirContextMark mark;
     int mark_active;
@@ -4305,13 +4631,18 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     root_local = UINT32_C(0);
     item_count = UINT32_C(0);
     type_count = UINT32_C(0);
+    value_count = UINT32_C(0);
     if (!cm_meta_section_count(&sections[4], CM_META_MAX_ITEMS,
             &item_count)
         || !cm_meta_section_count(&sections[3], CM_META_MAX_TYPES,
             &type_count)
+        || (declaration && !cm_meta_section_count(&sections[5],
+            CM_META_MAX_VALUES, &value_count))
         || !cm_meta_decode_crate(&sections[0], &crate_name, &edition)
         || !cm_meta_decode_modules(&sections[1], &modules, &root_local)
-        || !cm_meta_decode_generics(&sections[2], item_count, &generics)
+        || !cm_meta_decode_generics(&sections[2], item_count,
+            declaration ? value_count : UINT32_C(0), declaration,
+            &generics)
         || !cm_meta_decode_types(&sections[3], item_count, &generics,
             &types)
         || types.len != (size_t)type_count
@@ -4319,7 +4650,8 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             (uint32_t)generics.len, type_count, &items)
         || items.len != (size_t)item_count
         || (declaration && !cm_meta_decode_values(&sections[5], type_count,
-            &values))
+            (uint32_t)generics.len, &values))
+        || (declaration && values.len != (size_t)value_count)
         || (semantic && !cm_meta_decode_trait_universe(&sections[6],
             (uint32_t)modules.len, type_count, &traits, &impls))
         || !cm_meta_decode_entries(&sections[declaration ? 6u : 5u],
@@ -4505,7 +4837,10 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             ? CM_HIR_GENERIC_LIFETIME
             : (wire_generic->kind == CM_META_GENERIC_CONST
                 ? CM_HIR_GENERIC_CONST : CM_HIR_GENERIC_TYPE);
-        parameter.owner = runtime_items[wire_generic->owner - 1u];
+        parameter.owner = wire_generic->owner_kind
+                == CM_META_GENERIC_OWNER_ITEM
+            ? runtime_items[wire_generic->owner - 1u]
+            : runtime_values[wire_generic->owner - 1u];
         parameter.index = wire_generic->index;
         parameter.name = cm_meta_intern_name(context, wire_generic->name);
         parameter.span = span;
@@ -4650,6 +4985,13 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
                 wire_value->data.function.parameter_count;
             value.data.function.return_type = runtime_types[
                 wire_value->data.function.return_type - 1u];
+            value.data.function.generic_parameter_start =
+                wire_value->data.function.generic_count == 0u
+                    ? CM_HIR_GENERIC_PARAM_NONE
+                    : runtime_generics[
+                        wire_value->data.function.generic_start - 1u];
+            value.data.function.generic_parameter_count =
+                wire_value->data.function.generic_count;
             value.data.function.abi = cm_meta_intern_name(context,
                 wire_value->data.function.abi);
             value.data.function.safety =

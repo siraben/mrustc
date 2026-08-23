@@ -44,13 +44,16 @@ typedef enum CmHirLibraryValueKind {
 
 /*
  * Declaration-only callable shape. Parameter patterns and bodies are not
- * part of a cross-crate function signature. `parameter_types` and the ABI
- * intern ID are borrowed from the artifact's identity context.
+ * part of a cross-crate function signature. `parameter_types`, the generic
+ * parameter range, and the ABI intern ID are borrowed from the artifact's
+ * identity context.
  */
 typedef struct CmHirLibraryFunctionSignature {
     const CmHirTypeId *parameter_types;
     uint32_t parameter_count;
     CmHirTypeId return_type;
+    CmHirGenericParamId generic_parameter_start;
+    uint32_t generic_parameter_count;
     CmInternId abi;
     CmHirSafety safety;
     int is_const;
@@ -128,9 +131,10 @@ CmHirLibraryArtifactResult cm_hir_library_artifact_build(
 
 /*
  * Builds the declaration-v2 library view. In addition to the legacy type
- * namespace, it authenticates monomorphic public free functions, consts, and
- * statics plus same-crate value reexports. Bodies, evaluated consts, external
- * reexports, globs, macros, and link objects are not represented.
+ * namespace, it authenticates predicate-free public free functions, consts,
+ * and statics plus same-crate value reexports. Bodies, evaluated consts,
+ * external reexports, globs, macros, predicates, and link objects are not
+ * represented.
  */
 CmHirLibraryArtifactResult cm_hir_library_declaration_artifact_build(
     CmHirLibraryArtifact *artifact, const CmHirContext *context,

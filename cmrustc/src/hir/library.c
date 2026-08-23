@@ -267,6 +267,10 @@ static int cm_hir_library_value_equal(const CmHirLibraryValue *left,
                 != right->data.function.parameter_count
             || left->data.function.return_type
                 != right->data.function.return_type
+            || left->data.function.generic_parameter_start
+                != right->data.function.generic_parameter_start
+            || left->data.function.generic_parameter_count
+                != right->data.function.generic_parameter_count
             || left->data.function.abi != right->data.function.abi
             || left->data.function.safety != right->data.function.safety
             || left->data.function.is_const != right->data.function.is_const
@@ -300,7 +304,12 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         if (value->data.function.return_type == CM_HIR_TYPE_NONE
             || (value->data.function.parameter_count != 0u
-                && value->data.function.parameter_types == NULL)) {
+                && value->data.function.parameter_types == NULL)
+            || (value->data.function.generic_parameter_count == 0u
+                ? value->data.function.generic_parameter_start
+                    != CM_HIR_GENERIC_PARAM_NONE
+                : value->data.function.generic_parameter_start
+                    == CM_HIR_GENERIC_PARAM_NONE)) {
             return CM_HIR_LIBRARY_INVALID_ARGUMENT;
         }
     } else if (value->data.value.type == CM_HIR_TYPE_NONE
@@ -600,7 +609,8 @@ static int cm_hir_library_add_value_from_item(
     if (state == NULL || item == NULL
         || cm_hir_def_id_is_none(item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
-        || item->generic_parameter_count != 0u
+        || (item->kind != CM_HIR_ITEM_FUNCTION
+            && item->generic_parameter_count != 0u)
         || item->predicate_scope_count != 0u
         || item->predicate_count != 0u
         || item->outlives_predicate_count != 0u) return 0;
@@ -625,6 +635,10 @@ static int cm_hir_library_add_value_from_item(
         value.data.function.parameter_types = parameter_types;
         value.data.function.parameter_count = signature->parameter_count;
         value.data.function.return_type = signature->return_type;
+        value.data.function.generic_parameter_start =
+            item->generic_parameter_start;
+        value.data.function.generic_parameter_count =
+            item->generic_parameter_count;
         value.data.function.abi = signature->abi;
         value.data.function.safety = signature->safety;
         value.data.function.is_const = signature->is_const;
@@ -654,7 +668,8 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
         || value->kind != cm_hir_library_value_kind(item->kind)
         || !cm_hir_def_id_equal(value->definition, item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
-        || item->generic_parameter_count != 0u
+        || (item->kind != CM_HIR_ITEM_FUNCTION
+            && item->generic_parameter_count != 0u)
         || item->predicate_scope_count != 0u
         || item->predicate_count != 0u
         || item->outlives_predicate_count != 0u) return 0;
@@ -666,6 +681,10 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
             || value->data.function.parameter_count
                 != signature->parameter_count
             || value->data.function.return_type != signature->return_type
+            || value->data.function.generic_parameter_start
+                != item->generic_parameter_start
+            || value->data.function.generic_parameter_count
+                != item->generic_parameter_count
             || value->data.function.abi != signature->abi
             || value->data.function.safety != signature->safety
             || value->data.function.is_const != signature->is_const
@@ -705,6 +724,11 @@ static int cm_hir_library_owned_value_valid(
                 && (owned_value->parameter_types == NULL
                     || value->data.function.parameter_types
                         != owned_value->parameter_types))
+            || (value->data.function.generic_parameter_count == 0u
+                ? value->data.function.generic_parameter_start
+                    != CM_HIR_GENERIC_PARAM_NONE
+                : value->data.function.generic_parameter_start
+                    == CM_HIR_GENERIC_PARAM_NONE)
             || cm_interner_get(&state->context->strings,
                 value->data.function.abi) == NULL
             || (unsigned int)value->data.function.safety
@@ -719,6 +743,23 @@ static int cm_hir_library_owned_value_valid(
                 ++index) {
             if (!cm_hir_library_value_type_valid(state->context,
                     value->data.function.parameter_types[index])) return 0;
+        }
+        for (index = 0u;
+                index < value->data.function.generic_parameter_count;
+                ++index) {
+            CmHirGenericParamId parameter_id;
+            const CmHirGenericParam *parameter;
+
+            parameter_id = value->data.function.generic_parameter_start
+                + index;
+            if (parameter_id
+                    < value->data.function.generic_parameter_start) return 0;
+            parameter = cm_hir_get_generic_param(state->context,
+                parameter_id);
+            if (parameter == NULL
+                || !cm_hir_def_id_equal(parameter->owner,
+                    value->definition)
+                || parameter->index != index) return 0;
         }
         break;
     case CM_HIR_LIBRARY_VALUE_CONST:

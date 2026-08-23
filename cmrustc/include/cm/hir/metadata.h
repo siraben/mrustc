@@ -28,11 +28,11 @@ typedef struct CmHirMetadataArtifactResult {
 /*
  * Encode one live library artifact into deterministic cmhir-meta-v1 bytes.
  * The declaration slice accepts modules, extern types, structs, unions,
- * enums, free type aliases, lifetime/type generics and type defaults, their
- * supported structural types, public aliases/reexports, and builtin primitive
- * bindings.  Traits, impls, bodies, const generics, projections, unevaluated
- * constants, and dependency archives remain outside this boundary.  `output`
- * is replaced on success and unchanged on failure.
+ * enums, free type aliases, lifetime/type/const generics and type defaults,
+ * their supported structural types, public aliases/reexports, and builtin
+ * primitive bindings. Traits, impls, bodies, const-generic defaults,
+ * projections, unevaluated constants, and dependency archives remain outside
+ * this boundary. `output` is replaced on success and unchanged on failure.
  */
 CmHirMetadataArtifactResult cm_hir_metadata_encode_artifact(
     CmByteBuf *output, const CmHirLibraryArtifact *artifact);
@@ -64,11 +64,13 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     CmSourceId metadata_source);
 
 /*
- * Exact cmhir-meta-v2.0 declaration boundary. It extends v1.0 with
- * authenticated monomorphic public free-function signatures and public
+ * Exact cmhir-meta-v2.3 declaration boundary. It extends v1.0 with
+ * authenticated predicate-free public free-function signatures and public
  * const/static declarations in a separate value namespace. Bodies, MIR,
- * evaluated constants, generics, predicates, and link objects are absent by
- * contract; unsupported declaration types reject the complete transaction.
+ * evaluated constants, predicates, and link objects are absent by contract.
+ * ADT and free-function lifetime/type/const parameters, literal and parameter
+ * const arguments, and literal/parameter array lengths are transported.
+ * Unsupported declaration types reject the complete transaction.
  */
 CmHirMetadataArtifactResult cm_hir_metadata_encode_declaration_artifact(
     CmByteBuf *output, const CmHirLibraryArtifact *artifact);

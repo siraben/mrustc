@@ -177,7 +177,7 @@ AST_DUMP_PROGRAM := $(BUILD_DIR)/dump_ast
 AST_DIFFERENTIAL_SCRIPT := tests/syntax/run_ast_differential.sh
 ABI_PROBE_SCRIPT := tests/abi/run.sh
 
-.PHONY: all test check strict tcc check-all check-ast-differential stage0-hcc clean
+.PHONY: all test check strict tcc check-core-hir check-core-metadata check-all check-ast-differential stage0-hcc clean
 
 all: $(PROGRAM)
 
@@ -411,6 +411,9 @@ tcc:
 
 check-core-hir: $(CORE_HIR_PROBE_PROGRAM)
 	$(CORE_HIR_PROBE_PROGRAM) $(CORE_HIR_PROBE_SOURCE)
+
+check-core-metadata: $(CORE_HIR_PROBE_PROGRAM)
+	$(CORE_HIR_PROBE_PROGRAM) $(CORE_HIR_PROBE_SOURCE) --require-metadata
 
 check-all: strict tcc check-core-hir
 
