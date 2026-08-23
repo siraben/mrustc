@@ -1974,6 +1974,13 @@ bytes. V2.4 now implements the first predicate/reference-only nominal wire
 slice; the real-core gate must be re-run to identify the next exact unsupported
 shape. Direct trait-alias predicates remain fail-closed pending an
 alias-definition/provenance representation.
+The optimized post-`4bd79751` gate restores the same 451/1,632/20,692 capture
+after fixing availability validation to compare deduplicated identity sets
+rather than equality-occurrence counts. Declaration v2.4 still returns
+`unsupported HIR` and zero bytes. The next bounded encoder frontier is the
+first unsupported core predicate form, expected from `const_eval_select`'s
+`~const FnOnce` constraint before the known direct `Thin` alias predicate;
+temporary diagnostics must confirm that ordering before widening the wire.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

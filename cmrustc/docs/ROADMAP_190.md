@@ -62,6 +62,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   zero bytes. With v2.4 the next real-core result must be re-measured; direct
   trait-alias predicates such as `Thin` remain deliberately unsupported until
   alias-bound provenance has a sound wire representation.
+- At `4bd79751`, the post-v2.4 optimized gate reproduces that complete capture
+  exactly and the v2.4 encoder still rejects fail-closed with zero bytes. The
+  intervening capture regression was a validator bug: two predicate equality
+  occurrences may share one canonical availability identity. Availability is
+  now authenticated as a bidirectional deduplicated set. The next encoder
+  slice must cover the first unsupported real-core predicate shape; source
+  order places `const_eval_select`'s `~const FnOnce` constraint before the
+  already known direct `Thin` trait-alias bound, pending diagnostic confirmation.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
