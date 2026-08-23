@@ -41,6 +41,12 @@ typedef struct CmHirLibraryOwnedValue {
     uint32_t predicate_count;
     CmHirOutlivesPredicate *outlives_predicates;
     uint32_t outlives_predicate_count;
+    CmHirLibraryNominalReference *nominal_references;
+    CmInternId *nominal_reference_names;
+    CmHirGenericParamKind **nominal_reference_generic_kinds;
+    uint32_t nominal_reference_count;
+    CmHirLibraryAssociatedAvailability *associated_availability;
+    uint32_t associated_availability_count;
 } CmHirLibraryOwnedValue;
 
 typedef struct CmHirLibraryOwnedData {
@@ -66,7 +72,10 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_entry(
     const unsigned char *name, size_t name_length,
     const CmHirLibraryBinding *binding);
 
-/* Copies one unique declaration, including all nested function-signature data. */
+/*
+ * Copies one unique declaration, including nominal-reference name bytes and
+ * all other nested function-signature data.
+ */
 CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     CmHirLibraryOwnedData *data, const CmHirLibraryValue *value);
 

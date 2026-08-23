@@ -1242,7 +1242,11 @@ static int cm_meta_collect_values(const CmHirLibraryOwnedData *owned,
                 || owned_value->declaration.data.function.predicate_count
                     != 0u
                 || owned_value->declaration.data.function
-                    .outlives_predicate_count != 0u)) return 0;
+                    .outlives_predicate_count != 0u
+                || owned_value->declaration.data.function
+                    .nominal_reference_count != 0u
+                || owned_value->declaration.data.function
+                    .associated_availability_count != 0u)) return 0;
         for (module_index = 0u; module_index < owned->modules.len;
                 ++module_index) {
             const CmHirLibraryOwnedModule *module;

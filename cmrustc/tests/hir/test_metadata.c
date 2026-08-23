@@ -19,7 +19,9 @@ static const unsigned char generic_function_source[] =
         "bytes: [u8; N]) -> &'a T { let _ = bytes; value }\n";
 
 static const unsigned char predicate_function_source[] =
-    "trait Fn<Args> { type Output; }\n"
+    "trait FnOnce<Args> { type Output; }\n"
+    "trait FnMut<Args>: FnOnce<Args> {}\n"
+    "trait Fn<Args>: FnMut<Args> {}\n"
     "trait Copy {}\n"
     "pub fn constrained<Ret, C>(cond: C) -> C "
         "where C: Fn(&Ret) -> bool + Copy + 'static { cond }\n"
@@ -1086,6 +1088,28 @@ static CmHirLibraryValue lookup_value(
     assert(cm_hir_library_artifact_lookup_value(artifact, path, 2u,
         &value) == CM_HIR_LIBRARY_OK);
     return value;
+}
+
+static const CmHirLibraryNominalReference *find_nominal_reference(
+    const CmHirLibraryValue *value, const char *name,
+    CmHirLibraryNominalReferenceKind kind)
+{
+    uint32_t index;
+
+    assert(value != NULL && value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION);
+    for (index = 0u;
+            index < value->data.function.nominal_reference_count; ++index) {
+        const CmHirLibraryNominalReference *reference;
+
+        reference = &value->data.function.nominal_references[index];
+        if (reference->kind != kind) continue;
+        if (reference->name.length == strlen(name)
+            && memcmp(reference->name.bytes, name,
+                reference->name.length) == 0) {
+            return reference;
+        }
+    }
+    return NULL;
 }
 
 static int generic_function_valid(const CmHirContext *context,
@@ -3239,6 +3263,25 @@ static void test_declaration_v2_generic_function_round_trip(void)
     size_t predicate_root_index;
     CmHirGenericArg *owned_arguments;
     uint32_t owned_scope_span_end;
+    const CmHirLibraryNominalReference *fn_reference;
+    const CmHirLibraryNominalReference *fn_mut_reference;
+    const CmHirLibraryNominalReference *fn_once_reference;
+    const CmHirLibraryNominalReference *copy_reference;
+    const CmHirLibraryNominalReference *output_reference;
+    const CmHirLibraryNominalReference *owned_fn_reference;
+    CmHirLibraryNominalReference *owned_fn_mutable;
+    CmHirLibraryNominalReference *owned_copy_mutable;
+    CmHirLibraryNominalReference *owned_output_mutable;
+    CmHirDefId owned_declaring_trait;
+    CmHirDefId owned_available_trait;
+    CmHirGenericParamKind owned_schema_kind;
+    uint32_t nominal_index;
+    CmHirDefId owned_owner_module;
+    CmHirLibraryPathSegment owned_reference_name;
+    CmInternId owned_reference_name_id;
+    const CmInternedString *source_reference_name;
+    CmHirLibraryPathSegment hidden_path[2];
+    CmHirLibraryBinding hidden_binding;
 
     assert(parsed_producer_build(&producer, generic_function_source,
         sizeof(generic_function_source) - 1u, 1u, 0u, 1u, 1));
@@ -3292,6 +3335,84 @@ static void test_declaration_v2_generic_function_round_trip(void)
         && rejected_value.data.function.predicates != NULL
         && rejected_value.data.function.outlives_predicate_count == 1u
         && rejected_value.data.function.outlives_predicates != NULL);
+    fn_reference = find_nominal_reference(&rejected_value, "Fn",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    fn_mut_reference = find_nominal_reference(&rejected_value, "FnMut",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    fn_once_reference = find_nominal_reference(&rejected_value, "FnOnce",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    copy_reference = find_nominal_reference(&rejected_value, "Copy",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    output_reference = find_nominal_reference(&rejected_value, "Output",
+        CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE);
+    assert(cm_hir_library_artifact_identity(&rejected.artifact,
+        &predicate_identity));
+    assert(fn_reference != NULL);
+    source_definition = cm_hir_lookup_definition(&rejected.context,
+        fn_reference->definition);
+    source_item = source_definition == NULL ? NULL : cm_hir_get_item(
+        &rejected.context, source_definition->entity.item_id);
+    source_reference_name = source_item == NULL ? NULL : cm_interner_get(
+        &rejected.context.strings, source_item->name);
+    assert(rejected_value.data.function.nominal_reference_count == 5u
+        && fn_reference != NULL && fn_mut_reference != NULL
+        && fn_once_reference != NULL && copy_reference != NULL
+        && output_reference != NULL
+        && fn_reference->use == CM_HIR_LIBRARY_REFERENCE_ONLY
+        && fn_reference->generic_parameter_count == 1u
+        && fn_reference->generic_parameter_kinds[0] == CM_HIR_GENERIC_TYPE
+        && fn_mut_reference->generic_parameter_count == 1u
+        && fn_mut_reference->generic_parameter_kinds[0]
+            == CM_HIR_GENERIC_TYPE
+        && fn_once_reference->generic_parameter_count == 1u
+        && fn_once_reference->generic_parameter_kinds[0]
+            == CM_HIR_GENERIC_TYPE
+        && copy_reference->generic_parameter_count == 0u
+        && copy_reference->generic_parameter_kinds == NULL
+        && output_reference->generic_parameter_count == 0u
+        && output_reference->generic_parameter_kinds == NULL
+        && cm_hir_def_id_equal(fn_reference->owner_module,
+            predicate_identity.root_definition)
+        && cm_hir_def_id_equal(output_reference->owner_module,
+            predicate_identity.root_definition)
+        && source_reference_name != NULL
+        && fn_reference->name.length == 2u
+        && memcmp(fn_reference->name.bytes, "Fn", 2u) == 0
+        && fn_reference->name.bytes != source_reference_name->bytes
+        && cm_hir_def_id_equal(output_reference->declaring_trait,
+            fn_once_reference->definition)
+        && rejected_value.data.function.associated_availability_count == 1u
+        && cm_hir_def_id_equal(rejected_value.data.function
+                .associated_availability[0].direct_trait,
+            fn_reference->definition)
+        && cm_hir_def_id_equal(rejected_value.data.function
+                .associated_availability[0].associated_type,
+            output_reference->definition));
+    for (nominal_index = 1u;
+            nominal_index < rejected_value.data.function
+                .nominal_reference_count;
+            ++nominal_index) {
+        const CmHirDefId prior = rejected_value.data.function
+            .nominal_references[nominal_index - 1u].definition;
+        const CmHirDefId current = rejected_value.data.function
+            .nominal_references[nominal_index].definition;
+
+        assert(prior.crate_id < current.crate_id
+            || (prior.crate_id == current.crate_id
+                && prior.index < current.index));
+    }
+    hidden_path[0].bytes = (const unsigned char *)"producer";
+    hidden_path[0].length = 8u;
+    hidden_path[1].bytes = (const unsigned char *)"Fn";
+    hidden_path[1].length = 2u;
+    memset(&hidden_binding, 0, sizeof(hidden_binding));
+    assert(cm_hir_library_artifact_lookup_binding(&rejected.artifact,
+        hidden_path, 2u, &hidden_binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    source_definition = cm_hir_lookup_definition(&rejected.context,
+        output_reference->definition);
+    assert(source_definition != NULL
+        && source_definition->state == CM_HIR_DEFINITION_BOUND
+        && source_definition->reserved_item_kind == CM_HIR_ITEM_TYPE_ALIAS);
     predicate_parameter = cm_hir_get_generic_param(&rejected.context,
         rejected_value.data.function.generic_parameter_start + 1u);
     predicate_subject = cm_hir_get_type(&rejected.context,
@@ -3387,7 +3508,9 @@ static void test_declaration_v2_generic_function_round_trip(void)
         && scoped_value.data.function.predicate_count == 1u
         && scoped_value.data.function.predicates[0].scope == 1u
         && scoped_value.data.function.predicates[0].binder.lifetime_count == 0u
-        && scoped_value.data.function.outlives_predicate_count == 0u);
+        && scoped_value.data.function.outlives_predicate_count == 0u
+        && scoped_value.data.function.nominal_reference_count == 4u
+        && scoped_value.data.function.associated_availability_count == 1u);
     source_definition = cm_hir_lookup_definition(&rejected.context,
         scoped_value.definition);
     source_item = source_definition == NULL ? NULL : cm_hir_get_item(
@@ -3397,14 +3520,14 @@ static void test_declaration_v2_generic_function_round_trip(void)
             != source_item->predicate_scopes
         && scoped_value.data.function.predicate_scopes[0].binder.lifetimes
             != source_item->predicate_scopes[0].binder.lifetimes);
-    assert(cm_hir_library_artifact_identity(&rejected.artifact,
-        &predicate_identity));
     cm_hir_library_owned_data_init(&predicate_owned);
+    assert(cm_interner_length(&predicate_owned.names) == 0u);
     assert(cm_hir_library_owned_data_add_module(&predicate_owned,
         predicate_identity.root_definition, &predicate_root_index)
         == CM_HIR_LIBRARY_OK);
     assert(cm_hir_library_owned_data_add_value(&predicate_owned,
-        &rejected_value) == CM_HIR_LIBRARY_OK);
+        &rejected_value) == CM_HIR_LIBRARY_OK
+        && cm_interner_length(&predicate_owned.names) == 5u);
     assert(cm_hir_library_owned_data_add_value(&predicate_owned,
         &scoped_value) == CM_HIR_LIBRARY_OK);
     add_entry(&predicate_owned, predicate_root_index, "constrained",
@@ -3441,6 +3564,50 @@ static void test_declaration_v2_generic_function_round_trip(void)
     assert(owned_constrained != NULL && owned_scoped != NULL
         && cm_hir_library_artifact_identity(&predicate_artifact,
             &predicate_identity_after));
+    owned_fn_reference = find_nominal_reference(
+        &owned_constrained->declaration, "Fn",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    owned_fn_mutable = NULL;
+    owned_copy_mutable = NULL;
+    owned_output_mutable = NULL;
+    for (nominal_index = 0u;
+            nominal_index < owned_constrained->nominal_reference_count;
+            ++nominal_index) {
+        if (cm_hir_def_id_equal(
+                owned_constrained->nominal_references[nominal_index]
+                    .definition,
+                fn_reference->definition)) {
+            owned_fn_mutable =
+                &owned_constrained->nominal_references[nominal_index];
+        }
+        if (cm_hir_def_id_equal(
+                owned_constrained->nominal_references[nominal_index]
+                    .definition,
+                copy_reference->definition)) {
+            owned_copy_mutable =
+                &owned_constrained->nominal_references[nominal_index];
+        }
+        if (cm_hir_def_id_equal(
+                owned_constrained->nominal_references[nominal_index]
+                    .definition,
+                output_reference->definition)) {
+            owned_output_mutable =
+                &owned_constrained->nominal_references[nominal_index];
+        }
+    }
+    assert(owned_constrained->nominal_references
+            != rejected_value.data.function.nominal_references
+        && owned_constrained->associated_availability
+            != rejected_value.data.function.associated_availability
+        && owned_fn_reference != NULL
+        && owned_fn_mutable != NULL && owned_copy_mutable != NULL
+        && owned_output_mutable != NULL
+        && owned_fn_reference->name.bytes != fn_reference->name.bytes
+        && owned_fn_reference->name.length == fn_reference->name.length
+        && memcmp(owned_fn_reference->name.bytes, fn_reference->name.bytes,
+            fn_reference->name.length) == 0
+        && owned_fn_reference->generic_parameter_kinds
+            != fn_reference->generic_parameter_kinds);
     owned_arguments = owned_constrained->predicates[0].trait_type.arguments;
     owned_constrained->predicates[0].trait_type.arguments =
         rejected_value.data.function.predicates[0].trait_type.arguments;
@@ -3474,6 +3641,62 @@ static void test_declaration_v2_generic_function_round_trip(void)
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
         && predicate_owned.values.len == 2u);
     owned_scoped->predicate_scopes[0].span.end = owned_scope_span_end;
+    owned_schema_kind = owned_fn_mutable->generic_parameter_kinds[0];
+    owned_constrained->nominal_reference_generic_kinds[
+        (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)]
+            [0] = CM_HIR_GENERIC_CONST;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_constrained->nominal_reference_generic_kinds[
+        (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)]
+            [0] = owned_schema_kind;
+    owned_owner_module = owned_fn_mutable->owner_module;
+    owned_fn_mutable->owner_module = rejected_value.definition;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_fn_mutable->owner_module = owned_owner_module;
+    owned_reference_name = owned_fn_mutable->name;
+    owned_reference_name_id = owned_constrained->nominal_reference_names[
+        (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)];
+    owned_fn_mutable->name = owned_copy_mutable->name;
+    owned_constrained->nominal_reference_names[
+        (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)] =
+            owned_constrained->nominal_reference_names[(uint32_t)(
+                owned_copy_mutable - owned_constrained->nominal_references)];
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_fn_mutable->name = owned_reference_name;
+    owned_constrained->nominal_reference_names[
+        (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)] =
+            owned_reference_name_id;
+    owned_declaring_trait = owned_output_mutable->declaring_trait;
+    owned_output_mutable->declaring_trait = copy_reference->definition;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_output_mutable->declaring_trait = owned_declaring_trait;
+    owned_available_trait = owned_constrained->associated_availability[0]
+        .direct_trait;
+    owned_constrained->associated_availability[0].direct_trait =
+        copy_reference->definition;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_constrained->associated_availability[0].direct_trait =
+        owned_available_trait;
     assert(cm_hir_library_artifact_identity(&predicate_artifact,
         &predicate_identity)
         && predicate_identity.context == predicate_identity_after.context

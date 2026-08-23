@@ -1952,6 +1952,13 @@ predicates, and outlives predicates for public free functions. Declaration
 metadata v2.3 still explicitly rejects any such value without mutating its
 output; v2.4 must transport these facts and the referenced trait declarations
 instead of omitting them.
+Predicate capture additionally retains a sorted, deduplicated reference-only
+nominal closure and exact associated-type availability witnesses. The
+`build_check_ensures` fixture records `Fn`, `FnMut`, `FnOnce`, `Copy`, and
+`FnOnce::Output` with authenticated owner, name, generic schema, and declaring
+parent. The records remain opaque: they create neither namespace bindings nor
+fake empty traits. Strict GCC, TinyCC, and Clang ASan/UBSan/LSan library and
+metadata tests pass; v2.3 continues to reject the new facts fail-closed.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

@@ -4,6 +4,7 @@
 
 #include "cm/alloc.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmHirLibraryArtifactState {
@@ -130,6 +131,12 @@ static void cm_hir_library_owned_value_destroy(
         cm_free(value->predicate_equalities[index]);
         cm_free(value->predicate_lifetimes[index]);
     }
+    for (index = 0u; index < value->nominal_reference_count; ++index)
+        cm_free(value->nominal_reference_generic_kinds[index]);
+    cm_free(value->associated_availability);
+    cm_free(value->nominal_reference_generic_kinds);
+    cm_free(value->nominal_reference_names);
+    cm_free(value->nominal_references);
     cm_free(value->outlives_predicates);
     cm_free(value->predicate_lifetimes);
     cm_free(value->predicate_equalities);
@@ -432,6 +439,38 @@ static int cm_hir_library_predicate_scope_equal(
     return 0;
 }
 
+static int cm_hir_library_nominal_reference_equal(
+    const CmHirLibraryNominalReference *left,
+    const CmHirLibraryNominalReference *right)
+{
+    uint32_t index;
+
+    if (!cm_hir_def_id_equal(left->definition, right->definition)
+        || !cm_hir_def_id_equal(left->owner_module, right->owner_module)
+        || left->name.length != right->name.length
+        || memcmp(left->name.bytes, right->name.bytes,
+            left->name.length) != 0
+        || left->use != right->use || left->kind != right->kind
+        || !cm_hir_def_id_equal(left->declaring_trait,
+            right->declaring_trait)
+        || left->generic_parameter_count
+            != right->generic_parameter_count) return 0;
+    for (index = 0u; index < left->generic_parameter_count; ++index) {
+        if (left->generic_parameter_kinds[index]
+            != right->generic_parameter_kinds[index]) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_availability_equal(
+    const CmHirLibraryAssociatedAvailability *left,
+    const CmHirLibraryAssociatedAvailability *right)
+{
+    return cm_hir_def_id_equal(left->direct_trait, right->direct_trait)
+        && cm_hir_def_id_equal(left->associated_type,
+            right->associated_type);
+}
+
 static int cm_hir_library_function_predicates_equal(
     const CmHirLibraryFunctionSignature *left,
     const CmHirLibraryFunctionSignature *right)
@@ -441,7 +480,10 @@ static int cm_hir_library_function_predicates_equal(
     if (left->predicate_scope_count != right->predicate_scope_count
         || left->predicate_count != right->predicate_count
         || left->outlives_predicate_count
-            != right->outlives_predicate_count) return 0;
+            != right->outlives_predicate_count
+        || left->nominal_reference_count != right->nominal_reference_count
+        || left->associated_availability_count
+            != right->associated_availability_count) return 0;
     for (index = 0u; index < left->predicate_scope_count; ++index) {
         if (!cm_hir_library_predicate_scope_equal(
                 &left->predicate_scopes[index],
@@ -455,6 +497,16 @@ static int cm_hir_library_function_predicates_equal(
         if (!cm_hir_library_outlives_predicate_equal(
                 &left->outlives_predicates[index],
                 &right->outlives_predicates[index])) return 0;
+    }
+    for (index = 0u; index < left->nominal_reference_count; ++index) {
+        if (!cm_hir_library_nominal_reference_equal(
+                &left->nominal_references[index],
+                &right->nominal_references[index])) return 0;
+    }
+    for (index = 0u; index < left->associated_availability_count; ++index) {
+        if (!cm_hir_library_availability_equal(
+                &left->associated_availability[index],
+                &right->associated_availability[index])) return 0;
     }
     return 1;
 }
@@ -526,7 +578,14 @@ static int cm_hir_library_function_array_shapes_valid(
             function->predicate_count, sizeof(CmHirTraitPredicate))
         || !cm_hir_library_array_shape_valid(function->outlives_predicates,
             function->outlives_predicate_count,
-            sizeof(CmHirOutlivesPredicate))) return 0;
+            sizeof(CmHirOutlivesPredicate))
+        || !cm_hir_library_array_shape_valid(function->nominal_references,
+            function->nominal_reference_count,
+            sizeof(CmHirLibraryNominalReference))
+        || !cm_hir_library_array_shape_valid(
+            function->associated_availability,
+            function->associated_availability_count,
+            sizeof(CmHirLibraryAssociatedAvailability))) return 0;
     for (index = 0u; index < function->predicate_scope_count; ++index) {
         if (!cm_hir_library_binder_shape_valid(
                 &function->predicate_scopes[index].binder)) return 0;
@@ -546,6 +605,14 @@ static int cm_hir_library_function_array_shapes_valid(
             return 0;
         }
     }
+    for (index = 0u; index < function->nominal_reference_count; ++index) {
+        if (function->nominal_references[index].name.bytes == NULL
+            || function->nominal_references[index].name.length == 0u
+            || !cm_hir_library_array_shape_valid(
+                function->nominal_references[index].generic_parameter_kinds,
+                function->nominal_references[index].generic_parameter_count,
+                sizeof(CmHirGenericParamKind))) return 0;
+    }
     return 1;
 }
 
@@ -563,7 +630,7 @@ static void *cm_hir_library_copy_array(const void *source, uint32_t count,
 }
 
 static int cm_hir_library_owned_value_copy(CmHirLibraryOwnedValue *copy,
-    const CmHirLibraryValue *value)
+    CmInterner *names, const CmHirLibraryValue *value)
 {
     const CmHirLibraryFunctionSignature *source;
     CmHirLibraryFunctionSignature *target;
@@ -579,10 +646,15 @@ static int cm_hir_library_owned_value_copy(CmHirLibraryOwnedValue *copy,
     copy->predicate_scope_count = source->predicate_scope_count;
     copy->predicate_count = source->predicate_count;
     copy->outlives_predicate_count = source->outlives_predicate_count;
+    copy->nominal_reference_count = source->nominal_reference_count;
+    copy->associated_availability_count =
+        source->associated_availability_count;
     target->parameter_types = NULL;
     target->predicate_scopes = NULL;
     target->predicates = NULL;
     target->outlives_predicates = NULL;
+    target->nominal_references = NULL;
+    target->associated_availability = NULL;
     copy->parameter_types = (CmHirTypeId *)cm_hir_library_copy_array(
         source->parameter_types, source->parameter_count,
         sizeof(CmHirTypeId));
@@ -648,6 +720,44 @@ static int cm_hir_library_owned_value_copy(CmHirLibraryOwnedValue *copy,
             source->outlives_predicates, source->outlives_predicate_count,
             sizeof(CmHirOutlivesPredicate));
     target->outlives_predicates = copy->outlives_predicates;
+    copy->nominal_references =
+        (CmHirLibraryNominalReference *)cm_hir_library_copy_array(
+            source->nominal_references, source->nominal_reference_count,
+            sizeof(CmHirLibraryNominalReference));
+    copy->nominal_reference_generic_kinds =
+        source->nominal_reference_count == 0u ? NULL
+        : (CmHirGenericParamKind **)cm_alloc_zeroed(
+            source->nominal_reference_count, sizeof(CmHirGenericParamKind *));
+    copy->nominal_reference_names = source->nominal_reference_count == 0u
+        ? NULL : (CmInternId *)cm_alloc(
+            (size_t)source->nominal_reference_count * sizeof(CmInternId));
+    target->nominal_references = copy->nominal_references;
+    for (index = 0u; index < source->nominal_reference_count; ++index) {
+        const CmInternedString *owned_name;
+
+        copy->nominal_reference_names[index] = cm_interner_intern(names,
+            source->nominal_references[index].name.bytes,
+            source->nominal_references[index].name.length);
+        owned_name = cm_interner_get(names,
+            copy->nominal_reference_names[index]);
+        if (owned_name == NULL) return 0;
+        copy->nominal_references[index].name.bytes = owned_name->bytes;
+        copy->nominal_references[index].name.length = owned_name->len;
+        copy->nominal_references[index].generic_parameter_kinds = NULL;
+        copy->nominal_reference_generic_kinds[index] =
+            (CmHirGenericParamKind *)cm_hir_library_copy_array(
+                source->nominal_references[index].generic_parameter_kinds,
+                source->nominal_references[index].generic_parameter_count,
+                sizeof(CmHirGenericParamKind));
+        copy->nominal_references[index].generic_parameter_kinds =
+            copy->nominal_reference_generic_kinds[index];
+    }
+    copy->associated_availability =
+        (CmHirLibraryAssociatedAvailability *)cm_hir_library_copy_array(
+            source->associated_availability,
+            source->associated_availability_count,
+            sizeof(CmHirLibraryAssociatedAvailability));
+    target->associated_availability = copy->associated_availability;
     return 1;
 }
 
@@ -655,6 +765,7 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     CmHirLibraryOwnedData *data, const CmHirLibraryValue *value)
 {
     CmHirLibraryOwnedValue copy;
+    CmInternerMark names_mark;
     size_t index;
 
     if (data == NULL || value == NULL
@@ -693,10 +804,13 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
         return cm_hir_library_value_equal(&existing->declaration, value)
             ? CM_HIR_LIBRARY_OK : CM_HIR_LIBRARY_INVALID_HIR;
     }
-    if (!cm_hir_library_owned_value_copy(&copy, value)) {
+    names_mark = cm_interner_mark(&data->names);
+    if (!cm_hir_library_owned_value_copy(&copy, &data->names, value)) {
         cm_hir_library_owned_value_destroy(&copy);
+        cm_interner_rewind(&data->names, names_mark);
         return CM_HIR_LIBRARY_INVALID_HIR;
     }
+    cm_interner_discard_mark(&data->names, names_mark);
     (void)cm_vec_push(&data->values, &copy);
     return CM_HIR_LIBRARY_OK;
 }
@@ -951,11 +1065,330 @@ static int cm_hir_library_add_entry(CmHirLibraryArtifactState *state,
     return 1;
 }
 
+static int cm_hir_library_definition_compare(CmHirDefId left,
+    CmHirDefId right)
+{
+    if (left.crate_id != right.crate_id)
+        return left.crate_id < right.crate_id ? -1 : 1;
+    if (left.index != right.index) return left.index < right.index ? -1 : 1;
+    return 0;
+}
+
+static int cm_hir_library_nominal_reference_compare(const void *left_value,
+    const void *right_value)
+{
+    const CmHirLibraryNominalReference *left;
+    const CmHirLibraryNominalReference *right;
+    int order;
+
+    left = (const CmHirLibraryNominalReference *)left_value;
+    right = (const CmHirLibraryNominalReference *)right_value;
+    order = cm_hir_library_definition_compare(left->definition,
+        right->definition);
+    if (order != 0) return order;
+    if (left->kind != right->kind) return left->kind < right->kind ? -1 : 1;
+    return cm_hir_library_definition_compare(left->declaring_trait,
+        right->declaring_trait);
+}
+
+static int cm_hir_library_availability_compare(const void *left_value,
+    const void *right_value)
+{
+    const CmHirLibraryAssociatedAvailability *left;
+    const CmHirLibraryAssociatedAvailability *right;
+    int order;
+
+    left = (const CmHirLibraryAssociatedAvailability *)left_value;
+    right = (const CmHirLibraryAssociatedAvailability *)right_value;
+    order = cm_hir_library_definition_compare(left->direct_trait,
+        right->direct_trait);
+    return order != 0 ? order : cm_hir_library_definition_compare(
+        left->associated_type, right->associated_type);
+}
+
+static void cm_hir_library_nominal_reference_vec_destroy(CmVec *references)
+{
+    size_t index;
+
+    if (references == NULL) return;
+    for (index = 0u; index < references->len; ++index) {
+        CmHirLibraryNominalReference *reference;
+
+        reference = (CmHirLibraryNominalReference *)cm_vec_at(references,
+            index);
+        if (reference != NULL)
+            cm_free((void *)reference->generic_parameter_kinds);
+    }
+    cm_vec_destroy(references);
+}
+
+static int cm_hir_library_reference_schema_from_item(
+    const CmHirContext *context, const CmHirItem *item,
+    CmHirGenericParamKind **out_kinds)
+{
+    CmHirGenericParamKind *kinds;
+    uint32_t index;
+
+    if (out_kinds == NULL || context == NULL || item == NULL) return 0;
+    *out_kinds = NULL;
+    if (item->generic_parameter_count == 0u)
+        return item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE;
+    if (item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) return 0;
+    kinds = (CmHirGenericParamKind *)cm_alloc(
+        (size_t)item->generic_parameter_count
+            * sizeof(CmHirGenericParamKind));
+    for (index = 0u; index < item->generic_parameter_count; ++index) {
+        CmHirGenericParamId parameter_id;
+        const CmHirGenericParam *parameter;
+
+        parameter_id = item->generic_parameter_start + index;
+        if (parameter_id < item->generic_parameter_start) {
+            cm_free(kinds);
+            return 0;
+        }
+        parameter = cm_hir_get_generic_param(context, parameter_id);
+        if (parameter == NULL || parameter->index != index
+            || !cm_hir_def_id_equal(parameter->owner, item->definition)) {
+            cm_free(kinds);
+            return 0;
+        }
+        kinds[index] = parameter->kind;
+    }
+    *out_kinds = kinds;
+    return 1;
+}
+
+static const CmHirItem *cm_hir_library_bound_item(
+    const CmHirContext *context, CmHirDefId definition)
+{
+    const CmHirDefinition *resolved;
+
+    resolved = cm_hir_lookup_definition(context, definition);
+    if (resolved == NULL || resolved->state != CM_HIR_DEFINITION_BOUND
+        || resolved->kind != CM_HIR_DEFINITION_ITEM) return NULL;
+    return cm_hir_get_item(context, resolved->entity.item_id);
+}
+
+static int cm_hir_library_add_nominal_reference(const CmHirContext *context,
+    const CmInterner *names, CmInterner *capture_names, CmVec *references,
+    CmHirDefId definition,
+    CmHirLibraryNominalReferenceKind kind, CmHirDefId declaring_trait)
+{
+    const CmHirItem *item;
+    const CmHirModule *module;
+    const CmInternedString *owned_name;
+    const CmInternedString *source_name;
+    CmHirGenericParamKind *kinds;
+    CmInternId name;
+    CmHirLibraryNominalReference reference;
+    size_t index;
+
+    item = cm_hir_library_bound_item(context, definition);
+    module = item == NULL ? NULL
+        : cm_hir_get_module(context, item->owner_module);
+    source_name = item == NULL ? NULL
+        : cm_interner_get(&context->strings, item->name);
+    if (item == NULL
+        || module == NULL || source_name == NULL || source_name->len == 0u
+        || (kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
+            ? (item->kind != CM_HIR_ITEM_TRAIT
+                || !cm_hir_def_id_is_none(declaring_trait))
+            : (item->kind != CM_HIR_ITEM_TYPE_ALIAS
+                || item->data.type_alias_item.target != CM_HIR_TYPE_NONE
+                || cm_hir_def_id_is_none(declaring_trait)
+                || !cm_hir_def_id_equal(item->parent_definition,
+                    declaring_trait)))) return 0;
+    name = capture_names == NULL
+        ? cm_interner_lookup(names, source_name->bytes, source_name->len)
+        : cm_interner_intern(capture_names, source_name->bytes,
+            source_name->len);
+    if (name == CM_INTERN_ID_NONE) return 0;
+    owned_name = cm_interner_get(capture_names == NULL ? names : capture_names,
+        name);
+    if (owned_name == NULL) return 0;
+    kinds = NULL;
+    if (!cm_hir_library_reference_schema_from_item(context, item, &kinds))
+        return 0;
+    memset(&reference, 0, sizeof(reference));
+    reference.definition = definition;
+    reference.owner_module = module->definition;
+    reference.name.bytes = owned_name->bytes;
+    reference.name.length = owned_name->len;
+    reference.use = CM_HIR_LIBRARY_REFERENCE_ONLY;
+    reference.kind = kind;
+    reference.declaring_trait = declaring_trait;
+    reference.generic_parameter_kinds = kinds;
+    reference.generic_parameter_count = item->generic_parameter_count;
+    for (index = 0u; index < references->len; ++index) {
+        const CmHirLibraryNominalReference *existing;
+
+        existing = (const CmHirLibraryNominalReference *)cm_vec_at_const(
+            references, index);
+        if (existing == NULL
+            || !cm_hir_def_id_equal(existing->definition, definition)) {
+            continue;
+        }
+        if (!cm_hir_library_nominal_reference_equal(existing, &reference)) {
+            cm_free(kinds);
+            return 0;
+        }
+        cm_free(kinds);
+        return 1;
+    }
+    (void)cm_vec_push(references, &reference);
+    return 1;
+}
+
+static int cm_hir_library_collect_trait_closure(
+    const CmHirContext *context, const CmInterner *names,
+    CmInterner *capture_names, CmHirDefId trait_definition,
+    CmVec *references, size_t depth)
+{
+    const CmHirItem *trait_item;
+    size_t prior_count;
+    uint32_t index;
+
+    if (depth > context->items.len) return 0;
+    prior_count = references->len;
+    if (!cm_hir_library_add_nominal_reference(context, names, capture_names,
+            references, trait_definition, CM_HIR_LIBRARY_NOMINAL_TRAIT,
+            cm_hir_def_id_none())) return 0;
+    if (references->len == prior_count) return 1;
+    trait_item = cm_hir_library_bound_item(context, trait_definition);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) return 0;
+    for (index = 0u; index < trait_item->data.trait_item.supertrait_count;
+            ++index) {
+        if (!cm_hir_library_collect_trait_closure(context, names,
+                capture_names,
+                trait_item->data.trait_item.supertraits[index]
+                    .trait_type.definition,
+                references, depth + 1u)) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_references_contain_trait(const CmVec *references,
+    CmHirDefId definition)
+{
+    size_t index;
+
+    for (index = 0u; index < references->len; ++index) {
+        const CmHirLibraryNominalReference *reference;
+
+        reference = (const CmHirLibraryNominalReference *)cm_vec_at_const(
+            references, index);
+        if (reference != NULL
+            && reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
+            && cm_hir_def_id_equal(reference->definition, definition)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cm_hir_library_trait_reaches(const CmHirContext *context,
+    CmHirDefId start, CmHirDefId target, size_t depth)
+{
+    const CmHirItem *trait_item;
+    uint32_t index;
+
+    if (cm_hir_def_id_equal(start, target)) return 1;
+    if (depth > context->items.len) return 0;
+    trait_item = cm_hir_library_bound_item(context, start);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) return 0;
+    for (index = 0u; index < trait_item->data.trait_item.supertrait_count;
+            ++index) {
+        if (cm_hir_library_trait_reaches(context,
+                trait_item->data.trait_item.supertraits[index]
+                    .trait_type.definition,
+                target, depth + 1u)) return 1;
+    }
+    return 0;
+}
+
+static int cm_hir_library_add_availability(CmVec *availability,
+    CmHirDefId direct_trait, CmHirDefId associated_type)
+{
+    CmHirLibraryAssociatedAvailability value;
+    size_t index;
+
+    for (index = 0u; index < availability->len; ++index) {
+        const CmHirLibraryAssociatedAvailability *existing;
+
+        existing = (const CmHirLibraryAssociatedAvailability *)cm_vec_at_const(
+            availability, index);
+        if (existing != NULL
+            && cm_hir_def_id_equal(existing->direct_trait, direct_trait)
+            && cm_hir_def_id_equal(existing->associated_type,
+                associated_type)) return 1;
+    }
+    value.direct_trait = direct_trait;
+    value.associated_type = associated_type;
+    (void)cm_vec_push(availability, &value);
+    return 1;
+}
+
+static int cm_hir_library_collect_nominal_references(
+    const CmHirContext *context, const CmInterner *names,
+    CmInterner *capture_names, const CmHirItem *item, CmVec *references,
+    CmVec *availability)
+{
+    uint32_t predicate_index;
+
+    cm_vec_init(references, sizeof(CmHirLibraryNominalReference));
+    cm_vec_init(availability, sizeof(CmHirLibraryAssociatedAvailability));
+    if (context == NULL || item == NULL) return 0;
+    for (predicate_index = 0u; predicate_index < item->predicate_count;
+            ++predicate_index) {
+        const CmHirTraitPredicate *predicate;
+        uint32_t equality_index;
+
+        predicate = &item->predicates[predicate_index];
+        if (!cm_hir_library_collect_trait_closure(context, names,
+                capture_names,
+                predicate->trait_type.definition, references, 0u)) return 0;
+        for (equality_index = 0u; equality_index < predicate->equality_count;
+                ++equality_index) {
+            const CmHirAssociatedTypeEquality *equality;
+            const CmHirItem *associated;
+
+            equality = &predicate->equalities[equality_index];
+            associated = cm_hir_library_bound_item(context,
+                equality->associated_type);
+            if (associated == NULL
+                || associated->kind != CM_HIR_ITEM_TYPE_ALIAS
+                || associated->data.type_alias_item.target != CM_HIR_TYPE_NONE
+                || cm_hir_def_id_is_none(associated->parent_definition)
+                || !cm_hir_library_trait_reaches(context,
+                    predicate->trait_type.definition,
+                    associated->parent_definition, 0u)
+                || !cm_hir_library_references_contain_trait(references,
+                    associated->parent_definition)
+                || !cm_hir_library_add_nominal_reference(context, names,
+                    capture_names, references, equality->associated_type,
+                    CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE,
+                    associated->parent_definition)
+                || !cm_hir_library_add_availability(availability,
+                    predicate->trait_type.definition,
+                    equality->associated_type)) return 0;
+        }
+    }
+    if (references->len > 1u) qsort(references->data, references->len,
+        sizeof(CmHirLibraryNominalReference),
+        cm_hir_library_nominal_reference_compare);
+    if (availability->len > 1u) qsort(availability->data, availability->len,
+        sizeof(CmHirLibraryAssociatedAvailability),
+        cm_hir_library_availability_compare);
+    return 1;
+}
+
 static int cm_hir_library_add_value_from_item(
     CmHirLibraryArtifactState *state, const CmHirItem *item)
 {
     CmHirLibraryValue value;
     CmHirTypeId *parameter_types;
+    CmVec nominal_references;
+    CmVec associated_availability;
     uint32_t index;
     CmHirLibraryStatus status;
 
@@ -972,6 +1405,8 @@ static int cm_hir_library_add_value_from_item(
     value.kind = cm_hir_library_value_kind(item->kind);
     if (value.kind == CM_HIR_LIBRARY_VALUE_NONE) return 0;
     parameter_types = NULL;
+    memset(&nominal_references, 0, sizeof(nominal_references));
+    memset(&associated_availability, 0, sizeof(associated_availability));
     if (value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         const CmHirFunctionSignature *signature;
 
@@ -979,6 +1414,19 @@ static int cm_hir_library_add_value_from_item(
         if (signature->receiver != CM_HIR_RECEIVER_NONE
             || (signature->parameter_count != 0u
                 && signature->parameters == NULL)) return 0;
+        if (!cm_hir_library_collect_nominal_references(state->context,
+                &state->owned.names, &state->owned.names, item,
+                &nominal_references, &associated_availability)) {
+            cm_hir_library_nominal_reference_vec_destroy(&nominal_references);
+            cm_vec_destroy(&associated_availability);
+            return 0;
+        }
+        if (nominal_references.len > (size_t)UINT32_MAX
+            || associated_availability.len > (size_t)UINT32_MAX) {
+            cm_hir_library_nominal_reference_vec_destroy(&nominal_references);
+            cm_vec_destroy(&associated_availability);
+            return 0;
+        }
         if (signature->parameter_count != 0u) {
             parameter_types = (CmHirTypeId *)cm_alloc(
                 (size_t)signature->parameter_count * sizeof(CmHirTypeId));
@@ -1000,6 +1448,15 @@ static int cm_hir_library_add_value_from_item(
         value.data.function.outlives_predicates = item->outlives_predicates;
         value.data.function.outlives_predicate_count =
             item->outlives_predicate_count;
+        value.data.function.nominal_references =
+            (const CmHirLibraryNominalReference *)nominal_references.data;
+        value.data.function.nominal_reference_count =
+            (uint32_t)nominal_references.len;
+        value.data.function.associated_availability =
+            (const CmHirLibraryAssociatedAvailability *)
+                associated_availability.data;
+        value.data.function.associated_availability_count =
+            (uint32_t)associated_availability.len;
         value.data.function.abi = signature->abi;
         value.data.function.safety = signature->safety;
         value.data.function.is_const = signature->is_const;
@@ -1010,6 +1467,8 @@ static int cm_hir_library_add_value_from_item(
         value.data.value.mutability = item->data.value_item.mutability;
     }
     status = cm_hir_library_owned_data_add_value(&state->owned, &value);
+    cm_hir_library_nominal_reference_vec_destroy(&nominal_references);
+    cm_vec_destroy(&associated_availability);
     cm_free(parameter_types);
     return status == CM_HIR_LIBRARY_OK;
 }
@@ -1021,7 +1480,7 @@ static int cm_hir_library_value_type_valid(const CmHirContext *context,
 }
 
 static int cm_hir_library_owned_function_storage_valid(
-    const CmHirLibraryOwnedValue *owned_value)
+    const CmInterner *names, const CmHirLibraryOwnedValue *owned_value)
 {
     const CmHirLibraryFunctionSignature *function;
     uint32_t index;
@@ -1034,12 +1493,19 @@ static int cm_hir_library_owned_function_storage_valid(
         || function->predicate_count != owned_value->predicate_count
         || function->outlives_predicate_count
             != owned_value->outlives_predicate_count
+        || function->nominal_reference_count
+            != owned_value->nominal_reference_count
+        || function->associated_availability_count
+            != owned_value->associated_availability_count
         || !cm_hir_library_function_array_shapes_valid(function)
         || function->parameter_types != owned_value->parameter_types
         || function->predicate_scopes != owned_value->predicate_scopes
         || function->predicates != owned_value->predicates
         || function->outlives_predicates
             != owned_value->outlives_predicates
+        || function->nominal_references != owned_value->nominal_references
+        || function->associated_availability
+            != owned_value->associated_availability
         || !cm_hir_library_array_shape_valid(
             owned_value->predicate_scope_lifetimes,
             function->predicate_scope_count, sizeof(CmInternId *))
@@ -1051,7 +1517,14 @@ static int cm_hir_library_owned_function_storage_valid(
             sizeof(CmHirAssociatedTypeEquality *))
         || !cm_hir_library_array_shape_valid(
             owned_value->predicate_lifetimes, function->predicate_count,
-            sizeof(CmInternId *))) return 0;
+            sizeof(CmInternId *))
+        || !cm_hir_library_array_shape_valid(
+            owned_value->nominal_reference_generic_kinds,
+            function->nominal_reference_count,
+            sizeof(CmHirGenericParamKind *))
+        || !cm_hir_library_array_shape_valid(
+            owned_value->nominal_reference_names,
+            function->nominal_reference_count, sizeof(CmInternId))) return 0;
     for (index = 0u; index < function->predicate_scope_count; ++index) {
         if (function->predicate_scopes[index].binder.lifetimes
                 != owned_value->predicate_scope_lifetimes[index]) return 0;
@@ -1064,10 +1537,287 @@ static int cm_hir_library_owned_function_storage_valid(
             || function->predicates[index].binder.lifetimes
                 != owned_value->predicate_lifetimes[index]) return 0;
     }
+    for (index = 0u; index < function->nominal_reference_count; ++index) {
+        const CmInternedString *owned_name;
+
+        owned_name = cm_interner_get(names,
+            owned_value->nominal_reference_names[index]);
+        if (owned_name == NULL
+            || function->nominal_references[index].name.bytes
+                != owned_name->bytes
+            || function->nominal_references[index].name.length
+                != owned_name->len
+            || function->nominal_references[index].generic_parameter_kinds
+                != owned_value->nominal_reference_generic_kinds[index]) {
+            return 0;
+        }
+    }
     return 1;
 }
 
+static const CmHirLibraryNominalReference *
+cm_hir_library_find_nominal_reference(
+    const CmHirLibraryFunctionSignature *function, CmHirDefId definition,
+    CmHirLibraryNominalReferenceKind kind)
+{
+    uint32_t index;
+
+    for (index = 0u; index < function->nominal_reference_count; ++index) {
+        const CmHirLibraryNominalReference *reference;
+
+        reference = &function->nominal_references[index];
+        if (reference->kind == kind
+            && cm_hir_def_id_equal(reference->definition, definition)) {
+            return reference;
+        }
+    }
+    return NULL;
+}
+
+static int cm_hir_library_reference_schema_valid(
+    const CmHirContext *context,
+    const CmHirLibraryNominalReference *reference)
+{
+    uint32_t schema_index;
+    size_t parameter_index;
+    uint32_t matched_count;
+    uint32_t owner_count;
+
+    matched_count = 0u;
+    owner_count = 0u;
+    for (schema_index = 0u;
+            schema_index < reference->generic_parameter_count;
+            ++schema_index) {
+        uint32_t matches;
+
+        matches = 0u;
+        for (parameter_index = 0u;
+                parameter_index < context->generic_parameters.len;
+                ++parameter_index) {
+            const CmHirGenericParam *parameter;
+
+            parameter = (const CmHirGenericParam *)cm_vec_at_const(
+                &context->generic_parameters, parameter_index);
+            if (parameter != NULL
+                && cm_hir_def_id_equal(parameter->owner,
+                    reference->definition)
+                && parameter->index == schema_index
+                && parameter->kind
+                    == reference->generic_parameter_kinds[schema_index]) {
+                matches += 1u;
+            }
+        }
+        if (matches != 1u) return 0;
+        matched_count += matches;
+    }
+    for (parameter_index = 0u;
+            parameter_index < context->generic_parameters.len;
+            ++parameter_index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = (const CmHirGenericParam *)cm_vec_at_const(
+            &context->generic_parameters, parameter_index);
+        if (parameter != NULL && cm_hir_def_id_equal(parameter->owner,
+                reference->definition)) {
+            if (owner_count == UINT32_MAX
+                || parameter->index >= reference->generic_parameter_count) {
+                return 0;
+            }
+            owner_count += 1u;
+        }
+    }
+    return matched_count == reference->generic_parameter_count
+        && owner_count == reference->generic_parameter_count;
+}
+
+static int cm_hir_library_nominal_reference_valid(
+    const CmHirContext *context,
+    const CmHirLibraryFunctionSignature *function,
+    const CmHirLibraryNominalReference *reference)
+{
+    const CmHirDefinition *definition;
+    const CmHirDefinition *owner_definition;
+    const CmHirModule *owner_module;
+    const CmHirItem *item;
+    const CmInternedString *item_name;
+    CmHirItemKind expected_kind;
+
+    if (reference->use != CM_HIR_LIBRARY_REFERENCE_ONLY
+        || (unsigned int)reference->kind
+            > (unsigned int)CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE
+        || cm_hir_def_id_is_none(reference->definition)
+        || cm_hir_def_id_is_none(reference->owner_module)
+        || !cm_hir_library_reference_schema_valid(context, reference)) {
+        return 0;
+    }
+    owner_definition = cm_hir_lookup_definition(context,
+        reference->owner_module);
+    owner_module = owner_definition == NULL
+        || owner_definition->state != CM_HIR_DEFINITION_BOUND
+        || owner_definition->kind != CM_HIR_DEFINITION_MODULE
+        ? NULL : cm_hir_get_module(context,
+            owner_definition->entity.module_id);
+    if (reference->name.bytes == NULL || reference->name.length == 0u
+        || owner_module == NULL
+        || !cm_hir_def_id_equal(owner_module->definition,
+            reference->owner_module)) return 0;
+    expected_kind = reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
+        ? CM_HIR_ITEM_TRAIT : CM_HIR_ITEM_TYPE_ALIAS;
+    if (reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT) {
+        if (!cm_hir_def_id_is_none(reference->declaring_trait)) return 0;
+    } else if (cm_hir_def_id_is_none(reference->declaring_trait)
+        || cm_hir_library_find_nominal_reference(function,
+            reference->declaring_trait, CM_HIR_LIBRARY_NOMINAL_TRAIT)
+            == NULL) return 0;
+    definition = cm_hir_lookup_definition(context, reference->definition);
+    if (definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
+        || !definition->has_reserved_item_kind
+        || definition->reserved_item_kind != expected_kind) return 0;
+    if (definition->state == CM_HIR_DEFINITION_RESERVED) return 1;
+    if (definition->state != CM_HIR_DEFINITION_BOUND) return 0;
+    item = cm_hir_get_item(context, definition->entity.item_id);
+    if (item == NULL || item->kind != expected_kind
+        || !cm_hir_def_id_equal(item->definition,
+            reference->definition)) return 0;
+    item_name = cm_interner_get(&context->strings, item->name);
+    owner_module = cm_hir_get_module(context, item->owner_module);
+    if (item_name == NULL || owner_module == NULL
+        || !cm_hir_def_id_equal(owner_module->definition,
+            reference->owner_module)
+        || reference->name.length != item_name->len
+        || memcmp(reference->name.bytes, item_name->bytes,
+            reference->name.length) != 0) return 0;
+    if (reference->kind == CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) {
+        return item->data.type_alias_item.target == CM_HIR_TYPE_NONE
+            && cm_hir_def_id_equal(item->parent_definition,
+                reference->declaring_trait);
+    }
+    return cm_hir_def_id_is_none(item->parent_definition);
+}
+
+static int cm_hir_library_availability_present(
+    const CmHirLibraryFunctionSignature *function, CmHirDefId direct_trait,
+    CmHirDefId associated_type)
+{
+    uint32_t index;
+
+    for (index = 0u; index < function->associated_availability_count;
+            ++index) {
+        if (cm_hir_def_id_equal(
+                function->associated_availability[index].direct_trait,
+                direct_trait)
+            && cm_hir_def_id_equal(
+                function->associated_availability[index].associated_type,
+                associated_type)) return 1;
+    }
+    return 0;
+}
+
+static int cm_hir_library_function_references_structurally_valid(
+    const CmHirContext *context,
+    const CmHirLibraryFunctionSignature *function)
+{
+    uint32_t index;
+
+    for (index = 0u; index < function->nominal_reference_count; ++index) {
+        if (!cm_hir_library_nominal_reference_valid(context, function,
+                &function->nominal_references[index])
+            || (index != 0u && cm_hir_library_nominal_reference_compare(
+                &function->nominal_references[index - 1u],
+                &function->nominal_references[index]) >= 0)) return 0;
+    }
+    for (index = 0u; index < function->associated_availability_count;
+            ++index) {
+        const CmHirLibraryAssociatedAvailability *availability;
+        uint32_t predicate_index;
+        int matched;
+
+        availability = &function->associated_availability[index];
+        if (cm_hir_library_find_nominal_reference(function,
+                availability->direct_trait,
+                CM_HIR_LIBRARY_NOMINAL_TRAIT) == NULL
+            || cm_hir_library_find_nominal_reference(function,
+                availability->associated_type,
+                CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) == NULL
+            || (index != 0u && cm_hir_library_availability_compare(
+                &function->associated_availability[index - 1u],
+                availability) >= 0)) return 0;
+        matched = 0;
+        for (predicate_index = 0u; predicate_index < function->predicate_count;
+                ++predicate_index) {
+            const CmHirTraitPredicate *predicate;
+            uint32_t equality_index;
+
+            predicate = &function->predicates[predicate_index];
+            if (!cm_hir_def_id_equal(predicate->trait_type.definition,
+                    availability->direct_trait)) continue;
+            for (equality_index = 0u;
+                    equality_index < predicate->equality_count;
+                    ++equality_index) {
+                if (cm_hir_def_id_equal(
+                        predicate->equalities[equality_index].associated_type,
+                        availability->associated_type)) matched = 1;
+            }
+        }
+        if (!matched) return 0;
+    }
+    for (index = 0u; index < function->predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+        uint32_t equality_index;
+
+        predicate = &function->predicates[index];
+        if (cm_hir_library_find_nominal_reference(function,
+                predicate->trait_type.definition,
+                CM_HIR_LIBRARY_NOMINAL_TRAIT) == NULL) return 0;
+        for (equality_index = 0u; equality_index < predicate->equality_count;
+                ++equality_index) {
+            if (cm_hir_library_find_nominal_reference(function,
+                    predicate->equalities[equality_index].associated_type,
+                    CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) == NULL
+                || !cm_hir_library_availability_present(function,
+                    predicate->trait_type.definition,
+                    predicate->equalities[equality_index].associated_type)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int cm_hir_library_function_references_match_item(
+    const CmHirContext *context, const CmInterner *names,
+    const CmHirLibraryFunctionSignature *function, const CmHirItem *item)
+{
+    CmVec references;
+    CmVec availability;
+    CmHirLibraryFunctionSignature expected;
+    int result;
+
+    memset(&references, 0, sizeof(references));
+    memset(&availability, 0, sizeof(availability));
+    if (!cm_hir_library_collect_nominal_references(context, names, NULL, item,
+            &references, &availability)
+        || references.len > (size_t)UINT32_MAX
+        || availability.len > (size_t)UINT32_MAX) {
+        cm_hir_library_nominal_reference_vec_destroy(&references);
+        cm_vec_destroy(&availability);
+        return 0;
+    }
+    expected = *function;
+    expected.nominal_references =
+        (const CmHirLibraryNominalReference *)references.data;
+    expected.nominal_reference_count = (uint32_t)references.len;
+    expected.associated_availability =
+        (const CmHirLibraryAssociatedAvailability *)availability.data;
+    expected.associated_availability_count = (uint32_t)availability.len;
+    result = cm_hir_library_function_predicates_equal(function, &expected);
+    cm_hir_library_nominal_reference_vec_destroy(&references);
+    cm_vec_destroy(&availability);
+    return result;
+}
+
 static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
+    const CmHirContext *context, const CmInterner *names,
     const CmHirItem *item)
 {
     uint32_t index;
@@ -1110,7 +1860,9 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
         item_function.outlives_predicate_count =
             item->outlives_predicate_count;
         if (!cm_hir_library_function_predicates_equal(
-                &value->data.function, &item_function)) return 0;
+                &value->data.function, &item_function)
+            || !cm_hir_library_function_references_match_item(context, names,
+                &value->data.function, item)) return 0;
         for (index = 0u; index < signature->parameter_count; ++index) {
             if (value->data.function.parameter_types[index]
                 != signature->parameters[index].type) return 0;
@@ -1139,7 +1891,10 @@ static int cm_hir_library_owned_value_valid(
         expected_kind = CM_HIR_ITEM_FUNCTION;
         if (!cm_hir_library_value_type_valid(state->context,
                 value->data.function.return_type)
-            || !cm_hir_library_owned_function_storage_valid(owned_value)
+            || !cm_hir_library_owned_function_storage_valid(
+                &state->owned.names, owned_value)
+            || !cm_hir_library_function_references_structurally_valid(
+                state->context, &value->data.function)
             || (value->data.function.generic_parameter_count == 0u
                 ? value->data.function.generic_parameter_start
                     != CM_HIR_GENERIC_PARAM_NONE
@@ -1185,6 +1940,8 @@ static int cm_hir_library_owned_value_valid(
             || owned_value->predicate_scope_count != 0u
             || owned_value->predicate_count != 0u
             || owned_value->outlives_predicate_count != 0u
+            || owned_value->nominal_reference_count != 0u
+            || owned_value->associated_availability_count != 0u
             || owned_value->parameter_types != NULL
             || owned_value->predicate_scopes != NULL
             || owned_value->predicate_scope_lifetimes != NULL
@@ -1193,6 +1950,10 @@ static int cm_hir_library_owned_value_valid(
             || owned_value->predicate_equalities != NULL
             || owned_value->predicate_lifetimes != NULL
             || owned_value->outlives_predicates != NULL
+            || owned_value->nominal_references != NULL
+            || owned_value->nominal_reference_names != NULL
+            || owned_value->nominal_reference_generic_kinds != NULL
+            || owned_value->associated_availability != NULL
             || value->data.value.mutability != CM_HIR_IMMUTABLE
             || !cm_hir_library_value_type_valid(state->context,
                 value->data.value.type)) return 0;
@@ -1204,6 +1965,8 @@ static int cm_hir_library_owned_value_valid(
             || owned_value->predicate_scope_count != 0u
             || owned_value->predicate_count != 0u
             || owned_value->outlives_predicate_count != 0u
+            || owned_value->nominal_reference_count != 0u
+            || owned_value->associated_availability_count != 0u
             || owned_value->parameter_types != NULL
             || owned_value->predicate_scopes != NULL
             || owned_value->predicate_scope_lifetimes != NULL
@@ -1212,6 +1975,10 @@ static int cm_hir_library_owned_value_valid(
             || owned_value->predicate_equalities != NULL
             || owned_value->predicate_lifetimes != NULL
             || owned_value->outlives_predicates != NULL
+            || owned_value->nominal_references != NULL
+            || owned_value->nominal_reference_names != NULL
+            || owned_value->nominal_reference_generic_kinds != NULL
+            || owned_value->associated_availability != NULL
             || (unsigned int)value->data.value.mutability
                 > (unsigned int)CM_HIR_MUTABLE
             || !cm_hir_library_value_type_valid(state->context,
@@ -1229,13 +1996,16 @@ static int cm_hir_library_owned_value_valid(
         return value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION
             || (value->data.function.predicate_scope_count == 0u
                 && value->data.function.predicate_count == 0u
-                && value->data.function.outlives_predicate_count == 0u);
+                && value->data.function.outlives_predicate_count == 0u
+                && value->data.function.nominal_reference_count == 0u
+                && value->data.function.associated_availability_count == 0u);
     }
     if (definition->state == CM_HIR_DEFINITION_BOUND) {
         const CmHirItem *item;
 
         item = cm_hir_get_item(state->context, definition->entity.item_id);
-        return cm_hir_library_value_shape_equal(value, item);
+        return cm_hir_library_value_shape_equal(value, state->context,
+            &state->owned.names, item);
     }
     return 0;
 }

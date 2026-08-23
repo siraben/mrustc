@@ -42,6 +42,35 @@ typedef enum CmHirLibraryValueKind {
     CM_HIR_LIBRARY_VALUE_STATIC
 } CmHirLibraryValueKind;
 
+typedef enum CmHirLibraryNominalReferenceUse {
+    CM_HIR_LIBRARY_REFERENCE_ONLY = 0
+} CmHirLibraryNominalReferenceUse;
+
+typedef enum CmHirLibraryNominalReferenceKind {
+    CM_HIR_LIBRARY_NOMINAL_TRAIT = 0,
+    CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE
+} CmHirLibraryNominalReferenceKind;
+
+/* Identity/schema only: this never implies that a declaration was restored. */
+typedef struct CmHirLibraryNominalReference {
+    CmHirDefId definition;
+    CmHirDefId owner_module;
+    /* Borrowed from artifact-owned storage; callers need no interner access. */
+    CmHirLibraryPathSegment name;
+    CmHirLibraryNominalReferenceUse use;
+    CmHirLibraryNominalReferenceKind kind;
+    /* Non-none only for an associated type. */
+    CmHirDefId declaring_trait;
+    const CmHirGenericParamKind *generic_parameter_kinds;
+    uint32_t generic_parameter_count;
+} CmHirLibraryNominalReference;
+
+/* A direct predicate trait through which one associated type is available. */
+typedef struct CmHirLibraryAssociatedAvailability {
+    CmHirDefId direct_trait;
+    CmHirDefId associated_type;
+} CmHirLibraryAssociatedAvailability;
+
 /*
  * Declaration-only callable shape. Parameter patterns and bodies are not
  * part of a cross-crate function signature. `parameter_types`, the generic
@@ -60,6 +89,10 @@ typedef struct CmHirLibraryFunctionSignature {
     uint32_t predicate_count;
     const CmHirOutlivesPredicate *outlives_predicates;
     uint32_t outlives_predicate_count;
+    const CmHirLibraryNominalReference *nominal_references;
+    uint32_t nominal_reference_count;
+    const CmHirLibraryAssociatedAvailability *associated_availability;
+    uint32_t associated_availability_count;
     CmInternId abi;
     CmHirSafety safety;
     int is_const;

@@ -6,9 +6,9 @@ ledger; this document orders its tasks by the deepest consumable artifact.
 
 ## Audited baseline
 
-- The branch is at `a6e7c309`, 180 commits beyond `origin/master` and 45
-  commits beyond its fork tracking branch. The tracked tree was clean before
-  this audit.
+- The audit began at `a6e7c309`. Commits through `1630867d` added declaration
+  const terms, generic public functions, lossless public-function predicate
+  capture, and canonical callable lifetime elision.
 - The C implementation has 129,227 production C/header lines and 101,804
   C/header/shell test and tool lines. It is a substantial fork, but the normal
   rustc-shaped CLI still reports that the compiler pipeline is unimplemented.
@@ -36,6 +36,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   associated equalities. Declaration metadata v2.3 deliberately remains red
   for them; v2.4 must transport those facts and their referenced trait and
   associated-item identities rather than omit them.
+- Predicate capture now also owns a canonical, reference-only nominal closure
+  for every directly named trait, its supertraits, and associated types used
+  by equalities. For the contracts frontier this retains `Fn`, `FnMut`,
+  `FnOnce`, `Copy`, the true `FnOnce::Output` parent, and the exact
+  `Fn`-to-`Output` availability witness. These records are opaque identities:
+  they do not publish namespace entries or create empty trait declarations.
+  Strict GCC, TinyCC, and Clang sanitizer library/metadata tests pass. The
+  declaration v2.3 encoder still rejects them explicitly pending v2.4.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
