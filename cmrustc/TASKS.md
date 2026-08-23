@@ -1965,6 +1965,11 @@ alias. Opaque closure capture now distinguishes trait aliases and records
 `Thin`, `Pointee`, and `PointeeSized` identities, while deliberately omitting
 Thin's definition-owned `Metadata = ()` equality and any fabricated
 function-predicate availability. Alias expansion and solving remain deferred.
+The optimized post-`1746e681` whole-core gate now completes declaration
+library capture with 451 modules, 1,632 public type entries, and 20,692 public
+value entries. The v2.3 encoder then returns `unsupported HIR` with zero bytes,
+so M6-06's active frontier is the versioned predicate/reference-only nominal
+wire format rather than capture.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

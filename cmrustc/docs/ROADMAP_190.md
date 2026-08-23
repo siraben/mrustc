@@ -51,6 +51,11 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `PointeeSized` identities. It deliberately does not turn Thin's internal
   `Pointee<Metadata = ()>` bound into a function-predicate equality or
   availability fact; alias-definition semantics remain deferred.
+- At `1746e681`, an optimized whole-core gate completes value-aware library
+  capture: 451 modules, 1,632 public type entries, and 20,692 public value
+  entries. Declaration metadata v2.3 then rejects unsupported HIR and emits
+  zero bytes. The active frontier is therefore the versioned predicate and
+  reference-only nominal wire boundary, not library capture.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
