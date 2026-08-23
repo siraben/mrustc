@@ -67,9 +67,11 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   intervening capture regression was a validator bug: two predicate equality
   occurrences may share one canonical availability identity. Availability is
   now authenticated as a bidirectional deduplicated set. The next encoder
-  slice must cover the first unsupported real-core predicate shape; source
-  order places `const_eval_select`'s `~const FnOnce` constraint before the
-  already known direct `Thin` trait-alias bound, pending diagnostic confirmation.
+  slice must cover the first unsupported real-core predicate shape. An
+  encoder-policy trace identifies function DefId `1:9087` with a scope-free
+  `CONST_IF_CONST` (`~const`) predicate before the already known direct `Thin`
+  trait-alias bound; its direct nominal lookup is also absent and must be
+  explained rather than bypassed.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

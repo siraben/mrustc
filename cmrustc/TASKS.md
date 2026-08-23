@@ -1978,9 +1978,11 @@ The optimized post-`4bd79751` gate restores the same 451/1,632/20,692 capture
 after fixing availability validation to compare deduplicated identity sets
 rather than equality-occurrence counts. Declaration v2.4 still returns
 `unsupported HIR` and zero bytes. The next bounded encoder frontier is the
-first unsupported core predicate form, expected from `const_eval_select`'s
-`~const FnOnce` constraint before the known direct `Thin` alias predicate;
-temporary diagnostics must confirm that ordering before widening the wire.
+first unsupported core predicate form. A temporary encoder-policy trace
+identifies function DefId `1:9087` with a scope-free `CONST_IF_CONST`
+(`~const`) predicate before the known direct `Thin` alias predicate. Its direct
+nominal lookup is also absent, so the next slice must authenticate that capture
+edge as well as version the modifier; the trace was removed after measurement.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous
