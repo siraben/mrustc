@@ -48,7 +48,8 @@ typedef enum CmHirLibraryNominalReferenceUse {
 
 typedef enum CmHirLibraryNominalReferenceKind {
     CM_HIR_LIBRARY_NOMINAL_TRAIT = 0,
-    CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE
+    CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE,
+    CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS
 } CmHirLibraryNominalReferenceKind;
 
 /* Identity/schema only: this never implies that a declaration was restored. */

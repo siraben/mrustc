@@ -1959,6 +1959,12 @@ nominal closure and exact associated-type availability witnesses. The
 parent. The records remain opaque: they create neither namespace bindings nor
 fake empty traits. Strict GCC, TinyCC, and Clang ASan/UBSan/LSan library and
 metadata tests pass; v2.3 continues to reject the new facts fail-closed.
+The next instrumented whole-core capture failure was
+`core::ptr::null<T: PointeeSized + Thin>` at DefId `1:9501`: `Thin` is a trait
+alias. Opaque closure capture now distinguishes trait aliases and records
+`Thin`, `Pointee`, and `PointeeSized` identities, while deliberately omitting
+Thin's definition-owned `Metadata = ()` equality and any fabricated
+function-predicate availability. Alias expansion and solving remain deferred.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

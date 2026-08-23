@@ -44,6 +44,13 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   they do not publish namespace entries or create empty trait declarations.
   Strict GCC, TinyCC, and Clang sanitizer library/metadata tests pass. The
   declaration v2.3 encoder still rejects them explicitly pending v2.4.
+- An instrumented whole-core pass after `754cd5c4` proved the next capture
+  frontier was `core::ptr::null<T: PointeeSized + Thin>`: `Thin` is a trait
+  alias, not an ordinary trait. Reference-only closure capture now
+  distinguishes trait aliases and retains `Thin`, `Pointee`, and
+  `PointeeSized` identities. It deliberately does not turn Thin's internal
+  `Pointee<Metadata = ()>` bound into a function-predicate equality or
+  availability fact; alias-definition semantics remain deferred.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

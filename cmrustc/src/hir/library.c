@@ -1189,15 +1189,24 @@ static int cm_hir_library_add_nominal_reference(const CmHirContext *context,
     source_name = item == NULL ? NULL
         : cm_interner_get(&context->strings, item->name);
     if (item == NULL
-        || module == NULL || source_name == NULL || source_name->len == 0u
-        || (kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
-            ? (item->kind != CM_HIR_ITEM_TRAIT
-                || !cm_hir_def_id_is_none(declaring_trait))
-            : (item->kind != CM_HIR_ITEM_TYPE_ALIAS
+        || module == NULL || source_name == NULL || source_name->len == 0u) {
+        return 0;
+    }
+    if (kind == CM_HIR_LIBRARY_NOMINAL_TRAIT) {
+        if (item->kind != CM_HIR_ITEM_TRAIT
+            || !cm_hir_def_id_is_none(declaring_trait)) return 0;
+    } else if (kind == CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS) {
+        if (item->kind != CM_HIR_ITEM_TRAIT_ALIAS
+            || !cm_hir_def_id_is_none(declaring_trait)) return 0;
+    } else if (kind == CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) {
+        if (item->kind != CM_HIR_ITEM_TYPE_ALIAS
                 || item->data.type_alias_item.target != CM_HIR_TYPE_NONE
                 || cm_hir_def_id_is_none(declaring_trait)
                 || !cm_hir_def_id_equal(item->parent_definition,
-                    declaring_trait)))) return 0;
+                    declaring_trait)) return 0;
+    } else {
+        return 0;
+    }
     name = capture_names == NULL
         ? cm_interner_lookup(names, source_name->bytes, source_name->len)
         : cm_interner_intern(capture_names, source_name->bytes,
@@ -1239,30 +1248,60 @@ static int cm_hir_library_add_nominal_reference(const CmHirContext *context,
     return 1;
 }
 
-static int cm_hir_library_collect_trait_closure(
+static int cm_hir_library_collect_nominal_bound_closure(
     const CmHirContext *context, const CmInterner *names,
-    CmInterner *capture_names, CmHirDefId trait_definition,
+    CmInterner *capture_names, CmHirDefId bound_definition,
     CmVec *references, size_t depth)
 {
-    const CmHirItem *trait_item;
+    const CmHirItem *bound_item;
+    CmHirLibraryNominalReferenceKind reference_kind;
     size_t prior_count;
     uint32_t index;
 
     if (depth > context->items.len) return 0;
+    bound_item = cm_hir_library_bound_item(context, bound_definition);
+    if (bound_item == NULL) return 0;
+    if (bound_item->kind == CM_HIR_ITEM_TRAIT) {
+        reference_kind = CM_HIR_LIBRARY_NOMINAL_TRAIT;
+    } else if (bound_item->kind == CM_HIR_ITEM_TRAIT_ALIAS) {
+        reference_kind = CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS;
+    } else {
+        return 0;
+    }
     prior_count = references->len;
     if (!cm_hir_library_add_nominal_reference(context, names, capture_names,
-            references, trait_definition, CM_HIR_LIBRARY_NOMINAL_TRAIT,
+            references, bound_definition, reference_kind,
             cm_hir_def_id_none())) return 0;
     if (references->len == prior_count) return 1;
-    trait_item = cm_hir_library_bound_item(context, trait_definition);
-    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) return 0;
-    for (index = 0u; index < trait_item->data.trait_item.supertrait_count;
-            ++index) {
-        if (!cm_hir_library_collect_trait_closure(context, names,
-                capture_names,
-                trait_item->data.trait_item.supertraits[index]
-                    .trait_type.definition,
-                references, depth + 1u)) return 0;
+    if (bound_item->kind == CM_HIR_ITEM_TRAIT) {
+        for (index = 0u;
+                index < bound_item->data.trait_item.supertrait_count;
+                ++index) {
+            if (!cm_hir_library_collect_nominal_bound_closure(context, names,
+                    capture_names,
+                    bound_item->data.trait_item.supertraits[index]
+                        .trait_type.definition,
+                    references, depth + 1u)) return 0;
+        }
+    } else {
+        for (index = 0u;
+                index < bound_item->data.trait_alias_item.bound_count;
+                ++index) {
+            const CmHirTraitAliasBound *bound;
+
+            bound = &bound_item->data.trait_alias_item.bounds[index];
+            if (bound->kind == CM_HIR_TRAIT_ALIAS_BOUND_LIFETIME) continue;
+            /*
+             * Alias-bound equalities belong to the opaque alias definition,
+             * not to the consuming function predicate.  This slice records
+             * only the transitive nominal identity closure.
+             */
+            if (bound->kind != CM_HIR_TRAIT_ALIAS_BOUND_TRAIT
+                || !cm_hir_library_collect_nominal_bound_closure(context,
+                    names, capture_names,
+                    bound->data.trait_bound.trait_type.definition,
+                    references, depth + 1u)) return 0;
+        }
     }
     return 1;
 }
@@ -1344,7 +1383,7 @@ static int cm_hir_library_collect_nominal_references(
         uint32_t equality_index;
 
         predicate = &item->predicates[predicate_index];
-        if (!cm_hir_library_collect_trait_closure(context, names,
+        if (!cm_hir_library_collect_nominal_bound_closure(context, names,
                 capture_names,
                 predicate->trait_type.definition, references, 0u)) return 0;
         for (equality_index = 0u; equality_index < predicate->equality_count;
@@ -1574,6 +1613,19 @@ cm_hir_library_find_nominal_reference(
     return NULL;
 }
 
+static const CmHirLibraryNominalReference *
+cm_hir_library_find_trait_like_nominal_reference(
+    const CmHirLibraryFunctionSignature *function, CmHirDefId definition)
+{
+    const CmHirLibraryNominalReference *reference;
+
+    reference = cm_hir_library_find_nominal_reference(function, definition,
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    return reference != NULL ? reference
+        : cm_hir_library_find_nominal_reference(function, definition,
+            CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS);
+}
+
 static int cm_hir_library_reference_schema_valid(
     const CmHirContext *context,
     const CmHirLibraryNominalReference *reference)
@@ -1644,7 +1696,7 @@ static int cm_hir_library_nominal_reference_valid(
 
     if (reference->use != CM_HIR_LIBRARY_REFERENCE_ONLY
         || (unsigned int)reference->kind
-            > (unsigned int)CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE
+            > (unsigned int)CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS
         || cm_hir_def_id_is_none(reference->definition)
         || cm_hir_def_id_is_none(reference->owner_module)
         || !cm_hir_library_reference_schema_valid(context, reference)) {
@@ -1661,9 +1713,15 @@ static int cm_hir_library_nominal_reference_valid(
         || owner_module == NULL
         || !cm_hir_def_id_equal(owner_module->definition,
             reference->owner_module)) return 0;
-    expected_kind = reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
-        ? CM_HIR_ITEM_TRAIT : CM_HIR_ITEM_TYPE_ALIAS;
     if (reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT) {
+        expected_kind = CM_HIR_ITEM_TRAIT;
+    } else if (reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS) {
+        expected_kind = CM_HIR_ITEM_TRAIT_ALIAS;
+    } else {
+        expected_kind = CM_HIR_ITEM_TYPE_ALIAS;
+    }
+    if (reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
+        || reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS) {
         if (!cm_hir_def_id_is_none(reference->declaring_trait)) return 0;
     } else if (cm_hir_def_id_is_none(reference->declaring_trait)
         || cm_hir_library_find_nominal_reference(function,
@@ -1766,9 +1824,8 @@ static int cm_hir_library_function_references_structurally_valid(
         uint32_t equality_index;
 
         predicate = &function->predicates[index];
-        if (cm_hir_library_find_nominal_reference(function,
-                predicate->trait_type.definition,
-                CM_HIR_LIBRARY_NOMINAL_TRAIT) == NULL) return 0;
+        if (cm_hir_library_find_trait_like_nominal_reference(function,
+                predicate->trait_type.definition) == NULL) return 0;
         for (equality_index = 0u; equality_index < predicate->equality_count;
                 ++equality_index) {
             if (cm_hir_library_find_nominal_reference(function,

@@ -23,10 +23,14 @@ static const unsigned char predicate_function_source[] =
     "trait FnMut<Args>: FnOnce<Args> {}\n"
     "trait Fn<Args>: FnMut<Args> {}\n"
     "trait Copy {}\n"
+    "trait Pointee { type Metadata; }\n"
+    "trait PointeeSized {}\n"
+    "trait Thin = Pointee<Metadata = ()> + PointeeSized;\n"
     "pub fn constrained<Ret, C>(cond: C) -> C "
         "where C: Fn(&Ret) -> bool + Copy + 'static { cond }\n"
     "pub fn scoped<Ret, C>(cond: C) -> C "
-        "where for<'a> C: Fn(&'a Ret) -> bool { cond }\n";
+        "where for<'a> C: Fn(&'a Ret) -> bool { cond }\n"
+    "pub const fn null<T: PointeeSized + Thin>() {}\n";
 
 typedef struct ProducerFixture {
     CmHirContext context;
@@ -3245,6 +3249,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
     CmHirLibraryArtifactIdentity sentinel_identity;
     CmHirLibraryValue rejected_value;
     CmHirLibraryValue scoped_value;
+    CmHirLibraryValue alias_value;
     const CmHirType *predicate_subject;
     const CmHirGenericParam *predicate_parameter;
     const CmHirType *callable_argument;
@@ -3256,6 +3261,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
     CmHirLibraryOwnedData predicate_owned;
     CmHirLibraryOwnedValue *owned_constrained;
     CmHirLibraryOwnedValue *owned_scoped;
+    CmHirLibraryOwnedValue *owned_alias;
     CmHirLibraryArtifact predicate_artifact;
     CmHirLibraryArtifactResult library_result;
     CmHirLibraryArtifactIdentity predicate_identity;
@@ -3268,10 +3274,17 @@ static void test_declaration_v2_generic_function_round_trip(void)
     const CmHirLibraryNominalReference *fn_once_reference;
     const CmHirLibraryNominalReference *copy_reference;
     const CmHirLibraryNominalReference *output_reference;
+    const CmHirLibraryNominalReference *thin_reference;
+    const CmHirLibraryNominalReference *pointee_reference;
+    const CmHirLibraryNominalReference *pointee_sized_reference;
+    const CmHirLibraryNominalReference *metadata_reference;
     const CmHirLibraryNominalReference *owned_fn_reference;
     CmHirLibraryNominalReference *owned_fn_mutable;
     CmHirLibraryNominalReference *owned_copy_mutable;
     CmHirLibraryNominalReference *owned_output_mutable;
+    CmHirLibraryNominalReference *owned_thin_mutable;
+    CmHirLibraryNominalReferenceKind owned_nominal_kind;
+    CmHirDefId owned_nominal_definition;
     CmHirDefId owned_declaring_trait;
     CmHirDefId owned_available_trait;
     CmHirGenericParamKind owned_schema_kind;
@@ -3324,7 +3337,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
 
     assert(parsed_producer_build(&rejected, predicate_function_source,
-        sizeof(predicate_function_source) - 1u, 1u, 0u, 2u, 1));
+        sizeof(predicate_function_source) - 1u, 1u, 0u, 3u, 1));
     rejected_value = lookup_value(&rejected.artifact, "producer",
         "constrained");
     assert(rejected_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
@@ -3520,6 +3533,57 @@ static void test_declaration_v2_generic_function_round_trip(void)
             != source_item->predicate_scopes
         && scoped_value.data.function.predicate_scopes[0].binder.lifetimes
             != source_item->predicate_scopes[0].binder.lifetimes);
+    alias_value = lookup_value(&rejected.artifact, "producer", "null");
+    thin_reference = find_nominal_reference(&alias_value, "Thin",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS);
+    pointee_reference = find_nominal_reference(&alias_value, "Pointee",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    pointee_sized_reference = find_nominal_reference(&alias_value,
+        "PointeeSized", CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    metadata_reference = find_nominal_reference(&alias_value, "Metadata",
+        CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE);
+    assert(alias_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && alias_value.data.function.is_const == 1
+        && alias_value.data.function.parameter_count == 0u
+        && alias_value.data.function.generic_parameter_count == 1u
+        && alias_value.data.function.predicate_count == 2u
+        && alias_value.data.function.outlives_predicate_count == 0u
+        && alias_value.data.function.nominal_reference_count == 3u
+        && alias_value.data.function.associated_availability_count == 0u
+        && thin_reference != NULL && pointee_reference != NULL
+        && pointee_sized_reference != NULL && metadata_reference == NULL
+        && thin_reference->generic_parameter_count == 0u
+        && thin_reference->generic_parameter_kinds == NULL
+        && pointee_reference->generic_parameter_count == 0u
+        && pointee_sized_reference->generic_parameter_count == 0u
+        && cm_hir_def_id_equal(thin_reference->owner_module,
+            predicate_identity.root_definition)
+        && ((cm_hir_def_id_equal(alias_value.data.function.predicates[0]
+                    .trait_type.definition, thin_reference->definition)
+                && cm_hir_def_id_equal(alias_value.data.function.predicates[1]
+                    .trait_type.definition,
+                    pointee_sized_reference->definition))
+            || (cm_hir_def_id_equal(alias_value.data.function.predicates[1]
+                    .trait_type.definition, thin_reference->definition)
+                && cm_hir_def_id_equal(alias_value.data.function.predicates[0]
+                    .trait_type.definition,
+                    pointee_sized_reference->definition))));
+    source_definition = cm_hir_lookup_definition(&rejected.context,
+        thin_reference->definition);
+    source_item = source_definition == NULL ? NULL : cm_hir_get_item(
+        &rejected.context, source_definition->entity.item_id);
+    assert(source_definition != NULL
+        && source_definition->state == CM_HIR_DEFINITION_BOUND
+        && source_definition->reserved_item_kind == CM_HIR_ITEM_TRAIT_ALIAS
+        && source_item != NULL && source_item->kind == CM_HIR_ITEM_TRAIT_ALIAS
+        && source_item->data.trait_alias_item.bound_count == 2u);
+    hidden_path[0].bytes = (const unsigned char *)"producer";
+    hidden_path[0].length = 8u;
+    hidden_path[1].bytes = (const unsigned char *)"Thin";
+    hidden_path[1].length = 4u;
+    memset(&hidden_binding, 0, sizeof(hidden_binding));
+    assert(cm_hir_library_artifact_lookup_binding(&rejected.artifact,
+        hidden_path, 2u, &hidden_binding) == CM_HIR_LIBRARY_NOT_FOUND);
     cm_hir_library_owned_data_init(&predicate_owned);
     assert(cm_interner_length(&predicate_owned.names) == 0u);
     assert(cm_hir_library_owned_data_add_module(&predicate_owned,
@@ -3530,17 +3594,22 @@ static void test_declaration_v2_generic_function_round_trip(void)
         && cm_interner_length(&predicate_owned.names) == 5u);
     assert(cm_hir_library_owned_data_add_value(&predicate_owned,
         &scoped_value) == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &alias_value) == CM_HIR_LIBRARY_OK
+        && cm_interner_length(&predicate_owned.names) == 8u);
     add_entry(&predicate_owned, predicate_root_index, "constrained",
         value_binding(rejected_value.definition,
             CM_HIR_LIBRARY_VALUE_FUNCTION));
     add_entry(&predicate_owned, predicate_root_index, "scoped",
         value_binding(scoped_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
+    add_entry(&predicate_owned, predicate_root_index, "null",
+        value_binding(alias_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
     cm_hir_library_artifact_init(&predicate_artifact);
     library_result = cm_hir_library_artifact_restore_owned(
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "bounded", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_OK
-        && library_result.public_value_entry_count == 2u
+        && library_result.public_value_entry_count == 3u
         && predicate_owned.values.len == 0u);
     cm_hir_library_owned_data_destroy(&predicate_owned);
 
@@ -3552,18 +3621,44 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &rejected_value) == CM_HIR_LIBRARY_OK);
     assert(cm_hir_library_owned_data_add_value(&predicate_owned,
         &scoped_value) == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &alias_value) == CM_HIR_LIBRARY_OK);
     add_entry(&predicate_owned, predicate_root_index, "constrained",
         value_binding(rejected_value.definition,
             CM_HIR_LIBRARY_VALUE_FUNCTION));
     add_entry(&predicate_owned, predicate_root_index, "scoped",
         value_binding(scoped_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
+    add_entry(&predicate_owned, predicate_root_index, "null",
+        value_binding(alias_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
     owned_constrained = (CmHirLibraryOwnedValue *)cm_vec_at(
         &predicate_owned.values, 0u);
     owned_scoped = (CmHirLibraryOwnedValue *)cm_vec_at(
         &predicate_owned.values, 1u);
+    owned_alias = (CmHirLibraryOwnedValue *)cm_vec_at(
+        &predicate_owned.values, 2u);
     assert(owned_constrained != NULL && owned_scoped != NULL
+        && owned_alias != NULL
         && cm_hir_library_artifact_identity(&predicate_artifact,
             &predicate_identity_after));
+    owned_thin_mutable = NULL;
+    for (nominal_index = 0u;
+            nominal_index < owned_alias->nominal_reference_count;
+            ++nominal_index) {
+        if (cm_hir_def_id_equal(
+                owned_alias->nominal_references[nominal_index].definition,
+                thin_reference->definition)) {
+            owned_thin_mutable =
+                &owned_alias->nominal_references[nominal_index];
+        }
+    }
+    assert(owned_alias->nominal_references
+            != alias_value.data.function.nominal_references
+        && owned_alias->associated_availability == NULL
+        && owned_thin_mutable != NULL
+        && owned_thin_mutable->name.bytes != thin_reference->name.bytes
+        && owned_thin_mutable->name.length == thin_reference->name.length
+        && memcmp(owned_thin_mutable->name.bytes, thin_reference->name.bytes,
+            thin_reference->name.length) == 0);
     owned_fn_reference = find_nominal_reference(
         &owned_constrained->declaration, "Fn",
         CM_HIR_LIBRARY_NOMINAL_TRAIT);
@@ -3615,14 +3710,14 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_constrained->predicates[0].trait_type.arguments = owned_arguments;
     owned_constrained->predicates[0].modifier = CM_HIR_PREDICATE_CONST;
     library_result = cm_hir_library_artifact_restore_owned(
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_constrained->predicates[0].modifier = CM_HIR_PREDICATE_REQUIRED;
     owned_constrained->outlives_predicates[0].bound.kind =
         CM_HIR_REGION_ERASED;
@@ -3630,7 +3725,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_constrained->outlives_predicates[0].bound.kind =
         CM_HIR_REGION_STATIC;
     owned_scope_span_end = owned_scoped->predicate_scopes[0].span.end;
@@ -3639,7 +3734,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_scoped->predicate_scopes[0].span.end = owned_scope_span_end;
     owned_schema_kind = owned_fn_mutable->generic_parameter_kinds[0];
     owned_constrained->nominal_reference_generic_kinds[
@@ -3649,7 +3744,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_constrained->nominal_reference_generic_kinds[
         (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)]
             [0] = owned_schema_kind;
@@ -3659,7 +3754,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_fn_mutable->owner_module = owned_owner_module;
     owned_reference_name = owned_fn_mutable->name;
     owned_reference_name_id = owned_constrained->nominal_reference_names[
@@ -3673,7 +3768,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_fn_mutable->name = owned_reference_name;
     owned_constrained->nominal_reference_names[
         (uint32_t)(owned_fn_mutable - owned_constrained->nominal_references)] =
@@ -3684,7 +3779,7 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_output_mutable->declaring_trait = owned_declaring_trait;
     owned_available_trait = owned_constrained->associated_availability[0]
         .direct_trait;
@@ -3694,9 +3789,25 @@ static void test_declaration_v2_generic_function_round_trip(void)
         &predicate_artifact, &rejected.context, predicate_identity.crate_id,
         predicate_identity.root_definition, "broken", &predicate_owned);
     assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
-        && predicate_owned.values.len == 2u);
+        && predicate_owned.values.len == 3u);
     owned_constrained->associated_availability[0].direct_trait =
         owned_available_trait;
+    owned_nominal_kind = owned_thin_mutable->kind;
+    owned_thin_mutable->kind = CM_HIR_LIBRARY_NOMINAL_TRAIT;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 3u);
+    owned_thin_mutable->kind = owned_nominal_kind;
+    owned_nominal_definition = owned_thin_mutable->definition;
+    owned_thin_mutable->definition = pointee_reference->definition;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 3u);
+    owned_thin_mutable->definition = owned_nominal_definition;
     assert(cm_hir_library_artifact_identity(&predicate_artifact,
         &predicate_identity)
         && predicate_identity.context == predicate_identity_after.context
