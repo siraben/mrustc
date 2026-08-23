@@ -1927,7 +1927,7 @@ same-generation authorization ABA while barrier-derived admission is built.
 | M6-03 | TODO | Build scripts and override mechanism | Rust 1.90 overrides reproduce oracle outputs |
 | M6-04 | TODO | Native/proc-macro dependency handling | Proc macros and native libraries load |
 | M6-05 | DONE | Complete target-configured Rust 1.90 core HIR | `make check-core-hir`: 363-source/451-module core lowers with zero graph, import, and HIR errors (38176 items, 22524 bodies) |
-| M6-06 | TODO | Emit consumable core metadata and `.rlib` | Nonempty artifacts load in a dependent compile |
+| M6-06 | ACTIVE | Emit consumable core metadata and `.rlib` | Nonempty artifacts load in a dependent compile |
 | M6-07 | TODO | Build alloc against core artifacts | alloc consumes core macro/metadata artifacts and emits a nonempty `.rlib` |
 | M6-08 | TODO | Run a core/alloc-linked executable | Linked probe has the expected status and output |
 | M6-09 | TODO | Implement C `hcargo` Rust 1.90 DAG build | Complete pinned crate DAG produces checked nonempty artifacts |
@@ -1949,16 +1949,18 @@ first value-aware library capture rejected `core/src/contracts.rs:19`'s
 + 'static` clause lowers to two trait predicates and one outlives predicate.
 Library artifacts now deep-copy and authenticate predicate scopes, trait
 predicates, and outlives predicates for public free functions. Declaration
-metadata v2.3 still explicitly rejects any such value without mutating its
-output; v2.4 must transport these facts and the referenced trait declarations
-instead of omitting them.
+metadata v2.4 transports the bounded `build_check_ensures` shape, including
+its predicate-owned late-bound callable input, associated equality, and
+`'static` outlives fact. Referenced traits and associated types decode as
+opaque RESERVED identities rather than fabricated declarations.
 Predicate capture additionally retains a sorted, deduplicated reference-only
 nominal closure and exact associated-type availability witnesses. The
 `build_check_ensures` fixture records `Fn`, `FnMut`, `FnOnce`, `Copy`, and
 `FnOnce::Output` with authenticated owner, name, generic schema, and declaring
 parent. The records remain opaque: they create neither namespace bindings nor
 fake empty traits. Strict GCC, TinyCC, and Clang ASan/UBSan/LSan library and
-metadata tests pass; v2.3 continues to reject the new facts fail-closed.
+metadata tests pass. V2.4 fresh-process decode and byte-identical re-encode
+also pass while solver/projection consumers remain deferred.
 The next instrumented whole-core capture failure was
 `core::ptr::null<T: PointeeSized + Thin>` at DefId `1:9501`: `Thin` is a trait
 alias. Opaque closure capture now distinguishes trait aliases and records
@@ -1967,9 +1969,11 @@ Thin's definition-owned `Metadata = ()` equality and any fabricated
 function-predicate availability. Alias expansion and solving remain deferred.
 The optimized post-`1746e681` whole-core gate now completes declaration
 library capture with 451 modules, 1,632 public type entries, and 20,692 public
-value entries. The v2.3 encoder then returns `unsupported HIR` with zero bytes,
-so M6-06's active frontier is the versioned predicate/reference-only nominal
-wire format rather than capture.
+value entries. The v2.3 encoder then returned `unsupported HIR` with zero
+bytes. V2.4 now implements the first predicate/reference-only nominal wire
+slice; the real-core gate must be re-run to identify the next exact unsupported
+shape. Direct trait-alias predicates remain fail-closed pending an
+alias-definition/provenance representation.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

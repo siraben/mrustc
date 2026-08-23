@@ -64,13 +64,20 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     CmSourceId metadata_source);
 
 /*
- * Exact cmhir-meta-v2.3 declaration boundary. It extends v1.0 with
- * authenticated predicate-free public free-function signatures and public
- * const/static declarations in a separate value namespace. Bodies, MIR,
- * evaluated constants, predicates, and link objects are absent by contract.
- * ADT and free-function lifetime/type/const parameters, literal and parameter
- * const arguments, and literal/parameter array lengths are transported.
- * Unsupported declaration types reject the complete transaction.
+ * Exact cmhir-meta-v2.4 declaration encoder, with strict v2.4 then legacy
+ * v2.3 decoder dispatch. In addition to v2.3 values, v2.4 transports the
+ * bounded predicate shape used by generic public free functions: required
+ * scope-free trait predicates on direct function type parameters with type
+ * arguments, zero-GAT associated-type
+ * equalities, predicate-owned late-bound input regions, and type-subject
+ * `'static` outlives predicates whose subjects are direct function type
+ * parameters. Referenced traits, trait aliases, and
+ * associated types are restored as opaque REFERENCE_ONLY identities with
+ * schemas and ownership facts; no fake item or namespace binding is created.
+ * Solving, projection, trait-alias expansion, scoped HRTBs, bodies, MIR,
+ * evaluated constants, and link objects remain deferred or unsupported.
+ * Unsupported shapes reject the complete transaction, and output/context/
+ * artifact sentinels remain unchanged on failure.
  */
 CmHirMetadataArtifactResult cm_hir_metadata_encode_declaration_artifact(
     CmByteBuf *output, const CmHirLibraryArtifact *artifact);

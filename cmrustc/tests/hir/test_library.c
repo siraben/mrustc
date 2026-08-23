@@ -514,10 +514,87 @@ static void test_reserved_predicate_value_rejected(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_reserved_parameter_outlives_value_accepted(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    const CmHirModule *root;
+    CmHirDefId function_definition;
+    CmHirGenericParam generic;
+    CmHirGenericParamId generic_id;
+    CmHirType type;
+    CmHirTypeId parameter_type;
+    CmHirOutlivesPredicate outlives;
+    CmHirLibraryValue value;
+    CmHirLibraryBinding binding;
+    CmHirLibraryOwnedData owned;
+    size_t root_index;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactResult result;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context, cm_hir_intern(&context, "reserved"),
+        CM_HIR_EDITION_2024, test_span(1u, 20u), &crate_id, &root_module)
+        == CM_HIR_OK);
+    root = cm_hir_get_module(&context, root_module);
+    assert(root != NULL);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_FUNCTION, test_span(3u, 12u), &function_definition)
+        == CM_HIR_OK);
+    memset(&generic, 0, sizeof(generic));
+    generic.kind = CM_HIR_GENERIC_TYPE;
+    generic.owner = function_definition;
+    generic.name = cm_hir_intern(&context, "T");
+    generic.span = test_span(4u, 5u);
+    assert(cm_hir_add_generic_param(&context, &generic, &generic_id)
+        == CM_HIR_OK);
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = test_span(5u, 6u);
+    type.data.parameter_type.parameter = generic_id;
+    assert(cm_hir_add_type(&context, &type, &parameter_type) == CM_HIR_OK);
+    memset(&outlives, 0, sizeof(outlives));
+    outlives.subject_kind = CM_HIR_OUTLIVES_TYPE;
+    outlives.subject.type = parameter_type;
+    outlives.bound.kind = CM_HIR_REGION_STATIC;
+    outlives.span = test_span(5u, 8u);
+    memset(&value, 0, sizeof(value));
+    value.definition = function_definition;
+    value.kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+    value.data.function.return_type = parameter_type;
+    value.data.function.generic_parameter_start = generic_id;
+    value.data.function.generic_parameter_count = 1u;
+    value.data.function.outlives_predicates = &outlives;
+    value.data.function.outlives_predicate_count = 1u;
+    value.data.function.abi = cm_hir_intern(&context, "Rust");
+    cm_hir_library_owned_data_init(&owned);
+    assert(cm_hir_library_owned_data_add_module(&owned, root->definition,
+        &root_index) == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&owned, &value)
+        == CM_HIR_LIBRARY_OK);
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
+    binding.definition = function_definition;
+    binding.value_kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+    assert(cm_hir_library_owned_data_add_entry(&owned, root_index,
+        (const unsigned char *)"future", 6u, &binding)
+        == CM_HIR_LIBRARY_OK);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_library_artifact_restore_owned(&artifact, &context,
+        crate_id, root->definition, "reserved", &owned);
+    assert(result.status == CM_HIR_LIBRARY_OK && owned.values.len == 0u
+        && owned.modules.len == 0u);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_library_owned_data_destroy(&owned);
+    cm_hir_context_destroy(&context);
+}
+
 int main(void)
 {
     test_owned_restore_is_transactional();
     test_owned_predicate_copy_and_equality();
     test_reserved_predicate_value_rejected();
+    test_reserved_parameter_outlives_value_accepted();
     return 0;
 }

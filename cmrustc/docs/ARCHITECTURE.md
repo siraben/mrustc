@@ -77,9 +77,19 @@ declaration-only raw `cmhir` bytes. The private driver switches
 atomic publication. The v2.3 declaration format carries predicate-free public
 free functions (including lifetime/type/const parameters), public consts and
 statics, const generic parameters, and literal/parameter const uses in named
-arguments and array lengths. It does not yet carry the complete core
-trait/impl/predicate, body, instantiation, dependency-archive, or link-input
-surface, and it is not yet a consumable core `.rmeta` or `.rlib`.
+arguments and array lengths. Version 2.4 appends canonical `NREF` and sparse
+`PRED` sections for a bounded scope-free public-function predicate shape.
+Referenced traits and associated types remain opaque RESERVED identities with
+authenticated names, owners, generic schemas, declaring parents, and explicit
+associated-availability witnesses; they create no item or namespace binding.
+Predicate-owned late-bound input regions are accepted only beneath their
+authenticating binder. Decoder preflight checks canonical ordering, aggregate
+resource limits, type reachability and nesting, generic provenance, and all
+cross-section references before reserving runtime definitions. Exact v2.4
+decode falls back to exact v2.3 only for an unsupported version. Neither format
+yet carries the complete core trait/alias/impl, body, instantiation,
+dependency-archive, or link-input surface, and neither is yet a consumable core
+`.rmeta` or `.rlib`.
 
 The preceding Haskell `hrustc` experiment is useful negative evidence. Its
 last session reached a rustc-like binary that accepted `hello.rs` and exited

@@ -16,6 +16,7 @@ first_artifact=$temporary_directory/first.cmhir
 second_artifact=$temporary_directory/second.cmhir
 declaration_artifact=$temporary_directory/declaration-v2.cmhir
 generic_function_artifact=$temporary_directory/generic-function.cmhir
+predicate_function_artifact=$temporary_directory/predicate-function.cmhir
 
 "$test_program" produce-forward "$first_artifact"
 "$test_program" produce-reverse "$second_artifact"
@@ -28,5 +29,8 @@ test -s "$declaration_artifact"
 "$test_program" produce-generic-function "$generic_function_artifact"
 test -s "$generic_function_artifact"
 "$test_program" consume-generic-function "$generic_function_artifact"
+"$test_program" produce-predicate-function "$predicate_function_artifact"
+test -s "$predicate_function_artifact"
+"$test_program" consume-predicate-function "$predicate_function_artifact"
 
 echo "HIR metadata separate-process acceptance: ok"

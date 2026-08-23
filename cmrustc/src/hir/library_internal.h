@@ -3,6 +3,9 @@
 
 #include "cm/hir/library.h"
 
+/* Keep all recursive metadata/library type authentication stack-bounded. */
+#define CM_META_MAX_TYPE_NESTING 1024u
+
 /*
  * Owned, graph-independent namespace data.  A future metadata decoder can
  * construct this representation using only remapped, same-context DefIds.

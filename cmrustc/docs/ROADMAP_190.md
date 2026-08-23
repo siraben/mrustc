@@ -20,11 +20,13 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
   declaration metadata for that surface.
-- This audit extends declaration metadata to v2.3. It transports authenticated
+- This audit extends declaration metadata through v2.4. Version 2.3 transports authenticated
   literal and parameter const uses in named generic arguments and array
   lengths, plus predicate-free public free functions with lifetime, type, and
-  const parameters. Focused GCC, strict C99, TinyCC, and fresh-process
-  metadata tests pass; legacy v1.0/v1.1 bytes remain unchanged.
+  const parameters. Version 2.4 adds a bounded public-function predicate
+  section and opaque reference-only trait/associated identities. Strict v2.4
+  decode falls back to exact legacy v2.3 only on an unsupported-version result;
+  legacy v1.0/v1.1 bytes remain unchanged.
 - No current `.rlib`, compiler-built `core`, `alloc`, `std`, `rustc`, or
   `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
@@ -33,17 +35,20 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   -> bool + Copy + 'static` clause lowers to two trait predicates and one
   outlives predicate. Library capture now owns and authenticates all three
   predicate families, including nested callable binders, trait arguments, and
-  associated equalities. Declaration metadata v2.3 deliberately remains red
-  for them; v2.4 must transport those facts and their referenced trait and
-  associated-item identities rather than omit them.
+  associated equalities. Declaration metadata v2.4 transports this exact
+  scope-free required-predicate shape, its predicate-owned late-bound input
+  region, the `FnOnce::Output = bool` equality, and `C: 'static` without
+  publishing incomplete trait declarations.
 - Predicate capture now also owns a canonical, reference-only nominal closure
   for every directly named trait, its supertraits, and associated types used
   by equalities. For the contracts frontier this retains `Fn`, `FnMut`,
   `FnOnce`, `Copy`, the true `FnOnce::Output` parent, and the exact
   `Fn`-to-`Output` availability witness. These records are opaque identities:
   they do not publish namespace entries or create empty trait declarations.
-  Strict GCC, TinyCC, and Clang sanitizer library/metadata tests pass. The
-  declaration v2.3 encoder still rejects them explicitly pending v2.4.
+  Strict GCC, TinyCC, and Clang sanitizer library/metadata tests pass. Fresh
+  consumers retain the opaque identities as RESERVED definitions and re-encode
+  the constrained declaration byte-identically; trait solving and projection
+  normalization remain deferred.
 - An instrumented whole-core pass after `754cd5c4` proved the next capture
   frontier was `core::ptr::null<T: PointeeSized + Thin>`: `Thin` is a trait
   alias, not an ordinary trait. Reference-only closure capture now
@@ -53,9 +58,10 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   availability fact; alias-definition semantics remain deferred.
 - At `1746e681`, an optimized whole-core gate completes value-aware library
   capture: 451 modules, 1,632 public type entries, and 20,692 public value
-  entries. Declaration metadata v2.3 then rejects unsupported HIR and emits
-  zero bytes. The active frontier is therefore the versioned predicate and
-  reference-only nominal wire boundary, not library capture.
+  entries. The previous v2.3 encoder then rejected unsupported HIR and emitted
+  zero bytes. With v2.4 the next real-core result must be re-measured; direct
+  trait-alias predicates such as `Thin` remain deliberately unsupported until
+  alias-bound provenance has a sound wire representation.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
