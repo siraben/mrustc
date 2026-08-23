@@ -1235,6 +1235,14 @@ static int cm_meta_collect_values(const CmHirLibraryOwnedData *owned,
         collected.kind = cm_meta_value_kind_to_wire(
             owned_value->declaration.kind);
         if (collected.kind == 0u) return 0;
+        /* Declaration v2.3 has no predicate wire payload. */
+        if (owned_value->declaration.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+            && (owned_value->declaration.data.function.predicate_scope_count
+                    != 0u
+                || owned_value->declaration.data.function.predicate_count
+                    != 0u
+                || owned_value->declaration.data.function
+                    .outlives_predicate_count != 0u)) return 0;
         for (module_index = 0u; module_index < owned->modules.len;
                 ++module_index) {
             const CmHirLibraryOwnedModule *module;

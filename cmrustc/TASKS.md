@@ -1943,15 +1943,15 @@ returns nonzero until the HIR gate actually closes.
 `make check-core-metadata` runs the same real-core path through value-aware
 library capture and declaration-v2 metadata encoding, requires the metadata
 boundary to succeed, and remains red until M6-06 closes.
-The 2026-08-23 post-v2.3 gate reaches the complete M6-05 census, then
-value-aware library capture still returns `invalid HIR` and publishes zero
-entries before metadata encoding. Temporary tracing identifies the first
-rejection as `core/src/contracts.rs:19`'s
+The 2026-08-23 post-v2.3 gate reaches the complete M6-05 census, then its
+first value-aware library capture rejected `core/src/contracts.rs:19`'s
 `build_check_ensures<Ret, C>(cond: C) -> C`, whose `C: Fn(&Ret) -> bool + Copy
 + 'static` clause lowers to two trait predicates and one outlives predicate.
-Declaration metadata v2.3 accepts predicate-free generic public functions;
-the next boundary must transport these predicate facts and the referenced
-trait declarations instead of omitting them.
+Library artifacts now deep-copy and authenticate predicate scopes, trait
+predicates, and outlives predicates for public free functions. Declaration
+metadata v2.3 still explicitly rejects any such value without mutating its
+output; v2.4 must transport these facts and the referenced trait declarations
+instead of omitting them.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. Elided
 callable outputs and predicate-prefix binders combined with additional elided

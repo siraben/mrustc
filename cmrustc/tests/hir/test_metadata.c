@@ -19,7 +19,12 @@ static const unsigned char generic_function_source[] =
         "bytes: [u8; N]) -> &'a T { let _ = bytes; value }\n";
 
 static const unsigned char predicate_function_source[] =
-    "pub fn constrained<T>(value: T) -> T where T: 'static { value }\n";
+    "trait Fn<Args> { type Output; }\n"
+    "trait Copy {}\n"
+    "pub fn constrained<Ret, C>(cond: C) -> C "
+        "where C: Fn(&Ret) -> bool + Copy + 'static { cond }\n"
+    "pub fn scoped<Ret, C>(cond: C) -> C "
+        "where for<'a> C: Fn(&'a Ret) -> bool { cond }\n";
 
 typedef struct ProducerFixture {
     CmHirContext context;
@@ -3199,6 +3204,9 @@ static void corrupt_first_generic_owner_kind(CmByteBuf *encoded)
 
 static void test_declaration_v2_generic_function_round_trip(void)
 {
+    static const unsigned char rejected_sentinel[] = {
+        UINT8_C(0xa5), UINT8_C(0x5a), UINT8_C(0xc3)
+    };
     ParsedProducerFixture producer;
     ParsedProducerFixture rejected;
     CmByteBuf encoded;
@@ -3211,6 +3219,26 @@ static void test_declaration_v2_generic_function_round_trip(void)
     CmHirModuleId sentinel_module;
     ContextLengths before;
     CmHirLibraryArtifactIdentity sentinel_identity;
+    CmHirLibraryValue rejected_value;
+    CmHirLibraryValue scoped_value;
+    const CmHirType *predicate_subject;
+    const CmHirGenericParam *predicate_parameter;
+    const CmHirType *callable_argument;
+    const CmHirType *callable_input;
+    const CmHirType *callable_output;
+    const CmHirDefinition *source_definition;
+    const CmHirItem *source_item;
+    unsigned char *rejected_buffer_data;
+    CmHirLibraryOwnedData predicate_owned;
+    CmHirLibraryOwnedValue *owned_constrained;
+    CmHirLibraryOwnedValue *owned_scoped;
+    CmHirLibraryArtifact predicate_artifact;
+    CmHirLibraryArtifactResult library_result;
+    CmHirLibraryArtifactIdentity predicate_identity;
+    CmHirLibraryArtifactIdentity predicate_identity_after;
+    size_t predicate_root_index;
+    CmHirGenericArg *owned_arguments;
+    uint32_t owned_scope_span_end;
 
     assert(parsed_producer_build(&producer, generic_function_source,
         sizeof(generic_function_source) - 1u, 1u, 0u, 1u, 1));
@@ -3252,8 +3280,222 @@ static void test_declaration_v2_generic_function_round_trip(void)
         && reencoded.len == encoded.len
         && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
 
-    assert(!parsed_producer_build(&rejected, predicate_function_source,
-        sizeof(predicate_function_source) - 1u, 1u, 0u, 1u, 1));
+    assert(parsed_producer_build(&rejected, predicate_function_source,
+        sizeof(predicate_function_source) - 1u, 1u, 0u, 2u, 1));
+    rejected_value = lookup_value(&rejected.artifact, "producer",
+        "constrained");
+    assert(rejected_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && rejected_value.data.function.generic_parameter_count == 2u
+        && rejected_value.data.function.predicate_scope_count == 0u
+        && rejected_value.data.function.predicate_scopes == NULL
+        && rejected_value.data.function.predicate_count == 2u
+        && rejected_value.data.function.predicates != NULL
+        && rejected_value.data.function.outlives_predicate_count == 1u
+        && rejected_value.data.function.outlives_predicates != NULL);
+    predicate_parameter = cm_hir_get_generic_param(&rejected.context,
+        rejected_value.data.function.generic_parameter_start + 1u);
+    predicate_subject = cm_hir_get_type(&rejected.context,
+        rejected_value.data.function.outlives_predicates[0].subject.type);
+    assert(predicate_parameter != NULL
+        && predicate_parameter->kind == CM_HIR_GENERIC_TYPE
+        && cm_hir_def_id_equal(predicate_parameter->owner,
+            rejected_value.definition)
+        && predicate_subject != NULL
+        && predicate_subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && predicate_subject->data.parameter_type.parameter
+            == rejected_value.data.function.generic_parameter_start + 1u
+        && rejected_value.data.function.outlives_predicates[0].subject_kind
+            == CM_HIR_OUTLIVES_TYPE
+        && rejected_value.data.function.outlives_predicates[0].bound.kind
+            == CM_HIR_REGION_STATIC
+        && rejected_value.data.function.outlives_predicates[0].scope
+            == CM_HIR_PREDICATE_SCOPE_NONE);
+    assert(rejected_value.data.function.predicates[0].scope
+            == CM_HIR_PREDICATE_SCOPE_NONE
+        && rejected_value.data.function.predicates[0].subject
+            == rejected_value.data.function.outlives_predicates[0]
+                .subject.type
+        && rejected_value.data.function.predicates[0].binder.lifetime_count
+            == 1u
+        && rejected_value.data.function.predicates[0].binder.lifetimes != NULL
+        && rejected_value.data.function.predicates[0].trait_type.argument_count
+            == 1u
+        && rejected_value.data.function.predicates[0].trait_type.arguments
+            != NULL
+        && rejected_value.data.function.predicates[0].trait_type.arguments[0]
+            .kind == CM_HIR_GENERIC_ARG_TYPE
+        && rejected_value.data.function.predicates[0].equality_count == 1u
+        && rejected_value.data.function.predicates[0].equalities != NULL
+        && rejected_value.data.function.predicates[0].modifier
+            == CM_HIR_PREDICATE_REQUIRED
+        && rejected_value.data.function.predicates[1].scope
+            == CM_HIR_PREDICATE_SCOPE_NONE
+        && rejected_value.data.function.predicates[1].binder.lifetime_count
+            == 0u
+        && rejected_value.data.function.predicates[1].binder.lifetimes == NULL
+        && rejected_value.data.function.predicates[1].trait_type.argument_count
+            == 0u
+        && rejected_value.data.function.predicates[1].trait_type.arguments
+            == NULL
+        && rejected_value.data.function.predicates[1].equality_count == 0u
+        && rejected_value.data.function.predicates[1].equalities == NULL);
+    callable_argument = cm_hir_get_type(&rejected.context,
+        rejected_value.data.function.predicates[0].trait_type.arguments[0]
+            .data.type);
+    callable_input = callable_argument == NULL
+        || callable_argument->kind != CM_HIR_TYPE_TUPLE_KIND
+        || callable_argument->data.tuple_type.element_count != 1u
+        ? NULL : cm_hir_get_type(&rejected.context,
+            callable_argument->data.tuple_type.elements[0]);
+    callable_output = cm_hir_get_type(&rejected.context,
+        rejected_value.data.function.predicates[0].equalities[0].value);
+    assert(callable_argument != NULL
+        && callable_argument->kind == CM_HIR_TYPE_TUPLE_KIND
+        && callable_input != NULL
+        && callable_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && callable_input->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && callable_input->data.reference_type.region.data.binder_index == 0u
+        && callable_output != NULL
+        && callable_output->kind == CM_HIR_TYPE_BOOL_KIND);
+    source_definition = cm_hir_lookup_definition(&rejected.context,
+        rejected_value.definition);
+    source_item = source_definition == NULL ? NULL : cm_hir_get_item(
+        &rejected.context, source_definition->entity.item_id);
+    assert(source_item != NULL
+        && rejected_value.data.function.predicates != source_item->predicates
+        && rejected_value.data.function.outlives_predicates
+            != source_item->outlives_predicates
+        && rejected_value.data.function.predicates[0].binder.lifetimes
+            != source_item->predicates[0].binder.lifetimes
+        && rejected_value.data.function.predicates[0].trait_type.arguments
+            != source_item->predicates[0].trait_type.arguments
+        && rejected_value.data.function.predicates[0].equalities
+            != source_item->predicates[0].equalities);
+    scoped_value = lookup_value(&rejected.artifact, "producer", "scoped");
+    assert(scoped_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && scoped_value.data.function.predicate_scope_count == 1u
+        && scoped_value.data.function.predicate_scopes != NULL
+        && scoped_value.data.function.predicate_scopes[0].binder.lifetime_count
+            == 1u
+        && scoped_value.data.function.predicate_scopes[0].binder.lifetimes
+            != NULL
+        && scoped_value.data.function.predicate_scopes[0]
+            .trait_predicate_count == 1u
+        && scoped_value.data.function.predicate_scopes[0]
+            .outlives_predicate_count == 0u
+        && scoped_value.data.function.predicate_count == 1u
+        && scoped_value.data.function.predicates[0].scope == 1u
+        && scoped_value.data.function.predicates[0].binder.lifetime_count == 0u
+        && scoped_value.data.function.outlives_predicate_count == 0u);
+    source_definition = cm_hir_lookup_definition(&rejected.context,
+        scoped_value.definition);
+    source_item = source_definition == NULL ? NULL : cm_hir_get_item(
+        &rejected.context, source_definition->entity.item_id);
+    assert(source_item != NULL
+        && scoped_value.data.function.predicate_scopes
+            != source_item->predicate_scopes
+        && scoped_value.data.function.predicate_scopes[0].binder.lifetimes
+            != source_item->predicate_scopes[0].binder.lifetimes);
+    assert(cm_hir_library_artifact_identity(&rejected.artifact,
+        &predicate_identity));
+    cm_hir_library_owned_data_init(&predicate_owned);
+    assert(cm_hir_library_owned_data_add_module(&predicate_owned,
+        predicate_identity.root_definition, &predicate_root_index)
+        == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &rejected_value) == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &scoped_value) == CM_HIR_LIBRARY_OK);
+    add_entry(&predicate_owned, predicate_root_index, "constrained",
+        value_binding(rejected_value.definition,
+            CM_HIR_LIBRARY_VALUE_FUNCTION));
+    add_entry(&predicate_owned, predicate_root_index, "scoped",
+        value_binding(scoped_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
+    cm_hir_library_artifact_init(&predicate_artifact);
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "bounded", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_OK
+        && library_result.public_value_entry_count == 2u
+        && predicate_owned.values.len == 0u);
+    cm_hir_library_owned_data_destroy(&predicate_owned);
+
+    cm_hir_library_owned_data_init(&predicate_owned);
+    assert(cm_hir_library_owned_data_add_module(&predicate_owned,
+        predicate_identity.root_definition, &predicate_root_index)
+        == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &rejected_value) == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_owned_data_add_value(&predicate_owned,
+        &scoped_value) == CM_HIR_LIBRARY_OK);
+    add_entry(&predicate_owned, predicate_root_index, "constrained",
+        value_binding(rejected_value.definition,
+            CM_HIR_LIBRARY_VALUE_FUNCTION));
+    add_entry(&predicate_owned, predicate_root_index, "scoped",
+        value_binding(scoped_value.definition, CM_HIR_LIBRARY_VALUE_FUNCTION));
+    owned_constrained = (CmHirLibraryOwnedValue *)cm_vec_at(
+        &predicate_owned.values, 0u);
+    owned_scoped = (CmHirLibraryOwnedValue *)cm_vec_at(
+        &predicate_owned.values, 1u);
+    assert(owned_constrained != NULL && owned_scoped != NULL
+        && cm_hir_library_artifact_identity(&predicate_artifact,
+            &predicate_identity_after));
+    owned_arguments = owned_constrained->predicates[0].trait_type.arguments;
+    owned_constrained->predicates[0].trait_type.arguments =
+        rejected_value.data.function.predicates[0].trait_type.arguments;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_constrained->predicates[0].trait_type.arguments = owned_arguments;
+    owned_constrained->predicates[0].modifier = CM_HIR_PREDICATE_CONST;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_constrained->predicates[0].modifier = CM_HIR_PREDICATE_REQUIRED;
+    owned_constrained->outlives_predicates[0].bound.kind =
+        CM_HIR_REGION_ERASED;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_constrained->outlives_predicates[0].bound.kind =
+        CM_HIR_REGION_STATIC;
+    owned_scope_span_end = owned_scoped->predicate_scopes[0].span.end;
+    owned_scoped->predicate_scopes[0].span.end = owned_scope_span_end - 1u;
+    library_result = cm_hir_library_artifact_restore_owned(
+        &predicate_artifact, &rejected.context, predicate_identity.crate_id,
+        predicate_identity.root_definition, "broken", &predicate_owned);
+    assert(library_result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && predicate_owned.values.len == 2u);
+    owned_scoped->predicate_scopes[0].span.end = owned_scope_span_end;
+    assert(cm_hir_library_artifact_identity(&predicate_artifact,
+        &predicate_identity)
+        && predicate_identity.context == predicate_identity_after.context
+        && predicate_identity.crate_id == predicate_identity_after.crate_id
+        && cm_hir_def_id_equal(predicate_identity.root_definition,
+            predicate_identity_after.root_definition)
+        && strcmp(predicate_identity.extern_name, "bounded") == 0);
+    cm_hir_library_owned_data_destroy(&predicate_owned);
+    cm_hir_library_artifact_destroy(&predicate_artifact);
+    cm_byte_buf_destroy(&reencoded);
+    cm_byte_buf_init(&reencoded);
+    cm_byte_buf_append(&reencoded, rejected_sentinel,
+        sizeof(rejected_sentinel));
+    rejected_buffer_data = reencoded.data;
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &rejected.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
+        && reencoded.data == rejected_buffer_data
+        && reencoded.len == sizeof(rejected_sentinel)
+        && memcmp(reencoded.data, rejected_sentinel,
+            sizeof(rejected_sentinel)) == 0);
+    parsed_producer_destroy(&rejected);
 
     cm_byte_buf_destroy(&reencoded);
     cm_hir_library_artifact_destroy(&artifact);

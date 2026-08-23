@@ -112,6 +112,35 @@ static char *cm_hir_library_copy_c_str(const char *text)
     return copy;
 }
 
+static void cm_hir_library_owned_value_destroy(
+    CmHirLibraryOwnedValue *value)
+{
+    uint32_t index;
+
+    if (value == NULL) return;
+    if (value->storage_kind != CM_HIR_LIBRARY_VALUE_FUNCTION) {
+        memset(value, 0, sizeof(*value));
+        return;
+    }
+    for (index = 0u; index < value->predicate_scope_count; ++index) {
+        cm_free(value->predicate_scope_lifetimes[index]);
+    }
+    for (index = 0u; index < value->predicate_count; ++index) {
+        cm_free(value->predicate_arguments[index]);
+        cm_free(value->predicate_equalities[index]);
+        cm_free(value->predicate_lifetimes[index]);
+    }
+    cm_free(value->outlives_predicates);
+    cm_free(value->predicate_lifetimes);
+    cm_free(value->predicate_equalities);
+    cm_free(value->predicate_arguments);
+    cm_free(value->predicates);
+    cm_free(value->predicate_scope_lifetimes);
+    cm_free(value->predicate_scopes);
+    cm_free(value->parameter_types);
+    memset(value, 0, sizeof(*value));
+}
+
 void cm_hir_library_owned_data_init(CmHirLibraryOwnedData *data)
 {
     if (data == NULL) return;
@@ -136,7 +165,7 @@ void cm_hir_library_owned_data_destroy(CmHirLibraryOwnedData *data)
         CmHirLibraryOwnedValue *value;
 
         value = (CmHirLibraryOwnedValue *)cm_vec_at(&data->values, index);
-        if (value != NULL) cm_free(value->parameter_types);
+        cm_hir_library_owned_value_destroy(value);
     }
     cm_vec_destroy(&data->values);
     cm_vec_destroy(&data->modules);
@@ -254,6 +283,182 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_entry(
     return CM_HIR_LIBRARY_OK;
 }
 
+static int cm_hir_library_span_equal(CmSpan left, CmSpan right)
+{
+    return left.source == right.source && left.start == right.start
+        && left.end == right.end;
+}
+
+static int cm_hir_library_region_equal(const CmHirRegion *left,
+    const CmHirRegion *right)
+{
+    if (left->kind != right->kind) return 0;
+    switch (left->kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left->data.binder_index == right->data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_hir_library_const_arg_equal(const CmHirConstArg *left,
+    const CmHirConstArg *right)
+{
+    if (left->kind != right->kind || left->type != right->type) return 0;
+    switch (left->kind) {
+    case CM_HIR_CONST_VALUE:
+        return left->data.value.low_bits == right->data.value.low_bits
+            && left->data.value.high_bits == right->data.value.high_bits;
+    case CM_HIR_CONST_PARAMETER:
+        return left->data.parameter == right->data.parameter;
+    case CM_HIR_CONST_UNEVALUATED:
+        return cm_hir_def_id_equal(left->data.definition,
+            right->data.definition);
+    case CM_HIR_CONST_INFER:
+        return left->data.inference_variable
+            == right->data.inference_variable;
+    case CM_HIR_CONST_ERROR:
+        return left->data.error_reason == right->data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_hir_library_generic_arg_equal(const CmHirGenericArg *left,
+    const CmHirGenericArg *right)
+{
+    if (left->kind != right->kind) return 0;
+    switch (left->kind) {
+    case CM_HIR_GENERIC_ARG_LIFETIME:
+        return cm_hir_library_region_equal(&left->data.lifetime,
+            &right->data.lifetime);
+    case CM_HIR_GENERIC_ARG_TYPE:
+        return left->data.type == right->data.type;
+    case CM_HIR_GENERIC_ARG_CONST:
+        return cm_hir_library_const_arg_equal(&left->data.constant,
+            &right->data.constant);
+    }
+    return 0;
+}
+
+static int cm_hir_library_binder_equal(const CmHirLifetimeBinder *left,
+    const CmHirLifetimeBinder *right)
+{
+    uint32_t index;
+
+    if (left->lifetime_count != right->lifetime_count
+        || !cm_hir_library_span_equal(left->span, right->span)) return 0;
+    for (index = 0u; index < left->lifetime_count; ++index) {
+        if (left->lifetimes[index] != right->lifetimes[index]) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_named_type_equal(const CmHirNamedType *left,
+    const CmHirNamedType *right)
+{
+    uint32_t index;
+
+    if (!cm_hir_def_id_equal(left->definition, right->definition)
+        || left->argument_count != right->argument_count) return 0;
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_hir_library_generic_arg_equal(&left->arguments[index],
+                &right->arguments[index])) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_trait_predicate_equal(
+    const CmHirTraitPredicate *left, const CmHirTraitPredicate *right)
+{
+    uint32_t index;
+
+    if (left->subject != right->subject
+        || !cm_hir_library_named_type_equal(&left->trait_type,
+            &right->trait_type)
+        || left->equality_count != right->equality_count
+        || left->scope != right->scope
+        || !cm_hir_library_binder_equal(&left->binder, &right->binder)
+        || !cm_hir_library_span_equal(left->span, right->span)
+        || left->modifier != right->modifier) return 0;
+    for (index = 0u; index < left->equality_count; ++index) {
+        if (!cm_hir_def_id_equal(left->equalities[index].associated_type,
+                right->equalities[index].associated_type)
+            || left->equalities[index].value
+                != right->equalities[index].value
+            || !cm_hir_library_span_equal(left->equalities[index].span,
+                right->equalities[index].span)) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_outlives_predicate_equal(
+    const CmHirOutlivesPredicate *left,
+    const CmHirOutlivesPredicate *right)
+{
+    if (left->subject_kind != right->subject_kind
+        || left->scope != right->scope
+        || !cm_hir_library_region_equal(&left->bound, &right->bound)
+        || !cm_hir_library_span_equal(left->span, right->span)) return 0;
+    if (left->subject_kind == CM_HIR_OUTLIVES_TYPE)
+        return left->subject.type == right->subject.type;
+    if (left->subject_kind == CM_HIR_OUTLIVES_LIFETIME)
+        return cm_hir_library_region_equal(&left->subject.lifetime,
+            &right->subject.lifetime);
+    return 0;
+}
+
+static int cm_hir_library_predicate_scope_equal(
+    const CmHirPredicateScope *left, const CmHirPredicateScope *right)
+{
+    if (left->subject_kind != right->subject_kind
+        || !cm_hir_library_binder_equal(&left->binder, &right->binder)
+        || left->trait_predicate_count != right->trait_predicate_count
+        || left->outlives_predicate_count != right->outlives_predicate_count
+        || !cm_hir_library_span_equal(left->span, right->span)) return 0;
+    if (left->subject_kind == CM_HIR_OUTLIVES_TYPE)
+        return left->subject.type == right->subject.type;
+    if (left->subject_kind == CM_HIR_OUTLIVES_LIFETIME)
+        return cm_hir_library_region_equal(&left->subject.lifetime,
+            &right->subject.lifetime);
+    return 0;
+}
+
+static int cm_hir_library_function_predicates_equal(
+    const CmHirLibraryFunctionSignature *left,
+    const CmHirLibraryFunctionSignature *right)
+{
+    uint32_t index;
+
+    if (left->predicate_scope_count != right->predicate_scope_count
+        || left->predicate_count != right->predicate_count
+        || left->outlives_predicate_count
+            != right->outlives_predicate_count) return 0;
+    for (index = 0u; index < left->predicate_scope_count; ++index) {
+        if (!cm_hir_library_predicate_scope_equal(
+                &left->predicate_scopes[index],
+                &right->predicate_scopes[index])) return 0;
+    }
+    for (index = 0u; index < left->predicate_count; ++index) {
+        if (!cm_hir_library_trait_predicate_equal(&left->predicates[index],
+                &right->predicates[index])) return 0;
+    }
+    for (index = 0u; index < left->outlives_predicate_count; ++index) {
+        if (!cm_hir_library_outlives_predicate_equal(
+                &left->outlives_predicates[index],
+                &right->outlives_predicates[index])) return 0;
+    }
+    return 1;
+}
+
 static int cm_hir_library_value_equal(const CmHirLibraryValue *left,
     const CmHirLibraryValue *right)
 {
@@ -271,6 +476,8 @@ static int cm_hir_library_value_equal(const CmHirLibraryValue *left,
                 != right->data.function.generic_parameter_start
             || left->data.function.generic_parameter_count
                 != right->data.function.generic_parameter_count
+            || !cm_hir_library_function_predicates_equal(
+                &left->data.function, &right->data.function)
             || left->data.function.abi != right->data.function.abi
             || left->data.function.safety != right->data.function.safety
             || left->data.function.is_const != right->data.function.is_const
@@ -288,6 +495,162 @@ static int cm_hir_library_value_equal(const CmHirLibraryValue *left,
         && left->data.value.mutability == right->data.value.mutability;
 }
 
+static int cm_hir_library_array_shape_valid(const void *array,
+    uint32_t count, size_t element_size)
+{
+    size_t byte_count;
+
+    return (count == 0u) == (array == NULL)
+        && element_size != 0u
+        && cm_size_mul((size_t)count, element_size, &byte_count);
+}
+
+static int cm_hir_library_binder_shape_valid(
+    const CmHirLifetimeBinder *binder)
+{
+    return binder != NULL && cm_hir_library_array_shape_valid(
+        binder->lifetimes, binder->lifetime_count, sizeof(CmInternId));
+}
+
+static int cm_hir_library_function_array_shapes_valid(
+    const CmHirLibraryFunctionSignature *function)
+{
+    uint32_t index;
+
+    if (function == NULL
+        || !cm_hir_library_array_shape_valid(function->parameter_types,
+            function->parameter_count, sizeof(CmHirTypeId))
+        || !cm_hir_library_array_shape_valid(function->predicate_scopes,
+            function->predicate_scope_count, sizeof(CmHirPredicateScope))
+        || !cm_hir_library_array_shape_valid(function->predicates,
+            function->predicate_count, sizeof(CmHirTraitPredicate))
+        || !cm_hir_library_array_shape_valid(function->outlives_predicates,
+            function->outlives_predicate_count,
+            sizeof(CmHirOutlivesPredicate))) return 0;
+    for (index = 0u; index < function->predicate_scope_count; ++index) {
+        if (!cm_hir_library_binder_shape_valid(
+                &function->predicate_scopes[index].binder)) return 0;
+    }
+    for (index = 0u; index < function->predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+
+        predicate = &function->predicates[index];
+        if (!cm_hir_library_array_shape_valid(
+                predicate->trait_type.arguments,
+                predicate->trait_type.argument_count,
+                sizeof(CmHirGenericArg))
+            || !cm_hir_library_array_shape_valid(predicate->equalities,
+                predicate->equality_count,
+                sizeof(CmHirAssociatedTypeEquality))
+            || !cm_hir_library_binder_shape_valid(&predicate->binder)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void *cm_hir_library_copy_array(const void *source, uint32_t count,
+    size_t element_size)
+{
+    void *copy;
+    size_t byte_count;
+
+    if (count == 0u) return NULL;
+    byte_count = (size_t)count * element_size;
+    copy = cm_alloc(byte_count);
+    memcpy(copy, source, byte_count);
+    return copy;
+}
+
+static int cm_hir_library_owned_value_copy(CmHirLibraryOwnedValue *copy,
+    const CmHirLibraryValue *value)
+{
+    const CmHirLibraryFunctionSignature *source;
+    CmHirLibraryFunctionSignature *target;
+    uint32_t index;
+
+    memset(copy, 0, sizeof(*copy));
+    copy->declaration = *value;
+    copy->storage_kind = value->kind;
+    if (value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION) return 1;
+    source = &value->data.function;
+    target = &copy->declaration.data.function;
+    copy->parameter_count = source->parameter_count;
+    copy->predicate_scope_count = source->predicate_scope_count;
+    copy->predicate_count = source->predicate_count;
+    copy->outlives_predicate_count = source->outlives_predicate_count;
+    target->parameter_types = NULL;
+    target->predicate_scopes = NULL;
+    target->predicates = NULL;
+    target->outlives_predicates = NULL;
+    copy->parameter_types = (CmHirTypeId *)cm_hir_library_copy_array(
+        source->parameter_types, source->parameter_count,
+        sizeof(CmHirTypeId));
+    target->parameter_types = copy->parameter_types;
+    copy->predicate_scopes = (CmHirPredicateScope *)cm_hir_library_copy_array(
+        source->predicate_scopes, source->predicate_scope_count,
+        sizeof(CmHirPredicateScope));
+    copy->predicate_scope_lifetimes = source->predicate_scope_count == 0u
+        ? NULL : (CmInternId **)cm_alloc_zeroed(
+            source->predicate_scope_count, sizeof(CmInternId *));
+    target->predicate_scopes = copy->predicate_scopes;
+    for (index = 0u; index < source->predicate_scope_count; ++index) {
+        copy->predicate_scopes[index].binder.lifetimes = NULL;
+        copy->predicate_scope_lifetimes[index] =
+            (CmInternId *)cm_hir_library_copy_array(
+                source->predicate_scopes[index].binder.lifetimes,
+                source->predicate_scopes[index].binder.lifetime_count,
+                sizeof(CmInternId));
+        copy->predicate_scopes[index].binder.lifetimes =
+            copy->predicate_scope_lifetimes[index];
+    }
+    copy->predicates = (CmHirTraitPredicate *)cm_hir_library_copy_array(
+        source->predicates, source->predicate_count,
+        sizeof(CmHirTraitPredicate));
+    copy->predicate_arguments = source->predicate_count == 0u
+        ? NULL : (CmHirGenericArg **)cm_alloc_zeroed(
+            source->predicate_count, sizeof(CmHirGenericArg *));
+    copy->predicate_equalities =
+        source->predicate_count == 0u ? NULL
+        : (CmHirAssociatedTypeEquality **)cm_alloc_zeroed(
+            source->predicate_count, sizeof(CmHirAssociatedTypeEquality *));
+    copy->predicate_lifetimes = source->predicate_count == 0u
+        ? NULL : (CmInternId **)cm_alloc_zeroed(
+            source->predicate_count, sizeof(CmInternId *));
+    target->predicates = copy->predicates;
+    for (index = 0u; index < source->predicate_count; ++index) {
+        copy->predicates[index].trait_type.arguments = NULL;
+        copy->predicates[index].equalities = NULL;
+        copy->predicates[index].binder.lifetimes = NULL;
+        copy->predicate_arguments[index] =
+            (CmHirGenericArg *)cm_hir_library_copy_array(
+                source->predicates[index].trait_type.arguments,
+                source->predicates[index].trait_type.argument_count,
+                sizeof(CmHirGenericArg));
+        copy->predicates[index].trait_type.arguments =
+            copy->predicate_arguments[index];
+        copy->predicate_equalities[index] =
+            (CmHirAssociatedTypeEquality *)cm_hir_library_copy_array(
+                source->predicates[index].equalities,
+                source->predicates[index].equality_count,
+                sizeof(CmHirAssociatedTypeEquality));
+        copy->predicates[index].equalities = copy->predicate_equalities[index];
+        copy->predicate_lifetimes[index] =
+            (CmInternId *)cm_hir_library_copy_array(
+                source->predicates[index].binder.lifetimes,
+                source->predicates[index].binder.lifetime_count,
+                sizeof(CmInternId));
+        copy->predicates[index].binder.lifetimes =
+            copy->predicate_lifetimes[index];
+    }
+    copy->outlives_predicates =
+        (CmHirOutlivesPredicate *)cm_hir_library_copy_array(
+            source->outlives_predicates, source->outlives_predicate_count,
+            sizeof(CmHirOutlivesPredicate));
+    target->outlives_predicates = copy->outlives_predicates;
+    return 1;
+}
+
 CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     CmHirLibraryOwnedData *data, const CmHirLibraryValue *value)
 {
@@ -303,8 +666,8 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     }
     if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         if (value->data.function.return_type == CM_HIR_TYPE_NONE
-            || (value->data.function.parameter_count != 0u
-                && value->data.function.parameter_types == NULL)
+            || !cm_hir_library_function_array_shapes_valid(
+                &value->data.function)
             || (value->data.function.generic_parameter_count == 0u
                 ? value->data.function.generic_parameter_start
                     != CM_HIR_GENERIC_PARAM_NONE
@@ -330,19 +693,9 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
         return cm_hir_library_value_equal(&existing->declaration, value)
             ? CM_HIR_LIBRARY_OK : CM_HIR_LIBRARY_INVALID_HIR;
     }
-    memset(&copy, 0, sizeof(copy));
-    copy.declaration = *value;
-    if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION
-        && value->data.function.parameter_count != 0u) {
-        size_t byte_count;
-
-        byte_count = (size_t)value->data.function.parameter_count
-            * sizeof(CmHirTypeId);
-        copy.parameter_types = (CmHirTypeId *)cm_alloc(byte_count);
-        memcpy(copy.parameter_types, value->data.function.parameter_types,
-            byte_count);
-        copy.declaration.data.function.parameter_types =
-            copy.parameter_types;
+    if (!cm_hir_library_owned_value_copy(&copy, value)) {
+        cm_hir_library_owned_value_destroy(&copy);
+        return CM_HIR_LIBRARY_INVALID_HIR;
     }
     (void)cm_vec_push(&data->values, &copy);
     return CM_HIR_LIBRARY_OK;
@@ -610,10 +963,10 @@ static int cm_hir_library_add_value_from_item(
         || cm_hir_def_id_is_none(item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
         || (item->kind != CM_HIR_ITEM_FUNCTION
-            && item->generic_parameter_count != 0u)
-        || item->predicate_scope_count != 0u
-        || item->predicate_count != 0u
-        || item->outlives_predicate_count != 0u) return 0;
+            && (item->generic_parameter_count != 0u
+                || item->predicate_scope_count != 0u
+                || item->predicate_count != 0u
+                || item->outlives_predicate_count != 0u))) return 0;
     memset(&value, 0, sizeof(value));
     value.definition = item->definition;
     value.kind = cm_hir_library_value_kind(item->kind);
@@ -639,6 +992,14 @@ static int cm_hir_library_add_value_from_item(
             item->generic_parameter_start;
         value.data.function.generic_parameter_count =
             item->generic_parameter_count;
+        value.data.function.predicate_scopes = item->predicate_scopes;
+        value.data.function.predicate_scope_count =
+            item->predicate_scope_count;
+        value.data.function.predicates = item->predicates;
+        value.data.function.predicate_count = item->predicate_count;
+        value.data.function.outlives_predicates = item->outlives_predicates;
+        value.data.function.outlives_predicate_count =
+            item->outlives_predicate_count;
         value.data.function.abi = signature->abi;
         value.data.function.safety = signature->safety;
         value.data.function.is_const = signature->is_const;
@@ -659,6 +1020,53 @@ static int cm_hir_library_value_type_valid(const CmHirContext *context,
     return type != CM_HIR_TYPE_NONE && cm_hir_get_type(context, type) != NULL;
 }
 
+static int cm_hir_library_owned_function_storage_valid(
+    const CmHirLibraryOwnedValue *owned_value)
+{
+    const CmHirLibraryFunctionSignature *function;
+    uint32_t index;
+
+    function = &owned_value->declaration.data.function;
+    if (owned_value->storage_kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || function->parameter_count != owned_value->parameter_count
+        || function->predicate_scope_count
+            != owned_value->predicate_scope_count
+        || function->predicate_count != owned_value->predicate_count
+        || function->outlives_predicate_count
+            != owned_value->outlives_predicate_count
+        || !cm_hir_library_function_array_shapes_valid(function)
+        || function->parameter_types != owned_value->parameter_types
+        || function->predicate_scopes != owned_value->predicate_scopes
+        || function->predicates != owned_value->predicates
+        || function->outlives_predicates
+            != owned_value->outlives_predicates
+        || !cm_hir_library_array_shape_valid(
+            owned_value->predicate_scope_lifetimes,
+            function->predicate_scope_count, sizeof(CmInternId *))
+        || !cm_hir_library_array_shape_valid(
+            owned_value->predicate_arguments, function->predicate_count,
+            sizeof(CmHirGenericArg *))
+        || !cm_hir_library_array_shape_valid(
+            owned_value->predicate_equalities, function->predicate_count,
+            sizeof(CmHirAssociatedTypeEquality *))
+        || !cm_hir_library_array_shape_valid(
+            owned_value->predicate_lifetimes, function->predicate_count,
+            sizeof(CmInternId *))) return 0;
+    for (index = 0u; index < function->predicate_scope_count; ++index) {
+        if (function->predicate_scopes[index].binder.lifetimes
+                != owned_value->predicate_scope_lifetimes[index]) return 0;
+    }
+    for (index = 0u; index < function->predicate_count; ++index) {
+        if (function->predicates[index].trait_type.arguments
+                != owned_value->predicate_arguments[index]
+            || function->predicates[index].equalities
+                != owned_value->predicate_equalities[index]
+            || function->predicates[index].binder.lifetimes
+                != owned_value->predicate_lifetimes[index]) return 0;
+    }
+    return 1;
+}
+
 static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
     const CmHirItem *item)
 {
@@ -669,12 +1077,13 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
         || !cm_hir_def_id_equal(value->definition, item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
         || (item->kind != CM_HIR_ITEM_FUNCTION
-            && item->generic_parameter_count != 0u)
-        || item->predicate_scope_count != 0u
-        || item->predicate_count != 0u
-        || item->outlives_predicate_count != 0u) return 0;
+            && (item->generic_parameter_count != 0u
+                || item->predicate_scope_count != 0u
+                || item->predicate_count != 0u
+                || item->outlives_predicate_count != 0u))) return 0;
     if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         const CmHirFunctionSignature *signature;
+        CmHirLibraryFunctionSignature item_function;
 
         signature = &item->data.function_item.signature;
         if (signature->receiver != CM_HIR_RECEIVER_NONE
@@ -692,6 +1101,16 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
             || value->data.function.is_variadic != signature->is_variadic) {
             return 0;
         }
+        item_function = value->data.function;
+        item_function.predicate_scopes = item->predicate_scopes;
+        item_function.predicate_scope_count = item->predicate_scope_count;
+        item_function.predicates = item->predicates;
+        item_function.predicate_count = item->predicate_count;
+        item_function.outlives_predicates = item->outlives_predicates;
+        item_function.outlives_predicate_count =
+            item->outlives_predicate_count;
+        if (!cm_hir_library_function_predicates_equal(
+                &value->data.function, &item_function)) return 0;
         for (index = 0u; index < signature->parameter_count; ++index) {
             if (value->data.function.parameter_types[index]
                 != signature->parameters[index].type) return 0;
@@ -720,10 +1139,7 @@ static int cm_hir_library_owned_value_valid(
         expected_kind = CM_HIR_ITEM_FUNCTION;
         if (!cm_hir_library_value_type_valid(state->context,
                 value->data.function.return_type)
-            || (value->data.function.parameter_count != 0u
-                && (owned_value->parameter_types == NULL
-                    || value->data.function.parameter_types
-                        != owned_value->parameter_types))
+            || !cm_hir_library_owned_function_storage_valid(owned_value)
             || (value->data.function.generic_parameter_count == 0u
                 ? value->data.function.generic_parameter_start
                     != CM_HIR_GENERIC_PARAM_NONE
@@ -764,13 +1180,39 @@ static int cm_hir_library_owned_value_valid(
         break;
     case CM_HIR_LIBRARY_VALUE_CONST:
         expected_kind = CM_HIR_ITEM_CONST;
-        if (value->data.value.mutability != CM_HIR_IMMUTABLE
+        if (owned_value->storage_kind != CM_HIR_LIBRARY_VALUE_CONST
+            || owned_value->parameter_count != 0u
+            || owned_value->predicate_scope_count != 0u
+            || owned_value->predicate_count != 0u
+            || owned_value->outlives_predicate_count != 0u
+            || owned_value->parameter_types != NULL
+            || owned_value->predicate_scopes != NULL
+            || owned_value->predicate_scope_lifetimes != NULL
+            || owned_value->predicates != NULL
+            || owned_value->predicate_arguments != NULL
+            || owned_value->predicate_equalities != NULL
+            || owned_value->predicate_lifetimes != NULL
+            || owned_value->outlives_predicates != NULL
+            || value->data.value.mutability != CM_HIR_IMMUTABLE
             || !cm_hir_library_value_type_valid(state->context,
                 value->data.value.type)) return 0;
         break;
     case CM_HIR_LIBRARY_VALUE_STATIC:
         expected_kind = CM_HIR_ITEM_STATIC;
-        if ((unsigned int)value->data.value.mutability
+        if (owned_value->storage_kind != CM_HIR_LIBRARY_VALUE_STATIC
+            || owned_value->parameter_count != 0u
+            || owned_value->predicate_scope_count != 0u
+            || owned_value->predicate_count != 0u
+            || owned_value->outlives_predicate_count != 0u
+            || owned_value->parameter_types != NULL
+            || owned_value->predicate_scopes != NULL
+            || owned_value->predicate_scope_lifetimes != NULL
+            || owned_value->predicates != NULL
+            || owned_value->predicate_arguments != NULL
+            || owned_value->predicate_equalities != NULL
+            || owned_value->predicate_lifetimes != NULL
+            || owned_value->outlives_predicates != NULL
+            || (unsigned int)value->data.value.mutability
                 > (unsigned int)CM_HIR_MUTABLE
             || !cm_hir_library_value_type_valid(state->context,
                 value->data.value.type)) return 0;
@@ -783,7 +1225,12 @@ static int cm_hir_library_owned_value_valid(
     if (definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
         || !definition->has_reserved_item_kind
         || definition->reserved_item_kind != expected_kind) return 0;
-    if (definition->state == CM_HIR_DEFINITION_RESERVED) return 1;
+    if (definition->state == CM_HIR_DEFINITION_RESERVED) {
+        return value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+            || (value->data.function.predicate_scope_count == 0u
+                && value->data.function.predicate_count == 0u
+                && value->data.function.outlives_predicate_count == 0u);
+    }
     if (definition->state == CM_HIR_DEFINITION_BOUND) {
         const CmHirItem *item;
 

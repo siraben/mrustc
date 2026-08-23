@@ -28,7 +28,19 @@ typedef struct CmHirLibraryOwnedModule {
 
 typedef struct CmHirLibraryOwnedValue {
     CmHirLibraryValue declaration;
+    CmHirLibraryValueKind storage_kind;
     CmHirTypeId *parameter_types;
+    uint32_t parameter_count;
+    CmHirPredicateScope *predicate_scopes;
+    CmInternId **predicate_scope_lifetimes;
+    uint32_t predicate_scope_count;
+    CmHirTraitPredicate *predicates;
+    CmHirGenericArg **predicate_arguments;
+    CmHirAssociatedTypeEquality **predicate_equalities;
+    CmInternId **predicate_lifetimes;
+    uint32_t predicate_count;
+    CmHirOutlivesPredicate *outlives_predicates;
+    uint32_t outlives_predicate_count;
 } CmHirLibraryOwnedValue;
 
 typedef struct CmHirLibraryOwnedData {
@@ -54,7 +66,7 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_entry(
     const unsigned char *name, size_t name_length,
     const CmHirLibraryBinding *binding);
 
-/* Copies one unique declaration, including its function parameter types. */
+/* Copies one unique declaration, including all nested function-signature data. */
 CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     CmHirLibraryOwnedData *data, const CmHirLibraryValue *value);
 

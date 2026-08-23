@@ -45,8 +45,8 @@ typedef enum CmHirLibraryValueKind {
 /*
  * Declaration-only callable shape. Parameter patterns and bodies are not
  * part of a cross-crate function signature. `parameter_types`, the generic
- * parameter range, and the ABI intern ID are borrowed from the artifact's
- * identity context.
+ * parameter range, predicate arrays, and the ABI intern ID are borrowed from
+ * the artifact's identity context.
  */
 typedef struct CmHirLibraryFunctionSignature {
     const CmHirTypeId *parameter_types;
@@ -54,6 +54,12 @@ typedef struct CmHirLibraryFunctionSignature {
     CmHirTypeId return_type;
     CmHirGenericParamId generic_parameter_start;
     uint32_t generic_parameter_count;
+    const CmHirPredicateScope *predicate_scopes;
+    uint32_t predicate_scope_count;
+    const CmHirTraitPredicate *predicates;
+    uint32_t predicate_count;
+    const CmHirOutlivesPredicate *outlives_predicates;
+    uint32_t outlives_predicate_count;
     CmInternId abi;
     CmHirSafety safety;
     int is_const;

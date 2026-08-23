@@ -28,13 +28,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
 - No current `.rlib`, compiler-built `core`, `alloc`, `std`, `rustc`, or
   `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
-  census after v2.3, then still fails library capture with `invalid HIR`
-  before encoding and publishes zero artifact entries. Temporary fail-closed
-  tracing identifies the first rejected declaration as
+  census after v2.3. Its first library-capture rejection was
   `core/src/contracts.rs:19`'s `build_check_ensures<Ret, C>`: its `C: Fn(&Ret)
   -> bool + Copy + 'static` clause lowers to two trait predicates and one
-  outlives predicate. Those facts and their referenced trait declarations
-  must be transported rather than omitted.
+  outlives predicate. Library capture now owns and authenticates all three
+  predicate families, including nested callable binders, trait arguments, and
+  associated equalities. Declaration metadata v2.3 deliberately remains red
+  for them; v2.4 must transport those facts and their referenced trait and
+  associated-item identities rather than omit them.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters. Elided callable outputs and unrepresentable mixed binders reject
