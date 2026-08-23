@@ -1808,9 +1808,9 @@ static int cm_hir_library_nominal_reference_valid(
     return cm_hir_def_id_is_none(item->parent_definition);
 }
 
-static int cm_hir_library_availability_present(
+static int cm_hir_library_availability_find(
     const CmHirLibraryFunctionSignature *function, CmHirDefId direct_trait,
-    CmHirDefId associated_type)
+    CmHirDefId associated_type, uint32_t *out_index)
 {
     uint32_t low;
     uint32_t high;
@@ -1828,7 +1828,10 @@ static int cm_hir_library_availability_present(
             availability->direct_trait, direct_trait);
         if (order == 0) order = cm_hir_library_definition_compare(
             availability->associated_type, associated_type);
-        if (order == 0) return 1;
+        if (order == 0) {
+            if (out_index != NULL) *out_index = middle;
+            return 1;
+        }
         if (order > 0) high = middle;
         else low = middle + 1u;
     }
@@ -1840,9 +1843,8 @@ static int cm_hir_library_function_references_structurally_valid(
     const CmHirLibraryFunctionSignature *function)
 {
     uint32_t index;
-    size_t total_equalities;
+    unsigned char *availability_witnessed;
 
-    total_equalities = 0u;
     for (index = 0u; index < function->nominal_reference_count; ++index) {
         if (!cm_hir_library_nominal_reference_valid(context, function,
                 &function->nominal_references[index])
@@ -1864,29 +1866,44 @@ static int cm_hir_library_function_references_structurally_valid(
                 &function->associated_availability[index - 1u],
                 availability) >= 0)) return 0;
     }
+    availability_witnessed = (unsigned char *)cm_alloc_zeroed(
+        function->associated_availability_count, sizeof(unsigned char));
     for (index = 0u; index < function->predicate_count; ++index) {
         const CmHirTraitPredicate *predicate;
         uint32_t equality_index;
 
         predicate = &function->predicates[index];
-        if (!cm_size_add(total_equalities, predicate->equality_count,
-                &total_equalities)) return 0;
         if (cm_hir_library_find_trait_like_nominal_reference(function,
-                predicate->trait_type.definition) == NULL) return 0;
+                predicate->trait_type.definition) == NULL) {
+            cm_free(availability_witnessed);
+            return 0;
+        }
         for (equality_index = 0u; equality_index < predicate->equality_count;
                 ++equality_index) {
+            uint32_t availability_index;
+
             if (cm_hir_library_find_nominal_reference(function,
                     predicate->equalities[equality_index].associated_type,
                     CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE) == NULL
-                || !cm_hir_library_availability_present(function,
+                || !cm_hir_library_availability_find(function,
                     predicate->trait_type.definition,
-                    predicate->equalities[equality_index].associated_type)) {
+                    predicate->equalities[equality_index].associated_type,
+                    &availability_index)) {
+                cm_free(availability_witnessed);
                 return 0;
             }
+            availability_witnessed[availability_index] = UINT8_C(1);
         }
     }
-    return total_equalities
-        == (size_t)function->associated_availability_count;
+    for (index = 0u; index < function->associated_availability_count;
+            ++index) {
+        if (availability_witnessed[index] == 0u) {
+            cm_free(availability_witnessed);
+            return 0;
+        }
+    }
+    cm_free(availability_witnessed);
+    return 1;
 }
 
 static int cm_hir_library_function_references_match_item(

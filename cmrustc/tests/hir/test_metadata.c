@@ -45,14 +45,22 @@ static const unsigned char early_predicate_function_source[] =
     "pub fn rejected<'a, T, C>(cond: C) -> C "
         "where C: Uses<&'a T> { cond }\n";
 
+static const unsigned char duplicate_const_callable_source[] =
+    "trait FnOnce<Args> { type Output; }\n"
+    "pub const fn const_eval_select<ARG, F, G, RET>("
+        "_arg: ARG, _called_in_const: F, _called_at_rt: G) -> RET "
+        "where G: FnOnce<ARG, Output = RET>, "
+        "F: const FnOnce<ARG, Output = RET> { loop {} }\n";
+
 static const unsigned char multi_predicate_source_a[] =
     "trait Pair<A, B> { type First; type Second; }\n"
     "trait Left { type Item; }\n"
     "trait Right { type Item; }\n"
-    "trait Marker {}\n"
+    "trait Marker { type Item; }\n"
     "pub fn multi<T, U, C>(cond: C) -> C "
         "where C: Pair<T, U, Second = U, First = T>, "
-        "T: Marker + 'static, U: Marker + 'static { cond }\n"
+        "T: Marker<Item = T> + 'static, "
+        "U: Marker<Item = U> + 'static { cond }\n"
     "pub fn both<C>(cond: C) -> C "
         "where C: Left<Item = ()> + Right<Item = ()> { cond }\n";
 
@@ -60,10 +68,11 @@ static const unsigned char multi_predicate_source_b[] =
     "trait Pair<A, B> { type First; type Second; }\n"
     "trait Left { type Item; }\n"
     "trait Right { type Item; }\n"
-    "trait Marker {}\n"
+    "trait Marker { type Item; }\n"
     "pub fn multi<T, U, C>(cond: C) -> C "
         "where C: Pair<T, U, First = T, Second = U>, "
-        "U: Marker + 'static, T: Marker + 'static { cond }\n"
+        "U: Marker<Item = U> + 'static, "
+        "T: Marker<Item = T> + 'static { cond }\n"
     "pub fn both<C>(cond: C) -> C "
         "where C: Right<Item = ()> + Left<Item = ()> { cond }\n";
 
@@ -4522,6 +4531,8 @@ static void test_declaration_v24_multi_fact_canonical_order(void)
     const CmHirLibraryNominalReference *item_references[2];
     uint32_t item_count;
     CmHirDefId marker_definition;
+    CmHirDefId marker_item_definition;
+    const CmHirLibraryNominalReference *marker_reference;
     CmHirTypeId marker_subjects[2];
     uint32_t marker_count;
     uint32_t equality_predicate_count;
@@ -4551,21 +4562,27 @@ static void test_declaration_v24_multi_fact_canonical_order(void)
     both = lookup_value(&artifact, "dep", "both");
     assert(multi.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
         && multi.data.function.predicate_count == 3u
-        && multi.data.function.associated_availability_count == 2u
+        && multi.data.function.associated_availability_count == 3u
         && multi.data.function.outlives_predicate_count == 2u
         && both.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
         && both.data.function.predicate_count == 2u
         && both.data.function.associated_availability_count == 2u);
-    marker_definition = cm_hir_def_id_none();
+    marker_reference = find_nominal_reference(&multi, "Marker",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    assert(marker_reference != NULL);
+    marker_definition = marker_reference->definition;
+    marker_item_definition = cm_hir_def_id_none();
     for (index = 0u; index < multi.data.function.nominal_reference_count;
             ++index) {
         const CmHirLibraryNominalReference *reference;
 
         reference = &multi.data.function.nominal_references[index];
-        if (reference->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT
-            && reference->name.length == 6u
-            && memcmp(reference->name.bytes, "Marker", 6u) == 0)
-            marker_definition = reference->definition;
+        if (reference->kind == CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE
+            && reference->name.length == 4u
+            && memcmp(reference->name.bytes, "Item", 4u) == 0
+            && cm_hir_def_id_equal(reference->declaring_trait,
+                marker_definition))
+            marker_item_definition = reference->definition;
     }
     assert(!cm_hir_def_id_is_none(marker_definition));
     marker_count = 0u;
@@ -4577,12 +4594,47 @@ static void test_declaration_v24_multi_fact_canonical_order(void)
         if (predicate->equality_count == 2u) equality_predicate_count += 1u;
         if (cm_hir_def_id_equal(predicate->trait_type.definition,
                 marker_definition)) {
+            const CmHirType *subject_type;
+            const CmHirType *equality_type;
+
             assert(marker_count < 2u);
             marker_subjects[marker_count++] = predicate->subject;
+            subject_type = cm_hir_get_type(&consumer, predicate->subject);
+            equality_type = predicate->equality_count == 1u
+                ? cm_hir_get_type(&consumer,
+                    predicate->equalities[0].value) : NULL;
+            assert(predicate->equality_count == 1u
+                && cm_hir_def_id_equal(
+                    predicate->equalities[0].associated_type,
+                    marker_item_definition)
+                && subject_type != NULL && equality_type != NULL
+                && subject_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                && equality_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+                && subject_type->data.parameter_type.parameter
+                    == equality_type->data.parameter_type.parameter);
         }
     }
-    assert(equality_predicate_count == 1u && marker_count == 2u
+    assert(!cm_hir_def_id_is_none(marker_item_definition)
+        && equality_predicate_count == 1u && marker_count == 2u
         && marker_subjects[0] != marker_subjects[1]);
+    {
+        uint32_t marker_availability_count;
+
+        marker_availability_count = 0u;
+        for (index = 0u;
+                index < multi.data.function.associated_availability_count;
+                ++index) {
+            const CmHirLibraryAssociatedAvailability *availability;
+
+            availability = &multi.data.function.associated_availability[
+                index];
+            if (cm_hir_def_id_equal(availability->direct_trait,
+                    marker_definition)
+                && cm_hir_def_id_equal(availability->associated_type,
+                    marker_item_definition)) marker_availability_count += 1u;
+        }
+        assert(marker_availability_count == 1u);
+    }
     item_count = 0u;
     for (index = 0u; index < both.data.function.nominal_reference_count;
             ++index) {
@@ -4617,6 +4669,78 @@ static void test_declaration_v24_multi_fact_canonical_order(void)
     cm_byte_buf_destroy(&first_bytes);
     parsed_producer_destroy(&second);
     parsed_producer_destroy(&first);
+}
+
+static void test_duplicate_const_callable_library_capture(void)
+{
+    static const unsigned char sentinel[] = { 0xd1u, 0x24u, 0x5au };
+    ParsedProducerFixture producer;
+    CmHirLibraryValue value;
+    const CmHirLibraryNominalReference *fn_once;
+    const CmHirLibraryNominalReference *output;
+    CmHirTypeId subjects[2];
+    CmHirGenericParamId equality_parameter;
+    uint32_t index;
+    uint32_t const_count;
+    CmByteBuf encoded;
+    unsigned char *sentinel_data;
+    CmHirMetadataArtifactResult result;
+
+    assert(parsed_producer_build(&producer, duplicate_const_callable_source,
+        sizeof(duplicate_const_callable_source) - 1u, 1u, 0u, 1u, 1));
+    value = lookup_value(&producer.artifact, "producer",
+        "const_eval_select");
+    fn_once = find_nominal_reference(&value, "FnOnce",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    output = find_nominal_reference(&value, "Output",
+        CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE);
+    assert(fn_once != NULL && output != NULL
+        && cm_hir_def_id_equal(output->declaring_trait,
+            fn_once->definition)
+        && value.data.function.predicate_count == 2u
+        && value.data.function.associated_availability_count == 1u
+        && cm_hir_def_id_equal(value.data.function
+            .associated_availability[0].direct_trait, fn_once->definition)
+        && cm_hir_def_id_equal(value.data.function
+            .associated_availability[0].associated_type,
+            output->definition));
+    equality_parameter = CM_HIR_GENERIC_PARAM_NONE;
+    const_count = 0u;
+    for (index = 0u; index < value.data.function.predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+        const CmHirType *equality_type;
+
+        predicate = &value.data.function.predicates[index];
+        equality_type = predicate->equality_count == 1u
+            ? cm_hir_get_type(&producer.context,
+                predicate->equalities[0].value) : NULL;
+        subjects[index] = predicate->subject;
+        assert(cm_hir_def_id_equal(predicate->trait_type.definition,
+                fn_once->definition)
+            && predicate->equality_count == 1u
+            && cm_hir_def_id_equal(predicate->equalities[0].associated_type,
+                output->definition)
+            && equality_type != NULL
+            && equality_type->kind == CM_HIR_TYPE_PARAMETER_KIND);
+        if (index == 0u) equality_parameter =
+            equality_type->data.parameter_type.parameter;
+        else assert(equality_type->data.parameter_type.parameter
+            == equality_parameter);
+        if (predicate->modifier == CM_HIR_PREDICATE_CONST) const_count += 1u;
+        else assert(predicate->modifier == CM_HIR_PREDICATE_REQUIRED);
+    }
+    assert(subjects[0] != subjects[1] && const_count == 1u);
+
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_append(&encoded, sentinel, sizeof(sentinel));
+    sentinel_data = encoded.data;
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
+        && encoded.data == sentinel_data && encoded.len == sizeof(sentinel)
+        && memcmp(encoded.data, sentinel, sizeof(sentinel)) == 0);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
 }
 
 int main(int argc, char **argv)
@@ -4668,6 +4792,7 @@ int main(int argc, char **argv)
     test_declaration_v2_generic_function_round_trip();
     test_declaration_v24_predicate_function_round_trip();
     test_declaration_v24_multi_fact_canonical_order();
+    test_duplicate_const_callable_library_capture();
     test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(
         CM_HIR_METADATA_ARTIFACT_OK), "ok") == 0);
