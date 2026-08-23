@@ -1953,9 +1953,10 @@ metadata v2.3 still explicitly rejects any such value without mutating its
 output; v2.4 must transport these facts and the referenced trait declarations
 instead of omitting them.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
-lifetimes become deterministic predicate-owned late-bound parameters. Elided
-callable outputs and predicate-prefix binders combined with additional elided
-inputs remain fail-closed until their semantics have an explicit HIR shape.
+lifetimes become deterministic predicate-owned late-bound parameters. An
+elided callable output inherits the sole distinct input lifetime; ambiguous
+outputs and predicate-prefix binders combined with additional elided inputs
+remain fail-closed.
 
 ## M7: Bootstrap and current stable
 

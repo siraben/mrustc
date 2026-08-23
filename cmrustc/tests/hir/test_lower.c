@@ -6218,14 +6218,17 @@ static void test_callable_predicate_lifetime_elision(void)
         "F: for<'a> Fn(&'a T, &T) -> &'a T {}";
     static const char explicit_prefix_source[] =
         "trait Fn<Args> { type Output; } "
-        "fn explicit<T, F>() where for<'a> F: Fn(&'a T) -> bool {}";
+        "fn explicit<T, F>() where for<'a> F: Fn(&'a T) -> &T {}";
     static const char inferred_source[] =
         "trait Bound<T> {} "
         "fn angle<T, F>() where F: Bound<&T> {} "
         "fn ordinary<T>(value: &T) {}";
     static const char output_elision[] =
         "trait Fn<Args> { type Output; } "
-        "fn output<T, F>() where F: Fn(&T) -> (&T,) {}";
+        "fn output<T, U, F>() where F: Fn(&T) -> &U {}";
+    static const char ambiguous_output_elision[] =
+        "trait Fn<Args> { type Output; } "
+        "fn output<T, U, V, F>() where F: Fn(&T, &U) -> &V {}";
     static const char mixed_prefix_elision[] =
         "trait Fn<Args> { type Output; } "
         "fn mixed<T, F>() where for<'a> F: Fn(&T) -> bool {}";
@@ -6343,6 +6346,9 @@ static void test_callable_predicate_lifetime_elision(void)
             || tuple->data.tuple_type.elements == NULL
         ? NULL : cm_hir_get_type(&context,
             tuple->data.tuple_type.elements[0]);
+    output = predicate == NULL || predicate->equality_count != 1u
+            || predicate->equalities == NULL
+        ? NULL : cm_hir_get_type(&context, predicate->equalities[0].value);
     assert(result.error_count == 0u && function != NULL
         && function->predicate_scope_count == 1u
         && function->predicate_scopes != NULL
@@ -6353,7 +6359,11 @@ static void test_callable_predicate_lifetime_elision(void)
         && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
         && first->data.reference_type.region.kind
             == CM_HIR_REGION_LATE_BOUND
-        && first->data.reference_type.region.data.binder_index == 0u);
+        && first->data.reference_type.region.data.binder_index == 0u
+        && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && output->data.reference_type.region.data.binder_index == 0u);
     cm_hir_context_destroy(&context);
 
     result = lower_source(inferred_source, &context, NULL);
@@ -6380,10 +6390,38 @@ static void test_callable_predicate_lifetime_elision(void)
     cm_hir_context_destroy(&context);
 
     result = lower_source(output_elision, &context, NULL);
+    function = find_item(&context, "output");
+    predicate = function == NULL || function->predicate_count != 1u
+            || function->predicates == NULL
+        ? NULL : &function->predicates[0];
+    tuple = predicate == NULL || predicate->trait_type.arguments == NULL
+        ? NULL : cm_hir_get_type(&context,
+            predicate->trait_type.arguments[0].data.type);
+    first = tuple == NULL || tuple->kind != CM_HIR_TYPE_TUPLE_KIND
+            || tuple->data.tuple_type.element_count != 1u
+            || tuple->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&context,
+            tuple->data.tuple_type.elements[0]);
+    output = predicate == NULL || predicate->equality_count != 1u
+            || predicate->equalities == NULL
+        ? NULL : cm_hir_get_type(&context, predicate->equalities[0].value);
+    assert(result.error_count == 0u && predicate != NULL
+        && predicate->binder.lifetime_count == 1u
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index == 0u
+        && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && output->data.reference_type.region.data.binder_index == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(ambiguous_output_elision, &context, NULL);
     assert(result.error_count == 1u
         && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
         && strstr(result.first_error.message,
-            "elided lifetime in callable trait output") != NULL);
+            "callable trait output lifetime is ambiguous") != NULL);
     cm_hir_context_destroy(&context);
 
     result = lower_source(mixed_prefix_elision, &context, NULL);

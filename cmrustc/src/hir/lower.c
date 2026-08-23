@@ -136,6 +136,9 @@ typedef struct CmLowerState {
     CmHirLifetimeBinder *active_callable_predicate_binder;
     CmSpan active_callable_predicate_span;
     uint32_t callable_input_depth;
+    CmHirRegion callable_input_region;
+    int has_callable_input_region;
+    int ambiguous_callable_input_region;
     int reject_callable_input_elision;
     int reject_callable_output_elision;
     uint32_t next_type_inference;
@@ -2909,6 +2912,40 @@ static int cm_lower_hir_primitive(CmHirPrimitiveKind source,
     return cm_lower_resolved_primitive(resolved, NULL, out_type);
 }
 
+static int cm_lower_regions_equal(CmHirRegion left, CmHirRegion right)
+{
+    if (left.kind != right.kind) return 0;
+    switch (left.kind) {
+    case CM_HIR_REGION_STATIC:
+    case CM_HIR_REGION_ERASED:
+        return 1;
+    case CM_HIR_REGION_EARLY_BOUND:
+        return left.data.parameter == right.data.parameter;
+    case CM_HIR_REGION_LATE_BOUND:
+        return left.data.binder_index == right.data.binder_index;
+    case CM_HIR_REGION_INFER:
+        return left.data.inference_variable
+            == right.data.inference_variable;
+    case CM_HIR_REGION_ERROR:
+        return left.data.error_reason == right.data.error_reason;
+    }
+    return 0;
+}
+
+static int cm_lower_finish_lifetime(CmLowerState *state,
+    const CmHirRegion *region)
+{
+    if (state->callable_input_depth == 0u) return 1;
+    if (!state->has_callable_input_region) {
+        state->callable_input_region = *region;
+        state->has_callable_input_region = 1;
+    } else if (!cm_lower_regions_equal(state->callable_input_region,
+            *region)) {
+        state->ambiguous_callable_input_region = 1;
+    }
+    return 1;
+}
+
 static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
     CmHirDefId owner, CmSpan span, CmHirRegion *out_region)
 {
@@ -2966,7 +3003,7 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
             }
             out_region->kind = CM_HIR_REGION_LATE_BOUND;
             out_region->data.binder_index = binder_index;
-            return 1;
+            return cm_lower_finish_lifetime(state, out_region);
         }
         if (state->callable_input_depth != 0u
             && state->reject_callable_input_elision) {
@@ -2978,20 +3015,24 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
             return 0;
         }
         if (state->reject_callable_output_elision) {
+            if (state->has_callable_input_region
+                && !state->ambiguous_callable_input_region) {
+                *out_region = state->callable_input_region;
+                return 1;
+            }
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
-                CM_HIR_OK,
-                "elided lifetime in callable trait output is not supported");
+                CM_HIR_OK, "callable trait output lifetime is ambiguous");
             return 0;
         }
         out_region->kind = CM_HIR_REGION_INFER;
         out_region->data.inference_variable = state->next_region_inference;
         state->next_region_inference += 1u;
-        return 1;
+        return cm_lower_finish_lifetime(state, out_region);
     }
     if (cm_lower_string_is(state, lifetime, "'static")) {
         out_region->kind = CM_HIR_REGION_STATIC;
-        return 1;
+        return cm_lower_finish_lifetime(state, out_region);
     }
     if (state->active_lifetime_binder != NULL) {
         for (binder_index = 0u;
@@ -3002,7 +3043,7 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
                         binder_index])) {
                 out_region->kind = CM_HIR_REGION_LATE_BOUND;
                 out_region->data.binder_index = binder_index;
-                return 1;
+                return cm_lower_finish_lifetime(state, out_region);
             }
         }
     }
@@ -3023,7 +3064,7 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
         }
         out_region->kind = CM_HIR_REGION_INFER;
         out_region->data.inference_variable = alias->inference_variable;
-        return 1;
+        return cm_lower_finish_lifetime(state, out_region);
     }
     generic = cm_lower_find_generic_in_scope(state, owner, lifetime);
     if (generic == NULL || generic->kind != CM_HIR_GENERIC_LIFETIME) {
@@ -3034,7 +3075,7 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
     }
     out_region->kind = CM_HIR_REGION_EARLY_BOUND;
     out_region->data.parameter = generic->hir_id;
-    return 1;
+    return cm_lower_finish_lifetime(state, out_region);
 }
 
 static int cm_lower_validate_generic_constraint(CmLowerState *state,
@@ -12194,6 +12235,9 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     CmHirLifetimeBinder *previous_callable_binder;
     CmSpan previous_callable_span;
     uint32_t previous_callable_depth;
+    CmHirRegion previous_callable_region;
+    int previous_has_callable_region;
+    int previous_ambiguous_callable_region;
     int previous_input_rejection;
     int previous_output_rejection;
     int callable_inputs;
@@ -12211,6 +12255,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     previous_callable_binder = state->active_callable_predicate_binder;
     previous_callable_span = state->active_callable_predicate_span;
     previous_callable_depth = state->callable_input_depth;
+    previous_callable_region = state->callable_input_region;
+    previous_has_callable_region = state->has_callable_input_region;
+    previous_ambiguous_callable_region =
+        state->ambiguous_callable_input_region;
     previous_input_rejection = state->reject_callable_input_elision;
     previous_output_rejection = state->reject_callable_output_elision;
     if (ast_binder != NULL && ast_binder->lifetime_count != 0u) {
@@ -12221,6 +12269,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
             ? &out_predicate->binder : NULL;
         state->active_callable_predicate_span = predicate_span;
         state->callable_input_depth = 0u;
+        memset(&state->callable_input_region, 0,
+            sizeof(state->callable_input_region));
+        state->has_callable_input_region = 0;
+        state->ambiguous_callable_input_region = 0;
         state->reject_callable_input_elision = previous_input_rejection
             || previous_binder != NULL;
     }
@@ -12231,6 +12283,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
         state->active_callable_predicate_binder = previous_callable_binder;
         state->active_callable_predicate_span = previous_callable_span;
         state->callable_input_depth = previous_callable_depth;
+        state->callable_input_region = previous_callable_region;
+        state->has_callable_input_region = previous_has_callable_region;
+        state->ambiguous_callable_input_region =
+            previous_ambiguous_callable_region;
         state->reject_callable_input_elision = previous_input_rejection;
         state->reject_callable_output_elision = previous_output_rejection;
         cm_free(out_predicate->trait_type.arguments);
@@ -12252,6 +12308,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
         state->active_callable_predicate_binder = previous_callable_binder;
         state->active_callable_predicate_span = previous_callable_span;
         state->callable_input_depth = previous_callable_depth;
+        state->callable_input_region = previous_callable_region;
+        state->has_callable_input_region = previous_has_callable_region;
+        state->ambiguous_callable_input_region =
+            previous_ambiguous_callable_region;
         state->reject_callable_input_elision = previous_input_rejection;
         state->reject_callable_output_elision = previous_output_rejection;
         cm_free(out_predicate->trait_type.arguments);
@@ -12264,6 +12324,10 @@ static int cm_lower_one_trait_predicate(CmLowerState *state,
     state->active_callable_predicate_binder = previous_callable_binder;
     state->active_callable_predicate_span = previous_callable_span;
     state->callable_input_depth = previous_callable_depth;
+    state->callable_input_region = previous_callable_region;
+    state->has_callable_input_region = previous_has_callable_region;
+    state->ambiguous_callable_input_region =
+        previous_ambiguous_callable_region;
     state->reject_callable_input_elision = previous_input_rejection;
     state->reject_callable_output_elision = previous_output_rejection;
     return 1;

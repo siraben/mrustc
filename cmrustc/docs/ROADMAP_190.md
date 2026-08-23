@@ -38,8 +38,9 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   associated-item identities rather than omit them.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
-  parameters. Elided callable outputs and unrepresentable mixed binders reject
-  rather than publishing inference variables across a crate boundary.
+  parameters, and an elided output inherits the sole distinct input lifetime.
+  Ambiguous outputs and unrepresentable mixed binders reject rather than
+  publishing inference variables across a crate boundary.
 - The working directory contains roughly 17 GiB of untracked experimental
   build directories. They are evidence/debug debris, not source; do not use
   their presence as a passing gate or delete them without a separate cleanup
