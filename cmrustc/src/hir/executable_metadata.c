@@ -1877,7 +1877,7 @@ static int cm_exec_sections_canonical(const CmHirExecutableMetadata *metadata,
     return valid;
 }
 
-CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode(
+static CmHirExecutableMetadataStatus cm_exec_decode(
     const void *encoded, size_t encoded_length,
     const CmHirExecutableMetadataExpectation *expectation,
     CmHirExecutableMetadata *output)
@@ -1890,8 +1890,7 @@ CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode(
     CmHirMetadataStatus wire_status;
     CmHirExecutableMetadataStatus status;
     size_t index;
-    if (output == NULL || (encoded_length != 0u && encoded == NULL)
-        || !cm_exec_expectation_valid(expectation))
+    if (output == NULL || (encoded_length != 0u && encoded == NULL))
         return CM_HIR_EXEC_METADATA_INVALID_ARGUMENT;
     wire_status = cm_hir_metadata_decode_envelope_version(encoded,
         encoded_length, CM_HIR_EXEC_METADATA_MAJOR, CM_HIR_EXEC_METADATA_MINOR,
@@ -1944,7 +1943,78 @@ CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode(
         return status == CM_HIR_EXEC_METADATA_LIMIT_EXCEEDED ? status
             : CM_HIR_EXEC_METADATA_INVALID_FORMAT;
     }
-    if (!cm_exec_identity_matches_expectation(&candidate, expectation)) {
+    if (expectation != NULL
+        && !cm_exec_identity_matches_expectation(&candidate, expectation)) {
+        cm_hir_executable_metadata_destroy(&candidate);
+        return CM_HIR_EXEC_METADATA_IDENTITY_MISMATCH;
+    }
+    cm_hir_executable_metadata_destroy(output);
+    *output = candidate;
+    return CM_HIR_EXEC_METADATA_OK;
+}
+
+CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode(
+    const void *encoded, size_t encoded_length,
+    const CmHirExecutableMetadataExpectation *expectation,
+    CmHirExecutableMetadata *output)
+{
+    if (!cm_exec_expectation_valid(expectation))
+        return CM_HIR_EXEC_METADATA_INVALID_ARGUMENT;
+    return cm_exec_decode(encoded, encoded_length, expectation, output);
+}
+
+static int cm_exec_configuration_matches(
+    const CmHirExecutableMetadata *metadata,
+    const CmHirArtifactConfig *configuration)
+{
+    CmHirExecutableString target;
+    CmHirExecutableString panic;
+    size_t index;
+
+    if (configuration == NULL || metadata == NULL
+        || configuration->cfg_count > CM_HIR_ARTIFACT_MAX_CFG_COUNT
+        || (configuration->cfg_count != 0u
+            && configuration->cfgs == NULL)) return 0;
+    target.data = (unsigned char *)configuration->target_descriptor.data;
+    target.length = configuration->target_descriptor.length;
+    panic.data = (unsigned char *)configuration->panic_strategy.data;
+    panic.length = configuration->panic_strategy.length;
+    if (metadata->edition != configuration->edition
+        || !cm_exec_string_valid(target, 1u,
+            CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
+        || !cm_exec_string_equal(panic,
+            (CmHirExecutableString){ (unsigned char *)"abort", 5u })
+        || !cm_exec_string_equal(metadata->target_descriptor, target)
+        || !cm_exec_string_equal(metadata->panic_strategy, panic)
+        || metadata->cfg_count != configuration->cfg_count) return 0;
+    for (index = 0u; index < configuration->cfg_count; index += 1u) {
+        CmHirExecutableString cfg;
+
+        cfg.data = (unsigned char *)configuration->cfgs[index].data;
+        cfg.length = configuration->cfgs[index].length;
+        if (!cm_exec_string_valid(cfg, 1u, CM_HIR_ARTIFACT_MAX_CFG_SIZE)
+            || !cm_exec_string_equal(metadata->cfgs[index], cfg)) return 0;
+    }
+    return 1;
+}
+
+CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode_configured(
+    const void *encoded, size_t encoded_length,
+    const CmHirArtifactConfig *configuration,
+    CmHirExecutableMetadata *output)
+{
+    CmHirExecutableMetadata candidate;
+    CmHirExecutableMetadataStatus status;
+
+    if (configuration == NULL || output == NULL)
+        return CM_HIR_EXEC_METADATA_INVALID_ARGUMENT;
+    cm_hir_executable_metadata_init(&candidate);
+    status = cm_exec_decode(encoded, encoded_length, NULL, &candidate);
+    if (status != CM_HIR_EXEC_METADATA_OK) {
+        cm_hir_executable_metadata_destroy(&candidate);
+        return status;
+    }
+    if (!cm_exec_configuration_matches(&candidate, configuration)) {
         cm_hir_executable_metadata_destroy(&candidate);
         return CM_HIR_EXEC_METADATA_IDENTITY_MISMATCH;
     }

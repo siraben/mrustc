@@ -2,6 +2,7 @@
 #define CMRUSTC_CM_HIR_EXECUTABLE_METADATA_H
 
 #include "cm/buf.h"
+#include "cm/hir/artifact_config.h"
 #include "cm/hir/artifact_identity.h"
 
 #include <stdint.h>
@@ -219,6 +220,17 @@ CmHirExecutableMetadataStatus cm_hir_executable_metadata_compute_identity(
 CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode(
     const void *encoded, size_t encoded_length,
     const CmHirExecutableMetadataExpectation *expectation,
+    CmHirExecutableMetadata *output);
+
+/*
+ * Decode a self-authenticating artifact when the consumer cannot know the
+ * producer's source digest or crate disambiguator in advance.  The complete
+ * internal identity remains mandatory; the caller-provided canonical build
+ * configuration is additionally required to match exactly.
+ */
+CmHirExecutableMetadataStatus cm_hir_executable_metadata_decode_configured(
+    const void *encoded, size_t encoded_length,
+    const CmHirArtifactConfig *configuration,
     CmHirExecutableMetadata *output);
 
 const char *cm_hir_executable_metadata_status_name(

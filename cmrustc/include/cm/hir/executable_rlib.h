@@ -64,6 +64,12 @@ CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
     const CmHirExecutableMetadataExpectation *expectation,
     CmHirExecutableRlib *output);
 
+/* Self-authenticate producer identity and require the consumer build config. */
+CmHirExecutableRlibStatus cm_hir_executable_rlib_decode_configured(
+    const void *archive, size_t archive_length,
+    const CmHirArtifactConfig *configuration,
+    CmHirExecutableRlib *output);
+
 const char *cm_hir_executable_rlib_status_name(
     CmHirExecutableRlibStatus status);
 

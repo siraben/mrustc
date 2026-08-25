@@ -183,9 +183,10 @@ CmHirExecutableRlibStatus cm_hir_executable_rlib_encode(
     return CM_HIR_EXECUTABLE_RLIB_OK;
 }
 
-CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
+static CmHirExecutableRlibStatus cm_exec_rlib_decode(
     const void *archive, size_t archive_length,
     const CmHirExecutableMetadataExpectation *expectation,
+    const CmHirArtifactConfig *configuration,
     CmHirExecutableRlib *output)
 {
     CmRlibArchiveView archive_view;
@@ -196,7 +197,8 @@ CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
     size_t archive_index;
     size_t object_index;
 
-    if (output == NULL || expectation == NULL || archive == NULL)
+    if (output == NULL || archive == NULL
+        || ((expectation == NULL) == (configuration == NULL)))
         return CM_HIR_EXECUTABLE_RLIB_INVALID_ARGUMENT;
     archive_status = cm_rlib_decode_members(archive, archive_length,
         &archive_view);
@@ -210,8 +212,11 @@ CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
         return CM_HIR_EXECUTABLE_RLIB_LIMIT_EXCEEDED;
 
     cm_hir_executable_rlib_init(&candidate);
-    metadata_status = cm_hir_executable_metadata_decode(metadata_member.data,
-        metadata_member.length, expectation, &candidate.metadata);
+    metadata_status = expectation != NULL
+        ? cm_hir_executable_metadata_decode(metadata_member.data,
+            metadata_member.length, expectation, &candidate.metadata)
+        : cm_hir_executable_metadata_decode_configured(metadata_member.data,
+            metadata_member.length, configuration, &candidate.metadata);
     if (metadata_status != CM_HIR_EXEC_METADATA_OK) {
         cm_hir_executable_rlib_destroy(&candidate);
         return cm_exec_rlib_metadata_status(metadata_status);
@@ -277,6 +282,28 @@ CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
     cm_hir_executable_rlib_destroy(output);
     *output = candidate;
     return CM_HIR_EXECUTABLE_RLIB_OK;
+}
+
+CmHirExecutableRlibStatus cm_hir_executable_rlib_decode(
+    const void *archive, size_t archive_length,
+    const CmHirExecutableMetadataExpectation *expectation,
+    CmHirExecutableRlib *output)
+{
+    if (expectation == NULL)
+        return CM_HIR_EXECUTABLE_RLIB_INVALID_ARGUMENT;
+    return cm_exec_rlib_decode(archive, archive_length, expectation, NULL,
+        output);
+}
+
+CmHirExecutableRlibStatus cm_hir_executable_rlib_decode_configured(
+    const void *archive, size_t archive_length,
+    const CmHirArtifactConfig *configuration,
+    CmHirExecutableRlib *output)
+{
+    if (configuration == NULL)
+        return CM_HIR_EXECUTABLE_RLIB_INVALID_ARGUMENT;
+    return cm_exec_rlib_decode(archive, archive_length, NULL, configuration,
+        output);
 }
 
 const char *cm_hir_executable_rlib_status_name(

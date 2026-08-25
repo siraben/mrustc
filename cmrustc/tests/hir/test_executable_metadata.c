@@ -277,8 +277,12 @@ static void test_round_trip_and_twin(void)
     TestFixture second;
     CmHirExecutableMetadataExpectation expectation;
     CmHirExecutableMetadata decoded;
+    CmHirExecutableMetadata configured;
+    CmHirArtifactConfig configuration;
+    CmHirArtifactBytes configured_cfg;
     CmByteBuf bytes1;
     CmByteBuf bytes2;
+    unsigned char *saved_crate_name;
     test_fixture_init(&first);
     test_fixture_init(&second);
     test_expectation_init(&first, &expectation);
@@ -308,6 +312,31 @@ static void test_round_trip_and_twin(void)
     assert(cm_hir_executable_metadata_validate(&decoded)
         == CM_HIR_EXEC_METADATA_UNSUPPORTED_DESCRIPTOR);
     cm_hir_executable_metadata_destroy(&decoded);
+
+    memset(&configuration, 0, sizeof(configuration));
+    configuration.edition = first.metadata.edition;
+    configuration.target_descriptor.data
+        = first.metadata.target_descriptor.data;
+    configuration.target_descriptor.length
+        = first.metadata.target_descriptor.length;
+    configuration.panic_strategy.data = first.metadata.panic_strategy.data;
+    configuration.panic_strategy.length
+        = first.metadata.panic_strategy.length;
+    configured_cfg.data = first.metadata.cfgs[0].data;
+    configured_cfg.length = first.metadata.cfgs[0].length;
+    configuration.cfgs = &configured_cfg;
+    configuration.cfg_count = 1u;
+    cm_hir_executable_metadata_init(&configured);
+    assert(cm_hir_executable_metadata_decode_configured(bytes1.data,
+        bytes1.len, &configuration, &configured)
+        == CM_HIR_EXEC_METADATA_OK);
+    saved_crate_name = configured.crate_name.data;
+    configuration.edition = UINT32_C(2018);
+    assert(cm_hir_executable_metadata_decode_configured(bytes1.data,
+        bytes1.len, &configuration, &configured)
+        == CM_HIR_EXEC_METADATA_IDENTITY_MISMATCH);
+    assert(configured.crate_name.data == saved_crate_name);
+    cm_hir_executable_metadata_destroy(&configured);
     cm_byte_buf_destroy(&bytes1);
     cm_byte_buf_destroy(&bytes2);
 }

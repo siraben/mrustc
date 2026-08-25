@@ -202,6 +202,8 @@ static void test_deterministic_round_trip(void)
 {
     TestFixture fixture;
     CmHirExecutableMetadataExpectation expectation;
+    CmHirArtifactConfig configuration;
+    CmHirArtifactBytes configured_cfg;
     CmHirExecutableRlib decoded;
     CmHirExecutableRlibObjectView copied_view;
     CmRlibArchiveView archive_view;
@@ -238,6 +240,30 @@ static void test_deterministic_round_trip(void)
     cm_hir_executable_rlib_destroy(&decoded);
     assert(strcmp(copied_view.archive_member_name, "g3_dep.o") == 0);
     assert(memcmp(copied_view.data, "OBJ!", 4u) == 0);
+
+    memset(&configuration, 0, sizeof(configuration));
+    configuration.edition = fixture.metadata.edition;
+    configuration.target_descriptor.data
+        = fixture.metadata.target_descriptor.data;
+    configuration.target_descriptor.length
+        = fixture.metadata.target_descriptor.length;
+    configuration.panic_strategy.data = fixture.metadata.panic_strategy.data;
+    configuration.panic_strategy.length
+        = fixture.metadata.panic_strategy.length;
+    configured_cfg.data = fixture.metadata.cfgs[0].data;
+    configured_cfg.length = fixture.metadata.cfgs[0].length;
+    configuration.cfgs = &configured_cfg;
+    configuration.cfg_count = 1u;
+    cm_hir_executable_rlib_init(&decoded);
+    assert(cm_hir_executable_rlib_decode_configured(first.data, first.len,
+        &configuration, &decoded) == CM_HIR_EXECUTABLE_RLIB_OK);
+    configuration.edition = UINT32_C(2018);
+    assert(cm_hir_executable_rlib_decode_configured(first.data, first.len,
+        &configuration, &decoded)
+        == CM_HIR_EXECUTABLE_RLIB_IDENTITY_MISMATCH);
+    assert(decoded.object_count == 1u
+        && memcmp(decoded.objects[0].data, "OBJ!", 4u) == 0);
+    cm_hir_executable_rlib_destroy(&decoded);
 
     fixture.object.archive_member_name = (CmHirExecutableString)S("a.o");
     test_expectation_init(&fixture, &expectation);
