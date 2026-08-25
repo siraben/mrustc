@@ -171,8 +171,9 @@ provenance so `FnMut(T)` lowers to a `FnMut` trait reference whose positional
 argument is a one-element tuple, without admitting ambiguous
 ordinary `(T)`/`(T,)` source syntax. Predicates and equalities retain resolved
 DefIds, arguments, source order, and exact spans in deterministic `hir-v15`
-output. Default bodies are deliberately minimized while preserving
-required-versus-default body state. This structural storage does not claim
+output. Default bodies are deliberately minimized while preserving an
+explicit required-versus-default promise independently of executable body
+availability. This structural storage does not claim
 obligation solving or method applicability. Nine methods remain excluded:
 three with const generics, three with lifetime generics, and three with nested
 associated constraints or `impl Trait`. Raw and standalone-expanded entry
@@ -278,7 +279,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v31` and
+remains omitted rather than guessed. Canonical dumps are `hir-v32` and
 `mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -305,10 +306,12 @@ observer currentness authenticate the arena. This is representation only:
 capture absence/class and Copy evidence are uncomputed, while invocation,
 lifetime inference, expansion, MIR, and C emission reject these nodes.
 
-Canonical `hir-v31` preserves the compiler-authenticated const capability of
+Canonical `hir-v32` preserves the compiler-authenticated const capability of
 traits and the exact constness of trait impl headers. Const inherent impls and
 const impls of non-const traits reject; legacy semantic metadata v1.1 rejects
-these facts instead of silently erasing them.
+these facts and trait method/associated-const default promises instead of
+silently erasing them. Declaration metadata v2.x remains reference-only for
+trait identities and does not claim associated-declaration completeness.
 
 Every current function, const, and static body still has an `ITEM_SOURCE`
 origin whose definition, enclosing definition, item backlink, and legacy owner
@@ -663,9 +666,9 @@ link, their impl parent, `Self`-owned type, effective provenance, and
 graph-owned initializer body; missing, mismatched, and duplicate definitions
 remain errors. This clears `Integer::{ZERO, ONE}` from
 `int!(u16, u32, u64)` in `num/dec2flt/float.rs:48`. This slice also retains
-optional trait associated const defaults as graph-owned
-unlowered bodies. A targetless const requires exactly one impl definition;
-a default permits zero or one override. This clears `SIG_BITS` and the
+optional trait associated const defaults as explicit promises plus graph-owned
+unlowered bodies when source is available. A required const needs exactly one
+impl definition; a promised default permits zero or one override. This clears `SIG_BITS` and the
 following `RawFloat` defaults. The next whole-core rejection is the generic
 trait-impl method `Hash::hash<H>` in `num/nonzero.rs:291`; positive trait impl
 methods now retain their method-owned generics and where predicates, with

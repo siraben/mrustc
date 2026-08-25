@@ -363,6 +363,7 @@ static void give_trait_method_default_body(TestFixture *fixture)
     assert(cm_hir_add_body(&fixture->hir, &body, &body_id) == CM_HIR_OK);
     method = mutable_item(fixture, fixture->trait_method);
     method->data.function_item.body = body_id;
+    method->data.function_item.has_default_body = 1;
 }
 
 static void add_duplicate_impl_method(TestFixture *fixture)
@@ -512,6 +513,15 @@ static void test_default_method_rules(void)
     TestFixture fixture;
     CmSemanticItemResult result;
     CmHirItem *method;
+
+    fixture_init(&fixture, 0, 0);
+    method = mutable_item(&fixture, fixture.trait_method);
+    method->data.function_item.has_default_body = 1;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_OK
+        && method->data.function_item.body == CM_HIR_BODY_NONE);
+    fixture_destroy(&fixture);
 
     fixture_init(&fixture, 0, 0);
     give_trait_method_default_body(&fixture);

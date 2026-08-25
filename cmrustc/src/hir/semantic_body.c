@@ -1694,16 +1694,21 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         }
     }
     if (matches == 0u
-        && declared_callable->data.function_item.body != CM_HIR_BODY_NONE) {
+        && declared_callable->data.function_item.has_default_body) {
         selected_callable = declared_callable;
     }
     if (matches > 1u || selected_callable == NULL
         || selected_callable->generic_parameter_count != 0u
         || selected_callable->predicate_scope_count != 0u
         || selected_callable->predicate_count != 0u
-        || selected_callable->outlives_predicate_count != 0u
-        || selected_callable->data.function_item.body == CM_HIR_BODY_NONE) {
+        || selected_callable->outlives_predicate_count != 0u) {
         status = CM_SEMANTIC_BODY_INVALID;
+        goto cleanup;
+    }
+    if (selected_callable->data.function_item.body == CM_HIR_BODY_NONE) {
+        /* A metadata-only default is callable in principle, but its
+         * executable body is intentionally outside this HIR slice. */
+        status = CM_SEMANTIC_BODY_UNSUPPORTED;
         goto cleanup;
     }
     signature = &selected_callable->data.function_item.signature;

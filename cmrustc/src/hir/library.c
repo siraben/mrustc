@@ -1492,6 +1492,11 @@ static int cm_hir_library_add_value_from_item(
     if (state == NULL || item == NULL
         || cm_hir_def_id_is_none(item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
+        || (item->kind == CM_HIR_ITEM_FUNCTION
+            && item->data.function_item.has_default_body)
+        || ((item->kind == CM_HIR_ITEM_CONST
+                || item->kind == CM_HIR_ITEM_STATIC)
+            && item->data.value_item.has_default_body)
         || (item->kind != CM_HIR_ITEM_FUNCTION
             && (item->generic_parameter_count != 0u
                 || item->predicate_scope_count != 0u
@@ -2359,6 +2364,11 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
         || value->kind != cm_hir_library_value_kind(item->kind)
         || !cm_hir_def_id_equal(value->definition, item->definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
+        || (item->kind == CM_HIR_ITEM_FUNCTION
+            && item->data.function_item.has_default_body)
+        || ((item->kind == CM_HIR_ITEM_CONST
+                || item->kind == CM_HIR_ITEM_STATIC)
+            && item->data.value_item.has_default_body)
         || (item->kind != CM_HIR_ITEM_FUNCTION
             && (item->generic_parameter_count != 0u
                 || item->predicate_scope_count != 0u

@@ -2525,6 +2525,59 @@ static void test_semantic_unsupported_producers(void)
 
     cm_hir_context_init(&context);
     assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "default_method"), CM_HIR_EDITION_2024,
+        test_span(1u, 10u), &local_crate, &local_root) == CM_HIR_OK);
+    u8_type = add_integer_type(&context, CM_HIR_INT_U8, 2u);
+    implemented_trait = add_metadata_trait(&context, local_crate,
+        local_root, "Defaulted", 0, 3u);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_FUNCTION, test_span(4u, 5u),
+        &trait_member_definition) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_FUNCTION;
+    item.definition = trait_member_definition;
+    item.owner_module = local_root;
+    item.parent_definition = implemented_trait;
+    item.name = cm_hir_intern(&context, "provided");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(4u, 5u);
+    item.data.function_item.signature.return_type = u8_type;
+    item.data.function_item.signature.abi = cm_hir_intern(&context, "Rust");
+    item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.has_default_body = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert_semantic_encode_unsupported(&context, local_crate, local_root);
+    cm_hir_context_destroy(&context);
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "default_const"), CM_HIR_EDITION_2024,
+        test_span(1u, 10u), &local_crate, &local_root) == CM_HIR_OK);
+    u8_type = add_integer_type(&context, CM_HIR_INT_U8, 2u);
+    implemented_trait = add_metadata_trait(&context, local_crate,
+        local_root, "Defaulted", 0, 3u);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_CONST, test_span(4u, 5u), &trait_member_definition)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_CONST;
+    item.definition = trait_member_definition;
+    item.owner_module = local_root;
+    item.parent_definition = implemented_trait;
+    item.name = cm_hir_intern(&context, "PROVIDED");
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(4u, 5u);
+    item.data.value_item.type = u8_type;
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item.data.value_item.has_default_body = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert_semantic_encode_unsupported(&context, local_crate, local_root);
+    cm_hir_context_destroy(&context);
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
         cm_hir_intern(&context, "foreign_traits"), CM_HIR_EDITION_2024,
         test_span(1u, 10u), &foreign_crate, &foreign_root) == CM_HIR_OK);
     foreign_trait = add_metadata_trait(&context, foreign_crate,
@@ -3317,6 +3370,7 @@ static void test_parsed_declaration_v2_capture(void)
     CmHirLibraryValue const_value;
     CmHirLibraryValue static_value;
     CmByteBuf encoded;
+    size_t item_index;
 
     assert(parsed_producer_build(&producer, source, sizeof(source) - 1u,
         1u, 1u, 3u, 1));
@@ -3333,6 +3387,37 @@ static void test_parsed_declaration_v2_capture(void)
     assert(cm_hir_metadata_encode_declaration_artifact(&encoded,
         &producer.artifact).status == CM_HIR_METADATA_ARTIFACT_OK);
     cm_byte_buf_destroy(&encoded);
+    for (item_index = 0u; item_index < producer.context.items.len;
+            ++item_index) {
+        CmHirItem *item;
+        CmHirLibraryPathSegment path[2];
+        CmHirLibraryValue forged_value;
+        const CmInternedString *item_name;
+
+        item = (CmHirItem *)cm_vec_at(&producer.context.items, item_index);
+        if (item == NULL || (item->kind != CM_HIR_ITEM_FUNCTION
+                && item->kind != CM_HIR_ITEM_CONST
+                && item->kind != CM_HIR_ITEM_STATIC)) continue;
+        if (item->kind == CM_HIR_ITEM_FUNCTION) {
+            item->data.function_item.has_default_body = 1;
+        } else {
+            item->data.value_item.has_default_body = 1;
+        }
+        item_name = cm_interner_get(&producer.context.strings, item->name);
+        assert(item_name != NULL);
+        path[0].bytes = (const unsigned char *)"producer";
+        path[0].length = strlen("producer");
+        path[1].bytes = item_name->bytes;
+        path[1].length = item_name->len;
+        memset(&forged_value, 0, sizeof(forged_value));
+        assert(cm_hir_library_artifact_lookup_value(&producer.artifact,
+            path, 2u, &forged_value) == CM_HIR_LIBRARY_INVALID_HIR);
+        if (item->kind == CM_HIR_ITEM_FUNCTION) {
+            item->data.function_item.has_default_body = 0;
+        } else {
+            item->data.value_item.has_default_body = 0;
+        }
+    }
     parsed_producer_destroy(&producer);
 }
 

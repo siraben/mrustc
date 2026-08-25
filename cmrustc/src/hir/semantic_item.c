@@ -857,8 +857,8 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
             if (result.status != CM_SEMANTIC_ITEM_OK) goto cleanup;
         } else if (trait_member->kind == CM_HIR_ITEM_FUNCTION) {
             if (count == 0u) {
-                if (trait_member->data.function_item.body
-                        != CM_HIR_BODY_NONE) continue;
+                if (trait_member->data.function_item.has_default_body)
+                    continue;
                 result.status = CM_SEMANTIC_ITEM_MISSING_REQUIRED_METHOD;
                 goto cleanup;
             }

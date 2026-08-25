@@ -4060,6 +4060,19 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
                 result.status = CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR;
                 return result;
             }
+            if (item->definition.crate_id == identity.crate_id
+                && ((item->kind == CM_HIR_ITEM_FUNCTION
+                        && item->data.function_item.has_default_body)
+                    || (item->kind == CM_HIR_ITEM_CONST
+                        && item->data.value_item.has_default_body))) {
+                /*
+                 * Semantic v1.1 carries neither associated declarations nor
+                 * their default promises.  Reject rather than publish a
+                 * trait contract weaker than the producer's live HIR.
+                 */
+                result.status = CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR;
+                return result;
+            }
         }
     }
 

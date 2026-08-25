@@ -987,6 +987,7 @@ static void test_closed_trait_default_definition_mode(void)
         cm_hir_intern(&fixture.hir, "Rust");
     item.data.function_item.signature.safety = CM_HIR_SAFE;
     item.data.function_item.body = body_id;
+    item.data.function_item.has_default_body = 1;
     assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK
         && add_local_expression(&fixture.hir, body_id, 0u,
             fixture.u32_type, test_span(50u, 55u), &leaf) == CM_HIR_OK
@@ -1386,6 +1387,7 @@ static void test_explicit_qualified_callable_selection(void)
     CmHirDefId trait_definition;
     CmHirDefId impl_definition;
     CmHirDefId declared_definition;
+    CmHirDefId opaque_definition;
     CmHirDefId selected_definition;
     CmHirDefId caller_definition;
     CmHirDefId method_caller_definition;
@@ -1413,6 +1415,7 @@ static void test_explicit_qualified_callable_selection(void)
     CmSemanticSession session;
     CmSemanticSessionOptions options;
     CmSemanticBodyResult result;
+    CmTypeckContext *typeck;
     WritebackProbe probe;
 
     fixture_init(&fixture);
@@ -1638,6 +1641,63 @@ static void test_explicit_qualified_callable_selection(void)
     assert(result.status == CM_SEMANTIC_BODY_OK
         && probe.invocation_count == 1u);
     cm_semantic_session_destroy(&session);
+
+    {
+        CmHirItem *declared;
+        CmHirExpr *qualified_call;
+        CmHirDefId saved_declared_callable;
+        CmHirFunctionParameter opaque_parameters[2];
+        size_t before_types;
+
+        declared = mutable_item(&fixture, declared_definition);
+        assert(declared != NULL);
+        assert(cm_hir_reserve_item_definition_as(&fixture.hir,
+            fixture.crate_id, CM_HIR_ITEM_FUNCTION,
+            test_span(131u, 145u), &opaque_definition) == CM_HIR_OK);
+        memset(opaque_parameters, 0, sizeof(opaque_parameters));
+        opaque_parameters[0].name = cm_hir_intern(&fixture.hir, "self");
+        opaque_parameters[0].type = trait_self_type;
+        opaque_parameters[0].span = test_span(133u, 136u);
+        opaque_parameters[0].binding_kind = CM_HIR_BINDING_NAMED;
+        opaque_parameters[1].name = cm_hir_intern(&fixture.hir, "value");
+        opaque_parameters[1].type = trait_self_type;
+        opaque_parameters[1].span = test_span(137u, 141u);
+        opaque_parameters[1].binding_kind = CM_HIR_BINDING_NAMED;
+        init_item(&item, CM_HIR_ITEM_FUNCTION, opaque_definition,
+            fixture.root, "opaque", &fixture.hir);
+        item.parent_definition = trait_definition;
+        item.data.function_item.signature.parameters = opaque_parameters;
+        item.data.function_item.signature.parameter_count = 2u;
+        item.data.function_item.signature.receiver = CM_HIR_RECEIVER_VALUE;
+        item.data.function_item.signature.return_type = trait_self_type;
+        item.data.function_item.signature.abi =
+            cm_hir_intern(&fixture.hir, "Rust");
+        item.data.function_item.signature.safety = CM_HIR_SAFE;
+        item.data.function_item.has_default_body = 1;
+        assert(cm_hir_add_item(&fixture.hir, &item, &item_id) == CM_HIR_OK);
+        qualified_call = (CmHirExpr *)cm_vec_at(&fixture.hir.expressions,
+            (size_t)call - 1u);
+        assert(qualified_call != NULL
+            && qualified_call->kind == CM_HIR_EXPR_QUALIFIED_CALL);
+        saved_declared_callable = qualified_call->data.qualified_call
+            .declared_trait_callable;
+        qualified_call->data.qualified_call.declared_trait_callable =
+            opaque_definition;
+        declared->data.function_item.has_default_body = 1;
+        memset(&session, 0, sizeof(session));
+        options = session_options(&fixture, caller_definition);
+        assert(cm_semantic_session_init(&session, &fixture.hir, &options)
+            == CM_TRAIT_SOLVER_PROVEN);
+        typeck = cm_semantic_session_typeck(&session);
+        before_types = cm_typeck_type_count(typeck);
+        result = cm_semantic_body_check_definition(&session, caller_body);
+        assert(result.status == CM_SEMANTIC_BODY_UNSUPPORTED
+            && cm_typeck_type_count(typeck) == before_types);
+        cm_semantic_session_destroy(&session);
+        qualified_call->data.qualified_call.declared_trait_callable =
+            saved_declared_callable;
+        declared->data.function_item.has_default_body = 0;
+    }
 
     memset(&session, 0, sizeof(session));
     options = session_options(&fixture, method_caller_definition);

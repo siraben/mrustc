@@ -2745,6 +2745,52 @@ static void test_const_trait_impl_fidelity(void)
     }
 }
 
+static void test_trait_default_body_fidelity(void)
+{
+    static const char source[] =
+        "trait Defaults {"
+        " fn required();"
+        " fn provided() {}"
+        "}"
+        "struct Value;"
+        "impl Defaults for Value {"
+        " fn required() {}"
+        "}";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *trait_item;
+    const CmHirItem *impl_item;
+    const CmHirItem *required_method;
+    const CmHirItem *provided_method;
+    const CmHirItem *impl_required_method;
+
+    result = lower_source(source, &context, NULL);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "default-body lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    trait_item = find_item(&context, "Defaults");
+    impl_item = find_impl(&context);
+    required_method = trait_item == NULL ? NULL
+        : find_child(&context, trait_item->definition, "required");
+    provided_method = trait_item == NULL ? NULL
+        : find_child(&context, trait_item->definition, "provided");
+    impl_required_method = impl_item == NULL ? NULL
+        : find_child(&context, impl_item->definition, "required");
+    assert(result.error_count == 0u && context.items.len == 6u
+        && trait_item != NULL && impl_item != NULL
+        && required_method != NULL && provided_method != NULL
+        && impl_required_method != NULL);
+    assert(required_method->data.function_item.body == CM_HIR_BODY_NONE
+        && required_method->data.function_item.has_default_body == 0
+        && provided_method->data.function_item.body != CM_HIR_BODY_NONE
+        && provided_method->data.function_item.has_default_body == 1
+        && find_child(&context, impl_item->definition, "provided") == NULL);
+    assert(impl_required_method->data.function_item.has_default_body == 0);
+    cm_hir_context_destroy(&context);
+}
+
 static void check_adt_default_visible_to_trait_method(
     const CmHirContext *context, const CmHirLowerResult *result)
 {
@@ -11500,6 +11546,7 @@ int main(void)
     test_impl_header_self_type_projection();
     test_const_literal_adt_argument();
     test_struct_inline_trait_bound();
+    test_trait_default_body_fidelity();
     test_defaulted_alias_entry_points();
     test_explicit_projection_entry_points();
     test_cross_trait_projection_default_entry_points();

@@ -340,7 +340,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v31`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v32`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
@@ -788,8 +788,9 @@ enum selection remains supported. Trait children may be bare, targetless
 associated type declarations or ordinary non-generic Rust-ABI methods. Impl
 children may be bare, target-bearing associated type definitions or matching
 method definitions. Every required declaration must have exactly one
-definition, except that a trait method with a default body may be omitted or
-overridden. Impl and trait safety must match, and extra or duplicate
+definition, except that a trait method or associated const with an explicit
+default-body promise may be omitted or overridden even when declaration-only
+HIR has no executable body. Impl and trait safety must match, and extra or duplicate
 definitions are errors. Each impl association records the DefId of its trait
 declaration. Both `Self::Assoc` and qualified `<Self as Trait>::Assoc` lower to
 the same definition-backed projection shape.
@@ -1017,9 +1018,11 @@ effective provenance, and graph-owned initializer body. Model validation and
 impl completeness reject absent, mismatched, or duplicate links. This clears
 `Integer::{ZERO, ONE}` from `int!(u16, u32, u64)` in
 `num/dec2flt/float.rs:48`. Trait associated const defaults retain a
-declaration-owned type and graph-owned unlowered body. Impl completeness
-requires one definition for a targetless const but allows zero or one override
-for a default. This clears `SIG_BITS` and the following `RawFloat` defaults.
+declaration-owned type, an explicit default-body promise, and, when source is
+available, a graph-owned unlowered body. Impl completeness uses the promise:
+it requires one definition for a required const but allows zero or one
+override for a default. This clears `SIG_BITS` and the following `RawFloat`
+defaults.
 The next whole-core barrier is the generic trait-impl method `Hash::hash<H>`
 in `num/nonzero.rs:291`; positive trait-impl methods now reuse method-owned
 generic and predicate scopes, and model validation checks linked declaration
@@ -1375,7 +1378,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v31`.
+wrong-kind targets hard-error. The canonical format is `hir-v32`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are
@@ -1389,8 +1392,9 @@ by callable notation; ordinary one-element source tuple/group syntax remains a
 hard error. Shorthand projections such as `U::IntoIter` resolve from active
 item predicates, and omitted trailing trait arguments materialize supported
 defaults such as `PartialOrd<Rhs = Self>`. Default method bodies are minimized
-in the fixture, but required-versus-default body presence and all declaration
-metadata remain structural. Item reservations carry an expected HIR item kind;
+in the fixture, but the explicit required-versus-default promise remains
+structural independently of executable body availability. Item reservations
+carry an expected HIR item kind;
 pre-bind `Self` types are admitted only for definitions explicitly reserved as
 traits or impls, and binding a different item kind hard-errors.
 

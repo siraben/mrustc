@@ -142,7 +142,9 @@ CmHirLowerResult cm_hir_lower_expanded_crate(CmHirContext *context,
  * impl headers retain their real self type without inventing a trait identity.
  * Immutable, explicitly typed, targetless trait associated const declarations
  * retain their child DefId and trait-owned `Self` type; optional defaults
- * retain a declaration-owned unlowered body. Mutable or generated statics
+ * retain an explicit declaration promise independently of an optional
+ * declaration-owned unlowered body. Trait methods use the same promise/body
+ * split. Mutable or generated statics
  * remain rejected. Direct, attribute-free
  * trait/impl methods retain source-
  * qualified unlowered body identities; nested effective cfg/attribute views

@@ -505,7 +505,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v31\n", stream);
+    fputs("hir-v32\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -1143,12 +1143,16 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 item->data.function_item.trait_item_definition);
             fprintf(stream, " receiver=%s", cm_hir_receiver_name(
                 item->data.function_item.signature.receiver));
+            fprintf(stream, " default-body=%d",
+                item->data.function_item.has_default_body);
         }
         if (item->kind == CM_HIR_ITEM_CONST
             || item->kind == CM_HIR_ITEM_STATIC) {
             fputs(" trait-item=", stream);
             cm_hir_dump_def(stream,
                 item->data.value_item.trait_item_definition);
+            fprintf(stream, " default-body=%d",
+                item->data.value_item.has_default_body);
         }
         fprintf(stream, " generics=%u..%u",
             (unsigned int)item->generic_parameter_start,

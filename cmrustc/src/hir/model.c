@@ -2612,6 +2612,8 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
         || (signature->is_const != 0 && signature->is_const != 1)
         || (signature->is_async != 0 && signature->is_async != 1)
         || (signature->is_variadic != 0 && signature->is_variadic != 1)
+        || (item->data.function_item.has_default_body != 0
+            && item->data.function_item.has_default_body != 1)
         || (item->data.function_item.body != CM_HIR_BODY_NONE
             && cm_hir_get_body(context,
                 item->data.function_item.body) == NULL)) {
@@ -2655,7 +2657,8 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
     }
     if (!cm_hir_function_body_matches_signature(context, item)) return 0;
     if (cm_hir_def_id_is_none(item->parent_definition)) {
-        return signature->receiver == CM_HIR_RECEIVER_NONE
+        return item->data.function_item.has_default_body == 0
+            && signature->receiver == CM_HIR_RECEIVER_NONE
             && cm_hir_def_id_is_none(
                 item->data.function_item.trait_item_definition)
             && cm_hir_function_self_roots_valid(context, item,
@@ -2667,6 +2670,8 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
     if (parent->kind == CM_HIR_ITEM_TRAIT) {
         return cm_hir_def_id_is_none(
                 item->data.function_item.trait_item_definition)
+            && (item->data.function_item.body == CM_HIR_BODY_NONE
+                || item->data.function_item.has_default_body == 1)
             && cm_hir_receiver_shape_valid(context, signature,
                 item->parent_definition)
             && cm_hir_function_self_roots_valid(context, item,
@@ -2674,6 +2679,7 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
     }
     if (parent->kind != CM_HIR_ITEM_IMPL
         || parent->data.impl_item.is_negative != 0
+        || item->data.function_item.has_default_body != 0
         || item->data.function_item.body == CM_HIR_BODY_NONE) {
         return 0;
     }
@@ -3572,6 +3578,8 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
             item->data.value_item.type, expected_owner, 0u)
         || (unsigned int)item->data.value_item.mutability >
             (unsigned int)CM_HIR_MUTABLE
+        || (item->data.value_item.has_default_body != 0
+            && item->data.value_item.has_default_body != 1)
         || !cm_hir_body_self_roots_valid(context,
             item->data.value_item.body, expected_owner)) {
         return 0;
@@ -3579,6 +3587,7 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
     if (cm_hir_def_id_is_none(item->parent_definition)) {
         if (!cm_hir_def_id_is_none(
                 item->data.value_item.trait_item_definition)
+            || item->data.value_item.has_default_body != 0
             || item->data.value_item.body == CM_HIR_BODY_NONE) return 0;
     } else {
         parent = cm_hir_bound_definition_item(context,
@@ -3588,6 +3597,8 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
             if (item->data.value_item.mutability != CM_HIR_IMMUTABLE
                 || !cm_hir_def_id_is_none(
                     item->data.value_item.trait_item_definition)) return 0;
+            if (item->data.value_item.body != CM_HIR_BODY_NONE
+                && item->data.value_item.has_default_body != 1) return 0;
             if (item->data.value_item.body == CM_HIR_BODY_NONE) return 1;
             body = cm_hir_get_body(context, item->data.value_item.body);
             return body != NULL
@@ -3595,6 +3606,7 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
         }
         if (parent->kind != CM_HIR_ITEM_IMPL
             || parent->data.impl_item.is_negative
+            || item->data.value_item.has_default_body != 0
             || item->data.value_item.body == CM_HIR_BODY_NONE
             || item->data.value_item.mutability != CM_HIR_IMMUTABLE) {
             return 0;
@@ -3607,8 +3619,6 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
                 item->data.value_item.trait_item_definition);
             if (trait_declaration == NULL
                 || trait_declaration->kind != CM_HIR_ITEM_CONST
-                || trait_declaration->data.value_item.body
-                    != CM_HIR_BODY_NONE
                 || !cm_hir_def_id_equal(
                     trait_declaration->parent_definition,
                     parent->data.impl_item.trait_type.definition)

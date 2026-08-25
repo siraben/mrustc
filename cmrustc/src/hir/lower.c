@@ -9433,7 +9433,6 @@ static const CmHirItem *cm_lower_find_associated_const(
         item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
             index);
         if (item != NULL && item->kind == CM_HIR_ITEM_CONST
-            && item->data.value_item.body == CM_HIR_BODY_NONE
             && cm_hir_def_id_equal(item->parent_definition,
                 trait_definition)
             && cm_lower_hir_name_matches_ast(state, item->name,
@@ -10119,6 +10118,9 @@ static int cm_lower_function_item(CmLowerState *state,
         ? CM_HIR_UNSAFE : CM_HIR_SAFE;
     hir_item->data.function_item.signature.is_const = function->is_const;
     hir_item->data.function_item.signature.is_async = function->is_async;
+    hir_item->data.function_item.has_default_body =
+        record->parent_kind == CM_LOWER_PARENT_TRAIT
+            && function->body != CM_AST_EXPR_NONE;
     hir_item->data.function_item.trait_item_definition =
         trait_item_definition;
     hir_item->data.function_item.body = cm_lower_body(state,
@@ -14729,6 +14731,8 @@ static int cm_lower_value_item(CmLowerState *state,
             ast_item->data.value_item.type, record->owner_module,
             record->parent_definition);
         hir_item->data.value_item.mutability = CM_HIR_IMMUTABLE;
+        hir_item->data.value_item.has_default_body =
+            ast_item->data.value_item.has_value;
         hir_item->data.value_item.body = cm_lower_body(state,
             record->definition, hir_item->data.value_item.type,
             ast_item->data.value_item.initializer, NULL, 0u, 0u,
@@ -14792,6 +14796,7 @@ static int cm_lower_value_item(CmLowerState *state,
     hir_item->data.value_item.mutability =
         ast_item->data.value_item.is_mutable
             ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
+    hir_item->data.value_item.has_default_body = 0;
     hir_item->data.value_item.trait_item_definition =
         trait_item_definition;
     hir_item->data.value_item.body = cm_lower_body(state,
@@ -19158,8 +19163,7 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
                     || declaration->kind == CM_HIR_ITEM_FUNCTION)
                 && matches == 0u
                 && ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS)
-                    || declaration->data.function_item.body
-                        == CM_HIR_BODY_NONE)
+                    || !declaration->data.function_item.has_default_body)
                 && cm_lower_count_inherited_specialization_members(state,
                     impl_item, declaration) == 1u) {
                 continue;
@@ -19167,18 +19171,16 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
             if ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS
                     && matches != 1u)
                 || (declaration->kind == CM_HIR_ITEM_CONST
-                    && declaration->data.value_item.body == CM_HIR_BODY_NONE
+                    && !declaration->data.value_item.has_default_body
                     && matches != 1u)
                 || (declaration->kind == CM_HIR_ITEM_CONST
-                    && declaration->data.value_item.body != CM_HIR_BODY_NONE
+                    && declaration->data.value_item.has_default_body
                     && matches > 1u)
                 || (declaration->kind == CM_HIR_ITEM_FUNCTION
-                    && declaration->data.function_item.body
-                        == CM_HIR_BODY_NONE
+                    && !declaration->data.function_item.has_default_body
                     && matches != 1u)
                 || (declaration->kind == CM_HIR_ITEM_FUNCTION
-                    && declaration->data.function_item.body
-                        != CM_HIR_BODY_NONE
+                    && declaration->data.function_item.has_default_body
                     && matches > 1u)) {
                 cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL,
                     impl_item->span, CM_AST_ITEM_NONE, CM_AST_TYPE_NONE,

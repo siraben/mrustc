@@ -2266,7 +2266,7 @@ static void test_rustc_as_vec_into_iter_fixture(void)
         "AsVecIntoIter imports lost visibility, metadata, or bindings");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(hir_dump,
             "visibility=public kind=use "
             "tree=\"self::into_iter::IntoIter\" "
@@ -2276,7 +2276,7 @@ static void test_rustc_as_vec_into_iter_fixture(void)
             "\\\"1.0.0\\\")\"") != NULL
         && strstr(hir_dump,
             "namespace=type name=\"IntoIter\" target=") != NULL,
-        "AsVecIntoIter hir-v31 dump omitted the attributed reexport");
+        "AsVecIntoIter hir-v32 dump omitted the attributed reexport");
     free(hir_dump);
     check(trait_item != NULL && into_iter_item != NULL && impl_item != NULL
         && trait_associated != NULL && impl_associated != NULL
@@ -2522,13 +2522,13 @@ static void test_rustc_as_vec_into_iter_fixture(void)
         "no-global-oom HIR imports did not remove only cfg-disabled uses");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(hir_dump,
             "tree=\"self::into_iter::IntoIter\"") != NULL
         && strstr(hir_dump,
             "tree=\"self::in_place_collect::AsVecIntoIter\"") == NULL
         && strstr(hir_dump, "tree=\"super::AsVecIntoIter\"") == NULL,
-        "no-global-oom hir-v31 dump retained a cfg-disabled import");
+        "no-global-oom hir-v32 dump retained a cfg-disabled import");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -3232,7 +3232,7 @@ static void test_rustc_future_ready_pending_fixture(void)
         "Pending::poll discard parameter created a local or lost provenance");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(hir_dump, "binding=discard name=none") != NULL
         && strstr(hir_dump, "binding=named name=\"_cx\"") != NULL
         && strstr(hir_dump, "binding=named name=\"cx\"") != NULL
@@ -3241,7 +3241,7 @@ static void test_rustc_future_ready_pending_fixture(void)
             "origin=parameter[0].binding[0] name=\"self\" "
             "mutability=immutable")
             != NULL,
-        "Future/Ready/Pending hir-v31 dump lost binding distinctions");
+        "Future/Ready/Pending hir-v32 dump lost binding distinctions");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -4114,13 +4114,13 @@ static void test_rustc_try_family_fixture(void)
 
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(hir_dump, "modifier=const-if-const trait=") != NULL
         && strstr(hir_dump, "name=\"FromResidual\"") != NULL
         && strstr(hir_dump, "name=\"from_output\"") != NULL
         && strstr(hir_dump, "name=\"branch\"") != NULL
         && strstr(hir_dump, "meta=\"inline\"") != NULL,
-        "Try-family hir-v31 dump omitted its supertrait or methods");
+        "Try-family hir-v32 dump omitted its supertrait or methods");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -4542,14 +4542,14 @@ static void test_rustc_into_iterator_deref_fixture(void)
     relaxed_modifier_dump = second_bound_dump == NULL ? NULL
         : strstr(second_bound_dump, "modifier=relaxed trait=");
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && first_bound_dump != NULL && equality_dump != NULL
         && second_bound_dump != NULL && first_bound_dump < equality_dump
         && equality_dump < second_bound_dump
         && required_modifier_dump != NULL
         && required_modifier_dump < equality_dump
         && relaxed_modifier_dump != NULL,
-        "IntoIterator/Deref hir-v31 bound/equality dump order differs");
+        "IntoIterator/Deref hir-v32 bound/equality dump order differs");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -4995,7 +4995,7 @@ static void test_rustc_iterator_methods_fixture(void)
 
     hir_dump = dump_hir(&hir);
     dump_order_ok = hir_dump != NULL
-        && strncmp(hir_dump, "hir-v31\n", strlen("hir-v31\n")) == 0;
+        && strncmp(hir_dump, "hir-v32\n", strlen("hir-v32\n")) == 0;
     dump_end = hir_dump == NULL ? NULL : hir_dump + strlen(hir_dump);
     for (index = 0u; index < 25u && dump_order_ok; ++index) {
         written = snprintf(marker, sizeof(marker), " name=\"%s\"",
@@ -5031,7 +5031,7 @@ static void test_rustc_iterator_methods_fixture(void)
         && text_count_between(hir_dump, dump_end, "trait-predicate item#")
             == 9u;
     check(dump_order_ok,
-        "Iterator hir-v31 dump lost item, attribute, or predicate order");
+        "Iterator hir-v32 dump lost item, attribute, or predicate order");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -5473,7 +5473,7 @@ static void test_rustc_iterator_generic_methods_fixture(void)
         dump_b = dump_hir(&hir);
         dump_ok = dump_a != NULL && dump_b != NULL
             && strcmp(dump_a, dump_b) == 0
-            && strncmp(dump_a, "hir-v31\n", strlen("hir-v31\n")) == 0;
+            && strncmp(dump_a, "hir-v32\n", strlen("hir-v32\n")) == 0;
         cursor = dump_ok ? strstr(dump_a, " name=\"Iterator\"") : NULL;
         cursor = cursor == NULL ? NULL : strstr(cursor + 1, " name=\"Item\"");
         for (method_index = 0u;
@@ -5493,7 +5493,7 @@ static void test_rustc_iterator_generic_methods_fixture(void)
                 "trait-predicate-equality item#") == equality_total
             && predicate_total != 0u && equality_total != 0u;
         check(dump_ok,
-            "generic Iterator hir-v31 dump is incomplete or nondeterministic");
+            "generic Iterator hir-v32 dump is incomplete or nondeterministic");
         free(dump_a);
         free(dump_b);
     }
@@ -6335,7 +6335,9 @@ static void test_trait_associated_const_declarations(void)
         && zero_item->data.value_item.mutability == CM_HIR_IMMUTABLE
         && one_item->data.value_item.mutability == CM_HIR_IMMUTABLE
         && zero_item->data.value_item.body == CM_HIR_BODY_NONE
+        && zero_item->data.value_item.has_default_body == 0
         && one_item->data.value_item.body != CM_HIR_BODY_NONE
+        && one_item->data.value_item.has_default_body == 1
         && hir_attributes_match_graph(&graph, &hir, zero_item,
             &zero_attribute, 1u)
         && zero_type != NULL && zero_type->kind == CM_HIR_TYPE_SELF_KIND
@@ -6360,9 +6362,13 @@ static void test_generated_trait_impl_consts(void)
         "macro_rules! int { ($($ty:ty),+) => { $(\n"
         "impl Integer for $ty {\n"
         "const ZERO: Self = 0; const ONE: Self = 1;\n"
+        "const DEFAULT: Self = 2;\n"
         "}\n"
         ")+ } }\n"
-        "int!(u16, u32, u64);\n";
+        "int!(u16, u32, u64);\n"
+        "impl Integer for u8 {\n"
+        "const ZERO: Self = 0; const ONE: Self = 1;\n"
+        "}\n";
     CmSourceSet sources;
     CmSourceId root;
     CmModuleGraph graph;
@@ -6381,6 +6387,7 @@ static void test_generated_trait_impl_consts(void)
     size_t impl_count;
     size_t zero_count;
     size_t one_count;
+    size_t default_count;
     int definitions_valid;
 
     cm_source_set_init(&sources);
@@ -6416,6 +6423,7 @@ static void test_generated_trait_impl_consts(void)
     impl_count = 0u;
     zero_count = 0u;
     one_count = 0u;
+    default_count = 0u;
     definitions_valid = 1;
     for (index = 0u; index < hir.items.len; ++index) {
         const CmHirItem *item;
@@ -6448,20 +6456,68 @@ static void test_generated_trait_impl_consts(void)
                         .trait_item_definition,
                     one_declaration->definition)) {
                 one_count += 1u;
+            } else if (default_declaration != NULL
+                && cm_hir_def_id_equal(item->data.value_item
+                        .trait_item_definition,
+                    default_declaration->definition)) {
+                default_count += 1u;
             } else {
                 definitions_valid = 0;
             }
         }
     }
     check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 13u && hir.items.len == 13u
-        && hir.bodies.len == 7u && trait_item != NULL
+        && result.lowered_item_count == 19u && hir.items.len == 19u
+        && hir.bodies.len == 12u && trait_item != NULL
         && zero_declaration != NULL && one_declaration != NULL
         && default_declaration != NULL
         && default_declaration->data.value_item.body != CM_HIR_BODY_NONE
-        && impl_count == 3u && zero_count == 3u && one_count == 3u
+        && impl_count == 4u && zero_count == 4u && one_count == 4u
+        && default_count == 3u
         && definitions_valid,
-        "generated trait impl consts lost declaration links, Self, or bodies");
+        "generated trait impl consts lost links, defaults, or omission");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_required_trait_const_omission_rejected(void)
+{
+    static const unsigned char source[] =
+        "trait Required { const VALUE: u8; }\n"
+        "impl Required for u8 {}\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "required-trait-const/lib.rs",
+        source, sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add required associated const fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    check(graph_result.error_count == 0u && result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "missing a required associated const definition") != NULL,
+        "required associated const omission did not fail closed");
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
@@ -6842,10 +6898,10 @@ static void test_enum_variant_glob_import(void)
         "enum variant glob bindings lost namespace-specific identities");
     dump = dump_hir(&hir);
     check(dump != NULL
-        && strncmp(dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(dump, "enum-variant bound enum-item#1 variant=0")
             != NULL,
-        "hir-v31 dump omitted canonical enum variant identity");
+        "hir-v32 dump omitted canonical enum variant identity");
     free(dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -11967,11 +12023,11 @@ static void test_core_auto_trait_negative_impl_cluster(void)
     }
     dump = dump_hir(&hir);
     check(dump != NULL
-        && strncmp(dump, "hir-v31\n", strlen("hir-v31\n")) == 0
+        && strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0
         && strstr(dump, "safety=unsafe auto=1") != NULL
         && text_count_between(dump, dump + strlen(dump),
             "safety=safe negative=1") == 2u,
-        "hir-v31 dump erased auto-trait or negative-impl headers");
+        "hir-v32 dump erased auto-trait or negative-impl headers");
     free(dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -12004,6 +12060,7 @@ int main(void)
     test_source_const();
     test_trait_associated_const_declarations();
     test_generated_trait_impl_consts();
+    test_required_trait_const_omission_rejected();
     test_specializable_impl_members();
     test_source_static_with_named_array_length();
     test_enum_variant_glob_import();
