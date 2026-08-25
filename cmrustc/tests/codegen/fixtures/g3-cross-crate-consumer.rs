@@ -2,7 +2,9 @@
 #![no_core]
 #![no_main]
 
+use provider::bounded;
+
 #[no_mangle]
 pub extern "C" fn consumer_probe(x: u32) -> u32 {
-    provider::bounded::<u32>(x)
+    bounded::<u32>(x)
 }

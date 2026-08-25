@@ -179,6 +179,7 @@ static const CmHirItem *cm_hir_body_find_free_function(
     CmInternId name)
 {
     const CmHirItem *found;
+    const CmHirModule *owner_module;
     size_t index;
 
     found = NULL;
@@ -197,6 +198,47 @@ static const CmHirItem *cm_hir_body_find_free_function(
         }
         if (found != NULL) return NULL;
         found = item;
+    }
+    owner_module = cm_hir_get_module(context, module);
+    if (owner_module == NULL) return NULL;
+    for (index = 0u; index < owner_module->import_count; ++index) {
+        const CmHirImport *import_record;
+        uint32_t binding_index;
+
+        import_record = &owner_module->imports[index];
+        for (binding_index = 0u;
+                binding_index < import_record->binding_count;
+                ++binding_index) {
+            const CmHirImportBinding *binding;
+            const CmHirDefinition *definition;
+            const CmHirItem *item;
+
+            binding = &import_record->bindings[binding_index];
+            if (binding->namespace_kind != CM_HIR_NAMESPACE_VALUE
+                || binding->is_anonymous
+                || cm_hir_def_id_is_none(binding->target)
+                || !cm_hir_body_ast_hir_text_equal(ast, name, context,
+                    binding->name)) {
+                continue;
+            }
+            definition = cm_hir_lookup_definition(context,
+                binding->target);
+            item = definition == NULL
+                    || definition->kind != CM_HIR_DEFINITION_ITEM
+                    || definition->state != CM_HIR_DEFINITION_BOUND
+                ? NULL : cm_hir_get_item(context,
+                    definition->entity.item_id);
+            if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+                || !cm_hir_def_id_equal(item->definition,
+                    binding->target)
+                || !cm_hir_def_id_is_none(item->parent_definition)
+                || !cm_hir_def_id_is_none(
+                    item->data.function_item.trait_item_definition)) {
+                return NULL;
+            }
+            if (found != NULL) return NULL;
+            found = item;
+        }
     }
     return found;
 }

@@ -3191,8 +3191,9 @@ static CmHirLibraryStatus cm_hir_library_lookup_from_module(
 {
     size_t segment_index;
 
-    if (out_binding != NULL) memset(out_binding, 0, sizeof(*out_binding));
-    if (state == NULL || out_binding == NULL || segments == NULL
+    if (out_binding == NULL) return CM_HIR_LIBRARY_INVALID_ARGUMENT;
+    memset(out_binding, 0, sizeof(*out_binding));
+    if (state == NULL || segments == NULL
         || segment_count == 0u || state->context == NULL
         || cm_hir_def_id_is_none(current_module)) {
         return CM_HIR_LIBRARY_INVALID_ARGUMENT;
@@ -3400,17 +3401,18 @@ static int cm_hir_library_import_name_is(const CmImportResolver *imports,
     return matches;
 }
 
-CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
+static CmHirLibraryStatus cm_hir_library_artifact_resolve_import_namespace(
     const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,
     const CmModuleGraph *consumer,
     CmModuleGraphRevision consumer_revision, CmModuleId consumer_module,
     const CmHirLibraryPathSegment *local_name,
-    CmHirLibraryImport *out_import)
+    int value_namespace, CmHirLibraryImport *out_import)
 {
     const CmHirLibraryArtifactState *state;
     CmResolvePathSegmentView local_segment;
     CmResolvedBinding local_binding;
     CmImportLookupStatus local_lookup;
+    CmResolveNamespace local_namespace;
     CmHirLibraryBinding candidate;
     CmResolveItemRef candidate_import;
     CmHirLibraryStatus candidate_status;
@@ -3434,19 +3436,6 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
         || !cm_import_resolver_matches_graph(imports, consumer)) {
         return CM_HIR_LIBRARY_STALE_REVISION;
     }
-    local_segment.bytes = local_name->bytes;
-    local_segment.length = local_name->length;
-    memset(&local_binding, 0, sizeof(local_binding));
-    local_lookup = cm_import_resolve_path_checked(imports, consumer,
-        consumer_revision, consumer_module, 0, &local_segment, 1u,
-        CM_RESOLVE_NAMESPACE_TYPE, &local_binding);
-    if (local_lookup == CM_IMPORT_LOOKUP_OK
-        || local_lookup == CM_IMPORT_LOOKUP_AMBIGUOUS
-        || local_lookup == CM_IMPORT_LOOKUP_CYCLE) {
-        return CM_HIR_LIBRARY_AMBIGUOUS;
-    }
-    if (local_lookup != CM_IMPORT_LOOKUP_NOT_FOUND)
-        return CM_HIR_LIBRARY_STALE_REVISION;
     memset(&candidate, 0, sizeof(candidate));
     memset(&candidate_import, 0, sizeof(candidate_import));
     candidate_status = CM_HIR_LIBRARY_NOT_FOUND;
@@ -3475,14 +3464,17 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
         if (leaf.is_anonymous || leaf.segment_count < 2u
             || !cm_hir_library_import_name_is(imports, leaf.import_name,
                 local_name)) continue;
-        contender_count += 1u;
-        if (contender_count != 1u
-            || !cm_import_get_leaf_segment(imports,
-                (uint32_t)leaf_index, 0u, &first)) continue;
+        if (!cm_import_get_leaf_segment(imports,
+                (uint32_t)leaf_index, 0u, &first)) {
+            candidate_status = CM_HIR_LIBRARY_INVALID_ARGUMENT;
+            continue;
+        }
         first_library.bytes = first.bytes;
         first_library.length = first.length;
         if (!cm_hir_library_segment_is_c_str(&first_library,
                 state->extern_name)) continue;
+        contender_count += 1u;
+        if (contender_count != 1u) continue;
         {
             CmHirLibraryPathSegment *path;
             size_t segment_index;
@@ -3506,8 +3498,9 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
                 path[segment_index].length = segment.length;
             }
             candidate_status = path_ok
-                ? cm_hir_library_artifact_lookup_binding(artifact, path,
-                    leaf.segment_count, &candidate)
+                ? cm_hir_library_lookup_from_module(state,
+                    state->root_definition, &path[1],
+                    leaf.segment_count - 1u, value_namespace, &candidate)
                 : CM_HIR_LIBRARY_INVALID_ARGUMENT;
             cm_free(path);
             candidate_import = leaf.declaration;
@@ -3521,11 +3514,50 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
         candidate_status = CM_HIR_LIBRARY_NOT_FOUND;
     }
     if (candidate_status == CM_HIR_LIBRARY_OK) {
+        local_segment.bytes = local_name->bytes;
+        local_segment.length = local_name->length;
+        memset(&local_binding, 0, sizeof(local_binding));
+        local_namespace = value_namespace ? CM_RESOLVE_NAMESPACE_VALUE
+                                          : CM_RESOLVE_NAMESPACE_TYPE;
+        local_lookup = cm_import_resolve_path_checked(imports, consumer,
+            consumer_revision, consumer_module, 0, &local_segment, 1u,
+            local_namespace, &local_binding);
+        if (local_lookup == CM_IMPORT_LOOKUP_OK
+            || local_lookup == CM_IMPORT_LOOKUP_AMBIGUOUS
+            || local_lookup == CM_IMPORT_LOOKUP_CYCLE) {
+            return CM_HIR_LIBRARY_AMBIGUOUS;
+        }
+        if (local_lookup != CM_IMPORT_LOOKUP_NOT_FOUND)
+            return CM_HIR_LIBRARY_STALE_REVISION;
         out_import->consumer_module = consumer_module;
         out_import->import_declaration = candidate_import;
         out_import->binding = candidate;
     }
     return candidate_status;
+}
+
+CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
+    const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,
+    const CmModuleGraph *consumer,
+    CmModuleGraphRevision consumer_revision, CmModuleId consumer_module,
+    const CmHirLibraryPathSegment *local_name,
+    CmHirLibraryImport *out_import)
+{
+    return cm_hir_library_artifact_resolve_import_namespace(artifact,
+        imports, consumer, consumer_revision, consumer_module, local_name,
+        0, out_import);
+}
+
+CmHirLibraryStatus cm_hir_library_artifact_resolve_value_import(
+    const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,
+    const CmModuleGraph *consumer,
+    CmModuleGraphRevision consumer_revision, CmModuleId consumer_module,
+    const CmHirLibraryPathSegment *local_name,
+    CmHirLibraryImport *out_import)
+{
+    return cm_hir_library_artifact_resolve_import_namespace(artifact,
+        imports, consumer, consumer_revision, consumer_module, local_name,
+        1, out_import);
 }
 
 CmHirLibraryStatus cm_hir_library_artifact_resolve_imported_type(

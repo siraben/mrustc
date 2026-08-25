@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "cm/hir/body.h"
 #include "cm/hir/lower.h"
 #include "cm/hir/projection.h"
 #include "cm/resolve/dependency_macro.h"
@@ -131,6 +132,21 @@ static const CmHirItem *find_hir_item_anywhere(const CmHirContext *hir,
 
         item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
         if (item != NULL && hir_name_is(hir, item->name, name)) return item;
+    }
+    return NULL;
+}
+
+static const CmHirItem *find_hir_item_kind_anywhere(const CmHirContext *hir,
+    CmHirItemKind kind, const char *name)
+{
+    size_t index;
+
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&hir->items, index);
+        if (item != NULL && item->kind == kind
+            && hir_name_is(hir, item->name, name)) return item;
     }
     return NULL;
 }
@@ -10233,13 +10249,16 @@ static void test_hir_library_artifact_types(void)
         "pub trait Generic<T> {}\n"
         "pub trait WithAssoc { type Item; }\n"
         "pub trait WithMethod { fn run(&self); }\n"
+        "pub const fn bounded<T>(x: T) -> T { x }\n"
+        "pub trait Dual {}\n"
+        "pub fn Dual(x: u32) -> u32 { x }\n"
         "pub mod primitive { pub use bool; pub use u8; }\n"
         "pub struct Root;\n"
         "struct PrivateRoot;\n";
     static const unsigned char consumer_source[] =
         "use dep::{Root as ImportedRoot, Exported as Imported, "
         "ExportedTrait as ImportedTrait, exposed as ImportedModule, "
-        "primitive::u8 as Byte};\n"
+        "primitive::u8 as Byte, bounded, Dual};\n"
         "pub struct Uses {\n"
         "    root: dep::Root,\n"
         "    exported: dep::Exported,\n"
@@ -10257,10 +10276,13 @@ static void test_hir_library_artifact_types(void)
         "impl ImportedModule::NestedTrait for Local {}\n"
         "impl dep::WithAssoc for Local { type Item = dep::Root; }\n"
         "impl dep::WithMethod for Local { fn run(&self) {} }\n"
+        "impl Dual for Local {}\n"
         "pub type Project = <Local as dep::WithAssoc>::Item;\n"
         "pub trait Bounded: dep::Marker {}\n"
         "pub trait GenericBound: dep::Generic<dep::Root> {}\n"
-        "pub trait BoundAssoc { type Output: dep::Marker; }\n";
+        "pub trait BoundAssoc { type Output: dep::Marker; }\n"
+        "pub fn probe(x: u32) -> u32 { bounded::<u32>(x) }\n"
+        "pub fn dual_probe(x: u32) -> u32 { Dual(x) }\n";
     static const unsigned char private_consumer_source[] =
         "use dep::{Root, hidden::Inner};\n"
         "struct Rejected; impl Inner for Rejected {}\n";
@@ -10362,6 +10384,9 @@ static void test_hir_library_artifact_types(void)
     CmHirLowerResult unrelated_lower;
     CmHirLowerResult collision_lower;
     CmHirLowerResult cross_equality_lower;
+    CmImportResolver consumer_imports;
+    CmImportResult consumer_import_result;
+    CmHirBodyLowerResult consumer_body_result;
     CmHirLibraryArtifact artifact;
     CmHirLibraryArtifactResult artifact_result;
     CmHirLibraryArtifactIdentity identity;
@@ -10376,6 +10401,12 @@ static void test_hir_library_artifact_types(void)
     CmHirLibraryPathSegment private_trait_path[3];
     CmHirLibraryPathSegment primitive_bool_path[3];
     CmHirLibraryPathSegment primitive_u8_path[3];
+    CmHirLibraryPathSegment bounded_path[2];
+    CmHirLibraryPathSegment bounded_local_name;
+    CmHirLibraryValue bounded_value;
+    CmHirLibraryStatus bounded_lookup_status;
+    CmHirLibraryImport bounded_import;
+    CmHirLibraryStatus bounded_import_status;
     CmHirLibraryType root_type;
     CmHirLibraryType exported_type;
     CmHirLibraryType alias_type;
@@ -10395,6 +10426,9 @@ static void test_hir_library_artifact_types(void)
     const CmHirItem *generic_trait_item;
     const CmHirItem *with_method_item;
     const CmHirItem *with_method_declaration;
+    const CmHirItem *producer_bounded_item;
+    const CmHirItem *producer_dual_trait_item;
+    const CmHirItem *producer_dual_function_item;
     const CmHirModule *exposed_module;
     const CmHirItem *uses_item;
     const CmHirItem *local_item;
@@ -10403,6 +10437,11 @@ static void test_hir_library_artifact_types(void)
     const CmHirItem *generic_bound_item;
     const CmHirItem *bound_output_item;
     const CmHirItem *project_item;
+    const CmHirItem *probe_item;
+    const CmHirItem *dual_probe_item;
+    const CmHirBody *probe_body;
+    const CmHirExpr *probe_root_expression;
+    const CmHirExpr *probe_call_expression;
     CmHirModuleId consumer_root_hir;
     const CmHirModule *consumer_root_module;
     CmHirDefId producer_root_definition;
@@ -10417,6 +10456,9 @@ static void test_hir_library_artifact_types(void)
     CmHirDefId generic_trait_definition;
     CmHirDefId with_method_definition;
     CmHirDefId with_method_declaration_definition;
+    CmHirDefId producer_bounded_definition;
+    CmHirDefId producer_dual_trait_definition;
+    CmHirDefId producer_dual_function_definition;
     CmHirDefId exposed_module_definition;
     size_t saved_crates;
     size_t saved_modules;
@@ -10500,6 +10542,11 @@ static void test_hir_library_artifact_types(void)
     with_method_declaration = with_method_item == NULL ? NULL
         : find_hir_associated_item(&hir, with_method_item->definition,
             CM_HIR_ITEM_FUNCTION, "run");
+    producer_bounded_item = find_hir_item_anywhere(&hir, "bounded");
+    producer_dual_trait_item = find_hir_item_kind_anywhere(&hir,
+        CM_HIR_ITEM_TRAIT, "Dual");
+    producer_dual_function_item = find_hir_item_kind_anywhere(&hir,
+        CM_HIR_ITEM_FUNCTION, "Dual");
     exposed_module = nested_item == NULL ? NULL
         : cm_hir_get_module(&hir, nested_item->owner_module);
     producer_root_definition = producer_root_item == NULL
@@ -10526,6 +10573,12 @@ static void test_hir_library_artifact_types(void)
         ? cm_hir_def_id_none() : with_method_item->definition;
     with_method_declaration_definition = with_method_declaration == NULL
         ? cm_hir_def_id_none() : with_method_declaration->definition;
+    producer_bounded_definition = producer_bounded_item == NULL
+        ? cm_hir_def_id_none() : producer_bounded_item->definition;
+    producer_dual_trait_definition = producer_dual_trait_item == NULL
+        ? cm_hir_def_id_none() : producer_dual_trait_item->definition;
+    producer_dual_function_definition = producer_dual_function_item == NULL
+        ? cm_hir_def_id_none() : producer_dual_function_item->definition;
     exposed_module_definition = exposed_module == NULL
         ? cm_hir_def_id_none() : exposed_module->definition;
     check(producer_root_item != NULL && shared_item != NULL
@@ -10535,10 +10588,15 @@ static void test_hir_library_artifact_types(void)
         && with_assoc_item != NULL && with_assoc_associated_item != NULL
         && generic_trait_item != NULL
         && with_method_item != NULL && with_method_declaration != NULL
+        && producer_bounded_item != NULL
+        && producer_bounded_item->kind == CM_HIR_ITEM_FUNCTION
+        && producer_bounded_item->generic_parameter_count == 1u
+        && producer_dual_trait_item != NULL
+        && producer_dual_function_item != NULL
         && exposed_module != NULL,
         "HIR library producer definitions are missing");
-    artifact_result = cm_hir_library_artifact_build(&artifact, &hir,
-        producer_lower.crate_id, &producer_graph,
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &hir, producer_lower.crate_id, &producer_graph,
         producer_graph_result.revision, &producer_map, "dep");
     memset(&identity, 0, sizeof(identity));
     check(artifact_result.status == CM_HIR_LIBRARY_OK
@@ -10549,6 +10607,23 @@ static void test_hir_library_artifact_types(void)
         && identity.crate_id == producer_lower.crate_id
         && strcmp(identity.extern_name, "dep") == 0,
         "HIR library artifact did not snapshot its producer identity");
+    bounded_path[0].bytes = (const unsigned char *)"dep";
+    bounded_path[0].length = 3u;
+    bounded_path[1].bytes = (const unsigned char *)"bounded";
+    bounded_path[1].length = 7u;
+    memset(&bounded_value, 0, sizeof(bounded_value));
+    bounded_lookup_status = cm_hir_library_artifact_lookup_value(&artifact,
+        bounded_path, 2u, &bounded_value);
+    if (bounded_lookup_status != CM_HIR_LIBRARY_OK) {
+        fprintf(stderr, "hir-graph-lower: bounded lookup status %u, "
+            "captured values %lu\n", (unsigned int)bounded_lookup_status,
+            (unsigned long)artifact_result.public_value_entry_count);
+    }
+    check(bounded_lookup_status == CM_HIR_LIBRARY_OK
+        && bounded_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && cm_hir_def_id_equal(bounded_value.definition,
+            producer_bounded_definition),
+        "HIR library artifact did not capture the public generic function");
     for (index = 0u; index < 2u; ++index) {
         root_path[index].bytes = root_path_bytes[index];
         root_path[index].length = root_path_lengths[index];
@@ -10646,12 +10721,24 @@ static void test_hir_library_artifact_types(void)
     libraries[0] = &artifact;
     lower_options.dependency_libraries = libraries;
     lower_options.dependency_library_count = 1u;
-    consumer_lower = lower_module_graph(&hir, &consumer_graph,
-        consumer_graph_result.revision, &consumer_map, &lower_options);
+    cm_import_resolver_init(&consumer_imports);
+    consumer_import_result = cm_import_resolve(&consumer_imports,
+        &consumer_graph, consumer_graph_result.revision);
+    bounded_local_name.bytes = (const unsigned char *)"bounded";
+    bounded_local_name.length = 7u;
+    memset(&bounded_import, 0, sizeof(bounded_import));
+    bounded_import_status = cm_hir_library_artifact_resolve_import(&artifact,
+        &consumer_imports, &consumer_graph, consumer_graph_result.revision,
+        consumer_graph_result.root, &bounded_local_name, &bounded_import);
+    consumer_lower = cm_hir_lower_module_graph(&hir, &consumer_graph,
+        consumer_graph_result.revision, &consumer_imports, &consumer_map,
+        &lower_options);
     if (consumer_lower.error_count != 0u) {
-        fprintf(stderr, "hir-graph-lower library consumer: %s: %s\n",
+        fprintf(stderr, "hir-graph-lower library consumer: %s: %s "
+            "(bounded import status %u)\n",
             cm_hir_lower_error_kind_name(consumer_lower.first_error.kind),
-            consumer_lower.first_error.message);
+            consumer_lower.first_error.message,
+            (unsigned int)bounded_import_status);
     }
     uses_item = find_hir_item_anywhere(&hir, "Uses");
     local_item = find_hir_item_anywhere(&hir, "Local");
@@ -10662,6 +10749,8 @@ static void test_hir_library_artifact_types(void)
         : find_hir_associated_item(&hir, bound_assoc_item->definition,
             CM_HIR_ITEM_TYPE_ALIAS, "Output");
     project_item = find_hir_item_anywhere(&hir, "Project");
+    probe_item = find_hir_item_anywhere(&hir, "probe");
+    dual_probe_item = find_hir_item_anywhere(&hir, "dual_probe");
     consumer_root_hir = CM_HIR_MODULE_NONE;
     consumer_root_module = NULL;
     if (cm_hir_module_map_lookup_hir(&consumer_map, &consumer_graph,
@@ -10674,12 +10763,13 @@ static void test_hir_library_artifact_types(void)
         && local_item != NULL && bounded_item != NULL
         && bound_assoc_item != NULL && bound_output_item != NULL
         && generic_bound_item != NULL
-        && project_item != NULL
+        && project_item != NULL && probe_item != NULL
+        && dual_probe_item != NULL
         && uses_item->kind == CM_HIR_ITEM_STRUCT
         && uses_item->data.aggregate_item.field_count == 9u
         && consumer_root_module != NULL
         && consumer_root_module->import_count == 1u
-        && consumer_root_module->imports[0].binding_count == 5u
+        && consumer_root_module->imports[0].binding_count == 8u
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
             0u, CM_HIR_NAMESPACE_TYPE, "ImportedRoot",
             producer_root_definition)
@@ -10694,8 +10784,59 @@ static void test_hir_library_artifact_types(void)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
             4u, CM_HIR_NAMESPACE_TYPE, "Byte", cm_hir_def_id_none())
         && consumer_root_module->imports[0].bindings[4].primitive_kind
-            == CM_HIR_PRIMITIVE_U8,
+            == CM_HIR_PRIMITIVE_U8
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            5u, CM_HIR_NAMESPACE_VALUE, "bounded",
+            producer_bounded_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            6u, CM_HIR_NAMESPACE_TYPE, "Dual",
+            producer_dual_trait_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            7u, CM_HIR_NAMESPACE_VALUE, "Dual",
+            producer_dual_function_definition),
         "artifact-backed dependency types did not lower");
+    probe_body = NULL;
+    probe_root_expression = NULL;
+    probe_call_expression = NULL;
+    consumer_body_result.status = CM_HIR_BODY_LOWER_INVALID_ARGUMENT;
+    if (probe_item != NULL && probe_item->kind == CM_HIR_ITEM_FUNCTION) {
+        consumer_body_result = cm_hir_lower_body(&hir,
+            probe_item->data.function_item.body, &consumer_graph,
+            consumer_graph_result.revision, &consumer_imports,
+            &consumer_map);
+        probe_body = cm_hir_get_body(&hir,
+            probe_item->data.function_item.body);
+        probe_root_expression = probe_body == NULL ? NULL
+            : cm_hir_get_expr(&hir, probe_body->root_expression);
+        probe_call_expression = probe_root_expression == NULL
+                || probe_root_expression->kind != CM_HIR_EXPR_BLOCK
+            ? NULL : cm_hir_get_expr(&hir,
+                probe_root_expression->data.block.tail_expression);
+    }
+    check(consumer_import_result.revision == consumer_graph_result.revision
+        && consumer_body_result.status == CM_HIR_BODY_LOWER_OK
+        && probe_body != NULL && probe_body->state == CM_HIR_BODY_TYPED
+        && probe_call_expression != NULL
+        && probe_call_expression->kind == CM_HIR_EXPR_CALL
+        && cm_hir_def_id_equal(probe_call_expression->data.call.callee,
+            producer_bounded_definition)
+        && probe_call_expression->data.call.type_substitution_count == 1u
+        && probe_call_expression->data.call.type_substitutions[0]
+            == probe_body->expected_type,
+        "artifact-backed dependency function did not resolve in a body");
+    if (consumer_body_result.status != CM_HIR_BODY_LOWER_OK) {
+        fprintf(stderr, "hir-graph-lower: dependency body status %s\n",
+            cm_hir_body_lower_status_name(consumer_body_result.status));
+    } else if (probe_call_expression == NULL
+            || probe_call_expression->kind != CM_HIR_EXPR_CALL
+            || !cm_hir_def_id_equal(probe_call_expression->data.call.callee,
+                producer_bounded_definition)
+            || probe_call_expression->data.call.type_substitution_count != 1u
+            || probe_call_expression->data.call.type_substitutions[0]
+                != probe_body->expected_type) {
+        fprintf(stderr, "hir-graph-lower: dependency call shape mismatch\n");
+    }
+    cm_import_resolver_destroy(&consumer_imports);
     if (uses_item != NULL && uses_item->kind == CM_HIR_ITEM_STRUCT
         && uses_item->data.aggregate_item.field_count == 9u) {
         const CmHirType *field_type;

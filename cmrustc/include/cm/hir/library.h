@@ -217,6 +217,14 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_import(
     const CmHirLibraryPathSegment *local_name,
     CmHirLibraryImport *out_import);
 
+/* Authenticates the value-namespace half of an unresolved use-tree leaf. */
+CmHirLibraryStatus cm_hir_library_artifact_resolve_value_import(
+    const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,
+    const CmModuleGraph *consumer,
+    CmModuleGraphRevision consumer_revision, CmModuleId consumer_module,
+    const CmHirLibraryPathSegment *local_name,
+    CmHirLibraryImport *out_import);
+
 /* Resolves a type below one exactly authenticated imported module alias. */
 CmHirLibraryStatus cm_hir_library_artifact_resolve_imported_type(
     const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,

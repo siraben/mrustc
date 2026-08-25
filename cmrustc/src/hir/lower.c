@@ -280,6 +280,7 @@ static int cm_lower_resolve_library_import(
     const CmImportResolver *imports, const CmHirLowerOptions *options,
     CmModuleId module, CmResolveItemRef import_declaration,
     const unsigned char *name, size_t name_length,
+    CmResolveNamespace namespace_kind,
     CmHirLibraryBinding *out_binding)
 {
     CmHirLibraryPathSegment local_name;
@@ -292,6 +293,8 @@ static int cm_lower_resolve_library_import(
         || module == CM_MODULE_NONE
         || ((import_declaration.source == 0u)
             != (import_declaration.item == CM_AST_ITEM_NONE))
+        || (namespace_kind != CM_RESOLVE_NAMESPACE_TYPE
+            && namespace_kind != CM_RESOLVE_NAMESPACE_VALUE)
         || name == NULL
         || name_length == 0u) return 0;
     local_name.bytes = name;
@@ -303,9 +306,13 @@ static int cm_lower_resolve_library_import(
         CmHirLibraryStatus status;
 
         memset(&imported, 0, sizeof(imported));
-        status = cm_hir_library_artifact_resolve_import(
-            options->dependency_libraries[index], imports, graph, revision,
-            module, &local_name, &imported);
+        status = namespace_kind == CM_RESOLVE_NAMESPACE_VALUE
+            ? cm_hir_library_artifact_resolve_value_import(
+                options->dependency_libraries[index], imports, graph,
+                revision, module, &local_name, &imported)
+            : cm_hir_library_artifact_resolve_import(
+                options->dependency_libraries[index], imports, graph,
+                revision, module, &local_name, &imported);
         if (status == CM_HIR_LIBRARY_OK) {
             if (imported.consumer_module != module
                 || (import_declaration.source != 0u
@@ -367,7 +374,10 @@ static int cm_lower_import_errors_are_authenticated(
         if (status != CM_RESOLVE_VIEW_OK
             && !cm_lower_resolve_library_import(graph, revision, imports,
                 options, error.module, error.import_declaration, name,
-                name_length, NULL)) {
+                name_length, CM_RESOLVE_NAMESPACE_TYPE, NULL)
+            && !cm_lower_resolve_library_import(graph, revision, imports,
+                options, error.module, error.import_declaration, name,
+                name_length, CM_RESOLVE_NAMESPACE_VALUE, NULL)) {
             cm_free(name);
             return 0;
         }
@@ -3946,7 +3956,8 @@ static CmLowerLookupResult cm_lower_resolve_library_binding(
                 state->graph_revision, state->imports, state->options,
                 state->graph_module, (CmResolveItemRef){ 0u,
                     CM_AST_ITEM_NONE }, segments[0].bytes,
-                segments[0].length, out_binding);
+                segments[0].length, CM_RESOLVE_NAMESPACE_TYPE,
+                out_binding);
         cm_free(segments);
         return resolved ? CM_LOWER_LOOKUP_DEFINITION
                         : CM_LOWER_LOOKUP_NOT_FOUND;
@@ -4087,7 +4098,8 @@ static CmHirLowerResolution cm_lower_resolve_library_type(
                 state->graph_revision, state->imports, state->options,
                 state->graph_module, (CmResolveItemRef){ 0u,
                     CM_AST_ITEM_NONE }, segments[0].bytes,
-                segments[0].length, &imported_binding)
+                segments[0].length, CM_RESOLVE_NAMESPACE_TYPE,
+                &imported_binding)
             && (imported_binding.kind == CM_HIR_LIBRARY_BINDING_TYPE
                 || imported_binding.kind
                     == CM_HIR_LIBRARY_BINDING_PRIMITIVE)) {
@@ -17746,7 +17758,8 @@ static void cm_lower_free_imports(CmHirImport *imports,
 
 static int cm_lower_library_import_leaf(CmLowerState *state,
     CmModuleId graph_module, CmResolveItemRef declaration,
-    const CmImportLeafView *leaf, CmHirLibraryBinding *out_binding)
+    const CmImportLeafView *leaf, CmResolveNamespace namespace_kind,
+    CmHirLibraryBinding *out_binding)
 {
     size_t name_length;
     unsigned char *name;
@@ -17770,7 +17783,7 @@ static int cm_lower_library_import_leaf(CmLowerState *state,
     }
     resolved = cm_lower_resolve_library_import(state->graph,
         state->graph_revision, state->imports, state->options, graph_module,
-        declaration, name, name_length, out_binding);
+        declaration, name, name_length, namespace_kind, out_binding);
     cm_free(name);
     return resolved;
 }
@@ -17791,7 +17804,9 @@ static size_t cm_lower_library_import_binding_count(CmLowerState *state,
             || !cm_import_get_leaf(state->imports, (uint32_t)leaf_index,
                 &leaf)) return SIZE_MAX;
         if (cm_lower_library_import_leaf(state, graph_module, declaration,
-                &leaf, NULL)) count += 1u;
+                &leaf, CM_RESOLVE_NAMESPACE_TYPE, NULL)) count += 1u;
+        if (cm_lower_library_import_leaf(state, graph_module, declaration,
+                &leaf, CM_RESOLVE_NAMESPACE_VALUE, NULL)) count += 1u;
     }
     return count;
 }
@@ -17855,6 +17870,20 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
         valid_target = cm_hir_def_id_is_none(imported_binding.definition)
             && cm_lower_hir_primitive(imported_binding.primitive_kind,
                 NULL);
+    } else if (imported_binding.kind == CM_HIR_LIBRARY_BINDING_VALUE) {
+        const CmHirItem *item;
+
+        item = cm_lower_bound_item(state, imported_binding.definition);
+        valid_target = item != NULL
+            && ((imported_binding.value_kind
+                        == CM_HIR_LIBRARY_VALUE_FUNCTION
+                    && item->kind == CM_HIR_ITEM_FUNCTION)
+                || (imported_binding.value_kind
+                        == CM_HIR_LIBRARY_VALUE_CONST
+                    && item->kind == CM_HIR_ITEM_CONST)
+                || (imported_binding.value_kind
+                        == CM_HIR_LIBRARY_VALUE_STATIC
+                    && item->kind == CM_HIR_ITEM_STATIC));
     }
     if (!valid_target) {
         cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
@@ -17864,7 +17893,9 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
     }
     hir_binding->name = cm_lower_copy_import_string(state,
         leaf->import_name, span, declaration.item);
-    hir_binding->namespace_kind = CM_HIR_NAMESPACE_TYPE;
+    hir_binding->namespace_kind = imported_binding.kind
+            == CM_HIR_LIBRARY_BINDING_VALUE
+        ? CM_HIR_NAMESPACE_VALUE : CM_HIR_NAMESPACE_TYPE;
     hir_binding->target = imported_binding.definition;
     hir_binding->primitive_kind = imported_binding.primitive_kind;
     hir_binding->is_anonymous = 0;
@@ -18124,13 +18155,23 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                         binding_index += 1u;
                     }
                 } else {
-                    CmHirLibraryBinding imported_binding;
+                    static const CmResolveNamespace namespaces[] = {
+                        CM_RESOLVE_NAMESPACE_TYPE,
+                        CM_RESOLVE_NAMESPACE_VALUE
+                    };
+                    size_t namespace_index;
 
-                    memset(&imported_binding, 0,
-                        sizeof(imported_binding));
-                    if (cm_lower_library_import_leaf(state, graph_module,
-                            effective.declaration, &leaf,
-                            &imported_binding)) {
+                    for (namespace_index = 0u;
+                            namespace_index < CM_ARRAY_LEN(namespaces)
+                            && !state->failed; ++namespace_index) {
+                        CmHirLibraryBinding imported_binding;
+
+                        memset(&imported_binding, 0,
+                            sizeof(imported_binding));
+                        if (!cm_lower_library_import_leaf(state,
+                                graph_module, effective.declaration, &leaf,
+                                namespaces[namespace_index],
+                                &imported_binding)) continue;
                         if (binding_index >= binding_count
                             || !cm_lower_store_library_import_binding(state,
                                 &leaf, imported_binding, effective.span,
