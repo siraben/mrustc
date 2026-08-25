@@ -1972,8 +1972,7 @@ library capture with 451 modules, 1,632 public type entries, and 20,692 public
 value entries. The v2.3 encoder then returned `unsupported HIR` with zero
 bytes. V2.4 now implements the first predicate/reference-only nominal wire
 slice; the real-core gate must be re-run to identify the next exact unsupported
-shape. Direct trait-alias predicates remain fail-closed pending an
-alias-definition/provenance representation.
+shape.
 The optimized post-`4bd79751` gate restores the same 451/1,632/20,692 capture
 after fixing availability validation to compare deduplicated identity sets
 rather than equality-occurrence counts. Declaration v2.4 still returns
@@ -1991,7 +1990,15 @@ records reject atomically without legacy fallback. These modifiers remain
 opaque declaration facts: const-trait capability, selection, and associated
 projection semantics are still deferred. The next whole-core gate determines
 whether the direct `Thin` trait-alias predicate becomes the first unsupported
-shape.
+shape. The post-v2.5 optimized gate proves the same zero-error HIR census and
+451-module/1,632-type/20,692-value capture, then returns `unsupported HIR`
+with zero metadata bytes at the direct `Thin` trait-alias predicate boundary.
+Declaration v2.6 now transports that direct alias identity while keeping it
+opaque and RESERVED. It deliberately creates no alias expansion, associated
+equality or availability, item, namespace binding, or solver evidence; alias
+predicates with direct equalities remain fail-closed. Exact v2.5/v2.4/v2.3
+decode compatibility and fresh-process byte-identical v2.6 replay pass. The
+next whole-core gate must identify the next unsupported declaration shape.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

@@ -1744,7 +1744,11 @@ static int cm_meta_collect_nominals(const CmVec *values,
             direct = cm_meta_function_nominal_reference(function,
                 predicate->trait_type.definition, NULL);
             if (direct == NULL
-                || direct->kind != CM_HIR_LIBRARY_NOMINAL_TRAIT
+                || (direct->kind != CM_HIR_LIBRARY_NOMINAL_TRAIT
+                    && direct->kind
+                        != CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS)
+                || (direct->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS
+                    && predicate->equality_count != 0u)
                 || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
                 || !cm_meta_predicate_modifier_to_wire(
                     predicate->modifier, NULL)
@@ -4032,7 +4036,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         || owned->modules.len > (size_t)CM_META_MAX_MODULES
         || (crate_value = cm_hir_get_crate(identity.context,
             identity.crate_id)) == NULL) return result;
-    /* The current declaration encoder always emits the exact v2.5 family. */
+    /* The current declaration encoder always emits the exact v2.6 family. */
     declaration_v24 = declaration;
     if (semantic) {
         size_t item_index;
@@ -5880,7 +5884,8 @@ static int cm_meta_wire_types_reachable(const CmVec *generics,
 
 static int cm_meta_wire_predicates_canonical(const CmVec *generics,
     const CmVec *types, const CmVec *items, const CmVec *values,
-    const CmVec *nominals, const CmVec *payloads)
+    const CmVec *nominals, const CmVec *payloads,
+    int allow_trait_alias_predicates)
 {
     unsigned char *used;
     uint32_t *requirements;
@@ -6029,7 +6034,13 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
             }
             direct = (const CmMetaWireNominal *)cm_vec_at_const(nominals,
                 predicate->trait_reference - 1u);
-            if (!cm_meta_predicate_modifier_from_wire(predicate->modifier,
+            if (direct == NULL
+                || (direct->kind != CM_META_NOMINAL_TRAIT
+                    && (!allow_trait_alias_predicates
+                        || direct->kind != CM_META_NOMINAL_TRAIT_ALIAS))
+                || (direct->kind == CM_META_NOMINAL_TRAIT_ALIAS
+                    && predicate->equality_count != 0u)
+                || !cm_meta_predicate_modifier_from_wire(predicate->modifier,
                     NULL)
                 || (index != 0u
                     && (payload->predicates[index - 1u].trait_reference
@@ -6140,7 +6151,7 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
 static int cm_meta_decode_value_predicates(
     const CmHirMetadataSection *section, const CmVec *values,
     const CmVec *nominals, uint32_t type_count, int has_modifiers,
-    CmVec *payloads)
+    int allow_trait_alias_predicates, CmVec *payloads)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -6258,7 +6269,10 @@ static int cm_meta_decode_value_predicates(
                 goto invalid;
             direct = (const CmMetaWireNominal *)cm_vec_at_const(nominals,
                 predicate->trait_reference - 1u);
-            if (direct == NULL || direct->kind != CM_META_NOMINAL_TRAIT)
+            if (direct == NULL
+                || (direct->kind != CM_META_NOMINAL_TRAIT
+                    && (!allow_trait_alias_predicates
+                        || direct->kind != CM_META_NOMINAL_TRAIT_ALIAS)))
                 goto invalid;
             predicate->modifier = CM_META_PREDICATE_REQUIRED;
             if (has_modifiers
@@ -6299,7 +6313,9 @@ static int cm_meta_decode_value_predicates(
                     CM_META_MAX_PREDICATES)
                 || !cm_size_add(total_equalities, predicate->equality_count,
                     &total_equalities)
-                || total_equalities > CM_META_MAX_PREDICATES) goto invalid;
+                || total_equalities > CM_META_MAX_PREDICATES
+                || (direct->kind == CM_META_NOMINAL_TRAIT_ALIAS
+                    && predicate->equality_count != 0u)) goto invalid;
             predicate->equality_associated = predicate->equality_count == 0u
                 ? NULL : (uint32_t *)cm_alloc((size_t)
                     predicate->equality_count * sizeof(uint32_t));
@@ -7425,6 +7441,8 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     declaration_v24 = declaration
         && (declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
             || declaration_minor
+                == CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR
+            || declaration_minor
                 == CM_HIR_METADATA_DECLARATION_PREDICATE_MINOR);
     for (index = 0u; index < (declaration_v24 ? 9u
             : ((semantic || declaration) ? 7u : 6u));
@@ -7499,10 +7517,14 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             (uint32_t)modules.len, &nominals))
         || (declaration_v24 && !cm_meta_decode_value_predicates(&sections[8],
             &values, &nominals, type_count,
+            declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
+                || declaration_minor
+                    == CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR,
             declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR,
             &value_predicates))
         || (declaration_v24 && !cm_meta_wire_predicates_canonical(&generics,
-            &types, &items, &values, &nominals, &value_predicates))
+            &types, &items, &values, &nominals, &value_predicates,
+            declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR))
         || (semantic && !cm_meta_decode_trait_universe(&sections[6],
             (uint32_t)modules.len, type_count, &traits, &impls))
         || !cm_meta_decode_entries(&sections[declaration ? 6u : 5u],
@@ -8314,6 +8336,12 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
         CM_HIR_METADATA_DECLARATION_MAJOR,
         CM_HIR_METADATA_DECLARATION_MINOR, &envelope);
     minor = CM_HIR_METADATA_DECLARATION_MINOR;
+    if (status == CM_HIR_METADATA_UNSUPPORTED_VERSION) {
+        status = cm_hir_metadata_decode_envelope_version(encoded,
+            encoded_length, CM_HIR_METADATA_DECLARATION_MAJOR,
+            CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR, &envelope);
+        minor = CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR;
+    }
     if (status == CM_HIR_METADATA_UNSUPPORTED_VERSION) {
         status = cm_hir_metadata_decode_envelope_version(encoded,
             encoded_length, CM_HIR_METADATA_DECLARATION_MAJOR,

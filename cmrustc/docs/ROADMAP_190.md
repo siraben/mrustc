@@ -20,14 +20,16 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
   declaration metadata for that surface.
-- This audit extends declaration metadata through v2.5. Version 2.3 transports authenticated
+- This audit extends declaration metadata through v2.6. Version 2.3 transports authenticated
   literal and parameter const uses in named generic arguments and array
   lengths, plus predicate-free public free functions with lifetime, type, and
   const parameters. Version 2.4 adds a bounded public-function predicate
   section and opaque reference-only trait/associated identities. Version 2.5
   preserves REQUIRED, CONST_IF_CONST, and CONST predicate modifiers as
-  structural facts. Strict decode tries exact v2.5, v2.4, then v2.3 only on an
-  unsupported-version result; legacy v1.0/v1.1 bytes remain unchanged.
+  structural facts. Version 2.6 permits an opaque trait-alias identity as a
+  direct predicate target without transporting its expansion. Strict decode
+  tries exact v2.6, v2.5, v2.4, then v2.3 only on an unsupported-version
+  result; legacy v1.0/v1.1 bytes remain unchanged.
 - No current `.rlib`, compiler-built `core`, `alloc`, `std`, `rustc`, or
   `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
@@ -60,9 +62,7 @@ ledger; this document orders its tasks by the deepest consumable artifact.
 - At `1746e681`, an optimized whole-core gate completes value-aware library
   capture: 451 modules, 1,632 public type entries, and 20,692 public value
   entries. The previous v2.3 encoder then rejected unsupported HIR and emitted
-  zero bytes. With v2.4 the next real-core result must be re-measured; direct
-  trait-alias predicates such as `Thin` remain deliberately unsupported until
-  alias-bound provenance has a sound wire representation.
+  zero bytes. V2.4 subsequently crossed the first bounded predicate shape.
 - At `4bd79751`, the post-v2.4 optimized gate reproduces that complete capture
   exactly and the v2.4 encoder still rejects fail-closed with zero bytes. The
   intervening capture regression was a validator bug: two predicate equality
@@ -77,8 +77,17 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   wire constants. Fresh decode restores the exact modifier and re-encodes
   byte-identically; v2.4 predicate records default to REQUIRED. Const-trait
   capability is not yet a transported trait fact, so solving and projection
-  remain deferred. The next whole-core probe determines whether the direct
-  `Thin` alias predicate is now the first unsupported shape.
+  remain deferred. The post-v2.5 whole-core gate again proves zero HIR errors
+  and complete 451/1,632/20,692 library capture, then returns `unsupported HIR`
+  with zero metadata bytes. Source and encoder inspection identify the direct
+  `Thin` trait-alias predicate as that policy boundary.
+- Declaration v2.6 transports the direct `T: Thin` identity without changing
+  the NREF/PRED payload layout. Thin remains an opaque RESERVED trait-alias
+  identity: no alias body, `Metadata = ()` equality, availability fact, item,
+  namespace binding, or solver evidence is synthesized. Exact v2.5 retags of
+  alias-backed predicates reject atomically, while ordinary v2.5 artifacts
+  continue to decode and upgrade byte-identically. The next whole-core probe
+  must re-measure the first unsupported declaration shape.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

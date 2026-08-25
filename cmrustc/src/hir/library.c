@@ -2180,8 +2180,14 @@ static int cm_hir_library_reserved_function_predicates_valid_cached(
         direct = cm_hir_library_find_nominal_reference(function,
             predicate->trait_type.definition,
             CM_HIR_LIBRARY_NOMINAL_TRAIT);
+        if (direct == NULL)
+            direct = cm_hir_library_find_nominal_reference(function,
+                predicate->trait_type.definition,
+                CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS);
         if (direct == NULL || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
             || !cm_hir_library_predicate_modifier_valid(predicate->modifier)
+            || (direct->kind == CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS
+                && predicate->equality_count != 0u)
             || subject_type == NULL
             || subject_type->kind != CM_HIR_TYPE_PARAMETER_KIND
             || predicate->trait_type.argument_count

@@ -150,7 +150,7 @@ int main(int argc, char **argv)
                 metadata_result =
                     cm_hir_metadata_encode_declaration_artifact(&encoded,
                         &artifact);
-                printf("metadata-v2.4 status=%s bytes=%lu\n",
+                printf("metadata-v2.6 status=%s bytes=%lu\n",
                     cm_hir_metadata_artifact_status_name(
                         metadata_result.status),
                     metadata_result.status

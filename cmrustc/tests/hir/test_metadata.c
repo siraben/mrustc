@@ -61,6 +61,18 @@ static const unsigned char carrying_mul_add_source[] =
         "-> (U, T) where T: ~const CarryingMulAdd<Unsigned = U> "
         "{ loop {} }\n";
 
+static const unsigned char thin_predicate_source[] =
+    "trait PointeeSized {}\n"
+    "trait Pointee: PointeeSized { type Metadata; }\n"
+    "trait Thin = Pointee<Metadata = ()> + PointeeSized;\n"
+    "pub const fn null<T: PointeeSized + Thin>() -> *const T { loop {} }\n";
+
+static const unsigned char thin_predicate_swapped_source[] =
+    "trait PointeeSized {}\n"
+    "trait Pointee: PointeeSized { type Metadata; }\n"
+    "trait Thin = Pointee<Metadata = ()> + PointeeSized;\n"
+    "pub const fn null<T: Thin + PointeeSized>() -> *const T { loop {} }\n";
+
 static const unsigned char multi_predicate_source_a[] =
     "trait Pair<A, B> { type First; type Second; }\n"
     "trait Left { type Item; }\n"
@@ -1622,6 +1634,65 @@ static void truncate_first_predicate_at_modifier(CmByteBuf *encoded)
     cm_byte_buf_destroy(&contents);
 }
 
+static void corrupt_nominal_kind_named(CmByteBuf *encoded,
+    const char *target_name, uint8_t replacement_kind)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    CmHirMetadataReader reader;
+    uint32_t count;
+    uint32_t index;
+    int changed;
+
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    for (index = 0u; index < 8u; ++index)
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    assert(memcmp(section.tag, "NREF", 4u) == 0);
+    cm_hir_metadata_reader_init(&reader, section.data, section.length);
+    assert(cm_hir_metadata_read_u32(&reader, &count) == CM_HIR_METADATA_OK);
+    changed = 0;
+    for (index = 0u; index < count; ++index) {
+        size_t kind_offset;
+        uint8_t kind;
+        uint32_t ignored;
+        uint32_t name_length;
+        uint32_t generic_count;
+        uint32_t generic;
+        const unsigned char *name;
+
+        kind_offset = reader.cursor;
+        assert(cm_hir_metadata_read_u8(&reader, &kind) == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &name_length)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_bytes(&reader, name_length, &name)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &generic_count)
+                == CM_HIR_METADATA_OK);
+        for (generic = 0u; generic < generic_count; ++generic)
+            assert(cm_hir_metadata_read_u8(&reader, &kind)
+                == CM_HIR_METADATA_OK);
+        if (!changed && strlen(target_name) == (size_t)name_length
+            && memcmp(name, target_name, name_length) == 0) {
+            encoded->data[(size_t)(section.data - encoded->data)
+                + kind_offset] = replacement_kind;
+            changed = 1;
+        }
+    }
+    assert(changed && cm_hir_metadata_reader_finish(&reader)
+        == CM_HIR_METADATA_OK);
+    recompute_metadata_crc(encoded);
+}
+
 static void replace_v24_section(CmByteBuf *encoded,
     const unsigned char tag[4], const CmByteBuf *replacement_contents)
 {
@@ -1864,6 +1935,22 @@ static void derive_legacy_declaration_v23(const CmByteBuf *current,
         CM_HIR_METADATA_DECLARATION_MAJOR,
         CM_HIR_METADATA_DECLARATION_LEGACY_MINOR, UINT32_C(0),
         envelope.payload, reader.cursor) == CM_HIR_METADATA_OK);
+}
+
+static void derive_legacy_declaration_v25(const CmByteBuf *current,
+    CmByteBuf *legacy)
+{
+    CmHirMetadataEnvelope envelope;
+
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(current->data,
+        current->len, CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MINOR, &envelope) == CM_HIR_METADATA_OK);
+    cm_byte_buf_init(legacy);
+    assert(cm_hir_metadata_encode_envelope_version(legacy,
+        CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR, UINT32_C(0),
+        envelope.payload, envelope.payload_length) == CM_HIR_METADATA_OK);
 }
 
 static void derive_legacy_declaration_v24(const CmByteBuf *current,
@@ -3482,6 +3569,92 @@ static int consume_modifier_function_process_artifact(const char *path)
     return ok;
 }
 
+static int produce_trait_alias_function_process_artifact(const char *path)
+{
+    ParsedProducerFixture producer;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+    int ok;
+
+    if (!parsed_producer_build(&producer, thin_predicate_source,
+            sizeof(thin_predicate_source) - 1u, 1u, 0u, 1u, 1)) {
+        return 0;
+    }
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && write_metadata_file(path, &encoded);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+    return ok;
+}
+
+static int consume_trait_alias_function_process_artifact(const char *path)
+{
+    CmByteBuf encoded;
+    CmByteBuf reencoded;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirMetadataArtifactResult result;
+    CmHirLibraryValue value;
+    const CmHirLibraryNominalReference *thin;
+    const CmHirLibraryNominalReference *pointee;
+    const CmHirLibraryNominalReference *pointee_sized;
+    uint32_t alias_count;
+    uint32_t index;
+    int ok;
+
+    if (!read_metadata_file(path, &encoded)) return 0;
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&context,
+        &artifact, encoded.data, encoded.len, "dep", 115u);
+    value = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        ? lookup_value(&artifact, "dep", "null")
+        : (CmHirLibraryValue){0};
+    thin = value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        ? find_nominal_reference(&value, "Thin",
+            CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS) : NULL;
+    pointee = value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        ? find_nominal_reference(&value, "Pointee",
+            CM_HIR_LIBRARY_NOMINAL_TRAIT) : NULL;
+    pointee_sized = value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        ? find_nominal_reference(&value, "PointeeSized",
+            CM_HIR_LIBRARY_NOMINAL_TRAIT) : NULL;
+    alias_count = 0u;
+    if (value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION && thin != NULL)
+        for (index = 0u; index < value.data.function.predicate_count;
+                ++index)
+            if (cm_hir_def_id_equal(value.data.function.predicates[index]
+                    .trait_type.definition, thin->definition)
+                && value.data.function.predicates[index].equality_count == 0u)
+                alias_count += 1u;
+    ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u
+        && value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.predicate_count == 2u
+        && value.data.function.nominal_reference_count == 3u
+        && value.data.function.associated_availability_count == 0u
+        && thin != NULL && pointee != NULL && pointee_sized != NULL
+        && alias_count == 1u
+        && cm_hir_lookup_definition(&context, thin->definition) != NULL;
+    cm_byte_buf_init(&reencoded);
+    if (ok) {
+        result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+            &artifact);
+        ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
+            && reencoded.len == encoded.len
+            && memcmp(reencoded.data, encoded.data, encoded.len) == 0;
+    }
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_byte_buf_destroy(&encoded);
+    return ok;
+}
+
 static int consume_process_artifact(const char *path)
 {
     CmByteBuf encoded;
@@ -4590,6 +4763,7 @@ static void test_declaration_v24_predicate_function_round_trip(void)
     CmHirContext consumer;
     CmHirLibraryArtifact artifact;
     CmByteBuf encoded;
+    CmByteBuf legacy_v25;
     CmByteBuf legacy_v24;
     CmByteBuf reencoded;
     CmByteBuf corrupted;
@@ -4635,6 +4809,26 @@ static void test_declaration_v24_predicate_function_round_trip(void)
         &producer.artifact);
     assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
         && encoded.len != 0u);
+
+    derive_legacy_declaration_v25(&encoded, &legacy_v25);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, legacy_v25.data, legacy_v25.len, "legacy5", 105u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    value = lookup_value(&artifact, "legacy5", "constrained");
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.predicate_count == 2u);
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&legacy_v25);
 
     derive_legacy_declaration_v24(&encoded, &legacy_v24);
     cm_hir_context_init(&consumer);
@@ -5159,6 +5353,241 @@ static void test_carrying_mul_add_modifier_round_trip(void)
     parsed_producer_destroy(&producer);
 }
 
+static void test_thin_trait_alias_predicate_round_trip(void)
+{
+    ParsedProducerFixture producer;
+    ParsedProducerFixture swapped;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryValue value;
+    const CmHirLibraryNominalReference *thin;
+    const CmHirLibraryNominalReference *pointee;
+    const CmHirLibraryNominalReference *pointee_sized;
+    const CmHirLibraryNominalReference *metadata;
+    const CmHirTraitPredicate *thin_predicate;
+    const CmHirTraitPredicate *sized_predicate;
+    const CmHirGenericParam *parameter;
+    const CmHirType *subject;
+    const CmHirType *return_type;
+    const CmHirType *return_pointee;
+    const CmHirDefinition *definition;
+    CmHirLibraryPathSegment hidden[2];
+    CmHirLibraryBinding binding;
+    CmByteBuf encoded;
+    CmByteBuf swapped_encoded;
+    CmByteBuf reencoded;
+    CmByteBuf malformed;
+    CmByteBuf legacy_v25;
+    CmHirMetadataArtifactResult result;
+    ContextLengths before;
+    CmHirLibraryArtifactIdentity sentinel_identity;
+    CmHirCrateId sentinel_crate;
+    CmHirModuleId sentinel_module;
+    uint32_t index;
+
+    assert(parsed_producer_build(&producer, thin_predicate_source,
+        sizeof(thin_predicate_source) - 1u, 1u, 0u, 1u, 1));
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u && encoded.len != 0u);
+    assert(parsed_producer_build(&swapped, thin_predicate_swapped_source,
+        sizeof(thin_predicate_swapped_source) - 1u, 1u, 0u, 1u, 1));
+    cm_byte_buf_init(&swapped_encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&swapped_encoded,
+        &swapped.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && swapped_encoded.len == encoded.len
+        && memcmp(swapped_encoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&swapped_encoded);
+    parsed_producer_destroy(&swapped);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "dep", 113u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && result.public_entry_count == 1u);
+    value = lookup_value(&artifact, "dep", "null");
+    thin = find_nominal_reference(&value, "Thin",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS);
+    pointee = find_nominal_reference(&value, "Pointee",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    pointee_sized = find_nominal_reference(&value, "PointeeSized",
+        CM_HIR_LIBRARY_NOMINAL_TRAIT);
+    metadata = find_nominal_reference(&value, "Metadata",
+        CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE);
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && value.data.function.is_const == 1
+        && value.data.function.parameter_count == 0u
+        && value.data.function.generic_parameter_count == 1u
+        && value.data.function.predicate_count == 2u
+        && value.data.function.outlives_predicate_count == 0u
+        && value.data.function.nominal_reference_count == 3u
+        && value.data.function.associated_availability_count == 0u
+        && thin != NULL && pointee != NULL && pointee_sized != NULL
+        && metadata == NULL);
+    thin_predicate = NULL;
+    sized_predicate = NULL;
+    for (index = 0u; index < value.data.function.predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+
+        predicate = &value.data.function.predicates[index];
+        if (cm_hir_def_id_equal(predicate->trait_type.definition,
+                thin->definition)) thin_predicate = predicate;
+        if (cm_hir_def_id_equal(predicate->trait_type.definition,
+                pointee_sized->definition)) sized_predicate = predicate;
+    }
+    assert(thin_predicate != NULL && sized_predicate != NULL
+        && thin_predicate->subject == sized_predicate->subject
+        && thin_predicate->modifier == CM_HIR_PREDICATE_REQUIRED
+        && thin_predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && thin_predicate->binder.lifetime_count == 0u
+        && thin_predicate->trait_type.argument_count == 0u
+        && thin_predicate->equality_count == 0u
+        && sized_predicate->modifier == CM_HIR_PREDICATE_REQUIRED
+        && sized_predicate->binder.lifetime_count == 0u
+        && sized_predicate->trait_type.argument_count == 0u
+        && sized_predicate->equality_count == 0u);
+    parameter = cm_hir_get_generic_param(&consumer,
+        value.data.function.generic_parameter_start);
+    subject = cm_hir_get_type(&consumer, thin_predicate->subject);
+    return_type = cm_hir_get_type(&consumer,
+        value.data.function.return_type);
+    return_pointee = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_RAW_POINTER_KIND
+        ? NULL : cm_hir_get_type(&consumer,
+            return_type->data.raw_pointer_type.pointee);
+    assert(parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+        && parameter->index == 0u
+        && cm_hir_def_id_equal(parameter->owner, value.definition)
+        && subject != NULL && subject->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && subject->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+        && return_type->data.raw_pointer_type.mutability == CM_HIR_IMMUTABLE
+        && return_pointee != NULL
+        && return_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && return_pointee->data.parameter_type.parameter
+            == value.data.function.generic_parameter_start);
+    definition = cm_hir_lookup_definition(&consumer, thin->definition);
+    assert(definition != NULL
+        && definition->state == CM_HIR_DEFINITION_RESERVED
+        && definition->has_reserved_item_kind
+        && definition->reserved_item_kind == CM_HIR_ITEM_TRAIT_ALIAS);
+    for (index = 0u; index < (uint32_t)consumer.items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&consumer.items, index);
+        assert(item == NULL || (!cm_hir_def_id_equal(item->definition,
+                thin->definition)
+            && !cm_hir_def_id_equal(item->definition, pointee->definition)
+            && !cm_hir_def_id_equal(item->definition,
+                pointee_sized->definition)));
+    }
+    hidden[0].bytes = (const unsigned char *)"dep";
+    hidden[0].length = 3u;
+    hidden[1].bytes = (const unsigned char *)"Thin";
+    hidden[1].length = 4u;
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, hidden, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    cm_byte_buf_init(&reencoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&reencoded,
+        &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && reencoded.len == encoded.len
+        && memcmp(reencoded.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&reencoded);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+
+    consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
+        &sentinel_module);
+    before = context_lengths(&consumer);
+    assert(cm_hir_library_artifact_identity(&artifact,
+        &sentinel_identity));
+    cm_byte_buf_init(&malformed);
+    cm_byte_buf_append(&malformed, encoded.data, encoded.len);
+    corrupt_nominal_kind_named(&malformed, "Thin", UINT8_C(0));
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, malformed.data, malformed.len, "broken", 114u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&malformed);
+
+    derive_legacy_declaration_v25(&encoded, &legacy_v25);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, legacy_v25.data, legacy_v25.len, "legacy5", 114u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+    assert_sentinel_preserved(&consumer, &artifact, before,
+        &sentinel_identity);
+    cm_byte_buf_destroy(&legacy_v25);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+
+    {
+        static const unsigned char equality_sentinel[] = {
+            UINT8_C(0x26), UINT8_C(0xea), UINT8_C(0x51)
+        };
+        const CmHirLibraryOwnedData *producer_owned_const;
+        CmHirLibraryOwnedValue *producer_owned_value;
+        CmHirLibraryValue producer_value;
+        const CmHirLibraryNominalReference *producer_thin;
+        CmHirAssociatedTypeEquality fake_equality;
+        CmHirAssociatedTypeEquality *saved_equalities;
+        uint32_t saved_equality_count;
+        uint32_t predicate_index;
+        unsigned char *sentinel_data;
+
+        producer_value = lookup_value(&producer.artifact, "producer", "null");
+        producer_thin = find_nominal_reference(&producer_value, "Thin",
+            CM_HIR_LIBRARY_NOMINAL_TRAIT_ALIAS);
+        producer_owned_const = cm_hir_library_artifact_owned_data_const(
+            &producer.artifact);
+        assert(producer_thin != NULL && producer_owned_const != NULL
+            && producer_owned_const->values.len == 1u);
+        producer_owned_value = (CmHirLibraryOwnedValue *)(void *)
+            cm_vec_at_const(&producer_owned_const->values, 0u);
+        assert(producer_owned_value != NULL);
+        predicate_index = UINT32_MAX;
+        for (index = 0u; index < producer_owned_value->predicate_count;
+                ++index)
+            if (cm_hir_def_id_equal(producer_owned_value->predicates[index]
+                    .trait_type.definition, producer_thin->definition))
+                predicate_index = index;
+        assert(predicate_index != UINT32_MAX);
+        saved_equalities = producer_owned_value->predicates[predicate_index]
+            .equalities;
+        saved_equality_count = producer_owned_value
+            ->predicates[predicate_index].equality_count;
+        memset(&fake_equality, 0, sizeof(fake_equality));
+        producer_owned_value->predicates[predicate_index].equalities =
+            &fake_equality;
+        producer_owned_value->predicates[predicate_index].equality_count = 1u;
+        cm_byte_buf_init(&malformed);
+        cm_byte_buf_append(&malformed, equality_sentinel,
+            sizeof(equality_sentinel));
+        sentinel_data = malformed.data;
+        result = cm_hir_metadata_encode_declaration_artifact(&malformed,
+            &producer.artifact);
+        assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
+            && malformed.data == sentinel_data
+            && malformed.len == sizeof(equality_sentinel)
+            && memcmp(malformed.data, equality_sentinel,
+                sizeof(equality_sentinel)) == 0);
+        cm_byte_buf_destroy(&malformed);
+        producer_owned_value->predicates[predicate_index].equalities =
+            saved_equalities;
+        producer_owned_value->predicates[predicate_index].equality_count =
+            saved_equality_count;
+    }
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+}
+
 static void test_duplicate_const_callable_library_capture(void)
 {
     ParsedProducerFixture producer;
@@ -5293,13 +5722,22 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "consume-modifier-function") == 0) {
         return consume_modifier_function_process_artifact(argv[2]) ? 0 : 1;
     }
+    if (argc == 3 && strcmp(argv[1], "produce-trait-alias-function") == 0) {
+        return produce_trait_alias_function_process_artifact(argv[2])
+            ? 0 : 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "consume-trait-alias-function") == 0) {
+        return consume_trait_alias_function_process_artifact(argv[2])
+            ? 0 : 1;
+    }
     if (argc != 1) {
         fputs("usage: test_hir_metadata "
             "[produce-forward|produce-reverse|consume|produce-declaration|"
             "consume-declaration|produce-generic-function|"
             "consume-generic-function|produce-predicate-function|"
             "consume-predicate-function|produce-modifier-function|"
-            "consume-modifier-function FILE]\n", stderr);
+            "consume-modifier-function|produce-trait-alias-function|"
+            "consume-trait-alias-function FILE]\n", stderr);
         return 2;
     }
     test_primitive_only_round_trip();
@@ -5315,6 +5753,7 @@ int main(int argc, char **argv)
     test_declaration_v24_predicate_function_round_trip();
     test_declaration_v24_multi_fact_canonical_order();
     test_carrying_mul_add_modifier_round_trip();
+    test_thin_trait_alias_predicate_round_trip();
     test_duplicate_const_callable_library_capture();
     test_parsed_declaration_v2_capture();
     assert(strcmp(cm_hir_metadata_artifact_status_name(
