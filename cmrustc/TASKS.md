@@ -1988,9 +1988,8 @@ stable wire tags, restores exact modifiers in fresh contexts, and upgrades
 modifierless v2.4 predicates as REQUIRED. Unknown and truncated current-version
 records reject atomically without legacy fallback. These modifiers remain
 opaque declaration facts: const-trait capability, selection, and associated
-projection semantics are still deferred. The next whole-core gate determines
-whether the direct `Thin` trait-alias predicate becomes the first unsupported
-shape. The post-v2.5 optimized gate proves the same zero-error HIR census and
+projection semantics are still deferred. The post-v2.5 optimized gate proves
+the same zero-error HIR census and
 451-module/1,632-type/20,692-value capture, then returns `unsupported HIR`
 with zero metadata bytes at the direct `Thin` trait-alias predicate boundary.
 Declaration v2.6 now transports that direct alias identity while keeping it
@@ -1998,7 +1997,16 @@ opaque and RESERVED. It deliberately creates no alias expansion, associated
 equality or availability, item, namespace binding, or solver evidence; alias
 predicates with direct equalities remain fail-closed. Exact v2.5/v2.4/v2.3
 decode compatibility and fresh-process byte-identical v2.6 replay pass. The
-next whole-core gate must identify the next unsupported declaration shape.
+post-v2.6 optimized gate again proves the complete zero-error HIR and library
+census, then returns `unsupported HIR` with zero bytes. Temporary failure-only
+instrumentation localizes the rejection to ITEM collection. Declaration v2
+cannot represent core's traits, aliases, associated children, impl headers, or
+trait namespace entries; skipping those families would produce an artifact
+that alloc could not safely consume. The next metadata boundary is therefore
+cmhir-meta v3 with explicit family capabilities and real declaration items,
+not another opaque v2 omission. V3.0 targets declaration-safe trait/alias/
+associated/impl headers plus projection and function-pointer types; impl
+absence remains deferred until a later cfg-active completeness certificate.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

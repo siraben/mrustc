@@ -96,6 +96,14 @@ yet carries the complete core trait/alias/impl, body, instantiation,
 dependency-archive, or link-input surface, and none is yet a consumable core
 `.rmeta` or `.rlib`.
 
+The downstream-safe successor is specified in `docs/METADATA_V3.md`. It uses
+an exact capability manifest and distinct complete declaration/positive
+semantic profiles so omitted traits, associated declarations, impls, macros,
+bodies, and link inputs cannot be mistaken for an empty or complete family.
+V3 is a new major because its unified declaration identities, trait namespace
+targets, and completeness semantics are incompatible with the opaque v2
+boundary.
+
 The preceding Haskell `hrustc` experiment is useful negative evidence. Its
 last session reached a rustc-like binary that accepted `hello.rs` and exited
 successfully, but emitted no artifact; work stopped at output-path handling

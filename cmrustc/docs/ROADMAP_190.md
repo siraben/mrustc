@@ -87,7 +87,22 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   namespace binding, or solver evidence is synthesized. Exact v2.5 retags of
   alias-backed predicates reject atomically, while ordinary v2.5 artifacts
   continue to decode and upgrade byte-identically. The next whole-core probe
-  must re-measure the first unsupported declaration shape.
+  re-measures the first unsupported declaration shape.
+- At `48418fd0`, the optimized post-v2.6 gate again proves zero HIR errors and
+  complete 451/1,632/20,692 library capture, then rejects metadata with zero
+  bytes. Failure-only instrumentation localizes the rejection to ITEM
+  collection. This is a format-family boundary, not one missing scalar:
+  declaration v2 cannot encode core's complete trait, trait-alias, associated
+  item, and 9,092-impl universe, nor publish trait namespace bindings. Those
+  families must not be skipped or materialized as fake empty traits.
+- The downstream-safe successor is therefore a new capability-manifested v3
+  format. Its first declaration-consumable checkpoint must transport real
+  trait/alias/associated declarations, projection and function-pointer types,
+  impl headers, and complete namespace identities while keeping solver absence
+  open. A later authenticated completeness layer may seal the cfg-active impl
+  universe; bodies, macros, semantic attributes, and link inputs remain
+  separately declared capabilities rather than implicit omissions.
+  `docs/METADATA_V3.md` is the normative schema and acceptance contract.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
