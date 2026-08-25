@@ -13,7 +13,7 @@ typedef struct CmHirPreboundAssociatedType {
     CmSpan span;
 } CmHirPreboundAssociatedType;
 
-static int cm_hir_body_item_source_origin_valid(const CmHirBody *body);
+static int cm_hir_body_origin_valid(const CmHirBody *body);
 
 static const void *cm_hir_get_id(const CmVec *arena, uint32_t id)
 {
@@ -4709,7 +4709,7 @@ static CmHirStatus cm_hir_add_item_internal(CmHirContext *context,
 
         body = cm_hir_get_body(context,
             item->data.function_item.body);
-        if (!cm_hir_body_item_source_origin_valid(body)
+        if (!cm_hir_body_origin_valid(body)
             || !cm_hir_def_id_equal(body->owner, definition_id)) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
@@ -4720,7 +4720,7 @@ static CmHirStatus cm_hir_add_item_internal(CmHirContext *context,
         const CmHirBody *body;
 
         body = cm_hir_get_body(context, item->data.value_item.body);
-        if (!cm_hir_body_item_source_origin_valid(body)
+        if (!cm_hir_body_origin_valid(body)
             || !cm_hir_def_id_equal(body->owner, definition_id)) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
@@ -5255,15 +5255,55 @@ CmHirBodyOrigin cm_hir_body_origin_item_source(CmHirDefId definition)
     return origin;
 }
 
-static int cm_hir_body_item_source_origin_valid(const CmHirBody *body)
+CmHirBodyOrigin cm_hir_body_origin_metadata_recipe(CmHirDefId definition,
+    const unsigned char artifact_identity[CM_HIR_ARTIFACT_IDENTITY_SIZE],
+    uint32_t recipe_index, uint32_t argument_index)
 {
-    return body != NULL
-        && body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
-        && cm_hir_def_id_equal(body->origin.definition, body->owner)
-        && cm_hir_def_id_equal(body->origin.enclosing_definition,
-            body->owner)
-        && cm_hir_def_id_equal(
+    CmHirBodyOrigin origin;
+
+    memset(&origin, 0, sizeof(origin));
+    origin.kind = CM_HIR_BODY_ORIGIN_METADATA_RECIPE;
+    origin.definition = definition;
+    origin.enclosing_definition = definition;
+    origin.data.metadata_recipe.item_definition = definition;
+    if (artifact_identity != NULL) {
+        memcpy(origin.data.metadata_recipe.artifact_identity,
+            artifact_identity, CM_HIR_ARTIFACT_IDENTITY_SIZE);
+    }
+    origin.data.metadata_recipe.recipe_index = recipe_index;
+    origin.data.metadata_recipe.argument_index = argument_index;
+    return origin;
+}
+
+static int cm_hir_artifact_identity_nonzero(
+    const unsigned char identity[CM_HIR_ARTIFACT_IDENTITY_SIZE])
+{
+    size_t index;
+
+    for (index = 0u; index < CM_HIR_ARTIFACT_IDENTITY_SIZE; ++index) {
+        if (identity[index] != 0u) return 1;
+    }
+    return 0;
+}
+
+static int cm_hir_body_origin_valid(const CmHirBody *body)
+{
+    if (body == NULL
+        || !cm_hir_def_id_equal(body->origin.definition, body->owner)
+        || !cm_hir_def_id_equal(body->origin.enclosing_definition,
+            body->owner)) return 0;
+    if (body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE) {
+        return cm_hir_def_id_equal(
             body->origin.data.item_source.item_definition, body->owner);
+    }
+    if (body->origin.kind == CM_HIR_BODY_ORIGIN_METADATA_RECIPE) {
+        return cm_hir_def_id_equal(
+                body->origin.data.metadata_recipe.item_definition,
+                body->owner)
+            && cm_hir_artifact_identity_nonzero(
+                body->origin.data.metadata_recipe.artifact_identity);
+    }
+    return 0;
 }
 
 CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
@@ -5281,7 +5321,7 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     }
     owner_definition = cm_hir_lookup_definition(context, body->owner);
     if (!cm_hir_span_is_ordered(body->span)
-        || !cm_hir_body_item_source_origin_valid(body)
+        || !cm_hir_body_origin_valid(body)
         || owner_definition == NULL
         || owner_definition->kind != CM_HIR_DEFINITION_ITEM
         || !cm_hir_type_id_valid(context, body->expected_type)
@@ -5293,13 +5333,17 @@ CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
         ? cm_hir_get_expr(context, body->root_expression) : NULL;
     if ((body->state == CM_HIR_BODY_UNLOWERED
             && (body->source == 0u
-                || body->source_expression_id == 0u
+                || (body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+                    ? body->source_expression_id == 0u
+                    : body->source_expression_id != 0u)
                 || body->span.source != body->source
                 || body->root_expression != CM_HIR_EXPR_NONE
                 || body->error_reason != CM_INTERN_ID_NONE))
         || (body->state == CM_HIR_BODY_TYPED
             && (body->source == 0u
-                || body->source_expression_id == 0u
+                || (body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+                    ? body->source_expression_id == 0u
+                    : body->source_expression_id != 0u)
                 || body->span.source != body->source
                 || typed_root == NULL
                 || typed_root->owner_body != CM_HIR_BODY_NONE

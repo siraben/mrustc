@@ -1073,15 +1073,23 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         cm_hir_dump_def(stream, body->owner);
         fputs(" origin=", stream);
         fputs(body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
-                ? "item-source" : "invalid",
-            stream);
+                ? "item-source"
+                : body->origin.kind == CM_HIR_BODY_ORIGIN_METADATA_RECIPE
+                    ? "metadata-recipe" : "invalid", stream);
         fputs(" definition=", stream);
         cm_hir_dump_def(stream, body->origin.definition);
         fputs(" enclosing=", stream);
         cm_hir_dump_def(stream, body->origin.enclosing_definition);
         fputs(" item=", stream);
         cm_hir_dump_def(stream,
-            body->origin.data.item_source.item_definition);
+            body->origin.kind == CM_HIR_BODY_ORIGIN_METADATA_RECIPE
+                ? body->origin.data.metadata_recipe.item_definition
+                : body->origin.data.item_source.item_definition);
+        if (body->origin.kind == CM_HIR_BODY_ORIGIN_METADATA_RECIPE) {
+            fprintf(stream, " recipe=%u argument=%u",
+                (unsigned int)body->origin.data.metadata_recipe.recipe_index,
+                (unsigned int)body->origin.data.metadata_recipe.argument_index);
+        }
         fprintf(stream, " state=%s expected=ty#%u locals=%u params=%u ",
             body->state == CM_HIR_BODY_UNLOWERED ? "unlowered"
                 : (body->state == CM_HIR_BODY_TYPED ? "typed" : "error"),

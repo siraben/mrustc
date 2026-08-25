@@ -1810,6 +1810,61 @@ static void test_body_public_invariants(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_metadata_recipe_body_origin(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirTypeId unit_type;
+    CmHirDefId definition;
+    CmHirBody body;
+    CmHirBodyId body_id;
+    unsigned char identity[CM_HIR_ARTIFACT_IDENTITY_SIZE];
+    const CmHirBody *stored;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "metadata_body"), CM_HIR_EDITION_2021,
+        test_span(0u, 100u), &crate_id, &root_id) == CM_HIR_OK);
+    (void)root_id;
+    unit_type = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(1u, 2u));
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(10u, 40u), &definition) == CM_HIR_OK);
+    memset(identity, 0, sizeof(identity));
+    memset(&body, 0, sizeof(body));
+    body.owner = definition;
+    body.origin = cm_hir_body_origin_metadata_recipe(definition,
+        identity, 7u, 0u);
+    body.state = CM_HIR_BODY_UNLOWERED;
+    body.expected_type = unit_type;
+    body.source = 1u;
+    body.source_expression_id = 0u;
+    body.span = test_span(10u, 40u);
+    body_id = CM_HIR_BODY_NONE;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVALID_ARGUMENT);
+    assert(body_id == CM_HIR_BODY_NONE && context.bodies.len == 0u);
+
+    identity[0] = 0x42u;
+    identity[CM_HIR_ARTIFACT_IDENTITY_SIZE - 1u] = 0xa5u;
+    body.origin = cm_hir_body_origin_metadata_recipe(definition,
+        identity, 7u, 0u);
+    body.source_expression_id = 1u;
+    assert(cm_hir_add_body(&context, &body, &body_id)
+        == CM_HIR_INVARIANT_VIOLATION);
+    body.source_expression_id = 0u;
+    assert(cm_hir_add_body(&context, &body, &body_id) == CM_HIR_OK);
+    stored = cm_hir_get_body(&context, body_id);
+    assert(stored != NULL
+        && stored->origin.kind == CM_HIR_BODY_ORIGIN_METADATA_RECIPE
+        && stored->origin.data.metadata_recipe.recipe_index == 7u
+        && stored->origin.data.metadata_recipe.argument_index == 0u
+        && memcmp(stored->origin.data.metadata_recipe.artifact_identity,
+            identity, sizeof(identity)) == 0);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_discard_parameter_model(void)
 {
     CmHirContext context;
@@ -9282,6 +9337,7 @@ int main(void)
     test_function_pointer_lifetime_binder_model();
     test_scoped_self_and_receiver_invariants();
     test_body_public_invariants();
+    test_metadata_recipe_body_origin();
     test_discard_parameter_model();
     test_tuple_parameter_model();
     test_unary_rust_call_tuple_parameter_model();

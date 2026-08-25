@@ -1007,8 +1007,12 @@ typedef enum CmHirBodyState {
 
 typedef enum CmHirBodyOriginKind {
     /* A source expression attached directly to one function/const/static. */
-    CM_HIR_BODY_ORIGIN_ITEM_SOURCE = 0
+    CM_HIR_BODY_ORIGIN_ITEM_SOURCE = 0,
+    /* A typed recipe restored from one completely validated artifact. */
+    CM_HIR_BODY_ORIGIN_METADATA_RECIPE
 } CmHirBodyOriginKind;
+
+#define CM_HIR_ARTIFACT_IDENTITY_SIZE 32u
 
 typedef struct CmHirBodyOrigin {
     CmHirBodyOriginKind kind;
@@ -1020,6 +1024,12 @@ typedef struct CmHirBodyOrigin {
         struct {
             CmHirDefId item_definition;
         } item_source;
+        struct {
+            CmHirDefId item_definition;
+            unsigned char artifact_identity[CM_HIR_ARTIFACT_IDENTITY_SIZE];
+            uint32_t recipe_index;
+            uint32_t argument_index;
+        } metadata_recipe;
     } data;
 } CmHirBodyOrigin;
 
@@ -1177,6 +1187,10 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     CmHirGenericParamId parameter_id, const CmHirGenericArg *argument);
 /* Construct the only body origin admitted by this additive checkpoint. */
 CmHirBodyOrigin cm_hir_body_origin_item_source(CmHirDefId definition);
+/* Construct provenance for a body recipe from an authenticated artifact. */
+CmHirBodyOrigin cm_hir_body_origin_metadata_recipe(CmHirDefId definition,
+    const unsigned char artifact_identity[CM_HIR_ARTIFACT_IDENTITY_SIZE],
+    uint32_t recipe_index, uint32_t argument_index);
 CmHirStatus cm_hir_add_body(CmHirContext *context, const CmHirBody *body,
     CmHirBodyId *out_id);
 /*

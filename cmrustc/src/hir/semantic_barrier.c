@@ -314,8 +314,7 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
                 &body->origin.enclosing_definition, 1u,
                 sizeof(body->origin.enclosing_definition))
             || !cm_semantic_barrier_hash_array(&hash,
-                &body->origin.data.item_source.item_definition, 1u,
-                sizeof(body->origin.data.item_source.item_definition))
+                &body->origin.data, 1u, sizeof(body->origin.data))
             || !cm_semantic_barrier_hash_array(&hash,
                 body->locals, (size_t)body->local_count,
                 sizeof(*body->locals))) return 0;
