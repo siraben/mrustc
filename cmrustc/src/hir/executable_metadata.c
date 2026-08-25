@@ -1726,7 +1726,7 @@ static int cm_exec_identity_matches_expectation(
     return 1;
 }
 
-static int cm_exec_recompute_identity(CmHirExecutableMetadata *metadata,
+static int cm_exec_recompute_identity(const CmHirExecutableMetadata *metadata,
     const CmHirMetadataSection *link)
 {
     CmHirArtifactIdentityInput input;
@@ -1767,6 +1767,28 @@ static int cm_exec_recompute_identity(CmHirExecutableMetadata *metadata,
     }
     cm_free(cfgs);
     return cm_exec_digest_equal(&identity, &metadata->artifact_identity);
+}
+
+CmHirExecutableMetadataStatus cm_hir_executable_metadata_validate(
+    const CmHirExecutableMetadata *metadata)
+{
+    CmByteBuf sections[CM_EXEC_SECTION_COUNT];
+    CmHirMetadataSection link;
+    CmHirExecutableMetadataStatus status;
+    size_t index;
+
+    status = cm_exec_validate(metadata);
+    if (status != CM_HIR_EXEC_METADATA_OK) return status;
+    status = cm_exec_build_sections(metadata, sections);
+    if (status == CM_HIR_EXEC_METADATA_OK) {
+        link.data = sections[13].data;
+        link.length = sections[13].len;
+        if (!cm_exec_recompute_identity(metadata, &link))
+            status = CM_HIR_EXEC_METADATA_IDENTITY_MISMATCH;
+    }
+    for (index = 0u; index < CM_EXEC_SECTION_COUNT; index += 1u)
+        cm_byte_buf_destroy(&sections[index]);
+    return status;
 }
 
 static int cm_exec_validate_families(const CmHirExecutableMetadata *metadata,

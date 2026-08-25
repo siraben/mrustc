@@ -298,6 +298,15 @@ static void test_round_trip_and_twin(void)
     assert(decoded.object_count == 1u && decoded.symbol_count == 1u);
     assert(decoded.values[0].kind == CM_HIR_EXEC_VALUE_RECIPE);
     assert(decoded.values[1].kind == CM_HIR_EXEC_VALUE_NATIVE_OBJECT);
+    assert(cm_hir_executable_metadata_validate(&decoded)
+        == CM_HIR_EXEC_METADATA_OK);
+    decoded.source_digest.bytes[0] ^= UINT8_C(1);
+    assert(cm_hir_executable_metadata_validate(&decoded)
+        == CM_HIR_EXEC_METADATA_IDENTITY_MISMATCH);
+    decoded.source_digest.bytes[0] ^= UINT8_C(1);
+    decoded.bodies[0].parameter_index = decoded.values[0].parameter_count;
+    assert(cm_hir_executable_metadata_validate(&decoded)
+        == CM_HIR_EXEC_METADATA_UNSUPPORTED_DESCRIPTOR);
     cm_hir_executable_metadata_destroy(&decoded);
     cm_byte_buf_destroy(&bytes1);
     cm_byte_buf_destroy(&bytes2);

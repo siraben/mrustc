@@ -193,6 +193,16 @@ void cm_hir_executable_metadata_init(CmHirExecutableMetadata *metadata);
 void cm_hir_executable_metadata_destroy(CmHirExecutableMetadata *metadata);
 
 /*
+ * Revalidate an authenticated in-memory descriptor without requiring the
+ * producer-only source and object byte views.  This is required before a
+ * decoded descriptor is materialized because its public records may have
+ * been modified after decode.  The structural records, link-manifest digest,
+ * and artifact identity must still agree exactly.
+ */
+CmHirExecutableMetadataStatus cm_hir_executable_metadata_validate(
+    const CmHirExecutableMetadata *metadata);
+
+/*
  * The descriptor uses one-based local references. Inputs must already be in
  * the canonical structural order specified by cmhir-meta-v3.2. Encoding and
  * decoding replace their output only after complete validation. This exact
