@@ -21962,6 +21962,350 @@ static int cm_lower_impl_pair_is_compiler_fn_ptr_disjoint(
 }
 
 /*
+ * Rust's conversion blankets form one deliberately small implication chain:
+ *
+ *     U: Into<T>  <-  T: From<U>
+ *
+ * The `TryFrom<U> for T where U: Into<T>` blanket is therefore disjoint from
+ * a concrete fallible conversion when neither an explicit `Into<T> for U`
+ * nor a `From<U> for T` provider can exist.  This is not general predicate
+ * solving.  Authenticate the three diagnostic traits and both exact blankets,
+ * require downstream-closed primitive or local-nominal query types (so a
+ * downstream crate cannot add either foreign impl), and treat every
+ * unsupported or predicate-bearing provider as possible overlap.
+ */
+static int cm_lower_conversion_trait(const CmLowerState *state,
+    CmHirDefId definition, const char *diagnostic_name)
+{
+    const CmHirItem *item;
+    const CmHirGenericParam *parameter;
+    char attribute[64];
+    int written;
+
+    if (state == NULL || diagnostic_name == NULL
+        || definition.crate_id != state->result.crate_id) return 0;
+    item = cm_lower_bound_item(state, definition);
+    if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT
+        || item->data.trait_item.safety != CM_HIR_SAFE
+        || item->data.trait_item.is_auto
+        || item->generic_parameter_count != 1u
+        || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    parameter = cm_hir_get_generic_param(state->hir,
+        item->generic_parameter_start);
+    if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+        || parameter->index != 0u || parameter->has_default
+        || !cm_hir_def_id_equal(parameter->owner, item->definition)) {
+        return 0;
+    }
+    written = snprintf(attribute, sizeof(attribute),
+        "rustc_diagnostic_item = \"%s\"", diagnostic_name);
+    return written > 0 && (size_t)written < sizeof(attribute)
+        && cm_lower_item_has_exact_attribute(state, item, attribute);
+}
+
+static int cm_lower_impl_owned_type_parameter_id(
+    const CmLowerState *state, const CmHirItem *impl_item,
+    CmHirTypeId type_id, CmHirGenericParamId *out_parameter)
+{
+    const CmHirType *type;
+
+    if (state == NULL || impl_item == NULL || out_parameter == NULL) {
+        return 0;
+    }
+    type = cm_hir_get_type(state->hir, type_id);
+    if (type == NULL || type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+            type->data.parameter_type.parameter, CM_HIR_GENERIC_TYPE)) {
+        return 0;
+    }
+    *out_parameter = type->data.parameter_type.parameter;
+    return 1;
+}
+
+static int cm_lower_impl_has_two_plain_type_parameters(
+    const CmLowerState *state, const CmHirItem *impl_item)
+{
+    uint32_t index;
+
+    if (state == NULL || impl_item == NULL
+        || impl_item->generic_parameter_count != 2u
+        || impl_item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    for (index = 0u; index < 2u; ++index) {
+        const CmHirGenericParam *parameter = cm_hir_get_generic_param(
+            state->hir, impl_item->generic_parameter_start + index);
+
+        if (parameter == NULL || parameter->kind != CM_HIR_GENERIC_TYPE
+            || parameter->index != index || parameter->has_default
+            || !cm_hir_def_id_equal(parameter->owner,
+                impl_item->definition)) return 0;
+    }
+    return 1;
+}
+
+static int cm_lower_conversion_predicate(const CmLowerState *state,
+    const CmHirItem *impl_item, CmHirGenericParamId subject_parameter,
+    const char *trait_name, CmHirGenericParamId argument_parameter,
+    CmHirDefId *out_trait)
+{
+    const CmHirTraitPredicate *predicate;
+    const CmHirType *subject;
+    const CmHirGenericArg *argument;
+    const CmHirType *argument_type;
+
+    if (state == NULL || impl_item == NULL || out_trait == NULL
+        || impl_item->predicate_count != 1u
+        || impl_item->predicates == NULL) return 0;
+    predicate = &impl_item->predicates[0];
+    if (predicate->modifier != CM_HIR_PREDICATE_CONST_IF_CONST
+        || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+        || predicate->binder.lifetime_count != 0u
+        || predicate->binder.lifetimes != NULL
+        || predicate->equality_count != 0u
+        || predicate->equalities != NULL
+        || predicate->trait_type.argument_count != 1u
+        || predicate->trait_type.arguments == NULL) return 0;
+    subject = cm_hir_get_type(state->hir, predicate->subject);
+    argument = &predicate->trait_type.arguments[0];
+    argument_type = argument->kind == CM_HIR_GENERIC_ARG_TYPE
+        ? cm_hir_get_type(state->hir, argument->data.type) : NULL;
+    if (subject == NULL || subject->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || subject->data.parameter_type.parameter != subject_parameter
+        || argument_type == NULL
+        || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || argument_type->data.parameter_type.parameter
+            != argument_parameter
+        || !cm_lower_conversion_trait(state,
+            predicate->trait_type.definition, trait_name)) return 0;
+    *out_trait = predicate->trait_type.definition;
+    return 1;
+}
+
+static int cm_lower_impl_is_try_from_blanket(const CmLowerState *state,
+    CmLowerImplSelfClass self_class, const CmHirItem *impl_item,
+    CmHirDefId *out_into_trait)
+{
+    const CmHirGenericArg *argument;
+    CmHirGenericParamId target_parameter;
+    CmHirGenericParamId source_parameter;
+
+    if (state == NULL || impl_item == NULL || out_into_trait == NULL
+        || self_class != CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+        || !cm_lower_conversion_trait(state,
+            impl_item->data.impl_item.trait_type.definition, "TryFrom")
+        || !cm_lower_impl_has_two_plain_type_parameters(state, impl_item)
+        || impl_item->data.impl_item.trait_type.argument_count != 1u
+        || impl_item->data.impl_item.trait_type.arguments == NULL
+        || !cm_lower_impl_owned_type_parameter_id(state, impl_item,
+            impl_item->data.impl_item.self_type, &target_parameter)) {
+        return 0;
+    }
+    argument = &impl_item->data.impl_item.trait_type.arguments[0];
+    if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        || !cm_lower_impl_owned_type_parameter_id(state, impl_item,
+            argument->data.type, &source_parameter)
+        || source_parameter == target_parameter) return 0;
+    return cm_lower_conversion_predicate(state, impl_item,
+        source_parameter, "Into", target_parameter, out_into_trait);
+}
+
+static int cm_lower_impl_is_into_from_blanket(const CmLowerState *state,
+    const CmHirItem *impl_item, CmHirDefId into_trait,
+    CmHirDefId *out_from_trait)
+{
+    const CmHirGenericArg *argument;
+    CmHirGenericParamId source_parameter;
+    CmHirGenericParamId target_parameter;
+
+    if (state == NULL || impl_item == NULL || out_from_trait == NULL
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+        || !cm_hir_def_id_equal(
+            impl_item->data.impl_item.trait_type.definition, into_trait)
+        || !cm_lower_conversion_trait(state, into_trait, "Into")
+        || !cm_lower_impl_has_two_plain_type_parameters(state, impl_item)
+        || impl_item->data.impl_item.trait_type.argument_count != 1u
+        || impl_item->data.impl_item.trait_type.arguments == NULL
+        || !cm_lower_impl_owned_type_parameter_id(state, impl_item,
+            impl_item->data.impl_item.self_type, &source_parameter)) {
+        return 0;
+    }
+    argument = &impl_item->data.impl_item.trait_type.arguments[0];
+    if (argument->kind != CM_HIR_GENERIC_ARG_TYPE
+        || !cm_lower_impl_owned_type_parameter_id(state, impl_item,
+            argument->data.type, &target_parameter)
+        || source_parameter == target_parameter) return 0;
+    return cm_lower_conversion_predicate(state, impl_item,
+        target_parameter, "From", source_parameter, out_from_trait);
+}
+
+static int cm_lower_impl_matches_unary_trait_query(
+    const CmHirContext *hir, const CmHirItem *impl_item,
+    CmHirDefId trait_definition, CmHirTypeId self_type,
+    CmHirTypeId argument_type)
+{
+    CmVec bindings;
+    const CmHirGenericArg *argument;
+    int matches;
+
+    if (hir == NULL || impl_item == NULL
+        || impl_item->kind != CM_HIR_ITEM_IMPL
+        || !impl_item->data.impl_item.has_trait
+        || !cm_hir_def_id_equal(
+            impl_item->data.impl_item.trait_type.definition,
+            trait_definition)
+        || impl_item->data.impl_item.trait_type.argument_count != 1u
+        || impl_item->data.impl_item.trait_type.arguments == NULL) return 0;
+    argument = &impl_item->data.impl_item.trait_type.arguments[0];
+    if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) return 0;
+    cm_vec_init(&bindings, sizeof(CmLowerUnifyBinding));
+    matches = cm_lower_unify_type(hir, &bindings,
+        impl_item->data.impl_item.self_type, self_type,
+        (size_t)hir->types.len + 1u)
+        && cm_lower_unify_type(hir, &bindings, argument->data.type,
+            argument_type, (size_t)hir->types.len + 1u);
+    cm_vec_destroy(&bindings);
+    return matches;
+}
+
+static int cm_lower_type_is_downstream_closed(const CmLowerState *state,
+    CmHirTypeId type_id, size_t budget)
+{
+    const CmHirType *type;
+    uint32_t index;
+
+    if (state == NULL || state->hir == NULL || budget == 0u) return 0;
+    type = cm_hir_get_type(state->hir, type_id);
+    if (type == NULL) return 0;
+    switch (type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_INTEGER_KIND:
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return 1;
+    case CM_HIR_TYPE_ADT_KIND: {
+        const CmHirItem *item;
+
+        if (type->data.named_type.definition.crate_id
+                != state->result.crate_id
+            || (type->data.named_type.argument_count != 0u
+                && type->data.named_type.arguments == NULL)) return 0;
+        item = cm_lower_bound_item(state,
+            type->data.named_type.definition);
+        if (item == NULL
+            || (item->kind != CM_HIR_ITEM_STRUCT
+                && item->kind != CM_HIR_ITEM_ENUM
+                && item->kind != CM_HIR_ITEM_UNION)) return 0;
+        for (index = 0u; index < type->data.named_type.argument_count;
+             ++index) {
+            const CmHirGenericArg *argument =
+                &type->data.named_type.arguments[index];
+
+            if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
+                if (!cm_lower_type_is_downstream_closed(state,
+                        argument->data.type, budget - 1u)) return 0;
+            } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+                if (argument->data.constant.kind != CM_HIR_CONST_VALUE
+                    || !cm_lower_type_is_downstream_closed(state,
+                        argument->data.constant.type,
+                        budget - 1u)) return 0;
+            } else if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_impl_pair_is_conversion_predicate_disjoint(
+    const CmLowerState *state, CmLowerImplSelfClass left_class,
+    const CmHirItem *left, CmLowerImplSelfClass right_class,
+    const CmHirItem *right)
+{
+    const CmHirItem *blanket;
+    const CmHirItem *concrete;
+    CmLowerImplSelfClass blanket_class;
+    CmHirDefId into_trait;
+    CmHirDefId from_trait = cm_hir_def_id_none();
+    const CmHirGenericArg *source_argument;
+    CmHirTypeId source_type;
+    CmHirTypeId target_type;
+    size_t index;
+    int saw_into_blanket = 0;
+
+    if (state == NULL || left == NULL || right == NULL
+        || left->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+        || right->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE) return 0;
+    if (cm_lower_impl_is_try_from_blanket(state, left_class, left,
+            &into_trait)) {
+        blanket = left;
+        blanket_class = left_class;
+        concrete = right;
+    } else if (cm_lower_impl_is_try_from_blanket(state, right_class, right,
+            &into_trait)) {
+        blanket = right;
+        blanket_class = right_class;
+        concrete = left;
+    } else {
+        return 0;
+    }
+    (void)blanket;
+    (void)blanket_class;
+    if (concrete->generic_parameter_count != 0u
+        || concrete->predicate_count != 0u
+        || concrete->data.impl_item.trait_type.argument_count != 1u
+        || concrete->data.impl_item.trait_type.arguments == NULL) return 0;
+    source_argument = &concrete->data.impl_item.trait_type.arguments[0];
+    if (source_argument->kind != CM_HIR_GENERIC_ARG_TYPE) return 0;
+    source_type = source_argument->data.type;
+    target_type = concrete->data.impl_item.self_type;
+    if (!cm_lower_type_is_downstream_closed(state, source_type,
+            (size_t)state->hir->types.len + 1u)
+        || !cm_lower_type_is_downstream_closed(state, target_type,
+            (size_t)state->hir->types.len + 1u)) return 0;
+
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *provider = (const CmHirItem *)cm_vec_at_const(
+            &state->hir->items, index);
+        CmHirDefId provider_from;
+
+        if (provider == NULL || provider->kind != CM_HIR_ITEM_IMPL
+            || provider->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+            || !cm_lower_impl_matches_unary_trait_query(state->hir,
+                provider, into_trait, source_type, target_type)) continue;
+        if (!cm_lower_impl_is_into_from_blanket(state, provider, into_trait,
+                &provider_from)
+            || (saw_into_blanket
+                && !cm_hir_def_id_equal(from_trait, provider_from))) {
+            return 0;
+        }
+        saw_into_blanket = 1;
+        from_trait = provider_from;
+    }
+    if (!saw_into_blanket
+        || !cm_lower_conversion_trait(state, from_trait, "From")) return 0;
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *provider = (const CmHirItem *)cm_vec_at_const(
+            &state->hir->items, index);
+
+        if (provider != NULL && provider->kind == CM_HIR_ITEM_IMPL
+            && provider->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
+            && cm_lower_impl_matches_unary_trait_query(state->hir, provider,
+                from_trait, target_type, source_type)) return 0;
+    }
+    return 1;
+}
+
+/*
  * An overlapping impl pair is admitted as a specialization step when either
  * impl owns a `default` member: mrustc-style, the per-impl specializable
  * marker is the evidence that an ordered impl family is intentional.
@@ -22063,6 +22407,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     prior_class, prior, item_class, item)) continue;
             if (!cm_lower_impl_headers_unify(state->hir, prior,
                     item)) continue;
+            if (cm_lower_impl_pair_is_conversion_predicate_disjoint(state,
+                    prior_class, prior, item_class, item)) continue;
             if (cm_lower_impl_pair_is_admitted_specialization(state, prior,
                     item)) {
                 continue;

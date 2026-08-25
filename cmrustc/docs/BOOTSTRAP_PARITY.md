@@ -1,0 +1,222 @@
+# cmrustc bootstrap parity map
+
+This document charts the shortest evidence-backed path from the current C
+compiler to the point where it can replace the retained C++ `mrustc` in the
+Rust bootstrap.  It is about artifacts that a later stage can consume, not
+about how many source declarations a front end can count.
+
+## Target policy
+
+Let `T` be the newest Rust release that an exact, pinned upstream `mrustc`
+revision demonstrably bootstraps with a recorded source archive, patch set,
+build overrides, target triple, and clean acceptance run.  Let `S` be the
+first official Rust release built by that `T` toolchain.
+
+The currently recovered proof fixes `T = 1.90.0` and `S = 1.91.1`.  Those are
+measurements, not permanent policy.  A newer upstream proof moves `T` without
+changing this roadmap.  cmrustc only needs to build `T`; official rustc
+self-host and release-ladder machinery owns `S` through latest-at-run-time.
+
+The successful Nix ripgrep experiment does not prove this cmrustc edge.  Its
+first compiler is `${mrustc}/bin/mrustc` from `thepowersgang/mrustc`, the C++
+implementation.  It proves the downstream mechanism through the releases in
+that recovered run once a real `T` toolchain exists.
+
+More precisely, the recovered branch at `50dc282b0c34` proves the source-only
+sequence 1.90.0 -> 1.91.1 -> 1.92.0 -> 1.93.1 -> 1.94.0 -> 1.95.0 and then
+ripgrep.  It does not yet prove its documented 1.96/1.97 continuation.  “To
+latest” below is the policy and remaining gate, not a claim about that archived
+run.  Its 1.93.1 source also disagrees with the 1.93.0 entry in `PINS.md`; the
+ladder record must settle that version and use one canonical archive format
+and hash before it is provenance authority.
+
+## Audited boundary
+
+The current tree has three important, but different, kinds of evidence:
+
+1. Strict GCC, Clang, and TinyCC tests exercise a real bounded `no_core`
+   source-to-C-to-executable path.
+2. Private cmhir v1/v2 fixtures prove deterministic, fresh-process transport
+   for a limited declaration subset.
+3. A historical target-configured Rust 1.90 `core` run loaded 363 sources and
+   451 modules and counted 38,176 HIR items, 22,524 body records, and 159,528
+   types.  Body records are not equivalent to typed, executable bodies.
+
+The 2026-08-25 working-tree probe re-established the 363-source/451-module
+graph and import result and moved the active coherence frontier from
+`convert/mod.rs:833` to `error.rs:937`.  The latter is the overlap between the
+`T: Type<'a>` blanket `MaybeSizedType<'a> for T` and the nominal
+`MaybeSizedType<'a> for MaybeSizedValue<T>` impl.  This remains a red G1 result:
+it calls for a bounded, authenticated proof that the blanket predicate has no
+matching provider, not an unconditional overlap exemption.
+
+There is no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or `cargo`.
+The ordinary rustc-shaped driver path still reports that its compiler pipeline
+is unimplemented.  Metadata v3 is a design specification, not implemented
+wire-format support.  The archive helper is not yet a general object-bearing
+Rust rlib, and there is no C `hcargo`.
+
+## Gap chart
+
+| Stage | Current cmrustc boundary | Boundary required to replace mrustc |
+| --- | --- | --- |
+| Parse and expand | Whole-`core` declaration graph; bounded builtins | Body-position expansion, derives, dependency macros, and proc-macro execution for the `T` corpus |
+| Resolve and HIR | Local imports and declaration census | Cross-crate identities, namespaces, reexports, traits, associated items, impl completeness, lang items, and semantic attributes |
+| Bodies and type checking | Small `no_core` expression and trait slice | All body forms reached by `core`/`alloc`; coercions, projections, method selection, CTFE, closures, coroutines, vtables, and erased types |
+| MIR | Assign, call, goto, return, and boolean switch over a small type set | General places, rvalues, control flow, drops, cleanup/unwind, casts, aggregates, statics, consts, intrinsics, and validation |
+| Reachability and monomorphization | Local roots and a bounded substitution canary | Arbitrary type/lifetime/const substitutions across crates, trait/default methods, drop glue, vtables, statics, and stable symbols |
+| Layout and ABI | Integers, references, and simple local structs | Enums/niches, unions, tuples, arrays, slices/DSTs, fat pointers, `repr`, SIMD, function ABIs, panic/unwind, atomics, and TLS |
+| C and native output | C text for an exact `no_core` envelope | Compile objects, archive libraries, extract dependencies, and link all required crate types and native inputs |
+| Cross-crate artifact | Limited private declaration metadata | Authenticated declarations, impl facts, macros, generic body/const recipes, link inputs, object members, and archive symbol index |
+| Orchestration | No C implementation | rustc-compatible invocation plus a C manifest DAG with build scripts, overrides, proc macros, host/target split, caching, and native dependencies |
+
+The retained C++ implementation is an oracle for flags, crate ordering,
+patches, AST/HIR/MIR, target layout, emitted symbols, and runtime behavior.  It
+is not an acceptable binary input to the final cmrustc trust edge.
+
+## Dependency-ordered gates
+
+### G0: Lock the oracle and target
+
+Record the exact upstream `mrustc` revision, `T` archive, patches, overrides,
+target, and output identities.  Replay its `TestRustcBootstrap`-equivalent in
+isolated inputs and record the `S` comparison.
+
+Acceptance: one machine-readable record derives `T` and `S`; no roadmap text
+or package expression silently selects a different release.
+
+### G1: Keep the current front end green
+
+Repeat strict/TinyCC twin builds, the native ABI suite, and the target-configured
+whole-`core` HIR gate at current HEAD.  Historical census commits remain useful
+diagnostics but do not make a changed compiler green.
+
+Acceptance: isolated current-source runs agree and the full configured `core`
+front end has zero graph, import, lowering, and semantic errors.
+
+### G2: Capture the invocation contract
+
+Record or translate the upstream rustc/minicargo contract: crate name/type,
+target, extern/search paths, cfg/features, emit/output paths, metadata identity,
+panic/codegen flags, environment, source patches, and native inputs.  A
+manifest DAG and build-script override scaffold may proceed in parallel.
+
+Acceptance: a trace comparison accounts for every input affecting a small
+upstream crate build; unknown correctness-relevant flags fail closed.
+
+The minimum compiler command surface is positional source, `-o`, crate name,
+crate type (`rlib`, `bin`, `proc-macro`, or `dylib`), crate tag, `--extern`,
+`-L`, `-l`, cfgs, edition, target, optimization/debug flags, depfile, panic
+mode, and deferred build-command output.  It must also publish target cfgs.
+Expected outputs follow upstream minicargo naming: `libNAME-TAG.rlib`, the
+requested binary, or an executable `libNAME-TAG-plugin` proc macro.
+
+### G3: Produce the smallest executable cross-crate artifact
+
+Implement only the v3 capability families, body/const recipe, object/archive,
+dependency loading, and linking needed for one public generic function and one
+trait implementation.  This gate deliberately precedes broad declaration-only
+metadata work.
+
+Acceptance: a fresh process consumes the artifact, GCC and TinyCC link and run
+the same result, two producers agree, and corrupt, incomplete, mismatched, or
+stale inputs publish no output.
+
+### G4: Produce a consumable `core` rlib
+
+Broaden G3 along the first failing real-`core` path until the artifact carries
+the complete cfg-active public declarations, macros and reexports, semantic
+attributes, impl universe, generic bodies/const IR, link inputs, and necessary
+objects.  Generalize type checking, MIR, monomorphization, layout, ABI, and C
+emission as those failures require.
+
+Acceptance: two isolated builds emit deterministic nonempty object-bearing
+artifacts; a fresh dependent compile loads the archive and linked representative
+`no_std` probes execute.  Metadata bytes or an HIR census alone cannot pass.
+
+### G5: Build `alloc`
+
+Build `alloc` against the G4 artifact.  Close const evaluation,
+coercion/unsizing, lang-item, intrinsic, panic, allocation, and wider MIR gaps
+as executable vertical slices.
+
+Acceptance: `alloc` emits a consumable artifact and fresh `Box`, `Vec`, and
+allocation probes link and run.
+
+### G6: Build the bootstrap libraries and tooling surface
+
+Add compiler-builtins, libc/unwind and panic crates, proc-macro transport and
+execution, `std`, `proc_macro`, and `test`.  Complete deterministic host/target
+DAG scheduling, build scripts/overrides, feature/cfg/environment handling,
+native linking, and cache identity in C orchestration.
+
+Proc macros and build scripts and their dependencies are host artifacts;
+target libraries remain target artifacts and use separate output/cache
+identities.  Build-script execution must provide Cargo's relevant environment
+and consume normalized `cargo:rustc-*` cfg, link, flag, and environment output.
+The current 1.90 recipe also relies on recorded overrides for
+`compiler_builtins`, `libc`, and `std`.  cmrustc must advertise a distinct
+`rust_compiler="cmrustc"` cfg, with the hashed source patch recognizing it
+where the upstream recipe currently special-cases `mrustc`.
+
+Acceptance: serial and parallel clean builds select the same pinned graph;
+build-script and proc-macro round trips pass; hello and test binaries run.
+
+### G7: Build `rustc` and `cargo` for `T`
+
+Use the full patched `T` source graph and source-built native prerequisites.
+The produced tools must not require cmrustc at runtime.
+
+Acceptance: `rustc --version`, a hello program, a proc-macro crate, and a Cargo
+workspace pass using only the produced toolchain.
+
+### G8: Hand off to official Rust
+
+Use the cmrustc-produced `T` rustc and Cargo to build `S`, then run the
+upstream normalized stage comparison (binary equality where the pinned oracle
+claims it).  From this point onward cmrustc is outside the release ladder.
+
+Retain the upstream `run_rustc` staging semantics: rebuild the standard
+library with the produced rustc, rebuild rustc against that library, and then
+rebuild the final library so rustc, std, and proc macros share ABI and symbol
+hashes.  During the transition, target compilations use the newer compiler
+while host/build-script compilations use the previous one.  This is an ABI
+bridge, not optional cleanup.
+
+Acceptance: the `S` toolchain rebuilds itself and passes version, hello,
+proc-macro, and workspace tests.
+
+### G9: Climb to latest-at-run-time
+
+Build each required official source release in sequence.  Record the source
+and tool closure and require version, hello, and workspace gates at every rung.
+
+Acceptance: the terminal compiler is the latest release selected by the
+verified ladder policy, not a version hardcoded in cmrustc.
+
+### G10: Close source-only provenance
+
+Insert cmrustc and the C orchestrator into the pinned i386-musl live-bootstrap
+chain, resolve the Rust host transition and source-built LLVM/CMake/native
+dependencies, and repeat G3 through G9 without an unaccounted binary input.
+
+Acceptance: a clean seed-to-terminal rebuild has a complete source closure and
+reproduces all artifact and runtime gates above.
+
+## Priority and risk
+
+The first engineering priority is G3, not completion of a broad metadata
+census.  Its fresh-process executable forces metadata, trait selection,
+generic body transport, MIR, objects, archives, and linking to meet at one
+honest boundary.  G1 and G2 can progress alongside it.
+
+The largest risks, in order, are general body/MIR semantics; complete and
+authenticated cross-crate executable artifacts; proc macros/build scripts and
+native dependencies; and target ABI/runtime plus the source-only host
+transition.  Orchestration is broad, but upstream minicargo supplies a useful
+behavioral oracle and a known crate graph.
+
+For every newly reached Rust construct: reduce the first real failure to a
+focused positive and negative fixture, compare with upstream mrustc/rustc,
+implement the bounded semantic slice, run strict and TinyCC gates, and then
+rerun the deepest real artifact consumer.

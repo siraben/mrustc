@@ -1,4 +1,11 @@
-# Rust 1.90 bootstrap roadmap
+# Rust bootstrap roadmap (current measured target: 1.90)
+
+The target is not permanently fixed at Rust 1.90.  The authoritative target
+policy and current cross-pipeline audit are in `BOOTSTRAP_PARITY.md`: cmrustc
+targets the newest release `T` demonstrably bootstrapped by the exact pinned
+upstream mrustc revision, then hands off to official Rust release machinery.
+The recovered proof currently measures `T = 1.90.0` and its first successor as
+`S = 1.91.1`.
 
 This is the development critical path from the audited 2026-08-23 tree to a
 bootstrapped upstream Rust 1.90.0 compiler. `TASKS.md` remains the detailed
@@ -119,26 +126,27 @@ useful context but must be rerun at the current revision before release claims.
 
 ## Critical path
 
-### P1: Consumable `core` declaration artifact (M6-06)
+The later parity audit changes the sequencing below: implement only enough P1
+metadata to close P2's executable cross-crate canary, then broaden the same
+artifact toward `core`.  Do not complete a whole-`core` declaration format
+before any downstream stage consumes it.
 
-1. Make `check-core-metadata` capture the value-aware library artifact and
-   encode the v2 declaration format without omitting public declaration
-   families. The gate must fail on unsupported HIR and require nonempty bytes.
-2. Extend library capture and the versioned wire format in bounded slices:
-   public-value predicates, traits and trait aliases, associated declarations
-   and projections, impl headers, and dependency-backed type edges. Preserve
-   deterministic local handles, atomic decode rollback, and fail-closed
-   version checks.
-3. Decode the complete artifact in a fresh HIR context, re-encode it
-   byte-identically, and compile a dependent fixture that uses a generic type,
-   public value, trait, associated type, and impl from the decoded crate.
-4. Put the checked metadata in the deterministic SysV archive container and
+### P1: Minimum consumable declaration slice (M6-06, bounded by P2)
+
+1. Implement the smallest v3 capability set needed to transport a public
+   generic function, a trait, and one impl without omitting facts that affect
+   that fixture. The gate must fail on unsupported HIR and require nonempty
+   bytes.
+2. Decode it in a fresh HIR context, re-encode it byte-identically, and feed it
+   immediately into P2. Preserve deterministic local handles, atomic decode
+   rollback, and fail-closed version and capability checks.
+3. Put the checked metadata in the deterministic SysV archive container and
    teach the driver to load that container. Call it an `.rlib` only when the
    archive contract and any required object members are explicit.
 
-Acceptance: two isolated producers emit identical nonempty core artifacts; a
-fresh process loads one, resolves the dependent fixture without producer
-state, and rejects corrupt or semantically incomplete artifacts atomically.
+Acceptance: two isolated producers emit identical nonempty fixture artifacts;
+a fresh process loads one without producer state, and rejects corrupt or
+semantically incomplete artifacts atomically. P2, not bytes alone, closes P1.
 
 ### P2: One executable cross-crate core slice (M6-08 before breadth)
 
@@ -151,6 +159,13 @@ coverage that no later stage consumes.
 Acceptance: GCC and TinyCC development builds produce the same observable
 result; unsupported substitutions, missing impl facts, and stale artifacts
 hard-fail without preserving a newly written output.
+
+After this passes, broaden the same capability-manifested artifact along the
+first real-`core` failure: traits and aliases, associated declarations and
+projections, impl completeness, dependency identities, macros, semantic
+attributes, generic bodies/const IR, link inputs, and object members. A real
+`core.rlib` requires a fresh linked consumer; a complete metadata census is
+only an intermediate diagnostic.
 
 ### P3: Build `alloc` against `core` (M6-07)
 

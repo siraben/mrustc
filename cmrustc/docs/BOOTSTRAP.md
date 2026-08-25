@@ -1,6 +1,11 @@
 # Bootstrap proof
 
-## Trust chain
+## Target trust chain
+
+This diagram is the intended end state, not a statement that `hcargo`, a
+compiler-built Rust library, or a cmrustc-built rustc exists today.  The target
+release is selected by the evidence policy in `BOOTSTRAP_PARITY.md`; the
+currently proven upstream mrustc instance is Rust 1.90.0.
 
 The intended provenance is:
 
@@ -13,9 +18,9 @@ stage0 seed
   -> TinyCC 0.9.27 rebuilds itself
   -> TinyCC builds cmrustc and hcargo on i386-musl
   -> later source-built build tools, GCC/C++, CMake, Python, zlib, and LLVM
-  -> cmrustc builds Rust 1.90 std, rustc, and cargo
-  -> upstream rustc self-host stages reach 1.91.1
-  -> successive official source releases reach 1.97.1
+  -> cmrustc builds Rust T std, rustc, and cargo
+  -> upstream rustc self-host stages reach the first official successor S
+  -> successive official source releases reach latest-at-run-time
 ```
 
 Native dependencies of rustc, including LLVM, must be supplied by packages
@@ -217,12 +222,12 @@ run after the stage0 chain builds `cmrustc` on the initial i386-musl host.
 2. **No-core:** `cmrustc` emits C, TCC compiles it, and the program's exit and
    output match the oracle.
 3. **Libraries:** core, compiler_builtins, alloc, proc_macro, std, and test build.
-4. **Rustc root:** the patched Rust 1.90 compiler crate graph links and runs.
+4. **Rustc root:** the patched Rust `T` compiler crate graph links and runs.
 5. **Self-host:** upstream Rust rebuilds itself to the deterministic comparison
    used by `TestRustcBootstrap.sh`.
-6. **Current stable:** the official self-host ladder reaches Rust 1.97.1 and
-   builds a hello program plus Cargo workspace without `cmrustc` remaining in
-   the runtime closure.
+6. **Current stable:** the verified official self-host ladder reaches the
+   latest release selected at run time and builds a hello program plus Cargo
+   workspace without `cmrustc` remaining in the runtime closure.
 
 Passing a process that emits no artifact is not a milestone. Every gate names
 the expected files, verifies they are non-empty, executes them where possible,

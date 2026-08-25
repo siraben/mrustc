@@ -1171,6 +1171,147 @@ static void test_reservation_impl_lowering_and_coherence(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_try_from_conversion_coherence(void)
+{
+    static const char declarations[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}";
+    static const char blankets[] =
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}";
+    static const char concrete[] =
+        "impl const TryFrom<i16> for i8 {}";
+    static const char closed_adt[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "struct NonZero<T>(T);"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl const TryFrom<NonZero<i16>> for NonZero<i8> {}";
+    static const char reverse[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl const TryFrom<i16> for i8 {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}";
+    static const char with_from_provider[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl const From<i16> for i8 {}"
+        "impl const TryFrom<i16> for i8 {}";
+    static const char reservation_is_not_provider[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "#[rustc_reservation_impl = \"not evidence\"]"
+        "impl const From<i16> for i8 {}"
+        "impl const TryFrom<i16> for i8 {}";
+    static const char missing_into_blanket[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl const TryFrom<i16> for i8 {}";
+    static const char required_instead_of_const[] =
+        "#[rustc_diagnostic_item = \"Into\"] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"] trait TryFrom<T> {}"
+        "impl<T, U> Into<U> for T where U: From<T> {}"
+        "impl<T, U> TryFrom<U> for T where U: Into<T> {}"
+        "impl TryFrom<i16> for i8 {}";
+    static const char open_source_parameter[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl<V> const TryFrom<V> for i8 {}";
+    char source[2048];
+    CmHirContext context;
+    CmHirLowerResult result;
+    const char *const rejected[] = {
+        with_from_provider, missing_into_blanket,
+        required_instead_of_const, open_source_parameter
+    };
+    size_t index;
+
+    (void)snprintf(source, sizeof(source), "%s%s%s", declarations,
+        blankets, concrete);
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "TryFrom conversion disjointness: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(reverse, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(closed_adt, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "closed nominal TryFrom disjointness: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(reservation_is_not_provider, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        result = lower_graph_source(rejected[index], &context);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+            || strstr(result.first_error.message,
+                "overlapping blanket impl candidates") == NULL) {
+            fprintf(stderr, "TryFrom conservative rejection %lu: %s: %s\n",
+                (unsigned long)index,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "overlapping blanket impl candidates") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_union_declarations(void)
 {
     static const char source[] =
@@ -12423,6 +12564,7 @@ int main(void)
     test_function_pointer_binder_ast_mutations();
     test_function_pointer_impl_coherence();
     test_reservation_impl_lowering_and_coherence();
+    test_try_from_conversion_coherence();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
     test_default_specialization_lowering();

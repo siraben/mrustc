@@ -61,5 +61,8 @@ cmrustc/
 
 See [TASKS.md](TASKS.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), and
-[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md). Exact source revisions and hashes are
+[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md). The audited compiler-parity gaps,
+dynamic target-version policy, and artifact-gated critical path are in
+[docs/BOOTSTRAP_PARITY.md](docs/BOOTSTRAP_PARITY.md). Exact source revisions
+and hashes are
 in [docs/PINS.md](docs/PINS.md).
