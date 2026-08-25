@@ -1,6 +1,7 @@
 #include "cm/compile.h"
 #include "cm/diag.h"
 #include "cm/driver.h"
+#include "cm/driver/g3_options.h"
 #include "cm/source.h"
 #include "cm/syntax/ast.h"
 #include "cm/syntax/lexer.h"
@@ -24,6 +25,10 @@ static void cm_print_usage(FILE *stream)
           "  --dump-token-tree FILE  emit canonical nested token trees\n"
           "  --dump-ast FILE         parse and emit the canonical AST\n"
           "  --emit-c FILE -o FILE   compile a supported crate to portable C\n"
+          "    --extern-cmrlib NAME=FILE\n"
+          "                          load an exact executable dependency\n"
+          "  --emit-cmrlib FILE --crate-name NAME --cc CC -o FILE\n"
+          "                          emit an exact executable cmrlib\n"
           "  --emit-cmhir FILE --crate-name NAME -o FILE\n"
           "                          emit private declaration metadata\n"
           "    --extern-cmhir NAME FILE\n"
@@ -380,6 +385,100 @@ static int cm_emit_cmhir_cli(int argc, char **argv, int action_index,
     return 0;
 }
 
+static int cm_run_g3_cli(int argc, char **argv)
+{
+    CmG3Options options;
+    CmG3OptionsResult parsed;
+    const CmTargetDesc *target;
+    enum cm_edition edition;
+    CmCompileCmrlibDependency *dependencies;
+    char **extern_names;
+    size_t initialized_names;
+    size_t index;
+    CmCompileResult result;
+    int return_code;
+
+    parsed = cm_g3_options_parse(argc, (const char *const *)argv, &options);
+    if (parsed.status != CM_G3_OPTIONS_OK) {
+        fprintf(stderr, "cmrustc: executable artifact options: %s",
+            cm_g3_options_status_name(parsed.status));
+        if (parsed.option != NULL) fprintf(stderr, ": %s", parsed.option);
+        fputc('\n', stderr);
+        return 2;
+    }
+    target = options.target == NULL ? cm_target_default()
+        : cm_target_find(options.target);
+    if (target == NULL) {
+        fprintf(stderr, "cmrustc: unsupported target: %s\n",
+            options.target == NULL ? "(default)" : options.target);
+        return 2;
+    }
+    edition = CM_EDITION_2021;
+    if (options.edition != NULL
+        && !cm_parse_edition(options.edition, &edition)) {
+        fputs("cmrustc: invalid executable artifact edition\n", stderr);
+        return 2;
+    }
+    if (options.action == CM_G3_ACTION_EMIT_CMRLIB) {
+        result = cm_compile_emit_cmrlib(options.input_path,
+            options.output_path, options.crate_name, options.c_compiler,
+            edition, target);
+        if (result.status != CM_COMPILE_OK) {
+            fprintf(stderr, "cmrustc: %s: %s\n",
+                cm_compile_status_name(result.status), result.message);
+            return 1;
+        }
+        return 0;
+    }
+
+    dependencies = options.extern_count == 0u ? NULL
+        : (CmCompileCmrlibDependency *)calloc(options.extern_count,
+            sizeof(*dependencies));
+    extern_names = options.extern_count == 0u ? NULL
+        : (char **)calloc(options.extern_count, sizeof(*extern_names));
+    if (options.extern_count != 0u
+        && (dependencies == NULL || extern_names == NULL)) {
+        free(extern_names);
+        free(dependencies);
+        fputs("cmrustc: cannot allocate executable dependency options\n",
+            stderr);
+        return 1;
+    }
+    initialized_names = 0u;
+    return_code = 1;
+    for (index = 0u; index < options.extern_count; ++index) {
+        extern_names[index] = (char *)malloc(options.externs[index].name.length
+            + 1u);
+        if (extern_names[index] == NULL) {
+            fputs("cmrustc: cannot allocate executable extern name\n",
+                stderr);
+            goto cleanup_g3;
+        }
+        memcpy(extern_names[index], options.externs[index].name.data,
+            options.externs[index].name.length);
+        extern_names[index][options.externs[index].name.length] = '\0';
+        initialized_names += 1u;
+        dependencies[index].extern_name = extern_names[index];
+        dependencies[index].path = options.externs[index].path;
+    }
+    result = cm_compile_emit_c_with_dependencies(options.input_path,
+        options.output_path, options.crate_name, edition, target,
+        dependencies, options.extern_count);
+    if (result.status != CM_COMPILE_OK) {
+        fprintf(stderr, "cmrustc: %s: %s\n",
+            cm_compile_status_name(result.status), result.message);
+        goto cleanup_g3;
+    }
+    return_code = 0;
+
+cleanup_g3:
+    for (index = 0u; index < initialized_names; ++index)
+        free(extern_names[index]);
+    free(extern_names);
+    free(dependencies);
+    return return_code;
+}
+
 int cm_driver_main(int argc, char **argv)
 {
     const CmTargetDesc *target;
@@ -388,6 +487,12 @@ int cm_driver_main(int argc, char **argv)
 
     target = cm_target_default();
     edition = CM_EDITION_2021;
+    for (index = 1; index < argc; ++index) {
+        if (strcmp(argv[index], "--emit-cmrlib") == 0
+            || strcmp(argv[index], "--extern-cmrlib") == 0) {
+            return cm_run_g3_cli(argc, argv);
+        }
+    }
     index = 1;
     while (index < argc) {
         const char *argument;

@@ -1932,6 +1932,18 @@ same-generation authorization ABA while barrier-derived admission is built.
 | M6-08 | TODO | Run a core/alloc-linked executable | Linked probe has the expected status and output |
 | M6-09 | TODO | Implement C `hcargo` Rust 1.90 DAG build | Complete pinned crate DAG produces checked nonempty artifacts |
 
+The bounded bootstrap-parity G3 gate is complete as of 2026-08-25.  It is
+strictly smaller than M6-06: an admitted `no_core` provider emits an exact
+v3.2 archive containing authenticated trait/primitive-impl facts, one generic
+`RETURN_ARGUMENT` recipe, its native object and link manifest.  A fresh
+consumer process uses only that archive, proves the transported bound,
+instantiates the generic, and links/runs under GCC and TinyCC.  Twin producers,
+strict GCC, a TinyCC-built compiler, Clang ASan/UBSan/LSan, and atomic negative
+artifact cases pass through `tests/codegen/run_g3_cross_crate.sh` and the
+focused executable metadata/capture/materialization/recipe tests.  M6-06 stays
+`ACTIVE` because no `core.rlib` exists and this exact profile rejects general
+library declarations, bodies, MIR, layout, and ABI.
+
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
 coverage are necessary diagnostics but do not substitute for metadata,

@@ -32,13 +32,17 @@ and hash before it is provenance authority.
 
 ## Audited boundary
 
-The current tree has three important, but different, kinds of evidence:
+The current tree has four important, but different, kinds of evidence:
 
 1. Strict GCC, Clang, and TinyCC tests exercise a real bounded `no_core`
    source-to-C-to-executable path.
 2. Private cmhir v1/v2 fixtures prove deterministic, fresh-process transport
    for a limited declaration subset.
-3. A historical target-configured Rust 1.90 `core` run loaded 363 sources and
+3. The bounded G3 profile emits a deterministic object-bearing cmrlib from an
+   admitted provider, then a fresh process loads its trait, positive primitive
+   impl, and generic `RETURN_ARGUMENT` body recipe and emits a linked consumer
+   that executes under both GCC and TinyCC.
+4. A historical target-configured Rust 1.90 `core` run loaded 363 sources and
    451 modules and counted 38,176 HIR items, 22,524 body records, and 159,528
    types.  Body records are not equivalent to typed, executable bodies.
 
@@ -50,11 +54,12 @@ graph and import result and moved the active coherence frontier from
 it calls for a bounded, authenticated proof that the blanket predicate has no
 matching provider, not an unconditional overlap exemption.
 
-There is no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or `cargo`.
-The ordinary rustc-shaped driver path still reports that its compiler pipeline
-is unimplemented.  Metadata v3 is a design specification, not implemented
-wire-format support.  The archive helper is not yet a general object-bearing
-Rust rlib, and there is no C `hcargo`.
+There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
+`cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
+`--extern-cmrlib` path is deliberately the exact v3.2 executable-slice
+profile, not a general Rust rlib or rustc-compatible driver.  It transports
+one structural marker-trait/primitive-impl/generic-identity recipe family and
+one native object; every unsupported live fact fails closed.
 
 ## Gap chart
 
@@ -66,8 +71,8 @@ Rust rlib, and there is no C `hcargo`.
 | MIR | Assign, call, goto, return, and boolean switch over a small type set | General places, rvalues, control flow, drops, cleanup/unwind, casts, aggregates, statics, consts, intrinsics, and validation |
 | Reachability and monomorphization | Local roots and a bounded substitution canary | Arbitrary type/lifetime/const substitutions across crates, trait/default methods, drop glue, vtables, statics, and stable symbols |
 | Layout and ABI | Integers, references, and simple local structs | Enums/niches, unions, tuples, arrays, slices/DSTs, fat pointers, `repr`, SIMD, function ABIs, panic/unwind, atomics, and TLS |
-| C and native output | C text for an exact `no_core` envelope | Compile objects, archive libraries, extract dependencies, and link all required crate types and native inputs |
-| Cross-crate artifact | Limited private declaration metadata | Authenticated declarations, impl facts, macros, generic body/const recipes, link inputs, object members, and archive symbol index |
+| C and native output | C text plus one isolated, fixed-name native object for the exact G3 profile | General object/library production, dependency extraction, and linking for all required crate types and native inputs |
+| Cross-crate artifact | Exact authenticated v3.2 marker-trait, primitive-impl, generic identity-recipe, link-manifest, and object slice | Complete declarations, impl facts, macros, generic body/const recipes, link inputs, objects, and archive symbol index |
 | Orchestration | No C implementation | rustc-compatible invocation plus a C manifest DAG with build scripts, overrides, proc macros, host/target split, caching, and native dependencies |
 
 The retained C++ implementation is an oracle for flags, crate ordering,
@@ -111,7 +116,7 @@ mode, and deferred build-command output.  It must also publish target cfgs.
 Expected outputs follow upstream minicargo naming: `libNAME-TAG.rlib`, the
 requested binary, or an executable `libNAME-TAG-plugin` proc macro.
 
-### G3: Produce the smallest executable cross-crate artifact
+### G3: Produce the smallest executable cross-crate artifact (complete)
 
 Implement only the v3 capability families, body/const recipe, object/archive,
 dependency loading, and linking needed for one public generic function and one
@@ -121,6 +126,19 @@ metadata work.
 Acceptance: a fresh process consumes the artifact, GCC and TinyCC link and run
 the same result, two producers agree, and corrupt, incomplete, mismatched, or
 stale inputs publish no output.
+
+The 2026-08-25 gate meets this bounded acceptance with
+`tests/codegen/run_g3_cross_crate.sh`: two isolated physical roots produce
+byte-identical archives for each selected C compiler; the archive contains
+authenticated `cmrustc.rmeta` and `cmrustc.object` members; the provider source
+is removed before the consumer process starts; and the consumer resolves and
+instantiates the transported generic only after its transported marker impl is
+selected.  GCC and TinyCC link and run identical identity/object canaries.
+Corrupt, truncated, missing, wrong-extern, wrong-target, wrong-source-digest,
+and stale-identity cases are covered by the process gate plus focused exact
+codec expectation tests, with existing outputs preserved.  This is G3 only:
+the consumer C emitter handles the authenticated `RETURN_ARGUMENT` shape and
+does not imply general cross-crate MIR or `core.rlib` support.
 
 ### G4: Produce a consumable `core` rlib
 
@@ -205,10 +223,9 @@ reproduces all artifact and runtime gates above.
 
 ## Priority and risk
 
-The first engineering priority is G3, not completion of a broad metadata
-census.  Its fresh-process executable forces metadata, trait selection,
-generic body transport, MIR, objects, archives, and linking to meet at one
-honest boundary.  G1 and G2 can progress alongside it.
+The first engineering priority is now G4: drive this consumed executable
+artifact through the first real-`core` failure instead of widening a
+declaration census.  G1 and G2 remain parallel obligations.
 
 The largest risks, in order, are general body/MIR semantics; complete and
 authenticated cross-crate executable artifacts; proc macros/build scripts and

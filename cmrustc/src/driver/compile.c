@@ -5,10 +5,12 @@
 #include "cm/alloc.h"
 #include "cm/buf.h"
 #include "cm/codegen/c.h"
+#include "cm/codegen/executable_recipe.h"
 #include "cm/driver/cfg.h"
 #include "cm/hir/admission.h"
 #include "cm/hir/artifact_config.h"
 #include "cm/hir/body.h"
+#include "cm/hir/executable_capture.h"
 #include "cm/hir/executable_materialize.h"
 #include "cm/hir/executable_rlib.h"
 #include "cm/hir/lower.h"
@@ -1908,6 +1910,19 @@ CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
             "whole-crate semantic admission was not retained");
         goto cleanup;
     }
+    if (dependency_count != 0u) {
+        CmExecutableRecipeEmitStatus recipe_status;
+
+        recipe_status = cm_c_emit_executable_recipe_program(&hir,
+            &all_local_admission, hir_result.crate_id, target, &c_output);
+        if (recipe_status != CM_EXECUTABLE_RECIPE_EMIT_OK
+            || c_output.len == 0u) {
+            result = cm_compile_result(CM_COMPILE_CODEGEN,
+                cm_executable_recipe_emit_status_name(recipe_status));
+            goto cleanup;
+        }
+        goto publish_c_output;
+    }
     /* Every cfg-active supported local definition is typed before roots. */
     entry_id = cm_compile_find_entry(&hir, hir_result.root_module);
     use_hosted_entry = hir.items.len == 1u
@@ -2041,6 +2056,7 @@ CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
         goto cleanup;
     }
 
+publish_c_output:
     cm_str_buf_append(&temporary_path, output_path);
     cm_str_buf_append(&temporary_path, ".tmp.XXXXXX");
     temporary_fd = cm_compile_open_temporary(temporary_path.data);
@@ -2138,6 +2154,364 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
 {
     return cm_compile_emit_c_with_dependencies(input_path, output_path,
         "cmrustc_input", edition, target, NULL, 0u);
+}
+
+CmCompileResult cm_compile_emit_cmrlib(const char *input_path,
+    const char *output_path, const char *crate_name,
+    const char *c_compiler, enum cm_edition edition,
+    const CmTargetDesc *target)
+{
+    static const char native_logical_path[] = "native/cmrustc.object.c";
+    static const char rust_logical_path[] = "src/lib.rs";
+    static const unsigned char member_name[] = "cmrustc.object";
+    static const char hex[] = "0123456789abcdef";
+    CmCompileResult result;
+    char scratch[] = "/tmp/cmrustc-g3.XXXXXX";
+    char native_path[128];
+    char object_path[128];
+    char disambiguator[69];
+    char *compiler_arguments[10];
+    CmProcessStatus process_status;
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmSourceId native_source;
+    CmSourceId object_source;
+    const CmSourceFile *root_file;
+    const CmSourceFile *native_file;
+    const CmSourceFile *object_file;
+    CmCfgSet cfg;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirContext hir;
+    CmHirModuleMap module_map;
+    CmHirLowerOptions hir_options;
+    CmHirLowerResult hir_result;
+    CmSemanticBarrier semantic_barrier;
+    CmSemanticAdmission admission;
+    CmSemanticAdmission intermediate_admission;
+    CmHirArtifactConfig artifact_config;
+    CmHirArtifactSourceEntry source_entries[2];
+    CmHirArtifactDigest source_digest;
+    CmHirExecutableCaptureInput capture_input;
+    CmHirExecutableCaptureResult capture_result;
+    CmHirExecutableMetadata metadata;
+    CmByteBuf archive;
+    CmStrBuf temporary_path;
+    struct stat input_stat;
+    struct stat output_stat;
+    FILE *output;
+    int temporary_fd;
+    int temporary_exists;
+    int scratch_exists;
+    int native_exists;
+    int object_exists;
+    int write_failed;
+    int native_path_length;
+    int object_path_length;
+    size_t written;
+    size_t index;
+
+    result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+        "invalid executable cmrlib request");
+    if (input_path == NULL || input_path[0] == '\0'
+        || output_path == NULL || output_path[0] == '\0'
+        || !cm_compile_identifier_valid(crate_name)
+        || c_compiler == NULL || c_compiler[0] == '\0' || target == NULL
+        || strcmp(input_path, output_path) == 0
+        || stat(input_path, &input_stat) != 0) return result;
+    if (stat(output_path, &output_stat) == 0
+        && cm_compile_same_file(&input_stat, &output_stat)) return result;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_import_resolver_init(&imports);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&module_map);
+    memset(&semantic_barrier, 0, sizeof(semantic_barrier));
+    memset(&admission, 0, sizeof(admission));
+    memset(&intermediate_admission, 0, sizeof(intermediate_admission));
+    cm_hir_artifact_config_init(&artifact_config);
+    cm_hir_executable_metadata_init(&metadata);
+    cm_byte_buf_init(&archive);
+    cm_str_buf_init(&temporary_path);
+    output = NULL;
+    temporary_fd = -1;
+    temporary_exists = 0;
+    scratch_exists = 0;
+    native_exists = 0;
+    object_exists = 0;
+
+    if (mkdtemp(scratch) == NULL) {
+        result = cm_compile_result(CM_COMPILE_OUTPUT_IO,
+            "cannot create private native build directory");
+        goto cleanup_cmrlib;
+    }
+    scratch_exists = 1;
+    native_path_length = snprintf(native_path, sizeof(native_path), "%s/%s",
+        scratch, "cmrustc.object.c");
+    object_path_length = snprintf(object_path, sizeof(object_path), "%s/%s",
+        scratch, "cmrustc.object");
+    if (native_path_length < 0
+        || (size_t)native_path_length >= sizeof(native_path)
+        || object_path_length < 0
+        || (size_t)object_path_length >= sizeof(object_path)) {
+        result = cm_compile_result(CM_COMPILE_OUTPUT_IO,
+            "private native path is too long");
+        goto cleanup_cmrlib;
+    }
+    result = cm_compile_emit_c_with_dependencies(input_path, native_path,
+        crate_name, edition, target, NULL, 0u);
+    if (result.status != CM_COMPILE_OK) goto cleanup_cmrlib;
+    native_exists = 1;
+
+    compiler_arguments[0] = (char *)c_compiler;
+    compiler_arguments[1] = (char *)"-std=c99";
+    compiler_arguments[2] = (char *)"-Wall";
+    compiler_arguments[3] = (char *)"-Werror";
+    compiler_arguments[4] = (char *)"-c";
+    compiler_arguments[5] = (char *)"cmrustc.object.c";
+    compiler_arguments[6] = (char *)"-o";
+    compiler_arguments[7] = (char *)"cmrustc.object";
+    compiler_arguments[8] = NULL;
+    compiler_arguments[9] = NULL;
+    /* A failed compiler may still leave a partial file; remove it on exit. */
+    object_exists = 1;
+    if (!cm_process_run_in_directory(scratch, compiler_arguments,
+            &process_status)
+        || !process_status.launched || !process_status.exited
+        || process_status.exit_code != 0) {
+        result = cm_compile_result(CM_COMPILE_CODEGEN,
+            "C compiler rejected the executable object slice");
+        goto cleanup_cmrlib;
+    }
+    if (cm_source_load_file_bounded(&sources, input_path,
+            CM_HIR_ARTIFACT_MAX_SOURCE_FILE_SIZE, &root_source)
+            != CM_SOURCE_OK
+        || cm_source_load_file_bounded(&sources, native_path,
+            CM_HIR_ARTIFACT_MAX_SOURCE_FILE_SIZE, &native_source)
+            != CM_SOURCE_OK
+        || cm_source_load_file_bounded(&sources, object_path,
+            CM_HIR_ARTIFACT_MAX_SOURCE_FILE_SIZE, &object_source)
+            != CM_SOURCE_OK) {
+        result = cm_compile_result(CM_COMPILE_SOURCE_IO,
+            "cannot load complete executable artifact inputs");
+        goto cleanup_cmrlib;
+    }
+    root_file = cm_source_get(&sources, root_source);
+    native_file = cm_source_get(&sources, native_source);
+    object_file = cm_source_get(&sources, object_source);
+    if (root_file == NULL || native_file == NULL || object_file == NULL
+        || object_file->length == 0u) {
+        result = cm_compile_result(CM_COMPILE_SOURCE_IO,
+            "executable artifact input is empty");
+        goto cleanup_cmrlib;
+    }
+    if (!cm_target_cfg_set(&cfg, target)
+        || cm_hir_artifact_config_build(target, edition,
+            CM_HIR_ARTIFACT_PANIC_ABORT, &cfg, &artifact_config)
+            != CM_HIR_ARTIFACT_CONFIG_OK) {
+        result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+            "target cannot produce an executable artifact configuration");
+        goto cleanup_cmrlib;
+    }
+
+    cm_module_graph_options_init(&graph_options);
+    graph_options.edition = edition;
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    if (graph_result.root == CM_MODULE_NONE
+        || graph_result.revision == CM_MODULE_GRAPH_REVISION_NONE
+        || graph_result.error_count != 0u) {
+        result = cm_compile_result(CM_COMPILE_MODULE_GRAPH,
+            "provider module graph construction failed");
+        goto cleanup_cmrlib;
+    }
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    if (import_result.revision != graph_result.revision
+        || import_result.error_count != 0u) {
+        result = cm_compile_result(CM_COMPILE_IMPORTS,
+            "provider imports did not resolve");
+        goto cleanup_cmrlib;
+    }
+    cm_hir_lower_options_init(&hir_options);
+    hir_options.crate_name = crate_name;
+    hir_options.source = root_source;
+    if (!cm_compile_hir_edition(edition, &hir_options.edition)) {
+        result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+            "unsupported Rust edition");
+        goto cleanup_cmrlib;
+    }
+    hir_result = cm_hir_lower_module_graph(&hir, &graph,
+        graph_result.revision, &imports, &module_map, &hir_options);
+    if (hir_result.error_count != 0u
+        || hir_result.crate_id == CM_HIR_CRATE_NONE
+        || hir_result.root_module == CM_HIR_MODULE_NONE) {
+        result = cm_compile_result(CM_COMPILE_HIR,
+            hir_result.error_count == 0u ? "provider HIR has no crate"
+                : hir_result.first_error.message);
+        goto cleanup_cmrlib;
+    }
+    {
+        CmSemanticBarrierResult barrier_result;
+        CmSemanticAdmissionResult admission_result;
+
+        barrier_result = cm_semantic_barrier_init_structural(
+            &semantic_barrier, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup_cmrlib;
+        }
+        barrier_result = cm_semantic_barrier_advance_typed(
+            &semantic_barrier, &graph, graph_result.revision, &imports,
+            &module_map);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup_cmrlib;
+        }
+        admission_result = cm_semantic_admit_local_crate(
+            &intermediate_admission, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup_cmrlib;
+        }
+        barrier_result = cm_semantic_barrier_advance_marked_admitted(
+            &semantic_barrier, &intermediate_admission);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup_cmrlib;
+        }
+        cm_semantic_admission_destroy(&intermediate_admission);
+        admission_result = cm_semantic_admit_local_crate(
+            &intermediate_admission, &hir, hir_result.crate_id, &graph,
+            graph_result.revision, &imports, &module_map);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup_cmrlib;
+        }
+        barrier_result = cm_semantic_barrier_advance_regions_admitted(
+            &semantic_barrier, &intermediate_admission);
+        if (barrier_result.status != CM_SEMANTIC_BARRIER_OK) {
+            result = cm_compile_result(CM_COMPILE_SEMANTIC,
+                cm_semantic_barrier_status_name(barrier_result.status));
+            goto cleanup_cmrlib;
+        }
+        cm_semantic_admission_destroy(&intermediate_admission);
+        admission_result = cm_semantic_admit_regions_local_crate(&admission,
+            &semantic_barrier);
+        if (admission_result.status != CM_SEMANTIC_ADMISSION_OK) {
+            result = cm_compile_local_admission_failure(&admission_result);
+            goto cleanup_cmrlib;
+        }
+    }
+
+    source_entries[0].logical_path.data = native_logical_path;
+    source_entries[0].logical_path.length = sizeof(native_logical_path) - 1u;
+    source_entries[0].contents.data = native_file->bytes;
+    source_entries[0].contents.length = native_file->length;
+    source_entries[1].logical_path.data = rust_logical_path;
+    source_entries[1].logical_path.length = sizeof(rust_logical_path) - 1u;
+    source_entries[1].contents.data = root_file->bytes;
+    source_entries[1].contents.length = root_file->length;
+    if (cm_hir_artifact_source_closure_digest(source_entries, 2u,
+            &source_digest) != CM_HIR_ARTIFACT_IDENTITY_OK) {
+        result = cm_compile_result(CM_COMPILE_METADATA,
+            "provider source closure identity failed");
+        goto cleanup_cmrlib;
+    }
+    memcpy(disambiguator, "src-", 4u);
+    for (index = 0u; index < CM_HIR_ARTIFACT_IDENTITY_SIZE; ++index) {
+        disambiguator[4u + index * 2u] = hex[source_digest.bytes[index] >> 4u];
+        disambiguator[5u + index * 2u] = hex[source_digest.bytes[index] & 15u];
+    }
+    disambiguator[68] = '\0';
+    memset(&capture_input, 0, sizeof(capture_input));
+    capture_input.hir = &hir;
+    capture_input.crate_id = hir_result.crate_id;
+    capture_input.regions_admission = &admission;
+    capture_input.configuration = &artifact_config;
+    capture_input.crate_disambiguator.data = disambiguator;
+    capture_input.crate_disambiguator.length = 68u;
+    capture_input.source_entries = source_entries;
+    capture_input.source_entry_count = 2u;
+    capture_input.archive_member_name.data = member_name;
+    capture_input.archive_member_name.length = sizeof(member_name) - 1u;
+    capture_input.object_bytes.data = object_file->bytes;
+    capture_input.object_bytes.length = object_file->length;
+    capture_result = cm_hir_executable_metadata_capture(&capture_input,
+        &metadata);
+    if (capture_result.status != CM_HIR_EXEC_CAPTURE_OK) {
+        result = cm_compile_result(CM_COMPILE_METADATA,
+            cm_hir_executable_capture_status_name(capture_result.status));
+        goto cleanup_cmrlib;
+    }
+    if (cm_hir_executable_rlib_encode(&metadata, &archive)
+            != CM_HIR_EXECUTABLE_RLIB_OK || archive.len == 0u) {
+        result = cm_compile_result(CM_COMPILE_METADATA,
+            "executable cmrlib packaging failed");
+        goto cleanup_cmrlib;
+    }
+
+    cm_str_buf_append(&temporary_path, output_path);
+    cm_str_buf_append(&temporary_path, ".tmp.XXXXXX");
+    temporary_fd = cm_compile_open_temporary(temporary_path.data);
+    if (temporary_fd < 0) {
+        result = cm_compile_result(CM_COMPILE_OUTPUT_IO,
+            "cannot create temporary cmrlib output");
+        goto cleanup_cmrlib;
+    }
+    temporary_exists = 1;
+    output = fdopen(temporary_fd, "wb");
+    if (output == NULL) {
+        (void)close(temporary_fd);
+        temporary_fd = -1;
+        result = cm_compile_result(CM_COMPILE_OUTPUT_IO,
+            "cannot open temporary cmrlib output stream");
+        goto cleanup_cmrlib;
+    }
+    temporary_fd = -1;
+    written = fwrite(archive.data, 1u, archive.len, output);
+    write_failed = written != archive.len;
+    if (fflush(output) != 0) write_failed = 1;
+    if (fclose(output) != 0) write_failed = 1;
+    output = NULL;
+    if (write_failed || rename(temporary_path.data, output_path) != 0) {
+        result = cm_compile_result(CM_COMPILE_OUTPUT_IO,
+            "cannot publish complete cmrlib output");
+        goto cleanup_cmrlib;
+    }
+    temporary_exists = 0;
+    result = cm_compile_result(CM_COMPILE_OK, "ok");
+
+cleanup_cmrlib:
+    if (output != NULL) (void)fclose(output);
+    if (temporary_fd >= 0) (void)close(temporary_fd);
+    if (temporary_exists) (void)remove(temporary_path.data);
+    cm_str_buf_destroy(&temporary_path);
+    cm_byte_buf_destroy(&archive);
+    cm_hir_executable_metadata_destroy(&metadata);
+    cm_hir_artifact_config_destroy(&artifact_config);
+    cm_semantic_admission_destroy(&admission);
+    cm_semantic_admission_destroy(&intermediate_admission);
+    cm_semantic_barrier_destroy(&semantic_barrier);
+    cm_hir_module_map_destroy(&module_map);
+    cm_hir_context_destroy(&hir);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+    if (object_exists) (void)remove(object_path);
+    if (native_exists) (void)remove(native_path);
+    if (scratch_exists) (void)rmdir(scratch);
+    return result;
 }
 
 CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,

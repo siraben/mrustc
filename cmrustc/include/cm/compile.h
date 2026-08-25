@@ -66,6 +66,17 @@ CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
     size_t dependency_count);
 
 /*
+ * Emit the exact bounded executable cmrlib profile. The supplied C compiler
+ * is invoked without a shell in a private directory to compile the admitted
+ * native C slice. Metadata and object bytes are packaged and published only
+ * after the complete source, semantic, identity, and archive checks pass.
+ */
+CmCompileResult cm_compile_emit_cmrlib(const char *input_path,
+    const char *output_path, const char *crate_name,
+    const char *c_compiler, enum cm_edition edition,
+    const CmTargetDesc *target);
+
+/*
  * Lower one declaration crate through the ordinary source/module/import/HIR
  * pipeline and publish deterministic cmhir-meta-v1 bytes atomically.  This
  * is an explicitly cmrustc-private declaration format, not Rust `.rmeta` or

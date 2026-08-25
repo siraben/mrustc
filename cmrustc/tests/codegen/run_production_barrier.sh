@@ -9,14 +9,15 @@ esac
 
 test -f "$compile_source"
 function_body=$(sed -n \
-    '/^CmCompileResult cm_compile_emit_c(/,/^CmCompileResult cm_compile_emit_cmhir_kind(/p' \
+    '/^CmCompileResult cm_compile_emit_c_with_dependencies(/,/^CmCompileResult cm_compile_emit_c(/p' \
     "$compile_source")
 test -n "$function_body"
 
 for required in \
     cm_compile_admit_instance_closure \
     cm_compile_publish_reachable_mir \
-    cm_c_emit_admitted_program
+    cm_c_emit_admitted_program \
+    cm_c_emit_executable_recipe_program
 do
     printf '%s\n' "$function_body" | grep -q "$required"
 done

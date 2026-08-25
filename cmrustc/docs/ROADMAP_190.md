@@ -16,9 +16,9 @@ ledger; this document orders its tasks by the deepest consumable artifact.
 - The audit began at `a6e7c309`. Commits through `1630867d` added declaration
   const terms, generic public functions, lossless public-function predicate
   capture, and canonical callable lifetime elision.
-- The C implementation has 129,227 production C/header lines and 101,804
-  C/header/shell test and tool lines. It is a substantial fork, but the normal
-  rustc-shaped CLI still reports that the compiler pipeline is unimplemented.
+- The C implementation is a substantial fork.  Its general rustc-shaped CLI
+  is still incomplete, but `--emit-cmrlib` and dependency-aware `--emit-c`
+  now expose the exact bounded v3.2 executable profile.
 - `make check-core-hir` is the strongest completed Rust-library gate. At
   `6b63926f`, target-configured Rust 1.90 `core` loaded 363 sources and 451
   modules with zero graph, import, or HIR errors, producing 38,176 items,
@@ -37,8 +37,10 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   direct predicate target without transporting its expansion. Strict decode
   tries exact v2.6, v2.5, v2.4, then v2.3 only on an unsupported-version
   result; legacy v1.0/v1.1 bytes remain unchanged.
-- No current `.rlib`, compiler-built `core`, `alloc`, `std`, `rustc`, or
-  `cargo` artifact exists. M6-06 is therefore the active vertical milestone.
+- A deterministic object-bearing cmrlib now exists for the bounded G3
+  provider/consumer profile.  No compiler-built `core.rlib`, `alloc`, `std`,
+  `rustc`, or `cargo` artifact exists, so M6-06 remains the active vertical
+  milestone.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
   census after v2.3. Its first library-capture rejection was
   `core/src/contracts.rs:19`'s `build_check_ensures<Ret, C>`: its `C: Fn(&Ret)
@@ -102,8 +104,9 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   declaration v2 cannot encode core's complete trait, trait-alias, associated
   item, and 9,092-impl universe, nor publish trait namespace bindings. Those
   families must not be skipped or materialized as fake empty traits.
-- The downstream-safe successor is therefore a new capability-manifested v3
-  format. Its first declaration-consumable checkpoint must transport real
+- The downstream-safe successor is the capability-manifested v3 family.  Its
+  exact v3.2 executable-slice profile is implemented and consumed at runtime;
+  the broader declaration-consumable checkpoint must still transport real
   trait/alias/associated declarations, projection and function-pointer types,
   impl headers, and complete namespace identities while keeping solver absence
   open. A later authenticated completeness layer may seal the cfg-active impl
@@ -131,7 +134,7 @@ metadata to close P2's executable cross-crate canary, then broaden the same
 artifact toward `core`.  Do not complete a whole-`core` declaration format
 before any downstream stage consumes it.
 
-### P1: Minimum consumable declaration slice (M6-06, bounded by P2)
+### P1: Minimum consumable declaration slice (bounded G3 profile complete)
 
 1. Implement the smallest v3 capability set needed to transport a public
    generic function, a trait, and one impl without omitting facts that affect
@@ -148,7 +151,12 @@ Acceptance: two isolated producers emit identical nonempty fixture artifacts;
 a fresh process loads one without producer state, and rejects corrupt or
 semantically incomplete artifacts atomically. P2, not bytes alone, closes P1.
 
-### P2: One executable cross-crate core slice (M6-08 before breadth)
+The 2026-08-25 exact v3.2 gate closes this bounded P1 profile with a canonical
+configuration/source identity, trait and positive primitive impl records,
+one generic `RETURN_ARGUMENT` body recipe, a link manifest, and a checked
+native object member.  This does not close M6-06 for real `core`.
+
+### P2: One executable cross-crate canary (bounded G3 profile complete)
 
 Carry one generic public function plus one trait implementation across the
 artifact boundary through body typing, trait selection, MIR, instance
@@ -159,6 +167,11 @@ coverage that no later stage consumes.
 Acceptance: GCC and TinyCC development builds produce the same observable
 result; unsupported substitutions, missing impl facts, and stale artifacts
 hard-fail without preserving a newly written output.
+
+`tests/codegen/run_g3_cross_crate.sh` now passes this acceptance from both
+strict-GCC-built and TinyCC-built cmrustc binaries, with Clang sanitizer
+coverage.  The canary is intentionally `no_core`; M6-08 remains open until a
+real core/alloc-linked executable runs.
 
 After this passes, broaden the same capability-manifested artifact along the
 first real-`core` failure: traits and aliases, associated declarations and
