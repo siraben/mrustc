@@ -38,6 +38,198 @@ static void set_size_field(CmByteBuf *archive, const char field[10])
     memcpy(archive->data + TEST_SIZE_OFFSET, field, 10);
 }
 
+static void expect_archive_decode_failure(
+    const CmByteBuf *archive,
+    CmRlibStatus expected_status
+)
+{
+    CmRlibArchiveView view;
+
+    memset(&view, 0x5a, sizeof(view));
+    assert(cm_rlib_decode_members(
+        archive->data, archive->len, &view) == expected_status);
+    assert(view.member_count == 0);
+    assert(view.members[0].data == NULL);
+    assert(view.members[0].length == 0);
+    assert(view.members[0].name[0] == '\0');
+}
+
+static void test_multi_member_archive(void)
+{
+    static const unsigned char link_data[] = { 1u, 2u, 3u };
+    static const unsigned char object_data[] = { 0x7fu, 'E', 'L', 'F' };
+    static const unsigned char metadata_data[] = { 'C', 'M', 'H', '3', 0u };
+    CmRlibMember members[3];
+    CmRlibArchiveView view;
+    CmRlibMemberView member;
+    CmByteBuf first;
+    CmByteBuf second;
+
+    members[0].name = "cmrustc.link";
+    members[0].data = link_data;
+    members[0].length = sizeof(link_data);
+    members[1].name = "cmrustc.object";
+    members[1].data = object_data;
+    members[1].length = sizeof(object_data);
+    members[2].name = "cmrustc.rmeta";
+    members[2].data = metadata_data;
+    members[2].length = sizeof(metadata_data);
+
+    cm_byte_buf_init(&first);
+    cm_byte_buf_init(&second);
+    assert(cm_rlib_encode_members(&first, members, 3u) == CM_RLIB_OK);
+    assert(cm_rlib_encode_members(&second, members, 3u) == CM_RLIB_OK);
+    assert(first.len == second.len);
+    assert(memcmp(first.data, second.data, first.len) == 0);
+
+    assert(cm_rlib_decode_members(first.data, first.len, &view)
+        == CM_RLIB_OK);
+    assert(view.member_count == 3u);
+    assert(strcmp(view.members[0].name, "cmrustc.link") == 0);
+    assert(view.members[0].length == sizeof(link_data));
+    assert(memcmp(view.members[0].data, link_data, sizeof(link_data)) == 0);
+    assert(strcmp(view.members[1].name, "cmrustc.object") == 0);
+    assert(view.members[1].length == sizeof(object_data));
+    assert(memcmp(view.members[1].data, object_data,
+        sizeof(object_data)) == 0);
+    assert(strcmp(view.members[2].name, "cmrustc.rmeta") == 0);
+    assert(view.members[2].length == sizeof(metadata_data));
+    assert(memcmp(view.members[2].data, metadata_data,
+        sizeof(metadata_data)) == 0);
+
+    assert(cm_rlib_find_member(&view, "cmrustc.object", &member)
+        == CM_RLIB_OK);
+    assert(member.data == view.members[1].data);
+    assert(member.length == sizeof(object_data));
+    member.data = (const unsigned char *)"sentinel";
+    member.length = 8u;
+    assert(cm_rlib_find_member(&view, "missing", &member)
+        == CM_RLIB_WRONG_MEMBER);
+    assert(member.data == NULL);
+    assert(member.length == 0);
+    assert(member.name[0] == '\0');
+
+    cm_byte_buf_destroy(&second);
+    cm_byte_buf_destroy(&first);
+}
+
+static void test_multi_member_encode_rejections(void)
+{
+    CmRlibMember members[CM_RLIB_MAX_MEMBER_COUNT + 1u];
+    CmByteBuf output;
+    unsigned char *saved_data;
+    size_t saved_length;
+    size_t index;
+
+    cm_byte_buf_init(&output);
+    cm_byte_buf_append(&output, "unchanged", 9u);
+    saved_data = output.data;
+    saved_length = output.len;
+
+    members[0].name = "b";
+    members[0].data = "b";
+    members[0].length = 1u;
+    members[1].name = "a";
+    members[1].data = "a";
+    members[1].length = 1u;
+    assert(cm_rlib_encode_members(&output, members, 2u)
+        == CM_RLIB_NONCANONICAL_ORDER);
+    assert(output.data == saved_data && output.len == saved_length);
+
+    members[0].name = "a";
+    members[1].name = "a";
+    assert(cm_rlib_encode_members(&output, members, 2u)
+        == CM_RLIB_NONCANONICAL_ORDER);
+    assert(output.data == saved_data && output.len == saved_length);
+
+    members[0].name = "";
+    assert(cm_rlib_encode_members(&output, members, 1u)
+        == CM_RLIB_INVALID_MEMBER_NAME);
+    members[0].name = "has/slash";
+    assert(cm_rlib_encode_members(&output, members, 1u)
+        == CM_RLIB_INVALID_MEMBER_NAME);
+    members[0].name = "sixteen-chars-xxx";
+    assert(cm_rlib_encode_members(&output, members, 1u)
+        == CM_RLIB_INVALID_MEMBER_NAME);
+    members[0].name = "a";
+    members[0].data = NULL;
+    members[0].length = 1u;
+    assert(cm_rlib_encode_members(&output, members, 1u)
+        == CM_RLIB_INVALID_ARGUMENT);
+    members[0].data = "x";
+    members[0].length = CM_RLIB_MAX_MEMBER_SIZE + 1u;
+    assert(cm_rlib_encode_members(&output, members, 1u)
+        == CM_RLIB_LIMIT_EXCEEDED);
+
+    for (index = 0; index < CM_RLIB_MAX_MEMBER_COUNT + 1u; index += 1u) {
+        members[index].name = "a";
+        members[index].data = NULL;
+        members[index].length = 0;
+    }
+    assert(cm_rlib_encode_members(&output, members,
+        CM_RLIB_MAX_MEMBER_COUNT + 1u) == CM_RLIB_TOO_MANY_MEMBERS);
+    assert(cm_rlib_encode_members(NULL, members, 1u)
+        == CM_RLIB_INVALID_ARGUMENT);
+    assert(cm_rlib_encode_members(&output, NULL, 1u)
+        == CM_RLIB_INVALID_ARGUMENT);
+    assert(output.data == saved_data && output.len == saved_length);
+    assert(memcmp(output.data, "unchanged", 9u) == 0);
+
+    cm_byte_buf_destroy(&output);
+}
+
+static void test_multi_member_decode_rejections(void)
+{
+    CmRlibMember members[2];
+    CmRlibArchiveView view;
+    CmByteBuf original;
+    CmByteBuf changed;
+    size_t second_header;
+
+    members[0].name = "a";
+    members[0].data = "x";
+    members[0].length = 1u;
+    members[1].name = "b";
+    members[1].data = "yz";
+    members[1].length = 2u;
+    cm_byte_buf_init(&original);
+    cm_byte_buf_init(&changed);
+    assert(cm_rlib_encode_members(&original, members, 2u) == CM_RLIB_OK);
+    second_header = 8u + 60u + 2u;
+
+    copy_bytes(&changed, &original);
+    memcpy(changed.data + second_header,
+        changed.data + TEST_NAME_OFFSET, 16u);
+    expect_archive_decode_failure(&changed, CM_RLIB_NONCANONICAL_ORDER);
+
+    copy_bytes(&changed, &original);
+    changed.data[TEST_NAME_OFFSET] = (unsigned char)'b';
+    changed.data[second_header] = (unsigned char)'a';
+    expect_archive_decode_failure(&changed, CM_RLIB_NONCANONICAL_ORDER);
+
+    copy_bytes(&changed, &original);
+    changed.data[TEST_NAME_OFFSET] = (unsigned char)'/';
+    expect_archive_decode_failure(&changed, CM_RLIB_INVALID_MEMBER_NAME);
+
+    copy_bytes(&changed, &original);
+    changed.data[8u + 60u + 1u] = (unsigned char)' ';
+    expect_archive_decode_failure(&changed, CM_RLIB_INVALID_PADDING);
+
+    copy_bytes(&changed, &original);
+    changed.len = second_header + 20u;
+    expect_archive_decode_failure(&changed, CM_RLIB_TRAILING_BYTES);
+
+    memset(&view, 0x5a, sizeof(view));
+    assert(cm_rlib_decode_members(NULL, 0u, &view)
+        == CM_RLIB_INVALID_ARGUMENT);
+    assert(view.member_count == 0u);
+    assert(cm_rlib_decode_members(original.data, original.len, NULL)
+        == CM_RLIB_INVALID_ARGUMENT);
+
+    cm_byte_buf_destroy(&changed);
+    cm_byte_buf_destroy(&original);
+}
+
 static void test_exact_encoding_and_decode(void)
 {
     static const unsigned char expected_even[] =
@@ -323,12 +515,21 @@ static void test_status_names(void)
         "invalid padding") == 0);
     assert(strcmp(cm_rlib_status_name(CM_RLIB_TRAILING_BYTES),
         "trailing bytes") == 0);
+    assert(strcmp(cm_rlib_status_name(CM_RLIB_INVALID_MEMBER_NAME),
+        "invalid member name") == 0);
+    assert(strcmp(cm_rlib_status_name(CM_RLIB_TOO_MANY_MEMBERS),
+        "too many members") == 0);
+    assert(strcmp(cm_rlib_status_name(CM_RLIB_NONCANONICAL_ORDER),
+        "noncanonical member order") == 0);
     assert(strcmp(cm_rlib_status_name((CmRlibStatus)999),
         "unknown rlib status") == 0);
 }
 
 int main(void)
 {
+    test_multi_member_archive();
+    test_multi_member_encode_rejections();
+    test_multi_member_decode_rejections();
     test_exact_encoding_and_decode();
     test_encode_failures_are_transactional();
     test_decode_arguments_and_truncation();
