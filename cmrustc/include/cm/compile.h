@@ -37,6 +37,11 @@ typedef struct CmCompileCmhirDependency {
     enum CmCompileCmhirKind kind;
 } CmCompileCmhirDependency;
 
+typedef struct CmCompileCmrlibDependency {
+    const char *extern_name;
+    const char *path;
+} CmCompileCmrlibDependency;
+
 /*
  * Compile one source crate to a portable C translation unit.  This function
  * never invokes a C compiler.  It completes every semantic phase and builds
@@ -47,6 +52,18 @@ typedef struct CmCompileCmhirDependency {
 CmCompileResult cm_compile_emit_c(const char *input_path,
     const char *output_path, enum cm_edition edition,
     const CmTargetDesc *target);
+
+/*
+ * Dependency-aware executable slice. Each cmrlib is self-authenticated,
+ * required to match the current canonical build configuration, and
+ * materialized into the same fresh HIR context before the source crate is
+ * lowered. The archive bytes remain alive through semantic/codegen use.
+ */
+CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
+    const char *output_path, const char *crate_name,
+    enum cm_edition edition, const CmTargetDesc *target,
+    const CmCompileCmrlibDependency *dependencies,
+    size_t dependency_count);
 
 /*
  * Lower one declaration crate through the ordinary source/module/import/HIR

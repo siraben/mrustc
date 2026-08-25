@@ -7,7 +7,10 @@
 #include "cm/codegen/c.h"
 #include "cm/driver/cfg.h"
 #include "cm/hir/admission.h"
+#include "cm/hir/artifact_config.h"
 #include "cm/hir/body.h"
+#include "cm/hir/executable_materialize.h"
+#include "cm/hir/executable_rlib.h"
 #include "cm/hir/lower.h"
 #include "cm/hir/metadata.h"
 #include "cm/hir/module_map.h"
@@ -1563,9 +1566,11 @@ static CmCompileResult cm_compile_local_admission_failure(
     return result;
 }
 
-CmCompileResult cm_compile_emit_c(const char *input_path,
-    const char *output_path, enum cm_edition edition,
-    const CmTargetDesc *target)
+CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
+    const char *output_path, const char *crate_name,
+    enum cm_edition edition, const CmTargetDesc *target,
+    const CmCompileCmrlibDependency *dependencies,
+    size_t dependency_count)
 {
     CmCompileResult result;
     CmSourceSet sources;
@@ -1601,19 +1606,60 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     CmSemanticAdmission marked_admission;
     CmSemanticAdmission reachable_admission;
     CmSemanticBarrier semantic_barrier;
+    CmHirArtifactConfig artifact_config;
+    CmHirExecutableRlib *dependency_rlibs;
+    CmHirLibraryArtifact *dependency_artifacts;
+    const CmHirLibraryArtifact **dependency_views;
+    size_t initialized_dependencies;
+    size_t dependency_index;
+    int output_exists;
     int use_hosted_entry;
 
     result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
         "invalid compile request");
     if (input_path == NULL || input_path[0] == '\0' || output_path == NULL
         || output_path[0] == '\0' || target == NULL
-        || strcmp(input_path, output_path) == 0) {
+        || !cm_compile_identifier_valid(crate_name)
+        || strcmp(input_path, output_path) == 0
+        || (dependency_count != 0u && dependencies == NULL)
+        || dependency_count > (size_t)UINT32_MAX
+        || dependency_count > (size_t)-1 / sizeof(*dependency_rlibs)
+        || dependency_count > (size_t)-1 / sizeof(*dependency_artifacts)
+        || dependency_count > (size_t)-1 / sizeof(*dependency_views)) {
         return result;
+    }
+
+    for (dependency_index = 0u; dependency_index < dependency_count;
+         ++dependency_index) {
+        size_t prior_index;
+
+        if (!cm_compile_identifier_valid(
+                dependencies[dependency_index].extern_name)
+            || dependencies[dependency_index].path == NULL
+            || dependencies[dependency_index].path[0] == '\0'
+            || strcmp(output_path,
+                dependencies[dependency_index].path) == 0) return result;
+        for (prior_index = 0u; prior_index < dependency_index;
+             ++prior_index) {
+            if (strcmp(dependencies[dependency_index].extern_name,
+                    dependencies[prior_index].extern_name) == 0) {
+                return cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+                    "duplicate cmrlib dependency extern name");
+            }
+        }
     }
 
     if (!cm_target_cfg_set(&cfg, target)) {
         return cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
             "target cannot produce an exact cfg environment");
+    }
+    cm_hir_artifact_config_init(&artifact_config);
+    if (cm_hir_artifact_config_build(target, edition,
+            CM_HIR_ARTIFACT_PANIC_ABORT, &cfg, &artifact_config)
+            != CM_HIR_ARTIFACT_CONFIG_OK) {
+        cm_hir_artifact_config_destroy(&artifact_config);
+        return cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+            "target cannot produce an executable artifact configuration");
     }
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
@@ -1631,6 +1677,11 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     memset(&marked_admission, 0, sizeof(marked_admission));
     memset(&reachable_admission, 0, sizeof(reachable_admission));
     memset(&semantic_barrier, 0, sizeof(semantic_barrier));
+    dependency_rlibs = NULL;
+    dependency_artifacts = NULL;
+    dependency_views = NULL;
+    initialized_dependencies = 0u;
+    output_exists = 0;
     cm_vec_init(&exact_state.instances,
         sizeof(CmCompileReachableInstance));
     cm_vec_init(&exact_state.edges, sizeof(CmCompileReachableEdge));
@@ -1656,12 +1707,91 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
             "cannot identify input source");
         goto cleanup;
     }
-    if (stat(output_path, &output_stat) == 0
-        && input_stat.st_dev == output_stat.st_dev
-        && input_stat.st_ino == output_stat.st_ino) {
-        result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
-            "input and output paths identify the same file");
-        goto cleanup;
+    if (stat(output_path, &output_stat) == 0) {
+        output_exists = 1;
+        if (input_stat.st_dev == output_stat.st_dev
+            && input_stat.st_ino == output_stat.st_ino) {
+            result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+                "input and output paths identify the same file");
+            goto cleanup;
+        }
+    }
+    if (dependency_count != 0u) {
+        dependency_rlibs = (CmHirExecutableRlib *)calloc(dependency_count,
+            sizeof(*dependency_rlibs));
+        dependency_artifacts = (CmHirLibraryArtifact *)calloc(
+            dependency_count, sizeof(*dependency_artifacts));
+        dependency_views = (const CmHirLibraryArtifact **)calloc(
+            dependency_count, sizeof(*dependency_views));
+        if (dependency_rlibs == NULL || dependency_artifacts == NULL
+            || dependency_views == NULL) {
+            result = cm_compile_result(CM_COMPILE_METADATA,
+                "cannot allocate cmrlib dependency state");
+            goto cleanup;
+        }
+    }
+    for (dependency_index = 0u; dependency_index < dependency_count;
+         ++dependency_index) {
+        CmSourceId metadata_source;
+        const CmSourceFile *metadata_file;
+        struct stat dependency_stat;
+        CmHirExecutableRlibStatus rlib_status;
+        CmHirExecutableMaterializeResult materialize_result;
+
+        cm_hir_executable_rlib_init(&dependency_rlibs[dependency_index]);
+        cm_hir_library_artifact_init(
+            &dependency_artifacts[dependency_index]);
+        initialized_dependencies += 1u;
+        if (cm_source_load_file_bounded(&sources,
+                dependencies[dependency_index].path,
+                CM_RLIB_MAX_ARCHIVE_SIZE, &metadata_source)
+                != CM_SOURCE_OK) {
+            result = cm_compile_result(CM_COMPILE_SOURCE_IO,
+                "cannot load executable cmrlib dependency");
+            goto cleanup;
+        }
+        metadata_file = cm_source_get(&sources, metadata_source);
+        if (metadata_file == NULL
+            || stat(dependencies[dependency_index].path,
+                &dependency_stat) != 0) {
+            result = cm_compile_result(CM_COMPILE_SOURCE_IO,
+                "cannot identify executable cmrlib dependency");
+            goto cleanup;
+        }
+        if (output_exists
+            && cm_compile_same_file(&output_stat, &dependency_stat)) {
+            result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
+                "dependency and output paths identify the same file");
+            goto cleanup;
+        }
+        rlib_status = cm_hir_executable_rlib_decode_configured(
+            metadata_file->bytes, metadata_file->length, &artifact_config,
+            &dependency_rlibs[dependency_index]);
+        if (rlib_status != CM_HIR_EXECUTABLE_RLIB_OK) {
+            result = cm_compile_result(CM_COMPILE_METADATA,
+                "executable cmrlib dependency decode failed");
+            (void)snprintf(result.message, sizeof(result.message),
+                "cmrlib dependency '%s' decode failed: %s",
+                dependencies[dependency_index].extern_name,
+                cm_hir_executable_rlib_status_name(rlib_status));
+            goto cleanup;
+        }
+        materialize_result = cm_hir_executable_metadata_materialize(&hir,
+            &dependency_artifacts[dependency_index],
+            &dependency_rlibs[dependency_index].metadata,
+            dependencies[dependency_index].extern_name, metadata_source);
+        if (materialize_result.status != CM_HIR_EXEC_MATERIALIZE_OK) {
+            result = cm_compile_result(CM_COMPILE_METADATA,
+                "executable cmrlib dependency materialization failed");
+            (void)snprintf(result.message, sizeof(result.message),
+                "cmrlib dependency '%s' materialization failed: %s",
+                dependencies[dependency_index].extern_name,
+                cm_hir_executable_materialize_status_name(
+                    materialize_result.status));
+            goto cleanup;
+        }
+        dependency_views[dependency_index] =
+            &dependency_artifacts[dependency_index];
     }
     cm_module_graph_options_init(&graph_options);
     graph_options.edition = edition;
@@ -1678,15 +1808,17 @@ CmCompileResult cm_compile_emit_c(const char *input_path,
     }
     import_result = cm_import_resolve(&imports, &graph,
         graph_result.revision);
-    if (import_result.error_count != 0u
-        || import_result.revision != graph_result.revision) {
+    if (import_result.revision != graph_result.revision
+        || (dependency_count == 0u && import_result.error_count != 0u)) {
         result = cm_compile_result(CM_COMPILE_IMPORTS,
             "local imports did not resolve");
         goto cleanup;
     }
     cm_hir_lower_options_init(&hir_options);
-    hir_options.crate_name = "cmrustc_input";
+    hir_options.crate_name = crate_name;
     hir_options.source = root_source;
+    hir_options.dependency_libraries = dependency_views;
+    hir_options.dependency_library_count = dependency_count;
     if (!cm_compile_hir_edition(edition, &hir_options.edition)) {
         result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
             "unsupported Rust edition");
@@ -1981,12 +2113,31 @@ cleanup:
     cm_semantic_admission_destroy(&all_local_admission);
     cm_semantic_admission_destroy(&marked_admission);
     cm_semantic_barrier_destroy(&semantic_barrier);
+    for (dependency_index = 0u;
+         dependency_index < initialized_dependencies; ++dependency_index) {
+        cm_hir_library_artifact_destroy(
+            &dependency_artifacts[dependency_index]);
+        cm_hir_executable_rlib_destroy(
+            &dependency_rlibs[dependency_index]);
+    }
+    free(dependency_views);
+    free(dependency_artifacts);
+    free(dependency_rlibs);
+    cm_hir_artifact_config_destroy(&artifact_config);
     cm_hir_module_map_destroy(&module_map);
     cm_hir_context_destroy(&hir);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
     cm_source_set_destroy(&sources);
     return result;
+}
+
+CmCompileResult cm_compile_emit_c(const char *input_path,
+    const char *output_path, enum cm_edition edition,
+    const CmTargetDesc *target)
+{
+    return cm_compile_emit_c_with_dependencies(input_path, output_path,
+        "cmrustc_input", edition, target, NULL, 0u);
 }
 
 CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
