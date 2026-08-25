@@ -321,7 +321,7 @@ static int cm_compile_instance_spec_for_item(const CmHirContext *hir,
     if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
         || impl_item->generic_parameter_count != 0u
         || !impl_item->data.impl_item.has_trait
-        || impl_item->data.impl_item.is_negative
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || cm_hir_def_id_is_none(
             item->data.function_item.trait_item_definition)) return 0;
     out_spec->declared_trait_callable =
@@ -1104,7 +1104,7 @@ static int cm_compile_discover_expression_callees(
             || !cm_hir_def_id_equal(impl_item->definition,
                 selection.selected_impl)
             || !impl_item->data.impl_item.has_trait
-            || impl_item->data.impl_item.is_negative
+            || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
             || !cm_hir_def_id_equal(
                 impl_item->data.impl_item.trait_type.definition,
                 selection.requested_trait)

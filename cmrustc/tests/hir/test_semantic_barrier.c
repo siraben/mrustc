@@ -329,7 +329,7 @@ static void test_marked_usage_rules_and_dump(void)
         && fseek(stream, 0L, SEEK_SET) == 0);
     dump_size = fread(dump, 1u, sizeof(dump) - 1u, stream);
     dump[dump_size] = '\0';
-    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
+    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0
         && strstr(dump, "usage=move static-borrow=not-promoted") != NULL
         && strstr(dump, "usage=borrow static-borrow=not-promoted") != NULL);
     assert(fclose(stream) == 0);

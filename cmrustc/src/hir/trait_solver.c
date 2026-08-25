@@ -759,7 +759,10 @@ static CmTraitSolverResultKind cm_trait_impl_index_init_internal(
 
         item = cm_hir_get_item(hir, (CmHirItemId)(item_index + 1u));
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
-            || !item->data.impl_item.has_trait) continue;
+            || !item->data.impl_item.has_trait
+            || item->data.impl_item.polarity == CM_HIR_IMPL_RESERVATION) {
+            continue;
+        }
         memset(&entry, 0, sizeof(entry));
         entry.trait_definition = item->data.impl_item.trait_type.definition;
         entry.self_head = cm_trait_hir_head(hir,
@@ -781,7 +784,7 @@ static CmTraitSolverResultKind cm_trait_impl_index_init_internal(
         if (item->outlives_predicate_count != 0u) {
             entry.unsupported_flags |= CM_TRAIT_IMPL_UNSUPPORTED_OUTLIVES;
         }
-        if (item->data.impl_item.is_negative) {
+        if (item->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
             entry.unsupported_flags |= CM_TRAIT_IMPL_UNSUPPORTED_NEGATIVE;
         }
         if (cm_trait_impl_contains_specializable_member(hir,
@@ -2053,7 +2056,7 @@ static int cm_trait_negative_entry_is_exact(
             entry->impl_definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
         || !item->data.impl_item.has_trait
-        || !item->data.impl_item.is_negative
+        || item->data.impl_item.polarity != CM_HIR_IMPL_NEGATIVE
         || item->data.impl_item.safety != CM_HIR_SAFE
         || !cm_hir_def_id_equal(item->data.impl_item
             .trait_type.definition, entry->trait_definition)
@@ -2102,7 +2105,7 @@ static int cm_trait_positive_auto_entry_is_exact(
             entry->impl_definition)
         || !cm_hir_def_id_is_none(item->parent_definition)
         || item->data.impl_item.has_trait != 1
-        || item->data.impl_item.is_negative != 0
+        || item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || item->data.impl_item.safety != CM_HIR_SAFE
         || !cm_hir_def_id_equal(item->data.impl_item
             .trait_type.definition, entry->trait_definition)

@@ -627,7 +627,17 @@ static CmSemanticItemResult cm_semantic_item_check_impl(
         || !cm_hir_def_id_is_none(trait_item->parent_definition)) {
         return result;
     }
-    if (impl_item->data.impl_item.is_negative) {
+    if (impl_item->data.impl_item.polarity == CM_HIR_IMPL_RESERVATION) {
+        /*
+         * Reservation impls are coherence declarations only.  Lowering and
+         * the model authenticate their structural trait contract, but no
+         * semantic admission path may turn that contract into provider
+         * evidence or an executable member.
+         */
+        result.status = CM_SEMANTIC_ITEM_PENDING_RESERVATION;
+        return result;
+    }
+    if (impl_item->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
         /*
          * Negative impl headers have no positive trait contract to check:
          * they neither provide associated items nor inherit required ones.
@@ -1352,6 +1362,8 @@ const char *cm_semantic_item_status_name(CmSemanticItemStatus status)
     case CM_SEMANTIC_ITEM_PENDING_SPECIALIZATION:
         return "pending-specialization";
     case CM_SEMANTIC_ITEM_PENDING_NEGATIVE: return "pending-negative";
+    case CM_SEMANTIC_ITEM_PENDING_RESERVATION:
+        return "pending-reservation";
     case CM_SEMANTIC_ITEM_MISSING_ASSOCIATED_TYPE:
         return "missing-associated-type";
     case CM_SEMANTIC_ITEM_MISSING_REQUIRED_METHOD:

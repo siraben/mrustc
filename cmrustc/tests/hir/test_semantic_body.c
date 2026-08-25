@@ -2872,7 +2872,7 @@ static void test_dot_method_negative_and_no_solution(void)
             /* This post-construction polarity forgery retains the linked
              * method, so the solver authority must not authenticate it as
              * itemless negative evidence. */
-            impl_item->data.impl_item.is_negative = 1;
+            impl_item->data.impl_item.polarity = CM_HIR_IMPL_NEGATIVE;
         }
     }
     traits[0] = fixture.trait_definition;

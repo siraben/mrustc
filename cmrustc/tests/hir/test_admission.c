@@ -2150,7 +2150,7 @@ static void test_exact_instance_closure_executes_inherited_trait_default(void)
             index);
         if (candidate != NULL && candidate->kind == CM_HIR_ITEM_IMPL
             && candidate->data.impl_item.has_trait
-            && !candidate->data.impl_item.is_negative
+            && candidate->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
             && trait_default != NULL
             && cm_hir_def_id_equal(candidate->data.impl_item.trait_type
                     .definition, trait_default->parent_definition)) {

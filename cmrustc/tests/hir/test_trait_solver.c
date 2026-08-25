@@ -195,7 +195,8 @@ static CmHirDefId add_impl(CmHirContext *hir, CmHirCrateId crate_id,
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = trait_definition;
     item.data.impl_item.safety = CM_HIR_SAFE;
-    item.data.impl_item.is_negative = is_negative;
+    item.data.impl_item.polarity = is_negative
+        ? CM_HIR_IMPL_NEGATIVE : CM_HIR_IMPL_POSITIVE;
     assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
     return definition;
 }
@@ -281,7 +282,8 @@ static CmHirDefId add_impl_with_type_argument(CmHirContext *hir,
     item.data.impl_item.trait_type.arguments = &argument;
     item.data.impl_item.trait_type.argument_count = 1u;
     item.data.impl_item.safety = CM_HIR_SAFE;
-    item.data.impl_item.is_negative = is_negative;
+    item.data.impl_item.polarity = is_negative
+        ? CM_HIR_IMPL_NEGATIVE : CM_HIR_IMPL_POSITIVE;
     assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
     return definition;
 }
@@ -321,7 +323,8 @@ static CmHirDefId add_blanket_impl(CmHirContext *hir,
     item.data.impl_item.has_trait = 1;
     item.data.impl_item.trait_type.definition = trait_definition;
     item.data.impl_item.safety = CM_HIR_SAFE;
-    item.data.impl_item.is_negative = is_negative;
+    item.data.impl_item.polarity = is_negative
+        ? CM_HIR_IMPL_NEGATIVE : CM_HIR_IMPL_POSITIVE;
     assert(cm_hir_add_item(hir, &item, &item_id) == CM_HIR_OK);
     return definition;
 }
@@ -1998,6 +2001,39 @@ static void test_projection_overflow_and_invalid_query(void)
     fixture_destroy(&fixture);
 }
 
+static void test_reservation_impl_is_not_evidence(void)
+{
+    TestFixture fixture;
+    CmTraitImplIndex index;
+    CmTypeckContext typeck;
+    CmTypeckTypeId self_type;
+    CmTypeckNamedType query;
+    CmTraitSelectionResult result;
+    CmHirItem *impl_item;
+
+    fixture_init(&fixture);
+    impl_item = find_mutable_item(&fixture, fixture.exact_impl);
+    assert(impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL);
+    impl_item->data.impl_item.polarity = CM_HIR_IMPL_RESERVATION;
+    memset(&index, 0, sizeof(index));
+    assert(cm_trait_impl_index_init(&index, &fixture.hir,
+        fixture.crate_id, CM_TRAIT_IMPL_UNIVERSE_OPEN)
+        == CM_TRAIT_SOLVER_PROVEN);
+    assert(cm_trait_impl_index_entry_count(&index) == 15u);
+    cm_typeck_context_init(&typeck, &fixture.hir);
+    assert(cm_typeck_import_hir_type(&typeck, fixture.u8_hir, &self_type)
+        == CM_TYPECK_OK);
+    query = trait_query(fixture.exact_trait);
+    result = cm_trait_solver_select(&index, &typeck, self_type, &query);
+    assert(result.kind == CM_TRAIT_SOLVER_DEFERRED_METADATA
+        && result.supported_match_count == 0u
+        && result.negative_match_count == 0u
+        && cm_hir_def_id_is_none(result.impl_definition));
+    cm_typeck_context_destroy(&typeck);
+    cm_trait_impl_index_destroy(&index);
+    fixture_destroy(&fixture);
+}
+
 static void test_const_scanning(void)
 {
     TestFixture fixture;
@@ -2283,6 +2319,7 @@ int main(void)
     test_exact_negative_selection();
     test_exact_positive_auto_selection();
     test_projection_overflow_and_invalid_query();
+    test_reservation_impl_is_not_evidence();
     test_const_scanning();
     test_stale_index_fingerprints();
     test_finalized_complete_index();

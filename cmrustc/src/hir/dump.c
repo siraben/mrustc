@@ -516,7 +516,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v33\n", stream);
+    fputs("hir-v34\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -1185,12 +1185,16 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
         }
         if (item->kind == CM_HIR_ITEM_IMPL) {
             fprintf(stream,
-                "impl-header item#%u safety=%s negative=%d const=%d "
+                "impl-header item#%u safety=%s polarity=%s const=%d "
                 "self=ty#%u trait=",
                 (unsigned int)(index + 1u),
                 item->data.impl_item.safety == CM_HIR_UNSAFE
                     ? "unsafe" : "safe",
-                item->data.impl_item.is_negative,
+                item->data.impl_item.polarity
+                    == CM_HIR_IMPL_RESERVATION
+                    ? "reservation"
+                    : item->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
+                        ? "negative" : "positive",
                 item->data.impl_item.is_const,
                 (unsigned int)item->data.impl_item.self_type);
             if (item->data.impl_item.has_trait) {

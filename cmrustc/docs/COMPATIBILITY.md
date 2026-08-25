@@ -279,7 +279,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v33` and
+remains omitted rather than guessed. Canonical dumps are `hir-v34` and
 `mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -306,14 +306,14 @@ observer currentness authenticate the arena. This is representation only:
 capture absence/class and Copy evidence are uncomputed, while invocation,
 lifetime inference, expansion, MIR, and C emission reject these nodes.
 
-Canonical `hir-v33` preserves the compiler-authenticated const capability of
+Canonical `hir-v34` preserves the compiler-authenticated const capability of
 traits and the exact constness of trait impl headers. Const inherent impls and
 const impls of non-const traits reject; legacy semantic metadata v1.1 rejects
 these facts and trait method/associated-const default promises instead of
 silently erasing them. Declaration metadata v2.x remains reference-only for
 trait identities and does not claim associated-declaration completeness.
 
-Canonical `hir-v33` also preserves explicit and elided function-pointer
+Canonical `hir-v34` also preserves explicit and elided function-pointer
 lifetime binders as nearest-scope late-bound indices. Nested function pointers
 are independently closed, item early-bound lifetimes remain available, and an
 attempt to capture an enclosing late binder fails even when an item lifetime
@@ -322,6 +322,15 @@ structural identity. There is no binder-depth representation yet. Typeck and
 in-memory semantic-results storage, canonical instance v2, semantic metadata
 v1.1, and declaration metadata v2.x reject nonzero function-pointer binders
 without changing their binder-zero wire layouts.
+
+Canonical `hir-v34` replaces the impl-header negative boolean with the closed
+`POSITIVE`, `NEGATIVE`, or `RESERVATION` polarity. Lowering recognizes only an
+exact cfg-effective string-valued `rustc_reservation_impl` attribute, rejects
+malformed, duplicate, misplaced, inherent, negative, and `Drop` reservation
+uses, and permits reservation impls to overlap without treating them as
+positive providers. Legacy impl-bearing semantic metadata that cannot
+represent this third polarity rejects it rather than erasing it; declaration
+metadata v2.x has no impl family and intentionally omits the fact.
 
 Impl coherence keeps first-order header unification symmetric. The sole
 predicate-derived disjointness fact is the local compiler `FnPtr` domain: an

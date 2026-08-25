@@ -264,11 +264,15 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
                     return 0;
                 }
             }
-        } else if (item->kind == CM_HIR_ITEM_IMPL
-            && item->data.impl_item.has_trait
-            && !cm_semantic_barrier_hash_named(&hash,
-                &item->data.impl_item.trait_type)) {
-            return 0;
+        } else if (item->kind == CM_HIR_ITEM_IMPL) {
+            hash = cm_semantic_barrier_hash_bytes(hash,
+                &item->data.impl_item.polarity,
+                sizeof(item->data.impl_item.polarity));
+            if (item->data.impl_item.has_trait
+                && !cm_semantic_barrier_hash_named(&hash,
+                    &item->data.impl_item.trait_type)) {
+                return 0;
+            }
         } else if (item->kind == CM_HIR_ITEM_TRAIT_ALIAS) {
             uint32_t bound_index;
 

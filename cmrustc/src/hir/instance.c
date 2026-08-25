@@ -150,7 +150,7 @@ static int cm_instance_trait_callable_relation_valid(
         || enclosing->kind != CM_HIR_ITEM_IMPL
         || trait_item->kind != CM_HIR_ITEM_TRAIT
         || !enclosing->data.impl_item.has_trait
-        || enclosing->data.impl_item.is_negative
+        || enclosing->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || !cm_hir_def_id_equal(declared->parent_definition,
             trait_item->definition)
         || !cm_hir_def_id_is_none(
@@ -1881,6 +1881,7 @@ CmHirInstanceStatus cm_hir_canonical_instance_decode(
         trait_item = cm_instance_item(hir,
             decoded.parts.implemented_trait);
         if (enclosing == NULL || enclosing->kind != CM_HIR_ITEM_IMPL
+            || enclosing->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
             || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT) {
             status = CM_HIR_INSTANCE_INVALID_RELATION;
             goto done;

@@ -1873,7 +1873,7 @@ static CmHirStatus cm_hir_item_parent_status(const CmHirContext *context,
     if ((parent->kind == CM_HIR_ITEM_TRAIT
             && parent->data.trait_item.is_auto)
         || (parent->kind == CM_HIR_ITEM_IMPL
-            && parent->data.impl_item.is_negative)) {
+            && parent->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     if (item->kind != CM_HIR_ITEM_FUNCTION
@@ -1884,7 +1884,7 @@ static CmHirStatus cm_hir_item_parent_status(const CmHirContext *context,
     if (!item->is_specializable) return CM_HIR_OK;
     if (parent->kind != CM_HIR_ITEM_IMPL
         || !parent->data.impl_item.has_trait
-        || parent->data.impl_item.is_negative) {
+        || parent->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     implemented_trait = cm_hir_bound_definition_item(context,
@@ -1941,10 +1941,21 @@ static int cm_hir_type_late_bound_free(const CmHirContext *context,
     return type != NULL && type->late_bound_requirement == 0u;
 }
 
+static int cm_hir_impl_effective_polarity(const CmHirItem *item,
+    CmHirImplPolarity *out_polarity)
+{
+    if (item == NULL || out_polarity == NULL
+        || (unsigned int)item->data.impl_item.polarity
+            > (unsigned int)CM_HIR_IMPL_RESERVATION) return 0;
+    *out_polarity = item->data.impl_item.polarity;
+    return 1;
+}
+
 static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
     const CmHirItem *item)
 {
     const CmHirItem *trait_item;
+    CmHirImplPolarity polarity;
 
     if (!cm_hir_type_id_valid(context, item->data.impl_item.self_type)
         || !cm_hir_type_late_bound_free(context,
@@ -1953,8 +1964,7 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
             item->data.impl_item.self_type, item->definition, 0u)
         || (item->data.impl_item.has_trait != 0
             && item->data.impl_item.has_trait != 1)
-        || (item->data.impl_item.is_negative != 0
-            && item->data.impl_item.is_negative != 1)
+        || !cm_hir_impl_effective_polarity(item, &polarity)
         || (item->data.impl_item.is_const != 0
             && item->data.impl_item.is_const != 1)
         || (unsigned int)item->data.impl_item.safety
@@ -1962,7 +1972,7 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
         return 0;
     }
     if (!item->data.impl_item.has_trait) {
-        return !item->data.impl_item.is_negative
+        return polarity == CM_HIR_IMPL_POSITIVE
             && !item->data.impl_item.is_const
             && item->data.impl_item.safety == CM_HIR_SAFE
             && cm_hir_def_id_is_none(
@@ -1987,7 +1997,7 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
             && !trait_item->data.trait_item.is_const)) {
         return 0;
     }
-    if (item->data.impl_item.is_negative) {
+    if (polarity == CM_HIR_IMPL_NEGATIVE) {
         /* Negative impls are authenticated by their resolved trait identity;
          * auto-ness is relevant to the auto-trait solver, not to HIR
          * declaration validity.  The lowerer already enforces safe,
@@ -2754,7 +2764,7 @@ static int cm_hir_function_item_payload_valid(const CmHirContext *context,
                 item->parent_definition);
     }
     if (parent->kind != CM_HIR_ITEM_IMPL
-        || parent->data.impl_item.is_negative != 0
+        || parent->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
         || item->data.function_item.has_default_body != 0
         || item->data.function_item.body == CM_HIR_BODY_NONE) {
         return 0;
@@ -3623,7 +3633,7 @@ static int cm_hir_type_alias_payload_valid(const CmHirContext *context,
         || item->data.type_alias_item.bound_count != 0u
         || item->data.type_alias_item.bounds != NULL
         || parent->data.impl_item.has_trait != 1
-        || parent->data.impl_item.is_negative != 0) {
+        || parent->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
         return 0;
     }
     trait_declaration = cm_hir_bound_definition_item(context,
@@ -3684,7 +3694,7 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
                 && body->expected_type == item->data.value_item.type;
         }
         if (parent->kind != CM_HIR_ITEM_IMPL
-            || parent->data.impl_item.is_negative
+            || parent->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
             || item->data.value_item.has_default_body != 0
             || item->data.value_item.body == CM_HIR_BODY_NONE
             || item->data.value_item.mutability != CM_HIR_IMMUTABLE) {

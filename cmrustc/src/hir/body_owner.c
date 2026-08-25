@@ -415,7 +415,7 @@ CmHirBodyFunctionOwnerKind cm_hir_body_function_owner_kind(
         || !cm_hir_body_owner_type_parameters_supported(context, parent)
         || !cm_hir_body_owner_constraints_empty(parent)
         || !parent->data.impl_item.has_trait
-        || parent->data.impl_item.is_negative
+        || parent->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || !cm_hir_body_owner_type_parameters_supported(context, item)
         || item->generic_parameter_count != 0u
         || !cm_hir_body_owner_constraints_empty(item)

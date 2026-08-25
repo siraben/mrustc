@@ -596,7 +596,7 @@ static void cm_param_env_add_impl_header(CmParamEnvState *state,
     CmParamEnvFact fact;
 
     if (!impl_item->data.impl_item.has_trait
-        || impl_item->data.impl_item.is_negative) return;
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE) return;
     memset(&fact, 0, sizeof(fact));
     fact.kind = CM_PARAM_ENV_FACT_IMPLEMENTED;
     fact.provenance = CM_PARAM_ENV_PROVENANCE_POSITIVE_IMPL_HEADER;

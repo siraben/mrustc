@@ -165,6 +165,9 @@ static const CmHirItem *find_impl(const CmHirContext *context)
     return NULL;
 }
 
+static const CmHirItem *find_impl_for_trait(const CmHirContext *context,
+    CmHirDefId trait_definition, size_t ordinal);
+
 static const CmHirItem *find_child(const CmHirContext *context,
     CmHirDefId parent, const char *name)
 {
@@ -1046,6 +1049,128 @@ static void test_function_pointer_impl_coherence(void)
     }
 }
 
+static void test_reservation_impl_lowering_and_coherence(void)
+{
+    static const char source[] =
+        "#[const_trait] trait From<A> { fn from(value: A) -> Self; }"
+        "#[rustc_reservation_impl = \"future compatibility\"]"
+        "impl<T> const From<!> for T { fn from(value: !) -> T { value } }"
+        "impl<T> const From<T> for T { fn from(value: T) -> T { value } }";
+    static const char cfg_source[] =
+        "trait Marker {}"
+        "impl Marker for u8 {}"
+        "#[cfg_attr(all(), rustc_reservation_impl = r#\"reserved\"#)]"
+        "impl Marker for u8 {}";
+    static const char escaped_source[] =
+        "trait Marker {} impl Marker for u8 {}"
+        "#[rustc_reservation_impl = \"future \\\n+            compatibility\"] impl Marker for u8 {}";
+    static const char duplicate_reservations[] =
+        "trait Marker {}"
+        "#[rustc_reservation_impl = \"first\"] impl Marker for u8 {}"
+        "#[rustc_reservation_impl = \"second\"] impl Marker for u8 {}";
+    static const char *const malformed[] = {
+        "trait Marker {} #[rustc_reservation_impl] impl Marker for u8 {}",
+        "trait Marker {} #[rustc_reservation_impl(message)] impl Marker for u8 {}",
+        "trait Marker {} #[rustc_reservation_impl = 1] impl Marker for u8 {}",
+        ("trait Marker {} #[rustc_reservation_impl/**/=\"commented\"]"
+            " impl Marker for u8 {}"),
+        ("trait Marker {} #[rustc_reservation_impl = \"bad \\q\"]"
+            " impl Marker for u8 {}"),
+        ("trait Marker {} #[rustc_reservation_impl = \"one\"]"
+            "#[rustc_reservation_impl = \"two\"] impl Marker for u8 {}"),
+        "#[rustc_reservation_impl = \"trait\"] trait Marker {}",
+        "struct Local; #[rustc_reservation_impl = \"inherent\"] impl Local {}",
+        ("trait Marker {} #[rustc_reservation_impl = \"negative\"]"
+            "impl !Marker for u8 {}")
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *trait_item;
+    const CmHirItem *first_impl;
+    const CmHirItem *second_impl;
+    size_t index;
+
+    result = lower_graph_source(source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "reservation impl lowering failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    trait_item = find_item(&context, "From");
+    first_impl = trait_item == NULL ? NULL
+        : find_impl_for_trait(&context, trait_item->definition, 0u);
+    second_impl = trait_item == NULL ? NULL
+        : find_impl_for_trait(&context, trait_item->definition, 1u);
+    assert(result.error_count == 0u && trait_item != NULL
+        && first_impl != NULL && second_impl != NULL
+        && first_impl->data.impl_item.polarity == CM_HIR_IMPL_RESERVATION
+        && first_impl->data.impl_item.is_const
+        && first_impl->attribute_count == 1u
+        && hir_string_is(&context,
+            first_impl->attributes[0].metadata,
+            "rustc_reservation_impl = \"future compatibility\"")
+        && second_impl->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(cfg_source, &context);
+    assert(result.error_count == 0u);
+    trait_item = find_item(&context, "Marker");
+    second_impl = trait_item == NULL ? NULL
+        : find_impl_for_trait(&context, trait_item->definition, 1u);
+    assert(second_impl != NULL
+        && second_impl->data.impl_item.polarity
+            == CM_HIR_IMPL_RESERVATION);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(escaped_source, &context);
+    assert(result.error_count == 0u);
+    trait_item = find_item(&context, "Marker");
+    second_impl = trait_item == NULL ? NULL
+        : find_impl_for_trait(&context, trait_item->definition, 1u);
+    assert(second_impl != NULL
+        && second_impl->data.impl_item.polarity
+            == CM_HIR_IMPL_RESERVATION);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(duplicate_reservations, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u; index < sizeof(malformed) / sizeof(malformed[0]);
+         ++index) {
+        result = lower_graph_source(malformed[index], &context);
+        if (result.error_count != 1u) {
+            fprintf(stderr, "reservation attribute rejection %lu: %s: %s\n",
+                (unsigned long)index,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u);
+        cm_hir_context_destroy(&context);
+    }
+
+    result = lower_graph_source(
+        "#[lang = \"drop\"] trait Drop { fn drop(&mut self); }"
+        "#[rustc_reservation_impl = \"drop\"]"
+        "impl Drop for u8 { fn drop(&mut self) {} }",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message, "reservation Drop") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(
+        "trait Required { fn required(&self); }"
+        "#[rustc_reservation_impl = \"still complete\"]"
+        "impl Required for u8 {}",
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "missing a required trait method") != NULL);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_union_declarations(void)
 {
     static const char source[] =
@@ -1496,7 +1621,7 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         if (candidate == NULL || candidate->kind != CM_HIR_ITEM_IMPL) {
             continue;
         }
-        if (candidate->data.impl_item.is_negative) {
+        if (candidate->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
             negative_impl = candidate;
         } else {
             positive_impl = candidate;
@@ -1527,7 +1652,7 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         && send->predicate_count == 0u
         && send->data.trait_item.supertrait_count == 0u
         && negative_impl != NULL
-        && negative_impl->data.impl_item.is_negative
+        && negative_impl->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
         && !negative_impl->data.impl_item.is_const
         && negative_impl->data.impl_item.has_trait
         && negative_impl->data.impl_item.safety == CM_HIR_SAFE
@@ -1550,7 +1675,7 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         && negative_pointee->data.parameter_type.parameter
             == negative_impl->generic_parameter_start
         && positive_impl != NULL
-        && !positive_impl->data.impl_item.is_negative
+        && positive_impl->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && !positive_impl->data.impl_item.is_const
         && positive_impl->data.impl_item.safety == CM_HIR_UNSAFE
         && positive_self != NULL
@@ -1635,8 +1760,11 @@ static void test_generic_reference_impl_entry_points(void)
 
         item = (const CmHirItem *)cm_vec_at_const(&context.items, index);
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL) continue;
-        if (item->data.impl_item.is_negative) negative = item;
-        else positive = item;
+        if (item->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
+            negative = item;
+        } else {
+            positive = item;
+        }
         impl_count += 1u;
     }
     positive_parameter = positive == NULL
@@ -1661,8 +1789,8 @@ static void test_generic_reference_impl_entry_points(void)
         && negative->generic_parameter_count == 1u
         && positive->data.impl_item.has_trait
         && negative->data.impl_item.has_trait
-        && !positive->data.impl_item.is_negative
-        && negative->data.impl_item.is_negative
+        && positive->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
+        && negative->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
         && positive_self != NULL
         && positive_self->kind == CM_HIR_TYPE_REFERENCE_KIND
         && positive_self->data.reference_type.mutability == CM_HIR_IMMUTABLE
@@ -3272,7 +3400,7 @@ static void test_const_trait_impl_fidelity(void)
         if (candidate == NULL || candidate->kind != CM_HIR_ITEM_IMPL) {
             continue;
         }
-        if (candidate->data.impl_item.is_negative) {
+        if (candidate->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
             negative_impl = candidate;
         } else {
             positive_impl = candidate;
@@ -3287,14 +3415,14 @@ static void test_const_trait_impl_fidelity(void)
         && hir_string_is(&context, trait_item->attributes[0].metadata,
             "const_trait")
         && negative_impl != NULL
-        && negative_impl->data.impl_item.is_negative
+        && negative_impl->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
         && negative_impl->data.impl_item.is_const
         && negative_impl->data.impl_item.safety == CM_HIR_SAFE
         && cm_hir_def_id_equal(
             negative_impl->data.impl_item.trait_type.definition,
             trait_item->definition)
         && positive_impl != NULL
-        && !positive_impl->data.impl_item.is_negative
+        && positive_impl->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && positive_impl->data.impl_item.is_const
         && positive_impl->data.impl_item.safety == CM_HIR_UNSAFE
         && cm_hir_def_id_equal(
@@ -4568,7 +4696,7 @@ static void check_monomorphic_impl_result(CmHirContext *context)
     assert(impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
         && impl_item->name == CM_INTERN_ID_NONE
         && impl_item->data.impl_item.has_trait == 1
-        && impl_item->data.impl_item.is_negative == 0
+        && impl_item->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && cm_hir_def_id_equal(
             impl_item->data.impl_item.trait_type.definition,
             trait_item->definition));
@@ -12294,6 +12422,7 @@ int main(void)
     test_function_pointer_lifetime_binders();
     test_function_pointer_binder_ast_mutations();
     test_function_pointer_impl_coherence();
+    test_reservation_impl_lowering_and_coherence();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
     test_default_specialization_lowering();

@@ -1431,6 +1431,7 @@ static int cm_meta_collect_trait_universe(
             || item->predicate_count != 0u
             || item->outlives_predicate_count != 0u
             || item->data.impl_item.is_const
+            || item->data.impl_item.polarity == CM_HIR_IMPL_RESERVATION
             || item->data.impl_item.trait_type.argument_count != 0u
             || item->data.impl_item.trait_type.arguments != NULL) return 0;
         (void)cm_vec_push(impls, &impl_value);
@@ -4332,7 +4333,8 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
                     (uint8_t)impl_value->item->data.impl_item.safety)
                     != CM_HIR_METADATA_OK
                 || cm_hir_metadata_write_u8(&writer,
-                    impl_value->item->data.impl_item.is_negative
+                    impl_value->item->data.impl_item.polarity
+                            == CM_HIR_IMPL_NEGATIVE
                         ? UINT8_C(1) : UINT8_C(0))
                     != CM_HIR_METADATA_OK) {
                 result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
@@ -7329,7 +7331,8 @@ static int cm_meta_bind_runtime_impl(CmHirContext *context,
     item.data.impl_item.trait_type.definition =
         runtime_traits[wire->trait_local - 1u];
     item.data.impl_item.safety = (CmHirSafety)wire->safety;
-    item.data.impl_item.is_negative = wire->is_negative;
+    item.data.impl_item.polarity = wire->is_negative
+        ? CM_HIR_IMPL_NEGATIVE : CM_HIR_IMPL_POSITIVE;
     return cm_hir_add_item(context, &item, &item_id) == CM_HIR_OK;
 }
 

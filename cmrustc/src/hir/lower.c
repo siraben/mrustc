@@ -2736,7 +2736,7 @@ static int cm_lower_primitive_self_size_length(const CmLowerState *state,
         owner_record->parent_definition);
     if (parent_impl == NULL || parent_impl->kind != CM_HIR_ITEM_IMPL
         || parent_impl->data.impl_item.has_trait
-        || parent_impl->data.impl_item.is_negative
+        || parent_impl->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || parent_impl->generic_parameter_count != 0u) return 0;
     self_type = cm_hir_get_type(state->hir,
         parent_impl->data.impl_item.self_type);
@@ -4262,7 +4262,7 @@ static int cm_lower_self_context(const CmLowerState *state,
         return 1;
     }
     if (parent->kind != CM_HIR_ITEM_IMPL
-        || parent->data.impl_item.is_negative != 0) {
+        || parent->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE) {
         return 0;
     }
     if (!parent->data.impl_item.has_trait) return 1;
@@ -4434,7 +4434,8 @@ static CmHirTypeId cm_lower_self_path_type(CmLowerState *state,
             implemented_trait = &self_context_item->data.impl_item
                 .trait_type;
             if (!self_context_item->data.impl_item.has_trait
-                || self_context_item->data.impl_item.is_negative
+                || self_context_item->data.impl_item.polarity
+                    == CM_HIR_IMPL_NEGATIVE
                 || !cm_hir_def_id_equal(implemented_trait->definition,
                     trait_definition)
                 || implemented_trait->argument_count
@@ -9784,6 +9785,14 @@ static int cm_lower_item_has_exact_attribute(const CmLowerState *state,
     return 0;
 }
 
+static int cm_lower_meta_identifier_continue(unsigned char byte)
+{
+    return (byte >= (unsigned char)'a' && byte <= (unsigned char)'z')
+        || (byte >= (unsigned char)'A' && byte <= (unsigned char)'Z')
+        || (byte >= (unsigned char)'0' && byte <= (unsigned char)'9')
+        || byte == (unsigned char)'_' || byte >= 0x80u;
+}
+
 static int cm_lower_item_has_attribute_name(const CmLowerState *state,
     const CmHirItem *item, const char *expected)
 {
@@ -9805,11 +9814,273 @@ static int cm_lower_item_has_attribute_name(const CmLowerState *state,
         }
         if (metadata->len == expected_length) return 1;
         next = metadata->bytes[expected_length];
-        if (next == (unsigned char)'(' || next == (unsigned char)'='
-            || next == (unsigned char)' ' || next == (unsigned char)'\t'
-            || next == (unsigned char)'\r' || next == (unsigned char)'\n') {
-            return 1;
+        if (!cm_lower_meta_identifier_continue(next)) return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_meta_space(unsigned char byte)
+{
+    return byte == (unsigned char)' ' || byte == (unsigned char)'\t'
+        || byte == (unsigned char)'\r' || byte == (unsigned char)'\n';
+}
+
+static int cm_lower_metadata_has_attribute_name(
+    const CmInternedString *metadata, const char *expected)
+{
+    size_t expected_length;
+    size_t position;
+
+    if (metadata == NULL || expected == NULL) return 0;
+    expected_length = strlen(expected);
+    position = 0u;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (metadata->len - position < expected_length
+        || memcmp(metadata->bytes + position, expected,
+            expected_length) != 0) return 0;
+    position += expected_length;
+    if (position == metadata->len) return 1;
+    return !cm_lower_meta_identifier_continue(metadata->bytes[position]);
+}
+
+static int cm_lower_meta_hex_value(unsigned char byte, uint32_t *out_value)
+{
+    if (byte >= (unsigned char)'0' && byte <= (unsigned char)'9') {
+        *out_value = (uint32_t)(byte - (unsigned char)'0');
+        return 1;
+    }
+    if (byte >= (unsigned char)'a' && byte <= (unsigned char)'f') {
+        *out_value = 10u + (uint32_t)(byte - (unsigned char)'a');
+        return 1;
+    }
+    if (byte >= (unsigned char)'A' && byte <= (unsigned char)'F') {
+        *out_value = 10u + (uint32_t)(byte - (unsigned char)'A');
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_meta_string_escape(const unsigned char *bytes,
+    size_t length, size_t *position)
+{
+    unsigned char escape;
+
+    if (bytes == NULL || position == NULL || *position >= length) return 0;
+    escape = bytes[*position];
+    if (escape == (unsigned char)'"' || escape == (unsigned char)'\''
+        || escape == (unsigned char)'\\' || escape == (unsigned char)'n'
+        || escape == (unsigned char)'r' || escape == (unsigned char)'t'
+        || escape == (unsigned char)'0') {
+        *position += 1u;
+        return 1;
+    }
+    if (escape == (unsigned char)'x') {
+        uint32_t first;
+        uint32_t second;
+
+        if (length - *position < 3u
+            || !cm_lower_meta_hex_value(bytes[*position + 1u], &first)
+            || !cm_lower_meta_hex_value(bytes[*position + 2u], &second)
+            || first > 7u) return 0;
+        *position += 3u;
+        return 1;
+    }
+    if (escape == (unsigned char)'u') {
+        uint32_t value;
+        uint32_t digit;
+        size_t digits;
+        int previous_underscore;
+
+        if (length - *position < 4u
+            || bytes[*position + 1u] != (unsigned char)'{') return 0;
+        *position += 2u;
+        value = 0u;
+        digits = 0u;
+        previous_underscore = 0;
+        while (*position < length
+            && bytes[*position] != (unsigned char)'}') {
+            if (bytes[*position] == (unsigned char)'_') {
+                if (digits == 0u || previous_underscore) return 0;
+                previous_underscore = 1;
+                *position += 1u;
+                continue;
+            }
+            if (digits == 6u
+                || !cm_lower_meta_hex_value(bytes[*position], &digit)) {
+                return 0;
+            }
+            value = value * 16u + digit;
+            digits += 1u;
+            previous_underscore = 0;
+            *position += 1u;
         }
+        if (*position == length || digits == 0u || previous_underscore
+            || value > 0x10ffffu
+            || (value >= 0xd800u && value <= 0xdfffu)) return 0;
+        *position += 1u;
+        return 1;
+    }
+    if (escape == (unsigned char)'\n'
+        || (escape == (unsigned char)'\r'
+            && *position + 1u < length
+            && bytes[*position + 1u] == (unsigned char)'\n')) {
+        *position += escape == (unsigned char)'\r' ? 2u : 1u;
+        while (*position < length
+            && cm_lower_meta_space(bytes[*position])) *position += 1u;
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_meta_name_value_string(const CmInternedString *metadata,
+    const char *expected, const unsigned char **out_value,
+    size_t *out_value_length)
+{
+    size_t expected_length;
+    size_t position;
+    size_t value_start;
+    size_t value_length;
+
+    if (metadata == NULL || expected == NULL) return 0;
+    expected_length = strlen(expected);
+    position = 0u;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (metadata->len - position < expected_length
+        || memcmp(metadata->bytes + position, expected,
+            expected_length) != 0) return 0;
+    position += expected_length;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (position == metadata->len
+        || metadata->bytes[position] != (unsigned char)'=') return 0;
+    position += 1u;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    value_start = 0u;
+    value_length = 0u;
+    if (position < metadata->len
+        && metadata->bytes[position] == (unsigned char)'"') {
+        int closed;
+
+        position += 1u;
+        value_start = position;
+        closed = 0;
+        while (position < metadata->len) {
+            if (metadata->bytes[position] == (unsigned char)'\\') {
+                position += 1u;
+                if (!cm_lower_meta_string_escape(metadata->bytes,
+                        metadata->len, &position)) return 0;
+                continue;
+            }
+            if (metadata->bytes[position] == (unsigned char)'"') {
+                value_length = position - value_start;
+                position += 1u;
+                closed = 1;
+                break;
+            }
+            position += 1u;
+        }
+        if (!closed) return 0;
+    } else if (position < metadata->len
+        && metadata->bytes[position] == (unsigned char)'r') {
+        size_t hash_count;
+        size_t close;
+        size_t hash_index;
+        int closed;
+
+        position += 1u;
+        hash_count = 0u;
+        while (position < metadata->len
+            && metadata->bytes[position] == (unsigned char)'#') {
+            hash_count += 1u;
+            position += 1u;
+        }
+        if (position == metadata->len
+            || metadata->bytes[position] != (unsigned char)'"') return 0;
+        position += 1u;
+        value_start = position;
+        closed = 0;
+        while (position < metadata->len) {
+            if (metadata->bytes[position] != (unsigned char)'"') {
+                position += 1u;
+                continue;
+            }
+            close = position + 1u;
+            if (metadata->len - close < hash_count) return 0;
+            for (hash_index = 0u; hash_index < hash_count; ++hash_index) {
+                if (metadata->bytes[close + hash_index]
+                    != (unsigned char)'#') break;
+            }
+            if (hash_index == hash_count) {
+                value_length = position - value_start;
+                position = close + hash_count;
+                closed = 1;
+                break;
+            }
+            position += 1u;
+        }
+        if (!closed) return 0;
+    } else {
+        return 0;
+    }
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (position != metadata->len) return 0;
+    if (out_value != NULL) *out_value = metadata->bytes + value_start;
+    if (out_value_length != NULL) *out_value_length = value_length;
+    return 1;
+}
+
+static int cm_lower_item_single_name_value_string_attribute(
+    const CmLowerState *state, const CmHirItem *item, const char *name,
+    int *out_present)
+{
+    uint32_t index;
+    uint32_t named_count;
+    uint32_t valid_count;
+
+    if (state == NULL || state->hir == NULL || item == NULL || name == NULL
+        || out_present == NULL) return 0;
+    named_count = 0u;
+    valid_count = 0u;
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *metadata;
+
+        metadata = cm_interner_get(&state->hir->strings,
+            item->attributes[index].metadata);
+        if (!cm_lower_metadata_has_attribute_name(metadata, name)) continue;
+        named_count += 1u;
+        if (cm_lower_meta_name_value_string(metadata, name, NULL, NULL)) {
+            valid_count += 1u;
+        }
+    }
+    *out_present = named_count != 0u;
+    return named_count == 0u
+        || (named_count == 1u && valid_count == 1u);
+}
+
+static int cm_lower_item_has_name_value_string(const CmLowerState *state,
+    const CmHirItem *item, const char *name, const char *value)
+{
+    const unsigned char *found_value;
+    size_t found_length;
+    size_t value_length;
+    uint32_t index;
+
+    if (state == NULL || state->hir == NULL || item == NULL || name == NULL
+        || value == NULL) return 0;
+    value_length = strlen(value);
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *metadata;
+
+        metadata = cm_interner_get(&state->hir->strings,
+            item->attributes[index].metadata);
+        if (cm_lower_meta_name_value_string(metadata, name, &found_value,
+                &found_length)
+            && found_length == value_length
+            && memcmp(found_value, value, value_length) == 0) return 1;
     }
     return 0;
 }
@@ -9820,6 +10091,7 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
 {
     const CmHirItem *implemented_trait;
     const CmHirItem *parent_impl;
+    int reservation_attribute;
     CmSpan span;
 
     span = cm_lower_span(state, ast_item->span);
@@ -9845,7 +10117,8 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
             || parent_impl == NULL
             || parent_impl->kind != CM_HIR_ITEM_IMPL
             || !parent_impl->data.impl_item.has_trait
-            || parent_impl->data.impl_item.is_negative
+            || parent_impl->data.impl_item.polarity
+                != CM_HIR_IMPL_POSITIVE
             || implemented_trait == NULL
             || implemented_trait->kind != CM_HIR_ITEM_TRAIT
             || implemented_trait->data.trait_item.is_auto) {
@@ -9899,6 +10172,16 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "const_trait is valid only as a word attribute on a trait");
+        return 0;
+    }
+    reservation_attribute = 0;
+    if (!cm_lower_item_single_name_value_string_attribute(state, out_item,
+            "rustc_reservation_impl", &reservation_attribute)
+        || (reservation_attribute && ast_item->kind != CM_AST_ITEM_IMPL)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "rustc_reservation_impl is valid only as one name-value string "
+            "attribute on a positive trait impl");
         return 0;
     }
     out_item->generic_parameter_start = record->generic_parameter_start;
@@ -10173,7 +10456,8 @@ static int cm_lower_function_item(CmLowerState *state,
 
         parent_impl = cm_lower_bound_item(state, record->parent_definition);
         if (parent_impl == NULL || parent_impl->kind != CM_HIR_ITEM_IMPL
-            || parent_impl->data.impl_item.is_negative != 0) {
+            || parent_impl->data.impl_item.polarity
+                == CM_HIR_IMPL_NEGATIVE) {
             cm_free(locals);
             cm_free(parameters);
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
@@ -14266,6 +14550,7 @@ static int cm_lower_impl_item(CmLowerState *state,
 {
     CmLowerTraitTarget trait_target;
     const CmHirItem *trait_item;
+    int is_reservation;
     CmHirSafety safety;
     CmSpan span;
 
@@ -14284,6 +14569,14 @@ static int cm_lower_impl_item(CmLowerState *state,
             "impl has an invalid const flag");
         return 0;
     }
+    is_reservation = 0;
+    if (!cm_lower_item_single_name_value_string_attribute(state, hir_item,
+            "rustc_reservation_impl", &is_reservation)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "impl reservation attribute is malformed or duplicated");
+        return 0;
+    }
     if (ast_item->visibility.kind != CM_AST_VIS_INHERITED) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -14297,6 +14590,12 @@ static int cm_lower_impl_item(CmLowerState *state,
         return 0;
     }
     if (ast_item->data.impl_item.trait_type == CM_AST_TYPE_NONE) {
+        if (is_reservation) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "reservation impls cannot be inherent");
+            return 0;
+        }
         if (ast_item->data.impl_item.is_const) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
                 ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -14323,7 +14622,7 @@ static int cm_lower_impl_item(CmLowerState *state,
         }
         hir_item->kind = CM_HIR_ITEM_IMPL;
         hir_item->data.impl_item.has_trait = 0;
-        hir_item->data.impl_item.is_negative = 0;
+        hir_item->data.impl_item.polarity = CM_HIR_IMPL_POSITIVE;
         hir_item->data.impl_item.is_const = 0;
         hir_item->data.impl_item.safety = CM_HIR_SAFE;
         hir_item->data.impl_item.self_type = cm_lower_type(state,
@@ -14333,8 +14632,10 @@ static int cm_lower_impl_item(CmLowerState *state,
     }
     hir_item->kind = CM_HIR_ITEM_IMPL;
     hir_item->data.impl_item.has_trait = 1;
-    hir_item->data.impl_item.is_negative =
-        ast_item->data.impl_item.is_negative;
+    hir_item->data.impl_item.polarity = is_reservation
+        ? CM_HIR_IMPL_RESERVATION
+        : ast_item->data.impl_item.is_negative
+            ? CM_HIR_IMPL_NEGATIVE : CM_HIR_IMPL_POSITIVE;
     hir_item->data.impl_item.is_const =
         ast_item->data.impl_item.is_const;
     hir_item->data.impl_item.safety = ast_item->data.impl_item.is_unsafe
@@ -14360,6 +14661,19 @@ static int cm_lower_impl_item(CmLowerState *state,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
             CM_HIR_INVARIANT_VIOLATION,
             "implemented trait header is not bound before the impl");
+        return 0;
+    }
+    if (is_reservation && ast_item->data.impl_item.is_negative) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "reservation impls cannot be negative");
+        return 0;
+    }
+    if (is_reservation && cm_lower_item_has_name_value_string(state,
+            trait_item, "lang", "drop")) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "reservation Drop impls are not supported");
         return 0;
     }
     if (trait_item->definition.crate_id == state->result.crate_id
@@ -14929,7 +15243,8 @@ static int cm_lower_value_item(CmLowerState *state,
     if (record->parent_kind == CM_LOWER_PARENT_IMPL) {
         parent_impl = cm_lower_bound_item(state, record->parent_definition);
         if (parent_impl == NULL || parent_impl->kind != CM_HIR_ITEM_IMPL
-            || parent_impl->data.impl_item.is_negative) {
+            || parent_impl->data.impl_item.polarity
+                == CM_HIR_IMPL_NEGATIVE) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
                 ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_INVARIANT_VIOLATION,
@@ -19263,7 +19578,8 @@ static uint32_t cm_lower_count_inherited_specialization_members(
                 impl_item->definition)
             || base_impl->definition.crate_id != state->result.crate_id
             || !base_impl->data.impl_item.has_trait
-            || base_impl->data.impl_item.is_negative
+            || base_impl->data.impl_item.polarity
+                != CM_HIR_IMPL_POSITIVE
             || !cm_hir_def_id_equal(
                 base_impl->data.impl_item.trait_type.definition,
                 impl_item->data.impl_item.trait_type.definition)
@@ -19330,7 +19646,8 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
         if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
             || impl_item->definition.crate_id != state->result.crate_id
             || !impl_item->data.impl_item.has_trait
-            || impl_item->data.impl_item.is_negative) {
+            || impl_item->data.impl_item.polarity
+                == CM_HIR_IMPL_NEGATIVE) {
             continue;
         }
         for (declaration_index = 0u;
@@ -19387,6 +19704,8 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
             if ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS
                     || declaration->kind == CM_HIR_ITEM_FUNCTION)
                 && matches == 0u
+                && impl_item->data.impl_item.polarity
+                    == CM_HIR_IMPL_POSITIVE
                 && ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS)
                     || !declaration->data.function_item.has_default_body)
                 && cm_lower_count_inherited_specialization_members(state,
@@ -21676,7 +21995,9 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             index);
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
             || item->definition.crate_id != state->result.crate_id
-            || !item->data.impl_item.has_trait) {
+            || !item->data.impl_item.has_trait
+            || item->data.impl_item.polarity
+                == CM_HIR_IMPL_RESERVATION) {
             continue;
         }
         classes[index] = cm_lower_impl_self_class(state, item,
@@ -21705,7 +22026,9 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             index);
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
             || item->definition.crate_id != state->result.crate_id
-            || !item->data.impl_item.has_trait) {
+            || !item->data.impl_item.has_trait
+            || item->data.impl_item.polarity
+                == CM_HIR_IMPL_RESERVATION) {
             continue;
         }
         item_class = classes[index];
@@ -21719,6 +22042,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                 prior_index);
             if (prior == NULL || prior->kind != CM_HIR_ITEM_IMPL
                 || prior->definition.crate_id != state->result.crate_id
+                || prior->data.impl_item.polarity
+                    == CM_HIR_IMPL_RESERVATION
                 || !cm_hir_def_id_equal(
                     prior->data.impl_item.trait_type.definition,
                     item->data.impl_item.trait_type.definition)) {
@@ -21745,8 +22070,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,
-                prior->data.impl_item.is_negative
-                            != item->data.impl_item.is_negative
+                prior->data.impl_item.polarity
+                            != item->data.impl_item.polarity
                         ? "conflicting positive and negative impl candidates "
                           "for one trait and self type"
                         : item_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
@@ -21767,7 +22092,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                         == CM_LOWER_IMPL_SELF_ORDERED_GENERIC_TUPLE
                     ? "overlapping ordered generic impl candidates for one "
                       "trait and local ADT head"
-                    : item->data.impl_item.is_negative
+                    : item->data.impl_item.polarity
+                            == CM_HIR_IMPL_NEGATIVE
                             ? "duplicate exact negative impl candidate for "
                               "one trait and self type"
                         : "duplicate exact impl candidate for one trait "

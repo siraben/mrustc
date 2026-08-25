@@ -414,7 +414,7 @@ static int cm_results_callable_identity_valid(const CmHirContext *hir,
             record->requested_trait)
         && impl_item != NULL && impl_item->kind == CM_HIR_ITEM_IMPL
         && impl_item->data.impl_item.has_trait
-        && !impl_item->data.impl_item.is_negative
+        && impl_item->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && cm_hir_def_id_equal(
             impl_item->data.impl_item.trait_type.definition,
             record->requested_trait)
@@ -656,6 +656,7 @@ static int cm_results_callable_matches_instantiated_hir(
     impl_item = cm_results_item(hir, record->selected_impl);
     selected = cm_results_item(hir, record->selected_callable);
     if (impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || selected == NULL || selected->kind != CM_HIR_ITEM_FUNCTION
         || !cm_hir_def_id_equal(record->body_definition,
             record->selected_callable)
@@ -7460,6 +7461,7 @@ static int cm_results_hir_type_is_monomorphic_inner(
 
         owner = cm_results_item(hir, type->data.self_type.owner);
         if (owner == NULL || owner->kind != CM_HIR_ITEM_IMPL
+            || owner->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
             || owner->generic_parameter_count != 0u
             || owner->data.impl_item.self_type == CM_HIR_TYPE_NONE
             || owner->data.impl_item.self_type == type_id) {

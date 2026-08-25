@@ -820,11 +820,11 @@ static void test_known_trait_projection_model(void)
     item.data.impl_item.has_trait = 0;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.has_trait = 1;
-    item.data.impl_item.is_negative = 1;
+    item.data.impl_item.polarity = CM_HIR_IMPL_NEGATIVE;
     item.definition = negative_impl_definition;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     item.definition = impl_definition;
-    item.data.impl_item.is_negative = 0;
+    item.data.impl_item.polarity = CM_HIR_IMPL_POSITIVE;
     item_count = context.items.len;
     arena_bytes = cm_arena_bytes_used(&context.storage);
     item.data.impl_item.trait_type.definition = struct_definition;
@@ -850,7 +850,7 @@ static void test_known_trait_projection_model(void)
     stored_impl = cm_hir_get_item(&context, item_id);
     assert(stored_impl != NULL && stored_impl->name == CM_INTERN_ID_NONE
         && stored_impl->data.impl_item.has_trait == 1
-        && stored_impl->data.impl_item.is_negative == 0
+        && stored_impl->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && cm_hir_def_id_equal(
             stored_impl->data.impl_item.trait_type.definition,
             trait_definition)
@@ -1379,7 +1379,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1638,7 +1638,7 @@ static void test_function_pointer_lifetime_binder_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
+    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0
         && strstr(dump,
             "type#4 for<\"'a\"> fn[\"Rust\"](ty#2)->ty#2 ") != NULL
         && strstr(dump,
@@ -3043,7 +3043,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -3427,7 +3427,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
+    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -4114,7 +4114,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -4596,7 +4596,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -5113,7 +5113,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -6260,7 +6260,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -8040,6 +8040,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     CmHirDefId negative_definition;
     CmHirDefId ordinary_negative_definition;
     CmHirDefId positive_definition;
+    CmHirDefId reservation_definition;
     CmHirDefId child_definition;
     CmHirType type;
     CmHirTypeId u8_type;
@@ -8224,11 +8225,11 @@ static void test_auto_trait_and_negative_impl_model(void)
         test_span(61u, 100u));
     item.data.impl_item.self_type = u8_type;
     item.data.impl_item.has_trait = 1;
-    item.data.impl_item.is_negative = 2;
+    item.data.impl_item.polarity = (CmHirImplPolarity)3;
     item.data.impl_item.safety = CM_HIR_SAFE;
     item.data.impl_item.trait_type.definition = auto_definition;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
-    item.data.impl_item.is_negative = 1;
+    item.data.impl_item.polarity = CM_HIR_IMPL_NEGATIVE;
     item.data.impl_item.is_const = 2;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.is_const = 0;
@@ -8251,7 +8252,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     stored = cm_hir_get_item(&context, item_id);
     assert(stored != NULL && stored->kind == CM_HIR_ITEM_IMPL
-        && stored->data.impl_item.is_negative
+        && stored->data.impl_item.polarity == CM_HIR_IMPL_NEGATIVE
         && stored->data.impl_item.is_const
         && stored->data.impl_item.safety == CM_HIR_SAFE
         && cm_hir_def_id_equal(
@@ -8273,22 +8274,48 @@ static void test_auto_trait_and_negative_impl_model(void)
     item.data.impl_item.safety = CM_HIR_UNSAFE;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
 
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_IMPL, test_span(141u, 175u),
+        &reservation_definition) == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_IMPL, reservation_definition,
+        root_module, cm_hir_def_id_none(), CM_INTERN_ID_NONE,
+        test_span(141u, 175u));
+    item.data.impl_item.self_type = u8_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = ordinary_definition;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    item.data.impl_item.polarity = (CmHirImplPolarity)3;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    item.data.impl_item.polarity = CM_HIR_IMPL_RESERVATION;
+    item.data.impl_item.has_trait = 0;
+    item.data.impl_item.trait_type.definition = cm_hir_def_id_none();
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = ordinary_definition;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    stored = cm_hir_get_item(&context, item_id);
+    assert(stored != NULL
+        && stored->data.impl_item.polarity == CM_HIR_IMPL_RESERVATION);
+
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(strstr(dump,
         "trait-header item#2 safety=unsafe auto=1 const=1")
         != NULL);
     assert(strstr(dump, "{assoc=1:4,value=ty#1}") != NULL);
     assert(strstr(dump,
-        "impl-header item#4 safety=safe negative=1 const=0")
+        "impl-header item#4 safety=safe polarity=negative const=0")
         != NULL);
     assert(strstr(dump,
-        "impl-header item#5 safety=safe negative=1 const=1")
+        "impl-header item#5 safety=safe polarity=negative const=1")
         != NULL);
     assert(strstr(dump,
-        "impl-header item#6 safety=unsafe negative=0 const=1")
+        "impl-header item#6 safety=unsafe polarity=positive const=1")
+        != NULL);
+    assert(strstr(dump,
+        "impl-header item#7 safety=safe polarity=reservation const=0")
         != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
@@ -8674,7 +8701,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -9223,7 +9250,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
+    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,

@@ -920,7 +920,7 @@ static int cm_admission_canonical_instance_supported(
         && enclosing->predicate_count == 0u
         && enclosing->outlives_predicate_count == 0u
         && enclosing->data.impl_item.has_trait
-        && !enclosing->data.impl_item.is_negative
+        && enclosing->data.impl_item.polarity == CM_HIR_IMPL_POSITIVE
         && trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
         && cm_hir_def_id_equal(enclosing->data.impl_item.trait_type
             .definition, trait_item->definition)

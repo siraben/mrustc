@@ -454,7 +454,7 @@ CmHirProjectionImplTarget cm_hir_projection_impl_target(
     if (!cm_projection_association_valid(trait_item, trait_associated)
         || impl_item == NULL || impl_item->kind != CM_HIR_ITEM_IMPL
         || impl_item->data.impl_item.has_trait != 1
-        || impl_item->data.impl_item.is_negative != 0
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || !cm_hir_def_id_equal(
             impl_item->data.impl_item.trait_type.definition,
             trait_definition)) {
@@ -579,7 +579,7 @@ CmHirProjectionMatch cm_hir_match_projection(
         item = (const CmHirItem *)cm_vec_at_const(&context->items, index);
         if (item == NULL || item->kind != CM_HIR_ITEM_IMPL
             || item->data.impl_item.has_trait != 1
-            || item->data.impl_item.is_negative != 0
+            || item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
             || !cm_hir_def_id_equal(
                 item->data.impl_item.trait_type.definition,
                 trait_item->definition)) {

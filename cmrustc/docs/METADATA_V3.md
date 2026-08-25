@@ -451,7 +451,7 @@ module_local owner_module
 u32 source_ordinal
 u8  kind                            # TRAIT or INHERENT
 u8  safety
-u8  polarity                        # POSITIVE or NEGATIVE
+u8  polarity                        # POSITIVE, NEGATIVE, or RESERVATION
 u8  defaultness                     # FINAL or DEFAULT
 u8  constness                       # NON_CONST or CONST
 u8  reserved[3]                     # zero
@@ -484,7 +484,13 @@ filtering private inherent impls is not compatible with
 `impl_universe` remains `OPEN`: a missing match returns
 `CM_TRAIT_SOLVER_DEFERRED_METADATA`, never `NO_SOLUTION`. Exact transported
 negative impls may refute only where the existing solver's authenticated
-negative-proof rules permit it.
+negative-proof rules permit it. A reservation record is a declaration and
+coherence fact only: it permits overlap but is neither positive selection
+evidence nor a negative proof. Legacy formats and semantic consumers that
+cannot preserve that distinction reject the record rather than remapping its
+polarity. Reservation-owned `AITM` records are structural declarations only:
+they are never selection or projection evidence and cannot be instantiated,
+lowered to MIR, or code-generated.
 
 ### `NSPC`: effective public namespace
 

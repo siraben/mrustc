@@ -993,7 +993,7 @@ static void test_pending_and_invalid(void)
 
     fixture_init(&fixture, 0, 0);
     impl_item = mutable_item(&fixture, fixture.impl_definition);
-    impl_item->data.impl_item.is_negative = 1;
+    impl_item->data.impl_item.polarity = CM_HIR_IMPL_NEGATIVE;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
     assert(result.status == CM_SEMANTIC_ITEM_OK);
@@ -1013,7 +1013,7 @@ static void test_pending_and_invalid(void)
         fixture.crate_id);
     assert(result.status == CM_SEMANTIC_ITEM_SAFETY_MISMATCH);
     impl_item->data.impl_item.safety = CM_HIR_SAFE;
-    impl_item->data.impl_item.is_negative = 0;
+    impl_item->data.impl_item.polarity = CM_HIR_IMPL_POSITIVE;
     impl_item->data.impl_item.trait_type.definition.crate_id += 10u;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
@@ -1022,7 +1022,7 @@ static void test_pending_and_invalid(void)
 
     fixture_init(&fixture, 1, 0);
     impl_item = mutable_item(&fixture, fixture.impl_definition);
-    impl_item->data.impl_item.is_negative = 1;
+    impl_item->data.impl_item.polarity = CM_HIR_IMPL_NEGATIVE;
     result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
         fixture.crate_id);
     assert(result.status == CM_SEMANTIC_ITEM_WRONG_ASSOCIATION
@@ -1199,6 +1199,24 @@ static void test_specialization_is_a_hard_barrier(void)
     fixture_destroy(&fixture);
 }
 
+static void test_reservation_is_a_hard_barrier(void)
+{
+    TestFixture fixture;
+    CmSemanticItemResult result;
+
+    fixture_init(&fixture, 1, 1);
+    mutable_item(&fixture, fixture.impl_definition)->data.impl_item.polarity =
+        CM_HIR_IMPL_RESERVATION;
+    result = cm_semantic_item_check_local_trait_impls(&fixture.hir,
+        fixture.crate_id);
+    assert(result.status == CM_SEMANTIC_ITEM_PENDING_RESERVATION
+        && cm_hir_def_id_equal(result.impl_definition,
+            fixture.impl_definition)
+        && cm_hir_def_id_equal(result.trait_definition,
+            fixture.trait_definition));
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_positive_and_signature_mismatches();
@@ -1213,6 +1231,7 @@ int main(void)
     test_associated_type_bounds_are_pending();
     test_pending_and_invalid();
     test_explicit_auto_trait_impl_headers();
+    test_reservation_is_a_hard_barrier();
     test_specialization_is_a_hard_barrier();
     puts("hir semantic item tests passed");
     return 0;

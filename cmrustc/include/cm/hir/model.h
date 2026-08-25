@@ -36,6 +36,12 @@ typedef enum CmHirSafety {
     CM_HIR_UNSAFE
 } CmHirSafety;
 
+typedef enum CmHirImplPolarity {
+    CM_HIR_IMPL_POSITIVE = 0,
+    CM_HIR_IMPL_NEGATIVE,
+    CM_HIR_IMPL_RESERVATION
+} CmHirImplPolarity;
+
 typedef enum CmHirGenericParamKind {
     CM_HIR_GENERIC_LIFETIME = 0,
     CM_HIR_GENERIC_TYPE,
@@ -717,7 +723,7 @@ typedef struct CmHirItem {
             int has_trait;
             CmHirNamedType trait_type;
             CmHirSafety safety;
-            int is_negative;
+            CmHirImplPolarity polarity;
             int is_const;
         } impl_item;
     } data;

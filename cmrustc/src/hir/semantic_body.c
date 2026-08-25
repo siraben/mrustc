@@ -1030,6 +1030,7 @@ static CmSemanticBodyStatus cm_semantic_body_copy_trait_arguments(
         || out_arguments == NULL || out_count == NULL
         || impl_item->kind != CM_HIR_ITEM_IMPL
         || !impl_item->data.impl_item.has_trait
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || !cm_hir_def_id_equal(impl_item->data.impl_item.trait_type
             .definition, expected_trait)
         || query_trait->argument_count
@@ -1654,7 +1655,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_qualified_callable(
         || !cm_semantic_type_only_owner(constraints->hir, impl_item,
             impl_item->generic_parameter_count)
         || !impl_item->data.impl_item.has_trait
-        || impl_item->data.impl_item.is_negative
+        || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
         || impl_item->data.impl_item.trait_type.argument_count
             != query_trait.argument_count
         || (impl_item->data.impl_item.trait_type.argument_count != 0u)
@@ -2177,7 +2178,7 @@ static CmSemanticBodyStatus cm_semantic_body_check_method_callable(
                 || !cm_semantic_type_only_owner(constraints->hir,
                     impl_item, impl_item->generic_parameter_count)
                 || !impl_item->data.impl_item.has_trait
-                || impl_item->data.impl_item.is_negative
+                || impl_item->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
                 || impl_item->data.impl_item.trait_type.argument_count
                     != trait_item->generic_parameter_count
                 || (impl_item->data.impl_item.trait_type.argument_count != 0u)
@@ -4024,6 +4025,8 @@ static CmSemanticBodyResult cm_semantic_body_check_calls_mode(
                         cm_semantic_session_enclosing_owner(session))
                 : enclosing_item == NULL
                     || enclosing_item->kind != CM_HIR_ITEM_IMPL
+                    || enclosing_item->data.impl_item.polarity
+                        != CM_HIR_IMPL_POSITIVE
                     || !cm_hir_def_id_equal(
                         owner_item->parent_definition,
                         cm_semantic_session_enclosing_owner(session)))
