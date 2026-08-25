@@ -148,6 +148,7 @@ typedef struct CmTypeckType {
             CmTypeckTypeId *parameters;
             uint32_t parameter_count;
             CmTypeckTypeId return_type;
+            uint32_t binder_lifetime_count;
             CmInternId abi;
             CmHirSafety safety;
             int is_variadic;

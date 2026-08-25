@@ -43,6 +43,9 @@ typedef struct CmSemanticRegionsScratch {
 
 static int cm_semantic_regions_scan_type(
     CmSemanticRegionsScratch *scratch, CmHirTypeId type_id, size_t depth);
+static int cm_semantic_regions_binder_valid(
+    const CmSemanticRegionsScratch *scratch,
+    const CmHirLifetimeBinder *binder, int require_nonempty);
 static int cm_semantic_regions_visit_expression(
     CmSemanticRegionsScratch *scratch, CmHirExprId expression_id,
     CmHirValueUsage expected_usage, size_t depth);
@@ -425,6 +428,8 @@ static int cm_semantic_regions_type_equal(
     case CM_HIR_TYPE_FN_POINTER_KIND:
         if (left->data.fn_pointer_type.parameter_count
                 != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.binder.lifetime_count
+                != right->data.fn_pointer_type.binder.lifetime_count
             || left->data.fn_pointer_type.parameter_count
                 > CM_SEMANTIC_REGIONS_SLICE_LIMIT
             || left->data.fn_pointer_type.abi
@@ -818,6 +823,8 @@ static int cm_semantic_regions_scan_type(
                 != (type->data.fn_pointer_type.parameters == NULL)
             || type->data.fn_pointer_type.parameter_count
                 > CM_SEMANTIC_REGIONS_SLICE_LIMIT
+            || !cm_semantic_regions_binder_valid(scratch,
+                &type->data.fn_pointer_type.binder, 0)
             || cm_interner_get(&scratch->hir->strings,
                     type->data.fn_pointer_type.abi) == NULL
             || (unsigned int)type->data.fn_pointer_type.safety
@@ -828,18 +835,33 @@ static int cm_semantic_regions_scan_type(
                 CM_SEMANTIC_REGIONS_INVALID_HIR, type_id);
             break;
         }
+        {
+        uint32_t saved_late_bound_limit;
+        int saved_late_bound_allowed;
+
+        saved_late_bound_limit = scratch->late_bound_limit;
+        saved_late_bound_allowed = scratch->late_bound_allowed;
+        scratch->late_bound_allowed = 1;
+        scratch->late_bound_limit =
+            type->data.fn_pointer_type.binder.lifetime_count;
+        ok = 1;
         for (index = 0u;
              index < type->data.fn_pointer_type.parameter_count; ++index) {
             if (!cm_semantic_regions_scan_type(scratch,
                     type->data.fn_pointer_type.parameters[index],
                     depth + 1u)) {
                 ok = 0;
-                goto done;
+                break;
             }
         }
-        ok = cm_semantic_regions_scan_type(scratch,
-            type->data.fn_pointer_type.return_type, depth + 1u);
+        if (ok) {
+            ok = cm_semantic_regions_scan_type(scratch,
+                type->data.fn_pointer_type.return_type, depth + 1u);
+        }
+        scratch->late_bound_limit = saved_late_bound_limit;
+        scratch->late_bound_allowed = saved_late_bound_allowed;
         break;
+        }
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
         ok = cm_semantic_regions_scan_named(scratch,
             &type->data.named_type, type_id,

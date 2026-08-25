@@ -229,6 +229,14 @@ static void print_type(const CmAst *ast, CmAstTypeId id)
         fputs("array(", stdout); print_type(ast, type->child); fputc(')', stdout);
         break;
     case CM_AST_TYPE_FUNCTION:
+        if (type->binder.lifetime_count != 0u) {
+            fputs("for<", stdout);
+            for (index = 0u; index < type->binder.lifetime_count; ++index) {
+                if (index != 0u) fputc(',', stdout);
+                print_string(ast, type->binder.lifetimes[index]);
+            }
+            fputs(">;", stdout);
+        }
         fputs(type->is_unsafe ? "fn(unsafe;" : "fn(safe;", stdout);
         for (index = 0u; index < type->element_count; ++index) {
             if (index != 0u) fputc(',', stdout);

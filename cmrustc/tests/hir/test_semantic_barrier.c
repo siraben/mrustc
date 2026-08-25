@@ -329,7 +329,7 @@ static void test_marked_usage_rules_and_dump(void)
         && fseek(stream, 0L, SEEK_SET) == 0);
     dump_size = fread(dump, 1u, sizeof(dump) - 1u, stream);
     dump[dump_size] = '\0';
-    assert(strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0
+    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
         && strstr(dump, "usage=move static-borrow=not-promoted") != NULL
         && strstr(dump, "usage=borrow static-borrow=not-promoted") != NULL);
     assert(fclose(stream) == 0);
@@ -740,7 +740,8 @@ static void test_regions_predicate_terms_and_binders(void)
     static const char source[] =
         "struct Wrap<'a, T>(&'a T); "
         "trait Bound<T> {} "
-        "fn bounded<'outer, T: Bound<Wrap<'outer, T>>>(value: T) -> T "
+        "fn bounded<'outer, T: Bound<Wrap<'outer, T>>>(value: T, "
+        "callback: for<'a> fn(for<'b> fn(&'b u8), &'a u8)) -> T "
         "where for<'inner> T: Bound<Wrap<'inner, T>> + 'inner { value }";
     Fixture fixture;
     CmSemanticBarrier barrier;
@@ -750,6 +751,9 @@ static void test_regions_predicate_terms_and_binders(void)
     CmHirItem *owner;
     CmHirPredicateScope *scope;
     CmHirType *late_type;
+    CmHirType *outer_function;
+    CmHirType *inner_function;
+    CmHirType *inner_reference;
     CmHirRegion saved_bound;
     uint32_t saved_binder_index;
     uint32_t saved_scope_count;
@@ -784,6 +788,34 @@ static void test_regions_predicate_terms_and_binders(void)
             == CM_HIR_GENERIC_ARG_LIFETIME
         && late_type->data.named_type.arguments[0].data.lifetime.kind
             == CM_HIR_REGION_LATE_BOUND);
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_OK);
+
+    outer_function = (CmHirType *)cm_vec_at(&fixture.hir.types,
+        (size_t)owner->data.function_item.signature.parameters[1].type - 1u);
+    inner_function = outer_function == NULL
+            || outer_function->kind != CM_HIR_TYPE_FN_POINTER_KIND
+        ? NULL : (CmHirType *)cm_vec_at(&fixture.hir.types,
+            (size_t)outer_function->data.fn_pointer_type.parameters[0] - 1u);
+    inner_reference = inner_function == NULL
+            || inner_function->kind != CM_HIR_TYPE_FN_POINTER_KIND
+        ? NULL : (CmHirType *)cm_vec_at(&fixture.hir.types,
+            (size_t)inner_function->data.fn_pointer_type.parameters[0] - 1u);
+    assert(outer_function != NULL
+        && outer_function->data.fn_pointer_type.binder.lifetime_count == 1u
+        && inner_function != NULL
+        && inner_function->data.fn_pointer_type.binder.lifetime_count == 1u
+        && inner_reference != NULL
+        && inner_reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && inner_reference->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND);
+    saved_binder_index = inner_reference->data.reference_type.region
+        .data.binder_index;
+    inner_reference->data.reference_type.region.data.binder_index = 1u;
+    regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
+    assert(regions.status == CM_SEMANTIC_REGIONS_INVALID_HIR);
+    inner_reference->data.reference_type.region.data.binder_index =
+        saved_binder_index;
     regions = cm_hir_semantic_check_regions(&fixture.hir, &atom.body, 1u);
     assert(regions.status == CM_SEMANTIC_REGIONS_OK);
 

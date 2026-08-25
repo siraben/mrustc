@@ -434,6 +434,19 @@ static void cm_dump_type(FILE *stream, const CmAst *ast, CmAstTypeId id)
         fputc(')', stream);
         break;
     case CM_AST_TYPE_FUNCTION:
+        if (type->binder.lifetime_count != 0u) {
+            uint32_t lifetime_index;
+
+            fputs("for<", stream);
+            for (lifetime_index = 0u;
+                 lifetime_index < type->binder.lifetime_count;
+                 ++lifetime_index) {
+                if (lifetime_index != 0u) fputs(", ", stream);
+                cm_dump_string(stream, ast,
+                    type->binder.lifetimes[lifetime_index]);
+            }
+            fputs("> ", stream);
+        }
         fputs(type->is_unsafe ? "unsafe-fn(" : "fn(", stream);
         cm_dump_type_list(stream, ast, type);
         fputs(")->", stream);

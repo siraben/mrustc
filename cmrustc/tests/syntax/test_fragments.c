@@ -693,6 +693,11 @@ static void test_type_fragments(void)
     CmTypeFragment macro;
     CmTypeFragment trailing;
     CmTypeFragment empty;
+    CmTypeFragment bound_function;
+    CmTypeFragment implicit_function;
+    CmTypeFragment duplicate_binder;
+    const CmAstType *bound_function_type;
+    const CmAstType *implicit_function_type;
     const CmAstType *macro_type;
     const CmAstPath *macro_path;
 
@@ -702,13 +707,24 @@ static void test_type_fragments(void)
         strlen("Wrapping<Result<u8, E>>"), CM_EDITION_2024);
     macro = cm_parse_type_fragment(&ast, "wrap::in_ref!(x x)",
         strlen("wrap::in_ref!(x x)"), CM_EDITION_2024);
+    trailing = cm_parse_type_fragment(&ast, "u8 u16",
+        strlen("u8 u16"), CM_EDITION_2024);
+    empty = cm_parse_type_fragment(&ast, NULL, 0u, CM_EDITION_2024);
+    bound_function = cm_parse_type_fragment(&ast,
+        "for<'a, 'b> unsafe fn(&'a u8, &'b u16) -> &'a u8",
+        strlen("for<'a, 'b> unsafe fn(&'a u8, &'b u16) -> &'a u8"),
+        CM_EDITION_2024);
+    implicit_function = cm_parse_type_fragment(&ast, "fn(&u8) -> &u8",
+        strlen("fn(&u8) -> &u8"), CM_EDITION_2024);
+    duplicate_binder = cm_parse_type_fragment(&ast,
+        "for<'a, 'a> fn(&'a u8)",
+        strlen("for<'a, 'a> fn(&'a u8)"), CM_EDITION_2024);
     macro_type = cm_ast_get_type(&ast, macro.type);
     macro_path = macro_type == NULL
             || macro_type->kind != CM_AST_TYPE_MACRO
         ? NULL : cm_ast_get_path(&ast, macro_type->macro_type.path);
-    trailing = cm_parse_type_fragment(&ast, "u8 u16",
-        strlen("u8 u16"), CM_EDITION_2024);
-    empty = cm_parse_type_fragment(&ast, NULL, 0u, CM_EDITION_2024);
+    bound_function_type = cm_ast_get_type(&ast, bound_function.type);
+    implicit_function_type = cm_ast_get_type(&ast, implicit_function.type);
     if (generic.parse.error_count != 0u
         || generic.type == CM_AST_TYPE_NONE
         || macro.parse.error_count != 0u || macro_type == NULL
@@ -723,7 +739,21 @@ static void test_type_fragments(void)
         || trailing.parse.error_count == 0u
         || trailing.type != CM_AST_TYPE_NONE
         || empty.parse.error_count == 0u
-        || empty.type != CM_AST_TYPE_NONE) {
+        || empty.type != CM_AST_TYPE_NONE
+        || bound_function.parse.error_count != 0u
+        || bound_function_type == NULL
+        || bound_function_type->kind != CM_AST_TYPE_FUNCTION
+        || !bound_function_type->is_unsafe
+        || bound_function_type->binder.lifetime_count != 2u
+        || bound_function_type->binder.lifetimes == NULL
+        || !string_is(&ast, bound_function_type->binder.lifetimes[0], "'a")
+        || !string_is(&ast, bound_function_type->binder.lifetimes[1], "'b")
+        || implicit_function.parse.error_count != 0u
+        || implicit_function_type == NULL
+        || implicit_function_type->kind != CM_AST_TYPE_FUNCTION
+        || implicit_function_type->binder.lifetime_count != 0u
+        || implicit_function_type->binder.lifetimes != NULL
+        || duplicate_binder.parse.error_count != 0u) {
         fail("type-fragment",
             "complete type fragment boundaries were not enforced");
     }

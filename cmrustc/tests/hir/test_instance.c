@@ -38,6 +38,7 @@ typedef struct Fixture {
     CmHirTypeId duplicate_static_reference;
     CmHirTypeId erased_reference;
     CmHirTypeId bound_reference;
+    CmHirTypeId bound_function_pointer;
     CmHirTypeId array_128;
 } Fixture;
 
@@ -66,6 +67,7 @@ static void fixture_init(Fixture *fixture)
 {
     static const char source[] =
         "fn choose<A, B>(left: A, _right: B) -> A { left } "
+        "type BoundFn = for<'a> fn(&'a u8); "
         "struct Holder<T> { value: T } "
         "trait Value { fn value(value: u32) -> u32; } "
         "impl Value for u32 { fn value(value: u32) -> u32 { value } } "
@@ -134,6 +136,10 @@ static void fixture_init(Fixture *fixture)
         } else if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT
             && intern_is(&fixture->hir, item->name, "Holder")) {
             fixture->holder_definition = item->definition;
+        } else if (item != NULL && item->kind == CM_HIR_ITEM_TYPE_ALIAS
+            && intern_is(&fixture->hir, item->name, "BoundFn")) {
+            fixture->bound_function_pointer =
+                item->data.type_alias_item.target;
         } else if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
             && intern_is(&fixture->hir, item->name, "value")) {
             if (item->data.function_item.body == CM_HIR_BODY_NONE) {
@@ -914,6 +920,25 @@ static void test_clone_oom_is_transactional(void)
     fixture_destroy(&fixture);
 }
 
+static void test_bound_function_pointer_fails_closed(void)
+{
+    Fixture fixture;
+    CmHirGenericArg arguments[2];
+    CmHirInstanceSpec spec;
+    CmHirInstanceKey key;
+
+    fixture_init(&fixture);
+    memset(&key, 0, sizeof(key));
+    spec = make_spec(&fixture, arguments);
+    arguments[0].data.type = fixture.bound_function_pointer;
+    assert(fixture.bound_function_pointer != CM_HIR_TYPE_NONE
+        && cm_hir_instance_key_init(&key, &fixture.admission, &spec)
+            == CM_HIR_INSTANCE_UNSUPPORTED_REGION
+        && key.state == NULL);
+    cm_hir_instance_key_destroy(&key);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_structural_key_clone_compare_dump();
@@ -926,6 +951,7 @@ int main(void)
     test_fail_closed_and_stale();
     test_same_hir_foreign_admission();
     test_clone_oom_is_transactional();
+    test_bound_function_pointer_fails_closed();
     puts("hir instance key tests passed");
     return 0;
 }

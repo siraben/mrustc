@@ -343,7 +343,11 @@ static int cm_semantic_barrier_typed_payload_fingerprint(
             if (!cm_semantic_barrier_hash_array(&hash,
                     type->data.fn_pointer_type.parameters,
                     (size_t)type->data.fn_pointer_type.parameter_count,
-                    sizeof(*type->data.fn_pointer_type.parameters))) {
+                    sizeof(*type->data.fn_pointer_type.parameters))
+                || !cm_semantic_barrier_hash_array(&hash,
+                    type->data.fn_pointer_type.binder.lifetimes,
+                    (size_t)type->data.fn_pointer_type.binder.lifetime_count,
+                    sizeof(*type->data.fn_pointer_type.binder.lifetimes))) {
                 return 0;
             }
         } else if (type->kind == CM_HIR_TYPE_FN_DEFINITION_KIND

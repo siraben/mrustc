@@ -351,7 +351,9 @@ static int cm_normalize_type_equal_inner(CmNormalizeCompareState *compare,
             left->data.slice_type.element,
             right->data.slice_type.element);
     case CM_TYPECK_TYPE_FN_POINTER:
-        if (left->data.fn_pointer_type.parameter_count
+        if (left->data.fn_pointer_type.binder_lifetime_count != 0u
+            || right->data.fn_pointer_type.binder_lifetime_count != 0u
+            || left->data.fn_pointer_type.parameter_count
                 != right->data.fn_pointer_type.parameter_count
             || left->data.fn_pointer_type.abi
                 != right->data.fn_pointer_type.abi

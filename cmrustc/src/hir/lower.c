@@ -107,6 +107,11 @@ typedef struct CmLowerVariantRecord {
     uint32_t source_index;
 } CmLowerVariantRecord;
 
+typedef struct CmLowerHiddenLifetimeBinder {
+    const CmAstLifetimeBinder *binder;
+    const struct CmLowerHiddenLifetimeBinder *previous;
+} CmLowerHiddenLifetimeBinder;
+
 typedef struct CmLowerMacroRecord {
     CmResolveItemRef declaration;
     CmHirDefId definition;
@@ -133,6 +138,7 @@ typedef struct CmLowerState {
     CmVec expected_module_bindings;
     const CmHirItem *active_item;
     const CmAstLifetimeBinder *active_lifetime_binder;
+    const CmLowerHiddenLifetimeBinder *hidden_lifetime_binders;
     CmHirLifetimeBinder *active_callable_predicate_binder;
     CmSpan active_callable_predicate_span;
     uint32_t callable_input_depth;
@@ -175,6 +181,11 @@ static int cm_lower_validate_impl_trait_type(CmLowerState *state,
 static int cm_lower_lifetime_binder_is_valid(
     const CmAstLifetimeBinder *binder, CmAstSpan bound_span,
     const CmAstType *trait_type);
+static int cm_lower_function_lifetime_binder_is_valid(
+    const CmAstLifetimeBinder *binder, CmAstSpan type_span);
+static int cm_lower_copy_lifetime_binder(CmLowerState *state,
+    CmAstItemId ast_item_id, const CmAstLifetimeBinder *ast_binder,
+    CmHirLifetimeBinder *out_binder);
 static int cm_lower_item_trait_predicates(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item);
@@ -235,6 +246,33 @@ static CmSpan cm_lower_span(const CmLowerState *state, CmAstSpan ast_span)
     span.start = ast_span.start;
     span.end = ast_span.end;
     return span;
+}
+
+static int cm_lower_function_lifetime_binder_is_valid(
+    const CmAstLifetimeBinder *binder, CmAstSpan type_span)
+{
+    uint32_t index;
+    uint32_t prior;
+
+    if (binder == NULL) return 0;
+    if (binder->lifetime_count > CM_HIR_LIFETIME_BINDER_LIMIT) return 0;
+    if (binder->lifetime_count == 0u) {
+        return binder->lifetimes == NULL
+            && binder->span.start == 0u && binder->span.end == 0u;
+    }
+    if (binder->lifetimes == NULL
+        || binder->span.start >= binder->span.end
+        || binder->span.start < type_span.start
+        || binder->span.end > type_span.end) return 0;
+    for (index = 0u; index < binder->lifetime_count; ++index) {
+        if (binder->lifetimes[index] == CM_INTERN_ID_NONE) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (binder->lifetimes[prior] == binder->lifetimes[index]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
 }
 
 static int cm_lower_resolve_library_import(
@@ -2963,7 +3001,8 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
             char name[32];
             int length;
 
-            if (callable_binder->lifetime_count == UINT32_MAX
+            if (callable_binder->lifetime_count
+                    >= CM_HIR_LIFETIME_BINDER_LIMIT
 #if SIZE_MAX <= UINT32_MAX
                 || callable_binder->lifetime_count
                     >= (uint32_t)(SIZE_MAX / sizeof(CmInternId))
@@ -3044,6 +3083,27 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
                 out_region->kind = CM_HIR_REGION_LATE_BOUND;
                 out_region->data.binder_index = binder_index;
                 return cm_lower_finish_lifetime(state, out_region);
+            }
+        }
+    }
+    {
+        const CmLowerHiddenLifetimeBinder *hidden;
+
+        for (hidden = state->hidden_lifetime_binders; hidden != NULL;
+             hidden = hidden->previous) {
+            if (hidden->binder == NULL) continue;
+            for (binder_index = 0u;
+                 binder_index < hidden->binder->lifetime_count;
+                 ++binder_index) {
+                if (cm_lower_strings_equal(state, lifetime,
+                        hidden->binder->lifetimes[binder_index])) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                        span, CM_AST_ITEM_NONE, CM_AST_TYPE_NONE,
+                        CM_AST_PATH_NONE, CM_HIR_OK,
+                        "closed function pointer captures an enclosing "
+                        "late-bound lifetime");
+                    return 0;
+                }
             }
         }
     }
@@ -4729,6 +4789,8 @@ static int cm_lower_projection_type_equal(const CmHirContext *hir,
     case CM_HIR_TYPE_FN_POINTER_KIND:
         if (left->data.fn_pointer_type.parameter_count
                 != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.binder.lifetime_count
+                != right->data.fn_pointer_type.binder.lifetime_count
             || left->data.fn_pointer_type.abi
                 != right->data.fn_pointer_type.abi
             || left->data.fn_pointer_type.safety
@@ -5950,6 +6012,7 @@ static int cm_lower_lifetime_binder_is_valid(
     uint32_t index;
     uint32_t prior;
 
+    if (binder->lifetime_count > CM_HIR_LIFETIME_BINDER_LIMIT) return 0;
     if (binder->lifetime_count == 0u) {
         return binder->lifetimes == NULL
             && binder->span.start == 0u && binder->span.end == 0u;
@@ -6159,6 +6222,16 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         return CM_HIR_TYPE_NONE;
     }
     span = cm_lower_span(state, ast_type->span);
+    if (ast_type->kind != CM_AST_TYPE_FUNCTION
+        && (ast_type->binder.lifetime_count != 0u
+            || ast_type->binder.lifetimes != NULL
+            || ast_type->binder.span.start != 0u
+            || ast_type->binder.span.end != 0u)) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+            CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
+            "non-function type carries a function lifetime binder");
+        return CM_HIR_TYPE_NONE;
+    }
     if (ast_type->kind != CM_AST_TYPE_TUPLE
         && ast_type->tuple_provenance != CM_AST_TUPLE_SOURCE) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
@@ -6356,10 +6429,34 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             : cm_lower_add_type(state, &type, ast_type_id);
     }
     case CM_AST_TYPE_FUNCTION:
+    {
+        const CmAstLifetimeBinder *previous_binder;
+        const CmLowerHiddenLifetimeBinder *previous_hidden_binders;
+        CmLowerHiddenLifetimeBinder hidden_binder;
+        CmHirLifetimeBinder *previous_callable_binder;
+        CmSpan previous_callable_span;
+        uint32_t previous_callable_depth;
+        CmHirRegion previous_callable_region;
+        int previous_has_callable_region;
+        int previous_ambiguous_callable_region;
+        int previous_input_rejection;
+        int previous_output_rejection;
+
         if (ast_type->element_count != 0u && ast_type->elements == NULL) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
                 CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
                 "function type count has no parameter storage");
+            return CM_HIR_TYPE_NONE;
+        }
+        if (!cm_lower_function_lifetime_binder_is_valid(
+                &ast_type->binder, ast_type->span)
+            || !cm_lower_copy_lifetime_binder(state, CM_AST_ITEM_NONE,
+                &ast_type->binder, &type.data.fn_pointer_type.binder)) {
+            if (!state->failed) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                    CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE,
+                    CM_HIR_OK, "function lifetime binder is invalid");
+            }
             return CM_HIR_TYPE_NONE;
         }
         elements = NULL;
@@ -6367,6 +6464,35 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             elements = (CmHirTypeId *)cm_alloc_zeroed(
                 (size_t)ast_type->element_count, sizeof(CmHirTypeId));
         }
+        previous_binder = state->active_lifetime_binder;
+        previous_hidden_binders = state->hidden_lifetime_binders;
+        previous_callable_binder =
+            state->active_callable_predicate_binder;
+        previous_callable_span = state->active_callable_predicate_span;
+        previous_callable_depth = state->callable_input_depth;
+        previous_callable_region = state->callable_input_region;
+        previous_has_callable_region = state->has_callable_input_region;
+        previous_ambiguous_callable_region =
+            state->ambiguous_callable_input_region;
+        previous_input_rejection = state->reject_callable_input_elision;
+        previous_output_rejection = state->reject_callable_output_elision;
+        /* A function pointer is a closed nearest-binder scope.  Installing
+         * even its empty AST binder deliberately hides an enclosing late
+         * binder while ordinary early-bound generic lookup remains live. */
+        hidden_binder.binder = previous_binder;
+        hidden_binder.previous = previous_hidden_binders;
+        state->hidden_lifetime_binders = &hidden_binder;
+        state->active_lifetime_binder = &ast_type->binder;
+        state->active_callable_predicate_binder =
+            &type.data.fn_pointer_type.binder;
+        state->active_callable_predicate_span = span;
+        state->callable_input_depth = 1u;
+        memset(&state->callable_input_region, 0,
+            sizeof(state->callable_input_region));
+        state->has_callable_input_region = 0;
+        state->ambiguous_callable_input_region = 0;
+        state->reject_callable_input_elision = 0;
+        state->reject_callable_output_elision = 0;
         for (index = 0u; index < ast_type->element_count && !state->failed;
              ++index) {
             elements[index] = cm_lower_type(state, ast_type->elements[index],
@@ -6375,13 +6501,28 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         type.kind = CM_HIR_TYPE_FN_POINTER_KIND;
         type.data.fn_pointer_type.parameters = elements;
         type.data.fn_pointer_type.parameter_count = ast_type->element_count;
+        state->active_callable_predicate_binder = NULL;
+        state->callable_input_depth = 0u;
+        state->reject_callable_output_elision = 1;
         type.data.fn_pointer_type.return_type = cm_lower_type(state,
             ast_type->child, module, owner);
         type.data.fn_pointer_type.abi = cm_hir_intern(state->hir, "Rust");
         type.data.fn_pointer_type.safety = ast_type->is_unsafe
             ? CM_HIR_UNSAFE : CM_HIR_SAFE;
+        state->active_lifetime_binder = previous_binder;
+        state->hidden_lifetime_binders = previous_hidden_binders;
+        state->active_callable_predicate_binder = previous_callable_binder;
+        state->active_callable_predicate_span = previous_callable_span;
+        state->callable_input_depth = previous_callable_depth;
+        state->callable_input_region = previous_callable_region;
+        state->has_callable_input_region = previous_has_callable_region;
+        state->ambiguous_callable_input_region =
+            previous_ambiguous_callable_region;
+        state->reject_callable_input_elision = previous_input_rejection;
+        state->reject_callable_output_elision = previous_output_rejection;
         if (state->failed) {
             cm_free(elements);
+            cm_free(type.data.fn_pointer_type.binder.lifetimes);
             return CM_HIR_TYPE_NONE;
         }
         {
@@ -6389,8 +6530,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
 
             result = cm_lower_add_type(state, &type, ast_type_id);
             cm_free(elements);
+            cm_free(type.data.fn_pointer_type.binder.lifetimes);
             return result;
         }
+    }
     case CM_AST_TYPE_IMPL_TRAIT:
     {
         const CmLowerApitRecord *apit;
@@ -7931,7 +8074,8 @@ static int cm_lower_predeclare_all_generics(CmLowerState *state)
 
 static int cm_lower_validate_default_type(CmLowerState *state,
     CmHirTypeId type_id, CmHirDefId owner, uint32_t parameter_index,
-    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id, size_t depth);
+    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id,
+    uint32_t binder_lifetime_count, size_t depth);
 
 /* Keep malformed or adversarial generic defaults off the C call stack. */
 #define CM_LOWER_GENERIC_DEFAULT_MAX_DEPTH 256u
@@ -7968,9 +8112,12 @@ static int cm_lower_validate_default_parameter(CmLowerState *state,
 
 static int cm_lower_validate_default_region(CmLowerState *state,
     const CmHirRegion *region, CmHirDefId owner, uint32_t parameter_index,
-    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id)
+    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id,
+    uint32_t binder_lifetime_count)
 {
     if (region->kind == CM_HIR_REGION_STATIC) return 1;
+    if (region->kind == CM_HIR_REGION_LATE_BOUND
+        && region->data.binder_index < binder_lifetime_count) return 1;
     if (region->kind == CM_HIR_REGION_EARLY_BOUND) {
         return cm_lower_validate_default_parameter(state,
             region->data.parameter, owner, parameter_index, span, item_id,
@@ -7986,7 +8133,7 @@ static int cm_lower_validate_default_region(CmLowerState *state,
 static int cm_lower_validate_default_named(CmLowerState *state,
     const CmHirNamedType *named, CmHirDefId owner,
     uint32_t parameter_index, CmSpan span, CmAstItemId item_id,
-    CmAstTypeId ast_type_id, size_t depth)
+    CmAstTypeId ast_type_id, uint32_t binder_lifetime_count, size_t depth)
 {
     uint32_t index;
 
@@ -7997,19 +8144,20 @@ static int cm_lower_validate_default_named(CmLowerState *state,
         if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
             if (!cm_lower_validate_default_region(state,
                     &argument->data.lifetime, owner, parameter_index, span,
-                    item_id, ast_type_id)) {
+                    item_id, ast_type_id, binder_lifetime_count)) {
                 return 0;
             }
         } else if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
             if (!cm_lower_validate_default_type(state,
                     argument->data.type, owner, parameter_index, span,
-                    item_id, ast_type_id, depth + 1u)) {
+                    item_id, ast_type_id, binder_lifetime_count,
+                    depth + 1u)) {
                 return 0;
             }
         } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST
             && !cm_lower_validate_default_type(state,
                 argument->data.constant.type, owner, parameter_index, span,
-                item_id, ast_type_id, depth + 1u)) {
+                item_id, ast_type_id, binder_lifetime_count, depth + 1u)) {
             return 0;
         }
     }
@@ -8018,7 +8166,8 @@ static int cm_lower_validate_default_named(CmLowerState *state,
 
 static int cm_lower_validate_default_type(CmLowerState *state,
     CmHirTypeId type_id, CmHirDefId owner, uint32_t parameter_index,
-    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id, size_t depth)
+    CmSpan span, CmAstItemId item_id, CmAstTypeId ast_type_id,
+    uint32_t binder_lifetime_count, size_t depth)
 {
     const CmHirType *type;
     uint32_t index;
@@ -8078,21 +8227,22 @@ static int cm_lower_validate_default_type(CmLowerState *state,
     case CM_HIR_TYPE_REFERENCE_KIND:
         return cm_lower_validate_default_region(state,
                 &type->data.reference_type.region, owner, parameter_index,
-                span, item_id, ast_type_id)
+                span, item_id, ast_type_id, binder_lifetime_count)
             && cm_lower_validate_default_type(state,
                 type->data.reference_type.pointee, owner, parameter_index,
-                span, item_id, ast_type_id, depth + 1u);
+                span, item_id, ast_type_id, binder_lifetime_count,
+                depth + 1u);
     case CM_HIR_TYPE_RAW_POINTER_KIND:
         return cm_lower_validate_default_type(state,
             type->data.raw_pointer_type.pointee, owner, parameter_index,
-            span, item_id, ast_type_id, depth + 1u);
+            span, item_id, ast_type_id, binder_lifetime_count, depth + 1u);
     case CM_HIR_TYPE_TUPLE_KIND:
         for (index = 0u; index < type->data.tuple_type.element_count;
              ++index) {
             if (!cm_lower_validate_default_type(state,
                     type->data.tuple_type.elements[index], owner,
                     parameter_index, span, item_id, ast_type_id,
-                    depth + 1u)) {
+                    binder_lifetime_count, depth + 1u)) {
                 return 0;
             }
         }
@@ -8100,34 +8250,37 @@ static int cm_lower_validate_default_type(CmLowerState *state,
     case CM_HIR_TYPE_ARRAY_KIND:
         return cm_lower_validate_default_type(state,
                 type->data.array_type.element, owner, parameter_index, span,
-                item_id, ast_type_id, depth + 1u)
+                item_id, ast_type_id, binder_lifetime_count, depth + 1u)
             && cm_lower_validate_default_type(state,
                 type->data.array_type.length.type, owner, parameter_index,
-                span, item_id, ast_type_id, depth + 1u);
+                span, item_id, ast_type_id, binder_lifetime_count,
+                depth + 1u);
     case CM_HIR_TYPE_SLICE_KIND:
         return cm_lower_validate_default_type(state,
             type->data.slice_type.element, owner, parameter_index, span,
-            item_id, ast_type_id, depth + 1u);
+            item_id, ast_type_id, binder_lifetime_count, depth + 1u);
     case CM_HIR_TYPE_FN_POINTER_KIND:
         for (index = 0u;
              index < type->data.fn_pointer_type.parameter_count; ++index) {
             if (!cm_lower_validate_default_type(state,
                     type->data.fn_pointer_type.parameters[index], owner,
                     parameter_index, span, item_id, ast_type_id,
+                    type->data.fn_pointer_type.binder.lifetime_count,
                     depth + 1u)) {
                 return 0;
             }
         }
         return cm_lower_validate_default_type(state,
             type->data.fn_pointer_type.return_type, owner, parameter_index,
-            span, item_id, ast_type_id, depth + 1u);
+            span, item_id, ast_type_id,
+            type->data.fn_pointer_type.binder.lifetime_count, depth + 1u);
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
         return cm_lower_validate_default_named(state,
             &type->data.named_type, owner, parameter_index, span, item_id,
-            ast_type_id, depth);
+            ast_type_id, binder_lifetime_count, depth);
     case CM_HIR_TYPE_PARAMETER_KIND:
         return cm_lower_validate_default_parameter(state,
             type->data.parameter_type.parameter, owner, parameter_index,
@@ -8135,26 +8288,31 @@ static int cm_lower_validate_default_type(CmLowerState *state,
     case CM_HIR_TYPE_PROJECTION_KIND:
         return cm_lower_validate_default_type(state,
                 type->data.projection_type.self_type, owner,
-                parameter_index, span, item_id, ast_type_id, depth + 1u)
+                parameter_index, span, item_id, ast_type_id,
+                binder_lifetime_count, depth + 1u)
             && cm_lower_validate_default_named(state,
                 &type->data.projection_type.trait_type, owner,
-                parameter_index, span, item_id, ast_type_id, depth)
+                parameter_index, span, item_id, ast_type_id,
+                binder_lifetime_count, depth)
             && cm_lower_validate_default_named(state,
                 &type->data.projection_type.associated_type, owner,
-                parameter_index, span, item_id, ast_type_id, depth);
+                parameter_index, span, item_id, ast_type_id,
+                binder_lifetime_count, depth);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
         if ((type->data.dyn_trait_type.has_principal
                 && !cm_lower_validate_default_named(state,
                     &type->data.dyn_trait_type.principal_trait, owner,
-                    parameter_index, span, item_id, ast_type_id, depth))
+                    parameter_index, span, item_id, ast_type_id,
+                    binder_lifetime_count, depth))
             || !cm_lower_validate_default_region(state,
                 &type->data.dyn_trait_type.region, owner, parameter_index,
-                span, item_id, ast_type_id)) return 0;
+                span, item_id, ast_type_id, binder_lifetime_count)) return 0;
         for (index = 0u;
              index < type->data.dyn_trait_type.auto_trait_count; ++index) {
             if (!cm_lower_validate_default_named(state,
                     &type->data.dyn_trait_type.auto_traits[index], owner,
-                    parameter_index, span, item_id, ast_type_id, depth)) {
+                    parameter_index, span, item_id, ast_type_id,
+                    binder_lifetime_count, depth)) {
                 return 0;
             }
         }
@@ -8163,7 +8321,7 @@ static int cm_lower_validate_default_type(CmLowerState *state,
             if (!cm_lower_validate_default_type(state,
                     type->data.dyn_trait_type.equalities[index].value,
                     owner, parameter_index, span, item_id, ast_type_id,
-                    depth + 1u)) {
+                    binder_lifetime_count, depth + 1u)) {
                 return 0;
             }
         }
@@ -8676,7 +8834,8 @@ static int cm_lower_predeclare_all_generic_defaults(CmLowerState *state,
                 if (!cm_lower_validate_default_type(state,
                         argument.data.type, record->definition,
                         parameter_index, record->effective_span,
-                        record->ast_id, ast_parameter->default_type, 0u)) {
+                        record->ast_id, ast_parameter->default_type, 0u,
+                        0u)) {
                     return 0;
                 }
             } else {
@@ -14203,6 +14362,15 @@ static int cm_lower_impl_item(CmLowerState *state,
             "implemented trait header is not bound before the impl");
         return 0;
     }
+    if (trait_item->definition.crate_id == state->result.crate_id
+        && cm_lower_item_has_exact_attribute(state, trait_item,
+            "rustc_deny_explicit_impl")) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "explicit impl targets a local #[rustc_deny_explicit_impl] "
+            "trait");
+        return 0;
+    }
     if (ast_item->data.impl_item.is_const
         && !trait_item->data.trait_item.is_const) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
@@ -18711,10 +18879,26 @@ typedef struct CmLowerInheritedScope {
     const CmHirItem *member;
 } CmLowerInheritedScope;
 
+#define CM_LOWER_INHERITED_EQUAL_MAX_DEPTH 256u
+#define CM_LOWER_INHERITED_EQUAL_NODE_LIMIT 4096u
+
+typedef struct CmLowerInheritedEqualBudget {
+    uint32_t remaining;
+} CmLowerInheritedEqualBudget;
+
+static int cm_lower_inherited_equal_take(
+    CmLowerInheritedEqualBudget *budget, size_t depth)
+{
+    if (budget == NULL || depth > CM_LOWER_INHERITED_EQUAL_MAX_DEPTH
+        || budget->remaining == 0u) return 0;
+    budget->remaining -= 1u;
+    return 1;
+}
+
 static int cm_lower_inherited_type_equal(CmLowerState *state,
     const CmLowerInheritedScope *left_scope, CmHirTypeId left_id,
     const CmLowerInheritedScope *right_scope, CmHirTypeId right_id,
-    size_t depth);
+    CmLowerInheritedEqualBudget *budget, size_t depth);
 
 static int cm_lower_inherited_parameter_index(const CmHirContext *hir,
     const CmLowerInheritedScope *scope, CmHirGenericParamId parameter_id,
@@ -18740,12 +18924,14 @@ static int cm_lower_inherited_parameter_index(const CmHirContext *hir,
 
 static int cm_lower_inherited_region_equal(const CmHirContext *hir,
     const CmHirRegion *left, const CmLowerInheritedScope *left_scope,
-    const CmHirRegion *right, const CmLowerInheritedScope *right_scope)
+    const CmHirRegion *right, const CmLowerInheritedScope *right_scope,
+    CmLowerInheritedEqualBudget *budget, size_t depth)
 {
     uint32_t left_index;
     uint32_t right_index;
 
-    if (left == NULL || right == NULL || left->kind != right->kind) {
+    if (!cm_lower_inherited_equal_take(budget, depth)
+        || left == NULL || right == NULL || left->kind != right->kind) {
         return 0;
     }
     switch (left->kind) {
@@ -18772,14 +18958,15 @@ static int cm_lower_inherited_region_equal(const CmHirContext *hir,
 static int cm_lower_inherited_const_equal(CmLowerState *state,
     const CmHirConstArg *left, const CmLowerInheritedScope *left_scope,
     const CmHirConstArg *right, const CmLowerInheritedScope *right_scope,
-    size_t depth)
+    CmLowerInheritedEqualBudget *budget, size_t depth)
 {
     uint32_t left_index;
     uint32_t right_index;
 
-    if (left == NULL || right == NULL || left->kind != right->kind
+    if (!cm_lower_inherited_equal_take(budget, depth)
+        || left == NULL || right == NULL || left->kind != right->kind
         || !cm_lower_inherited_type_equal(state, left_scope, left->type,
-            right_scope, right->type, depth + 1u)) {
+            right_scope, right->type, budget, depth + 1u)) {
         return 0;
     }
     switch (left->kind) {
@@ -18807,22 +18994,25 @@ static int cm_lower_inherited_const_equal(CmLowerState *state,
 static int cm_lower_inherited_generic_arg_equal(CmLowerState *state,
     const CmHirGenericArg *left, const CmLowerInheritedScope *left_scope,
     const CmHirGenericArg *right, const CmLowerInheritedScope *right_scope,
-    size_t depth)
+    CmLowerInheritedEqualBudget *budget, size_t depth)
 {
-    if (left == NULL || right == NULL || left->kind != right->kind) {
+    if (!cm_lower_inherited_equal_take(budget, depth)
+        || left == NULL || right == NULL || left->kind != right->kind) {
         return 0;
     }
     switch (left->kind) {
     case CM_HIR_GENERIC_ARG_LIFETIME:
         return cm_lower_inherited_region_equal(state->hir,
             &left->data.lifetime, left_scope, &right->data.lifetime,
-            right_scope);
+            right_scope, budget, depth + 1u);
     case CM_HIR_GENERIC_ARG_TYPE:
         return cm_lower_inherited_type_equal(state, left_scope,
-            left->data.type, right_scope, right->data.type, depth + 1u);
+            left->data.type, right_scope, right->data.type, budget,
+            depth + 1u);
     case CM_HIR_GENERIC_ARG_CONST:
         return cm_lower_inherited_const_equal(state, &left->data.constant,
-            left_scope, &right->data.constant, right_scope, depth + 1u);
+            left_scope, &right->data.constant, right_scope, budget,
+            depth + 1u);
     }
     return 0;
 }
@@ -18830,11 +19020,12 @@ static int cm_lower_inherited_generic_arg_equal(CmLowerState *state,
 static int cm_lower_inherited_named_type_equal(CmLowerState *state,
     const CmHirNamedType *left, const CmLowerInheritedScope *left_scope,
     const CmHirNamedType *right, const CmLowerInheritedScope *right_scope,
-    size_t depth)
+    CmLowerInheritedEqualBudget *budget, size_t depth)
 {
     uint32_t index;
 
-    if (left == NULL || right == NULL
+    if (!cm_lower_inherited_equal_take(budget, depth)
+        || left == NULL || right == NULL
         || !cm_hir_def_id_equal(left->definition, right->definition)
         || left->argument_count != right->argument_count
         || (left->argument_count != 0u && left->arguments == NULL)
@@ -18844,7 +19035,7 @@ static int cm_lower_inherited_named_type_equal(CmLowerState *state,
     for (index = 0u; index < left->argument_count; ++index) {
         if (!cm_lower_inherited_generic_arg_equal(state,
                 &left->arguments[index], left_scope, &right->arguments[index],
-                right_scope, depth + 1u)) {
+                right_scope, budget, depth + 1u)) {
             return 0;
         }
     }
@@ -18854,7 +19045,7 @@ static int cm_lower_inherited_named_type_equal(CmLowerState *state,
 static int cm_lower_inherited_type_equal(CmLowerState *state,
     const CmLowerInheritedScope *left_scope, CmHirTypeId left_id,
     const CmLowerInheritedScope *right_scope, CmHirTypeId right_id,
-    size_t depth)
+    CmLowerInheritedEqualBudget *budget, size_t depth)
 {
     const CmHirType *left;
     const CmHirType *right;
@@ -18862,7 +19053,7 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
     uint32_t left_index;
     uint32_t right_index;
 
-    if (depth > state->hir->types.len) return 0;
+    if (!cm_lower_inherited_equal_take(budget, depth)) return 0;
     left = cm_hir_get_type(state->hir, left_id);
     right = cm_hir_get_type(state->hir, right_id);
     if (left == NULL || right == NULL || left->kind != right->kind) {
@@ -18890,16 +19081,17 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
                 == right->data.reference_type.mutability
             && cm_lower_inherited_region_equal(state->hir,
                 &left->data.reference_type.region, left_scope,
-                &right->data.reference_type.region, right_scope)
+                &right->data.reference_type.region, right_scope, budget,
+                depth + 1u)
             && cm_lower_inherited_type_equal(state, left_scope,
                 left->data.reference_type.pointee, right_scope,
-                right->data.reference_type.pointee, depth + 1u);
+                right->data.reference_type.pointee, budget, depth + 1u);
     case CM_HIR_TYPE_RAW_POINTER_KIND:
         return left->data.raw_pointer_type.mutability
                 == right->data.raw_pointer_type.mutability
             && cm_lower_inherited_type_equal(state, left_scope,
                 left->data.raw_pointer_type.pointee, right_scope,
-                right->data.raw_pointer_type.pointee, depth + 1u);
+                right->data.raw_pointer_type.pointee, budget, depth + 1u);
     case CM_HIR_TYPE_TUPLE_KIND:
         if (left->data.tuple_type.element_count
                 != right->data.tuple_type.element_count
@@ -18912,7 +19104,8 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
              ++index) {
             if (!cm_lower_inherited_type_equal(state, left_scope,
                     left->data.tuple_type.elements[index], right_scope,
-                    right->data.tuple_type.elements[index], depth + 1u)) {
+                    right->data.tuple_type.elements[index], budget,
+                    depth + 1u)) {
                 return 0;
             }
         }
@@ -18920,21 +19113,48 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
     case CM_HIR_TYPE_ARRAY_KIND:
         return cm_lower_inherited_type_equal(state, left_scope,
                 left->data.array_type.element, right_scope,
-                right->data.array_type.element, depth + 1u)
+                right->data.array_type.element, budget, depth + 1u)
             && cm_lower_inherited_const_equal(state,
                 &left->data.array_type.length, left_scope,
-                &right->data.array_type.length, right_scope, depth + 1u);
+                &right->data.array_type.length, right_scope, budget,
+                depth + 1u);
     case CM_HIR_TYPE_SLICE_KIND:
         return cm_lower_inherited_type_equal(state, left_scope,
             left->data.slice_type.element, right_scope,
-            right->data.slice_type.element, depth + 1u);
+            right->data.slice_type.element, budget, depth + 1u);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (left->data.fn_pointer_type.binder.lifetime_count
+                != right->data.fn_pointer_type.binder.lifetime_count
+            || left->data.fn_pointer_type.parameter_count
+                != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.abi
+                != right->data.fn_pointer_type.abi
+            || left->data.fn_pointer_type.safety
+                != right->data.fn_pointer_type.safety
+            || left->data.fn_pointer_type.is_variadic
+                != right->data.fn_pointer_type.is_variadic) {
+            return 0;
+        }
+        for (index = 0u;
+             index < left->data.fn_pointer_type.parameter_count; ++index) {
+            if (!cm_lower_inherited_type_equal(state, left_scope,
+                    left->data.fn_pointer_type.parameters[index],
+                    right_scope,
+                    right->data.fn_pointer_type.parameters[index],
+                    budget, depth + 1u)) {
+                return 0;
+            }
+        }
+        return cm_lower_inherited_type_equal(state, left_scope,
+            left->data.fn_pointer_type.return_type, right_scope,
+            right->data.fn_pointer_type.return_type, budget, depth + 1u);
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
         return cm_lower_inherited_named_type_equal(state,
             &left->data.named_type, left_scope, &right->data.named_type,
-            right_scope, depth + 1u);
+            right_scope, budget, depth + 1u);
     case CM_HIR_TYPE_SELF_KIND:
         return cm_hir_def_id_equal(left->data.self_type.owner,
                 left_scope->impl_item->definition)
@@ -18943,18 +19163,18 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
     case CM_HIR_TYPE_PROJECTION_KIND:
         return cm_lower_inherited_type_equal(state, left_scope,
                 left->data.projection_type.self_type, right_scope,
-                right->data.projection_type.self_type, depth + 1u)
+                right->data.projection_type.self_type, budget, depth + 1u)
             && cm_lower_inherited_named_type_equal(state,
                 &left->data.projection_type.trait_type, left_scope,
                 &right->data.projection_type.trait_type, right_scope,
-                depth + 1u)
+                budget, depth + 1u)
             && cm_hir_def_id_equal(
                 left->data.projection_type.associated_type.definition,
                 right->data.projection_type.associated_type.definition)
             && cm_lower_inherited_named_type_equal(state,
                 &left->data.projection_type.associated_type, left_scope,
                 &right->data.projection_type.associated_type, right_scope,
-                depth + 1u);
+                budget, depth + 1u);
     default:
         return 0;
     }
@@ -18963,7 +19183,8 @@ static int cm_lower_inherited_type_equal(CmLowerState *state,
 static int cm_lower_inherited_signature_type_equal(CmLowerState *state,
     const CmHirItem *first_impl, const CmHirItem *first_member,
     CmHirTypeId first_type, const CmHirItem *member_impl,
-    const CmHirItem *member, CmHirTypeId member_type)
+    const CmHirItem *member, CmHirTypeId member_type,
+    CmLowerInheritedEqualBudget *budget)
 {
     CmLowerInheritedScope first_scope;
     CmLowerInheritedScope member_scope;
@@ -18973,19 +19194,22 @@ static int cm_lower_inherited_signature_type_equal(CmLowerState *state,
     member_scope.impl_item = member_impl;
     member_scope.member = member;
     return cm_lower_inherited_type_equal(state, &first_scope, first_type,
-        &member_scope, member_type, 0u);
+        &member_scope, member_type, budget, 0u);
 }
 
 static int cm_lower_inherited_member_consistent(CmLowerState *state,
     const CmHirItem *first_impl, const CmHirItem *first,
     const CmHirItem *member_impl, const CmHirItem *member)
 {
+    CmLowerInheritedEqualBudget budget;
     uint32_t index;
+
+    budget.remaining = CM_LOWER_INHERITED_EQUAL_NODE_LIMIT;
 
     if (first->kind == CM_HIR_ITEM_TYPE_ALIAS) {
         return cm_lower_inherited_signature_type_equal(state, first_impl,
             first, first->data.type_alias_item.target, member_impl, member,
-            member->data.type_alias_item.target);
+            member->data.type_alias_item.target, &budget);
     }
     if (first->data.function_item.signature.parameter_count
             != member->data.function_item.signature.parameter_count
@@ -18997,7 +19221,7 @@ static int cm_lower_inherited_member_consistent(CmLowerState *state,
             first_impl, first,
             first->data.function_item.signature.return_type,
             member_impl, member,
-            member->data.function_item.signature.return_type)) {
+            member->data.function_item.signature.return_type, &budget)) {
         return 0;
     }
     for (index = 0u;
@@ -19007,7 +19231,8 @@ static int cm_lower_inherited_member_consistent(CmLowerState *state,
                 first_impl, first,
                 first->data.function_item.signature.parameters[index].type,
                 member_impl, member,
-                member->data.function_item.signature.parameters[index].type)) {
+                member->data.function_item.signature.parameters[index].type,
+                &budget)) {
             return 0;
         }
     }
@@ -19565,6 +19790,20 @@ static int cm_lower_type_references_parameter(const CmHirContext *hir,
             }
         }
         return 0;
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        for (index = 0u;
+             index < type->data.fn_pointer_type.parameter_count; ++index) {
+            if (cm_lower_type_references_parameter(hir,
+                    cm_hir_get_type(hir,
+                        type->data.fn_pointer_type.parameters[index]),
+                    parameter_id, depth + 1u)) {
+                return 1;
+            }
+        }
+        return cm_lower_type_references_parameter(hir,
+            cm_hir_get_type(hir,
+                type->data.fn_pointer_type.return_type),
+            parameter_id, depth + 1u);
     default:
         return 0;
     }
@@ -20807,6 +21046,8 @@ static int cm_lower_impl_type_equal(const CmHirContext *hir,
     case CM_HIR_TYPE_FN_POINTER_KIND:
         if (left->data.fn_pointer_type.parameter_count
                 != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.binder.lifetime_count
+                != right->data.fn_pointer_type.binder.lifetime_count
             || left->data.fn_pointer_type.abi != right->data.fn_pointer_type.abi
             || left->data.fn_pointer_type.safety
                 != right->data.fn_pointer_type.safety
@@ -21031,6 +21272,39 @@ static int cm_lower_unify_occurs(const CmHirContext *hir, CmVec *bindings,
     }
 }
 
+static int cm_lower_unify_bind_parameter(const CmHirContext *hir,
+    CmVec *bindings, CmHirGenericParamId parameter, CmHirTypeId type_id,
+    size_t budget)
+{
+    CmLowerUnifyBinding binding;
+    const CmHirType *type;
+    uint32_t index;
+
+    if (hir == NULL || bindings == NULL || budget == 0u) return 0;
+    type_id = cm_lower_unify_resolve(hir, bindings, type_id);
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return 0;
+    if (type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && type->data.parameter_type.parameter == parameter) {
+        return 1;
+    }
+    for (index = 0u; index < bindings->len; ++index) {
+        const CmLowerUnifyBinding *existing
+            = (const CmLowerUnifyBinding *)cm_vec_at_const(bindings, index);
+
+        if (existing != NULL && existing->parameter == parameter) {
+            return cm_lower_unify_type(hir, bindings, existing->type,
+                type_id, budget - 1u);
+        }
+    }
+    if (cm_lower_unify_occurs(hir, bindings, parameter, type_id, budget)) {
+        return 0;
+    }
+    binding.parameter = parameter;
+    binding.type = type_id;
+    return cm_vec_push(bindings, &binding) != NULL;
+}
+
 static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
     CmHirTypeId left_id, CmHirTypeId right_id, size_t budget)
 {
@@ -21053,25 +21327,22 @@ static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
         && left->kind != CM_HIR_TYPE_PARAMETER_KIND) {
         return 1;
     }
-    if (left->kind != right->kind) {
-        return 0;
-    }
     if (left->kind == CM_HIR_TYPE_PARAMETER_KIND) {
-        CmLowerUnifyBinding binding;
-
         if (right->kind == CM_HIR_TYPE_PARAMETER_KIND
             && left->data.parameter_type.parameter
                 == right->data.parameter_type.parameter) {
             /* Both sides name the same substituted variable. */
             return 1;
         }
-        if (cm_lower_unify_occurs(hir, bindings,
-                left->data.parameter_type.parameter, right_id, budget)) {
-            return 0;
-        }
-        binding.parameter = left->data.parameter_type.parameter;
-        binding.type = right_id;
-        return cm_vec_push(bindings, &binding) != NULL;
+        return cm_lower_unify_bind_parameter(hir, bindings,
+            left->data.parameter_type.parameter, right_id, budget);
+    }
+    if (right->kind == CM_HIR_TYPE_PARAMETER_KIND) {
+        return cm_lower_unify_bind_parameter(hir, bindings,
+            right->data.parameter_type.parameter, left_id, budget);
+    }
+    if (left->kind != right->kind) {
+        return 0;
     }
     switch (left->kind) {
     case CM_HIR_TYPE_NEVER_KIND:
@@ -21123,6 +21394,27 @@ static int cm_lower_unify_type(const CmHirContext *hir, CmVec *bindings,
                 right->data.array_type.element, budget - 1u)
             && cm_lower_unify_const(&left->data.array_type.length,
                 &right->data.array_type.length);
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (left->data.fn_pointer_type.binder.lifetime_count
+                != right->data.fn_pointer_type.binder.lifetime_count
+            || left->data.fn_pointer_type.parameter_count
+                != right->data.fn_pointer_type.parameter_count
+            || left->data.fn_pointer_type.abi
+                != right->data.fn_pointer_type.abi
+            || left->data.fn_pointer_type.safety
+                != right->data.fn_pointer_type.safety
+            || left->data.fn_pointer_type.is_variadic
+                != right->data.fn_pointer_type.is_variadic) return 0;
+        for (index = 0u;
+             index < left->data.fn_pointer_type.parameter_count; ++index) {
+            if (!cm_lower_unify_type(hir, bindings,
+                    left->data.fn_pointer_type.parameters[index],
+                    right->data.fn_pointer_type.parameters[index],
+                    budget - 1u)) return 0;
+        }
+        return cm_lower_unify_type(hir, bindings,
+            left->data.fn_pointer_type.return_type,
+            right->data.fn_pointer_type.return_type, budget - 1u);
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
@@ -21169,6 +21461,185 @@ static int cm_lower_impl_headers_unify(const CmHirContext *hir,
     }
     cm_vec_destroy(&bindings);
     return unified;
+}
+
+/*
+ * `FnPtr` is a compiler-implemented lang trait whose explicit-impl ban makes
+ * its domain exactly the function-pointer type family.  Authenticate the
+ * complete compiler-only declaration and one atomic `F: FnPtr` predicate
+ * before using that closed domain as coherence evidence.  No other predicate
+ * receives disjointness treatment here.
+ */
+static int cm_lower_impl_is_compiler_fn_ptr_blanket(
+    const CmLowerState *state, CmLowerImplSelfClass self_class,
+    const CmHirItem *impl_item)
+{
+    const CmHirType *self_type;
+    CmHirGenericParamId self_parameter;
+    uint32_t index;
+
+    if (state == NULL || impl_item == NULL
+        || self_class != CM_LOWER_IMPL_SELF_SINGLE_PARAMETER) return 0;
+    self_type = cm_hir_get_type(state->hir,
+        impl_item->data.impl_item.self_type);
+    if (self_type == NULL
+        || self_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+            self_type->data.parameter_type.parameter,
+            CM_HIR_GENERIC_TYPE)) return 0;
+    self_parameter = self_type->data.parameter_type.parameter;
+    for (index = 0u; index < impl_item->predicate_count; ++index) {
+        const CmHirTraitPredicate *predicate;
+        const CmHirType *subject;
+        const CmHirItem *trait_item;
+
+        predicate = &impl_item->predicates[index];
+        if (predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+            || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+            || predicate->binder.lifetime_count != 0u
+            || predicate->binder.lifetimes != NULL
+            || predicate->equality_count != 0u
+            || predicate->equalities != NULL
+            || predicate->trait_type.argument_count != 0u
+            || predicate->trait_type.arguments != NULL) continue;
+        subject = cm_hir_get_type(state->hir, predicate->subject);
+        if (subject == NULL
+            || subject->kind != CM_HIR_TYPE_PARAMETER_KIND
+            || subject->data.parameter_type.parameter != self_parameter) {
+            continue;
+        }
+        if (predicate->trait_type.definition.crate_id
+            != state->result.crate_id) continue;
+        trait_item = cm_lower_bound_item(state,
+            predicate->trait_type.definition);
+        if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+            || trait_item->data.trait_item.safety != CM_HIR_SAFE
+            || trait_item->data.trait_item.is_auto
+            || trait_item->generic_parameter_count != 0u
+            || !cm_lower_item_has_exact_attribute(state, trait_item,
+                "lang = \"fn_ptr_trait\"")
+            || !cm_lower_item_has_exact_attribute(state, trait_item,
+                "rustc_deny_explicit_impl")) continue;
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_impl_is_sized_single_parameter(
+    const CmLowerState *state, CmLowerImplSelfClass self_class,
+    const CmHirItem *impl_item)
+{
+    const CmHirType *self_type;
+    const CmHirGenericParam *parameter;
+
+    if (state == NULL || impl_item == NULL
+        || self_class != CM_LOWER_IMPL_SELF_SINGLE_PARAMETER) return 0;
+    self_type = cm_hir_get_type(state->hir,
+        impl_item->data.impl_item.self_type);
+    if (self_type == NULL
+        || self_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || !cm_lower_impl_owned_parameter(state->hir, impl_item,
+            self_type->data.parameter_type.parameter,
+            CM_HIR_GENERIC_TYPE)) return 0;
+    parameter = cm_hir_get_generic_param(state->hir,
+        self_type->data.parameter_type.parameter);
+    return parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+        && !parameter->is_relaxed_sized;
+}
+
+#define CM_LOWER_DST_WRAPPER_LIMIT 1024u
+
+static int cm_lower_type_root_definitely_unsized(
+    const CmLowerState *state, CmHirTypeId type_id)
+{
+    CmHirDefId visited[CM_LOWER_DST_WRAPPER_LIMIT];
+    uint32_t depth = 0u;
+
+    if (state == NULL || state->hir == NULL) return 0;
+    while (depth < CM_LOWER_DST_WRAPPER_LIMIT) {
+        const CmHirType *type = cm_hir_get_type(state->hir, type_id);
+        const CmHirItem *item;
+        uint32_t index;
+
+        if (type == NULL) return 0;
+        if (type->kind == CM_HIR_TYPE_STR_KIND
+            || type->kind == CM_HIR_TYPE_SLICE_KIND
+            || type->kind == CM_HIR_TYPE_DYN_TRAIT_KIND) return 1;
+        if (type->kind != CM_HIR_TYPE_ADT_KIND
+            || type->data.named_type.argument_count != 0u
+            || type->data.named_type.arguments != NULL
+            || type->data.named_type.definition.crate_id
+                != state->result.crate_id) return 0;
+        for (index = 0u; index < depth; ++index) {
+            if (cm_hir_def_id_equal(visited[index],
+                    type->data.named_type.definition)) return 0;
+        }
+        visited[depth++] = type->data.named_type.definition;
+        item = cm_lower_bound_item(state,
+            type->data.named_type.definition);
+        if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT
+            || item->generic_parameter_count != 0u
+            || item->data.aggregate_item.field_count == 0u
+            || item->data.aggregate_item.fields == NULL) return 0;
+        type_id = item->data.aggregate_item.fields[
+            item->data.aggregate_item.field_count - 1u].type;
+    }
+    return 0;
+}
+
+static int cm_lower_impl_pair_is_implicit_sized_disjoint(
+    const CmLowerState *state, CmLowerImplSelfClass left_class,
+    const CmHirItem *left, CmLowerImplSelfClass right_class,
+    const CmHirItem *right)
+{
+    return (cm_lower_impl_is_sized_single_parameter(state, left_class, left)
+            && cm_lower_type_root_definitely_unsized(state,
+                right->data.impl_item.self_type))
+        || (cm_lower_impl_is_sized_single_parameter(state, right_class,
+                right)
+            && cm_lower_type_root_definitely_unsized(state,
+                left->data.impl_item.self_type));
+}
+
+static int cm_lower_type_root_definitely_not_fn_pointer(
+    const CmHirContext *hir, CmHirTypeId type_id)
+{
+    const CmHirType *type = cm_hir_get_type(hir, type_id);
+
+    if (type == NULL) return 0;
+    switch (type->kind) {
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_INTEGER_KIND:
+    case CM_HIR_TYPE_FLOAT_KIND:
+    case CM_HIR_TYPE_REFERENCE_KIND:
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+    case CM_HIR_TYPE_TUPLE_KIND:
+    case CM_HIR_TYPE_ARRAY_KIND:
+    case CM_HIR_TYPE_SLICE_KIND:
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int cm_lower_impl_pair_is_compiler_fn_ptr_disjoint(
+    const CmLowerState *state, CmLowerImplSelfClass left_class,
+    const CmHirItem *left, CmLowerImplSelfClass right_class,
+    const CmHirItem *right)
+{
+    return (cm_lower_impl_is_compiler_fn_ptr_blanket(state, left_class, left)
+            && cm_lower_type_root_definitely_not_fn_pointer(state->hir,
+                right->data.impl_item.self_type))
+        || (cm_lower_impl_is_compiler_fn_ptr_blanket(state, right_class,
+                right)
+            && cm_lower_type_root_definitely_not_fn_pointer(state->hir,
+                left->data.impl_item.self_type));
 }
 
 /*
@@ -21261,6 +21732,10 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     item_adt_definition, item->data.impl_item.self_type)) {
                 continue;
             }
+            if (cm_lower_impl_pair_is_compiler_fn_ptr_disjoint(state,
+                    prior_class, prior, item_class, item)) continue;
+            if (cm_lower_impl_pair_is_implicit_sized_disjoint(state,
+                    prior_class, prior, item_class, item)) continue;
             if (!cm_lower_impl_headers_unify(state->hir, prior,
                     item)) continue;
             if (cm_lower_impl_pair_is_admitted_specialization(state, prior,

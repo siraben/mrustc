@@ -19,6 +19,7 @@ typedef struct CmTypeckVariable {
 typedef struct CmTypeckStoredType {
     CmTypeckType type;
     CmHirTypeId source_hir_type;
+    uint32_t late_bound_requirement;
 } CmTypeckStoredType;
 
 typedef struct CmTypeckTrailEntry {
@@ -237,11 +238,130 @@ static void *cm_typeck_copy_array(CmTypeckState *state, const void *items,
     return copy;
 }
 
+static int cm_typeck_requirement_merge_region(const CmHirRegion *region,
+    uint32_t *requirement)
+{
+    uint32_t needed;
+
+    if (region->kind != CM_HIR_REGION_LATE_BOUND) return 1;
+    if (region->data.binder_index == UINT32_MAX) return 0;
+    needed = region->data.binder_index + 1u;
+    if (needed > *requirement) *requirement = needed;
+    return 1;
+}
+
+static int cm_typeck_requirement_merge_type(const CmTypeckState *state,
+    CmTypeckTypeId type, uint32_t *requirement)
+{
+    const CmTypeckStoredType *child;
+
+    child = cm_typeck_stored_type_const(state, type);
+    if (child == NULL) return 0;
+    if (child->late_bound_requirement > *requirement) {
+        *requirement = child->late_bound_requirement;
+    }
+    return 1;
+}
+
+static int cm_typeck_requirement_merge_named(const CmTypeckState *state,
+    const CmTypeckNamedType *named, uint32_t *requirement)
+{
+    uint32_t index;
+
+    for (index = 0u; index < named->argument_count; ++index) {
+        const CmTypeckGenericArg *argument;
+
+        argument = &named->arguments[index];
+        if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
+            if (!cm_typeck_requirement_merge_region(
+                    &argument->data.lifetime, requirement)) return 0;
+        } else if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
+            if (!cm_typeck_requirement_merge_type(state,
+                    argument->data.type, requirement)) return 0;
+        } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
+            if (!cm_typeck_requirement_merge_type(state,
+                    argument->data.constant.type, requirement)) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_typeck_type_requirement(const CmTypeckState *state,
+    const CmTypeckType *type, uint32_t *out_requirement)
+{
+    uint32_t requirement;
+    uint32_t index;
+
+    requirement = 0u;
+#define CM_TYPECK_REQUIRE_TYPE(child_id) do { \
+        if (!cm_typeck_requirement_merge_type(state, (child_id), \
+                &requirement)) return 0; \
+    } while (0)
+    switch (type->kind) {
+    case CM_TYPECK_TYPE_REFERENCE:
+        if (!cm_typeck_requirement_merge_region(
+                &type->data.reference_type.region, &requirement)) return 0;
+        CM_TYPECK_REQUIRE_TYPE(type->data.reference_type.pointee);
+        break;
+    case CM_TYPECK_TYPE_RAW_POINTER:
+        CM_TYPECK_REQUIRE_TYPE(type->data.raw_pointer_type.pointee);
+        break;
+    case CM_TYPECK_TYPE_TUPLE:
+        for (index = 0u; index < type->data.tuple_type.element_count;
+             ++index) {
+            CM_TYPECK_REQUIRE_TYPE(type->data.tuple_type.elements[index]);
+        }
+        break;
+    case CM_TYPECK_TYPE_ARRAY:
+        CM_TYPECK_REQUIRE_TYPE(type->data.array_type.element);
+        CM_TYPECK_REQUIRE_TYPE(type->data.array_type.length.type);
+        break;
+    case CM_TYPECK_TYPE_SLICE:
+        CM_TYPECK_REQUIRE_TYPE(type->data.slice_type.element);
+        break;
+    case CM_TYPECK_TYPE_FN_POINTER:
+        for (index = 0u;
+             index < type->data.fn_pointer_type.parameter_count; ++index) {
+            const CmTypeckStoredType *child = cm_typeck_stored_type_const(
+                state, type->data.fn_pointer_type.parameters[index]);
+            if (child == NULL || child->late_bound_requirement != 0u)
+                return 0;
+        }
+        {
+            const CmTypeckStoredType *child = cm_typeck_stored_type_const(
+                state, type->data.fn_pointer_type.return_type);
+            if (child == NULL || child->late_bound_requirement != 0u)
+                return 0;
+        }
+        break;
+    case CM_TYPECK_TYPE_ADT:
+        if (!cm_typeck_requirement_merge_named(state,
+                &type->data.named_type, &requirement)) return 0;
+        break;
+    case CM_TYPECK_TYPE_PROJECTION:
+        CM_TYPECK_REQUIRE_TYPE(type->data.projection_type.self_type);
+        if (!cm_typeck_requirement_merge_named(state,
+                &type->data.projection_type.trait_type, &requirement)
+            || !cm_typeck_requirement_merge_named(state,
+                &type->data.projection_type.associated_type, &requirement))
+            return 0;
+        break;
+    default:
+        break;
+    }
+#undef CM_TYPECK_REQUIRE_TYPE
+    *out_requirement = requirement;
+    return 1;
+}
+
 static CmTypeckStatus cm_typeck_add_stored(CmTypeckState *state,
     const CmTypeckType *type, CmHirTypeId source_hir_type,
     CmTypeckTypeId *out_type)
 {
     CmTypeckStoredType stored;
+    uint32_t late_bound_requirement;
     uint32_t index;
     int valid;
 
@@ -303,6 +423,9 @@ static CmTypeckStatus cm_typeck_add_stored(CmTypeckState *state,
             type->data.slice_type.element);
         break;
     case CM_TYPECK_TYPE_FN_POINTER:
+        if (type->data.fn_pointer_type.binder_lifetime_count != 0u) {
+            return CM_TYPECK_UNSUPPORTED_HIR_TYPE;
+        }
         valid = (type->data.fn_pointer_type.parameter_count == 0u)
                 == (type->data.fn_pointer_type.parameters == NULL)
             && cm_typeck_type_id_valid(state,
@@ -343,11 +466,13 @@ static CmTypeckStatus cm_typeck_add_stored(CmTypeckState *state,
         valid = 0;
         break;
     }
-    if (!valid) return CM_TYPECK_INVALID_ARGUMENT;
+    if (!valid || !cm_typeck_type_requirement(state, type,
+            &late_bound_requirement)) return CM_TYPECK_INVALID_ARGUMENT;
 
     memset(&stored, 0, sizeof(stored));
     stored.type = *type;
     stored.source_hir_type = source_hir_type;
+    stored.late_bound_requirement = late_bound_requirement;
     if (type->kind == CM_TYPECK_TYPE_TUPLE) {
         stored.type.data.tuple_type.elements =
             (CmTypeckTypeId *)cm_typeck_copy_array(state,
@@ -975,6 +1100,10 @@ static CmTypeckStatus cm_typeck_import_type_inner_impl(CmTypeckState *state,
             source->data.slice_type.element, &type.data.slice_type.element);
         break;
     case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (source->data.fn_pointer_type.binder.lifetime_count != 0u) {
+            status = CM_TYPECK_UNSUPPORTED_HIR_TYPE;
+            break;
+        }
         type.kind = CM_TYPECK_TYPE_FN_POINTER;
         type.data.fn_pointer_type.parameter_count =
             source->data.fn_pointer_type.parameter_count;
@@ -1505,6 +1634,9 @@ static CmTypeckStatus cm_typeck_instantiate_type_inner_impl(
             &type.data.slice_type.element);
         break;
     case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (source->data.fn_pointer_type.binder.lifetime_count != 0u) {
+            return CM_TYPECK_UNSUPPORTED_HIR_TYPE;
+        }
         type.kind = CM_TYPECK_TYPE_FN_POINTER;
         type.data.fn_pointer_type.parameter_count =
             source->data.fn_pointer_type.parameter_count;
@@ -2315,6 +2447,8 @@ static CmTypeckStatus cm_typeck_unify_inner_impl(CmTypeckUnifyState *unify,
     case CM_TYPECK_TYPE_FN_POINTER:
         if (left_type->data.fn_pointer_type.parameter_count
                 != right_type->data.fn_pointer_type.parameter_count
+            || left_type->data.fn_pointer_type.binder_lifetime_count
+                != right_type->data.fn_pointer_type.binder_lifetime_count
             || left_type->data.fn_pointer_type.abi
                 != right_type->data.fn_pointer_type.abi
             || left_type->data.fn_pointer_type.safety
@@ -2684,6 +2818,9 @@ static CmTypeckStatus cm_typeck_freeze_inner_impl(
             source->data.slice_type.element, &target.data.slice_type.element);
         break;
     case CM_TYPECK_TYPE_FN_POINTER:
+        if (source->data.fn_pointer_type.binder_lifetime_count != 0u) {
+            return CM_TYPECK_UNSUPPORTED_HIR_TYPE;
+        }
         target.kind = CM_HIR_TYPE_FN_POINTER_KIND;
         target.data.fn_pointer_type.parameter_count =
             source->data.fn_pointer_type.parameter_count;

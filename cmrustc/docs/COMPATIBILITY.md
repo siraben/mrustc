@@ -279,7 +279,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v32` and
+remains omitted rather than guessed. Canonical dumps are `hir-v33` and
 `mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -306,12 +306,37 @@ observer currentness authenticate the arena. This is representation only:
 capture absence/class and Copy evidence are uncomputed, while invocation,
 lifetime inference, expansion, MIR, and C emission reject these nodes.
 
-Canonical `hir-v32` preserves the compiler-authenticated const capability of
+Canonical `hir-v33` preserves the compiler-authenticated const capability of
 traits and the exact constness of trait impl headers. Const inherent impls and
 const impls of non-const traits reject; legacy semantic metadata v1.1 rejects
 these facts and trait method/associated-const default promises instead of
 silently erasing them. Declaration metadata v2.x remains reference-only for
 trait identities and does not claim associated-declaration completeness.
+
+Canonical `hir-v33` also preserves explicit and elided function-pointer
+lifetime binders as nearest-scope late-bound indices. Nested function pointers
+are independently closed, item early-bound lifetimes remain available, and an
+attempt to capture an enclosing late binder fails even when an item lifetime
+has the same name. Binder names are provenance; arity participates in HIR
+structural identity. There is no binder-depth representation yet. Typeck and
+in-memory semantic-results storage, canonical instance v2, semantic metadata
+v1.1, and declaration metadata v2.x reject nonzero function-pointer binders
+without changing their binder-zero wire layouts.
+
+Impl coherence keeps first-order header unification symmetric. The sole
+predicate-derived disjointness fact is the local compiler `FnPtr` domain: an
+exact self-parameter bound may exclude structural non-function-pointer roots
+only when its safe, non-auto, zero-generic trait carries both exact
+`lang = "fn_ptr_trait"` and word `rustc_deny_explicit_impl` attributes.
+Positive and negative explicit impls of such a deny-marked local trait reject.
+Ordinary bounds, imported opaque traits, nested trait arguments, parameter
+roots, and function-pointer roots remain conservative overlap candidates.
+The symmetric self-header gate also honors a bare type parameter's implicit
+`Sized` contract: it is disjoint only from `str`, slice, trait-object, or a
+cycle/depth-bounded chain of local zero-generic structs whose final field is
+already proven unsized. `?Sized`, parameter chains, generic ADTs, aliases,
+projections, pointers, references, arrays, tuples, unions, and enums remain
+conservative; the first-order unifier does not propagate size predicates.
 
 Every current function, const, and static body still has an `ITEM_SOURCE`
 origin whose definition, enclosing definition, item backlink, and legacy owner

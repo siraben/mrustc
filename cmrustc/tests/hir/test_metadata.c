@@ -3070,6 +3070,28 @@ static void test_parsed_unsupported_hir_rejected(void)
     parsed_producer_destroy(&producer);
 }
 
+static void test_bound_function_pointer_v2_rejected_transactionally(void)
+{
+    static const unsigned char source[] =
+        "pub fn bound(callback: for<'a> fn(&'a u8)) { let _ = callback; }\n";
+    static const unsigned char sentinel[] = { 'k', 'e', 'e', 'p' };
+    ParsedProducerFixture producer;
+    CmByteBuf encoded;
+    CmHirMetadataArtifactResult result;
+
+    assert(parsed_producer_build(&producer, source, sizeof(source) - 1u,
+        1u, 0u, 1u, 1));
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_append(&encoded, sentinel, sizeof(sentinel));
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
+        && encoded.len == sizeof(sentinel)
+        && memcmp(encoded.data, sentinel, sizeof(sentinel)) == 0);
+    cm_byte_buf_destroy(&encoded);
+    parsed_producer_destroy(&producer);
+}
+
 static void test_semantic_round_trip(void)
 {
     ProducerFixture producer;
@@ -5893,6 +5915,7 @@ int main(int argc, char **argv)
     test_semantic_trait_universe_round_trip();
     test_unsupported_hir_rejected();
     test_parsed_unsupported_hir_rejected();
+    test_bound_function_pointer_v2_rejected_transactionally();
     test_semantic_round_trip();
     test_declaration_v2_value_round_trip();
     test_declaration_v2_const_generic_round_trip();

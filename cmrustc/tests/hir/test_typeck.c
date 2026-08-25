@@ -534,6 +534,10 @@ static void test_functions_parameters_and_projections(void)
     CmTypeckTypeId function_rust;
     CmTypeckTypeId function_c;
     CmTypeckTypeId function_unsafe;
+    CmTypeckTypeId rejected;
+    CmTypeckTypeId late_reference;
+    CmTypeckType bound_type;
+    CmHirRegion late_region;
     CmTypeckTypeId parameter_a;
     CmTypeckTypeId parameter_b;
     CmTypeckGenericArg args_a[1];
@@ -549,6 +553,23 @@ static void test_functions_parameters_and_projections(void)
         fixture.bool_type, "C", CM_HIR_SAFE);
     function_unsafe = add_fn_pointer(&fixture, parameters, 1u,
         fixture.bool_type, "Rust", CM_HIR_UNSAFE);
+    bound_type = *cm_typeck_get_type(&fixture.typeck, function_rust);
+    bound_type.data.fn_pointer_type.binder_lifetime_count = 1u;
+    assert(cm_typeck_add_type(&fixture.typeck, &bound_type, &rejected)
+        == CM_TYPECK_UNSUPPORTED_HIR_TYPE);
+    memset(&late_region, 0, sizeof(late_region));
+    late_region.kind = CM_HIR_REGION_LATE_BOUND;
+    late_region.data.binder_index = 0u;
+    late_reference = add_reference_region(&fixture, fixture.u32_type,
+        late_region);
+    parameters[0] = late_reference;
+    bound_type.data.fn_pointer_type.parameters = parameters;
+    bound_type.data.fn_pointer_type.binder_lifetime_count = 0u;
+    assert(cm_typeck_add_type(&fixture.typeck, &bound_type, &rejected)
+        == CM_TYPECK_INVALID_ARGUMENT);
+    bound_type.data.fn_pointer_type.binder_lifetime_count = 1u;
+    assert(cm_typeck_add_type(&fixture.typeck, &bound_type, &rejected)
+        == CM_TYPECK_UNSUPPORTED_HIR_TYPE);
     assert(cm_typeck_unify(&fixture.typeck, function_rust, function_c)
         == CM_TYPECK_TYPE_MISMATCH);
     assert(cm_typeck_unify(&fixture.typeck, function_rust, function_unsafe)
@@ -898,9 +919,12 @@ static void test_import_rejection_and_complex_reuse(void)
     CmHirTypeKind unsupported[4];
     CmHirType type;
     CmHirTypeId hir_type;
+    CmHirTypeId late_reference;
+    CmHirTypeId bound_function;
     CmHirTypeId tuple_elements[7];
     CmHirTypeId fn_parameters[1];
     CmHirGenericArg named_arguments[1];
+    CmInternId binder_names[1];
     CmTypeckTypeId imported;
     CmTypeckFreezeResult result;
     CmHirContextMark mark;
@@ -920,6 +944,37 @@ static void test_import_rejection_and_complex_reuse(void)
         assert(imported == CM_TYPECK_TYPE_NONE
             && cm_typeck_type_count(&fixture.typeck) == count);
     }
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(39u, 40u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_LATE_BOUND;
+    type.data.reference_type.region.data.binder_index = 0u;
+    type.data.reference_type.pointee = fixture.hir_u32;
+    type.data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    assert(cm_hir_add_type(&fixture.hir, &type, &late_reference)
+        == CM_HIR_OK);
+    fn_parameters[0] = late_reference;
+    binder_names[0] = cm_hir_intern(&fixture.hir, "'a");
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_FN_POINTER_KIND;
+    type.span = test_span(39u, 40u);
+    type.data.fn_pointer_type.parameters = fn_parameters;
+    type.data.fn_pointer_type.parameter_count = 1u;
+    type.data.fn_pointer_type.return_type = fixture.hir_u32;
+    type.data.fn_pointer_type.binder.lifetimes = binder_names;
+    type.data.fn_pointer_type.binder.lifetime_count = 1u;
+    type.data.fn_pointer_type.binder.span = test_span(39u, 40u);
+    type.data.fn_pointer_type.abi = cm_hir_intern(&fixture.hir, "Rust");
+    type.data.fn_pointer_type.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_type(&fixture.hir, &type, &bound_function)
+        == CM_HIR_OK);
+    count = cm_typeck_type_count(&fixture.typeck);
+    imported = UINT32_MAX;
+    assert(cm_typeck_import_hir_type(&fixture.typeck, bound_function,
+        &imported) == CM_TYPECK_UNSUPPORTED_HIR_TYPE);
+    assert(imported == CM_TYPECK_TYPE_NONE
+        && cm_typeck_type_count(&fixture.typeck) == count);
 
     memset(&type, 0, sizeof(type));
     type.kind = CM_HIR_TYPE_ARRAY_KIND;

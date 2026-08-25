@@ -644,6 +644,9 @@ static CmGoalCanonicalStatus cm_goal_append_type_record(
                 type->data.slice_type.element));
         break;
     case CM_TYPECK_TYPE_FN_POINTER:
+        if (type->data.fn_pointer_type.binder_lifetime_count != 0u) {
+            return CM_GOAL_CANONICAL_INVALID;
+        }
         cm_goal_push_word(&canonical->record,
             (uint64_t)type->data.fn_pointer_type.parameter_count);
         for (index = 0u;

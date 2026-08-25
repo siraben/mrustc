@@ -9,6 +9,8 @@
 #include "cm/source.h"
 #include "cm/vec.h"
 
+#define CM_HIR_LIFETIME_BINDER_LIMIT 4096u
+
 typedef enum CmHirStatus {
     CM_HIR_OK = 0,
     CM_HIR_INVALID_ARGUMENT,
@@ -278,6 +280,9 @@ typedef struct CmHirPredicateScope {
 typedef struct CmHirType {
     CmHirTypeKind kind;
     CmSpan span;
+    /* Derived by cm_hir_add_type from already-committed children.  Callers'
+     * input value is ignored; function-pointer binders consume it to zero. */
+    uint32_t late_bound_requirement;
     union {
         struct {
             CmInternId reason;
@@ -316,6 +321,8 @@ typedef struct CmHirType {
             CmHirTypeId *parameters;
             uint32_t parameter_count;
             CmHirTypeId return_type;
+            /* Nearest, closed late-bound lifetime scope for this pointer. */
+            CmHirLifetimeBinder binder;
             CmInternId abi;
             CmHirSafety safety;
             int is_variadic;
@@ -1158,6 +1165,8 @@ CmHirStatus cm_hir_set_generic_param_declared_type(
     CmHirContext *context, CmHirGenericParamId parameter_id,
     CmHirTypeId type);
 
+/* Default validation is fail-closed after 256 nested types or 4096 visited
+ * type nodes. Rejection is transactional and leaves the parameter unset. */
 CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     CmHirGenericParamId parameter_id, const CmHirGenericArg *argument);
 /* Construct the only body origin admitted by this additive checkpoint. */

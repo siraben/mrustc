@@ -330,6 +330,17 @@ static void cm_hir_dump_type(FILE *stream, const CmHirContext *context,
             (unsigned int)type->data.slice_type.element);
         break;
     case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (type->data.fn_pointer_type.binder.lifetime_count != 0u) {
+            fputs("for<", stream);
+            for (index = 0u;
+                 index < type->data.fn_pointer_type.binder.lifetime_count;
+                 ++index) {
+                if (index != 0u) fputc(',', stream);
+                cm_hir_dump_string(stream, context,
+                    type->data.fn_pointer_type.binder.lifetimes[index]);
+            }
+            fputs("> ", stream);
+        }
         fputs(type->data.fn_pointer_type.safety == CM_HIR_UNSAFE
             ? "unsafe fn[" : "fn[", stream);
         cm_hir_dump_string(stream, context,
@@ -505,7 +516,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v32\n", stream);
+    fputs("hir-v33\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 

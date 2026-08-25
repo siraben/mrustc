@@ -1002,6 +1002,9 @@ static CmSemanticResultsStatus cm_results_typeck_type_mode(
                 != (type->data.fn_pointer_type.parameters == NULL)) {
             return CM_SEMANTIC_RESULTS_INVALID_HIR;
         }
+        if (type->data.fn_pointer_type.binder_lifetime_count != 0u) {
+            return CM_SEMANTIC_RESULTS_UNSUPPORTED_TYPE;
+        }
         status = cm_results_u32(buffer,
             type->data.fn_pointer_type.parameter_count);
         for (index = 0u; status == CM_SEMANTIC_RESULTS_OK

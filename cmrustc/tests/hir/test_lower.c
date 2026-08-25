@@ -472,6 +472,580 @@ static void test_complete_declarations(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_function_pointer_lifetime_binders(void)
+{
+    static const char source[] =
+        "struct Formatter<'a> { marker: &'a () }"
+        "struct NonNull<T> { pointer: *const T }"
+        "type Explicit = for<'a, 'b> "
+        "unsafe fn(&'a u8, &'b u16) -> &'a u8;"
+        "type Implicit = fn(&u8) -> &u8;"
+        "type Mixed = for<'a> fn(&'a u8, &u16) -> &'a u8;"
+        "type Multi = fn(&u8, &u16);"
+        "type Format = unsafe fn(NonNull<()>, &mut Formatter<'_>);"
+        "type Outer<'outer> = fn(&'outer ()) -> &'outer ();"
+        "type Nested = for<'a> fn(for<'b> fn(&'b u8), &'a u8);"
+        "struct DefaultImplicit<F = fn(&u8)> { value: F }"
+        "struct DefaultExplicit<F = for<'a> fn(&'a u8)> { value: F }";
+    static const char ambiguous[] =
+        "type Bad = fn(&u8, &u16) -> &u8;";
+    static const char enclosing_capture[] =
+        "trait Marker<T> {}"
+        "fn bad<T>() where for<'outer> T: "
+        "Marker<fn(&'outer u8)>;";
+    static const char enclosing_collision[] =
+        "trait Marker<T> {}"
+        "fn bad<'outer, T>() where for<'outer> T: "
+        "Marker<for<'inner> fn(fn(&'outer u8), &'inner u8)>;";
+    static const char no_input_output[] =
+        "type Bad = fn() -> &u8;";
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *item;
+    const CmHirType *function_type;
+    const CmHirType *first;
+    const CmHirType *second;
+    const CmHirType *output;
+    const CmHirType *nested;
+    const CmHirGenericParam *parameter;
+
+    result = lower_source(source, &context, NULL);
+    assert(result.error_count == 0u);
+    item = find_item(&context, "Explicit");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    first = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.parameters[0]);
+    second = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.parameters[1]);
+    output = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.return_type);
+    assert(function_type != NULL
+        && function_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && function_type->data.fn_pointer_type.safety == CM_HIR_UNSAFE
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 2u
+        && first != NULL && first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && first->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index == 0u
+        && second != NULL && second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && second->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && second->data.reference_type.region.data.binder_index == 1u
+        && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && output->data.reference_type.region.data.binder_index == 0u);
+
+    item = find_item(&context, "Implicit");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    first = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.parameters[0]);
+    output = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.return_type);
+    assert(function_type != NULL
+        && function_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 1u
+        && first != NULL && output != NULL
+        && first->data.reference_type.region.kind == CM_HIR_REGION_LATE_BOUND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && first->data.reference_type.region.data.binder_index
+            == output->data.reference_type.region.data.binder_index);
+
+    item = find_item(&context, "Mixed");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    assert(function_type != NULL
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 2u);
+
+    item = find_item(&context, "Multi");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    output = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.return_type);
+    assert(function_type != NULL
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 2u
+        && output != NULL && output->kind == CM_HIR_TYPE_UNIT_KIND);
+
+    item = find_item(&context, "Format");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    assert(function_type != NULL
+        && function_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 2u);
+
+    item = find_item(&context, "Outer");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    first = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.parameters[0]);
+    output = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.return_type);
+    assert(function_type != NULL
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 0u
+        && first != NULL && output != NULL
+        && first->data.reference_type.region.kind == CM_HIR_REGION_EARLY_BOUND
+        && output->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && first->data.reference_type.region.data.parameter
+            == output->data.reference_type.region.data.parameter);
+
+    item = find_item(&context, "Nested");
+    function_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.type_alias_item.target);
+    nested = function_type == NULL ? NULL : cm_hir_get_type(&context,
+        function_type->data.fn_pointer_type.parameters[0]);
+    assert(function_type != NULL
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 1u
+        && nested != NULL && nested->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && nested->data.fn_pointer_type.binder.lifetime_count == 1u);
+
+    item = find_item(&context, "DefaultImplicit");
+    parameter = item == NULL ? NULL : cm_hir_get_generic_param(&context,
+        item->generic_parameter_start);
+    function_type = parameter == NULL || !parameter->has_default
+        ? NULL : cm_hir_get_type(&context,
+            parameter->default_argument.data.type);
+    assert(function_type != NULL
+        && function_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 1u);
+    item = find_item(&context, "DefaultExplicit");
+    parameter = item == NULL ? NULL : cm_hir_get_generic_param(&context,
+        item->generic_parameter_start);
+    function_type = parameter == NULL || !parameter->has_default
+        ? NULL : cm_hir_get_type(&context,
+            parameter->default_argument.data.type);
+    assert(function_type != NULL
+        && function_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && function_type->data.fn_pointer_type.binder.lifetime_count == 1u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(ambiguous, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "callable trait output lifetime is ambiguous") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(enclosing_capture, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "captures an enclosing late-bound lifetime") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(no_input_output, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source(enclosing_collision, &context, NULL);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        && strstr(result.first_error.message,
+            "captures an enclosing late-bound lifetime") != NULL);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_function_pointer_binder_ast_mutations(void)
+{
+    static const char tuple_source[] = "type Mutated = (u8, u16);";
+    static const char function_source[] =
+        "type Duplicate = for<'a> fn(&'a u8);";
+    CmAst ast;
+    CmParseResult parse_result;
+    const CmAstItemId *root;
+    const CmAstItem *item;
+    CmAstType *type;
+    CmInternId names[2];
+    CmHirLowerOptions options;
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "fn_binder_mutation";
+    options.source = 1u;
+    cm_ast_init(&ast);
+    parse_result = cm_parse_crate(&ast, tuple_source,
+        sizeof(tuple_source) - 1u, CM_EDITION_2024);
+    root = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 0u);
+    item = root == NULL ? NULL : cm_ast_get_item(&ast, *root);
+    type = item == NULL ? NULL : (CmAstType *)cm_vec_at(&ast.types,
+        (size_t)item->data.value_item.type - 1u);
+    assert(parse_result.error_count == 0u && type != NULL
+        && type->kind == CM_AST_TYPE_TUPLE);
+    names[0] = cm_interner_intern(&ast.strings, "'forged", 7u);
+    type->binder.lifetimes = names;
+    type->binder.lifetime_count = 1u;
+    type->binder.span = type->span;
+    cm_hir_context_init(&context);
+    result = cm_hir_lower_crate(&context, &ast, &options);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_AST
+        && strstr(result.first_error.message,
+            "non-function type carries a function lifetime binder") != NULL);
+    cm_hir_context_destroy(&context);
+    cm_ast_destroy(&ast);
+
+    cm_ast_init(&ast);
+    parse_result = cm_parse_crate(&ast, function_source,
+        sizeof(function_source) - 1u, CM_EDITION_2024);
+    root = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 0u);
+    item = root == NULL ? NULL : cm_ast_get_item(&ast, *root);
+    type = item == NULL ? NULL : (CmAstType *)cm_vec_at(&ast.types,
+        (size_t)item->data.value_item.type - 1u);
+    assert(parse_result.error_count == 0u && type != NULL
+        && type->kind == CM_AST_TYPE_FUNCTION
+        && type->binder.lifetime_count == 1u);
+    names[0] = type->binder.lifetimes[0];
+    names[1] = names[0];
+    type->binder.lifetimes = names;
+    type->binder.lifetime_count = 2u;
+    cm_hir_context_init(&context);
+    result = cm_hir_lower_crate(&context, &ast, &options);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_AST
+        && strstr(result.first_error.message,
+            "function lifetime binder is invalid") != NULL);
+    cm_hir_context_destroy(&context);
+    type->binder.lifetime_count = CM_HIR_LIFETIME_BINDER_LIMIT + 1u;
+    cm_hir_context_init(&context);
+    result = cm_hir_lower_crate(&context, &ast, &options);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_AST
+        && strstr(result.first_error.message,
+            "function lifetime binder is invalid") != NULL);
+    cm_hir_context_destroy(&context);
+    cm_ast_destroy(&ast);
+}
+
+static void test_function_pointer_impl_coherence(void)
+{
+    static const char fn_ptr_blanket_first[] =
+        "trait PartialEq {}"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<F: FnPtr> PartialEq for F {}"
+        "impl<T> PartialEq for *const T {}";
+    static const char raw_pointer_first[] =
+        "trait PartialEq {}"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<T> PartialEq for *const T {}"
+        "impl<F: FnPtr> PartialEq for F {}";
+    static const char mutable_raw_pointer[] =
+        "trait PartialEq {}"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<T> PartialEq for *mut T {}"
+        "impl<F: FnPtr> PartialEq for F {}";
+    static const char generic_adt_first[] =
+        "trait PartialEq {} struct DynMetadata<T>(T);"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<T> PartialEq for DynMetadata<T> {}"
+        "impl<F: FnPtr> PartialEq for F {}";
+    static const char fn_ptr_missing_lang[] =
+        "trait PartialEq {}"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<T> PartialEq for *const T {}"
+        "impl<F: FnPtr> PartialEq for F {}";
+    static const char fn_ptr_missing_deny[] =
+        "trait PartialEq {}"
+        "#[lang = \"fn_ptr_trait\"] trait FnPtr {}"
+        "impl<T> PartialEq for *const T {}"
+        "impl<F: FnPtr> PartialEq for F {}";
+    static const char ordinary_bound_overlap[] =
+        "trait PartialEq {} trait Copy {}"
+        "impl PartialEq for u8 {}"
+        "impl<T: Copy> PartialEq for T {}";
+    static const char sized_blanket_first[] =
+        "trait Marker {}"
+        "impl<T> Marker for T {}"
+        "impl<T> Marker for [T] {}";
+    static const char sized_slice_first[] =
+        "trait Marker {}"
+        "impl<T> Marker for [T] {}"
+        "impl<T> Marker for T {}";
+    static const char relaxed_sized_slice_overlap[] =
+        "trait Marker {}"
+        "impl<T: ?Sized> Marker for T {}"
+        "impl<T> Marker for [T] {}";
+    static const char chained_sized_first[] =
+        "trait Marker<A> {}"
+        "impl<T> Marker<T> for T {}"
+        "impl<U: ?Sized> Marker<[u8]> for U {}";
+    static const char chained_relaxed_first[] =
+        "trait Marker<A> {}"
+        "impl<U: ?Sized> Marker<[u8]> for U {}"
+        "impl<T> Marker<T> for T {}";
+    static const char named_dst_blanket_first[] =
+        "trait Marker {} struct CStr { bytes: [u8] }"
+        "impl<T> Marker for T {} impl Marker for CStr {}";
+    static const char named_dst_wrapper_first[] =
+        "trait Marker {} struct CStr { bytes: [u8] }"
+        "impl Marker for CStr {} impl<T> Marker for T {}";
+    static const char tuple_dst_blanket_first[] =
+        "trait Marker {} struct ByteStr([u8]);"
+        "impl<T> Marker for T {} impl Marker for ByteStr {}";
+    static const char tuple_dst_wrapper_first[] =
+        "trait Marker {} struct ByteStr([u8]);"
+        "impl Marker for ByteStr {} impl<T> Marker for T {}";
+    static const char nested_dst_wrapper[] =
+        "trait Marker {} struct Inner([u8]); struct Outer { inner: Inner }"
+        "impl<T> Marker for T {} impl Marker for Outer {}";
+    static const char reference_is_sized[] =
+        "trait Marker {} impl<T> Marker for T {}"
+        "impl Marker for &'static [u8] {}";
+    static const char raw_pointer_is_sized[] =
+        "trait Marker {} impl<T> Marker for T {}"
+        "impl Marker for *const [u8] {}";
+    static const char array_is_sized[] =
+        "trait Marker {} impl<T> Marker for T {}"
+        "impl Marker for [u8; 3] {}";
+    static const char generic_dst_wrapper_unknown[] =
+        "trait Marker {} struct Wrap<T: ?Sized>(T);"
+        "impl<T> Marker for T {} impl Marker for Wrap<[u8]> {}";
+    static const char non_self_fn_ptr_bound[] =
+        "trait Marker<A> {}"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<T, F: FnPtr> Marker<F> for T {}"
+        "impl Marker<fn(u8)> for u8 {}";
+    static const char two_fn_ptr_blankets[] =
+        "trait PartialEq {}"
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl<F: FnPtr> PartialEq for F {}"
+        "impl<G: FnPtr> PartialEq for G {}";
+    static const char explicit_fn_ptr_impl[] =
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl FnPtr for fn(u8) {}";
+    static const char negative_fn_ptr_impl[] =
+        "#[lang = \"fn_ptr_trait\"]"
+        "#[rustc_deny_explicit_impl] trait FnPtr {}"
+        "impl !FnPtr for fn(u8) {}";
+    static const char binder_zero_duplicate[] =
+        "trait Marker<T> {}"
+        "impl Marker<fn(u8)> for u8 {}"
+        "impl Marker<fn(u8)> for u8 {}";
+    static const char bound_duplicate[] =
+        "trait Marker<T> {}"
+        "impl Marker<for<'a> fn(&'a u8)> for u8 {}"
+        "impl Marker<for<'b> fn(&'b u8)> for u8 {}";
+    static const char different_arity[] =
+        "trait Marker<T> {}"
+        "impl Marker<for<'a> fn(&'a u8, &'a u8)> for u8 {}"
+        "impl Marker<for<'a, 'b> fn(&'a u8, &'b u8)> for u8 {}";
+    static const char generic_first[] =
+        "trait Marker<A> {}"
+        "impl<T> Marker<fn(T)> for u8 {}"
+        "impl Marker<fn(u8)> for u8 {}";
+    static const char concrete_first[] =
+        "trait Marker<A> {}"
+        "impl Marker<fn(u8)> for u8 {}"
+        "impl<T> Marker<fn(T)> for u8 {}";
+    static const char bound_generic[] =
+        "trait Marker<A> {}"
+        "impl<T> Marker<for<'a> fn(&'a T)> for u8 {}"
+        "impl Marker<for<'b> fn(&'b u8)> for u8 {}";
+    static const char *const symmetric_duplicates[] = {
+        generic_first, concrete_first, bound_generic
+    };
+    static const char *const fn_ptr_disjoint[] = {
+        fn_ptr_blanket_first, raw_pointer_first, mutable_raw_pointer,
+        generic_adt_first
+    };
+    static const char *const sized_slice_disjoint[] = {
+        sized_blanket_first, sized_slice_first
+    };
+    static const char *const chained_parameter_overlaps[] = {
+        chained_sized_first, chained_relaxed_first
+    };
+    static const char *const dst_wrapper_disjoint[] = {
+        named_dst_blanket_first, named_dst_wrapper_first,
+        tuple_dst_blanket_first, tuple_dst_wrapper_first,
+        nested_dst_wrapper
+    };
+    static const char *const dst_wrapper_unknown[] = {
+        reference_is_sized, raw_pointer_is_sized, array_is_sized,
+        generic_dst_wrapper_unknown
+    };
+    static const char *const fn_ptr_rejected[] = {
+        fn_ptr_missing_lang, fn_ptr_missing_deny, ordinary_bound_overlap,
+        non_self_fn_ptr_bound, two_fn_ptr_blankets
+    };
+    static const char *const explicit_fn_ptr_rejected[] = {
+        explicit_fn_ptr_impl, negative_fn_ptr_impl
+    };
+    CmHirContext context;
+    CmHirLowerResult result;
+    size_t index;
+
+    for (index = 0u;
+         index < sizeof(fn_ptr_disjoint) / sizeof(fn_ptr_disjoint[0]);
+         ++index) {
+        result = lower_graph_source(fn_ptr_disjoint[index], &context);
+        if (result.error_count != 0u) {
+            fprintf(stderr, "compiler FnPtr disjointness %lu: %s: %s\n",
+                (unsigned long)index,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 0u);
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u;
+         index < sizeof(sized_slice_disjoint)
+            / sizeof(sized_slice_disjoint[0]); ++index) {
+        result = lower_graph_source(sized_slice_disjoint[index], &context);
+        assert(result.error_count == 0u);
+        cm_hir_context_destroy(&context);
+    }
+
+    result = lower_graph_source(relaxed_sized_slice_overlap, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u;
+         index < sizeof(chained_parameter_overlaps)
+            / sizeof(chained_parameter_overlaps[0]); ++index) {
+        result = lower_graph_source(chained_parameter_overlaps[index],
+            &context);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "overlapping blanket impl candidates") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u;
+         index < sizeof(dst_wrapper_disjoint)
+            / sizeof(dst_wrapper_disjoint[0]); ++index) {
+        result = lower_graph_source(dst_wrapper_disjoint[index], &context);
+        assert(result.error_count == 0u);
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u;
+        index < sizeof(dst_wrapper_unknown)
+            / sizeof(dst_wrapper_unknown[0]); ++index) {
+        result = lower_graph_source(dst_wrapper_unknown[index], &context);
+        if (result.error_count != 1u
+            || !((result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+                    && strstr(result.first_error.message,
+                        "overlapping blanket impl candidates") != NULL)
+                || (result.first_error.kind
+                        == CM_HIR_LOWER_UNSUPPORTED_TYPE
+                    && strstr(result.first_error.message,
+                        "outside the bounded") != NULL))) {
+            fprintf(stderr, "conservative DST root %lu: %s: %s\n",
+                (unsigned long)index,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && ((result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+                    && strstr(result.first_error.message,
+                        "overlapping blanket impl candidates") != NULL)
+                || (result.first_error.kind
+                        == CM_HIR_LOWER_UNSUPPORTED_TYPE
+                    && strstr(result.first_error.message,
+                        "outside the bounded") != NULL)));
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u;
+         index < sizeof(fn_ptr_rejected) / sizeof(fn_ptr_rejected[0]);
+         ++index) {
+        result = lower_graph_source(fn_ptr_rejected[index], &context);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "overlapping blanket impl candidates") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+
+    for (index = 0u;
+         index < sizeof(explicit_fn_ptr_rejected)
+            / sizeof(explicit_fn_ptr_rejected[0]); ++index) {
+        result = lower_graph_source(explicit_fn_ptr_rejected[index],
+            &context);
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "rustc_deny_explicit_impl") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+
+    result = lower_graph_source(binder_zero_duplicate, &context);
+    if (result.error_count != 1u
+        || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+        || strstr(result.first_error.message,
+            "duplicate exact impl candidate") == NULL) {
+        fprintf(stderr, "binder-zero function-pointer impl duplicate: "
+            "%s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(bound_duplicate, &context);
+    if (result.error_count != 1u
+        || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+        || strstr(result.first_error.message,
+            "duplicate exact impl candidate") == NULL) {
+        fprintf(stderr, "bound function-pointer impl duplicate: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "duplicate exact impl candidate") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(different_arity, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "function-pointer impl arity mismatch: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    for (index = 0u;
+         index < sizeof(symmetric_duplicates)
+            / sizeof(symmetric_duplicates[0]); ++index) {
+        result = lower_graph_source(symmetric_duplicates[index], &context);
+        if (result.error_count != 1u
+            || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+            || strstr(result.first_error.message,
+                "duplicate exact impl candidate") == NULL) {
+            fprintf(stderr, "symmetric function-pointer impl overlap %lu: "
+                "%s: %s\n", (unsigned long)index,
+                cm_hir_lower_error_kind_name(result.first_error.kind),
+                result.first_error.message);
+        }
+        assert(result.error_count == 1u
+            && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+            && strstr(result.first_error.message,
+                "duplicate exact impl candidate") != NULL);
+        cm_hir_context_destroy(&context);
+    }
+}
+
 static void test_union_declarations(void)
 {
     static const char source[] =
@@ -9372,6 +9946,118 @@ static void test_concrete_reference_impl_self_class(void)
     cm_hir_context_destroy(&context);
 }
 
+static char *build_deep_inherited_member_source(size_t depth)
+{
+    static const char first[] =
+        "struct Box2<T> { value: T }"
+        "trait Stream { type Item; fn mark(&self); }"
+        "trait Fast {} trait Slow {}"
+        "impl<T> Stream for Box2<T> {"
+        " default fn mark(&self) {}"
+        " type Item = ";
+    static const char middle[] =
+        ";}"
+        "impl<T> Stream for Box2<T> where T: Fast {"
+        " default fn mark(&self) {}"
+        " type Item = ";
+    static const char last[] =
+        ";}"
+        "impl<T> Stream for Box2<T> where T: Fast + Slow {"
+        " fn mark(&self) {}"
+        "}";
+    static const char pointer[] = "*const ";
+    const size_t capacity = sizeof(first) - 1u + sizeof(middle) - 1u
+        + sizeof(last) - 1u + 2u * depth * (sizeof(pointer) - 1u)
+        + 2u * (sizeof("u8") - 1u) + 1u;
+    char *source;
+    size_t used;
+    size_t index;
+
+    source = (char *)malloc(capacity);
+    assert(source != NULL);
+    used = 0u;
+    memcpy(source + used, first, sizeof(first) - 1u);
+    used += sizeof(first) - 1u;
+    for (index = 0u; index < depth; ++index) {
+        memcpy(source + used, pointer, sizeof(pointer) - 1u);
+        used += sizeof(pointer) - 1u;
+    }
+    memcpy(source + used, "u8", sizeof("u8") - 1u);
+    used += sizeof("u8") - 1u;
+    memcpy(source + used, middle, sizeof(middle) - 1u);
+    used += sizeof(middle) - 1u;
+    for (index = 0u; index < depth; ++index) {
+        memcpy(source + used, pointer, sizeof(pointer) - 1u);
+        used += sizeof(pointer) - 1u;
+    }
+    memcpy(source + used, "u8", sizeof("u8") - 1u);
+    used += sizeof("u8") - 1u;
+    memcpy(source + used, last, sizeof(last) - 1u);
+    used += sizeof(last) - 1u;
+    assert(used + 1u == capacity);
+    source[used] = '\0';
+    return source;
+}
+
+static void append_inherited_test_source(char *source, size_t capacity,
+    size_t *used, const char *text)
+{
+    size_t length;
+
+    length = strlen(text);
+    assert(*used < capacity && length < capacity - *used);
+    memcpy(source + *used, text, length);
+    *used += length;
+    source[*used] = '\0';
+}
+
+static void append_inherited_test_signature(char *source, size_t capacity,
+    size_t *used, const char *prefix, size_t parameter_count,
+    const char *suffix)
+{
+    size_t index;
+
+    append_inherited_test_source(source, capacity, used, prefix);
+    for (index = 0u; index < parameter_count; ++index) {
+        int written;
+
+        written = snprintf(source + *used, capacity - *used,
+            ", p%lu: u8", (unsigned long)index);
+        assert(written >= 0 && (size_t)written < capacity - *used);
+        *used += (size_t)written;
+    }
+    append_inherited_test_source(source, capacity, used, suffix);
+}
+
+static char *build_aggregate_inherited_member_source(size_t parameter_count)
+{
+    const size_t capacity = parameter_count * 96u + 2048u;
+    char *source;
+    size_t used;
+
+    source = (char *)malloc(capacity);
+    assert(source != NULL);
+    source[0] = '\0';
+    used = 0u;
+    append_inherited_test_source(source, capacity, &used,
+        "struct Box2<T> { value: T }"
+        "trait Apply {");
+    append_inherited_test_signature(source, capacity, &used,
+        "fn apply(&self", parameter_count, ");}");
+    append_inherited_test_source(source, capacity, &used,
+        "trait Fast {} trait Slow {}"
+        "impl<T> Apply for Box2<T> {");
+    append_inherited_test_signature(source, capacity, &used,
+        "default fn apply(&self", parameter_count, ") {}");
+    append_inherited_test_source(source, capacity, &used,
+        "}impl<T> Apply for Box2<T> where T: Fast {");
+    append_inherited_test_signature(source, capacity, &used,
+        "default fn apply(&self", parameter_count, ") {}");
+    append_inherited_test_source(source, capacity, &used,
+        "}impl<T> Apply for Box2<T> where T: Fast + Slow {}");
+    return source;
+}
+
 static void test_specialization_inherits_associated_type(void)
 {
     static const char source[] =
@@ -9421,6 +10107,21 @@ static void test_specialization_inherits_associated_type(void)
             "}"
             "impl Stream for Pair<Range2, Range3> {"
             " fn next(&mut self) -> Option<u8> {}"
+            "}"),
+        /* Function-pointer binders are structural by arity, not by name. */
+        ("struct Box2<T> { value: T }"
+            "trait Stream { type Item; fn mark(&self); }"
+            "trait Fast {} trait Slow {}"
+            "impl<T> Stream for Box2<T> {"
+            " default fn mark(&self) {}"
+            " type Item = for<'a> fn(&'a u8);"
+            "}"
+            "impl<T> Stream for Box2<T> where T: Fast {"
+            " default fn mark(&self) {}"
+            " type Item = for<'x, 'y> fn(&'x u8);"
+            "}"
+            "impl<T> Stream for Box2<T> where T: Fast + Slow {"
+            " fn mark(&self) {}"
             "}")
     };
     CmHirContext context;
@@ -9430,6 +10131,8 @@ static void test_specialization_inherits_associated_type(void)
     const CmHirItem *specialized_impl;
     const CmHirItem *base_next;
     const CmHirItem *base_item;
+    char *aggregate_source;
+    char *deep_source;
     size_t index;
 
     result = lower_graph_source(source, &context);
@@ -9480,6 +10183,81 @@ static void test_specialization_inherits_associated_type(void)
     }
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
+
+    /* Independently lowered, alpha-equivalent function-pointer member
+     * signatures agree across multiple specializable bases. */
+    result = lower_graph_source(
+        "struct Box2<T> { value: T }"
+        "trait Apply { fn apply(&self, f: fn(&u8) -> u8); }"
+        "trait Fast {} trait Slow {}"
+        "impl<T> Apply for Box2<T> {"
+        " default fn apply(&self, f: fn(&u8) -> u8) {}"
+        "}"
+        "impl<T> Apply for Box2<T> where T: Fast {"
+        " default fn apply(&self, f: fn(&u8) -> u8) {}"
+        "}"
+        "impl<T> Apply for Box2<T> where T: Fast + Slow {}",
+        &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr,
+            "function-pointer specialization inheritance failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    /* The exact nesting boundary remains comparable. */
+    deep_source = build_deep_inherited_member_source(256u);
+    result = lower_graph_source(deep_source, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr,
+            "bounded inherited-member comparison failed: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+    free(deep_source);
+
+    /* One more edge fails closed rather than recursing without limit. */
+    deep_source = build_deep_inherited_member_source(257u);
+    result = lower_graph_source(deep_source, &context);
+    if (result.error_count != 1u
+        || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+        || strstr(result.first_error.message,
+            "missing a required associated type") == NULL) {
+        fprintf(stderr,
+            "deep inherited-member rejection mismatch: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "missing a required associated type") != NULL);
+    cm_hir_context_destroy(&context);
+    free(deep_source);
+
+    /* The node budget is shared across one complete method signature; it is
+     * not reset for each independently shallow parameter. */
+    aggregate_source = build_aggregate_inherited_member_source(4097u);
+    result = lower_graph_source(aggregate_source, &context);
+    if (result.error_count != 1u
+        || result.first_error.kind != CM_HIR_LOWER_INVALID_IMPL
+        || strstr(result.first_error.message,
+            "missing a required trait method") == NULL) {
+        fprintf(stderr,
+            "aggregate inherited-member rejection mismatch: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "missing a required trait method") != NULL);
+    cm_hir_context_destroy(&context);
+    free(aggregate_source);
 
     for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
          ++index) {
@@ -11513,6 +12291,9 @@ int main(void)
     test_concrete_reference_impl_self_class();
     test_specialization_inherits_associated_type();
     test_complete_declarations();
+    test_function_pointer_lifetime_binders();
+    test_function_pointer_binder_ast_mutations();
+    test_function_pointer_impl_coherence();
     test_union_declarations();
     test_enum_variant_attributes_fail_closed();
     test_default_specialization_lowering();

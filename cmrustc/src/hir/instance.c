@@ -520,6 +520,9 @@ static CmHirInstanceStatus cm_instance_encode_type(
                 != (type->data.fn_pointer_type.parameters == NULL)) {
             return CM_HIR_INSTANCE_INVALID_RELATION;
         }
+        if (type->data.fn_pointer_type.binder.lifetime_count != 0u) {
+            return CM_HIR_INSTANCE_UNSUPPORTED_REGION;
+        }
         status = cm_instance_u32(buffer,
             type->data.fn_pointer_type.parameter_count);
         for (index = 0u; status == CM_HIR_INSTANCE_OK

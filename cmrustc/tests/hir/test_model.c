@@ -1379,7 +1379,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1545,6 +1545,114 @@ static void test_scoped_self_and_receiver_invariants(void)
     item.data.type_alias_item.trait_item_definition = associated_definition;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
 
+    cm_hir_context_destroy(&context);
+}
+
+static void test_function_pointer_lifetime_binder_model(void)
+{
+    CmHirContext context;
+    CmHirType type;
+    CmHirTypeId unit_type;
+    CmHirTypeId late_zero_type;
+    CmHirTypeId late_one_type;
+    CmHirTypeId inner_type;
+    CmHirTypeId outer_type;
+    CmHirTypeId rejected;
+    CmHirTypeId parameters[2];
+    CmInternId names[2];
+    const CmHirType *stored;
+    FILE *dump_file;
+    char *dump;
+
+    cm_hir_context_init(&context);
+    unit_type = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(1u, 2u));
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+    type.span = test_span(4u, 8u);
+    type.data.reference_type.region.kind = CM_HIR_REGION_LATE_BOUND;
+    type.data.reference_type.region.data.binder_index = 0u;
+    type.data.reference_type.pointee = unit_type;
+    type.late_bound_requirement = 99u;
+    assert(cm_hir_add_type(&context, &type, &late_zero_type) == CM_HIR_OK);
+    stored = cm_hir_get_type(&context, late_zero_type);
+    assert(stored != NULL && stored->late_bound_requirement == 1u);
+    type.data.reference_type.region.data.binder_index = 1u;
+    assert(cm_hir_add_type(&context, &type, &late_one_type) == CM_HIR_OK);
+
+    names[0] = cm_hir_intern(&context, "'a");
+    parameters[0] = late_zero_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_FN_POINTER_KIND;
+    type.span = test_span(10u, 40u);
+    type.data.fn_pointer_type.parameters = parameters;
+    type.data.fn_pointer_type.parameter_count = 1u;
+    type.data.fn_pointer_type.return_type = late_zero_type;
+    type.data.fn_pointer_type.binder.lifetimes = names;
+    type.data.fn_pointer_type.binder.lifetime_count = 1u;
+    type.data.fn_pointer_type.binder.span = test_span(10u, 17u);
+    type.data.fn_pointer_type.abi = cm_hir_intern(&context, "Rust");
+    assert(cm_hir_add_type(&context, &type, &inner_type) == CM_HIR_OK);
+    names[0] = CM_INTERN_ID_NONE;
+    stored = cm_hir_get_type(&context, inner_type);
+    assert(stored != NULL
+        && stored->late_bound_requirement == 0u
+        && stored->data.fn_pointer_type.binder.lifetimes[0]
+            != CM_INTERN_ID_NONE);
+
+    memset(&type.data.fn_pointer_type.binder, 0,
+        sizeof(type.data.fn_pointer_type.binder));
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
+    names[0] = cm_hir_intern(&context, "'a");
+    type.data.fn_pointer_type.binder.lifetimes = NULL;
+    type.data.fn_pointer_type.binder.lifetime_count = 1u;
+    type.data.fn_pointer_type.binder.span = test_span(10u, 17u);
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
+    type.data.fn_pointer_type.binder.lifetimes = names;
+    type.data.fn_pointer_type.parameters = &late_one_type;
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
+    type.data.fn_pointer_type.parameters = parameters;
+    names[1] = names[0];
+    type.data.fn_pointer_type.binder.lifetime_count = 2u;
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
+    type.data.fn_pointer_type.binder.lifetime_count
+        = CM_HIR_LIFETIME_BINDER_LIMIT + 1u;
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
+
+    names[1] = cm_hir_intern(&context, "'outer");
+    parameters[0] = inner_type;
+    parameters[1] = late_zero_type;
+    type.data.fn_pointer_type.parameters = parameters;
+    type.data.fn_pointer_type.parameter_count = 2u;
+    type.data.fn_pointer_type.return_type = unit_type;
+    type.data.fn_pointer_type.binder.lifetimes = &names[1];
+    type.data.fn_pointer_type.binder.lifetime_count = 1u;
+    type.data.fn_pointer_type.binder.span = test_span(20u, 30u);
+    assert(cm_hir_add_type(&context, &type, &outer_type) == CM_HIR_OK);
+    assert(outer_type != CM_HIR_TYPE_NONE);
+    dump_file = tmpfile();
+    assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
+    dump = read_dump(dump_file);
+    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
+        && strstr(dump,
+            "type#4 for<\"'a\"> fn[\"Rust\"](ty#2)->ty#2 ") != NULL
+        && strstr(dump,
+            "type#5 for<\"'outer\"> fn[\"Rust\"](ty#4,ty#2)->ty#1 ")
+            != NULL);
+    cm_free(dump);
+    fclose(dump_file);
+
+    type.data.fn_pointer_type.parameters = parameters;
+    type.data.fn_pointer_type.parameter_count = 0u;
+    memset(&type.data.fn_pointer_type.binder, 0,
+        sizeof(type.data.fn_pointer_type.binder));
+    assert(cm_hir_add_type(&context, &type, &rejected)
+        == CM_HIR_INVALID_ID);
     cm_hir_context_destroy(&context);
 }
 
@@ -2935,7 +3043,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -3319,7 +3427,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0
+    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -4006,7 +4114,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -4488,7 +4596,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -5005,7 +5113,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -6152,7 +6260,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -7519,6 +7627,153 @@ static void test_adt_generic_default_model(void)
     cm_hir_context_destroy(&context);
 }
 
+static void test_generic_default_resource_limits(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirDefId definition;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirGenericArg argument;
+    CmHirType type;
+    CmHirTypeId unit_type;
+    CmHirTypeId deep_type;
+    CmHirTypeId shared_type;
+    CmHirTypeId elements[2];
+    const CmHirGenericParam *stored;
+    uint32_t index;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "default_resource_limits"),
+        CM_HIR_EDITION_2024, test_span(0u, 1000u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    (void)root_module;
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_STRUCT, test_span(1u, 999u), &definition)
+        == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = definition;
+    parameter.name = cm_hir_intern(&context, "T");
+    parameter.span = test_span(2u, 3u);
+    assert(cm_hir_add_generic_param(&context, &parameter, &parameter_id)
+        == CM_HIR_OK);
+    unit_type = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(4u, 5u));
+
+    deep_type = unit_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_RAW_POINTER_KIND;
+    type.span = test_span(6u, 7u);
+    type.data.raw_pointer_type.mutability = CM_HIR_IMMUTABLE;
+    for (index = 0u; index < 300u; ++index) {
+        type.data.raw_pointer_type.pointee = deep_type;
+        assert(cm_hir_add_type(&context, &type, &deep_type) == CM_HIR_OK);
+    }
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = deep_type;
+    assert(cm_hir_set_generic_param_default(&context, parameter_id,
+        &argument) == CM_HIR_INVARIANT_VIOLATION);
+    stored = cm_hir_get_generic_param(&context, parameter_id);
+    assert(stored != NULL && !stored->has_default
+        && stored->default_argument.data.type == CM_HIR_TYPE_NONE);
+
+    shared_type = unit_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_TUPLE_KIND;
+    type.span = test_span(8u, 9u);
+    type.data.tuple_type.elements = elements;
+    type.data.tuple_type.element_count = 2u;
+    for (index = 0u; index < 12u; ++index) {
+        elements[0] = shared_type;
+        elements[1] = shared_type;
+        assert(cm_hir_add_type(&context, &type, &shared_type) == CM_HIR_OK);
+    }
+    argument.data.type = shared_type;
+    assert(cm_hir_set_generic_param_default(&context, parameter_id,
+        &argument) == CM_HIR_INVARIANT_VIOLATION);
+    stored = cm_hir_get_generic_param(&context, parameter_id);
+    assert(stored != NULL && !stored->has_default
+        && stored->default_argument.data.type == CM_HIR_TYPE_NONE);
+
+    argument.data.type = unit_type;
+    assert(cm_hir_set_generic_param_default(&context, parameter_id,
+        &argument) == CM_HIR_OK);
+    stored = cm_hir_get_generic_param(&context, parameter_id);
+    assert(stored != NULL && stored->has_default
+        && stored->default_argument.kind == CM_HIR_GENERIC_ARG_TYPE
+        && stored->default_argument.data.type == unit_type);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_generic_default_nominal_depth_boundary(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirDefId definition;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId parameter_id;
+    CmHirGenericArg default_argument;
+    CmHirGenericArg named_argument;
+    CmHirType type;
+    CmHirTypeId current;
+    CmHirTypeId boundary;
+    const CmHirGenericParam *stored;
+    uint32_t index;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "default_nominal_depth"),
+        CM_HIR_EDITION_2024, test_span(0u, 1000u), &crate_id,
+        &root_module) == CM_HIR_OK);
+    (void)root_module;
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_STRUCT, test_span(1u, 999u), &definition)
+        == CM_HIR_OK);
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = definition;
+    parameter.name = cm_hir_intern(&context, "T");
+    parameter.span = test_span(2u, 3u);
+    assert(cm_hir_add_generic_param(&context, &parameter, &parameter_id)
+        == CM_HIR_OK);
+    current = add_simple_type(&context, CM_HIR_TYPE_UNIT_KIND,
+        test_span(4u, 5u));
+    memset(&named_argument, 0, sizeof(named_argument));
+    named_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(6u, 7u);
+    type.data.named_type.definition = definition;
+    type.data.named_type.arguments = &named_argument;
+    type.data.named_type.argument_count = 1u;
+    boundary = CM_HIR_TYPE_NONE;
+    for (index = 0u; index < 257u; ++index) {
+        named_argument.data.type = current;
+        assert(cm_hir_add_type(&context, &type, &current) == CM_HIR_OK);
+        if (index == 255u) boundary = current;
+    }
+    assert(boundary != CM_HIR_TYPE_NONE);
+    memset(&default_argument, 0, sizeof(default_argument));
+    default_argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    default_argument.data.type = current;
+    assert(cm_hir_set_generic_param_default(&context, parameter_id,
+        &default_argument) == CM_HIR_INVARIANT_VIOLATION);
+    stored = cm_hir_get_generic_param(&context, parameter_id);
+    assert(stored != NULL && !stored->has_default);
+    default_argument.data.type = boundary;
+    assert(cm_hir_set_generic_param_default(&context, parameter_id,
+        &default_argument) == CM_HIR_OK);
+    stored = cm_hir_get_generic_param(&context, parameter_id);
+    assert(stored != NULL && stored->has_default
+        && stored->default_argument.data.type == boundary);
+    cm_hir_context_destroy(&context);
+}
+
 static void test_const_generic_default_type_invariants(void)
 {
     CmHirContext context;
@@ -8021,7 +8276,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(strstr(dump,
         "trait-header item#2 safety=unsafe auto=1 const=1")
         != NULL);
@@ -8419,7 +8674,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -8968,7 +9223,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v32\n", strlen("hir-v32\n")) == 0);
+    assert(strncmp(first_dump, "hir-v33\n", strlen("hir-v33\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,
@@ -8997,6 +9252,7 @@ int main(void)
     test_structural_import_model();
     test_enum_variant_definition_model();
     test_macro_definition_model();
+    test_function_pointer_lifetime_binder_model();
     test_scoped_self_and_receiver_invariants();
     test_body_public_invariants();
     test_discard_parameter_model();
@@ -9024,6 +9280,8 @@ int main(void)
     test_closure_capture_semantic_mark_failures();
     test_context_generation_exhaustion_boundary();
     test_adt_generic_default_model();
+    test_generic_default_resource_limits();
+    test_generic_default_nominal_depth_boundary();
     test_const_generic_default_type_invariants();
     test_const_generic_trait_method_model();
     test_auto_trait_and_negative_impl_model();

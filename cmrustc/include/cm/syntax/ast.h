@@ -142,6 +142,8 @@ typedef struct CmAstType {
     uint32_t element_count;
     CmAstTypeBound *bounds;
     uint32_t bound_count;
+    /* Present only on CM_AST_TYPE_FUNCTION. */
+    CmAstLifetimeBinder binder;
     CmInternId lifetime;
     CmInternId text;
     int is_mutable;

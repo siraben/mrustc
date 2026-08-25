@@ -1949,73 +1949,14 @@ static int cm_hir_library_type_binder_requirement_cached(
     uint32_t *out_requirement)
 {
     const CmHirType *type;
-    uint32_t requirement;
-    uint32_t index;
 
-    if (context == NULL || out_requirement == NULL
-        || id == CM_HIR_TYPE_NONE
-        || depth >= (size_t)CM_META_MAX_TYPE_NESTING) return 0;
-    if ((size_t)id > context->types.len) return 0;
-    if (states[id - 1u] == UINT8_C(2)) {
-        *out_requirement = requirements[id - 1u];
-        return 1;
-    }
-    if (states[id - 1u] != 0u) return 0;
-    states[id - 1u] = UINT8_C(1);
+    (void)depth;
+    (void)requirements;
+    (void)states;
+    if (context == NULL || out_requirement == NULL) return 0;
     type = cm_hir_get_type(context, id);
     if (type == NULL) return 0;
-    requirement = 0u;
-#define CM_LIBRARY_REQUIRE_TYPE(child_id) do { \
-        uint32_t child_requirement; \
-        if (!cm_hir_library_type_binder_requirement_cached(context, \
-                (child_id), depth + 1u, requirements, states, \
-                &child_requirement)) return 0; \
-        if (child_requirement > requirement) requirement = child_requirement; \
-    } while (0)
-    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
-        if (type->data.reference_type.region.kind == CM_HIR_REGION_LATE_BOUND) {
-            if (type->data.reference_type.region.data.binder_index
-                    == UINT32_MAX) return 0;
-            requirement = type->data.reference_type.region.data.binder_index
-                + 1u;
-        }
-        CM_LIBRARY_REQUIRE_TYPE(type->data.reference_type.pointee);
-    } else if (type->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {
-        CM_LIBRARY_REQUIRE_TYPE(type->data.raw_pointer_type.pointee);
-    } else if (type->kind == CM_HIR_TYPE_TUPLE_KIND) {
-        for (index = 0u; index < type->data.tuple_type.element_count; ++index)
-            CM_LIBRARY_REQUIRE_TYPE(type->data.tuple_type.elements[index]);
-    } else if (type->kind == CM_HIR_TYPE_ARRAY_KIND) {
-        CM_LIBRARY_REQUIRE_TYPE(type->data.array_type.element);
-    } else if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
-        CM_LIBRARY_REQUIRE_TYPE(type->data.slice_type.element);
-    } else if (type->kind == CM_HIR_TYPE_ADT_KIND
-            || type->kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
-            || type->kind == CM_HIR_TYPE_FOREIGN_KIND) {
-        for (index = 0u; index < type->data.named_type.argument_count;
-                ++index) {
-            const CmHirGenericArg *argument;
-
-            argument = &type->data.named_type.arguments[index];
-            if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME
-                && argument->data.lifetime.kind == CM_HIR_REGION_LATE_BOUND) {
-                uint32_t needed;
-
-                if (argument->data.lifetime.data.binder_index == UINT32_MAX)
-                    return 0;
-                needed = argument->data.lifetime.data.binder_index + 1u;
-                if (needed > requirement) requirement = needed;
-            } else if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
-                CM_LIBRARY_REQUIRE_TYPE(argument->data.type);
-            } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
-                CM_LIBRARY_REQUIRE_TYPE(argument->data.constant.type);
-            }
-        }
-    }
-#undef CM_LIBRARY_REQUIRE_TYPE
-    requirements[id - 1u] = requirement;
-    states[id - 1u] = UINT8_C(2);
-    *out_requirement = requirement;
+    *out_requirement = type->late_bound_requirement;
     return 1;
 }
 
@@ -2091,6 +2032,14 @@ static int cm_hir_library_type_parameters_owned_cached(
             return 0;
     } else if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
         if (!CM_LIBRARY_OWNED_TYPE(type->data.slice_type.element)) return 0;
+    } else if (type->kind == CM_HIR_TYPE_FN_POINTER_KIND) {
+        for (index = 0u;
+             index < type->data.fn_pointer_type.parameter_count; ++index) {
+            if (!CM_LIBRARY_OWNED_TYPE(
+                    type->data.fn_pointer_type.parameters[index])) return 0;
+        }
+        if (!CM_LIBRARY_OWNED_TYPE(
+                type->data.fn_pointer_type.return_type)) return 0;
     } else if (type->kind == CM_HIR_TYPE_ADT_KIND
             || type->kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
             || type->kind == CM_HIR_TYPE_FOREIGN_KIND) {
@@ -2336,10 +2285,8 @@ static int cm_hir_library_reserved_function_predicates_valid(
     unsigned char *predicate_seen;
     int valid;
 
-    requirements = (uint32_t *)cm_alloc_zeroed(context->types.len,
-        sizeof(uint32_t));
-    requirement_states = (unsigned char *)cm_alloc_zeroed(context->types.len,
-        sizeof(unsigned char));
+    requirements = NULL;
+    requirement_states = NULL;
     signature_seen = (unsigned char *)cm_alloc_zeroed(context->types.len,
         sizeof(unsigned char));
     predicate_seen = (unsigned char *)cm_alloc_zeroed(context->types.len,
@@ -2349,8 +2296,6 @@ static int cm_hir_library_reserved_function_predicates_valid(
         signature_seen, predicate_seen);
     cm_free(predicate_seen);
     cm_free(signature_seen);
-    cm_free(requirement_states);
-    cm_free(requirements);
     return valid;
 }
 

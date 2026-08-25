@@ -641,6 +641,8 @@ static int cm_parser_parse_macro_arguments(CmParser *parser,
 }
 
 static CmAstTypeId cm_parser_parse_type(CmParser *parser);
+static void cm_parser_parse_lifetime_binder(CmParser *parser,
+    CmAstLifetimeBinder *binder);
 static void cm_parser_parse_trait_type_bounds(CmParser *parser,
     CmAstType *type);
 static int cm_parser_type_is_plain_sized_path(const CmParser *parser,
@@ -1031,11 +1033,15 @@ static CmAstTypeId cm_parser_parse_type(CmParser *parser)
     } else if (cm_parser_eat_keyword(parser, CM_KW_DYN)) {
         type.kind = CM_AST_TYPE_DYN_TRAIT;
         cm_parser_parse_trait_type_bounds(parser, &type);
-    } else if (cm_parser_keyword(parser, CM_KW_UNSAFE)
+    } else if (cm_parser_keyword(parser, CM_KW_FOR)
+        || cm_parser_keyword(parser, CM_KW_UNSAFE)
         || cm_parser_keyword(parser, CM_KW_FN)) {
         CmVec parameters;
 
         type.kind = CM_AST_TYPE_FUNCTION;
+        if (cm_parser_keyword(parser, CM_KW_FOR)) {
+            cm_parser_parse_lifetime_binder(parser, &type.binder);
+        }
         type.is_unsafe = cm_parser_eat_keyword(parser, CM_KW_UNSAFE);
         (void)cm_parser_expect_keyword(parser, CM_KW_FN,
             "expected 'fn' in function pointer type");

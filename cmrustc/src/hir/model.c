@@ -956,6 +956,160 @@ static int cm_hir_region_valid(const CmHirContext *context,
     return 0;
 }
 
+static int cm_hir_lifetime_binder_valid(const CmHirContext *context,
+    const CmHirLifetimeBinder *binder, CmSpan container_span,
+    int require_nonempty);
+
+static int cm_hir_requirement_merge_region(const CmHirRegion *region,
+    uint32_t *requirement)
+{
+    uint32_t needed;
+
+    if (region->kind != CM_HIR_REGION_LATE_BOUND) return 1;
+    if (region->data.binder_index == UINT32_MAX) return 0;
+    needed = region->data.binder_index + 1u;
+    if (needed > *requirement) *requirement = needed;
+    return 1;
+}
+
+static int cm_hir_requirement_merge_type(const CmHirContext *context,
+    CmHirTypeId type_id, uint32_t *requirement)
+{
+    const CmHirType *child;
+
+    child = cm_hir_get_type(context, type_id);
+    if (child == NULL) return 0;
+    if (child->late_bound_requirement > *requirement) {
+        *requirement = child->late_bound_requirement;
+    }
+    return 1;
+}
+
+static int cm_hir_requirement_merge_argument(const CmHirContext *context,
+    const CmHirGenericArg *argument, uint32_t *requirement)
+{
+    if (argument->kind == CM_HIR_GENERIC_ARG_LIFETIME) {
+        return cm_hir_requirement_merge_region(&argument->data.lifetime,
+            requirement);
+    }
+    if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
+        return cm_hir_requirement_merge_type(context, argument->data.type,
+            requirement);
+    }
+    return argument->kind == CM_HIR_GENERIC_ARG_CONST
+        && cm_hir_requirement_merge_type(context,
+            argument->data.constant.type, requirement);
+}
+
+static int cm_hir_requirement_merge_named(const CmHirContext *context,
+    const CmHirNamedType *named, uint32_t *requirement)
+{
+    uint32_t index;
+
+    for (index = 0u; index < named->argument_count; ++index) {
+        if (!cm_hir_requirement_merge_argument(context,
+                &named->arguments[index], requirement)) return 0;
+    }
+    return 1;
+}
+
+/* Type IDs only point at already committed nodes, so this is O(immediate
+ * children).  Nested function pointers consume their cached requirement. */
+static int cm_hir_type_late_bound_requirement(
+    const CmHirContext *context, const CmHirType *type,
+    uint32_t *out_requirement)
+{
+    uint32_t requirement;
+    uint32_t index;
+
+    if (context == NULL || type == NULL || out_requirement == NULL) return 0;
+    requirement = 0u;
+#define CM_HIR_REQUIRE_TYPE(child_id) do { \
+        if (!cm_hir_requirement_merge_type(context, (child_id), \
+                &requirement)) return 0; \
+    } while (0)
+    switch (type->kind) {
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        if (!cm_hir_requirement_merge_region(
+                &type->data.reference_type.region, &requirement)) return 0;
+        CM_HIR_REQUIRE_TYPE(type->data.reference_type.pointee);
+        break;
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        CM_HIR_REQUIRE_TYPE(type->data.raw_pointer_type.pointee);
+        break;
+    case CM_HIR_TYPE_TUPLE_KIND:
+        for (index = 0u; index < type->data.tuple_type.element_count; ++index)
+            CM_HIR_REQUIRE_TYPE(type->data.tuple_type.elements[index]);
+        break;
+    case CM_HIR_TYPE_ARRAY_KIND:
+        CM_HIR_REQUIRE_TYPE(type->data.array_type.element);
+        CM_HIR_REQUIRE_TYPE(type->data.array_type.length.type);
+        break;
+    case CM_HIR_TYPE_SLICE_KIND:
+        CM_HIR_REQUIRE_TYPE(type->data.slice_type.element);
+        break;
+    case CM_HIR_TYPE_FN_POINTER_KIND:
+        if (!cm_hir_lifetime_binder_valid(context,
+                &type->data.fn_pointer_type.binder, type->span, 0)) return 0;
+        for (index = 0u;
+             index < type->data.fn_pointer_type.parameter_count; ++index) {
+            const CmHirType *child = cm_hir_get_type(context,
+                type->data.fn_pointer_type.parameters[index]);
+            if (child == NULL || child->late_bound_requirement
+                    > type->data.fn_pointer_type.binder.lifetime_count)
+                return 0;
+        }
+        {
+            const CmHirType *child = cm_hir_get_type(context,
+                type->data.fn_pointer_type.return_type);
+            if (child == NULL || child->late_bound_requirement
+                    > type->data.fn_pointer_type.binder.lifetime_count)
+                return 0;
+        }
+        requirement = 0u;
+        break;
+    case CM_HIR_TYPE_FN_DEFINITION_KIND:
+    case CM_HIR_TYPE_ADT_KIND:
+    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
+    case CM_HIR_TYPE_OPAQUE_KIND:
+    case CM_HIR_TYPE_FOREIGN_KIND:
+        if (!cm_hir_requirement_merge_named(context,
+                &type->data.named_type, &requirement)) return 0;
+        break;
+    case CM_HIR_TYPE_PROJECTION_KIND:
+        CM_HIR_REQUIRE_TYPE(type->data.projection_type.self_type);
+        if (!cm_hir_requirement_merge_named(context,
+                &type->data.projection_type.trait_type, &requirement)
+            || !cm_hir_requirement_merge_named(context,
+                &type->data.projection_type.associated_type, &requirement))
+            return 0;
+        break;
+    case CM_HIR_TYPE_DYN_TRAIT_KIND:
+        if (!cm_hir_requirement_merge_region(
+                &type->data.dyn_trait_type.region, &requirement)) return 0;
+        if (type->data.dyn_trait_type.has_principal
+            && !cm_hir_requirement_merge_named(context,
+                &type->data.dyn_trait_type.principal_trait, &requirement))
+            return 0;
+        for (index = 0u;
+             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
+            if (!cm_hir_requirement_merge_named(context,
+                    &type->data.dyn_trait_type.auto_traits[index],
+                    &requirement)) return 0;
+        }
+        for (index = 0u;
+             index < type->data.dyn_trait_type.equality_count; ++index)
+            CM_HIR_REQUIRE_TYPE(
+                type->data.dyn_trait_type.equalities[index].value);
+        break;
+    default:
+        break;
+    }
+#undef CM_HIR_REQUIRE_TYPE
+    *out_requirement = requirement;
+    return 1;
+}
+
 static int cm_hir_const_valid(const CmHirContext *context,
     const CmHirConstArg *constant)
 {
@@ -1439,6 +1593,7 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
     CmHirTypeId *out_id)
 {
     CmHirType copy;
+    uint32_t late_bound_requirement;
     uint32_t index;
     int valid;
 
@@ -1506,8 +1661,10 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
     case CM_HIR_TYPE_FN_POINTER_KIND:
         valid = cm_hir_type_id_valid(context,
             type->data.fn_pointer_type.return_type)
-            && (type->data.fn_pointer_type.parameter_count == 0u
-                || type->data.fn_pointer_type.parameters != NULL)
+            && (type->data.fn_pointer_type.parameter_count == 0u)
+                == (type->data.fn_pointer_type.parameters == NULL)
+            && cm_hir_lifetime_binder_valid(context,
+                &type->data.fn_pointer_type.binder, type->span, 0)
             && cm_hir_intern_id_valid(context,
                 type->data.fn_pointer_type.abi)
             && (unsigned int)type->data.fn_pointer_type.safety <=
@@ -1578,7 +1735,12 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
     if (!valid) {
         return CM_HIR_INVALID_ID;
     }
+    if (!cm_hir_type_late_bound_requirement(context, type,
+            &late_bound_requirement)) {
+        return CM_HIR_INVALID_ID;
+    }
     copy = *type;
+    copy.late_bound_requirement = late_bound_requirement;
     switch (copy.kind) {
     case CM_HIR_TYPE_TUPLE_KIND:
         copy.data.tuple_type.elements = (CmHirTypeId *)cm_hir_copy_array(
@@ -1591,6 +1753,11 @@ CmHirStatus cm_hir_add_type(CmHirContext *context, const CmHirType *type,
                 type->data.fn_pointer_type.parameters,
                 type->data.fn_pointer_type.parameter_count,
                 sizeof(CmHirTypeId));
+        copy.data.fn_pointer_type.binder.lifetimes =
+            (CmInternId *)cm_hir_copy_array(context,
+                type->data.fn_pointer_type.binder.lifetimes,
+                type->data.fn_pointer_type.binder.lifetime_count,
+                sizeof(CmInternId));
         break;
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
@@ -1768,101 +1935,10 @@ static int cm_hir_type_late_bound_free(const CmHirContext *context,
     CmHirTypeId type_id, size_t depth)
 {
     const CmHirType *type;
-    uint32_t index;
 
-    if (depth > context->types.len) return 0;
+    (void)depth;
     type = cm_hir_get_type(context, type_id);
-    if (type == NULL) return 0;
-    switch (type->kind) {
-    case CM_HIR_TYPE_ERROR_KIND:
-    case CM_HIR_TYPE_INFER_KIND:
-    case CM_HIR_TYPE_NEVER_KIND:
-    case CM_HIR_TYPE_UNIT_KIND:
-    case CM_HIR_TYPE_BOOL_KIND:
-    case CM_HIR_TYPE_CHAR_KIND:
-    case CM_HIR_TYPE_STR_KIND:
-    case CM_HIR_TYPE_INTEGER_KIND:
-    case CM_HIR_TYPE_FLOAT_KIND:
-    case CM_HIR_TYPE_SELF_KIND:
-    case CM_HIR_TYPE_PARAMETER_KIND:
-        return 1;
-    case CM_HIR_TYPE_REFERENCE_KIND:
-        return type->data.reference_type.region.kind
-                != CM_HIR_REGION_LATE_BOUND
-            && cm_hir_type_late_bound_free(context,
-                type->data.reference_type.pointee, depth + 1u);
-    case CM_HIR_TYPE_RAW_POINTER_KIND:
-        return cm_hir_type_late_bound_free(context,
-            type->data.raw_pointer_type.pointee, depth + 1u);
-    case CM_HIR_TYPE_TUPLE_KIND:
-        for (index = 0u; index < type->data.tuple_type.element_count;
-             ++index) {
-            if (!cm_hir_type_late_bound_free(context,
-                    type->data.tuple_type.elements[index], depth + 1u)) {
-                return 0;
-            }
-        }
-        return 1;
-    case CM_HIR_TYPE_ARRAY_KIND:
-        return cm_hir_type_late_bound_free(context,
-                type->data.array_type.element, depth + 1u)
-            && cm_hir_type_late_bound_free(context,
-                type->data.array_type.length.type, depth + 1u);
-    case CM_HIR_TYPE_SLICE_KIND:
-        return cm_hir_type_late_bound_free(context,
-            type->data.slice_type.element, depth + 1u);
-    case CM_HIR_TYPE_FN_POINTER_KIND:
-        for (index = 0u;
-             index < type->data.fn_pointer_type.parameter_count; ++index) {
-            if (!cm_hir_type_late_bound_free(context,
-                    type->data.fn_pointer_type.parameters[index],
-                    depth + 1u)) return 0;
-        }
-        return cm_hir_type_late_bound_free(context,
-            type->data.fn_pointer_type.return_type, depth + 1u);
-    case CM_HIR_TYPE_FN_DEFINITION_KIND:
-    case CM_HIR_TYPE_ADT_KIND:
-    case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
-    case CM_HIR_TYPE_OPAQUE_KIND:
-    case CM_HIR_TYPE_FOREIGN_KIND:
-        return cm_hir_named_late_bound_free(context,
-            &type->data.named_type, depth);
-    case CM_HIR_TYPE_CLOSURE_KIND:
-        return cm_hir_get_closure(context,
-            type->data.closure_type.closure) != NULL;
-    case CM_HIR_TYPE_PROJECTION_KIND:
-        return cm_hir_type_late_bound_free(context,
-                type->data.projection_type.self_type, depth + 1u)
-            && cm_hir_named_late_bound_free(context,
-                &type->data.projection_type.trait_type, depth)
-            && cm_hir_named_late_bound_free(context,
-                &type->data.projection_type.associated_type, depth);
-    case CM_HIR_TYPE_DYN_TRAIT_KIND:
-        if (type->data.dyn_trait_type.region.kind
-                == CM_HIR_REGION_LATE_BOUND
-            || (type->data.dyn_trait_type.has_principal
-                && !cm_hir_named_late_bound_free(context,
-                    &type->data.dyn_trait_type.principal_trait, depth))) {
-            return 0;
-        }
-        for (index = 0u;
-             index < type->data.dyn_trait_type.auto_trait_count; ++index) {
-            if (!cm_hir_named_late_bound_free(context,
-                    &type->data.dyn_trait_type.auto_traits[index], depth)) {
-                return 0;
-            }
-        }
-        for (index = 0u;
-             index < type->data.dyn_trait_type.equality_count; ++index) {
-            if (!cm_hir_type_late_bound_free(context,
-                    type->data.dyn_trait_type.equalities[index].value,
-                    depth + 1u)) {
-                return 0;
-            }
-        }
-        return 1;
-    }
-    return 0;
+    return type != NULL && type->late_bound_requirement == 0u;
 }
 
 static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
@@ -2868,14 +2944,16 @@ static int cm_hir_predicate_type_in_scope(const CmHirContext *context,
              index < type->data.fn_pointer_type.parameter_count; ++index) {
             if (!cm_hir_predicate_type_in_scope(context,
                     type->data.fn_pointer_type.parameters[index],
-                    owner_definition, parent_definition, binder,
+                    owner_definition, parent_definition,
+                    &type->data.fn_pointer_type.binder,
                     depth + 1u)) {
                 return 0;
             }
         }
         return cm_hir_predicate_type_in_scope(context,
             type->data.fn_pointer_type.return_type, owner_definition,
-            parent_definition, binder, depth + 1u);
+            parent_definition, &type->data.fn_pointer_type.binder,
+            depth + 1u);
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
@@ -2966,6 +3044,7 @@ static int cm_hir_lifetime_binder_valid(const CmHirContext *context,
     uint32_t binder_index;
     uint32_t prior_index;
 
+    if (binder->lifetime_count > CM_HIR_LIFETIME_BINDER_LIMIT) return 0;
     if (binder->lifetime_count == 0u) {
         return !require_nonempty && binder->lifetimes == NULL
             && binder->span.source == 0u && binder->span.start == 0u
@@ -4786,10 +4865,14 @@ CmHirStatus cm_hir_prebind_trait_associated_type_declaration(
 
 static int cm_hir_default_argument_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
-    const CmHirGenericArg *argument, size_t depth);
+    const CmHirGenericArg *argument, uint32_t binder_lifetime_count,
+    size_t depth, size_t *node_budget);
 static int cm_hir_default_type_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index, CmHirTypeId type_id,
-    size_t depth);
+    uint32_t binder_lifetime_count, size_t depth, size_t *node_budget);
+/* The root type is depth one; permit 256 enclosing type constructors. */
+#define CM_HIR_DEFAULT_MAX_DEPTH 257u
+#define CM_HIR_DEFAULT_NODE_LIMIT 4096u
 static int cm_hir_body_type_equal(const CmHirContext *context,
     CmHirTypeId left_id, CmHirTypeId right_id);
 static int cm_hir_expression_body_span_valid(const CmHirBody *body,
@@ -4811,9 +4894,12 @@ static int cm_hir_default_parameter_in_scope(const CmHirContext *context,
 }
 
 static int cm_hir_default_region_in_scope(const CmHirContext *context,
-    CmHirDefId owner, uint32_t parameter_index, const CmHirRegion *region)
+    CmHirDefId owner, uint32_t parameter_index, const CmHirRegion *region,
+    uint32_t binder_lifetime_count)
 {
-    if (region->kind == CM_HIR_REGION_LATE_BOUND) return 0;
+    if (region->kind == CM_HIR_REGION_LATE_BOUND) {
+        return region->data.binder_index < binder_lifetime_count;
+    }
     return region->kind != CM_HIR_REGION_EARLY_BOUND
         || cm_hir_default_parameter_in_scope(context, owner,
             parameter_index, region->data.parameter);
@@ -4821,10 +4907,11 @@ static int cm_hir_default_region_in_scope(const CmHirContext *context,
 
 static int cm_hir_default_const_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
-    const CmHirConstArg *constant, size_t depth)
+    const CmHirConstArg *constant, uint32_t binder_lifetime_count,
+    size_t depth, size_t *node_budget)
 {
     if (!cm_hir_default_type_in_scope(context, owner, parameter_index,
-            constant->type, depth)) {
+            constant->type, binder_lifetime_count, depth, node_budget)) {
         return 0;
     }
     return constant->kind != CM_HIR_CONST_PARAMETER
@@ -4834,13 +4921,15 @@ static int cm_hir_default_const_in_scope(const CmHirContext *context,
 
 static int cm_hir_default_named_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
-    const CmHirNamedType *named, size_t depth)
+    const CmHirNamedType *named, uint32_t binder_lifetime_count,
+    size_t depth, size_t *node_budget)
 {
     uint32_t index;
 
     for (index = 0u; index < named->argument_count; ++index) {
         if (!cm_hir_default_argument_in_scope(context, owner,
-                parameter_index, &named->arguments[index], depth + 1u)) {
+                parameter_index, &named->arguments[index],
+                binder_lifetime_count, depth, node_budget)) {
             return 0;
         }
     }
@@ -4849,12 +4938,14 @@ static int cm_hir_default_named_in_scope(const CmHirContext *context,
 
 static int cm_hir_default_type_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index, CmHirTypeId type_id,
-    size_t depth)
+    uint32_t binder_lifetime_count, size_t depth, size_t *node_budget)
 {
     const CmHirType *type;
     uint32_t index;
 
-    if (depth > context->types.len) return 0;
+    if (node_budget == NULL || *node_budget == 0u
+        || depth > CM_HIR_DEFAULT_MAX_DEPTH) return 0;
+    *node_budget -= 1u;
     type = cm_hir_get_type(context, type_id);
     if (type == NULL) return 0;
     switch (type->kind) {
@@ -4872,53 +4963,59 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
         return cm_hir_def_id_equal(type->data.self_type.owner, owner);
     case CM_HIR_TYPE_REFERENCE_KIND:
         return cm_hir_default_region_in_scope(context, owner,
-                parameter_index, &type->data.reference_type.region)
+                parameter_index, &type->data.reference_type.region,
+                binder_lifetime_count)
             && cm_hir_default_type_in_scope(context, owner,
                 parameter_index, type->data.reference_type.pointee,
-                depth + 1u);
+                binder_lifetime_count, depth + 1u, node_budget);
     case CM_HIR_TYPE_RAW_POINTER_KIND:
         return cm_hir_default_type_in_scope(context, owner,
             parameter_index, type->data.raw_pointer_type.pointee,
-            depth + 1u);
+            binder_lifetime_count, depth + 1u, node_budget);
     case CM_HIR_TYPE_TUPLE_KIND:
         for (index = 0u; index < type->data.tuple_type.element_count;
              ++index) {
             if (!cm_hir_default_type_in_scope(context, owner,
                     parameter_index, type->data.tuple_type.elements[index],
-                    depth + 1u)) {
+                    binder_lifetime_count, depth + 1u, node_budget)) {
                 return 0;
             }
         }
         return 1;
     case CM_HIR_TYPE_ARRAY_KIND:
         return cm_hir_default_type_in_scope(context, owner,
-                parameter_index, type->data.array_type.element, depth + 1u)
+                parameter_index, type->data.array_type.element,
+                binder_lifetime_count, depth + 1u, node_budget)
             && cm_hir_default_const_in_scope(context, owner,
                 parameter_index, &type->data.array_type.length,
-                depth + 1u);
+                binder_lifetime_count, depth + 1u, node_budget);
     case CM_HIR_TYPE_SLICE_KIND:
         return cm_hir_default_type_in_scope(context, owner,
-            parameter_index, type->data.slice_type.element, depth + 1u);
+            parameter_index, type->data.slice_type.element,
+            binder_lifetime_count, depth + 1u, node_budget);
     case CM_HIR_TYPE_FN_POINTER_KIND:
         for (index = 0u;
              index < type->data.fn_pointer_type.parameter_count; ++index) {
             if (!cm_hir_default_type_in_scope(context, owner,
                     parameter_index,
                     type->data.fn_pointer_type.parameters[index],
-                    depth + 1u)) {
+                    type->data.fn_pointer_type.binder.lifetime_count,
+                    depth + 1u, node_budget)) {
                 return 0;
             }
         }
         return cm_hir_default_type_in_scope(context, owner,
             parameter_index, type->data.fn_pointer_type.return_type,
-            depth + 1u);
+            type->data.fn_pointer_type.binder.lifetime_count, depth + 1u,
+            node_budget);
     case CM_HIR_TYPE_FN_DEFINITION_KIND:
     case CM_HIR_TYPE_ADT_KIND:
     case CM_HIR_TYPE_FOREIGN_KIND:
     case CM_HIR_TYPE_ALIAS_APPLICATION_KIND:
     case CM_HIR_TYPE_OPAQUE_KIND:
         return cm_hir_default_named_in_scope(context, owner,
-            parameter_index, &type->data.named_type, depth);
+            parameter_index, &type->data.named_type,
+            binder_lifetime_count, depth, node_budget);
     case CM_HIR_TYPE_CLOSURE_KIND:
         return 0;
     case CM_HIR_TYPE_PARAMETER_KIND:
@@ -4927,27 +5024,32 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
     case CM_HIR_TYPE_PROJECTION_KIND:
         return cm_hir_default_type_in_scope(context, owner,
                 parameter_index, type->data.projection_type.self_type,
-                depth + 1u)
+                binder_lifetime_count, depth + 1u, node_budget)
             && cm_hir_default_named_in_scope(context, owner,
                 parameter_index,
-                &type->data.projection_type.trait_type, depth)
+                &type->data.projection_type.trait_type,
+                binder_lifetime_count, depth, node_budget)
             && cm_hir_default_named_in_scope(context, owner,
                 parameter_index,
-                &type->data.projection_type.associated_type, depth);
+                &type->data.projection_type.associated_type,
+                binder_lifetime_count, depth, node_budget);
     case CM_HIR_TYPE_DYN_TRAIT_KIND:
         if ((type->data.dyn_trait_type.has_principal
                 && !cm_hir_default_named_in_scope(context, owner,
                     parameter_index,
-                    &type->data.dyn_trait_type.principal_trait, depth))
+                    &type->data.dyn_trait_type.principal_trait,
+                    binder_lifetime_count, depth, node_budget))
             || !cm_hir_default_region_in_scope(context, owner,
-                parameter_index, &type->data.dyn_trait_type.region)) {
+                parameter_index, &type->data.dyn_trait_type.region,
+                binder_lifetime_count)) {
             return 0;
         }
         for (index = 0u;
              index < type->data.dyn_trait_type.auto_trait_count; ++index) {
             if (!cm_hir_default_named_in_scope(context, owner,
                     parameter_index,
-                    &type->data.dyn_trait_type.auto_traits[index], depth)) {
+                    &type->data.dyn_trait_type.auto_traits[index],
+                    binder_lifetime_count, depth, node_budget)) {
                 return 0;
             }
         }
@@ -4956,7 +5058,7 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
             if (!cm_hir_default_type_in_scope(context, owner,
                     parameter_index,
                     type->data.dyn_trait_type.equalities[index].value,
-                    depth + 1u)) {
+                    binder_lifetime_count, depth + 1u, node_budget)) {
                 return 0;
             }
         }
@@ -4967,18 +5069,22 @@ static int cm_hir_default_type_in_scope(const CmHirContext *context,
 
 static int cm_hir_default_argument_in_scope(const CmHirContext *context,
     CmHirDefId owner, uint32_t parameter_index,
-    const CmHirGenericArg *argument, size_t depth)
+    const CmHirGenericArg *argument, uint32_t binder_lifetime_count,
+    size_t depth, size_t *node_budget)
 {
     switch (argument->kind) {
     case CM_HIR_GENERIC_ARG_LIFETIME:
         return cm_hir_default_region_in_scope(context, owner,
-            parameter_index, &argument->data.lifetime);
+            parameter_index, &argument->data.lifetime,
+            binder_lifetime_count);
     case CM_HIR_GENERIC_ARG_TYPE:
         return cm_hir_default_type_in_scope(context, owner,
-            parameter_index, argument->data.type, depth + 1u);
+            parameter_index, argument->data.type,
+            binder_lifetime_count, depth + 1u, node_budget);
     case CM_HIR_GENERIC_ARG_CONST:
         return cm_hir_default_const_in_scope(context, owner,
-            parameter_index, &argument->data.constant, depth + 1u);
+            parameter_index, &argument->data.constant,
+            binder_lifetime_count, depth + 1u, node_budget);
     }
     return 0;
 }
@@ -5069,6 +5175,7 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
     const CmHirDefinition *owner;
     const CmHirGenericParam *referenced_parameter;
     CmHirGenericArgKind expected_kind;
+    size_t node_budget;
 
     if (context == NULL || argument == NULL
         || parameter_id == CM_HIR_GENERIC_PARAM_NONE) {
@@ -5112,8 +5219,9 @@ CmHirStatus cm_hir_set_generic_param_default(CmHirContext *context,
             }
         }
     }
+    node_budget = CM_HIR_DEFAULT_NODE_LIMIT;
     if (!cm_hir_default_argument_in_scope(context, parameter->owner,
-            parameter->index, argument, 0u)) {
+            parameter->index, argument, 0u, 0u, &node_budget)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     parameter->has_default = 1;
@@ -5790,6 +5898,8 @@ static int cm_hir_call_type_matches(const CmHirContext *context,
     case CM_HIR_TYPE_FN_POINTER_KIND:
         if (declared_type->data.fn_pointer_type.parameter_count
                 != actual_type->data.fn_pointer_type.parameter_count
+            || declared_type->data.fn_pointer_type.binder.lifetime_count
+                != actual_type->data.fn_pointer_type.binder.lifetime_count
             || declared_type->data.fn_pointer_type.abi
                 != actual_type->data.fn_pointer_type.abi
             || declared_type->data.fn_pointer_type.safety
