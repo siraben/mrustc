@@ -1819,6 +1819,9 @@ static void test_metadata_recipe_body_origin(void)
     CmHirDefId definition;
     CmHirBody body;
     CmHirBodyId body_id;
+    CmHirLocal local;
+    CmHirExpr expression;
+    CmHirExprId root_expression;
     unsigned char identity[CM_HIR_ARTIFACT_IDENTITY_SIZE];
     const CmHirBody *stored;
 
@@ -1850,6 +1853,14 @@ static void test_metadata_recipe_body_origin(void)
     identity[CM_HIR_ARTIFACT_IDENTITY_SIZE - 1u] = 0xa5u;
     body.origin = cm_hir_body_origin_metadata_recipe(definition,
         identity, 7u, 0u);
+    memset(&local, 0, sizeof(local));
+    local.name = cm_hir_intern(&context, "value");
+    local.type = unit_type;
+    local.span = test_span(12u, 17u);
+    local.parameter_index = 0u;
+    body.locals = &local;
+    body.local_count = 1u;
+    body.parameter_count = 1u;
     body.source_expression_id = 1u;
     assert(cm_hir_add_body(&context, &body, &body_id)
         == CM_HIR_INVARIANT_VIOLATION);
@@ -1862,6 +1873,21 @@ static void test_metadata_recipe_body_origin(void)
         && stored->origin.data.metadata_recipe.argument_index == 0u
         && memcmp(stored->origin.data.metadata_recipe.artifact_identity,
             identity, sizeof(identity)) == 0);
+    memset(&expression, 0, sizeof(expression));
+    expression.kind = CM_HIR_EXPR_LOCAL;
+    expression.owner_body = body_id;
+    expression.type = unit_type;
+    expression.span = test_span(20u, 25u);
+    expression.data.local.local_index = 0u;
+    root_expression = CM_HIR_EXPR_NONE;
+    assert(cm_hir_add_expr(&context, &expression, &root_expression)
+        == CM_HIR_OK);
+    assert(cm_hir_set_body_root_expression(&context, body_id,
+        root_expression) == CM_HIR_OK);
+    stored = cm_hir_get_body(&context, body_id);
+    assert(stored != NULL && stored->state == CM_HIR_BODY_TYPED
+        && stored->root_expression == root_expression
+        && stored->source_expression_id == 0u);
     cm_hir_context_destroy(&context);
 }
 

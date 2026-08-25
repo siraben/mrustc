@@ -7112,7 +7112,10 @@ CmHirStatus cm_hir_set_body_root_expression(CmHirContext *context,
     }
     if (body->state != CM_HIR_BODY_UNLOWERED
         || body->root_expression != CM_HIR_EXPR_NONE
-        || body->source == 0u || body->source_expression_id == 0u
+        || body->source == 0u
+        || (body->origin.kind == CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+            ? body->source_expression_id == 0u
+            : body->source_expression_id != 0u)
         || body->error_reason != CM_INTERN_ID_NONE
         || !cm_hir_body_type_equal(context, root->type,
             body->expected_type)
