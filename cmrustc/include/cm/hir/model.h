@@ -687,6 +687,8 @@ typedef struct CmHirItem {
             CmHirSafety safety;
             /* Compiler-authenticated `auto trait`; never inferred. */
             int is_auto;
+            /* Effective compiler-authenticated `#[const_trait]`. */
+            int is_const;
             CmHirSupertrait *supertraits;
             uint32_t supertrait_count;
         } trait_item;
@@ -701,6 +703,7 @@ typedef struct CmHirItem {
             CmHirNamedType trait_type;
             CmHirSafety safety;
             int is_negative;
+            int is_const;
         } impl_item;
     } data;
 } CmHirItem;

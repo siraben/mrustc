@@ -2565,6 +2565,69 @@ static void test_semantic_unsupported_producers(void)
 
     cm_hir_context_init(&context);
     assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "const_trait"), CM_HIR_EDITION_2024,
+        test_span(1u, 10u), &local_crate, &local_root) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_TRAIT, test_span(2u, 3u), &implemented_trait)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_TRAIT;
+    item.definition = implemented_trait;
+    item.owner_module = local_root;
+    item.name = cm_hir_intern(&context, "ConstTrait");
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(2u, 3u);
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    item.data.trait_item.is_const = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert_semantic_encode_unsupported(&context, local_crate, local_root);
+    cm_hir_context_destroy(&context);
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "foreign_const_trait"),
+        CM_HIR_EDITION_2024, test_span(1u, 10u), &foreign_crate,
+        &foreign_root) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, foreign_crate,
+        CM_HIR_ITEM_TRAIT, test_span(2u, 3u), &implemented_trait)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_TRAIT;
+    item.definition = implemented_trait;
+    item.owner_module = foreign_root;
+    item.name = cm_hir_intern(&context, "ConstTrait");
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(2u, 3u);
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    item.data.trait_item.is_const = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "const_impl"), CM_HIR_EDITION_2024,
+        test_span(11u, 20u), &local_crate, &local_root) == CM_HIR_OK);
+    u8_type = add_integer_type(&context, CM_HIR_INT_U8, 12u);
+    assert(cm_hir_reserve_item_definition_as(&context, local_crate,
+        CM_HIR_ITEM_IMPL, test_span(13u, 14u), &impl_definition)
+        == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_IMPL;
+    item.definition = impl_definition;
+    item.owner_module = local_root;
+    item.visibility.kind = CM_HIR_VIS_PRIVATE;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(13u, 14u);
+    item.data.impl_item.self_type = u8_type;
+    item.data.impl_item.has_trait = 1;
+    item.data.impl_item.trait_type.definition = implemented_trait;
+    item.data.impl_item.safety = CM_HIR_SAFE;
+    item.data.impl_item.is_const = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert_semantic_encode_unsupported(&context, local_crate, local_root);
+    cm_hir_context_destroy(&context);
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
         cm_hir_intern(&context, "specializable_impl"),
         CM_HIR_EDITION_2024, test_span(1u, 20u), &local_crate,
         &local_root) == CM_HIR_OK);

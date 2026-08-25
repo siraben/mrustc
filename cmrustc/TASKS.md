@@ -390,7 +390,7 @@ meet the corpus-wide acceptance gates.
   to the bound side of their owning predicate. Predicate-prefix HRTBs use one
   item-owned scope shared by the subject and every atomic trait or outlives
   constraint expanded from the source predicate; scope counts and references
-  are validated together. Canonical dumps are `hir-v30`. This clears both
+  are validated together. Canonical dumps are `hir-v31`. This clears both
   `VaListImpl::with_copy` in `core/src/ffi/va_list.rs:246` and
   `for<'a> F: FnMut(GenericShunt<'a, I, R>) -> U` in
   `core/src/iter/adapters/mod.rs:155`. Graph-authenticated inherent methods may
@@ -503,7 +503,7 @@ meet the corpus-wide acceptance gates.
   predicates and supertraits, mixed trait/alias cycles reject iteratively, and
   impl headers cannot name an alias. This clears `Thin` in
   `core/src/ptr/metadata.rs:84`. Auto traits now retain authenticated identity,
-  and safe itemless non-const negative impls retain polarity, complete
+  and safe itemless negative impls retain polarity, complete
   generics/predicates/types, identities, and spans; duplicates and
   positive/negative overlap reject. Structural trait type defaults recursively
   substitute `Self` plus prior lifetime/type arguments with DAG memoization,
@@ -2007,6 +2007,13 @@ cmhir-meta v3 with explicit family capabilities and real declaration items,
 not another opaque v2 omission. V3.0 targets declaration-safe trait/alias/
 associated/impl headers plus projection and function-pointer types; impl
 absence remains deferred until a later cfg-active completeness certificate.
+The first v3 prerequisite is now canonical `hir-v31`: traits preserve exact
+effective `#[const_trait]` capability and trait impls preserve their const
+header bit, including safe itemless negative impls. Const inherent impls,
+non-word or misplaced `const_trait` attributes, and const impls of non-const
+traits reject. Semantic metadata v1.1 rejects either new bit rather than
+silently erasing it; v3 will transport both as authenticated declaration
+facts without claiming const-trait solving.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

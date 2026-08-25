@@ -847,10 +847,10 @@ static void test_auto_trait_and_negative_impl_lowering(void)
     static const char source[] =
         "trait PointeeSized {} "
         "pub unsafe auto trait Send {} "
-        "impl<T: PointeeSized> const !Send for *const T {} "
-        "unsafe impl const Send for u8 {}";
+        "impl<T: PointeeSized> !Send for *const T {} "
+        "unsafe impl Send for u8 {}";
     static const char *const rejected[] = {
-        "unsafe auto trait Marker {} unsafe impl const !Marker for u8 {}",
+        "unsafe auto trait Marker {} unsafe impl !Marker for u8 {}",
         "auto trait Marker { fn f(); }",
         "auto trait Marker<T> {}",
         "trait Bound {} auto trait Marker: Bound {}",
@@ -858,13 +858,19 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         "auto trait Marker {} impl<T> !Marker for *const T {} "
             "impl<U> !Marker for *const U {}",
         "unsafe auto trait Marker {} impl !Marker for u8 {} "
-            "unsafe impl Marker for u8 {}"
+            "unsafe impl Marker for u8 {}",
+        "trait Plain {} impl const Plain for u8 {}",
+        "trait Plain {} impl const !Plain for u8 {}",
+        "impl const u8 {}"
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_INVALID_TRAIT,
+        CM_HIR_LOWER_INVALID_IMPL,
+        CM_HIR_LOWER_INVALID_IMPL,
+        CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
@@ -938,14 +944,17 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         && pointee_sized != NULL
         && pointee_sized->kind == CM_HIR_ITEM_TRAIT
         && !pointee_sized->data.trait_item.is_auto
+        && !pointee_sized->data.trait_item.is_const
         && send != NULL && send->kind == CM_HIR_ITEM_TRAIT
         && send->data.trait_item.is_auto
+        && !send->data.trait_item.is_const
         && send->data.trait_item.safety == CM_HIR_UNSAFE
         && send->generic_parameter_count == 0u
         && send->predicate_count == 0u
         && send->data.trait_item.supertrait_count == 0u
         && negative_impl != NULL
         && negative_impl->data.impl_item.is_negative
+        && !negative_impl->data.impl_item.is_const
         && negative_impl->data.impl_item.has_trait
         && negative_impl->data.impl_item.safety == CM_HIR_SAFE
         && cm_hir_def_id_equal(
@@ -968,6 +977,7 @@ static void test_auto_trait_and_negative_impl_lowering(void)
             == negative_impl->generic_parameter_start
         && positive_impl != NULL
         && !positive_impl->data.impl_item.is_negative
+        && !positive_impl->data.impl_item.is_const
         && positive_impl->data.impl_item.safety == CM_HIR_UNSAFE
         && positive_self != NULL
         && positive_self->kind == CM_HIR_TYPE_INTEGER_KIND
@@ -982,10 +992,10 @@ static void test_auto_trait_and_negative_impl_lowering(void)
         : (CmAstItem *)cm_vec_at(&ast.items, (size_t)*impl_ast_id - 1u);
     assert(impl_ast_item != NULL && impl_ast_item->kind == CM_AST_ITEM_IMPL
         && impl_ast_item->data.impl_item.is_negative
-        && impl_ast_item->data.impl_item.is_const == 1);
+        && impl_ast_item->data.impl_item.is_const == 0);
     impl_ast_item->data.impl_item.is_const = 99;
     expect_invalid_ast_lowering(&ast, &options, "invalid const flag");
-    impl_ast_item->data.impl_item.is_const = 1;
+    impl_ast_item->data.impl_item.is_const = 0;
     saved_trait_type = impl_ast_item->data.impl_item.trait_type;
     impl_ast_item->data.impl_item.trait_type = CM_AST_TYPE_NONE;
     cm_hir_context_init(&context);
@@ -2641,6 +2651,98 @@ static CmHirLowerResult lower_cfg_view(CmHirContext *context,
     options.crate_name = "expanded_test";
     options.source = 11u;
     return cm_hir_lower_expanded_crate(context, ast, expanded, &options);
+}
+
+static void test_const_trait_impl_fidelity(void)
+{
+    static const char source[] =
+        "#[cfg_attr(unix, const_trait)] "
+        "pub unsafe auto trait ConstSend {} "
+        "impl const !ConstSend for u8 {} "
+        "unsafe impl const ConstSend for u16 {}";
+    static const char *const rejected[] = {
+        ("#[cfg_attr(windows, const_trait)] trait Plain {} "
+            "impl const Plain for u8 {}"),
+        "#[const_trait(extra)] trait Almost {}",
+        "#[const_trait] struct NotATrait;"
+    };
+    static const CmHirLowerErrorKind rejected_kinds[] = {
+        CM_HIR_LOWER_INVALID_IMPL,
+        CM_HIR_LOWER_INVALID_AST,
+        CM_HIR_LOWER_INVALID_AST
+    };
+    static const char *const rejected_messages[] = {
+        "not #[const_trait]",
+        "word attribute on a trait",
+        "word attribute on a trait"
+    };
+    CmAst ast;
+    CmExpandedAst expanded;
+    CmHirContext context;
+    CmHirLowerResult result;
+    const CmHirItem *trait_item;
+    const CmHirItem *negative_impl;
+    const CmHirItem *positive_impl;
+    size_t index;
+
+    make_cfg_view(source, &ast, &expanded);
+    result = lower_cfg_view(&context, &ast, &expanded);
+    trait_item = find_item(&context, "ConstSend");
+    negative_impl = NULL;
+    positive_impl = NULL;
+    for (index = 0u; index < context.items.len; ++index) {
+        const CmHirItem *candidate;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&context.items,
+            index);
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_IMPL) {
+            continue;
+        }
+        if (candidate->data.impl_item.is_negative) {
+            negative_impl = candidate;
+        } else {
+            positive_impl = candidate;
+        }
+    }
+    assert(result.error_count == 0u && result.lowered_item_count == 3u
+        && trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
+        && trait_item->data.trait_item.is_auto
+        && trait_item->data.trait_item.is_const
+        && trait_item->data.trait_item.safety == CM_HIR_UNSAFE
+        && trait_item->attribute_count == 1u
+        && hir_string_is(&context, trait_item->attributes[0].metadata,
+            "const_trait")
+        && negative_impl != NULL
+        && negative_impl->data.impl_item.is_negative
+        && negative_impl->data.impl_item.is_const
+        && negative_impl->data.impl_item.safety == CM_HIR_SAFE
+        && cm_hir_def_id_equal(
+            negative_impl->data.impl_item.trait_type.definition,
+            trait_item->definition)
+        && positive_impl != NULL
+        && !positive_impl->data.impl_item.is_negative
+        && positive_impl->data.impl_item.is_const
+        && positive_impl->data.impl_item.safety == CM_HIR_UNSAFE
+        && cm_hir_def_id_equal(
+            positive_impl->data.impl_item.trait_type.definition,
+            trait_item->definition));
+    cm_hir_context_destroy(&context);
+    cm_expanded_ast_destroy(&expanded);
+    cm_ast_destroy(&ast);
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+         ++index) {
+        make_cfg_view(rejected[index], &ast, &expanded);
+        result = lower_cfg_view(&context, &ast, &expanded);
+        assert(result.error_count == 1u
+            && result.first_error.kind == rejected_kinds[index]
+            && strstr(result.first_error.message,
+                rejected_messages[index])
+                != NULL);
+        cm_hir_context_destroy(&context);
+        cm_expanded_ast_destroy(&expanded);
+        cm_ast_destroy(&ast);
+    }
 }
 
 static void check_adt_default_visible_to_trait_method(
@@ -11370,6 +11472,7 @@ int main(void)
     test_default_specialization_lowering();
     test_trait_alias_lowering();
     test_auto_trait_and_negative_impl_lowering();
+    test_const_trait_impl_fidelity();
     test_generic_reference_impl_entry_points();
     test_impl_header_self_in_trait_argument();
     test_discard_parameter_entry_points();

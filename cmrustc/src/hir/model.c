@@ -1879,12 +1879,15 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
             && item->data.impl_item.has_trait != 1)
         || (item->data.impl_item.is_negative != 0
             && item->data.impl_item.is_negative != 1)
+        || (item->data.impl_item.is_const != 0
+            && item->data.impl_item.is_const != 1)
         || (unsigned int)item->data.impl_item.safety
             > (unsigned int)CM_HIR_UNSAFE) {
         return 0;
     }
     if (!item->data.impl_item.has_trait) {
         return !item->data.impl_item.is_negative
+            && !item->data.impl_item.is_const
             && item->data.impl_item.safety == CM_HIR_SAFE
             && cm_hir_def_id_is_none(
                 item->data.impl_item.trait_type.definition)
@@ -1903,7 +1906,9 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
         item->data.impl_item.trait_type.definition);
     if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
         || !cm_hir_named_type_matches_item_parameters(context,
-            &item->data.impl_item.trait_type, trait_item)) {
+            &item->data.impl_item.trait_type, trait_item)
+        || (item->data.impl_item.is_const
+            && !trait_item->data.trait_item.is_const)) {
         return 0;
     }
     if (item->data.impl_item.is_negative) {
@@ -3630,6 +3635,8 @@ static int cm_hir_trait_item_payload_valid(const CmHirContext *context,
             (unsigned int)CM_HIR_UNSAFE
         || (item->data.trait_item.is_auto != 0
             && item->data.trait_item.is_auto != 1)
+        || (item->data.trait_item.is_const != 0
+            && item->data.trait_item.is_const != 1)
         || (item->data.trait_item.supertrait_count != 0u
             && item->data.trait_item.supertraits == NULL)) {
         return 0;

@@ -9604,6 +9604,58 @@ static CmHirAttribute *cm_lower_item_attributes(CmLowerState *state,
     return attributes;
 }
 
+static int cm_lower_item_has_exact_attribute(const CmLowerState *state,
+    const CmHirItem *item, const char *expected)
+{
+    size_t expected_length;
+    uint32_t index;
+
+    if (state == NULL || state->hir == NULL || item == NULL
+        || expected == NULL) return 0;
+    expected_length = strlen(expected);
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *metadata;
+
+        metadata = cm_interner_get(&state->hir->strings,
+            item->attributes[index].metadata);
+        if (metadata != NULL && metadata->len == expected_length
+            && memcmp(metadata->bytes, expected, expected_length) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cm_lower_item_has_attribute_name(const CmLowerState *state,
+    const CmHirItem *item, const char *expected)
+{
+    size_t expected_length;
+    uint32_t index;
+
+    if (state == NULL || state->hir == NULL || item == NULL
+        || expected == NULL) return 0;
+    expected_length = strlen(expected);
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *metadata;
+        unsigned char next;
+
+        metadata = cm_interner_get(&state->hir->strings,
+            item->attributes[index].metadata);
+        if (metadata == NULL || metadata->len < expected_length
+            || memcmp(metadata->bytes, expected, expected_length) != 0) {
+            continue;
+        }
+        if (metadata->len == expected_length) return 1;
+        next = metadata->bytes[expected_length];
+        if (next == (unsigned char)'(' || next == (unsigned char)'='
+            || next == (unsigned char)' ' || next == (unsigned char)'\t'
+            || next == (unsigned char)'\r' || next == (unsigned char)'\n') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     const CmAstItem *ast_item, const CmLowerItemRecord *record,
     CmHirItem *out_item)
@@ -9682,6 +9734,15 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
         record, span, ast_item_id,
         &out_item->attribute_count);
     if (state->failed) return 0;
+    if (cm_lower_item_has_attribute_name(state, out_item, "const_trait")
+        && (ast_item->kind != CM_AST_ITEM_TRAIT
+            || !cm_lower_item_has_exact_attribute(state, out_item,
+                "const_trait"))) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "const_trait is valid only as a word attribute on a trait");
+        return 0;
+    }
     out_item->generic_parameter_start = record->generic_parameter_start;
     out_item->generic_parameter_count = record->generic_parameter_count;
     if (!cm_lower_visibility(state, ast_item->visibility,
@@ -14068,11 +14129,6 @@ static int cm_lower_impl_item(CmLowerState *state,
             "impl blocks cannot have explicit visibility");
         return 0;
     }
-    /*
-     * Match the mrustc oracle: `impl const` is accepted by the parser and
-     * deliberately erased before HIR.  The ordinary inherent/trait,
-     * polarity, and safety checks below remain authoritative.
-     */
     if (ast_item->data.impl_item.self_type == CM_AST_TYPE_NONE) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -14080,6 +14136,12 @@ static int cm_lower_impl_item(CmLowerState *state,
         return 0;
     }
     if (ast_item->data.impl_item.trait_type == CM_AST_TYPE_NONE) {
+        if (ast_item->data.impl_item.is_const) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                "inherent impls cannot be const");
+            return 0;
+        }
         if (ast_item->data.impl_item.is_negative) {
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span,
                 ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -14101,6 +14163,7 @@ static int cm_lower_impl_item(CmLowerState *state,
         hir_item->kind = CM_HIR_ITEM_IMPL;
         hir_item->data.impl_item.has_trait = 0;
         hir_item->data.impl_item.is_negative = 0;
+        hir_item->data.impl_item.is_const = 0;
         hir_item->data.impl_item.safety = CM_HIR_SAFE;
         hir_item->data.impl_item.self_type = cm_lower_type(state,
             ast_item->data.impl_item.self_type, record->owner_module,
@@ -14111,6 +14174,8 @@ static int cm_lower_impl_item(CmLowerState *state,
     hir_item->data.impl_item.has_trait = 1;
     hir_item->data.impl_item.is_negative =
         ast_item->data.impl_item.is_negative;
+    hir_item->data.impl_item.is_const =
+        ast_item->data.impl_item.is_const;
     hir_item->data.impl_item.safety = ast_item->data.impl_item.is_unsafe
         ? CM_HIR_UNSAFE : CM_HIR_SAFE;
     hir_item->data.impl_item.self_type = cm_lower_type(state,
@@ -14134,6 +14199,13 @@ static int cm_lower_impl_item(CmLowerState *state,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
             CM_HIR_INVARIANT_VIOLATION,
             "implemented trait header is not bound before the impl");
+        return 0;
+    }
+    if (ast_item->data.impl_item.is_const
+        && !trait_item->data.trait_item.is_const) {
+        cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
+            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+            "const impl targets a trait that is not #[const_trait]");
         return 0;
     }
     if (ast_item->data.impl_item.is_negative
@@ -14591,6 +14663,8 @@ static int cm_lower_trait_item(CmLowerState *state,
         ? CM_HIR_UNSAFE : CM_HIR_SAFE;
     hir_item->data.trait_item.is_auto =
         ast_item->data.trait_item.is_auto;
+    hir_item->data.trait_item.is_const =
+        cm_lower_item_has_exact_attribute(state, hir_item, "const_trait");
     hir_item->data.trait_item.supertraits = supertraits;
     hir_item->data.trait_item.supertrait_count = supertrait_count;
     return 1;

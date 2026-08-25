@@ -278,7 +278,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v30` and
+remains omitted rather than guessed. Canonical dumps are `hir-v31` and
 `mir-v9`.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
@@ -304,6 +304,11 @@ rewind, finalization, deterministic dumps, typed barrier fingerprints, and
 observer currentness authenticate the arena. This is representation only:
 capture absence/class and Copy evidence are uncomputed, while invocation,
 lifetime inference, expansion, MIR, and C emission reject these nodes.
+
+Canonical `hir-v31` preserves the compiler-authenticated const capability of
+traits and the exact constness of trait impl headers. Const inherent impls and
+const impls of non-const traits reject; legacy semantic metadata v1.1 rejects
+these facts instead of silently erasing them.
 
 Every current function, const, and static body still has an `ITEM_SOURCE`
 origin whose definition, enclosing definition, item backlink, and legacy owner
@@ -731,7 +736,7 @@ agree that `pub trait Thin = Pointee<Metadata = ()> + PointeeSized;` lowers
 with exact resolved RHS identity. Alias chains and alias use in predicates and
 supertraits are retained without prematurely erasing the alias into its
 bounds; canonical obligation expansion remains future solver work. Auto traits
-retain authenticated identity, and safe itemless non-const negative impls
+retain authenticated identity, and safe itemless negative impls
 retain full polarity, generics, predicates, types, identities, and spans;
 duplicates and positive/negative overlap reject. Structural trait type defaults
 recursively substitute `Self` and prior lifetime/type arguments with DAG

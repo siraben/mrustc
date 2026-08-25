@@ -53,8 +53,9 @@ and lifetime RHS bounds, including generic arguments and associated
 equalities, and may be referenced by predicates and ordinary supertraits while
 mixed cycles and impl headers fail closed. Authenticated auto-trait identity
 and safe negative impl polarity are now structural HIR rather than inferred
-from names; only itemless, non-const negative impls of auto traits are admitted,
-and duplicate or positive/negative overlap rejects transactionally. Structural
+from names; only itemless negative impls of auto traits are admitted, and a
+const negative impl must target a compiler-authenticated const trait. Duplicate
+or positive/negative overlap rejects transactionally. Structural
 trait type defaults substitute prior lifetime/type arguments and `Self`, and
 explicit trait lifetime arguments retain authenticated early- or late-bound
 identity. Associated-type trait bounds now retain positional lifetime/type
@@ -339,7 +340,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v30`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v31`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
@@ -1374,7 +1375,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v30`.
+wrong-kind targets hard-error. The canonical format is `hir-v31`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

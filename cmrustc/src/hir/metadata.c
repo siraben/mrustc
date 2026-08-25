@@ -1370,7 +1370,8 @@ static int cm_meta_collect_trait_universe(
         if (item->kind == CM_HIR_ITEM_TRAIT) {
             CmMetaEncodeTrait trait_value;
 
-            if (item->data.trait_item.supertrait_count != 0u) return 0;
+            if (item->data.trait_item.is_const
+                || item->data.trait_item.supertrait_count != 0u) return 0;
             memset(&trait_value, 0, sizeof(trait_value));
             trait_value.definition = item->definition;
             trait_value.item = item;
@@ -1429,6 +1430,7 @@ static int cm_meta_collect_trait_universe(
             || item->predicate_scope_count != 0u
             || item->predicate_count != 0u
             || item->outlives_predicate_count != 0u
+            || item->data.impl_item.is_const
             || item->data.impl_item.trait_type.argument_count != 0u
             || item->data.impl_item.trait_type.arguments != NULL) return 0;
         (void)cm_vec_push(impls, &impl_value);
