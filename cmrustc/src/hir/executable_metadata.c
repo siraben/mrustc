@@ -46,6 +46,13 @@ static int cm_exec_string_valid(CmHirExecutableString value,
     return 1;
 }
 
+static int cm_exec_bytes_valid(CmHirExecutableString value,
+    size_t minimum, size_t maximum)
+{
+    return value.length >= minimum && value.length <= maximum
+        && (value.length == 0u || value.data != NULL);
+}
+
 static int cm_exec_string_compare(CmHirExecutableString left,
     CmHirExecutableString right)
 {
@@ -264,7 +271,7 @@ static int cm_exec_descriptor_identity_fields(
             && metadata->edition != UINT32_C(2018)
             && metadata->edition != UINT32_C(2021)
             && metadata->edition != UINT32_C(2024))
-        || !cm_exec_string_valid(metadata->target_descriptor, 1u,
+        || !cm_exec_bytes_valid(metadata->target_descriptor, 1u,
             CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
         || !cm_exec_string_equal(metadata->panic_strategy,
             (CmHirExecutableString){ (unsigned char *)"abort", 5u })
@@ -1185,6 +1192,25 @@ static int cm_exec_read_string(CmHirMetadataReader *reader,
     return 1;
 }
 
+
+static int cm_exec_read_bytes(CmHirMetadataReader *reader,
+    CmHirExecutableString *output, size_t minimum, size_t maximum)
+{
+    uint32_t length;
+    const unsigned char *data;
+    CmHirExecutableString candidate;
+
+    if (cm_hir_metadata_read_u32(reader, &length) != CM_HIR_METADATA_OK
+        || (size_t)length < minimum || (size_t)length > maximum
+        || cm_hir_metadata_read_bytes(reader, (size_t)length, &data)
+            != CM_HIR_METADATA_OK) return 0;
+    candidate.length = (size_t)length;
+    candidate.data = length == 0u ? NULL : cm_alloc((size_t)length);
+    if (length != 0u) memcpy(candidate.data, data, (size_t)length);
+    *output = candidate;
+    return 1;
+}
+
 static int cm_exec_read_count(CmHirMetadataReader *reader, size_t maximum,
     size_t *output)
 {
@@ -1244,7 +1270,7 @@ static int cm_exec_parse_manifest(const CmHirMetadataSection *section,
     memcpy(metadata->crate_disambiguator.data, bytes, (size_t)length);
     if (cm_hir_metadata_read_u32(&reader, &metadata->edition)
             != CM_HIR_METADATA_OK || metadata->edition == 0u
-        || !cm_exec_read_string(&reader, &metadata->target_descriptor, 1u,
+        || !cm_exec_read_bytes(&reader, &metadata->target_descriptor, 1u,
             CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
         || !cm_exec_read_string(&reader, &metadata->panic_strategy, 1u,
             CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
@@ -1686,7 +1712,7 @@ static int cm_exec_expectation_valid(
             CM_HIR_ARTIFACT_MAX_NAME_SIZE)
         || !cm_exec_string_valid(expectation->crate_disambiguator, 1u,
             CM_HIR_ARTIFACT_MAX_DISAMBIGUATOR_SIZE)
-        || !cm_exec_string_valid(expectation->target_descriptor, 1u,
+        || !cm_exec_bytes_valid(expectation->target_descriptor, 1u,
             CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
         || !cm_exec_string_equal(expectation->panic_strategy,
             (CmHirExecutableString){ (unsigned char *)"abort", 5u })
@@ -1980,7 +2006,7 @@ static int cm_exec_configuration_matches(
     panic.data = (unsigned char *)configuration->panic_strategy.data;
     panic.length = configuration->panic_strategy.length;
     if (metadata->edition != configuration->edition
-        || !cm_exec_string_valid(target, 1u,
+        || !cm_exec_bytes_valid(target, 1u,
             CM_HIR_ARTIFACT_MAX_DESCRIPTOR_SIZE)
         || !cm_exec_string_equal(panic,
             (CmHirExecutableString){ (unsigned char *)"abort", 5u })

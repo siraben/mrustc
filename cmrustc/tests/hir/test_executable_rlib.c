@@ -36,6 +36,9 @@ static void test_hash(const void *data, size_t length,
 
 static void test_fixture_init(TestFixture *fixture)
 {
+    static const unsigned char target_descriptor[] = {
+        'C', 'M', 'T', 'G', 0u, 1u, 0u, 0u, 'x', '8', '6', '_', '6', '4'
+    };
     static const unsigned char source[]
         = "pub trait Present {} impl Present for u32 {}\n"
           "pub fn bounded<T:Present>(x:u32,y:T)->T{y}\n";
@@ -47,8 +50,8 @@ static void test_fixture_init(TestFixture *fixture)
     metadata->crate_disambiguator
         = (CmHirExecutableString)S("package-test");
     metadata->edition = UINT32_C(2021);
-    metadata->target_descriptor = (CmHirExecutableString)S(
-        "x86_64-unknown-linux-gnu;e-m:e-p:64:64");
+    metadata->target_descriptor.data = (unsigned char *)target_descriptor;
+    metadata->target_descriptor.length = sizeof(target_descriptor);
     metadata->panic_strategy = (CmHirExecutableString)S("abort");
     fixture->cfg = (CmHirExecutableString)S("target_pointer_width=64");
     metadata->cfgs = &fixture->cfg;
