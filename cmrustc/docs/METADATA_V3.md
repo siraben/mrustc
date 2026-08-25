@@ -360,7 +360,9 @@ a signature and do not establish who produced an artifact.
 
 The complete active v3.2 capture domain is intentionally narrow:
 
-- Modules and their effective public type/value namespace are complete.
+- Modules and their effective public type/value namespace are complete. This
+  initial executable slice requires exactly one defining namespace entry for
+  every transported module, trait, and value; any reexport rejects v3.2.
   Ordinary `ITEM` records are unsupported, so `TYPE_ITEMS` is complete with a
   canonical empty primary stream. Primitive types are structural `TYPE`
   records, not fake items.
@@ -717,7 +719,9 @@ tag/local, visibility, and canonical source/export ordinal. A `MACRO`
 namespace tag is invalid in v3.0/v3.1/v3.2 because `MACROS` is `ABSENT`.
 Targets are `MODULE`, `ITEM`, `VALUE`, `NOMINAL`, or `PRIMITIVE`. Ordinary
 traits and trait aliases use `NOMINAL`; there is no fake type item for them.
-Reexports point to the same canonical target handle as the defining entry.
+In v3.0/v3.1, reexports point to the same canonical target handle as the
+defining entry. V3.2 applies its narrower exact capture rule above and rejects
+all reexports.
 
 Records are ordered by module, namespace, name bytes, and export ordinal.
 Conflicting effective public bindings reject. Every nonprimitive target must
