@@ -289,6 +289,8 @@ CmHirArtifactIdentityStatus cm_hir_artifact_identity_compute(
     }
     cm_hir_artifact_hash_field(&context, (unsigned char)'S',
         input->source_closure.bytes, CM_HIR_ARTIFACT_IDENTITY_SIZE);
+    cm_hir_artifact_hash_field(&context, (unsigned char)'L',
+        input->link_manifest.bytes, CM_HIR_ARTIFACT_IDENTITY_SIZE);
     cm_hir_artifact_hash_count(&context, (unsigned char)'N',
         input->dependency_count);
     for (index = 0u; index < input->dependency_count; index += 1u) {

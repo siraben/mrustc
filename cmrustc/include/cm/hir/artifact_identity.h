@@ -53,6 +53,8 @@ typedef struct CmHirArtifactIdentityInput {
     const CmHirArtifactBytes *cfgs;
     size_t cfg_count;
     CmHirArtifactDigest source_closure;
+    /* Digest of the exact canonical LINK section payload. */
+    CmHirArtifactDigest link_manifest;
     const CmHirArtifactDigest *dependency_identities;
     size_t dependency_count;
 } CmHirArtifactIdentityInput;

@@ -179,6 +179,7 @@ static CmHirArtifactIdentityInput test_baseline_input(
     input.cfgs = cfgs;
     input.cfg_count = 2u;
     input.source_closure = source_closure;
+    test_fill_digest(&input.link_manifest, UINT8_C(0xc0));
     test_fill_digest(&dependencies[0], UINT8_C(0x10));
     test_fill_digest(&dependencies[1], UINT8_C(0x80));
     input.dependency_identities = dependencies;
@@ -201,14 +202,14 @@ static void test_every_identity_input_changes_identity(
     CmHirArtifactDigest source_closure)
 {
     static const unsigned char expected[CM_HIR_ARTIFACT_IDENTITY_SIZE] = {
-        UINT8_C(0x39), UINT8_C(0x13), UINT8_C(0x59), UINT8_C(0x7f),
-        UINT8_C(0x6e), UINT8_C(0xc4), UINT8_C(0x2a), UINT8_C(0xa8),
-        UINT8_C(0x7d), UINT8_C(0x20), UINT8_C(0x16), UINT8_C(0x9f),
-        UINT8_C(0x4b), UINT8_C(0xe9), UINT8_C(0x3b), UINT8_C(0x40),
-        UINT8_C(0x16), UINT8_C(0x75), UINT8_C(0x3c), UINT8_C(0x91),
-        UINT8_C(0xde), UINT8_C(0xcd), UINT8_C(0xfc), UINT8_C(0x4a),
-        UINT8_C(0xf6), UINT8_C(0x00), UINT8_C(0x82), UINT8_C(0xd9),
-        UINT8_C(0x8d), UINT8_C(0x1a), UINT8_C(0x8e), UINT8_C(0xc3)
+        UINT8_C(0x48), UINT8_C(0xa5), UINT8_C(0xd6), UINT8_C(0x1c),
+        UINT8_C(0xf6), UINT8_C(0xe6), UINT8_C(0x17), UINT8_C(0x17),
+        UINT8_C(0xfa), UINT8_C(0x1b), UINT8_C(0x45), UINT8_C(0x58),
+        UINT8_C(0xee), UINT8_C(0xe1), UINT8_C(0xf1), UINT8_C(0x7b),
+        UINT8_C(0xef), UINT8_C(0x9c), UINT8_C(0x4b), UINT8_C(0x58),
+        UINT8_C(0x5c), UINT8_C(0x24), UINT8_C(0xaf), UINT8_C(0x60),
+        UINT8_C(0x9b), UINT8_C(0xcd), UINT8_C(0x27), UINT8_C(0xcd),
+        UINT8_C(0xee), UINT8_C(0x76), UINT8_C(0x4a), UINT8_C(0x63)
     };
     CmHirArtifactBytes cfgs[2];
     CmHirArtifactDigest dependencies[2];
@@ -266,6 +267,10 @@ static void test_every_identity_input_changes_identity(
 
     changed_input = baseline_input;
     changed_input.source_closure.bytes[0] ^= UINT8_C(1);
+    test_expect_changed(&baseline, &changed_input);
+
+    changed_input = baseline_input;
+    changed_input.link_manifest.bytes[0] ^= UINT8_C(1);
     test_expect_changed(&baseline, &changed_input);
 
     changed_dependencies[0] = dependencies[0];
