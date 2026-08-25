@@ -147,13 +147,15 @@ const CmTargetDesc *cm_target_default(void)
 #endif
 }
 
-int cm_process_run(char *const arguments[], CmProcessStatus *status)
+static int cm_process_run_internal(const char *directory,
+    char *const arguments[], CmProcessStatus *status)
 {
     pid_t child;
     pid_t waited;
     int wait_status;
 
-    if (arguments == NULL || arguments[0] == NULL || status == NULL) {
+    if (arguments == NULL || arguments[0] == NULL || status == NULL
+        || (directory != NULL && directory[0] == '\0')) {
         return 0;
     }
     memset(status, 0, sizeof(*status));
@@ -162,6 +164,7 @@ int cm_process_run(char *const arguments[], CmProcessStatus *status)
         return 0;
     }
     if (child == (pid_t)0) {
+        if (directory != NULL && chdir(directory) != 0) _exit(126);
         execvp(arguments[0], arguments);
         _exit(127);
     }
@@ -179,4 +182,16 @@ int cm_process_run(char *const arguments[], CmProcessStatus *status)
         status->signal_number = WTERMSIG(wait_status);
     }
     return 1;
+}
+
+int cm_process_run(char *const arguments[], CmProcessStatus *status)
+{
+    return cm_process_run_internal(NULL, arguments, status);
+}
+
+int cm_process_run_in_directory(const char *directory,
+    char *const arguments[], CmProcessStatus *status)
+{
+    if (directory == NULL) return 0;
+    return cm_process_run_internal(directory, arguments, status);
 }

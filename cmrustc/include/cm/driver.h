@@ -37,6 +37,8 @@ const char *cm_build_identity(void);
 const CmTargetDesc *cm_target_find(const char *triple);
 const CmTargetDesc *cm_target_default(void);
 int cm_process_run(char *const arguments[], CmProcessStatus *status);
+int cm_process_run_in_directory(const char *directory,
+    char *const arguments[], CmProcessStatus *status);
 int cm_driver_main(int argc, char **argv);
 
 #endif
