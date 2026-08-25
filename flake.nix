@@ -40,6 +40,8 @@
               python3
               ripgrep
               tinycc
+              zlib
+              zlib.dev
             ] ++ linuxDebugTools;
 
             shellHook = ''
