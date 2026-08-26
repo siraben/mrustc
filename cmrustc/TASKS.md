@@ -1955,6 +1955,22 @@ through real v3 trait declarations and namespace identity, followed by
 associated declarations, aliases, and impl headers; another opaque v2
 reference or skipped family would not be a consumable `core` artifact.
 
+The first bounded v3.0 declaration step is now complete and consumed in a
+fresh HIR context.  `declaration_capture` lowers the focused
+`Gate<T: ?Sized>`/`GateReexport`/`needs<X: Gate<u8>>` provider from exact
+graph/import/module-map authority; `declaration_metadata` emits and replays
+the 12-section schema-1 `LOWER_SAFE` envelope deterministically; and
+`declaration_materialize` enforces exact crate, target, layout, edition,
+panic, and cfg expectations before transactionally binding HIR and library
+namespace state.  A new consumer successfully lowers direct and reexported
+trait predicates to one DefId.  Strict GCC and TinyCC full suites and focused
+Clang ASan/UBSan/LSan pass.  M3-04 and M6-06 remain `ACTIVE`: the implemented
+profile intentionally rejects associated declarations, trait aliases,
+projections, function pointers, impls, macros, semantic attributes, and
+general executable bodies.  The next artifact frontier is exact
+trait-associated declarations and ownership, then alias/projection and impl
+families, followed by another whole-core capture attempt.
+
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
 coverage are necessary diagnostics but do not substitute for metadata,

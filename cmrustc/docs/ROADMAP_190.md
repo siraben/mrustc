@@ -122,6 +122,19 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   universe; bodies, macros, semantic attributes, and link inputs remain
   separately declared capabilities rather than implicit omissions.
   `docs/METADATA_V3.md` is the normative schema and acceptance contract.
+- The first bounded v3.0 `LOWER_SAFE` declaration slice is implemented.  A
+  lowered provider containing `Gate<T: ?Sized>`, `pub use Gate as
+  GateReexport`, and `needs<X: Gate<u8>>` produces canonical 3.0 bytes with
+  schema-1 family descriptors.  Decode/re-encode is byte-identical; an exact
+  crate/target/layout/panic/cfg expectation is checked before HIR mutation;
+  and a fresh HIR consumer lowers both `dep::Gate<u8>` and
+  `GateReexport<u8>` to the same complete trait DefId.  The codec rejects
+  orphan supporting types, aliases without defining namespace entries,
+  malformed locals/ranges, wrong expectations, and late restore failures
+  transactionally.  Full strict GCC and TinyCC suites plus focused Clang
+  ASan/UBSan/LSan pass.  This slice covers no associated item, alias body,
+  projection, impl, macro, semantic attribute, general body, or link input;
+  it therefore does not make a core artifact or close M6-06.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

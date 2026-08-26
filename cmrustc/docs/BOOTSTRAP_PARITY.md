@@ -37,7 +37,12 @@ The current tree has four important, but different, kinds of evidence:
 1. Strict GCC, Clang, and TinyCC tests exercise a real bounded `no_core`
    source-to-C-to-executable path.
 2. Private cmhir v1/v2 fixtures prove deterministic, fresh-process transport
-   for a limited declaration subset.
+   for a limited declaration subset.  The first bounded v3.0 `LOWER_SAFE`
+   slice now additionally captures a real generic ordinary trait, its
+   canonical and reexported namespace names, and a public generic value whose
+   predicate names that same trait identity.  Decoded bytes materialize in a
+   fresh HIR context and a new consumer lowers both the direct and reexported
+   trait paths to the same bound DefId.
 3. The bounded G3 profile emits a deterministic object-bearing cmrlib from an
    admitted provider, then a fresh process loads its trait, positive primitive
    impl, and generic `RETURN_ARGUMENT` body recipe and emits a linked consumer
@@ -64,9 +69,13 @@ The active G4 boundary is now declaration metadata, not G1.  Full library
 capture succeeds, but v2.6 rejects at its previously localized ITEM family and
 emits zero bytes because that format cannot represent complete traits,
 aliases, associated children, impl headers, or trait namespace entries.  The
-next dependency-ordered capability is a real v3 ordinary-trait declaration
-whose canonical and reexported names and predicate references share one
-fresh-context identity.
+first real v3.0 ordinary-trait slice is now green: `Gate<T: ?Sized>`,
+`GateReexport`, and `needs<X: Gate<u8>>` survive deterministic capture,
+encode/decode/re-encode, exact target/config expectation checks, transactional
+materialization, and fresh-consumer lowering.  This is deliberately a bounded
+fixture profile, not whole-core v3.  The next dependency-ordered capability is
+associated declarations and their exact trait ownership, followed by trait
+aliases, projections/function pointers, and cfg-complete impl headers.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
