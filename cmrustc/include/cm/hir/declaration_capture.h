@@ -244,6 +244,13 @@ typedef struct CmHirDeclarationCaptureResult {
  * sole direct attribute is exact bare `doc(hidden)`; renamed public reexports
  * retain the same VALU identity. Mutability and body presence are retained,
  * but the initializer and CTFE/body IR are deliberately not transported.
+ * Reachable structural types are collected by one memoized tri-state walk,
+ * bucketed by semantic depth, stably sorted by the exact v3.0 canonical key,
+ * and deduplicated before unique edge limits are charged. HIR type IDs map
+ * directly to their canonical one-based TYPE locals. Captured ITEM HIR IDs
+ * map directly to ITEM locals, while source-authenticated trait DefIds use a
+ * capture-owned sorted local index; unreachable arena nodes and repeated
+ * structural occurrences do not consume descriptor limits.
  *
  * On success output owns all descriptor storage.  Failure leaves an already
  * initialized output unchanged.

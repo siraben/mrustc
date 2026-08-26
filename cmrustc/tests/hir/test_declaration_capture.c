@@ -1,4 +1,5 @@
 #include "cm/hir/declaration_capture.h"
+#include "cm/hir/declaration_materialize.h"
 #include "cm/hir/lower.h"
 #include "cm/alloc.h"
 
@@ -17,6 +18,9 @@ typedef struct CaptureFixture {
     CmHirLowerResult lower_result;
     CmHirArtifactConfig config;
 } CaptureFixture;
+
+static const CmHirItem *find_item(const CaptureFixture *fixture,
+    const char *name, CmHirItemId *out_id);
 
 static const unsigned char fixture_source[] =
     "mod layout {\n"
@@ -413,6 +417,106 @@ static void composite_associated_fixture_init(CaptureFixture *fixture,
     fixture_init_source(fixture, with_noise, "associated-composite.rs",
         composite_associated_fixture_source,
         sizeof(composite_associated_fixture_source) - 1u);
+}
+
+static void many_unique_array_fixture_init(CaptureFixture *fixture,
+    int with_noise, int reverse_discovery, size_t array_count)
+{
+    CmByteBuf source;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmHirType *outer;
+    CmHirType *templates;
+    CmHirTypeId *new_ids;
+    size_t index;
+    char fragment[64];
+    int written;
+    cm_byte_buf_init(&source);
+    cm_byte_buf_append(&source,
+        (const unsigned char *)"#[doc(hidden)]\npub static MANY: (",
+        sizeof("#[doc(hidden)]\npub static MANY: (") - 1u);
+    for (index = 0u; index < array_count; ++index) {
+        written = snprintf(fragment, sizeof(fragment), "[u8; %lu],",
+            (unsigned long)index);
+        assert(written > 0 && (size_t)written < sizeof(fragment));
+        cm_byte_buf_append(&source, (const unsigned char *)fragment,
+            (size_t)written);
+    }
+    cm_byte_buf_append(&source, (const unsigned char *)") = (",
+        sizeof(") = (") - 1u);
+    for (index = 0u; index < array_count; ++index) {
+        written = snprintf(fragment, sizeof(fragment), "[0; %lu],",
+            (unsigned long)index);
+        assert(written > 0 && (size_t)written < sizeof(fragment));
+        cm_byte_buf_append(&source, (const unsigned char *)fragment,
+            (size_t)written);
+    }
+    cm_byte_buf_append(&source, (const unsigned char *)
+        ");\npub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        sizeof(");\npub trait Gate<T: ?Sized> {}\n"
+            "pub fn needs<X: Gate<u8>>() {}\n") - 1u);
+    fixture_init_source(fixture, with_noise, "many-unique-arrays.rs",
+        source.data, source.len);
+    cm_byte_buf_destroy(&source);
+
+    item = (CmHirItem *)(void *)find_item(fixture, "MANY", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_STATIC);
+    outer = (CmHirType *)cm_hir_get_type(&fixture->hir,
+        item->data.value_item.type);
+    assert(outer != NULL && outer->kind == CM_HIR_TYPE_TUPLE_KIND
+        && outer->data.tuple_type.element_count == (uint32_t)array_count);
+    templates = (CmHirType *)cm_alloc_zeroed(array_count,
+        sizeof(*templates));
+    new_ids = (CmHirTypeId *)cm_alloc_zeroed(array_count, sizeof(*new_ids));
+    for (index = 0u; index < array_count; ++index) {
+        const CmHirType *array = cm_hir_get_type(&fixture->hir,
+            outer->data.tuple_type.elements[index]);
+        assert(array != NULL && array->kind == CM_HIR_TYPE_ARRAY_KIND
+            && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && array->data.array_type.length.data.value.low_bits == index);
+        templates[index] = *array;
+    }
+    for (index = 0u; index < array_count; ++index) {
+        size_t logical = reverse_discovery ? array_count - index - 1u : index;
+        assert(cm_hir_add_type(&fixture->hir, &templates[logical],
+                &new_ids[logical]) == CM_HIR_OK);
+    }
+    assert(array_count < 2u
+        || (reverse_discovery && new_ids[0] > new_ids[array_count - 1u])
+        || (!reverse_discovery && new_ids[0] < new_ids[array_count - 1u]));
+    outer = (CmHirType *)cm_hir_get_type(&fixture->hir,
+        item->data.value_item.type);
+    for (index = 0u; index < array_count; ++index)
+        outer->data.tuple_type.elements[index] = new_ids[index];
+    cm_free(new_ids);
+    cm_free(templates);
+}
+
+static void many_self_trait_fixture_init(CaptureFixture *fixture,
+    size_t trait_count)
+{
+    CmByteBuf source;
+    size_t index;
+    char declaration[96];
+    int written;
+    cm_byte_buf_init(&source);
+    for (index = 0u; index < trait_count; ++index) {
+        written = snprintf(declaration, sizeof(declaration),
+            "pub unsafe trait SelfTrait%lu { fn ping(&self); }\n",
+            (unsigned long)index);
+        assert(written > 0 && (size_t)written < sizeof(declaration));
+        cm_byte_buf_append(&source, (const unsigned char *)declaration,
+            (size_t)written);
+    }
+    cm_byte_buf_append(&source, (const unsigned char *)
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        sizeof("pub trait Gate<T: ?Sized> {}\n"
+            "pub fn needs<X: Gate<u8>>() {}\n") - 1u);
+    fixture_init_source(fixture, 0, "many-self-traits.rs", source.data,
+        source.len);
+    cm_byte_buf_destroy(&source);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -4796,6 +4900,17 @@ static void test_associated_composite_type_capture(void)
     ASSERT_COMPOSITE_ATOMIC_FAILURE();
     slice->data.slice_type.element = saved_type_id;
 
+    slice->data.slice_type.element =
+        wrap_application->data.named_type.arguments[0].data.type;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    slice->data.slice_type.element = saved_type_id;
+
+    saved_type_id = const_pointer->data.raw_pointer_type.pointee;
+    const_pointer->data.raw_pointer_type.pointee =
+        (CmHirTypeId)(first.hir.types.len + 1u);
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    const_pointer->data.raw_pointer_type.pointee = saved_type_id;
+
     saved_mutability = const_pointer->data.raw_pointer_type.mutability;
     const_pointer->data.raw_pointer_type.mutability = CM_HIR_MUTABLE;
     ASSERT_COMPOSITE_ATOMIC_FAILURE();
@@ -5036,6 +5151,127 @@ static void test_reachable_canonical_type_caps(void)
     fixture_destroy(&repeated_fixture);
 }
 
+static void test_many_unique_type_canonicalization_is_order_independent(void)
+{
+    enum { ARRAY_COUNT = 4096 };
+    CaptureFixture ascending;
+    CaptureFixture descending;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata ascending_metadata;
+    CmHirDeclarationMetadata descending_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf ascending_bytes;
+    CmByteBuf descending_bytes;
+    size_t index;
+    size_t array_index = 0u;
+    many_unique_array_fixture_init(&ascending, 0, 0, ARRAY_COUNT);
+    many_unique_array_fixture_init(&descending, 1, 1, ARRAY_COUNT);
+    cm_hir_declaration_metadata_init(&ascending_metadata);
+    cm_hir_declaration_metadata_init(&descending_metadata);
+    input = capture_input(&ascending);
+    result = cm_hir_declaration_metadata_capture(&input, &ascending_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && cm_hir_declaration_metadata_validate(&ascending_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    input = capture_input(&descending);
+    result = cm_hir_declaration_metadata_capture(&input, &descending_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && cm_hir_declaration_metadata_validate(&descending_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    for (index = 0u; index < ascending_metadata.type_count; ++index) {
+        const CmHirDeclarationType *type = &ascending_metadata.types[index];
+        if (type->kind != CM_HIR_DECL_TYPE_ARRAY) continue;
+        assert(array_index < ARRAY_COUNT
+            && type->array_length_low_bits == array_index
+            && type->array_length_high_bits == 0u
+            && type->child_type < index + 1u
+            && type->array_length_type < index + 1u);
+        array_index += 1u;
+    }
+    assert(array_index == ARRAY_COUNT);
+    cm_byte_buf_init(&ascending_bytes);
+    cm_byte_buf_init(&descending_bytes);
+    assert(cm_hir_declaration_metadata_encode(&ascending_metadata,
+                &ascending_bytes) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&descending_metadata,
+                &descending_bytes) == CM_HIR_DECL_METADATA_OK
+        && ascending_bytes.len == descending_bytes.len
+        && memcmp(ascending_bytes.data, descending_bytes.data,
+            ascending_bytes.len) == 0);
+    cm_byte_buf_destroy(&descending_bytes);
+    cm_byte_buf_destroy(&ascending_bytes);
+    cm_hir_declaration_metadata_destroy(&descending_metadata);
+    cm_hir_declaration_metadata_destroy(&ascending_metadata);
+    fixture_destroy(&descending);
+    fixture_destroy(&ascending);
+}
+
+static void test_many_self_traits_use_indexed_trait_locals(void)
+{
+    enum { TRAIT_COUNT = 1024 };
+    CaptureFixture fixture;
+    CaptureFixture dependency;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata dependency_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult materialize_result;
+    CmHirLibraryArtifact dependency_artifact;
+    const CmHirCrate *provider_crate;
+    size_t self_count = 0u;
+    size_t reference_count = 0u;
+    size_t index;
+    fixture_init(&dependency, 0);
+    cm_hir_declaration_metadata_init(&dependency_metadata);
+    input = capture_input(&dependency);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &dependency_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    many_self_trait_fixture_init(&fixture, TRAIT_COUNT);
+    memset(&expectation, 0, sizeof(expectation));
+    expectation.crate_name = dependency_metadata.crate_name;
+    expectation.crate_disambiguator =
+        dependency_metadata.crate_disambiguator;
+    expectation.edition = dependency_metadata.edition;
+    expectation.target_triple = dependency_metadata.target_triple;
+    expectation.data_layout = dependency_metadata.data_layout;
+    expectation.panic_strategy = dependency_metadata.panic_strategy;
+    expectation.cfgs = dependency_metadata.cfgs;
+    expectation.cfg_count = dependency_metadata.cfg_count;
+    provider_crate = cm_hir_get_crate(&fixture.hir,
+        fixture.lower_result.crate_id);
+    assert(provider_crate != NULL && fixture.hir.crates.len == 1u);
+    cm_hir_library_artifact_init(&dependency_artifact);
+    materialize_result = cm_hir_declaration_metadata_materialize(
+        &fixture.hir, &dependency_artifact, &dependency_metadata,
+        &expectation, "indexed_trait_dependency", provider_crate->span.source);
+    assert(materialize_result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && fixture.hir.crates.len == 2u
+        && materialize_result.crate_id != fixture.lower_result.crate_id);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == TRAIT_COUNT + 1u
+        && result.associated_count == TRAIT_COUNT
+        && metadata.associated_count == TRAIT_COUNT);
+    for (index = 0u; index < metadata.type_count; ++index) {
+        if (metadata.types[index].kind == CM_HIR_DECL_TYPE_SELF)
+            self_count += 1u;
+        else if (metadata.types[index].kind == CM_HIR_DECL_TYPE_REFERENCE)
+            reference_count += 1u;
+    }
+    assert(self_count == TRAIT_COUNT && reference_count == TRAIT_COUNT
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    cm_hir_library_artifact_destroy(&dependency_artifact);
+    fixture_destroy(&fixture);
+    cm_hir_declaration_metadata_destroy(&dependency_metadata);
+    fixture_destroy(&dependency);
+}
+
 int main(void)
 {
     test_primitive_reexports_and_determinism();
@@ -5043,6 +5279,8 @@ int main(void)
     test_allocator_like_associated_method_capture();
     test_associated_composite_type_capture();
     test_reachable_canonical_type_caps();
+    test_many_unique_type_canonicalization_is_order_independent();
+    test_many_self_traits_use_indexed_trait_locals();
     test_generic_enum_projection_glob_and_field_boundary();
     test_generic_enum_hostile_mutations_are_atomic();
     test_static_capture_and_determinism();
