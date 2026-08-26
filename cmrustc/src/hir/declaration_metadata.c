@@ -1596,6 +1596,21 @@ static int cm_decl_validate_aggregate_types(
     return valid;
 }
 
+static int cm_decl_zero_generic_unit_function(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationValue *value)
+{
+    const CmHirDeclarationType *return_type;
+    if (value->generic_start != 0u || value->generic_count != 0u
+        || value->predicate_start != 0u || value->predicate_count != 0u
+        || value->parameter_count != 0u || value->parameter_types != NULL
+        || !cm_decl_type_local(metadata, value->return_type)
+        || value->has_body != 1u || value->is_const != 0u) return 0;
+    return_type = &metadata->types[value->return_type - 1u];
+    return return_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && return_type->primitive == CM_HIR_DECL_PRIMITIVE_UNIT;
+}
+
 static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
 {
     size_t index;
@@ -1614,7 +1629,8 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
             || value->has_body > 1u
             || value->is_const > 1u) return 0;
         if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
-            if (value->generic_count == 0u
+            if ((value->generic_count == 0u
+                    && !cm_decl_zero_generic_unit_function(metadata, value))
                 || value->parameter_count
                     > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
                 || !cm_size_add(total_parameters, value->parameter_count,

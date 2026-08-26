@@ -170,6 +170,15 @@ typedef struct TypeNameFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } TypeNameFixture;
 
+typedef struct UnitFunctionFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationType types[2];
+    CmHirDeclarationValue values[1];
+    uint32_t parameters[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} UnitFunctionFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -1465,6 +1474,55 @@ static void type_name_of_val_fixture_init(TypeNameFixture *fixture)
     fixture->namespace_entries[0].export_ordinal = 1u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 1u;
+}
+
+static void unit_function_fixture_init(UnitFunctionFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("breakpoint_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-unit-function-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    metadata->types = fixture->types;
+    metadata->type_count = 1u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("breakpoint");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].return_type = 1u;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("breakpoint_alias");
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static void static_fixture_init(StaticFixture *fixture)
@@ -3749,6 +3807,176 @@ static void test_const_function_value_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_zero_generic_unit_function_family(void)
+{
+    UnitFunctionFixture fixture;
+    UnitFunctionFixture repeated_fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+    size_t common;
+    size_t payload;
+    size_t type_record;
+    size_t namespace_record;
+
+    unit_function_fixture_init(&fixture);
+    unit_function_fixture_init(&repeated_fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated_fixture.metadata,
+            &repeated) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    record = value_record_offset(&encoded, UINT32_C(0));
+    common = skip_string(&encoded, record + 8u);
+    payload = common + 44u;
+    assert(encoded.data[record] == CM_HIR_DECL_VALUE_FUNCTION
+        && get_u32(encoded.data + common + 12u) == UINT32_C(0)
+        && get_u32(encoded.data + common + 16u) == UINT32_C(0)
+        && get_u32(encoded.data + common + 28u) == UINT32_C(0)
+        && get_u32(encoded.data + common + 32u) == UINT32_C(0)
+        && get_u32(encoded.data + payload + 4u) == UINT32_C(0)
+        && get_u32(encoded.data + payload + 8u) == UINT32_C(1)
+        && encoded.data[payload + 12u] == UINT8_C(1)
+        && encoded.data[payload + 13u] == UINT8_C(0)
+        && encoded.data[payload + 14u] == UINT8_C(0)
+        && encoded.data[payload + 15u] == UINT8_C(0));
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.generic_count == 0u && decoded.generics == NULL
+        && decoded.predicate_count == 0u && decoded.predicates == NULL
+        && decoded.value_count == 1u
+        && decoded.values[0].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && decoded.values[0].generic_start == 0u
+        && decoded.values[0].generic_count == 0u
+        && decoded.values[0].predicate_start == 0u
+        && decoded.values[0].predicate_count == 0u
+        && decoded.values[0].parameter_count == 0u
+        && decoded.values[0].parameter_types == NULL
+        && decoded.values[0].return_type == 1u
+        && decoded.values[0].has_body == 1u
+        && decoded.values[0].is_const == 0u
+        && decoded.type_count == 1u
+        && decoded.types[0].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && decoded.types[0].primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && decoded.namespace_count == 2u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+#define ASSERT_INVALID_UNIT_FUNCTION(change_) do { \
+        unit_function_fixture_init(&fixture); \
+        change_; \
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+    } while (0)
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.types[0].primitive = CM_HIR_DECL_PRIMITIVE_BOOL);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.values[0].parameter_count = 1u;
+        fixture.values[0].parameter_types = fixture.parameters;
+        fixture.parameters[0] = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].predicate_start = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.values[0].predicate_start = 1u;
+        fixture.values[0].predicate_count = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].generic_start = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.values[0].generic_start = 1u;
+        fixture.values[0].generic_count = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].has_body = 0u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].is_const = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].return_type = 0u);
+    ASSERT_INVALID_UNIT_FUNCTION(fixture.values[0].declared_type = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.values[0].mutability = CM_HIR_DECL_IMMUTABLE);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+        fixture.types[1].primitive = CM_HIR_DECL_PRIMITIVE_BOOL;
+        fixture.metadata.type_count = 2u);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.metadata.namespace_entries = fixture.namespace_entries + 1u;
+        fixture.metadata.namespace_count = 1u);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.namespace_entries[0].namespace_kind =
+            CM_HIR_DECL_NAMESPACE_TYPE);
+    ASSERT_INVALID_UNIT_FUNCTION(
+        fixture.namespace_entries[0].target_local = 0u);
+#undef ASSERT_INVALID_UNIT_FUNCTION
+
+#define ASSERT_BAD_UNIT_VALUE_U32(offset_, value_) do { \
+        bad = copy_bytes(&encoded); \
+        put_u32(bad.data + (offset_), (value_)); \
+        recompute_family_crc(&bad, UINT8_C(3), "VALU"); \
+        assert_failed_transaction(&bad); \
+        cm_byte_buf_destroy(&bad); \
+    } while (0)
+    ASSERT_BAD_UNIT_VALUE_U32(common + 12u, UINT32_C(1));
+    ASSERT_BAD_UNIT_VALUE_U32(common + 16u, UINT32_C(1));
+    ASSERT_BAD_UNIT_VALUE_U32(common + 28u, UINT32_C(1));
+    ASSERT_BAD_UNIT_VALUE_U32(common + 32u, UINT32_C(1));
+    ASSERT_BAD_UNIT_VALUE_U32(payload + 4u, UINT32_C(1));
+    ASSERT_BAD_UNIT_VALUE_U32(payload + 8u, UINT32_C(0));
+#undef ASSERT_BAD_UNIT_VALUE_U32
+
+#define ASSERT_BAD_UNIT_VALUE_U8(offset_, value_) do { \
+        bad = copy_bytes(&encoded); \
+        bad.data[(offset_)] = (unsigned char)(value_); \
+        recompute_family_crc(&bad, UINT8_C(3), "VALU"); \
+        assert_failed_transaction(&bad); \
+        cm_byte_buf_destroy(&bad); \
+    } while (0)
+    ASSERT_BAD_UNIT_VALUE_U8(payload + 12u, UINT8_C(0));
+    ASSERT_BAD_UNIT_VALUE_U8(payload + 13u, UINT8_C(1));
+    ASSERT_BAD_UNIT_VALUE_U8(payload + 14u, UINT8_C(1));
+#undef ASSERT_BAD_UNIT_VALUE_U8
+
+    bad = copy_bytes(&encoded);
+    type_record = type_record_offset(&bad, UINT32_C(0));
+    bad.data[type_record + 4u] = CM_HIR_DECL_PRIMITIVE_BOOL;
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    namespace_record = namespace_record_offset(&bad, UINT32_C(0));
+    bad.data[namespace_record + 4u] = CM_HIR_DECL_NAMESPACE_TYPE;
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    namespace_record = namespace_record_offset(&bad, UINT32_C(0));
+    put_u32(bad.data + skip_string(&bad, namespace_record + 8u),
+        UINT32_C(0));
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_contextual_erased_reference_roots(void)
 {
     TypeNameFixture first;
@@ -5048,6 +5276,7 @@ int main(void)
     test_enum_named_adt_signature();
     test_const_value_family();
     test_const_function_value_family();
+    test_zero_generic_unit_function_family();
     test_contextual_erased_reference_roots();
     test_static_tuple_array_family();
     test_named_aggregate_family();
