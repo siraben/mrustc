@@ -149,6 +149,7 @@ typedef struct CmLowerState {
     int reject_callable_output_elision;
     CmHirRegion receiver_output_region;
     int has_receiver_output_region;
+    int erase_bounded_free_input_lifetime;
     uint32_t next_type_inference;
     uint32_t next_region_inference;
     CmSpan generated_span;
@@ -3075,6 +3076,11 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK, "callable trait output lifetime is ambiguous");
             return 0;
+        }
+        if (lifetime == CM_INTERN_ID_NONE
+            && state->erase_bounded_free_input_lifetime) {
+            out_region->kind = CM_HIR_REGION_ERASED;
+            return cm_lower_finish_lifetime(state, out_region);
         }
         if (lifetime == CM_INTERN_ID_NONE
             && state->has_receiver_output_region) {
@@ -10338,6 +10344,109 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     return !state->failed;
 }
 
+static int cm_lower_plain_path_type_named(const CmLowerState *state,
+    CmAstTypeId type_id, CmInternId expected_name)
+{
+    const CmAstType *type = cm_ast_get_type(state->ast, type_id);
+    const CmAstPath *path = type == NULL || type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_ast_get_path(state->ast, type->path);
+
+    return path != NULL && !path->absolute && path->segment_count == 1u
+        && path->segments != NULL
+        && path->segments[0].name == expected_name
+        && path->segments[0].argument_count == 0u
+        && path->segments[0].arguments == NULL;
+}
+
+static int cm_lower_plain_path_type_is_str(const CmLowerState *state,
+    CmAstTypeId type_id)
+{
+    const CmAstType *type = cm_ast_get_type(state->ast, type_id);
+    const CmAstPath *path = type == NULL || type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_ast_get_path(state->ast, type->path);
+
+    return path != NULL && !path->absolute && path->segment_count == 1u
+        && path->segments != NULL
+        && path->segments[0].argument_count == 0u
+        && path->segments[0].arguments == NULL
+        && cm_lower_string_is(state, path->segments[0].name, "str");
+}
+
+/*
+ * This is deliberately narrower than general Rust lifetime elision.  The
+ * admitted declaration has one source-omitted input lifetime and an explicit
+ * static output, so erasing the input cannot discard an output relation.
+ */
+static int cm_lower_bounded_free_input_erasure(
+    const CmLowerState *state, const CmAstItem *ast_item,
+    const CmLowerItemRecord *record)
+{
+    const CmAstFunction *function = &ast_item->data.function_item;
+    const CmAstGenericParam *ast_generic;
+    const CmAstGenericParamBound *ast_bound;
+    const CmAstType *ast_bound_type;
+    const CmHirGenericParam *hir_generic;
+    const CmAstType *parameter;
+    const CmAstType *result;
+
+    if (record->parent_kind != CM_LOWER_PARENT_NONE || record->is_foreign
+        || !function->is_const || function->is_async || function->is_safe
+        || function->is_unsafe || function->abi != CM_INTERN_ID_NONE
+        || function->parameter_count != 1u || function->parameters == NULL
+        || function->parameters[0].is_self
+        || ast_item->generic_parameter_count != 1u
+        || ast_item->generic_parameters == NULL
+        || ast_item->where_clause != CM_INTERN_ID_NONE
+        || ast_item->where_predicate_count != 0u
+        || ast_item->where_predicates != NULL
+        || record->generic_parameter_count != 1u
+        || record->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    ast_generic = &ast_item->generic_parameters[0];
+    hir_generic = cm_hir_get_generic_param(state->hir,
+        record->generic_parameter_start);
+    ast_bound = ast_generic->bounds == NULL || ast_generic->bound_count != 1u
+        ? NULL : &ast_generic->bounds[0];
+    ast_bound_type = ast_bound == NULL ? NULL
+        : cm_ast_get_type(state->ast, ast_bound->trait_type);
+    parameter = cm_ast_get_type(state->ast,
+        function->parameters[0].type);
+    result = cm_ast_get_type(state->ast, function->return_type);
+    return ast_generic->kind == CM_AST_PARAM_TYPE
+        && ast_generic->attributes == NULL
+        && ast_generic->attribute_count == 0u
+        && ast_generic->constraint != CM_INTERN_ID_NONE
+        && ast_generic->declared_type == CM_AST_TYPE_NONE
+        && ast_generic->default_type == CM_AST_TYPE_NONE
+        && ast_generic->default_const == CM_INTERN_ID_NONE
+        && ast_generic->default_const_expr == CM_AST_EXPR_NONE
+        && ast_bound != NULL
+        && ast_bound->kind == CM_AST_GENERIC_BOUND_TRAIT
+        && ast_bound->modifier == CM_AST_GENERIC_BOUND_RELAXED
+        && ast_bound->lifetime == CM_INTERN_ID_NONE
+        && ast_bound_type != NULL && ast_bound_type->kind == CM_AST_TYPE_PATH
+        && cm_lower_plain_path_type_named(state, ast_bound->trait_type,
+            cm_interner_lookup(&state->ast->strings,
+                (const unsigned char *)"Sized", sizeof("Sized") - 1u))
+        && hir_generic != NULL && hir_generic->kind == CM_HIR_GENERIC_TYPE
+        && cm_hir_def_id_equal(hir_generic->owner, record->definition)
+        && hir_generic->index == 0u
+        && hir_generic->declared_type == CM_HIR_TYPE_NONE
+        && hir_generic->is_relaxed_sized
+        && !hir_generic->has_default
+        && parameter != NULL && parameter->kind == CM_AST_TYPE_REFERENCE
+        && !parameter->is_mutable
+        && parameter->lifetime == CM_INTERN_ID_NONE
+        && cm_lower_plain_path_type_named(state, parameter->child,
+            ast_generic->name)
+        && result != NULL && result->kind == CM_AST_TYPE_REFERENCE
+        && !result->is_mutable
+        && result->lifetime != CM_INTERN_ID_NONE
+        && cm_lower_string_is(state, result->lifetime, "'static")
+        && cm_lower_plain_path_type_is_str(state, result->child);
+}
+
 static int cm_lower_function_item(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item)
@@ -10352,6 +10461,8 @@ static int cm_lower_function_item(CmLowerState *state,
     CmHirRegion receiver_output_region;
     CmSpan span;
     int previous_has_receiver_output_region;
+    int previous_erase_bounded_free_input_lifetime;
+    int erase_bounded_free_input_lifetime;
     int has_receiver_output_region;
     uint32_t index;
     uint32_t local_count;
@@ -10395,6 +10506,12 @@ static int cm_lower_function_item(CmLowerState *state,
         locals = (CmHirLocal *)cm_alloc_zeroed(
             (size_t)function->parameter_count * 2u, sizeof(CmHirLocal));
     }
+    erase_bounded_free_input_lifetime =
+        cm_lower_bounded_free_input_erasure(state, ast_item, record);
+    previous_erase_bounded_free_input_lifetime =
+        state->erase_bounded_free_input_lifetime;
+    state->erase_bounded_free_input_lifetime =
+        erase_bounded_free_input_lifetime;
     for (index = 0u; index < function->parameter_count && !state->failed;
          ++index) {
         CmInternId name;
@@ -10576,6 +10693,8 @@ static int cm_lower_function_item(CmLowerState *state,
             local_count += 1u;
         }
     }
+    state->erase_bounded_free_input_lifetime =
+        previous_erase_bounded_free_input_lifetime;
     if (state->failed) {
         cm_free(locals);
         cm_free(parameters);

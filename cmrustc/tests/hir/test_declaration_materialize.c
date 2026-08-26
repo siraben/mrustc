@@ -126,7 +126,8 @@ typedef struct TypeNameFixture {
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationModule modules[1];
     CmHirDeclarationGeneric generics[1];
-    CmHirDeclarationType types[2];
+    CmHirDeclarationType types[4];
+    uint32_t parameters[1];
     CmHirDeclarationValue values[1];
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } TypeNameFixture;
@@ -1553,12 +1554,18 @@ static void type_name_fixture_init(TypeNameFixture *fixture)
 
     fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
     fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_STR;
-    fixture->types[1].kind = CM_HIR_DECL_TYPE_REFERENCE;
-    fixture->types[1].child_type = 1u;
-    fixture->types[1].mutability = CM_HIR_DECL_IMMUTABLE;
-    fixture->types[1].region.kind = CM_HIR_DECL_REGION_STATIC;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[1].generic_local = 1u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[2].child_type = 1u;
+    fixture->types[2].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[2].region.kind = CM_HIR_DECL_REGION_STATIC;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[3].child_type = 2u;
+    fixture->types[3].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[3].region.kind = CM_HIR_DECL_REGION_ERASED;
     metadata->types = fixture->types;
-    metadata->type_count = 2u;
+    metadata->type_count = 4u;
 
     fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
     fixture->values[0].owner_module = 1u;
@@ -1566,7 +1573,10 @@ static void type_name_fixture_init(TypeNameFixture *fixture)
     fixture->values[0].source_ordinal = 1u;
     fixture->values[0].generic_start = 1u;
     fixture->values[0].generic_count = 1u;
-    fixture->values[0].return_type = 2u;
+    fixture->parameters[0] = 4u;
+    fixture->values[0].parameter_types = fixture->parameters;
+    fixture->values[0].parameter_count = 1u;
+    fixture->values[0].return_type = 3u;
     fixture->values[0].has_body = 1u;
     fixture->values[0].is_const = 1u;
     metadata->values = fixture->values;
@@ -2569,8 +2579,10 @@ static void test_type_name_fresh_consumer(CmHirContext *context,
     static const unsigned char source_text[] =
         "use dep::name_of as direct_name;\n"
         "use dep::name_alias as alias_name;\n"
-        "pub fn direct() -> &'static str { direct_name::<str>() }\n"
-        "pub fn via_alias() -> &'static str { alias_name::<str>() }\n";
+        "pub const fn direct<T: ?Sized>(value: &T) -> &'static str { "
+            "direct_name::<T>(value) }\n"
+        "pub const fn via_alias<T: ?Sized>(value: &T) -> &'static str { "
+            "alias_name::<T>(value) }\n";
     static const char *const names[] = { "direct", "via_alias" };
     CmSourceSet sources;
     CmSourceId root_source;
@@ -2615,9 +2627,19 @@ static void test_type_name_fresh_consumer(CmHirContext *context,
             CM_HIR_ITEM_FUNCTION, names[index]);
         CmHirBodyLowerResult body_result;
         const CmHirBody *body;
+        const CmHirType *parameter;
         size_t expression_count = context->expressions.len;
         assert(function != NULL
+            && function->generic_parameter_count == 1u
+            && function->data.function_item.signature.is_const
+            && function->data.function_item.signature.parameter_count == 1u
             && function->data.function_item.body != CM_HIR_BODY_NONE);
+        parameter = cm_hir_get_type(context,
+            function->data.function_item.signature.parameters[0].type);
+        assert(parameter != NULL
+            && parameter->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && parameter->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED);
         body_result = cm_hir_lower_body(context,
             function->data.function_item.body, &graph,
             graph_result.revision, &imports, &map);
@@ -4401,6 +4423,8 @@ static void test_type_name_materialize_and_consume(void)
     CmHirLibraryValue alias_value;
     const CmHirItem *item;
     const CmHirGenericParam *generic;
+    const CmHirType *parameter_type;
+    const CmHirType *parameter_pointee;
     const CmHirType *return_type;
     const CmHirType *pointee;
     const CmInternedString *abi;
@@ -4436,6 +4460,14 @@ static void test_type_name_materialize_and_consume(void)
     generic = item == NULL || item->generic_parameter_count != 1u
         ? NULL : cm_hir_get_generic_param(&context,
             item->generic_parameter_start);
+    parameter_type = item == NULL
+            || item->data.function_item.signature.parameter_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            item->data.function_item.signature.parameters[0].type);
+    parameter_pointee = parameter_type == NULL
+            || parameter_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            parameter_type->data.reference_type.pointee);
     return_type = item == NULL ? NULL : cm_hir_get_type(&context,
         item->data.function_item.signature.return_type);
     pointee = return_type == NULL
@@ -4448,8 +4480,8 @@ static void test_type_name_materialize_and_consume(void)
         && item->generic_parameter_count == 1u
         && item->predicate_count == 0u && item->predicates == NULL
         && item->attribute_count == 0u && item->attributes == NULL
-        && item->data.function_item.signature.parameter_count == 0u
-        && item->data.function_item.signature.parameters == NULL
+        && item->data.function_item.signature.parameter_count == 1u
+        && item->data.function_item.signature.parameters != NULL
         && item->data.function_item.signature.receiver == CM_HIR_RECEIVER_NONE
         && item->data.function_item.signature.safety == CM_HIR_SAFE
         && item->data.function_item.signature.is_const == 1
@@ -4460,6 +4492,15 @@ static void test_type_name_materialize_and_consume(void)
         && generic != NULL && generic->kind == CM_HIR_GENERIC_TYPE
         && generic->index == 0u && generic->is_relaxed_sized == 1
         && cm_hir_def_id_equal(generic->owner, item->definition)
+        && parameter_type != NULL
+        && parameter_type->data.reference_type.mutability
+            == CM_HIR_IMMUTABLE
+        && parameter_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && parameter_pointee != NULL
+        && parameter_pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && parameter_pointee->data.parameter_type.parameter
+            == item->generic_parameter_start
         && return_type != NULL
         && return_type->data.reference_type.mutability == CM_HIR_IMMUTABLE
         && return_type->data.reference_type.region.kind
@@ -4493,8 +4534,14 @@ static void test_type_name_materialize_and_consume(void)
         && alias_value.data.function.generic_parameter_count == 1u
         && direct_value.data.function.predicate_count == 0u
         && alias_value.data.function.predicate_count == 0u
-        && direct_value.data.function.parameter_count == 0u
-        && alias_value.data.function.parameter_count == 0u
+        && direct_value.data.function.parameter_count == 1u
+        && alias_value.data.function.parameter_count == 1u
+        && direct_value.data.function.parameter_types != NULL
+        && alias_value.data.function.parameter_types != NULL
+        && direct_value.data.function.parameter_types[0]
+            == item->data.function_item.signature.parameters[0].type
+        && alias_value.data.function.parameter_types[0]
+            == item->data.function_item.signature.parameters[0].type
         && direct_value.data.function.is_const == 1
         && alias_value.data.function.is_const == 1
         && direct_value.data.function.return_type
@@ -4531,11 +4578,11 @@ static void test_type_name_materialize_and_consume(void)
         &expectation, lengths, &identity, 215u);
     decoded.values[0].return_type = saved_local;
 
-    saved_byte = decoded.types[1].mutability;
-    decoded.types[1].mutability = 0u;
+    saved_byte = decoded.types[3].mutability;
+    decoded.types[3].mutability = 0u;
     assert_item_metadata_rejected(&context, &artifact, &decoded,
         &expectation, lengths, &identity, 216u);
-    decoded.types[1].mutability = saved_byte;
+    decoded.types[3].mutability = saved_byte;
 
     saved_byte = decoded.values[0].has_body;
     decoded.values[0].has_body = 2u;

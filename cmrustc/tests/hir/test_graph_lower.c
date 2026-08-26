@@ -13415,6 +13415,135 @@ static void test_core_auto_trait_negative_impl_cluster(void)
     cm_source_set_destroy(&sources);
 }
 
+static void test_bounded_free_const_input_lifetime_erasure(void)
+{
+    static const unsigned char source[] =
+        "pub trait Marker {}\n"
+        "pub const fn admitted<T: ?Sized>(_value: &T) -> &'static str { \"\" }\n"
+        "pub const fn placeholder<T: ?Sized>(_value: &'_ T) -> &'static str { \"\" }\n"
+        "pub const fn named<'a, T: ?Sized>(_value: &'a T) -> &'static str { \"\" }\n"
+        "pub const fn static_input<T: ?Sized>(_value: &'static T) -> &'static str { \"\" }\n"
+        "pub const fn mutable<T: ?Sized>(_value: &mut T) -> &'static str { \"\" }\n"
+        "pub const fn sized<T>(_value: &T) -> &'static str { \"\" }\n"
+        "pub fn nonconst<T: ?Sized>(_value: &T) -> &'static str { \"\" }\n"
+        "pub const fn constrained<T: ?Sized>(_value: &T) -> &'static str "
+            "where T: Marker { \"\" }\n"
+        "pub const fn inheriting<T: ?Sized>(_value: &T) -> &T { _value }\n";
+    static const char *const names[] = {
+        "admitted", "placeholder", "named", "static_input", "mutable",
+        "sized", "nonconst", "constrained"
+    };
+    static const CmHirRegionKind expected[] = {
+        CM_HIR_REGION_ERASED,
+        CM_HIR_REGION_INFER,
+        CM_HIR_REGION_EARLY_BOUND,
+        CM_HIR_REGION_STATIC,
+        CM_HIR_REGION_INFER,
+        CM_HIR_REGION_INFER,
+        CM_HIR_REGION_INFER,
+        CM_HIR_REGION_INFER
+    };
+    static const CmHirMutability expected_mutability[] = {
+        CM_HIR_IMMUTABLE, CM_HIR_IMMUTABLE, CM_HIR_IMMUTABLE,
+        CM_HIR_IMMUTABLE, CM_HIR_MUTABLE, CM_HIR_IMMUTABLE,
+        CM_HIR_IMMUTABLE, CM_HIR_IMMUTABLE
+    };
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *inheriting;
+    const CmHirType *inheriting_input;
+    const CmHirType *inheriting_output;
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "bounded-input-elision/lib.rs",
+        source, sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add bounded free input lifetime fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "bounded free input lifetime lowering: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    check(graph_result.error_count == 0u && result.error_count == 0u
+        && result.lowered_item_count == 10u,
+        "bounded free input lifetime fixture did not lower exactly");
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        const CmHirItem *item = find_hir_item_anywhere(&hir, names[index]);
+        const CmHirType *parameter = item == NULL
+                || item->data.function_item.signature.parameter_count != 1u
+            ? NULL : cm_hir_get_type(&hir,
+                item->data.function_item.signature.parameters[0].type);
+        const CmHirType *pointee = parameter == NULL
+                || parameter->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(&hir,
+                parameter->data.reference_type.pointee);
+        const CmHirType *return_type = item == NULL ? NULL
+            : cm_hir_get_type(&hir,
+                item->data.function_item.signature.return_type);
+        const CmHirType *return_pointee = return_type == NULL
+                || return_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(&hir,
+                return_type->data.reference_type.pointee);
+        const CmHirBody *body = item == NULL ? NULL
+            : cm_hir_get_body(&hir, item->data.function_item.body);
+
+        check(item != NULL && parameter != NULL
+            && parameter->data.reference_type.mutability
+                == expected_mutability[index]
+            && parameter->data.reference_type.region.kind == expected[index]
+            && pointee != NULL && pointee->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && return_type != NULL
+            && return_type->data.reference_type.region.kind
+                == CM_HIR_REGION_STATIC
+            && return_pointee != NULL
+            && return_pointee->kind == CM_HIR_TYPE_STR_KIND
+            && body != NULL && body->local_count == 1u
+            && body->locals != NULL
+            && body->locals[0].type
+                == item->data.function_item.signature.parameters[0].type,
+            "bounded free input lifetime changed an admitted or excluded "
+            "source shape");
+    }
+    inheriting = find_hir_item_anywhere(&hir, "inheriting");
+    inheriting_input = inheriting == NULL
+            || inheriting->data.function_item.signature.parameter_count != 1u
+        ? NULL : cm_hir_get_type(&hir,
+            inheriting->data.function_item.signature.parameters[0].type);
+    inheriting_output = inheriting == NULL ? NULL : cm_hir_get_type(&hir,
+        inheriting->data.function_item.signature.return_type);
+    check(inheriting_input != NULL && inheriting_output != NULL
+        && inheriting_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && inheriting_output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && inheriting_input->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && inheriting_output->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER,
+        "output-inheriting free function entered bounded input erasure");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
 int main(void)
 {
     test_imported_graph_paths();
@@ -13457,6 +13586,7 @@ int main(void)
     test_inherent_method_bound_lifetime_binder();
     test_generic_trait_impl_method();
     test_trait_receiver_output_lifetime_normalization();
+    test_bounded_free_const_input_lifetime_erasure();
     test_lifetime_generic_default_trait_method();
     test_adt_generic_type_defaults();
     test_lifetime_generic_trait_outlives();
