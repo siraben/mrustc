@@ -2093,7 +2093,14 @@ explicit 32/64-bit target authority.  Their clean pinned-core probe keeps the
 zero-error graph/HIR and exact 451/1,658/20,747 library census, then advances
 to `core/src/any.rs:856`: `type_name` (`def=1:18898`, source item `99:42`,
 rejected item `10801`) fails at `stage=items` with
-`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.
+`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.  Commits
+`1f8f6d22`, `1447e225`, and `a58142db` transport that const declaration while
+leaving its implementation unavailable.  Their clean pinned-core probe then
+measures `core/src/any.rs:896`: `type_name_of_val` (`def=1:18899`, source item
+`99:43`, rejected item `10802`) at `stage=items`/
+`item-source-invalid`.  Its elided `&T` input is still represented by an HIR
+inference region, which cannot be published as cross-crate declaration
+identity.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

@@ -171,7 +171,16 @@ again reports zero graph/import/HIR errors, 38,176 HIR items, and the exact
 451-module/1,658-type/20,747-value library census.  It advances the measured
 v3.0 frontier to `core/src/any.rs:856`: `type_name` (`def=1:18898`, source
 item `99:42`, rejected item `10801`) fails at `stage=items` with
-`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.
+`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.  Commits
+`1f8f6d22`, `1447e225`, and `a58142db` encode, materialize, and capture its
+exact const declaration while keeping its body unavailable.  The following
+clean pinned-core probe preserves the same zero-error graph/HIR and exact
+451-module/1,658-type/20,747-value library census, then advances to
+`core/src/any.rs:896`: `type_name_of_val` (`def=1:18899`, source item `99:43`,
+rejected item `10802`) at `stage=items` with
+`reason=item-source-invalid`.  Its elided `&T` input lifetime remains an
+unresolved HIR inference region and must not cross the declaration boundary
+as inference.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

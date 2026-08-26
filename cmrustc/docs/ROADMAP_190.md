@@ -273,7 +273,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   preserves the exact zero-error graph/HIR and 451/1,658/20,747 library
   census, then measures `core/src/any.rs:856`'s public `type_name` function
   (`def=1:18898`, source item `99:42`, rejected item `10801`) at
-  `stage=items`/`item-source-invalid`.
+  `stage=items`/`item-source-invalid`.  Commits `1f8f6d22`, `1447e225`, and
+  `a58142db` complete that exact const declaration path without claiming its
+  body is executable.  The next clean run measures
+  `core/src/any.rs:896`'s `type_name_of_val` (`def=1:18899`, source item
+  `99:43`, rejected item `10802`) at the same stage/reason.  Its omitted input
+  lifetime currently lowers to an unresolved HIR inference region; the next
+  slice must provide authenticated function-bound lifetime semantics rather
+  than serialize inference.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
