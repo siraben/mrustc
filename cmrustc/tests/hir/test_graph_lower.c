@@ -4,6 +4,7 @@
 #include "cm/hir/lower.h"
 #include "cm/hir/projection.h"
 #include "cm/resolve/dependency_macro.h"
+#include "../../src/hir/library_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,49 @@
 #include <unistd.h>
 
 static int failures;
+
+static CmHirLibraryOwnedEntry *mutable_library_entry(
+    CmHirLibraryArtifact *artifact, const char *expected_name,
+    CmHirLibraryBindingKind expected_kind)
+{
+    CmHirLibraryOwnedData *owned;
+    CmHirLibraryOwnedEntry *found;
+    size_t module_index;
+    size_t name_length;
+
+    owned = (CmHirLibraryOwnedData *)
+        cm_hir_library_artifact_owned_data_const(artifact);
+    found = NULL;
+    name_length = strlen(expected_name);
+    if (owned == NULL) return NULL;
+    for (module_index = 0u; module_index < owned->modules.len;
+            ++module_index) {
+        CmHirLibraryOwnedModule *module;
+        size_t entry_index;
+
+        module = (CmHirLibraryOwnedModule *)cm_vec_at(&owned->modules,
+            module_index);
+        if (module == NULL) return NULL;
+        for (entry_index = 0u; entry_index < module->entries.len;
+                ++entry_index) {
+            CmHirLibraryOwnedEntry *entry;
+            const CmInternedString *name;
+
+            entry = (CmHirLibraryOwnedEntry *)cm_vec_at(&module->entries,
+                entry_index);
+            name = entry == NULL ? NULL
+                : cm_interner_get(&owned->names, entry->name);
+            if (entry == NULL || name == NULL || entry->kind != expected_kind
+                || name->len != name_length
+                || memcmp(name->bytes, expected_name, name_length) != 0) {
+                continue;
+            }
+            if (found != NULL) return NULL;
+            found = entry;
+        }
+    }
+    return found;
+}
 
 static void check(int condition, const char *message)
 {
@@ -10254,13 +10298,15 @@ static void test_hir_library_artifact_types(void)
         "pub fn Dual(x: u32) -> u32 { x }\n"
         "pub mod primitive { pub use bool; pub use u8; }\n"
         "pub struct Root;\n"
+        "pub struct AllocError;\n"
         "struct PrivateRoot;\n";
     static const unsigned char consumer_source[] =
-        "use dep::{Root as ImportedRoot, Exported as Imported, "
+        "use dep::{Root as ImportedRoot, AllocError, Exported as Imported, "
         "ExportedTrait as ImportedTrait, exposed as ImportedModule, "
         "primitive::u8 as Byte, bounded, Dual};\n"
         "pub struct Uses {\n"
         "    root: dep::Root,\n"
+        "    alloc_error: AllocError,\n"
         "    exported: dep::Exported,\n"
         "    alias: dep::Alias,\n"
         "    imported_root: ImportedRoot,\n"
@@ -10377,6 +10423,9 @@ static void test_hir_library_artifact_types(void)
     CmHirModuleMap unrelated_map;
     CmHirModuleMap collision_map;
     CmHirModuleMap cross_equality_map;
+    CmHirModuleMap corrupt_constructor_map;
+    CmHirModuleMap wrong_namespace_map;
+    CmHirModuleMap stale_artifact_map;
     CmHirLowerOptions lower_options;
     CmHirLowerResult producer_lower;
     CmHirLowerResult consumer_lower;
@@ -10384,6 +10433,9 @@ static void test_hir_library_artifact_types(void)
     CmHirLowerResult unrelated_lower;
     CmHirLowerResult collision_lower;
     CmHirLowerResult cross_equality_lower;
+    CmHirLowerResult corrupt_constructor_lower;
+    CmHirLowerResult wrong_namespace_lower;
+    CmHirLowerResult stale_artifact_lower;
     CmImportResolver consumer_imports;
     CmImportResult consumer_import_result;
     CmHirBodyLowerResult consumer_body_result;
@@ -10415,6 +10467,7 @@ static void test_hir_library_artifact_types(void)
     CmHirLibraryBinding primitive_binding;
     CmHirLibraryType primitive_type;
     const CmHirItem *producer_root_item;
+    const CmHirItem *producer_alloc_error_item;
     const CmHirItem *shared_item;
     const CmHirItem *alias_item;
     const CmHirItem *nested_item;
@@ -10444,7 +10497,15 @@ static void test_hir_library_artifact_types(void)
     const CmHirExpr *probe_call_expression;
     CmHirModuleId consumer_root_hir;
     const CmHirModule *consumer_root_module;
+    const CmHirDefinition *constructor_definition;
+    const CmHirItem *constructor_item;
+    CmHirLibraryOwnedEntry *alloc_error_type_entry;
+    CmHirLibraryOwnedEntry *alloc_error_constructor_entry;
+    CmHirLibraryOwnedEntry saved_alloc_error_type_entry;
+    CmHirLibraryOwnedEntry saved_alloc_error_constructor_entry;
+    CmHirContext stale_artifact_hir;
     CmHirDefId producer_root_definition;
+    CmHirDefId producer_alloc_error_definition;
     CmHirDefId shared_definition;
     CmHirDefId alias_definition;
     CmHirDefId nested_definition;
@@ -10490,6 +10551,9 @@ static void test_hir_library_artifact_types(void)
     cm_hir_module_map_init(&unrelated_map);
     cm_hir_module_map_init(&collision_map);
     cm_hir_module_map_init(&cross_equality_map);
+    cm_hir_module_map_init(&corrupt_constructor_map);
+    cm_hir_module_map_init(&wrong_namespace_map);
+    cm_hir_module_map_init(&stale_artifact_map);
     cm_hir_library_artifact_init(&artifact);
     check(cm_source_add_memory(&producer_sources,
             "hir-library/producer.rs", producer_source,
@@ -10527,6 +10591,7 @@ static void test_hir_library_artifact_types(void)
         && producer_lower.error_count == 0u,
         "HIR library producer did not lower");
     producer_root_item = find_hir_item_anywhere(&hir, "Root");
+    producer_alloc_error_item = find_hir_item_anywhere(&hir, "AllocError");
     shared_item = find_hir_item_anywhere(&hir, "Shared");
     alias_item = find_hir_item_anywhere(&hir, "Alias");
     nested_item = find_hir_item_anywhere(&hir, "Nested");
@@ -10551,6 +10616,8 @@ static void test_hir_library_artifact_types(void)
         : cm_hir_get_module(&hir, nested_item->owner_module);
     producer_root_definition = producer_root_item == NULL
         ? cm_hir_def_id_none() : producer_root_item->definition;
+    producer_alloc_error_definition = producer_alloc_error_item == NULL
+        ? cm_hir_def_id_none() : producer_alloc_error_item->definition;
     shared_definition = shared_item == NULL
         ? cm_hir_def_id_none() : shared_item->definition;
     alias_definition = alias_item == NULL
@@ -10581,7 +10648,11 @@ static void test_hir_library_artifact_types(void)
         ? cm_hir_def_id_none() : producer_dual_function_item->definition;
     exposed_module_definition = exposed_module == NULL
         ? cm_hir_def_id_none() : exposed_module->definition;
-    check(producer_root_item != NULL && shared_item != NULL
+    check(producer_root_item != NULL && producer_alloc_error_item != NULL
+        && producer_alloc_error_item->kind == CM_HIR_ITEM_STRUCT
+        && producer_alloc_error_item->data.aggregate_item.form
+            == CM_HIR_AGGREGATE_UNIT
+        && shared_item != NULL
         && alias_item != NULL
         && nested_item != NULL && marker_item != NULL
         && inner_trait_item != NULL && nested_trait_item != NULL
@@ -10758,6 +10829,13 @@ static void test_hir_library_artifact_types(void)
             &hir, &consumer_root_hir) == CM_HIR_MODULE_MAP_OK) {
         consumer_root_module = cm_hir_get_module(&hir, consumer_root_hir);
     }
+    constructor_definition = cm_hir_lookup_definition(&hir,
+        producer_alloc_error_definition);
+    constructor_item = constructor_definition == NULL
+            || constructor_definition->kind != CM_HIR_DEFINITION_ITEM
+            || constructor_definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(&hir,
+            constructor_definition->entity.item_id);
     check(consumer_graph_result.error_count == 0u
         && consumer_lower.error_count == 0u && uses_item != NULL
         && local_item != NULL && bounded_item != NULL
@@ -10766,34 +10844,52 @@ static void test_hir_library_artifact_types(void)
         && project_item != NULL && probe_item != NULL
         && dual_probe_item != NULL
         && uses_item->kind == CM_HIR_ITEM_STRUCT
-        && uses_item->data.aggregate_item.field_count == 9u
+        && uses_item->data.aggregate_item.field_count == 10u
         && consumer_root_module != NULL
         && consumer_root_module->import_count == 1u
-        && consumer_root_module->imports[0].binding_count == 8u
+        && consumer_root_module->imports[0].binding_count == 12u
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
             0u, CM_HIR_NAMESPACE_TYPE, "ImportedRoot",
             producer_root_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            1u, CM_HIR_NAMESPACE_TYPE, "Imported", shared_definition)
+            1u, CM_HIR_NAMESPACE_VALUE, "ImportedRoot",
+            producer_root_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            2u, CM_HIR_NAMESPACE_TYPE, "ImportedTrait",
+            2u, CM_HIR_NAMESPACE_TYPE, "AllocError",
+            producer_alloc_error_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            3u, CM_HIR_NAMESPACE_VALUE, "AllocError",
+            producer_alloc_error_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            4u, CM_HIR_NAMESPACE_TYPE, "Imported", shared_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            5u, CM_HIR_NAMESPACE_VALUE, "Imported", shared_definition)
+        && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
+            6u, CM_HIR_NAMESPACE_TYPE, "ImportedTrait",
             inner_trait_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            3u, CM_HIR_NAMESPACE_TYPE, "ImportedModule",
+            7u, CM_HIR_NAMESPACE_TYPE, "ImportedModule",
             exposed_module_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            4u, CM_HIR_NAMESPACE_TYPE, "Byte", cm_hir_def_id_none())
-        && consumer_root_module->imports[0].bindings[4].primitive_kind
+            8u, CM_HIR_NAMESPACE_TYPE, "Byte", cm_hir_def_id_none())
+        && consumer_root_module->imports[0].bindings[8].primitive_kind
             == CM_HIR_PRIMITIVE_U8
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            5u, CM_HIR_NAMESPACE_VALUE, "bounded",
+            9u, CM_HIR_NAMESPACE_VALUE, "bounded",
             producer_bounded_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            6u, CM_HIR_NAMESPACE_TYPE, "Dual",
+            10u, CM_HIR_NAMESPACE_TYPE, "Dual",
             producer_dual_trait_definition)
         && hir_import_binding_is(&hir, &consumer_root_module->imports[0],
-            7u, CM_HIR_NAMESPACE_VALUE, "Dual",
-            producer_dual_function_definition),
+            11u, CM_HIR_NAMESPACE_VALUE, "Dual",
+            producer_dual_function_definition)
+        && constructor_item != NULL
+        && constructor_item->kind == CM_HIR_ITEM_STRUCT
+        && constructor_item->data.aggregate_item.form
+            == CM_HIR_AGGREGATE_UNIT
+        && cm_hir_def_id_equal(constructor_item->definition,
+            producer_alloc_error_definition)
+        && constructor_item->data.aggregate_item.field_count == 0u,
         "artifact-backed dependency types did not lower");
     probe_body = NULL;
     probe_root_expression = NULL;
@@ -10838,7 +10934,7 @@ static void test_hir_library_artifact_types(void)
     }
     cm_import_resolver_destroy(&consumer_imports);
     if (uses_item != NULL && uses_item->kind == CM_HIR_ITEM_STRUCT
-        && uses_item->data.aggregate_item.field_count == 9u) {
+        && uses_item->data.aggregate_item.field_count == 10u) {
         const CmHirType *field_type;
 
         field_type = cm_hir_get_type(&hir,
@@ -10851,44 +10947,50 @@ static void test_hir_library_artifact_types(void)
             uses_item->data.aggregate_item.fields[1].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
-                shared_definition),
-            "dependency type reexport lost its producer DefId");
+                producer_alloc_error_definition),
+            "constructor import type half lost its producer DefId");
         field_type = cm_hir_get_type(&hir,
             uses_item->data.aggregate_item.fields[2].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
                 shared_definition),
-            "dependency type alias did not normalize through producer HIR");
+            "dependency type reexport lost its producer DefId");
         field_type = cm_hir_get_type(&hir,
             uses_item->data.aggregate_item.fields[3].type);
+        check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
+            && cm_hir_def_id_equal(field_type->data.named_type.definition,
+                shared_definition),
+            "dependency type alias did not normalize through producer HIR");
+        field_type = cm_hir_get_type(&hir,
+            uses_item->data.aggregate_item.fields[4].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
                 producer_root_definition),
             "first grouped dependency import lost its producer DefId");
         field_type = cm_hir_get_type(&hir,
-            uses_item->data.aggregate_item.fields[4].type);
+            uses_item->data.aggregate_item.fields[5].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
                 shared_definition),
             "imported dependency type lost its producer DefId");
         field_type = cm_hir_get_type(&hir,
-            uses_item->data.aggregate_item.fields[5].type);
+            uses_item->data.aggregate_item.fields[6].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
                 nested_definition),
             "dependency module reexport lost its producer DefId");
         field_type = cm_hir_get_type(&hir,
-            uses_item->data.aggregate_item.fields[6].type);
+            uses_item->data.aggregate_item.fields[7].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_ADT_KIND
             && cm_hir_def_id_equal(field_type->data.named_type.definition,
                 nested_definition),
             "imported dependency module lost qualified type lookup");
         field_type = cm_hir_get_type(&hir,
-            uses_item->data.aggregate_item.fields[7].type);
+            uses_item->data.aggregate_item.fields[8].type);
         check(field_type != NULL && field_type->kind == CM_HIR_TYPE_BOOL_KIND,
             "qualified dependency primitive lowered to the wrong type");
         field_type = cm_hir_get_type(&hir,
-            uses_item->data.aggregate_item.fields[8].type);
+            uses_item->data.aggregate_item.fields[9].type);
         check(field_type != NULL
             && field_type->kind == CM_HIR_TYPE_INTEGER_KIND
             && field_type->data.integer_type.kind == CM_HIR_INT_U8,
@@ -10992,6 +11094,90 @@ static void test_hir_library_artifact_types(void)
     saved_types = hir.types.len;
     saved_definitions = hir.definitions.len;
     saved_strings = cm_interner_length(&hir.strings);
+    alloc_error_type_entry = mutable_library_entry(&artifact, "AllocError",
+        CM_HIR_LIBRARY_BINDING_TYPE);
+    alloc_error_constructor_entry = mutable_library_entry(&artifact,
+        "AllocError", CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR);
+    check(alloc_error_type_entry != NULL
+        && alloc_error_constructor_entry != NULL,
+        "constructor negative fixtures are missing authenticated mates");
+    if (alloc_error_type_entry != NULL
+        && alloc_error_constructor_entry != NULL) {
+        saved_alloc_error_type_entry = *alloc_error_type_entry;
+        saved_alloc_error_constructor_entry = *alloc_error_constructor_entry;
+
+        /* The value binding must retain its exact same-name TYPE mate. */
+        alloc_error_type_entry->target = producer_root_definition;
+        cm_hir_lower_options_init(&lower_options);
+        lower_options.crate_name = "missing_constructor_mate";
+        lower_options.dependency_libraries = libraries;
+        lower_options.dependency_library_count = 1u;
+        corrupt_constructor_lower = lower_module_graph(&hir, &consumer_graph,
+            consumer_graph_result.revision, &corrupt_constructor_map,
+            &lower_options);
+        check(corrupt_constructor_lower.error_count == 1u
+            && corrupt_constructor_lower.first_error.kind
+                == CM_HIR_LOWER_RESOLVER_FAILURE
+            && cm_hir_module_map_count(&corrupt_constructor_map) == 0u
+            && hir.crates.len == saved_crates
+            && hir.modules.len == saved_modules
+            && hir.items.len == saved_items
+            && hir.types.len == saved_types
+            && hir.definitions.len == saved_definitions
+            && cm_interner_length(&hir.strings) == saved_strings,
+            "constructor without its library TYPE mate did not reject "
+            "transactionally");
+        *alloc_error_type_entry = saved_alloc_error_type_entry;
+
+        /* A constructor cannot be relabeled as a free value binding. */
+        alloc_error_constructor_entry->kind =
+            CM_HIR_LIBRARY_BINDING_VALUE;
+        alloc_error_constructor_entry->type_kind = CM_HIR_TYPE_ERROR_KIND;
+        alloc_error_constructor_entry->value_kind =
+            CM_HIR_LIBRARY_VALUE_FUNCTION;
+        cm_hir_lower_options_init(&lower_options);
+        lower_options.crate_name = "wrong_constructor_namespace";
+        lower_options.dependency_libraries = libraries;
+        lower_options.dependency_library_count = 1u;
+        wrong_namespace_lower = lower_module_graph(&hir, &consumer_graph,
+            consumer_graph_result.revision, &wrong_namespace_map,
+            &lower_options);
+        check(wrong_namespace_lower.error_count == 1u
+            && wrong_namespace_lower.first_error.kind
+                == CM_HIR_LOWER_RESOLVER_FAILURE
+            && cm_hir_module_map_count(&wrong_namespace_map) == 0u
+            && hir.crates.len == saved_crates
+            && hir.modules.len == saved_modules
+            && hir.items.len == saved_items
+            && hir.types.len == saved_types
+            && hir.definitions.len == saved_definitions
+            && cm_interner_length(&hir.strings) == saved_strings,
+            "wrong-kind constructor binding did not reject transactionally");
+        *alloc_error_constructor_entry =
+            saved_alloc_error_constructor_entry;
+    }
+
+    /* Artifact identities cannot be replayed into a different HIR context. */
+    cm_hir_context_init(&stale_artifact_hir);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "stale_artifact_consumer";
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    stale_artifact_lower = lower_module_graph(&stale_artifact_hir,
+        &consumer_graph, consumer_graph_result.revision, &stale_artifact_map,
+        &lower_options);
+    check(stale_artifact_lower.error_count == 1u
+        && stale_artifact_lower.first_error.kind
+            == CM_HIR_LOWER_INVALID_ARGUMENT
+        && cm_hir_module_map_count(&stale_artifact_map) == 0u
+        && stale_artifact_hir.crates.len == 0u
+        && stale_artifact_hir.modules.len == 0u
+        && stale_artifact_hir.items.len == 0u
+        && stale_artifact_hir.types.len == 0u
+        && stale_artifact_hir.definitions.len == 0u
+        && cm_interner_length(&stale_artifact_hir.strings) == 0u,
+        "stale constructor artifact context was not rejected before mutation");
+    cm_hir_context_destroy(&stale_artifact_hir);
     private_graph_result = cm_module_graph_build(&private_graph,
         &private_sources, private_root, &graph_options);
     cm_hir_lower_options_init(&lower_options);
@@ -11092,6 +11278,9 @@ static void test_hir_library_artifact_types(void)
     cm_hir_module_map_destroy(&unrelated_map);
     cm_hir_module_map_destroy(&collision_map);
     cm_hir_module_map_destroy(&cross_equality_map);
+    cm_hir_module_map_destroy(&corrupt_constructor_map);
+    cm_hir_module_map_destroy(&wrong_namespace_map);
+    cm_hir_module_map_destroy(&stale_artifact_map);
     cm_hir_module_map_destroy(&consumer_map);
     cm_hir_library_artifact_destroy(&artifact);
     cm_hir_context_destroy(&hir);

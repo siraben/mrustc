@@ -332,7 +332,7 @@ static int cm_lower_resolve_library_import(
     if (failed || matches != 1u) {
         if (out_binding != NULL)
             memset(out_binding, 0, sizeof(*out_binding));
-        return 0;
+        return failed || matches > 1u ? -1 : 0;
     }
     return 1;
 }
@@ -17768,18 +17768,18 @@ static int cm_lower_library_import_leaf(CmLowerState *state,
     if (out_binding != NULL)
         memset(out_binding, 0, sizeof(*out_binding));
     if (state == NULL || leaf == NULL || state->graph == NULL
-        || leaf->revision != state->graph_revision
-        || leaf->module != graph_module
+        || leaf->revision != state->graph_revision) return -1;
+    if (leaf->module != graph_module
         || !cm_lower_item_ref_equal(leaf->declaration, declaration)
-        || leaf->is_resolved || leaf->is_glob || leaf->is_anonymous
-        || leaf->import_name == CM_RESOLVE_STRING_NONE) return 0;
+        || leaf->is_resolved || leaf->is_glob || leaf->is_anonymous) return 0;
+    if (leaf->import_name == CM_RESOLVE_STRING_NONE) return -1;
     name_length = cm_import_string_length(state->imports, leaf->import_name);
-    if (name_length == 0u || name_length == SIZE_MAX) return 0;
+    if (name_length == 0u || name_length == SIZE_MAX) return -1;
     name = (unsigned char *)cm_alloc(name_length + 1u);
     if (!cm_import_copy_string(state->imports, leaf->import_name,
             (char *)name, name_length + 1u)) {
         cm_free(name);
-        return 0;
+        return -1;
     }
     resolved = cm_lower_resolve_library_import(state->graph,
         state->graph_revision, state->imports, state->options, graph_module,
@@ -17789,7 +17789,7 @@ static int cm_lower_library_import_leaf(CmLowerState *state,
 }
 
 static size_t cm_lower_library_import_binding_count(CmLowerState *state,
-    CmModuleId graph_module, CmResolveItemRef declaration)
+    CmModuleId graph_module, CmResolveItemRef declaration, CmSpan span)
 {
     size_t leaf_count;
     size_t leaf_index;
@@ -17799,14 +17799,31 @@ static size_t cm_lower_library_import_binding_count(CmLowerState *state,
     count = 0u;
     for (leaf_index = 0u; leaf_index < leaf_count; ++leaf_index) {
         CmImportLeafView leaf;
+        int resolution;
 
         if (leaf_index > (size_t)UINT32_MAX
             || !cm_import_get_leaf(state->imports, (uint32_t)leaf_index,
                 &leaf)) return SIZE_MAX;
-        if (cm_lower_library_import_leaf(state, graph_module, declaration,
-                &leaf, CM_RESOLVE_NAMESPACE_TYPE, NULL)) count += 1u;
-        if (cm_lower_library_import_leaf(state, graph_module, declaration,
-                &leaf, CM_RESOLVE_NAMESPACE_VALUE, NULL)) count += 1u;
+        resolution = cm_lower_library_import_leaf(state, graph_module,
+            declaration, &leaf, CM_RESOLVE_NAMESPACE_TYPE, NULL);
+        if (resolution < 0) {
+            cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+                declaration.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "dependency library type import authentication failed");
+            return SIZE_MAX;
+        }
+        if (resolution > 0) count += 1u;
+        resolution = cm_lower_library_import_leaf(state, graph_module,
+            declaration, &leaf, CM_RESOLVE_NAMESPACE_VALUE, NULL);
+        if (resolution < 0) {
+            cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+                declaration.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_OK,
+                "dependency library value import authentication failed");
+            return SIZE_MAX;
+        }
+        if (resolution > 0) count += 1u;
     }
     return count;
 }
@@ -17884,6 +17901,18 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
                 || (imported_binding.value_kind
                         == CM_HIR_LIBRARY_VALUE_STATIC
                     && item->kind == CM_HIR_ITEM_STATIC));
+    } else if (imported_binding.kind
+            == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+        const CmHirItem *item;
+
+        item = cm_lower_bound_item(state, imported_binding.definition);
+        valid_target = item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+            && imported_binding.type_kind == CM_HIR_TYPE_ADT_KIND
+            && imported_binding.primitive_kind == CM_HIR_PRIMITIVE_NONE
+            && imported_binding.value_kind == CM_HIR_LIBRARY_VALUE_NONE
+            && (item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT
+                || item->data.aggregate_item.form
+                    == CM_HIR_AGGREGATE_TUPLE);
     }
     if (!valid_target) {
         cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
@@ -17894,7 +17923,9 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
     hir_binding->name = cm_lower_copy_import_string(state,
         leaf->import_name, span, declaration.item);
     hir_binding->namespace_kind = imported_binding.kind
-            == CM_HIR_LIBRARY_BINDING_VALUE
+                == CM_HIR_LIBRARY_BINDING_VALUE
+            || imported_binding.kind
+                == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
         ? CM_HIR_NAMESPACE_VALUE : CM_HIR_NAMESPACE_TYPE;
     hir_binding->target = imported_binding.definition;
     hir_binding->primitive_kind = imported_binding.primitive_kind;
@@ -18082,7 +18113,7 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
             resolved_binding_count = cm_import_declaration_binding_count(
                 state->imports, graph_module, effective.declaration);
             library_binding_count = cm_lower_library_import_binding_count(
-                state, graph_module, effective.declaration);
+                state, graph_module, effective.declaration, effective.span);
             if (library_binding_count == SIZE_MAX
                 || resolved_binding_count > (size_t)UINT32_MAX
                 || library_binding_count > (size_t)UINT32_MAX
@@ -18165,13 +18196,24 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                             namespace_index < CM_ARRAY_LEN(namespaces)
                             && !state->failed; ++namespace_index) {
                         CmHirLibraryBinding imported_binding;
+                        int resolution;
 
                         memset(&imported_binding, 0,
                             sizeof(imported_binding));
-                        if (!cm_lower_library_import_leaf(state,
+                        resolution = cm_lower_library_import_leaf(state,
                                 graph_module, effective.declaration, &leaf,
                                 namespaces[namespace_index],
-                                &imported_binding)) continue;
+                                &imported_binding);
+                        if (resolution < 0) {
+                            cm_lower_fail(state,
+                                CM_HIR_LOWER_RESOLVER_FAILURE,
+                                effective.span, effective.declaration.item,
+                                CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                                "dependency library import changed after "
+                                "authentication preflight");
+                            break;
+                        }
+                        if (resolution == 0) continue;
                         if (binding_index >= binding_count
                             || !cm_lower_store_library_import_binding(state,
                                 &leaf, imported_binding, effective.span,
