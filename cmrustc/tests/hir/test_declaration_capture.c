@@ -2413,6 +2413,219 @@ static void test_doc_inline_reexport_projection_and_negatives(void)
     fixture_destroy(&attributed);
 }
 
+static void test_doc_hidden_reexport_projection_and_negatives(void)
+{
+    static const unsigned char attributed_source[] =
+        "mod sip { pub struct SipHasher13; pub struct SipHasher24; }\n"
+        "#[stable(feature = \"sip_hash\", since = \"1.0.0\")]\n"
+        "#[doc(hidden)]\n"
+        "pub use self::sip::SipHasher13;\n"
+        "#[unstable(feature = \"hashmap_internals\", issue = \"none\")]\n"
+        "#[allow(deprecated)]\n"
+        "#[doc(hidden)]\n"
+        "pub use self::sip::{SipHasher24 as HiddenHasher};\n"
+        "#[doc(hidden)]\n"
+        "use self::sip::SipHasher24 as PrivateHasher;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char plain_source[] =
+        "mod sip { pub struct SipHasher13; pub struct SipHasher24; }\n"
+        "pub use self::sip::SipHasher13;\n"
+        "pub use self::sip::{SipHasher24 as HiddenHasher};\n"
+        "use self::sip::SipHasher24 as PrivateHasher;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char mutation_source[] =
+        "mod sip { pub struct SipHasher13; }\n"
+        "#[stable(feature = \"sip_hash\", since = \"1.0.0\")]\n"
+        "#[doc(hidden)]\n"
+        "pub use self::sip::SipHasher13;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const struct {
+        const char *path;
+        const unsigned char *source;
+        size_t source_length;
+        uint32_t rejected_attribute;
+    } rejected[] = {
+        { "doc-hidden-call.rs",
+            (const unsigned char *)
+                "mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden())]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden())]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "doc-hidden-malformed.rs",
+            (const unsigned char *)
+                "mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden = \"yes\")]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden = \"yes\")]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "doc-hidden-duplicate.rs",
+            (const unsigned char *)
+                "mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden)]\n"
+                "#[doc(hidden)]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod sip { pub struct SipHasher13; }\n"
+                "#[doc(hidden)]\n"
+                "#[doc(hidden)]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 1u },
+        { "doc-hidden-generated.rs",
+            (const unsigned char *)
+                "mod sip { pub struct SipHasher13; }\n"
+                "#[cfg_attr(all(), doc(hidden))]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod sip { pub struct SipHasher13; }\n"
+                "#[cfg_attr(all(), doc(hidden))]\n"
+                "pub use self::sip::SipHasher13;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u }
+    };
+    static const unsigned char item_attribute_source[] =
+        "#[doc(hidden)]\n"
+        "pub struct SipHasher13;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture attributed;
+    CaptureFixture plain;
+    CaptureFixture mutation;
+    CmHirDeclarationMetadata attributed_metadata;
+    CmHirDeclarationMetadata plain_metadata;
+    CmHirDeclarationMetadata mutation_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirImport *import;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint32_t saved_source_attribute;
+    CmByteBuf attributed_bytes;
+    CmByteBuf plain_bytes;
+    size_t index;
+    fixture_init_source(&attributed, 0, "doc-hidden.rs",
+        attributed_source, sizeof(attributed_source) - 1u);
+    fixture_init_source(&plain, 0, "doc-hidden.rs", plain_source,
+        sizeof(plain_source) - 1u);
+    fixture_init_source(&mutation, 0, "doc-hidden-mutation.rs",
+        mutation_source, sizeof(mutation_source) - 1u);
+    cm_hir_declaration_metadata_init(&attributed_metadata);
+    cm_hir_declaration_metadata_init(&plain_metadata);
+    cm_hir_declaration_metadata_init(&mutation_metadata);
+    input = capture_input(&attributed);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 5u
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "SipHasher13") != NULL
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "HiddenHasher") != NULL
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "PrivateHasher") == NULL);
+    input = capture_input(&plain);
+    result = cm_hir_declaration_metadata_capture(&input, &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 0u);
+    cm_byte_buf_init(&attributed_bytes);
+    cm_byte_buf_init(&plain_bytes);
+    assert(cm_hir_declaration_metadata_encode(&attributed_metadata,
+            &attributed_bytes) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&plain_metadata, &plain_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && attributed_bytes.len == plain_bytes.len
+        && memcmp(attributed_bytes.data, plain_bytes.data,
+            attributed_bytes.len) == 0);
+    cm_byte_buf_destroy(&plain_bytes);
+    cm_byte_buf_destroy(&attributed_bytes);
+
+    input = capture_input(&mutation);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &mutation_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    saved_items = mutation_metadata.items;
+    saved_namespace = mutation_metadata.namespace_entries;
+    import = find_unique_attributed_import(&mutation);
+    assert(import != NULL && import->attribute_count == 2u
+        && import->attributes != NULL);
+
+    saved_metadata = import->attributes[1].metadata;
+    import->attributes[1].metadata = cm_hir_intern(&mutation.hir,
+        "doc(hidden())");
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 1u);
+    import->attributes[1].metadata = saved_metadata;
+
+    saved_span = import->attributes[1].span;
+    import->attributes[1].span.start += 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 1u);
+    import->attributes[1].span = saved_span;
+
+    saved_source_attribute = import->attributes[1].source_attribute;
+    import->attributes[1].source_attribute += 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 1u);
+    import->attributes[1].source_attribute = saved_source_attribute;
+
+    import->attributes[1].expansion_depth = 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 1u);
+    import->attributes[1].expansion_depth = 0u;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+            ++index) {
+        CaptureFixture bad;
+        fixture_init_source(&bad, 0, rejected[index].path,
+            rejected[index].source, rejected[index].source_length);
+        assert_reexport_projection_failure(&bad, &mutation_metadata,
+            saved_items, saved_namespace, rejected[index].rejected_attribute);
+        fixture_destroy(&bad);
+    }
+    {
+        CaptureFixture item_attribute;
+        fixture_init_source(&item_attribute, 0, "doc-hidden-item.rs",
+            item_attribute_source, sizeof(item_attribute_source) - 1u);
+        input = capture_input(&item_attribute);
+        result = cm_hir_declaration_metadata_capture(&input,
+            &mutation_metadata);
+        assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+            && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+            && result.failure_reason
+                == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+            && mutation_metadata.items == saved_items
+            && mutation_metadata.namespace_entries == saved_namespace);
+        fixture_destroy(&item_attribute);
+    }
+    assert(cm_hir_declaration_metadata_validate(&mutation_metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&mutation_metadata);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
+    cm_hir_declaration_metadata_destroy(&attributed_metadata);
+    fixture_destroy(&mutation);
+    fixture_destroy(&plain);
+    fixture_destroy(&attributed);
+}
+
 static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
 {
     static const unsigned char bad_alias_attribute_source[] =
@@ -2423,7 +2636,7 @@ static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
         "pub fn needs<X: Gate<u8>>() {}\n";
     static const unsigned char bad_reexport_attribute_source[] =
         "pub struct Unit;\n"
-        "#[doc(hidden)]\n"
+        "#[doc(notable_trait)]\n"
         "pub use Unit as Alias;\n"
         "pub trait Gate<T: ?Sized> {}\n"
         "pub fn needs<X: Gate<u8>>() {}\n";
@@ -3656,7 +3869,7 @@ static void test_generic_enum_hostile_mutations_are_atomic(void)
             "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
             "  B(T),\n", "doc(no_inline)" },
         { "T", "#[repr(C)]\n", good_variants, "doc(no_inline)" },
-        { "T", "", good_variants, "doc(hidden)" },
+        { "T", "", good_variants, "doc(notable_trait)" },
         { "T", "", "  #[lang = \"A\"]\n"
             "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
             "  A,\n"
@@ -3927,11 +4140,11 @@ static void test_primitive_reexport_hostile_mutations_are_atomic(void)
                 "pub fn needs<X: Gate<u8>>() {}\n") - 1u },
         { "primitive-attr.rs",
             (const unsigned char *)
-                "#[doc(hidden)]\n"
+                "#[doc(notable_trait)]\n"
                 "pub use bool;\n"
                 "pub trait Gate<T: ?Sized> {}\n"
                 "pub fn needs<X: Gate<u8>>() {}\n",
-            sizeof("#[doc(hidden)]\n"
+            sizeof("#[doc(notable_trait)]\n"
                 "pub use bool;\n"
                 "pub trait Gate<T: ?Sized> {}\n"
                 "pub fn needs<X: Gate<u8>>() {}\n") - 1u }
@@ -4082,6 +4295,7 @@ int main(void)
     test_reexport_provenance_and_generated_negatives();
     test_rustfmt_skip_reexport_projection_and_negatives();
     test_doc_inline_reexport_projection_and_negatives();
+    test_doc_hidden_reexport_projection_and_negatives();
     test_alias_and_reexport_attributes_fail_closed_atomically();
     test_constructor_omission_authority_is_not_forgeable();
     test_many_private_bindings_do_not_consume_public_cap();

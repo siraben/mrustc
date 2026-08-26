@@ -2485,7 +2485,8 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
                     && kind != CM_DECL_ATTR_DOC_ALIAS
                     && kind != CM_DECL_ATTR_DOC_NO_INLINE
                     && kind != CM_DECL_ATTR_RUSTFMT_SKIP
-                    && kind != CM_DECL_ATTR_DOC_INLINE)
+                    && kind != CM_DECL_ATTR_DOC_INLINE
+                    && kind != CM_DECL_ATTR_DOC_HIDDEN)
                 || (seen & kind) != 0u) {
                 return cm_decl_capture_reexport_failure(result,
                     CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
