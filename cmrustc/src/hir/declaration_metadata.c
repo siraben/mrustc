@@ -147,6 +147,7 @@ void cm_hir_declaration_metadata_destroy(CmHirDeclarationMetadata *metadata)
     for (index = 0u; index < metadata->item_count; ++index) {
         uint32_t child;
         cm_decl_free_string(&metadata->items[index].name);
+        cm_decl_free_string(&metadata->items[index].diagnostic_item);
         for (child = 0u; metadata->items[index].variants != NULL
                 && child < metadata->items[index].variant_count;
                 ++child)
@@ -427,12 +428,23 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
             || (item->kind != CM_HIR_DECL_ITEM_ENUM
                 && (item->enum_repr_primitive != 0u
                     || item->variant_count != 0u
-                    || item->variants != NULL))) return 0;
+                    || item->variants != NULL
+                    || item->diagnostic_item.data != NULL
+                    || item->diagnostic_item.length != 0u))) return 0;
         if (item->kind == CM_HIR_DECL_ITEM_ENUM) {
             CmHirDeclarationString *names;
             unsigned char discriminants[256];
             uint32_t child;
-            if (item->enum_repr_primitive != CM_HIR_DECL_PRIMITIVE_U8
+            int explicit_discriminants;
+            explicit_discriminants = item->enum_repr_primitive
+                == CM_HIR_DECL_PRIMITIVE_U8;
+            if ((!explicit_discriminants
+                    && item->enum_repr_primitive
+                        != CM_HIR_DECL_ENUM_REPR_RUST)
+                || (explicit_discriminants
+                    ? (item->diagnostic_item.data != NULL
+                        || item->diagnostic_item.length != 0u)
+                    : !cm_decl_identifier(item->diagnostic_item))
                 || item->variant_count == 0u
                 || item->variant_count
                     > (uint32_t)CM_HIR_DECL_METADATA_MAX_VARIANTS
@@ -451,15 +463,22 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
                     || !cm_decl_identifier(variant->name)
                     || (child != 0u && item->variants[child - 1u]
                         .source_ordinal >= variant->source_ordinal)
-                    || variant->discriminant_primitive
-                        != CM_HIR_DECL_PRIMITIVE_ISIZE
-                    || variant->discriminant_high != UINT64_C(0)
-                    || variant->discriminant_low > UINT64_C(255)
-                    || discriminants[(size_t)variant->discriminant_low]) {
+                    || (explicit_discriminants
+                        ? (variant->discriminant_primitive
+                                != CM_HIR_DECL_PRIMITIVE_ISIZE
+                            || variant->discriminant_high != UINT64_C(0)
+                            || variant->discriminant_low > UINT64_C(255)
+                            || discriminants[(size_t)
+                                variant->discriminant_low])
+                        : (variant->discriminant_primitive
+                                != CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT
+                            || variant->discriminant_low != UINT64_C(0)
+                            || variant->discriminant_high != UINT64_C(0)))) {
                     cm_free(names);
                     return 0;
                 }
-                discriminants[(size_t)variant->discriminant_low] = 1u;
+                if (explicit_discriminants)
+                    discriminants[(size_t)variant->discriminant_low] = 1u;
                 names[child] = variant->name;
             }
             qsort(names, item->variant_count, sizeof(*names),
@@ -968,6 +987,49 @@ static int cm_decl_namespace_compare(
         : left->export_ordinal > right->export_ordinal;
 }
 
+static const CmHirDeclarationVariant *cm_decl_variant_local(
+    const CmHirDeclarationMetadata *metadata, uint32_t local,
+    const CmHirDeclarationItem **owner_out)
+{
+    size_t index;
+    uint32_t remaining;
+    if (local == 0u) return NULL;
+    remaining = local;
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *item = &metadata->items[index];
+        if (item->kind != CM_HIR_DECL_ITEM_ENUM) continue;
+        if (remaining <= item->variant_count) {
+            if (owner_out != NULL) *owner_out = item;
+            return &item->variants[remaining - 1u];
+        }
+        remaining -= item->variant_count;
+    }
+    return NULL;
+}
+
+static const CmHirDeclarationNamespaceEntry *cm_decl_namespace_find(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationNamespaceEntry *key)
+{
+    size_t first = 0u;
+    size_t count = metadata->namespace_count;
+    while (count != 0u) {
+        size_t step = count / 2u;
+        size_t current = first + step;
+        int order = cm_decl_namespace_compare(
+            &metadata->namespace_entries[current], key);
+        if (order < 0) {
+            first = current + 1u;
+            count -= step + 1u;
+        } else if (order > 0) {
+            count = step;
+        } else {
+            return &metadata->namespace_entries[current];
+        }
+    }
+    return NULL;
+}
+
 static int cm_decl_validate_namespace(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -983,14 +1045,20 @@ static int cm_decl_validate_namespace(
         if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE) {
             if ((entry->target_kind != CM_HIR_DECL_TARGET_MODULE
                     && entry->target_kind != CM_HIR_DECL_TARGET_ITEM
-                    && entry->target_kind != CM_HIR_DECL_TARGET_NOMINAL)
+                    && entry->target_kind != CM_HIR_DECL_TARGET_NOMINAL
+                    && entry->target_kind
+                        != CM_HIR_DECL_TARGET_ENUM_VARIANT)
                 || entry->target_local == 0u
                 || (entry->target_kind == CM_HIR_DECL_TARGET_MODULE
                     && (size_t)entry->target_local > metadata->module_count)
                 || (entry->target_kind == CM_HIR_DECL_TARGET_ITEM
                     && (size_t)entry->target_local > metadata->item_count)
                 || (entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL
-                    && (size_t)entry->target_local > metadata->trait_count))
+                    && (size_t)entry->target_local > metadata->trait_count)
+                || (entry->target_kind
+                        == CM_HIR_DECL_TARGET_ENUM_VARIANT
+                    && cm_decl_variant_local(metadata,
+                        entry->target_local, NULL) == NULL))
                 return 0;
             if (entry->target_kind == CM_HIR_DECL_TARGET_MODULE) {
                 const CmHirDeclarationModule *target = &metadata->modules[
@@ -1002,14 +1070,20 @@ static int cm_decl_validate_namespace(
             }
         } else if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE) {
             if ((entry->target_kind != CM_HIR_DECL_TARGET_ITEM
-                    && entry->target_kind != CM_HIR_DECL_TARGET_VALUE)
+                    && entry->target_kind != CM_HIR_DECL_TARGET_VALUE
+                    && entry->target_kind
+                        != CM_HIR_DECL_TARGET_ENUM_VARIANT)
                 || entry->target_local == 0u
                 || (entry->target_kind == CM_HIR_DECL_TARGET_ITEM
                     && ((size_t)entry->target_local > metadata->item_count
                         || metadata->items[entry->target_local - 1u].kind
                             != CM_HIR_DECL_ITEM_STRUCT))
                 || (entry->target_kind == CM_HIR_DECL_TARGET_VALUE
-                    && (size_t)entry->target_local > metadata->value_count))
+                    && (size_t)entry->target_local > metadata->value_count)
+                || (entry->target_kind
+                        == CM_HIR_DECL_TARGET_ENUM_VARIANT
+                    && cm_decl_variant_local(metadata,
+                        entry->target_local, NULL) == NULL))
                 return 0;
         } else {
             return 0;
@@ -1023,6 +1097,23 @@ static int cm_decl_validate_namespace(
                     && cm_decl_string_equal(prior->name, entry->name)))
                 return 0;
         }
+    }
+    for (index = 0u; index < metadata->namespace_count; ++index) {
+        const CmHirDeclarationNamespaceEntry *entry =
+            &metadata->namespace_entries[index];
+        CmHirDeclarationNamespaceEntry key;
+        const CmHirDeclarationNamespaceEntry *mate;
+        if (entry->target_kind != CM_HIR_DECL_TARGET_ENUM_VARIANT)
+            continue;
+        key = *entry;
+        key.namespace_kind = entry->namespace_kind
+                == CM_HIR_DECL_NAMESPACE_TYPE
+            ? CM_HIR_DECL_NAMESPACE_VALUE
+            : CM_HIR_DECL_NAMESPACE_TYPE;
+        mate = cm_decl_namespace_find(metadata, &key);
+        if (mate == NULL
+            || mate->target_kind != CM_HIR_DECL_TARGET_ENUM_VARIANT
+            || mate->target_local != entry->target_local) return 0;
     }
     for (index = 0u; index < metadata->item_count; ++index) {
         const CmHirDeclarationItem *item;
@@ -1424,6 +1515,8 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
                 cm_hir_metadata_write_u64(&writer,
                     variant->discriminant_high);
             }
+            if (item->enum_repr_primitive == CM_HIR_DECL_ENUM_REPR_RUST)
+                cm_decl_write_string(&writer, item->diagnostic_item);
         } else {
             cm_hir_metadata_write_u32(&writer, item->alias_target_type);
         }
@@ -2089,6 +2182,9 @@ static int cm_decl_parse_items(const CmHirMetadataSection *section,
                         &variant->discriminant_high) != CM_HIR_METADATA_OK)
                     return 0;
             }
+            if (item->enum_repr_primitive == CM_HIR_DECL_ENUM_REPR_RUST
+                && !cm_decl_read_string(&reader,
+                    &item->diagnostic_item)) return 0;
         } else if (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS) {
             if (cm_hir_metadata_read_u32(&reader,
                     &item->alias_target_type) != CM_HIR_METADATA_OK) return 0;

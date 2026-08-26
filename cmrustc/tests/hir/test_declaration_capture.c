@@ -53,6 +53,17 @@ static const unsigned char const_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char default_enum_fixture_source[] =
+    "#[rustc_diagnostic_item = \"mir_basic_block\"]\n"
+    "pub enum BasicBlock { Normal, Cleanup }\n"
+    "#[rustc_diagnostic_item = \"mir_unwind_terminate_reason\"]\n"
+    "pub enum UnwindTerminateReason { Abi, InCleanup }\n"
+    "pub use UnwindTerminateReason::{\n"
+    "  Abi as ReasonAbi, InCleanup as ReasonInCleanup\n"
+    "};\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -129,6 +140,14 @@ static void const_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-const-provider.rs",
         const_fixture_source, sizeof(const_fixture_source) - 1u);
+}
+
+static void default_enum_fixture_init(CaptureFixture *fixture,
+    int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "v30-default-enum-provider.rs",
+        default_enum_fixture_source,
+        sizeof(default_enum_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -1019,6 +1038,8 @@ static void test_ascii_char_enum_projection_and_determinism(void)
         && first_metadata.items[0].kind == CM_HIR_DECL_ITEM_ENUM
         && first_metadata.items[0].enum_repr_primitive
             == CM_HIR_DECL_PRIMITIVE_U8
+        && first_metadata.items[0].diagnostic_item.data == NULL
+        && first_metadata.items[0].diagnostic_item.length == 0u
         && first_metadata.items[0].variant_count == 2u
         && first_metadata.items[0].variants != NULL
         && first_metadata.items[0].variants[0].kind
@@ -1065,6 +1086,307 @@ static void test_ascii_char_enum_projection_and_determinism(void)
     cm_hir_declaration_metadata_destroy(&first_metadata);
     fixture_destroy(&noisy);
     fixture_destroy(&first);
+}
+
+static void assert_default_enum_descriptor(
+    const CmHirDeclarationMetadata *metadata)
+{
+    const CmHirDeclarationNamespaceEntry *basic_block;
+    const CmHirDeclarationNamespaceEntry *unwind;
+    const CmHirDeclarationNamespaceEntry *reason_abi_type;
+    const CmHirDeclarationNamespaceEntry *reason_abi_value;
+    const CmHirDeclarationNamespaceEntry *reason_cleanup_type;
+    const CmHirDeclarationNamespaceEntry *reason_cleanup_value;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(metadata->module_count == 1u && metadata->root_module == 1u
+        && metadata->item_count == 2u
+        && metadata->namespace_count == 8u
+        && metadata->items[0].kind == CM_HIR_DECL_ITEM_ENUM
+        && metadata->items[0].owner_module == 1u
+        && metadata->items[0].source_ordinal == 0u
+        && declaration_string_is(metadata->items[0].name, "BasicBlock")
+        && metadata->items[0].enum_repr_primitive
+            == CM_HIR_DECL_ENUM_REPR_RUST
+        && declaration_string_is(metadata->items[0].diagnostic_item,
+            "mir_basic_block")
+        && metadata->items[0].variant_count == 2u
+        && declaration_string_is(metadata->items[0].variants[0].name,
+            "Normal")
+        && metadata->items[0].variants[0].source_ordinal == 0u
+        && metadata->items[0].variants[0].discriminant_primitive
+            == CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT
+        && metadata->items[0].variants[0].discriminant_low == 0u
+        && metadata->items[0].variants[0].discriminant_high == 0u
+        && declaration_string_is(metadata->items[0].variants[1].name,
+            "Cleanup")
+        && metadata->items[0].variants[1].source_ordinal == 1u
+        && metadata->items[0].variants[1].discriminant_primitive
+            == CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT
+        && metadata->items[0].variants[1].discriminant_low == 0u
+        && metadata->items[0].variants[1].discriminant_high == 0u
+        && metadata->items[1].kind == CM_HIR_DECL_ITEM_ENUM
+        && metadata->items[1].owner_module == 1u
+        && metadata->items[1].source_ordinal == 1u
+        && declaration_string_is(metadata->items[1].name,
+            "UnwindTerminateReason")
+        && metadata->items[1].enum_repr_primitive
+            == CM_HIR_DECL_ENUM_REPR_RUST
+        && declaration_string_is(metadata->items[1].diagnostic_item,
+            "mir_unwind_terminate_reason")
+        && metadata->items[1].variant_count == 2u
+        && declaration_string_is(metadata->items[1].variants[0].name,
+            "Abi")
+        && declaration_string_is(metadata->items[1].variants[1].name,
+            "InCleanup"));
+    basic_block = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "BasicBlock");
+    unwind = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "UnwindTerminateReason");
+    reason_abi_type = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "ReasonAbi");
+    reason_abi_value = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "ReasonAbi");
+    reason_cleanup_type = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "ReasonInCleanup");
+    reason_cleanup_value = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "ReasonInCleanup");
+    assert(basic_block != NULL && unwind != NULL
+        && reason_abi_type != NULL && reason_abi_value != NULL
+        && reason_cleanup_type != NULL && reason_cleanup_value != NULL
+        && basic_block->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && basic_block->target_local == 1u
+        && unwind->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && unwind->target_local == 2u
+        && reason_abi_type->target_kind
+            == CM_HIR_DECL_TARGET_ENUM_VARIANT
+        && reason_abi_value->target_kind
+            == CM_HIR_DECL_TARGET_ENUM_VARIANT
+        && reason_abi_type->target_local == 3u
+        && reason_abi_value->target_local == 3u
+        && reason_abi_type->export_ordinal
+            == reason_abi_value->export_ordinal
+        && reason_cleanup_type->target_kind
+            == CM_HIR_DECL_TARGET_ENUM_VARIANT
+        && reason_cleanup_value->target_kind
+            == CM_HIR_DECL_TARGET_ENUM_VARIANT
+        && reason_cleanup_type->target_local == 4u
+        && reason_cleanup_value->target_local == 4u
+        && reason_cleanup_type->export_ordinal
+            == reason_cleanup_value->export_ordinal);
+}
+
+static void test_default_enum_variant_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    default_enum_fixture_init(&first, 0);
+    default_enum_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_OK) {
+        fprintf(stderr, "default enum capture failed: %s stage=%s reason=%s "
+            "metadata=%s library=%s binding=%u ast=%u namespace=%u "
+            "item=%u def=%u:%u span=%u:%u-%u\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            cm_hir_declaration_metadata_status_name(result.metadata_status),
+            cm_hir_library_status_name(result.library_status),
+            (unsigned int)result.rejected_binding_kind,
+            (unsigned int)result.rejected_ast_item_kind,
+            (unsigned int)result.rejected_namespace_kind,
+            (unsigned int)result.rejected_item,
+            (unsigned int)result.rejected_definition.crate_id,
+            (unsigned int)result.rejected_definition.index,
+            (unsigned int)result.rejected_span.source,
+            (unsigned int)result.rejected_span.start,
+            (unsigned int)result.rejected_span.end);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 2u && result.namespace_count == 8u
+        && result.projected_semantic_attribute_count == 0u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_EXACT_NONE);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 0u);
+    assert_default_enum_descriptor(&first_metadata);
+    assert_default_enum_descriptor(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_default_enum_hostile_mutations_are_atomic(void)
+{
+    static const char *const rejected_sources[] = {
+        "#[rustc_diagnostic_item = \"\"]\n"
+        "pub enum Bad { One }\n",
+        "#[rustc_diagnostic_item = \"bad-item\"]\n"
+        "pub enum Bad { One }\n",
+        "#[rustc_diagnostic_item = \"bad_explicit\"]\n"
+        "pub enum Bad { One = 0 }\n",
+        "#[rustc_diagnostic_item = \"bad_attr\"]\n"
+        "pub enum Bad { #[unstable(feature = \"bad\", issue = \"none\")] One }\n",
+        "#[rustc_diagnostic_item = \"bad_tuple\"]\n"
+        "pub enum Bad { One(u8) }\n"
+    };
+    CaptureFixture good;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    const CmHirItem *item_const;
+    CmHirItem *item;
+    CmHirItemId item_id;
+    CmInternId saved_metadata;
+    CmHirAttribute *saved_attributes;
+    CmSpan saved_attribute_span;
+    CmHirDefId saved_variant_definition;
+    CmHirAggregateForm saved_variant_form;
+    CmHirImportBinding *reason_abi_value = NULL;
+    CmHirDefId reason_cleanup_definition;
+    int saved_has_discriminant;
+    size_t index;
+    default_enum_fixture_init(&good, 0);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    item_const = find_item(&good, "BasicBlock", &item_id);
+    assert(item_const != NULL && item_const->kind == CM_HIR_ITEM_ENUM
+        && item_const->attribute_count == 1u
+        && item_const->attributes != NULL
+        && item_const->data.enum_item.variant_count == 2u);
+    item = (CmHirItem *)item_const;
+
+#define ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = cm_hir_intern(&good.hir,
+        "rustc_diagnostic_item = \"forged-name\"");
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->attributes[0].metadata = saved_metadata;
+
+    item->attributes[0].expansion_depth = 1u;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->attributes[0].expansion_depth = 0u;
+
+    saved_attribute_span = item->attributes[0].span;
+    item->attributes[0].span.start += 1u;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->attributes[0].span = saved_attribute_span;
+
+    saved_attributes = item->attributes;
+    item->attributes = NULL;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->attributes = saved_attributes;
+
+    saved_has_discriminant =
+        item->data.enum_item.variants[0].has_discriminant;
+    item->data.enum_item.variants[0].has_discriminant = 1;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->data.enum_item.variants[0].has_discriminant =
+        saved_has_discriminant;
+
+    saved_variant_definition =
+        item->data.enum_item.variants[0].definition;
+    item->data.enum_item.variants[0].definition =
+        item->data.enum_item.variants[1].definition;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->data.enum_item.variants[0].definition = saved_variant_definition;
+
+    saved_variant_form = item->data.enum_item.variants[0].form;
+    item->data.enum_item.variants[0].form = CM_HIR_AGGREGATE_TUPLE;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    item->data.enum_item.variants[0].form = saved_variant_form;
+
+    memset(&reason_cleanup_definition, 0, sizeof(reason_cleanup_definition));
+    for (index = 0u; index < good.hir.modules.len; ++index) {
+        CmHirModule *module = (CmHirModule *)cm_vec_at(&good.hir.modules,
+            index);
+        uint32_t import_index;
+        if (module == NULL
+            || module->crate_id != good.lower_result.crate_id) continue;
+        for (import_index = 0u; import_index < module->import_count;
+                ++import_index) {
+            CmHirImport *import = &module->imports[import_index];
+            uint32_t binding_index;
+            for (binding_index = 0u; binding_index < import->binding_count;
+                    ++binding_index) {
+                CmHirImportBinding *binding =
+                    &import->bindings[binding_index];
+                const CmInternedString *name = cm_interner_get(
+                    &good.hir.strings, binding->name);
+                if (name != NULL && name->len == strlen("ReasonAbi")
+                    && memcmp(name->bytes, "ReasonAbi", name->len) == 0
+                    && binding->namespace_kind == CM_HIR_NAMESPACE_VALUE)
+                    reason_abi_value = binding;
+                if (name != NULL && name->len == strlen("ReasonInCleanup")
+                    && memcmp(name->bytes, "ReasonInCleanup",
+                        name->len) == 0
+                    && binding->namespace_kind == CM_HIR_NAMESPACE_VALUE)
+                    reason_cleanup_definition = binding->target;
+            }
+        }
+    }
+    assert(reason_abi_value != NULL
+        && !cm_hir_def_id_is_none(reason_cleanup_definition)
+        && !cm_hir_def_id_equal(reason_abi_value->target,
+            reason_cleanup_definition));
+    saved_variant_definition = reason_abi_value->target;
+    reason_abi_value->target = reason_cleanup_definition;
+    ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+    reason_abi_value->target = saved_variant_definition;
+
+    for (index = 0u;
+            index < sizeof(rejected_sources) / sizeof(rejected_sources[0]);
+            ++index) {
+        CaptureFixture rejected;
+        char source[2048];
+        int written = snprintf(source, sizeof(source), "%s"
+            "pub trait Gate<T: ?Sized> {}\n"
+            "pub fn needs<X: Gate<u8>>() {}\n", rejected_sources[index]);
+        assert(written > 0 && (size_t)written < sizeof(source));
+        fixture_init_source(&rejected, 0, "bad-default-enum.rs",
+            (const unsigned char *)source, (size_t)written);
+        input = capture_input(&rejected);
+        ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE();
+        fixture_destroy(&rejected);
+    }
+    assert_default_enum_descriptor(&metadata);
+#undef ASSERT_DEFAULT_ENUM_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
 }
 
 static void test_ascii_char_128_variant_projection(void)
@@ -1937,6 +2259,8 @@ static void test_char_const_attributes_fail_closed_atomically(void)
 
 int main(void)
 {
+    test_default_enum_variant_capture_and_determinism();
+    test_default_enum_hostile_mutations_are_atomic();
     test_char_const_capture_and_determinism();
     test_char_const_hostile_mutations_are_atomic();
     test_char_const_attributes_fail_closed_atomically();

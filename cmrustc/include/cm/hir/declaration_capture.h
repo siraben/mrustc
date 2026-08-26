@@ -77,7 +77,7 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /*
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
-     * structs/repr(u8) unit-variant enums/type aliases/free consts/reexports,
+     * structs/bounded unit-variant enums/type aliases/free consts/reexports,
      * only the stricter LOWER_SAFE allowlist documented on the capture entry
      * point.
      * This does not call any projected attribute inert.
@@ -140,15 +140,19 @@ typedef struct CmHirDeclarationCaptureResult {
  * `derive(...)`, and bare `non_exhaustive`.  The latter is the sole authority
  * for an absent public VALUE constructor mate. A supported free alias permits
  * only the stability/deprecation subset and must target a captured UNIT struct.
- * A supported enum is public, top-level, zero-generic/predicate, exactly
- * `repr(u8)`, and contains only source-ordered UNIT variants with explicit
- * decimal ISIZE scalar discriminants in the u8 range. Its item must have
- * exactly one direct `derive(...)`, one direct `unstable(...)`, and normalized
- * `repr(u8)`; every variant must have exactly one direct `unstable(...)`.
- * Variant attributes and discriminants are authenticated against the graph's
- * source AST because this HIR model deliberately does not retain variant
- * attributes. ENUM variants remain ITEM-owned and never become module VALUE
- * entries.
+ * A supported enum is public, top-level, zero-generic/predicate and uses one
+ * of two exact profiles. The first is `repr(u8)` with source-ordered UNIT
+ * variants and explicit decimal ISIZE scalar discriminants in the u8 range;
+ * it has exactly direct `derive(...)`, `unstable(...)`, and normalized
+ * `repr(u8)` item attributes and one direct `unstable(...)` per variant. The
+ * second has Rust's default repr, only implicit-discriminant UNIT variants,
+ * no variant attributes, and exactly one direct `rustc_diagnostic_item =
+ * "IDENT"` item attribute. That diagnostic identity is retained structurally
+ * rather than counted as projected. Variant attributes and discriminants are
+ * authenticated against the graph's source AST because this HIR model does
+ * not retain variant attributes. Imported unit variants must have exact paired
+ * TYPE and VALUE namespace identities targeting the same flattened ITEM-owned
+ * variant local; no function or standalone value is synthesized.
  * A public reexport permits only direct `stable(...)` or `unstable(...)`,
  * `deprecated(...)`, `allow(...)`, and exact
  * `doc(alias("IDENT"))`, where IDENT is a nonempty ASCII Rust identifier.

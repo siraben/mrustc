@@ -154,6 +154,11 @@ typedef enum CmHirDeclarationVariantKind {
     CM_HIR_DECL_VARIANT_UNIT = 1
 } CmHirDeclarationVariantKind;
 
+/* Zero is reserved for the bounded Rust-default enum representation. */
+#define CM_HIR_DECL_ENUM_REPR_RUST UINT8_C(0)
+/* Zero denotes a source-level implicit discriminant in that representation. */
+#define CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT UINT8_C(0)
+
 typedef struct CmHirDeclarationVariant {
     uint8_t kind;
     CmHirDeclarationString name;
@@ -165,9 +170,9 @@ typedef struct CmHirDeclarationVariant {
 
 /*
  * The bounded ordinary ITEM slice includes public top-level unit structs,
- * repr(u8) unit-variant enums, and free type aliases to zero-argument STRUCT
- * ITEMs. Unit structs may own type parameters; enums and aliases require zero
- * generic/predicate ranges.
+ * repr(u8) unit-variant enums, Rust-default diagnostic unit enums, and free
+ * type aliases to zero-argument STRUCT ITEMs. Unit structs may own type
+ * parameters; enums and aliases require zero generic/predicate ranges.
  * A STRUCT's public constructor availability is represented by the complete
  * VALUE namespace. ENUM variants are item-owned and never module VALUE mates.
  */
@@ -182,10 +187,12 @@ typedef struct CmHirDeclarationItem {
     /* A contiguous ITEM-owned GPAR range; aliases require zero. */
     uint32_t generic_start;
     uint32_t generic_count;
-    /* ENUM requires U8 and a nonempty owned source-ordered variant array. */
+    /* ENUM requires a supported repr and an owned source-ordered variant array. */
     uint8_t enum_repr_primitive;
     uint32_t variant_count;
     CmHirDeclarationVariant *variants;
+    /* Required only by the Rust-default implicit diagnostic-enum profile. */
+    CmHirDeclarationString diagnostic_item;
 } CmHirDeclarationItem;
 
 typedef struct CmHirDeclarationGeneric {
@@ -259,7 +266,8 @@ typedef enum CmHirDeclarationNamespaceTarget {
     CM_HIR_DECL_TARGET_MODULE = 1,
     CM_HIR_DECL_TARGET_ITEM = 2,
     CM_HIR_DECL_TARGET_VALUE = 3,
-    CM_HIR_DECL_TARGET_NOMINAL = 4
+    CM_HIR_DECL_TARGET_NOMINAL = 4,
+    CM_HIR_DECL_TARGET_ENUM_VARIANT = 5
 } CmHirDeclarationNamespaceTarget;
 
 typedef struct CmHirDeclarationNamespaceEntry {
@@ -267,6 +275,11 @@ typedef struct CmHirDeclarationNamespaceEntry {
     uint8_t namespace_kind;
     CmHirDeclarationString name;
     uint8_t target_kind;
+    /*
+     * For ENUM_VARIANT this is a one-based flattened variant local: ENUM
+     * ITEMs in canonical ITEM order, then variants in source order. Other
+     * target kinds retain their family-specific one-based local.
+     */
     uint32_t target_local;
     uint32_t export_ordinal;
 } CmHirDeclarationNamespaceEntry;
