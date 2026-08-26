@@ -2105,7 +2105,13 @@ at `b0a41eef` keeps the zero-error graph/HIR and exact
 451-module/1,658-type/20,747-value library census, then measures
 `core/src/arch.rs:76`'s public `breakpoint` function (`def=1:36071`, source
 item `332:5`, rejected item `19448`) at `stage=items`/
-`item-source-invalid`.
+`item-source-invalid`.  Commits `9b7740c7`, `19635436`, and `cd76600e`
+complete its exact zero-generic unit declaration profile without transporting
+the inline intrinsic body.  The clean pinned-core probe at `cd76600e`
+preserves the zero-error graph/HIR and exact
+451-module/1,658-type/20,747-value library census, then measures
+`core/src/array/iter.rs:20`'s `IntoIter` (`def=1:19103`, source item `100:18`,
+rejected item `10819`) at `stage=items`/`item-shape-unsupported`.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

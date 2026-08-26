@@ -285,7 +285,13 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   451-module/1,658-type/20,747-value library census, then measures
   `core/src/arch.rs:76`'s public `breakpoint` function (`def=1:36071`, source
   item `332:5`, rejected item `19448`) at
-  `stage=items`/`item-source-invalid`.
+  `stage=items`/`item-source-invalid`.  Commits `9b7740c7`, `19635436`, and
+  `cd76600e` complete that exact zero-generic unit declaration profile.  The
+  clean pinned-core probe at `cd76600e` keeps the zero-error graph/HIR and
+  exact 451-module/1,658-type/20,747-value library census, then measures
+  `core/src/array/iter.rs:20`'s `IntoIter` (`def=1:19103`, source item
+  `100:18`, rejected item `10819`) at
+  `stage=items`/`item-shape-unsupported`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

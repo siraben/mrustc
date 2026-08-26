@@ -186,7 +186,14 @@ claiming executable body authority.  The clean pinned-core probe at
 the exact 451-module/1,658-type/20,747-value library census.  It advances the
 measured v3.0 frontier to `core/src/arch.rs:76`: public function `breakpoint`
 (`def=1:36071`, source item `332:5`, rejected item `19448`) fails at
-`stage=items` with `reason=item-source-invalid`.
+`stage=items` with `reason=item-source-invalid`.  Commits `9b7740c7`,
+`19635436`, and `cd76600e` encode, materialize, and capture its exact
+zero-generic unit declaration while leaving the inline intrinsic body
+unavailable.  The clean pinned-core probe at `cd76600e` preserves the same
+zero-error graph/HIR and exact 451-module/1,658-type/20,747-value library
+census, then advances the measured frontier to `core/src/array/iter.rs:20`:
+`IntoIter` (`def=1:19103`, source item `100:18`, rejected item `10819`) fails
+at `stage=items` with `reason=item-shape-unsupported`.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
