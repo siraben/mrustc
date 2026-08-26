@@ -142,6 +142,8 @@ void cm_hir_declaration_metadata_destroy(CmHirDeclarationMetadata *metadata)
         cm_decl_free_string(&metadata->traits[index].name);
     for (index = 0u; index < metadata->generic_count; ++index)
         cm_decl_free_string(&metadata->generics[index].name);
+    for (index = 0u; index < metadata->item_count; ++index)
+        cm_decl_free_string(&metadata->items[index].name);
     for (index = 0u; index < metadata->value_count; ++index) {
         cm_decl_free_string(&metadata->values[index].name);
         cm_free(metadata->values[index].parameter_types);
@@ -155,6 +157,7 @@ void cm_hir_declaration_metadata_destroy(CmHirDeclarationMetadata *metadata)
     cm_free(metadata->traits);
     cm_free(metadata->generics);
     cm_free(metadata->types);
+    cm_free(metadata->items);
     cm_free(metadata->values);
     cm_free(metadata->predicates);
     cm_free(metadata->namespace_entries);
@@ -345,6 +348,36 @@ static int cm_decl_validate_traits(const CmHirDeclarationMetadata *metadata)
                     && (order > 0 || (order == 0
                         && prior->source_ordinal
                             >= trait_value->source_ordinal)))) return 0;
+        }
+    }
+    return 1;
+}
+
+static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
+{
+    size_t index;
+    if (metadata->item_count != 0u && metadata->items == NULL) return 0;
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *item;
+        item = &metadata->items[index];
+        if (item->kind != CM_HIR_DECL_ITEM_STRUCT
+            || item->owner_module == 0u
+            || (size_t)item->owner_module > metadata->module_count
+            || !cm_decl_identifier(item->name)
+            || item->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
+            || item->visibility.restriction_module != 0u) return 0;
+        if (index != 0u) {
+            const CmHirDeclarationItem *prior;
+            int order;
+            prior = &metadata->items[index - 1u];
+            order = cm_decl_string_compare(prior->name, item->name);
+            if (prior->owner_module > item->owner_module
+                || (prior->owner_module == item->owner_module
+                    && (order > 0 || (order == 0
+                        && (prior->kind > item->kind
+                            || (prior->kind == item->kind
+                                && prior->source_ordinal
+                                    >= item->source_ordinal)))))) return 0;
         }
     }
     return 1;
@@ -565,17 +598,26 @@ static int cm_decl_validate_namespace(
             || !cm_decl_identifier(entry->name)) return 0;
         if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE) {
             if ((entry->target_kind != CM_HIR_DECL_TARGET_MODULE
+                    && entry->target_kind != CM_HIR_DECL_TARGET_ITEM
                     && entry->target_kind != CM_HIR_DECL_TARGET_NOMINAL)
                 || entry->target_local == 0u
                 || (entry->target_kind == CM_HIR_DECL_TARGET_MODULE
                     && (size_t)entry->target_local > metadata->module_count)
+                || (entry->target_kind == CM_HIR_DECL_TARGET_ITEM
+                    && (size_t)entry->target_local > metadata->item_count)
                 || (entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL
                     && (size_t)entry->target_local > metadata->trait_count))
                 return 0;
         } else if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE) {
-            if (entry->target_kind != CM_HIR_DECL_TARGET_VALUE
+            if ((entry->target_kind != CM_HIR_DECL_TARGET_ITEM
+                    && entry->target_kind != CM_HIR_DECL_TARGET_VALUE)
                 || entry->target_local == 0u
-                || (size_t)entry->target_local > metadata->value_count)
+                || (entry->target_kind == CM_HIR_DECL_TARGET_ITEM
+                    && ((size_t)entry->target_local > metadata->item_count
+                        || metadata->items[entry->target_local - 1u].kind
+                            != CM_HIR_DECL_ITEM_STRUCT))
+                || (entry->target_kind == CM_HIR_DECL_TARGET_VALUE
+                    && (size_t)entry->target_local > metadata->value_count))
                 return 0;
         } else {
             return 0;
@@ -589,6 +631,57 @@ static int cm_decl_validate_namespace(
                     && cm_decl_string_equal(prior->name, entry->name)))
                 return 0;
         }
+        if (entry->target_kind == CM_HIR_DECL_TARGET_ITEM) {
+            size_t counterpart_index;
+            size_t counterpart_count;
+            counterpart_count = 0u;
+            for (counterpart_index = 0u;
+                    counterpart_index < metadata->namespace_count;
+                    ++counterpart_index) {
+                const CmHirDeclarationNamespaceEntry *counterpart;
+                counterpart = &metadata->namespace_entries[
+                    counterpart_index];
+                if (counterpart->owner_module == entry->owner_module
+                    && counterpart->namespace_kind
+                        != entry->namespace_kind
+                    && counterpart->target_kind == CM_HIR_DECL_TARGET_ITEM
+                    && counterpart->target_local == entry->target_local
+                    && counterpart->export_ordinal == entry->export_ordinal
+                    && cm_decl_string_equal(counterpart->name,
+                        entry->name)) counterpart_count += 1u;
+            }
+            /* A unit STRUCT name denotes its type and value constructor. */
+            if (counterpart_count != 1u) return 0;
+        }
+    }
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *item;
+        size_t entry_index;
+        size_t type_defining_count;
+        size_t constructor_defining_count;
+        item = &metadata->items[index];
+        type_defining_count = 0u;
+        constructor_defining_count = 0u;
+        for (entry_index = 0u; entry_index < metadata->namespace_count;
+                ++entry_index) {
+            const CmHirDeclarationNamespaceEntry *entry;
+            entry = &metadata->namespace_entries[entry_index];
+            if (entry->owner_module == item->owner_module
+                && entry->target_kind == CM_HIR_DECL_TARGET_ITEM
+                && entry->target_local == (uint32_t)(index + 1u)
+                && entry->export_ordinal == item->source_ordinal
+                && cm_decl_string_equal(entry->name, item->name)) {
+                if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE)
+                    type_defining_count += 1u;
+                else if (entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_VALUE
+                    && item->kind == CM_HIR_DECL_ITEM_STRUCT)
+                    constructor_defining_count += 1u;
+            }
+        }
+        /* This bounded STRUCT form is UNIT and therefore has a constructor. */
+        if (type_defining_count != 1u
+            || constructor_defining_count != 1u) return 0;
     }
     for (index = 0u; index < metadata->module_count; ++index) {
         const CmHirDeclarationModule *module;
@@ -669,6 +762,8 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_validate(
             CM_HIR_DECL_METADATA_MAX_GENERICS)
         || !cm_decl_count_valid(metadata->type_count,
             CM_HIR_DECL_METADATA_MAX_TYPES)
+        || !cm_decl_count_valid(metadata->item_count,
+            CM_HIR_DECL_METADATA_MAX_ITEMS)
         || !cm_decl_count_valid(metadata->value_count,
             CM_HIR_DECL_METADATA_MAX_VALUES)
         || !cm_decl_count_valid(metadata->predicate_count,
@@ -698,6 +793,7 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_validate(
     }
     if (!cm_decl_validate_modules(metadata)
         || !cm_decl_validate_traits(metadata)
+        || !cm_decl_validate_items(metadata)
         || !cm_decl_validate_values(metadata)
         || !cm_decl_validate_generics(metadata)
         || !cm_decl_validate_types(metadata)
@@ -746,6 +842,15 @@ static void cm_decl_write_visibility(CmHirMetadataWriter *writer)
     cm_hir_metadata_write_u8(writer, UINT8_C(0));
     cm_hir_metadata_write_u16(writer, UINT16_C(0));
     cm_hir_metadata_write_u32(writer, UINT32_C(0));
+}
+
+static void cm_decl_write_item_visibility(CmHirMetadataWriter *writer,
+    const CmHirDeclarationVisibility *visibility)
+{
+    cm_hir_metadata_write_u8(writer, visibility->kind);
+    cm_hir_metadata_write_u8(writer, UINT8_C(0));
+    cm_hir_metadata_write_u16(writer, UINT16_C(0));
+    cm_hir_metadata_write_u32(writer, visibility->restriction_module);
 }
 
 static CmHirDeclarationMetadataStatus cm_decl_build_sections(
@@ -850,7 +955,32 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
 
     cm_hir_metadata_writer_init(&writer, &sections[7],
         (size_t)CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
-    cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+    cm_hir_metadata_write_u32(&writer, (uint32_t)metadata->item_count);
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *item;
+        item = &metadata->items[index];
+        cm_hir_metadata_write_u8(&writer, item->kind);
+        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+        cm_hir_metadata_write_u16(&writer, UINT16_C(0));
+        cm_hir_metadata_write_u32(&writer, item->owner_module);
+        cm_decl_write_string(&writer, item->name);
+        cm_decl_write_item_visibility(&writer, &item->visibility);
+        cm_hir_metadata_write_u32(&writer, item->source_ordinal);
+        /* Generic and the three predicate ranges are empty in this slice. */
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        /* STRUCT payload: UNIT form, no fields. */
+        cm_hir_metadata_write_u8(&writer, UINT8_C(1));
+        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+        cm_hir_metadata_write_u16(&writer, UINT16_C(0));
+        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+    }
 
     cm_hir_metadata_writer_init(&writer, &sections[8],
         (size_t)CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
@@ -977,6 +1107,7 @@ static CmHirDeclarationMetadataStatus cm_decl_build_manifest(
         + metadata->namespace_count);
     families[0].crc = cm_hir_metadata_crc32(module_family.data,
         module_family.len);
+    families[1].count = (uint32_t)metadata->item_count;
     families[1].crc = cm_hir_metadata_crc32(sections[7].data,
         sections[7].len);
     families[2].count = (uint32_t)metadata->value_count;
@@ -1242,6 +1373,17 @@ static int cm_decl_read_visibility(CmHirMetadataReader *reader)
         && cm_decl_read_u32(reader, UINT32_C(0));
 }
 
+static int cm_decl_read_item_visibility(CmHirMetadataReader *reader,
+    CmHirDeclarationVisibility *visibility)
+{
+    return cm_hir_metadata_read_u8(reader, &visibility->kind)
+            == CM_HIR_METADATA_OK
+        && cm_decl_read_u8(reader, UINT8_C(0))
+        && cm_decl_read_u16(reader, UINT16_C(0))
+        && cm_hir_metadata_read_u32(reader,
+            &visibility->restriction_module) == CM_HIR_METADATA_OK;
+}
+
 static int cm_decl_parse_traits(const CmHirMetadataSection *section,
     CmHirDeclarationMetadata *metadata)
 {
@@ -1360,6 +1502,46 @@ static int cm_decl_parse_types(const CmHirMetadataSection *section,
         } else {
             return 0;
         }
+    }
+    return cm_decl_reader_done(&reader);
+}
+
+static int cm_decl_parse_items(const CmHirMetadataSection *section,
+    CmHirDeclarationMetadata *metadata)
+{
+    CmHirMetadataReader reader;
+    size_t index;
+    cm_hir_metadata_reader_init(&reader, section->data, section->length);
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_ITEMS,
+            &metadata->item_count)) return 0;
+    metadata->items = metadata->item_count == 0u ? NULL
+        : (CmHirDeclarationItem *)cm_alloc_zeroed(metadata->item_count,
+            sizeof(CmHirDeclarationItem));
+    for (index = 0u; index < metadata->item_count; ++index) {
+        CmHirDeclarationItem *item;
+        item = &metadata->items[index];
+        if (cm_hir_metadata_read_u8(&reader, &item->kind)
+                != CM_HIR_METADATA_OK
+            || !cm_decl_read_u8(&reader, UINT8_C(0))
+            || !cm_decl_read_u16(&reader, UINT16_C(0))
+            || cm_hir_metadata_read_u32(&reader, &item->owner_module)
+                != CM_HIR_METADATA_OK
+            || !cm_decl_read_string(&reader, &item->name)
+            || !cm_decl_read_item_visibility(&reader, &item->visibility)
+            || cm_hir_metadata_read_u32(&reader, &item->source_ordinal)
+                != CM_HIR_METADATA_OK
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || !cm_decl_read_u8(&reader, UINT8_C(1))
+            || !cm_decl_read_u8(&reader, UINT8_C(0))
+            || !cm_decl_read_u16(&reader, UINT16_C(0))
+            || !cm_decl_read_u32(&reader, UINT32_C(0))) return 0;
     }
     return cm_decl_reader_done(&reader);
 }
@@ -1592,7 +1774,7 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_decode(
         || !cm_decl_parse_zero(&sections[4])
         || !cm_decl_parse_generics(&sections[5], &candidate)
         || !cm_decl_parse_types(&sections[6], &candidate)
-        || !cm_decl_parse_zero(&sections[7])
+        || !cm_decl_parse_items(&sections[7], &candidate)
         || !cm_decl_parse_values(&sections[8], &candidate)
         || !cm_decl_parse_predicates(&sections[9], &candidate)
         || !cm_decl_parse_zero(&sections[10])

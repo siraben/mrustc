@@ -15,11 +15,12 @@ typedef struct TestFixture {
     CmHirDeclarationTrait traits[1];
     CmHirDeclarationGeneric generics[2];
     CmHirDeclarationType types[4];
+    CmHirDeclarationItem items[1];
     CmHirDeclarationValue values[1];
     uint32_t parameters[1];
     CmHirDeclarationPredicate predicates[1];
     uint32_t predicate_arguments[1];
-    CmHirDeclarationNamespaceEntry namespace_entries[4];
+    CmHirDeclarationNamespaceEntry namespace_entries[8];
 } TestFixture;
 
 static void put_u16(unsigned char *bytes, uint16_t value)
@@ -35,6 +36,16 @@ static void put_u32(unsigned char *bytes, uint32_t value)
         bytes[index] = (unsigned char)(value & UINT32_C(0xff));
         value >>= 8u;
     }
+}
+
+static uint32_t get_u32(const unsigned char *bytes)
+{
+    uint32_t value;
+    unsigned int index;
+    value = UINT32_C(0);
+    for (index = 0u; index < 4u; ++index)
+        value |= (uint32_t)bytes[index] << (index * 8u);
+    return value;
 }
 
 static uint64_t get_u64(const unsigned char *bytes)
@@ -76,6 +87,112 @@ static CmByteBuf copy_bytes(const CmByteBuf *source)
     cm_byte_buf_init(&copy);
     cm_byte_buf_append(&copy, source->data, source->len);
     return copy;
+}
+
+static size_t skip_string(const CmByteBuf *bytes, size_t cursor)
+{
+    uint32_t length;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    length = get_u32(bytes->data + cursor);
+    cursor += 4u;
+    assert((size_t)length <= bytes->len - cursor);
+    return cursor + (size_t)length;
+}
+
+static size_t namespace_record_offset(const CmByteBuf *bytes,
+    uint32_t wanted_index)
+{
+    size_t cursor;
+    uint32_t count;
+    uint32_t index;
+    cursor = section_offset(bytes, "NSPC") + 12u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    count = get_u32(bytes->data + cursor);
+    cursor += 4u;
+    assert(wanted_index < count);
+    for (index = 0u; index < count; ++index) {
+        size_t record;
+        record = cursor;
+        assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+        cursor = skip_string(bytes, cursor + 8u);
+        assert(cursor <= bytes->len && bytes->len - cursor >= 16u);
+        cursor += 16u;
+        if (index == wanted_index) return record;
+    }
+    assert(0);
+    return 0u;
+}
+
+static size_t manifest_family_offset(const CmByteBuf *bytes, uint8_t family)
+{
+    size_t cursor;
+    uint32_t cfg_count;
+    uint32_t index;
+    cursor = section_offset(bytes, "MANF") + 12u;
+    cursor += 4u;
+    cursor = skip_string(bytes, cursor);
+    cursor = skip_string(bytes, cursor);
+    cursor += 1u;
+    cursor = skip_string(bytes, cursor);
+    cursor = skip_string(bytes, cursor);
+    cursor += 1u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    cfg_count = get_u32(bytes->data + cursor);
+    cursor += 4u;
+    for (index = 0u; index < cfg_count; ++index)
+        cursor = skip_string(bytes, cursor);
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u
+        && get_u32(bytes->data + cursor) == UINT32_C(14));
+    cursor += 4u;
+    for (index = 0u; index < UINT32_C(14); ++index) {
+        assert(cursor <= bytes->len && bytes->len - cursor >= 12u);
+        if (bytes->data[cursor] == family) return cursor;
+        cursor += 12u;
+    }
+    assert(0);
+    return 0u;
+}
+
+static void recompute_family_crc(CmByteBuf *bytes, uint8_t family,
+    const char section_tag[4])
+{
+    size_t family_offset;
+    size_t payload_offset;
+    uint64_t payload_length;
+    family_offset = manifest_family_offset(bytes, family);
+    payload_offset = section_offset(bytes, section_tag);
+    payload_length = get_u64(bytes->data + payload_offset + 4u);
+    assert(payload_length <= (uint64_t)SIZE_MAX);
+    put_u32(bytes->data + family_offset + 8u,
+        cm_hir_metadata_crc32(bytes->data + payload_offset + 12u,
+            (size_t)payload_length));
+    recompute_crc(bytes);
+}
+
+static void recompute_module_family_crc(CmByteBuf *bytes)
+{
+    CmByteBuf stream;
+    size_t family_offset;
+    size_t module_offset;
+    size_t namespace_offset;
+    uint64_t module_length;
+    uint64_t namespace_length;
+    family_offset = manifest_family_offset(bytes, UINT8_C(1));
+    module_offset = section_offset(bytes, "MODS");
+    namespace_offset = section_offset(bytes, "NSPC");
+    module_length = get_u64(bytes->data + module_offset + 4u);
+    namespace_length = get_u64(bytes->data + namespace_offset + 4u);
+    assert(module_length <= (uint64_t)SIZE_MAX
+        && namespace_length <= (uint64_t)SIZE_MAX);
+    cm_byte_buf_init(&stream);
+    cm_byte_buf_append(&stream, bytes->data + module_offset + 12u,
+        (size_t)module_length);
+    cm_byte_buf_append(&stream, bytes->data + namespace_offset + 12u,
+        (size_t)namespace_length);
+    put_u32(bytes->data + family_offset + 8u,
+        cm_hir_metadata_crc32(stream.data, stream.len));
+    cm_byte_buf_destroy(&stream);
+    recompute_crc(bytes);
 }
 
 static void fixture_init(TestFixture *fixture)
@@ -184,6 +301,49 @@ static void fixture_init(TestFixture *fixture)
     metadata->namespace_count = 4u;
 }
 
+static void item_fixture_init(TestFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    fixture_init(fixture);
+    metadata = &fixture->metadata;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 2u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Packet");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 3u;
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->namespace_entries[3].owner_module = 2u;
+    fixture->namespace_entries[3].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[3].name = fixture->items[0].name;
+    fixture->namespace_entries[3].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[3].target_local = 1u;
+    fixture->namespace_entries[3].export_ordinal = 3u;
+    fixture->namespace_entries[4].owner_module = 2u;
+    fixture->namespace_entries[4].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[4].name =
+        (CmHirDeclarationString)S("PacketAlias");
+    fixture->namespace_entries[4].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[4].target_local = 1u;
+    fixture->namespace_entries[4].export_ordinal = 4u;
+    fixture->namespace_entries[5] = fixture->namespace_entries[3];
+    fixture->namespace_entries[5].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[6] = fixture->namespace_entries[4];
+    fixture->namespace_entries[6].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[7] = fixture->namespace_entries[5];
+    fixture->namespace_entries[7].name = fixture->values[0].name;
+    fixture->namespace_entries[7].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[7].target_local = 1u;
+    fixture->namespace_entries[7].export_ordinal = 3u;
+    metadata->namespace_count = 8u;
+}
+
 static void assert_failed_transaction(const CmByteBuf *bytes)
 {
     CmHirDeclarationMetadata sentinel;
@@ -235,6 +395,7 @@ static void test_family_count_limits(void)
     ASSERT_COUNT_LIMIT(trait_count, CM_HIR_DECL_METADATA_MAX_NOMINALS, 1u);
     ASSERT_COUNT_LIMIT(generic_count, CM_HIR_DECL_METADATA_MAX_GENERICS, 2u);
     ASSERT_COUNT_LIMIT(type_count, CM_HIR_DECL_METADATA_MAX_TYPES, 3u);
+    ASSERT_COUNT_LIMIT(item_count, CM_HIR_DECL_METADATA_MAX_ITEMS, 0u);
     ASSERT_COUNT_LIMIT(value_count, CM_HIR_DECL_METADATA_MAX_VALUES, 1u);
     ASSERT_COUNT_LIMIT(predicate_count, CM_HIR_DECL_METADATA_MAX_PREDICATES,
         1u);
@@ -254,6 +415,164 @@ static void test_family_count_limits(void)
         == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
 }
 
+static void test_item_family(void)
+{
+    TestFixture first;
+    TestFixture second;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf rebuilt;
+    CmByteBuf bad;
+    size_t item_section;
+    size_t item_record;
+    size_t namespace_record;
+    size_t family;
+    uint64_t item_length;
+
+    item_fixture_init(&first);
+    item_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&rebuilt);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(first.namespace_entries[3].target_local
+        == first.namespace_entries[4].target_local);
+    assert(first.namespace_entries[3].target_local
+        == first.namespace_entries[5].target_local
+        && first.namespace_entries[5].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_VALUE
+        && first.namespace_entries[5].target_kind
+            == CM_HIR_DECL_TARGET_ITEM
+        && first.namespace_entries[4].target_local
+            == first.namespace_entries[6].target_local
+        && first.namespace_entries[6].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_VALUE);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    item_section = section_offset(&encoded, "ITEM");
+    item_length = get_u64(encoded.data + item_section + 4u);
+    family = manifest_family_offset(&encoded, UINT8_C(2));
+    assert(get_u32(encoded.data + family + 4u) == UINT32_C(1));
+    assert(get_u32(encoded.data + family + 8u)
+        == cm_hir_metadata_crc32(encoded.data + item_section + 12u,
+            (size_t)item_length));
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.item_count == 1u
+        && decoded.items[0].kind == CM_HIR_DECL_ITEM_STRUCT
+        && decoded.items[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && decoded.namespace_entries[3].target_kind
+            == CM_HIR_DECL_TARGET_ITEM
+        && decoded.namespace_entries[3].target_local
+            == decoded.namespace_entries[4].target_local
+        && decoded.namespace_entries[3].target_local
+            == decoded.namespace_entries[5].target_local
+        && decoded.namespace_entries[5].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_VALUE
+        && decoded.namespace_entries[5].target_kind
+            == CM_HIR_DECL_TARGET_ITEM
+        && decoded.namespace_entries[4].target_local
+            == decoded.namespace_entries[6].target_local
+        && decoded.namespace_entries[6].target_kind
+            == CM_HIR_DECL_TARGET_ITEM);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &rebuilt)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == rebuilt.len
+        && memcmp(encoded.data, rebuilt.data, encoded.len) == 0);
+
+    item_record = item_section + 12u + 4u;
+    bad = copy_bytes(&encoded);
+    bad.data[item_record] = UINT8_C(1);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    bad.data[item_record + 1u] = UINT8_C(1);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    bad.data[item_record + 18u] = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    bad.data[item_record + 62u] = UINT8_C(2);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + item_record + 66u, UINT32_C(1));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    family = manifest_family_offset(&bad, UINT8_C(2));
+    bad.data[family + 8u] ^= UINT8_C(1);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    namespace_record = namespace_record_offset(&bad, UINT32_C(3));
+    bad.data[namespace_record + 5u] = CM_HIR_DECL_TARGET_NOMINAL;
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    namespace_record = namespace_record_offset(&bad, UINT32_C(5));
+    bad.data[namespace_record + 5u] = CM_HIR_DECL_TARGET_VALUE;
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    first.namespace_entries[3].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.namespace_entries[3].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    first.namespace_entries[3].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.namespace_entries[3].target_local = 1u;
+    first.namespace_entries[3].export_ordinal = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.namespace_entries[3].export_ordinal = 3u;
+    first.namespace_entries[5].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.namespace_entries[5].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    first.namespace_entries[5].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.namespace_entries[5].target_local = 1u;
+    first.items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_RESTRICTED;
+    first.items[0].visibility.restriction_module = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&rebuilt);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -269,6 +588,7 @@ int main(void)
     fixture_init(&first);
     fixture_init(&second);
     test_family_count_limits();
+    test_item_family();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

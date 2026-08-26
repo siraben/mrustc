@@ -102,6 +102,35 @@ typedef struct CmHirDeclarationTrait {
     uint32_t generic_count;
 } CmHirDeclarationTrait;
 
+typedef enum CmHirDeclarationVisibilityKind {
+    CM_HIR_DECL_VISIBILITY_PRIVATE = 1,
+    CM_HIR_DECL_VISIBILITY_PUBLIC = 2,
+    CM_HIR_DECL_VISIBILITY_CRATE = 3,
+    CM_HIR_DECL_VISIBILITY_RESTRICTED = 4
+} CmHirDeclarationVisibilityKind;
+
+typedef struct CmHirDeclarationVisibility {
+    uint8_t kind;
+    /* Nonzero only for RESTRICTED; this first ITEM slice accepts PUBLIC. */
+    uint32_t restriction_module;
+} CmHirDeclarationVisibility;
+
+typedef enum CmHirDeclarationItemKind {
+    CM_HIR_DECL_ITEM_STRUCT = 2
+} CmHirDeclarationItemKind;
+
+/*
+ * The first ordinary ITEM slice is exactly a public, top-level unit struct.
+ * Generic, predicate, field, attribute, and repr payloads are canonical zero.
+ */
+typedef struct CmHirDeclarationItem {
+    uint8_t kind;
+    uint32_t owner_module;
+    CmHirDeclarationString name;
+    CmHirDeclarationVisibility visibility;
+    uint32_t source_ordinal;
+} CmHirDeclarationItem;
+
 typedef struct CmHirDeclarationGeneric {
     uint8_t owner_kind;
     uint32_t owner_local;
@@ -148,6 +177,7 @@ typedef enum CmHirDeclarationNamespace {
 
 typedef enum CmHirDeclarationNamespaceTarget {
     CM_HIR_DECL_TARGET_MODULE = 1,
+    CM_HIR_DECL_TARGET_ITEM = 2,
     CM_HIR_DECL_TARGET_VALUE = 3,
     CM_HIR_DECL_TARGET_NOMINAL = 4
 } CmHirDeclarationNamespaceTarget;
@@ -184,6 +214,8 @@ typedef struct CmHirDeclarationMetadata {
     size_t generic_count;
     CmHirDeclarationType *types;
     size_t type_count;
+    CmHirDeclarationItem *items;
+    size_t item_count;
     CmHirDeclarationValue *values;
     size_t value_count;
     CmHirDeclarationPredicate *predicates;
