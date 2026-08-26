@@ -8,7 +8,24 @@
 
 #define CM_HIR_DECL_METADATA_MAJOR UINT16_C(3)
 #define CM_HIR_DECL_METADATA_MINOR UINT16_C(0)
-#define CM_HIR_DECL_METADATA_MAX_RECORDS ((size_t)131072u)
+
+/* Exact v3.0 family and aggregate limits from docs/METADATA_V3.md. */
+#define CM_HIR_DECL_METADATA_MAX_CFGS ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_MODULES ((size_t)4096u)
+#define CM_HIR_DECL_METADATA_MAX_ITEMS ((size_t)65536u)
+#define CM_HIR_DECL_METADATA_MAX_NOMINALS ((size_t)65536u)
+#define CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_GENERICS ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_TYPES ((size_t)262144u)
+#define CM_HIR_DECL_METADATA_MAX_VALUES ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_PREDICATES ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_IMPLS ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES ((size_t)131072u)
+
+/* Kept for capture callers until they migrate to the family-specific names. */
+#define CM_HIR_DECL_METADATA_MAX_RECORDS \
+    CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
 
 typedef enum CmHirDeclarationMetadataStatus {
     CM_HIR_DECL_METADATA_OK = 0,

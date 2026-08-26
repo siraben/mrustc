@@ -194,6 +194,66 @@ static void assert_failed_transaction(const CmByteBuf *bytes)
     assert(sentinel.root_module == UINT32_C(77));
 }
 
+static void test_family_count_limits(void)
+{
+    TestFixture fixture;
+    CmHirDeclarationMetadata *metadata;
+
+    assert(CM_HIR_DECL_METADATA_MAX_MODULES == (size_t)4096u);
+    assert(CM_HIR_DECL_METADATA_MAX_ITEMS == (size_t)65536u);
+    assert(CM_HIR_DECL_METADATA_MAX_NOMINALS == (size_t)65536u);
+    assert(CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_GENERICS == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_TYPES == (size_t)262144u);
+    assert(CM_HIR_DECL_METADATA_MAX_VALUES == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_PREDICATES == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_IMPLS == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES == (size_t)131072u);
+    assert(CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES == (size_t)131072u);
+
+    fixture_init(&fixture);
+    metadata = &fixture.metadata;
+#define ASSERT_COUNT_BOUNDARY(field_, maximum_, original_) do { \
+        CmHirDeclarationString saved_name_ = metadata->crate_name; \
+        metadata->field_ = (maximum_); \
+        metadata->crate_name.data = NULL; \
+        metadata->crate_name.length = 0u; \
+        assert(cm_hir_declaration_metadata_validate(metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+        metadata->crate_name = saved_name_; \
+        metadata->field_ = (original_); \
+    } while (0)
+#define ASSERT_COUNT_LIMIT(field_, maximum_, original_) do { \
+        ASSERT_COUNT_BOUNDARY(field_, maximum_, original_); \
+        metadata->field_ = (maximum_) + 1u; \
+        assert(cm_hir_declaration_metadata_validate(metadata) \
+            == CM_HIR_DECL_METADATA_LIMIT_EXCEEDED); \
+        metadata->field_ = (original_); \
+    } while (0)
+    ASSERT_COUNT_LIMIT(cfg_count, CM_HIR_DECL_METADATA_MAX_CFGS, 2u);
+    ASSERT_COUNT_LIMIT(module_count, CM_HIR_DECL_METADATA_MAX_MODULES, 2u);
+    ASSERT_COUNT_LIMIT(trait_count, CM_HIR_DECL_METADATA_MAX_NOMINALS, 1u);
+    ASSERT_COUNT_LIMIT(generic_count, CM_HIR_DECL_METADATA_MAX_GENERICS, 2u);
+    ASSERT_COUNT_LIMIT(type_count, CM_HIR_DECL_METADATA_MAX_TYPES, 3u);
+    ASSERT_COUNT_LIMIT(value_count, CM_HIR_DECL_METADATA_MAX_VALUES, 1u);
+    ASSERT_COUNT_LIMIT(predicate_count, CM_HIR_DECL_METADATA_MAX_PREDICATES,
+        1u);
+    ASSERT_COUNT_LIMIT(namespace_count,
+        CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES, 4u);
+#undef ASSERT_COUNT_LIMIT
+#undef ASSERT_COUNT_BOUNDARY
+
+    fixture.values[0].parameter_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + 1u;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.values[0].parameter_count = 1u;
+    fixture.predicates[0].argument_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + 1u;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -208,6 +268,7 @@ int main(void)
 
     fixture_init(&first);
     fixture_init(&second);
+    test_family_count_limits();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);
@@ -260,6 +321,38 @@ int main(void)
     bad = copy_bytes(&bytes1);
     offset = section_offset(&bad, "GPAR");
     bad.data[offset + 12u + 17u] = 2u;
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&bytes1);
+    offset = section_offset(&bad, "MODS");
+    put_u32(bad.data + offset + 12u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_MODULES + 1u);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&bytes1);
+    offset = section_offset(&bad, "NOMD");
+    put_u32(bad.data + offset + 12u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_NOMINALS + 1u);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&bytes1);
+    offset = section_offset(&bad, "TYPE");
+    put_u32(bad.data + offset + 12u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_TYPES + 1u);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&bytes1);
+    offset = section_offset(&bad, "PRED");
+    put_u32(bad.data + offset + 12u + 32u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + 1u);
     recompute_crc(&bad);
     assert_failed_transaction(&bad);
     cm_byte_buf_destroy(&bad);

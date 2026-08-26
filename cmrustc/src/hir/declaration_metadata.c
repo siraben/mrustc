@@ -27,9 +27,9 @@ static const unsigned char cm_decl_tags[CM_DECL_SECTION_COUNT][4] = {
     { 'I', 'M', 'P', 'L' }, { 'N', 'S', 'P', 'C' }
 };
 
-static int cm_decl_count_valid(size_t count)
+static int cm_decl_count_valid(size_t count, size_t maximum)
 {
-    return count <= CM_HIR_DECL_METADATA_MAX_RECORDS
+    return count <= maximum
         && count <= (size_t)UINT32_MAX;
 }
 
@@ -385,7 +385,9 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
 static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
 {
     size_t index;
+    size_t total_parameters;
     if (metadata->value_count != 0u && metadata->values == NULL) return 0;
+    total_parameters = 0u;
     for (index = 0u; index < metadata->value_count; ++index) {
         const CmHirDeclarationValue *value;
         uint32_t child;
@@ -398,7 +400,10 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
             || !cm_decl_range(value->predicate_start,
                 value->predicate_count, metadata->predicate_count)
             || value->parameter_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_RECORDS
+                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+            || !cm_size_add(total_parameters, value->parameter_count,
+                &total_parameters)
+            || total_parameters > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
             || ((value->parameter_count == 0u)
                 != (value->parameter_types == NULL))
             || !cm_decl_type_local(metadata, value->return_type)
@@ -437,8 +442,10 @@ static int cm_decl_validate_predicates(
     const CmHirDeclarationMetadata *metadata)
 {
     size_t index;
+    size_t total_arguments;
     if (metadata->predicate_count != 0u && metadata->predicates == NULL)
         return 0;
+    total_arguments = 0u;
     for (index = 0u; index < metadata->predicate_count; ++index) {
         const CmHirDeclarationPredicate *predicate;
         const CmHirDeclarationTrait *trait_value;
@@ -458,7 +465,10 @@ static int cm_decl_validate_predicates(
                 subject->generic_local, predicate->owner_value)
             || predicate->argument_count != trait_value->generic_count
             || predicate->argument_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_RECORDS
+                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+            || !cm_size_add(total_arguments, predicate->argument_count,
+                &total_arguments)
+            || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
             || (predicate->argument_count != 0u
                 && predicate->argument_types == NULL)) return 0;
         for (child = 0u; child < predicate->argument_count; ++child) {
@@ -649,14 +659,22 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_validate(
 {
     size_t index;
     if (metadata == NULL) return CM_HIR_DECL_METADATA_INVALID_ARGUMENT;
-    if (!cm_decl_count_valid(metadata->cfg_count)
-        || !cm_decl_count_valid(metadata->module_count)
-        || !cm_decl_count_valid(metadata->trait_count)
-        || !cm_decl_count_valid(metadata->generic_count)
-        || !cm_decl_count_valid(metadata->type_count)
-        || !cm_decl_count_valid(metadata->value_count)
-        || !cm_decl_count_valid(metadata->predicate_count)
-        || !cm_decl_count_valid(metadata->namespace_count))
+    if (!cm_decl_count_valid(metadata->cfg_count,
+            CM_HIR_DECL_METADATA_MAX_CFGS)
+        || !cm_decl_count_valid(metadata->module_count,
+            CM_HIR_DECL_METADATA_MAX_MODULES)
+        || !cm_decl_count_valid(metadata->trait_count,
+            CM_HIR_DECL_METADATA_MAX_NOMINALS)
+        || !cm_decl_count_valid(metadata->generic_count,
+            CM_HIR_DECL_METADATA_MAX_GENERICS)
+        || !cm_decl_count_valid(metadata->type_count,
+            CM_HIR_DECL_METADATA_MAX_TYPES)
+        || !cm_decl_count_valid(metadata->value_count,
+            CM_HIR_DECL_METADATA_MAX_VALUES)
+        || !cm_decl_count_valid(metadata->predicate_count,
+            CM_HIR_DECL_METADATA_MAX_PREDICATES)
+        || !cm_decl_count_valid(metadata->namespace_count,
+            CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES))
         return CM_HIR_DECL_METADATA_LIMIT_EXCEEDED;
     if (!cm_decl_identifier(metadata->crate_name)
         || !cm_decl_bytes_valid(metadata->crate_disambiguator, 1u,
@@ -1104,11 +1122,12 @@ static int cm_decl_read_string_equal(CmHirMetadataReader *reader,
             (size_t)length) == 0);
 }
 
-static int cm_decl_read_count(CmHirMetadataReader *reader, size_t *out)
+static int cm_decl_read_count(CmHirMetadataReader *reader, size_t maximum,
+    size_t *out)
 {
     uint32_t count;
     if (cm_hir_metadata_read_u32(reader, &count) != CM_HIR_METADATA_OK
-        || !cm_decl_count_valid((size_t)count)) return 0;
+        || !cm_decl_count_valid((size_t)count, maximum)) return 0;
     *out = (size_t)count;
     return 1;
 }
@@ -1151,7 +1170,8 @@ static int cm_decl_parse_manifest(const CmHirMetadataSection *section,
         || !cm_decl_read_string(&reader, &metadata->data_layout)
         || cm_hir_metadata_read_u8(&reader, &metadata->panic_strategy)
             != CM_HIR_METADATA_OK
-        || !cm_decl_read_count(&reader, &metadata->cfg_count)) return 0;
+        || !cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_CFGS,
+            &metadata->cfg_count)) return 0;
     metadata->cfgs = metadata->cfg_count == 0u ? NULL
         : (CmHirDeclarationString *)cm_alloc_zeroed(metadata->cfg_count,
             sizeof(CmHirDeclarationString));
@@ -1199,7 +1219,8 @@ static int cm_decl_parse_modules(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t index;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->module_count)
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_MODULES,
+            &metadata->module_count)
         || metadata->module_count == 0u) return 0;
     metadata->modules = (CmHirDeclarationModule *)cm_alloc_zeroed(
         metadata->module_count, sizeof(CmHirDeclarationModule));
@@ -1227,7 +1248,8 @@ static int cm_decl_parse_traits(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t index;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->trait_count)) return 0;
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_NOMINALS,
+            &metadata->trait_count)) return 0;
     metadata->traits = metadata->trait_count == 0u ? NULL
         : (CmHirDeclarationTrait *)cm_alloc_zeroed(metadata->trait_count,
             sizeof(CmHirDeclarationTrait));
@@ -1278,7 +1300,8 @@ static int cm_decl_parse_generics(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t index;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->generic_count)) return 0;
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_GENERICS,
+            &metadata->generic_count)) return 0;
     metadata->generics = metadata->generic_count == 0u ? NULL
         : (CmHirDeclarationGeneric *)cm_alloc_zeroed(metadata->generic_count,
             sizeof(CmHirDeclarationGeneric));
@@ -1314,7 +1337,8 @@ static int cm_decl_parse_types(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t index;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->type_count)) return 0;
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_TYPES,
+            &metadata->type_count)) return 0;
     metadata->types = metadata->type_count == 0u ? NULL
         : (CmHirDeclarationType *)cm_alloc_zeroed(metadata->type_count,
             sizeof(CmHirDeclarationType));
@@ -1345,11 +1369,14 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
 {
     CmHirMetadataReader reader;
     size_t index;
+    size_t total_parameters;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->value_count)) return 0;
+    if (!cm_decl_read_count(&reader, CM_HIR_DECL_METADATA_MAX_VALUES,
+            &metadata->value_count)) return 0;
     metadata->values = metadata->value_count == 0u ? NULL
         : (CmHirDeclarationValue *)cm_alloc_zeroed(metadata->value_count,
             sizeof(CmHirDeclarationValue));
+    total_parameters = 0u;
     for (index = 0u; index < metadata->value_count; ++index) {
         CmHirDeclarationValue *value;
         uint32_t child;
@@ -1382,7 +1409,10 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
             || cm_hir_metadata_read_u32(&reader, &value->parameter_count)
                 != CM_HIR_METADATA_OK
             || value->parameter_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_RECORDS)
+                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+            || !cm_size_add(total_parameters, value->parameter_count,
+                &total_parameters)
+            || total_parameters > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES)
             return 0;
         value->parameter_types = value->parameter_count == 0u ? NULL
             : (uint32_t *)cm_alloc((size_t)value->parameter_count
@@ -1408,14 +1438,17 @@ static int cm_decl_parse_predicates(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t count;
     size_t index;
+    size_t total_arguments;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
     if (!cm_decl_read_u32(&reader, UINT32_C(0))
-        || !cm_decl_read_count(&reader, &count)
+        || !cm_decl_read_count(&reader,
+            CM_HIR_DECL_METADATA_MAX_PREDICATES, &count)
         || !cm_decl_read_u32(&reader, UINT32_C(0))) return 0;
     metadata->predicate_count = count;
     metadata->predicates = count == 0u ? NULL
         : (CmHirDeclarationPredicate *)cm_alloc_zeroed(count,
             sizeof(CmHirDeclarationPredicate));
+    total_arguments = 0u;
     for (index = 0u; index < count; ++index) {
         CmHirDeclarationPredicate *predicate;
         uint32_t child;
@@ -1434,7 +1467,11 @@ static int cm_decl_parse_predicates(const CmHirMetadataSection *section,
             || cm_hir_metadata_read_u32(&reader, &predicate->argument_count)
                 != CM_HIR_METADATA_OK
             || predicate->argument_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_RECORDS) return 0;
+                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+            || !cm_size_add(total_arguments, predicate->argument_count,
+                &total_arguments)
+            || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES)
+            return 0;
         predicate->argument_types = predicate->argument_count == 0u ? NULL
             : (uint32_t *)cm_alloc((size_t)predicate->argument_count
                 * sizeof(uint32_t));
@@ -1459,7 +1496,9 @@ static int cm_decl_parse_namespace(const CmHirMetadataSection *section,
     CmHirMetadataReader reader;
     size_t index;
     cm_hir_metadata_reader_init(&reader, section->data, section->length);
-    if (!cm_decl_read_count(&reader, &metadata->namespace_count)) return 0;
+    if (!cm_decl_read_count(&reader,
+            CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES,
+            &metadata->namespace_count)) return 0;
     metadata->namespace_entries = metadata->namespace_count == 0u ? NULL
         : (CmHirDeclarationNamespaceEntry *)cm_alloc_zeroed(
             metadata->namespace_count,
