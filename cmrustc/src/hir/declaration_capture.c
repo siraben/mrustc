@@ -44,6 +44,7 @@ typedef struct CmDeclCaptureState {
     size_t module_count;
     CmDeclCaptureNamespace *namespace_values;
     size_t namespace_count;
+    size_t namespace_capacity;
     CmDeclCaptureItem *traits;
     size_t trait_count;
     CmDeclCaptureItem *values;
@@ -62,6 +63,67 @@ static CmHirDeclarationCaptureResult cm_decl_capture_result(
     result.metadata_status = CM_HIR_DECL_METADATA_OK;
     result.library_status = CM_HIR_LIBRARY_OK;
     return result;
+}
+
+static int cm_decl_capture_fail(CmHirDeclarationCaptureResult *result,
+    CmHirDeclarationCaptureStage stage,
+    CmHirDeclarationCaptureReason reason)
+{
+    if (result->failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE) {
+        result->failure_stage = stage;
+        result->failure_reason = reason;
+    }
+    return 0;
+}
+
+static void cm_decl_capture_binding_failure(
+    CmHirDeclarationCaptureResult *result,
+    CmHirDeclarationCaptureReason reason, const CmResolvedBinding *binding,
+    const CmHirLibraryBinding *target, CmResolveItemRef source_item,
+    const CmResolveEffectiveItem *effective)
+{
+    if (result->failure_reason != CM_HIR_DECL_CAPTURE_REASON_NONE) return;
+    result->failure_stage = CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE;
+    result->failure_reason = reason;
+    result->has_rejected_binding = 1;
+    result->rejected_ast_item_kind = binding->item_kind;
+    result->rejected_namespace_kind = binding->namespace_kind;
+    result->rejected_source_item = source_item;
+    if (target != NULL) {
+        result->has_rejected_target = 1;
+        result->rejected_binding_kind = target->kind;
+        result->rejected_definition = target->definition;
+    }
+    if (effective != NULL) {
+        result->has_rejected_span = 1;
+        result->rejected_span = effective->span;
+    }
+}
+
+static void cm_decl_capture_item_failure(
+    CmHirDeclarationCaptureResult *result,
+    CmHirDeclarationCaptureReason reason, const CmDeclCaptureNamespace *entry,
+    const CmHirItem *item, CmHirItemId item_id)
+{
+    if (result->failure_reason != CM_HIR_DECL_CAPTURE_REASON_NONE) return;
+    result->failure_stage = CM_HIR_DECL_CAPTURE_STAGE_ITEMS;
+    result->failure_reason = reason;
+    result->rejected_item = item_id;
+    if (entry != NULL) {
+        result->has_rejected_binding = 1;
+        result->has_rejected_target = 1;
+        result->rejected_binding_kind = entry->target.kind;
+        result->rejected_ast_item_kind = entry->item_kind;
+        result->rejected_namespace_kind = entry->namespace_kind
+                == CM_HIR_DECL_NAMESPACE_TYPE
+            ? CM_RESOLVE_NAMESPACE_TYPE : CM_RESOLVE_NAMESPACE_VALUE;
+        result->rejected_definition = entry->target.definition;
+        result->rejected_source_item = entry->introduced_by;
+    }
+    if (item != NULL) {
+        result->has_rejected_span = 1;
+        result->rejected_span = item->span;
+    }
 }
 
 static int cm_decl_bytes_equal(const unsigned char *left, size_t left_length,
@@ -296,7 +358,9 @@ static int cm_decl_library_binding(const CmHirLibraryOwnedData *owned,
         const CmInternedString *entry_name = entry == NULL ? NULL
             : cm_interner_get(&owned->names, entry->name);
         int entry_value = entry != NULL
-            && entry->kind == CM_HIR_LIBRARY_BINDING_VALUE;
+            && (entry->kind == CM_HIR_LIBRARY_BINDING_VALUE
+                || entry->kind
+                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR);
         if (entry_name != NULL && entry_value == value_namespace
             && cm_decl_bytes_equal(entry_name->bytes, entry_name->len,
                 name, name_length)) {
@@ -357,7 +421,8 @@ static int cm_decl_namespace_target_shape(const CmResolvedBinding *binding,
 }
 
 static int cm_decl_collect_namespace(CmDeclCaptureState *state,
-    const CmHirLibraryOwnedData *owned)
+    const CmHirLibraryOwnedData *owned,
+    CmHirDeclarationCaptureResult *result)
 {
     size_t module_index;
     size_t capacity = 0u;
@@ -368,16 +433,47 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
         const CmHirLibraryOwnedModule *owned_module =
             cm_decl_owned_module(owned, module->hir->definition);
         int namespace_index;
-        if (owned_module == NULL) return 0;
+        if (owned_module == NULL)
+            return cm_decl_capture_fail(result,
+                CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_MODULE_MISSING);
+        if (owned_module->entries.len > SIZE_MAX - owned_entry_count)
+            return cm_decl_capture_fail(result,
+                CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT);
         owned_entry_count += owned_module->entries.len;
-        for (namespace_index = 0; namespace_index < 2; ++namespace_index)
-            capacity += cm_import_binding_count(state->input->imports,
-                module->graph.id, (CmResolveNamespace)namespace_index);
+        for (namespace_index = 0; namespace_index < 2; ++namespace_index) {
+            CmResolveNamespace namespace_kind =
+                (CmResolveNamespace)namespace_index;
+            size_t binding_count = cm_import_binding_count(
+                state->input->imports, module->graph.id, namespace_kind);
+            uint32_t binding_index;
+            if (binding_count > (size_t)UINT32_MAX)
+                return cm_decl_capture_fail(result,
+                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                    CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT);
+            for (binding_index = 0u; (size_t)binding_index < binding_count;
+                    ++binding_index) {
+                CmResolvedBinding binding;
+                if (!cm_import_get_binding(state->input->imports,
+                        module->graph.id, namespace_kind, binding_index,
+                        &binding))
+                    return cm_decl_capture_fail(result,
+                        CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_LOOKUP_FAILED);
+                if (!binding.is_public) continue;
+                if (capacity == CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES)
+                    return cm_decl_capture_fail(result,
+                        CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                        CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT);
+                capacity += 1u;
+            }
+        }
     }
-    if (capacity > CM_HIR_DECL_METADATA_MAX_RECORDS) return 0;
     state->namespace_values = capacity == 0u ? NULL
         : (CmDeclCaptureNamespace *)cm_alloc_zeroed(capacity,
             sizeof(*state->namespace_values));
+    state->namespace_capacity = capacity;
     for (module_index = 0u; module_index < state->module_count;
             ++module_index) {
         const CmDeclCaptureModule *module = &state->modules[module_index];
@@ -390,34 +486,82 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
             size_t binding_count = cm_import_binding_count(
                 state->input->imports, module->graph.id, namespace_kind);
             uint32_t binding_index;
+            if (binding_count > (size_t)UINT32_MAX)
+                return cm_decl_capture_fail(result,
+                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                    CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT);
             for (binding_index = 0u; (size_t)binding_index < binding_count;
                     ++binding_index) {
                 CmResolvedBinding binding;
                 CmDeclCaptureNamespace *entry;
                 CmResolveItemRef introduced;
-                uint32_t effective_index;
+                CmResolveEffectiveItem effective;
+                uint32_t effective_index = 0u;
+                int has_effective;
                 if (!cm_import_get_binding(state->input->imports,
                         module->graph.id, namespace_kind, binding_index,
-                        &binding)) return 0;
+                        &binding))
+                    return cm_decl_capture_fail(result,
+                        CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_LOOKUP_FAILED);
                 if (!binding.is_public) continue;
-                if (binding.is_ambiguous || binding.is_anonymous
-                    || binding.revision != state->input->revision
-                    || binding.module != module->graph.id) return 0;
-                if (state->namespace_count >= capacity) return 0;
-                entry = &state->namespace_values[state->namespace_count];
-                if (!cm_decl_copy_import_string(state->input->imports,
-                        binding.name, &entry->name, &entry->name_length)
-                    || !cm_decl_library_binding(owned, owned_module,
-                        namespace_kind == CM_RESOLVE_NAMESPACE_VALUE,
-                        entry->name, entry->name_length, &entry->target)
-                    || !cm_decl_namespace_target_shape(&binding,
-                        &entry->target)) return 0;
                 introduced = binding.is_import ? binding.import_declaration
                     : binding.declaration;
+                has_effective = introduced.source != 0u
+                    && introduced.item != CM_AST_ITEM_NONE
+                    && cm_decl_effective_ordinal(state, module->graph.id,
+                        introduced, &effective_index, &effective);
+                if (binding.is_ambiguous || binding.is_anonymous
+                    || binding.revision != state->input->revision
+                    || binding.module != module->graph.id) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_AUTHORITY_INVALID,
+                        &binding, NULL, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
+                if (state->namespace_count >= capacity) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT,
+                        &binding, NULL, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
+                entry = &state->namespace_values[state->namespace_count];
+                if (!cm_decl_copy_import_string(state->input->imports,
+                        binding.name, &entry->name, &entry->name_length)) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_NAME_INVALID,
+                        &binding, NULL, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
+                if (!cm_decl_library_binding(owned, owned_module,
+                        namespace_kind == CM_RESOLVE_NAMESPACE_VALUE,
+                        entry->name, entry->name_length, &entry->target)) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_LIBRARY_MISMATCH,
+                        &binding, NULL, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
+                if (!cm_decl_namespace_target_shape(&binding,
+                        &entry->target)) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED,
+                        &binding, &entry->target, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
                 if (introduced.source == 0u
                     || introduced.item == CM_AST_ITEM_NONE
-                    || !cm_decl_effective_ordinal(state, module->graph.id,
-                        introduced, &effective_index, NULL)) return 0;
+                    || !has_effective) {
+                    cm_decl_capture_binding_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_BINDING_INTRODUCTION_INVALID,
+                        &binding, &entry->target, introduced,
+                        has_effective ? &effective : NULL);
+                    return 0;
+                }
                 entry->owner_module = module->local;
                 entry->namespace_kind = namespace_kind
                         == CM_RESOLVE_NAMESPACE_TYPE
@@ -433,7 +577,10 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
         }
     }
     /* The owned artifact has one entry for every effective public binding. */
-    if (owned_entry_count != state->namespace_count) return 0;
+    if (owned_entry_count != state->namespace_count)
+        return cm_decl_capture_fail(result,
+            CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+            CM_HIR_DECL_CAPTURE_REASON_BINDING_CENSUS_MISMATCH);
     qsort(state->namespace_values, state->namespace_count,
         sizeof(*state->namespace_values), cm_decl_namespace_compare);
     for (module_index = 1u; module_index < state->namespace_count;
@@ -445,7 +592,10 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
         if (prior->owner_module == entry->owner_module
             && prior->namespace_kind == entry->namespace_kind
             && cm_decl_bytes_equal(prior->name, prior->name_length,
-                entry->name, entry->name_length)) return 0;
+                entry->name, entry->name_length))
+            return cm_decl_capture_fail(result,
+                CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                CM_HIR_DECL_CAPTURE_REASON_BINDING_DUPLICATE);
     }
     return 1;
 }
@@ -589,14 +739,21 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
         memset(&value, 0, sizeof(value));
         if (entry->target.kind == CM_HIR_LIBRARY_BINDING_MODULE) {
             if (cm_decl_module_by_definition(state,
-                    entry->target.definition) == NULL) return 0;
+                    entry->target.definition) == NULL) {
+                cm_decl_capture_item_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                    entry, NULL, CM_HIR_ITEM_NONE);
+                return 0;
+            }
             continue;
         }
         value.item = cm_decl_bound_item(state->hir,
             entry->target.definition, &value.id);
         if (value.item == NULL
             || value.item->definition.crate_id != state->input->crate_id) {
-            result->rejected_item = value.id;
+            cm_decl_capture_item_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_ITEM_DEFINITION_UNBOUND,
+                entry, value.item, value.id);
             return 0;
         }
         if (entry->target.kind == CM_HIR_LIBRARY_BINDING_TRAIT) {
@@ -604,9 +761,16 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
                     value.item->definition)) continue;
             if (!cm_decl_item_source(state, value.item->definition,
                     CM_AST_ITEM_TRAIT, &value.owner_module,
-                    &value.source_ordinal)
-                || !cm_decl_trait_shape(state, value.item)) {
-                result->rejected_item = value.id;
+                    &value.source_ordinal)) {
+                cm_decl_capture_item_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                    entry, value.item, value.id);
+                return 0;
+            }
+            if (!cm_decl_trait_shape(state, value.item)) {
+                cm_decl_capture_item_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED,
+                    entry, value.item, value.id);
                 return 0;
             }
             state->traits[state->trait_count++] = value;
@@ -615,13 +779,25 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
                     value.item->definition)) continue;
             if (!cm_decl_item_source(state, value.item->definition,
                     CM_AST_ITEM_FUNCTION, &value.owner_module,
-                    &value.source_ordinal)
-                || !cm_decl_value_shape(state, value.item)) {
-                result->rejected_item = value.id;
+                    &value.source_ordinal)) {
+                cm_decl_capture_item_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                    entry, value.item, value.id);
+                return 0;
+            }
+            if (!cm_decl_value_shape(state, value.item)) {
+                cm_decl_capture_item_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED,
+                    entry, value.item, value.id);
                 return 0;
             }
             state->values[state->value_count++] = value;
-        } else return 0;
+        } else {
+            cm_decl_capture_item_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED,
+                entry, value.item, value.id);
+            return 0;
+        }
     }
     cm_decl_sort_items(state->traits, state->trait_count, state);
     cm_decl_sort_items(state->values, state->value_count, state);
@@ -629,7 +805,11 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
         state->traits[index].local = (uint32_t)(index + 1u);
     for (index = 0u; index < state->value_count; ++index)
         state->values[index].local = (uint32_t)(index + 1u);
-    return state->trait_count != 0u && state->value_count != 0u;
+    if (state->trait_count == 0u || state->value_count == 0u)
+        return cm_decl_capture_fail(result,
+            CM_HIR_DECL_CAPTURE_STAGE_ITEMS,
+            CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING);
+    return 1;
 }
 
 static uint32_t cm_decl_trait_local(const CmDeclCaptureState *state,
@@ -695,7 +875,15 @@ static int cm_decl_mark_type(CmDeclCaptureState *state, CmHirTypeId type_id,
             return 1;
         }
     }
-    result->rejected_type = type_id;
+    if (result->failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE) {
+        result->failure_stage = CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA;
+        result->failure_reason = CM_HIR_DECL_CAPTURE_REASON_TYPE_UNSUPPORTED;
+        result->rejected_type = type_id;
+        if (type != NULL) {
+            result->has_rejected_span = 1;
+            result->rejected_span = type->span;
+        }
+    }
     return 0;
 }
 
@@ -1016,7 +1204,7 @@ static void cm_decl_state_destroy(CmDeclCaptureState *state)
     size_t index;
     for (index = 0u; index < state->module_count; ++index)
         cm_free(state->modules[index].path);
-    for (index = 0u; index < state->namespace_count; ++index)
+    for (index = 0u; index < state->namespace_capacity; ++index)
         cm_free(state->namespace_values[index].name);
     cm_free(state->modules);
     cm_free(state->namespace_values);
@@ -1044,6 +1232,8 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
     uint64_t storage_lifetime;
     uint64_t semantic_generation;
     uint64_t rewind_generation;
+    result.failure_stage = CM_HIR_DECL_CAPTURE_STAGE_INPUT;
+    result.failure_reason = CM_HIR_DECL_CAPTURE_REASON_INVALID_ARGUMENT;
     if (input == NULL || output == NULL || input->hir == NULL
         || input->graph == NULL || input->imports == NULL
         || input->modules == NULL || input->configuration == NULL
@@ -1059,13 +1249,23 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
         || cm_module_graph_error_count(input->graph) != 0u
         || cm_import_resolver_revision(input->imports) != input->revision
         || cm_import_error_count(input->imports) != 0u
-        || !cm_import_resolver_matches_graph(input->imports, input->graph))
-        return cm_decl_capture_result(CM_HIR_DECL_CAPTURE_INVALID_AUTHORITY);
+        || !cm_import_resolver_matches_graph(input->imports, input->graph)) {
+        result.status = CM_HIR_DECL_CAPTURE_INVALID_AUTHORITY;
+        result.failure_stage = CM_HIR_DECL_CAPTURE_STAGE_AUTHORITY;
+        result.failure_reason = CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_MISMATCH;
+        return result;
+    }
+    result.failure_stage = CM_HIR_DECL_CAPTURE_STAGE_NONE;
+    result.failure_reason = CM_HIR_DECL_CAPTURE_REASON_NONE;
     memset(&state, 0, sizeof(state));
     state.input = input;
     state.hir = input->hir;
     state.crate_value = cm_hir_get_crate(input->hir, input->crate_id);
-    if (state.crate_value == NULL) return result;
+    if (state.crate_value == NULL) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_INPUT,
+            CM_HIR_DECL_CAPTURE_REASON_CRATE_NOT_FOUND);
+        return result;
+    }
     graph_lifetime = cm_module_graph_lifetime_id(input->graph);
     resolver_lifetime = cm_import_resolver_lifetime_id(input->imports);
     resolver_generation = cm_import_resolver_generation(input->imports);
@@ -1079,6 +1279,8 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
     if (library_result.status != CM_HIR_LIBRARY_OK) {
         result.status = CM_HIR_DECL_CAPTURE_LIBRARY_FAILURE;
         result.library_status = library_result.status;
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_LIBRARY,
+            CM_HIR_DECL_CAPTURE_REASON_LIBRARY_REJECTED);
         cm_hir_library_artifact_destroy(&library);
         return result;
     }
@@ -1086,17 +1288,58 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
     cm_hir_declaration_metadata_init(&candidate);
     candidate.owns_storage = 1;
     result.status = CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR;
-    if (owned == NULL || !cm_decl_collect_modules(&state)
-        || !cm_decl_collect_namespace(&state, owned)
-        || !cm_decl_collect_items(&state, &result)
-        || !cm_decl_fill_identity(&state, &candidate)
-        || !cm_decl_fill_modules(&state, &candidate)
-        || !cm_decl_fill_items_and_generics(&state, &candidate)
-        || !cm_decl_fill_types_values_predicates(&state, &candidate, &result)
-        || !cm_decl_fill_namespace(&state, &candidate)) goto done;
+    if (owned == NULL) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_LIBRARY,
+            CM_HIR_DECL_CAPTURE_REASON_OWNED_DATA_MISSING);
+        goto done;
+    }
+    if (!cm_decl_collect_modules(&state)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+            CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID);
+        goto done;
+    }
+    if (!cm_decl_collect_namespace(&state, owned, &result)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+            CM_HIR_DECL_CAPTURE_REASON_BINDING_CENSUS_MISMATCH);
+        goto done;
+    }
+    if (!cm_decl_collect_items(&state, &result)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_ITEMS,
+            CM_HIR_DECL_CAPTURE_REASON_ITEM_METADATA_INVALID);
+        goto done;
+    }
+    if (!cm_decl_fill_identity(&state, &candidate)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_IDENTITY,
+            CM_HIR_DECL_CAPTURE_REASON_IDENTITY_UNSUPPORTED);
+        goto done;
+    }
+    if (!cm_decl_fill_modules(&state, &candidate)) {
+        cm_decl_capture_fail(&result,
+            CM_HIR_DECL_CAPTURE_STAGE_MODULE_METADATA,
+            CM_HIR_DECL_CAPTURE_REASON_MODULE_METADATA_INVALID);
+        goto done;
+    }
+    if (!cm_decl_fill_items_and_generics(&state, &candidate)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_ITEM_METADATA,
+            CM_HIR_DECL_CAPTURE_REASON_ITEM_METADATA_INVALID);
+        goto done;
+    }
+    if (!cm_decl_fill_types_values_predicates(&state, &candidate, &result)) {
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA,
+            CM_HIR_DECL_CAPTURE_REASON_TYPE_METADATA_INVALID);
+        goto done;
+    }
+    if (!cm_decl_fill_namespace(&state, &candidate)) {
+        cm_decl_capture_fail(&result,
+            CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE_METADATA,
+            CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_TARGET_UNMAPPED);
+        goto done;
+    }
     result.metadata_status = cm_hir_declaration_metadata_validate(&candidate);
     if (result.metadata_status != CM_HIR_DECL_METADATA_OK) {
         result.status = CM_HIR_DECL_CAPTURE_METADATA_FAILURE;
+        cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_VALIDATE,
+            CM_HIR_DECL_CAPTURE_REASON_METADATA_INVALID);
         goto done;
     }
     if (cm_module_graph_lifetime_id(input->graph) != graph_lifetime
@@ -1109,6 +1352,9 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
         || input->hir->semantic_generation != semantic_generation
         || input->hir->rewind_generation != rewind_generation) {
         result.status = CM_HIR_DECL_CAPTURE_INVALID_AUTHORITY;
+        cm_decl_capture_fail(&result,
+            CM_HIR_DECL_CAPTURE_STAGE_FINAL_AUTHORITY,
+            CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_CHANGED);
         goto done;
     }
     old = *output;
@@ -1116,6 +1362,8 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
     cm_hir_declaration_metadata_init(&candidate);
     cm_hir_declaration_metadata_destroy(&old);
     result.status = CM_HIR_DECL_CAPTURE_OK;
+    result.failure_stage = CM_HIR_DECL_CAPTURE_STAGE_NONE;
+    result.failure_reason = CM_HIR_DECL_CAPTURE_REASON_NONE;
     result.module_count = state.module_count;
     result.trait_count = state.trait_count;
     result.value_count = state.value_count;
@@ -1138,6 +1386,99 @@ const char *cm_hir_declaration_capture_status_name(
     case CM_HIR_DECL_CAPTURE_LIBRARY_FAILURE: return "library failure";
     case CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR: return "unsupported HIR";
     case CM_HIR_DECL_CAPTURE_METADATA_FAILURE: return "metadata failure";
+    }
+    return "unknown";
+}
+
+const char *cm_hir_declaration_capture_stage_name(
+    CmHirDeclarationCaptureStage stage)
+{
+    switch (stage) {
+    case CM_HIR_DECL_CAPTURE_STAGE_NONE: return "none";
+    case CM_HIR_DECL_CAPTURE_STAGE_INPUT: return "input";
+    case CM_HIR_DECL_CAPTURE_STAGE_AUTHORITY: return "authority";
+    case CM_HIR_DECL_CAPTURE_STAGE_LIBRARY: return "library";
+    case CM_HIR_DECL_CAPTURE_STAGE_MODULES: return "modules";
+    case CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE: return "namespace";
+    case CM_HIR_DECL_CAPTURE_STAGE_ITEMS: return "items";
+    case CM_HIR_DECL_CAPTURE_STAGE_IDENTITY: return "identity";
+    case CM_HIR_DECL_CAPTURE_STAGE_MODULE_METADATA: return "module-metadata";
+    case CM_HIR_DECL_CAPTURE_STAGE_ITEM_METADATA: return "item-metadata";
+    case CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA: return "type-metadata";
+    case CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE_METADATA:
+        return "namespace-metadata";
+    case CM_HIR_DECL_CAPTURE_STAGE_VALIDATE: return "validate";
+    case CM_HIR_DECL_CAPTURE_STAGE_FINAL_AUTHORITY:
+        return "final-authority";
+    }
+    return "unknown";
+}
+
+const char *cm_hir_declaration_capture_reason_name(
+    CmHirDeclarationCaptureReason reason)
+{
+    switch (reason) {
+    case CM_HIR_DECL_CAPTURE_REASON_NONE: return "none";
+    case CM_HIR_DECL_CAPTURE_REASON_INVALID_ARGUMENT:
+        return "invalid-argument";
+    case CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_MISMATCH:
+        return "authority-mismatch";
+    case CM_HIR_DECL_CAPTURE_REASON_CRATE_NOT_FOUND:
+        return "crate-not-found";
+    case CM_HIR_DECL_CAPTURE_REASON_LIBRARY_REJECTED:
+        return "library-rejected";
+    case CM_HIR_DECL_CAPTURE_REASON_OWNED_DATA_MISSING:
+        return "owned-data-missing";
+    case CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID:
+        return "module-census-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_MODULE_MISSING:
+        return "namespace-module-missing";
+    case CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT:
+        return "namespace-limit";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_LOOKUP_FAILED:
+        return "binding-lookup-failed";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_AUTHORITY_INVALID:
+        return "binding-authority-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_NAME_INVALID:
+        return "binding-name-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_LIBRARY_MISMATCH:
+        return "binding-library-mismatch";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED:
+        return "binding-shape-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_INTRODUCTION_INVALID:
+        return "binding-introduction-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_CENSUS_MISMATCH:
+        return "binding-census-mismatch";
+    case CM_HIR_DECL_CAPTURE_REASON_BINDING_DUPLICATE:
+        return "binding-duplicate";
+    case CM_HIR_DECL_CAPTURE_REASON_ITEM_DEFINITION_UNBOUND:
+        return "item-definition-unbound";
+    case CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID:
+        return "item-source-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED:
+        return "trait-shape-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED:
+        return "value-shape-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING:
+        return "required-items-missing";
+    case CM_HIR_DECL_CAPTURE_REASON_IDENTITY_UNSUPPORTED:
+        return "identity-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_MODULE_METADATA_INVALID:
+        return "module-metadata-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_ITEM_METADATA_INVALID:
+        return "item-metadata-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_TYPE_UNSUPPORTED:
+        return "type-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_PREDICATE_UNSUPPORTED:
+        return "predicate-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_TYPE_METADATA_INVALID:
+        return "type-metadata-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_TARGET_UNMAPPED:
+        return "namespace-target-unmapped";
+    case CM_HIR_DECL_CAPTURE_REASON_METADATA_INVALID:
+        return "metadata-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_CHANGED:
+        return "authority-changed";
     }
     return "unknown";
 }

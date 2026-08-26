@@ -30,7 +30,8 @@ static CmHirArtifactBytes test_bytes(const char *text)
     return bytes;
 }
 
-static void fixture_init(CaptureFixture *fixture, int with_noise)
+static void fixture_init_source(CaptureFixture *fixture, int with_noise,
+    const char *path, const unsigned char *source, size_t source_length)
 {
     CmSourceId root;
     CmModuleGraphOptions graph_options;
@@ -63,9 +64,8 @@ static void fixture_init(CaptureFixture *fixture, int with_noise)
         assert(cm_hir_add_type(&fixture->hir, &type, &ignored_type)
             == CM_HIR_OK);
     }
-    assert(cm_source_add_memory(&fixture->sources,
-        "v30-trait-provider.rs", fixture_source,
-        sizeof(fixture_source) - 1u, &root) == CM_SOURCE_OK);
+    assert(cm_source_add_memory(&fixture->sources, path, source,
+        source_length, &root) == CM_SOURCE_OK);
     cm_module_graph_options_init(&graph_options);
     graph_options.edition = CM_EDITION_2024;
     graph_options.cfg = &fixture->cfg;
@@ -86,6 +86,12 @@ static void fixture_init(CaptureFixture *fixture, int with_noise)
     assert(fixture->lower_result.error_count == 0u);
     fixture->config.edition = UINT32_C(2024);
     fixture->config.panic_strategy = test_bytes("abort");
+}
+
+static void fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "v30-trait-provider.rs",
+        fixture_source, sizeof(fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -216,6 +222,8 @@ static void test_fixture_and_determinism(void)
             (unsigned int)result.rejected_type);
     }
     assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NONE
+        && result.failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE
         && result.trait_count == 1u && result.value_count == 1u);
     result = cm_hir_declaration_metadata_capture(&noisy_input,
         &noisy_metadata);
@@ -263,14 +271,117 @@ static void test_failure_is_atomic(void)
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
         && result.rejected_item == needs_id
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED
+        && result.has_rejected_binding && result.has_rejected_target
+        && result.has_rejected_span
         && metadata.values == saved_values
         && metadata.namespace_entries == saved_namespace);
     needs->data.function_item.signature.safety = CM_HIR_SAFE;
     input.revision += UINT64_C(1);
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_INVALID_AUTHORITY
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_AUTHORITY
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_MISMATCH
         && metadata.values == saved_values
         && metadata.namespace_entries == saved_namespace);
+    assert_exact_descriptor(&metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_namespace_shape_diagnostic(void)
+{
+    static const unsigned char unsupported_source[] =
+        "pub struct Blocked;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    const CmSourceFile *source;
+
+    fixture_init_source(&fixture, 0, "unsupported-public-struct.rs",
+        unsupported_source, sizeof(unsupported_source) - 1u);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        || result.failure_stage != CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
+        || result.failure_reason
+            != CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED) {
+        fprintf(stderr, "namespace diagnostic status=%s stage=%s reason=%s "
+            "binding=%u ast=%u def=%u:%u item=%u:%u span=%d\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            (unsigned int)result.rejected_binding_kind,
+            (unsigned int)result.rejected_ast_item_kind,
+            (unsigned int)result.rejected_definition.crate_id,
+            (unsigned int)result.rejected_definition.index,
+            (unsigned int)result.rejected_source_item.source,
+            (unsigned int)result.rejected_source_item.item,
+            result.has_rejected_span);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED
+        && result.has_rejected_binding && result.has_rejected_target
+        && result.rejected_binding_kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && result.rejected_ast_item_kind == CM_AST_ITEM_STRUCT
+        && result.rejected_namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+        && result.rejected_definition.crate_id
+            == fixture.lower_result.crate_id
+        && result.rejected_definition.index != CM_HIR_DEF_INDEX_NONE
+        && result.rejected_source_item.source != 0u
+        && result.rejected_source_item.item != CM_AST_ITEM_NONE
+        && result.has_rejected_span);
+    source = cm_source_get(&fixture.sources, result.rejected_span.source);
+    assert(source != NULL
+        && strcmp(source->path, "unsupported-public-struct.rs") == 0
+        && result.rejected_span.start == 0u
+        && metadata.modules == NULL && metadata.module_count == 0u);
+    assert(strcmp(cm_hir_declaration_capture_stage_name(
+            result.failure_stage), "namespace") == 0
+        && strcmp(cm_hir_declaration_capture_reason_name(
+            result.failure_reason), "binding-shape-unsupported") == 0);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_many_private_bindings_do_not_consume_public_cap(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf source;
+    char declaration[64];
+    size_t index;
+    int length;
+
+    cm_byte_buf_init(&source);
+    cm_byte_buf_append(&source, fixture_source, sizeof(fixture_source) - 1u);
+    for (index = 0u; index < 2048u; ++index) {
+        length = snprintf(declaration, sizeof(declaration),
+            "fn private_%lu() {}\n", (unsigned long)index);
+        assert(length > 0 && (size_t)length < sizeof(declaration));
+        cm_byte_buf_append(&source, declaration, (size_t)length);
+    }
+    fixture_init_source(&fixture, 0, "many-private.rs", source.data,
+        source.len);
+    cm_byte_buf_destroy(&source);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NONE
+        && result.failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE
+        && result.namespace_count == 3u);
     assert_exact_descriptor(&metadata);
     cm_hir_declaration_metadata_destroy(&metadata);
     fixture_destroy(&fixture);
@@ -280,5 +391,7 @@ int main(void)
 {
     test_fixture_and_determinism();
     test_failure_is_atomic();
+    test_namespace_shape_diagnostic();
+    test_many_private_bindings_do_not_consume_public_cap();
     return 0;
 }

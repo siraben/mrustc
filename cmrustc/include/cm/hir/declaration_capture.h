@@ -15,6 +15,57 @@ typedef enum CmHirDeclarationCaptureStatus {
     CM_HIR_DECL_CAPTURE_METADATA_FAILURE
 } CmHirDeclarationCaptureStatus;
 
+typedef enum CmHirDeclarationCaptureStage {
+    CM_HIR_DECL_CAPTURE_STAGE_NONE = 0,
+    CM_HIR_DECL_CAPTURE_STAGE_INPUT,
+    CM_HIR_DECL_CAPTURE_STAGE_AUTHORITY,
+    CM_HIR_DECL_CAPTURE_STAGE_LIBRARY,
+    CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+    CM_HIR_DECL_CAPTURE_STAGE_ITEMS,
+    CM_HIR_DECL_CAPTURE_STAGE_IDENTITY,
+    CM_HIR_DECL_CAPTURE_STAGE_MODULE_METADATA,
+    CM_HIR_DECL_CAPTURE_STAGE_ITEM_METADATA,
+    CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA,
+    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE_METADATA,
+    CM_HIR_DECL_CAPTURE_STAGE_VALIDATE,
+    CM_HIR_DECL_CAPTURE_STAGE_FINAL_AUTHORITY
+} CmHirDeclarationCaptureStage;
+
+typedef enum CmHirDeclarationCaptureReason {
+    CM_HIR_DECL_CAPTURE_REASON_NONE = 0,
+    CM_HIR_DECL_CAPTURE_REASON_INVALID_ARGUMENT,
+    CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_MISMATCH,
+    CM_HIR_DECL_CAPTURE_REASON_CRATE_NOT_FOUND,
+    CM_HIR_DECL_CAPTURE_REASON_LIBRARY_REJECTED,
+    CM_HIR_DECL_CAPTURE_REASON_OWNED_DATA_MISSING,
+    CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_MODULE_MISSING,
+    CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_LOOKUP_FAILED,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_AUTHORITY_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_NAME_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_LIBRARY_MISMATCH,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_INTRODUCTION_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_CENSUS_MISMATCH,
+    CM_HIR_DECL_CAPTURE_REASON_BINDING_DUPLICATE,
+    CM_HIR_DECL_CAPTURE_REASON_ITEM_DEFINITION_UNBOUND,
+    CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING,
+    CM_HIR_DECL_CAPTURE_REASON_IDENTITY_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_MODULE_METADATA_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_ITEM_METADATA_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_TYPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_PREDICATE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_TYPE_METADATA_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_TARGET_UNMAPPED,
+    CM_HIR_DECL_CAPTURE_REASON_METADATA_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_CHANGED
+} CmHirDeclarationCaptureReason;
+
 typedef struct CmHirDeclarationCaptureInput {
     const CmHirContext *hir;
     CmHirCrateId crate_id;
@@ -39,6 +90,18 @@ typedef struct CmHirDeclarationCaptureResult {
     size_t value_count;
     size_t predicate_count;
     size_t namespace_count;
+    /* Append-only first-failure diagnostic; all fields are borrowed/scalar. */
+    CmHirDeclarationCaptureStage failure_stage;
+    CmHirDeclarationCaptureReason failure_reason;
+    int has_rejected_binding;
+    CmHirLibraryBindingKind rejected_binding_kind;
+    CmAstItemKind rejected_ast_item_kind;
+    CmResolveNamespace rejected_namespace_kind;
+    CmHirDefId rejected_definition;
+    int has_rejected_target;
+    CmResolveItemRef rejected_source_item;
+    int has_rejected_span;
+    CmSpan rejected_span;
 } CmHirDeclarationCaptureResult;
 
 /*
@@ -56,5 +119,9 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
 
 const char *cm_hir_declaration_capture_status_name(
     CmHirDeclarationCaptureStatus status);
+const char *cm_hir_declaration_capture_stage_name(
+    CmHirDeclarationCaptureStage stage);
+const char *cm_hir_declaration_capture_reason_name(
+    CmHirDeclarationCaptureReason reason);
 
 #endif
