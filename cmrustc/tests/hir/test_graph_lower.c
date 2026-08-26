@@ -2465,7 +2465,7 @@ static void test_rustc_as_vec_into_iter_fixture(void)
         "AsVecIntoIter imports lost visibility, metadata, or bindings");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(hir_dump,
             "visibility=public kind=use "
             "tree=\"self::into_iter::IntoIter\" "
@@ -2475,7 +2475,7 @@ static void test_rustc_as_vec_into_iter_fixture(void)
             "\\\"1.0.0\\\")\"") != NULL
         && strstr(hir_dump,
             "namespace=type name=\"IntoIter\" target=") != NULL,
-        "AsVecIntoIter hir-v36 dump omitted the attributed reexport");
+        "AsVecIntoIter hir-v37 dump omitted the attributed reexport");
     free(hir_dump);
     check(trait_item != NULL && into_iter_item != NULL && impl_item != NULL
         && trait_associated != NULL && impl_associated != NULL
@@ -2721,13 +2721,13 @@ static void test_rustc_as_vec_into_iter_fixture(void)
         "no-global-oom HIR imports did not remove only cfg-disabled uses");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(hir_dump,
             "tree=\"self::into_iter::IntoIter\"") != NULL
         && strstr(hir_dump,
             "tree=\"self::in_place_collect::AsVecIntoIter\"") == NULL
         && strstr(hir_dump, "tree=\"super::AsVecIntoIter\"") == NULL,
-        "no-global-oom hir-v36 dump retained a cfg-disabled import");
+        "no-global-oom hir-v37 dump retained a cfg-disabled import");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -3431,7 +3431,7 @@ static void test_rustc_future_ready_pending_fixture(void)
         "Pending::poll discard parameter created a local or lost provenance");
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(hir_dump, "binding=discard name=none") != NULL
         && strstr(hir_dump, "binding=named name=\"_cx\"") != NULL
         && strstr(hir_dump, "binding=named name=\"cx\"") != NULL
@@ -3440,7 +3440,7 @@ static void test_rustc_future_ready_pending_fixture(void)
             "origin=parameter[0].binding[0] name=\"self\" "
             "mutability=immutable")
             != NULL,
-        "Future/Ready/Pending hir-v36 dump lost binding distinctions");
+        "Future/Ready/Pending hir-v37 dump lost binding distinctions");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -4313,13 +4313,13 @@ static void test_rustc_try_family_fixture(void)
 
     hir_dump = dump_hir(&hir);
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(hir_dump, "modifier=const-if-const trait=") != NULL
         && strstr(hir_dump, "name=\"FromResidual\"") != NULL
         && strstr(hir_dump, "name=\"from_output\"") != NULL
         && strstr(hir_dump, "name=\"branch\"") != NULL
         && strstr(hir_dump, "meta=\"inline\"") != NULL,
-        "Try-family hir-v36 dump omitted its supertrait or methods");
+        "Try-family hir-v37 dump omitted its supertrait or methods");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -4741,14 +4741,14 @@ static void test_rustc_into_iterator_deref_fixture(void)
     relaxed_modifier_dump = second_bound_dump == NULL ? NULL
         : strstr(second_bound_dump, "modifier=relaxed trait=");
     check(hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && first_bound_dump != NULL && equality_dump != NULL
         && second_bound_dump != NULL && first_bound_dump < equality_dump
         && equality_dump < second_bound_dump
         && required_modifier_dump != NULL
         && required_modifier_dump < equality_dump
         && relaxed_modifier_dump != NULL,
-        "IntoIterator/Deref hir-v36 bound/equality dump order differs");
+        "IntoIterator/Deref hir-v37 bound/equality dump order differs");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -5194,7 +5194,7 @@ static void test_rustc_iterator_methods_fixture(void)
 
     hir_dump = dump_hir(&hir);
     dump_order_ok = hir_dump != NULL
-        && strncmp(hir_dump, "hir-v36\n", strlen("hir-v36\n")) == 0;
+        && strncmp(hir_dump, "hir-v37\n", strlen("hir-v37\n")) == 0;
     dump_end = hir_dump == NULL ? NULL : hir_dump + strlen(hir_dump);
     for (index = 0u; index < 25u && dump_order_ok; ++index) {
         written = snprintf(marker, sizeof(marker), " name=\"%s\"",
@@ -5230,7 +5230,7 @@ static void test_rustc_iterator_methods_fixture(void)
         && text_count_between(hir_dump, dump_end, "trait-predicate item#")
             == 9u;
     check(dump_order_ok,
-        "Iterator hir-v36 dump lost item, attribute, or predicate order");
+        "Iterator hir-v37 dump lost item, attribute, or predicate order");
     free(hir_dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -5672,7 +5672,7 @@ static void test_rustc_iterator_generic_methods_fixture(void)
         dump_b = dump_hir(&hir);
         dump_ok = dump_a != NULL && dump_b != NULL
             && strcmp(dump_a, dump_b) == 0
-            && strncmp(dump_a, "hir-v36\n", strlen("hir-v36\n")) == 0;
+            && strncmp(dump_a, "hir-v37\n", strlen("hir-v37\n")) == 0;
         cursor = dump_ok ? strstr(dump_a, " name=\"Iterator\"") : NULL;
         cursor = cursor == NULL ? NULL : strstr(cursor + 1, " name=\"Item\"");
         for (method_index = 0u;
@@ -5692,7 +5692,7 @@ static void test_rustc_iterator_generic_methods_fixture(void)
                 "trait-predicate-equality item#") == equality_total
             && predicate_total != 0u && equality_total != 0u;
         check(dump_ok,
-            "generic Iterator hir-v36 dump is incomplete or nondeterministic");
+            "generic Iterator hir-v37 dump is incomplete or nondeterministic");
         free(dump_a);
         free(dump_b);
     }
@@ -6990,7 +6990,11 @@ static void test_source_static_with_named_array_length(void)
 static void test_enum_variant_glob_import(void)
 {
     static const unsigned char source[] =
-        "pub enum Choice { Unit, Tuple(u8), Named { value: u8 } }\n"
+        "pub enum Choice {"
+        " #[lang = \"None\"] Unit,"
+        " #[lang = \"Some\"] Tuple(u8),"
+        " Named { value: u8 }"
+        "}\n"
         "use Choice::*;\n";
     CmSourceSet sources;
     CmSourceId root;
@@ -7057,6 +7061,12 @@ static void test_enum_variant_glob_import(void)
         && hir.definitions.len == 5u && choice != NULL
         && choice->kind == CM_HIR_ITEM_ENUM
         && choice->data.enum_item.variant_count == 3u
+        && choice->data.enum_item.variants[0].lang_item
+            != CM_INTERN_ID_NONE
+        && choice->data.enum_item.variants[1].lang_item
+            != CM_INTERN_ID_NONE
+        && choice->data.enum_item.variants[2].lang_item
+            == CM_INTERN_ID_NONE
         && choice_definition != NULL
         && choice_definition->kind == CM_HIR_DEFINITION_ITEM
         && choice_definition->state == CM_HIR_DEFINITION_BOUND
@@ -7097,15 +7107,90 @@ static void test_enum_variant_glob_import(void)
         "enum variant glob bindings lost namespace-specific identities");
     dump = dump_hir(&hir);
     check(dump != NULL
-        && strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(dump, "enum-variant bound enum-item#1 variant=0")
-            != NULL,
-        "hir-v36 dump omitted canonical enum variant identity");
+            != NULL
+        && strstr(dump, "lang=\"None\"") != NULL
+        && strstr(dump, "lang=\"Some\"") != NULL,
+        "hir-v37 dump omitted canonical enum variant identity");
     free(dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
     cm_source_set_destroy(&sources);
+}
+
+static void test_enum_variant_lang_provenance(void)
+{
+    static const unsigned char cfg_source[] =
+        "pub enum Choice {"
+        " #[cfg(any())] #[lang = \"Hidden\"] Hidden,"
+        " #[lang = \"None\"] None,"
+        " #[lang = \"Some\"] Some(u8)"
+        "}\n";
+    static const unsigned char duplicate_source[] =
+        "pub enum Bad {"
+        " #[lang = \"Same\"] First,"
+        " #[lang = \"Same\"] Second"
+        "}\n";
+    const unsigned char *sources_data[2];
+    const size_t source_lengths[2] = {
+        sizeof(cfg_source) - 1u, sizeof(duplicate_source) - 1u
+    };
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *choice;
+    uint32_t source_index;
+
+    sources_data[0] = cfg_source;
+    sources_data[1] = duplicate_source;
+    for (source_index = 0u; source_index < 2u; ++source_index) {
+        cm_source_set_init(&sources);
+        cm_module_graph_init(&graph);
+        check(cm_source_add_memory(&sources, "variant-lang/lib.rs",
+            sources_data[source_index], source_lengths[source_index], &root)
+                == CM_SOURCE_OK,
+            "could not add enum variant lang provenance fixture");
+        cm_cfg_set_init(&cfg);
+        cm_module_graph_options_init(&graph_options);
+        graph_options.cfg = &cfg;
+        graph_result = cm_module_graph_build(&graph, &sources, root,
+            &graph_options);
+        cm_hir_context_init(&hir);
+        cm_hir_module_map_init(&map);
+        cm_hir_lower_options_init(&options);
+        result = lower_module_graph(&hir, &graph, graph_result.revision,
+            &map, &options);
+        if (source_index == 0u) {
+            choice = find_hir_item_anywhere(&hir, "Choice");
+            check(graph_result.error_count == 0u && result.error_count == 0u
+                && choice != NULL && choice->kind == CM_HIR_ITEM_ENUM
+                && choice->data.enum_item.variant_count == 3u
+                && choice->data.enum_item.variants[0].lang_item
+                    == CM_INTERN_ID_NONE
+                && hir_name_is(&hir,
+                    choice->data.enum_item.variants[1].lang_item, "None")
+                && hir_name_is(&hir,
+                    choice->data.enum_item.variants[2].lang_item, "Some"),
+                "cfg-disabled variant borrowed active variant lang provenance");
+        } else {
+            check(graph_result.error_count == 0u && result.error_count == 1u
+                && hir_is_empty(&hir) && cm_hir_module_map_count(&map) == 0u,
+                "duplicate variant lang identity did not reject transactionally");
+        }
+        cm_hir_module_map_destroy(&map);
+        cm_hir_context_destroy(&hir);
+        cm_module_graph_destroy(&graph);
+        cm_source_set_destroy(&sources);
+    }
 }
 
 static void test_macro_import_identity(void)
@@ -12717,11 +12802,11 @@ static void test_core_auto_trait_negative_impl_cluster(void)
     }
     dump = dump_hir(&hir);
     check(dump != NULL
-        && strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(dump, "safety=unsafe auto=1") != NULL
         && text_count_between(dump, dump + strlen(dump),
             "safety=safe polarity=negative") == 2u,
-        "hir-v36 dump erased auto-trait or negative-impl headers");
+        "hir-v37 dump erased auto-trait or negative-impl headers");
     free(dump);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
@@ -12758,6 +12843,7 @@ int main(void)
     test_specializable_impl_members();
     test_source_static_with_named_array_length();
     test_enum_variant_glob_import();
+    test_enum_variant_lang_provenance();
     test_macro_import_identity();
     test_typed_const_generic_declarations();
     test_const_generic_trait_method_declaration();

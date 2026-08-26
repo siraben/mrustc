@@ -3970,9 +3970,13 @@ static int cm_hir_item_payload_valid(const CmHirContext *context,
         for (index = 0u; index < item->data.enum_item.variant_count;
              ++index) {
             const CmHirVariant *variant;
+            uint32_t prior;
 
             variant = &item->data.enum_item.variants[index];
             if (!cm_hir_intern_id_valid(context, variant->name)
+                || (variant->lang_item != CM_INTERN_ID_NONE
+                    && !cm_hir_intern_id_valid(context,
+                        variant->lang_item))
                 || !cm_hir_fields_valid(context, variant->fields,
                     variant->field_count, variant->form)
                 || !cm_hir_fields_self_roots_valid(context,
@@ -3990,6 +3994,14 @@ static int cm_hir_item_payload_valid(const CmHirContext *context,
                             variant->discriminant.type,
                             cm_hir_def_id_none(), 0u)))) {
                 return 0;
+            }
+            if (variant->lang_item != CM_INTERN_ID_NONE) {
+                for (prior = 0u; prior < index; ++prior) {
+                    if (item->data.enum_item.variants[prior].lang_item
+                            == variant->lang_item) {
+                        return 0;
+                    }
+                }
             }
         }
         return 1;
@@ -4011,6 +4023,37 @@ static int cm_hir_item_payload_valid(const CmHirContext *context,
         return cm_hir_trait_alias_item_payload_valid(context, item);
     }
     return 0;
+}
+
+static int cm_hir_item_field_generics_in_scope(
+    const CmHirContext *context, const CmHirItem *item,
+    CmHirDefId definition)
+{
+    uint32_t index;
+
+    if (item->kind == CM_HIR_ITEM_STRUCT
+        || item->kind == CM_HIR_ITEM_UNION) {
+        for (index = 0u; index < item->data.aggregate_item.field_count;
+             ++index) {
+            if (!cm_hir_predicate_type_in_scope(context,
+                    item->data.aggregate_item.fields[index].type,
+                    definition, cm_hir_def_id_none(), NULL, 0u)) return 0;
+        }
+    } else if (item->kind == CM_HIR_ITEM_ENUM) {
+        for (index = 0u; index < item->data.enum_item.variant_count;
+             ++index) {
+            const CmHirVariant *variant;
+            uint32_t field;
+
+            variant = &item->data.enum_item.variants[index];
+            for (field = 0u; field < variant->field_count; ++field) {
+                if (!cm_hir_predicate_type_in_scope(context,
+                        variant->fields[field].type, definition,
+                        cm_hir_def_id_none(), NULL, 0u)) return 0;
+            }
+        }
+    }
+    return 1;
 }
 
 static void cm_hir_copy_item_payload(CmHirContext *context,
@@ -4693,6 +4736,10 @@ static CmHirStatus cm_hir_add_item_internal(CmHirContext *context,
         return CM_HIR_INVARIANT_VIOLATION;
     }
     if (!cm_hir_item_generic_range_valid(context, item, definition_id)) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    if (!cm_hir_item_field_generics_in_scope(context, item,
+            definition_id)) {
         return CM_HIR_INVARIANT_VIOLATION;
     }
     if (!cm_hir_prebound_trait_children_valid(context, item,

@@ -77,7 +77,7 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /*
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
-     * and named aggregates/bounded unit-variant enums/type aliases/free
+     * and named aggregates/bounded unit/tuple-variant enums/type aliases/free
      * consts/reexports, only the stricter LOWER_SAFE allowlist documented on
      * the capture entry point.
      * This does not call any projected attribute inert.
@@ -152,22 +152,41 @@ typedef struct CmHirDeclarationCaptureResult {
  * stability and derive attributes are projected; layout/lang attributes are
  * normalized into retained ITEM facts. Predicated aggregates remain outside
  * this bounded profile and fail closed.
- * A supported enum is public, top-level, zero-generic/predicate and uses one
- * of two exact profiles. The first is `repr(u8)` with source-ordered UNIT
+ * A supported enum is public, top-level, predicate-free and uses one of three
+ * exact profiles. The first is zero-generic `repr(u8)` with source-ordered UNIT
  * variants and explicit decimal ISIZE scalar discriminants in the u8 range;
  * it has exactly direct `derive(...)`, `unstable(...)`, and normalized
  * `repr(u8)` item attributes and one direct `unstable(...)` per variant. The
- * second has Rust's default repr, only implicit-discriminant UNIT variants,
- * no variant attributes, and exactly one direct `rustc_diagnostic_item =
+ * second is zero-generic with Rust's default repr, only
+ * implicit-discriminant UNIT variants, no variant attributes, and exactly one
+ * direct `rustc_diagnostic_item =
  * "IDENT"` item attribute. That diagnostic identity is retained structurally
- * rather than counted as projected. Variant attributes and discriminants are
+ * rather than counted as projected. The third is the bounded Option/Result
+ * profile: one or more ordinary-Sized ITEM type generics, Rust-default repr,
+ * at least one TUPLE variant, only UNIT/TUPLE variants with implicit
+ * discriminants, and tuple fields whose exposed HIR types are direct generics
+ * of that enum. Every generic must be used. Its diagnostic identity, optional
+ * enum lang identity, and required per-variant lang identities are retained;
+ * direct stability/deprecation, derive, allow, exact `doc(search_unbox)`, and
+ * quoted `must_use` attributes use a closed authenticated projection.
+ * Variant attributes and discriminants are
  * authenticated against the graph's source AST because this HIR model does
- * not retain variant attributes. Imported unit variants must have exact paired
+ * not retain variant attributes. Imported unit and tuple variants must have
+ * exact paired
  * TYPE and VALUE namespace identities targeting the same flattened ITEM-owned
  * variant local; no function or standalone value is synthesized.
+ * The current parser intentionally discards attributes written on aggregate
+ * fields before graph/HIR construction. Consequently the generic-enum profile
+ * is explicitly HIR-relative: tuple-field attributes (including the source
+ * stability marker used by core Option/Result) cannot be counted or
+ * authenticated, identical structures with or without them encode identically,
+ * and this descriptor is not field-attribute or stability authority.
  * A public reexport permits only direct `stable(...)` or `unstable(...)`,
  * `deprecated(...)`, `allow(...)`, and exact
- * `doc(alias("IDENT"))`, where IDENT is a nonempty ASCII Rust identifier.
+ * `doc(alias("IDENT"))`, where IDENT is a nonempty ASCII Rust identifier, or
+ * exact `doc(no_inline)`. The latter additionally requires a complete public,
+ * resolved resolver-leaf census that is either named/grouped leaves or one
+ * glob leaf; mixed glob trees reject.
  * Every other item/reexport spelling, duplicate, generated attribute,
  * repr/lang/layout/ABI attribute, or inconsistent provenance rejects.
  * Attributes on other supported items also reject. Every successful omission

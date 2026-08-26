@@ -634,6 +634,8 @@ typedef struct CmHirVariant {
     /* Stable constructor/type identity distinct from the parent enum. */
     CmHirDefId definition;
     CmInternId name;
+    /* Retained compiler language identity; none for ordinary variants. */
+    CmInternId lang_item;
     CmHirAggregateForm form;
     CmHirField *fields;
     uint32_t field_count;

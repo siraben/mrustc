@@ -390,7 +390,7 @@ meet the corpus-wide acceptance gates.
   to the bound side of their owning predicate. Predicate-prefix HRTBs use one
   item-owned scope shared by the subject and every atomic trait or outlives
   constraint expanded from the source predicate; scope counts and references
-  are validated together. Canonical dumps are `hir-v36`. This clears both
+  are validated together. Canonical dumps are `hir-v37`. This clears both
   `VaListImpl::with_copy` in `core/src/ffi/va_list.rs:246` and
   `for<'a> F: FnMut(GenericShunt<'a, I, R>) -> U` in
   `core/src/iter/adapters/mod.rs:155`. Graph-authenticated inherent methods may
@@ -2105,6 +2105,11 @@ remain `SOURCE`. A bodyless source free const, metadata static/associated const,
 mutable metadata const, or metadata declaration carrying a body rejects. This
 is declaration identity and type availability only, not CTFE or codegen
 evidence.
+Canonical `hir-v37` retains optional enum-variant language-item identity as
+structural HIR, rejects duplicate non-empty identities within an enum, and
+prints the retained identity canonically. Graph-backed lowering authenticates
+the source/effective variant provenance; cfg-disabled raw variants do not
+inherit the attributes of the next effective variant.
 Parenthesized callable-trait input elision is now canonical HIR: omitted input
 lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous

@@ -120,6 +120,54 @@ static const unsigned char aggregate_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const char generic_enum_fixture_template[] =
+    "mod option_like {\n"
+    "  #[doc(search_unbox)]\n"
+    "  #[derive(Copy, Eq)]\n"
+    "  #[rustc_diagnostic_item = \"Maybe\"]\n"
+    "  #[lang = \"Maybe\"]\n"
+    "  #[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "  #[allow(dead_code)]\n"
+    "  pub enum Maybe<T> {\n"
+    "    #[lang = \"Nothing\"]\n"
+    "    #[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "    Nothing,\n"
+    "    #[lang = \"Just\"]\n"
+    "    #[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "    Just(%sT),\n"
+    "  }\n"
+    "}\n"
+    "mod result_like {\n"
+    "  #[doc(search_unbox)]\n"
+    "  #[derive(Copy, Eq)]\n"
+    "  #[must_use = \"this outcome must be handled\"]\n"
+    "  #[rustc_diagnostic_item = \"Outcome\"]\n"
+    "  #[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "  pub enum Outcome<T, E> {\n"
+    "    #[lang = \"Good\"]\n"
+    "    #[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "    Good(%sT),\n"
+    "    #[lang = \"Bad\"]\n"
+    "    #[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "    Bad(%sE),\n"
+    "  }\n"
+    "}\n"
+    "pub mod v1 {\n"
+    "  #[stable(feature = \"prelude\", since = \"1.0.0\")]\n"
+    "  #[doc(no_inline)]\n"
+    "  pub use crate::option_like::Maybe::{self, Nothing, Just};\n"
+    "  #[stable(feature = \"prelude\", since = \"1.0.0\")]\n"
+    "  #[doc(no_inline)]\n"
+    "  pub use crate::result_like::Outcome::{self, Good, Bad};\n"
+    "}\n"
+    "pub mod rust_2015 {\n"
+    "  #[stable(feature = \"prelude_2015\", since = \"1.0.0\")]\n"
+    "  #[doc(no_inline)]\n"
+    "  pub use crate::v1::*;\n"
+    "}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -218,6 +266,20 @@ static void aggregate_fixture_init(CaptureFixture *fixture, int with_noise)
         aggregate_fixture_source, sizeof(aggregate_fixture_source) - 1u);
 }
 
+static void generic_enum_fixture_init(CaptureFixture *fixture,
+    int with_noise, int with_field_stability)
+{
+    char source[8192];
+    const char *field_attribute = with_field_stability
+        ? "#[stable(feature = \"field\", since = \"1.0.0\")] " : "";
+    int written = snprintf(source, sizeof(source),
+        generic_enum_fixture_template, field_attribute, field_attribute,
+        field_attribute);
+    assert(written > 0 && (size_t)written < sizeof(source));
+    fixture_init_source(fixture, with_noise, "v30-generic-enum-provider.rs",
+        (const unsigned char *)source, (size_t)written);
+}
+
 static void fixture_destroy(CaptureFixture *fixture)
 {
     cm_hir_artifact_config_destroy(&fixture->config);
@@ -312,6 +374,39 @@ static int declaration_string_is(CmHirDeclarationString value,
     size_t length = strlen(text);
     return value.length == length
         && memcmp(value.data, text, length) == 0;
+}
+
+static const CmHirDeclarationItem *find_declaration_item(
+    const CmHirDeclarationMetadata *metadata, const char *name,
+    uint32_t *out_local)
+{
+    size_t index;
+    for (index = 0u; index < metadata->item_count; ++index) {
+        if (declaration_string_is(metadata->items[index].name, name)) {
+            if (out_local != NULL) *out_local = (uint32_t)(index + 1u);
+            return &metadata->items[index];
+        }
+    }
+    if (out_local != NULL) *out_local = 0u;
+    return NULL;
+}
+
+static uint32_t declaration_variant_local(
+    const CmHirDeclarationMetadata *metadata, uint32_t item_local,
+    uint32_t variant_index)
+{
+    uint32_t local = 0u;
+    uint32_t item_index;
+    for (item_index = 0u; item_index < metadata->item_count; ++item_index) {
+        const CmHirDeclarationItem *item = &metadata->items[item_index];
+        if (item->kind != CM_HIR_DECL_ITEM_ENUM) continue;
+        if (item_index + 1u == item_local) {
+            return variant_index < item->variant_count
+                ? local + variant_index + 1u : 0u;
+        }
+        local += item->variant_count;
+    }
+    return 0u;
 }
 
 static const CmHirDeclarationNamespaceEntry *find_namespace_entry(
@@ -2890,8 +2985,348 @@ static void test_static_type_dag_is_structurally_deduplicated(void)
     fixture_destroy(&fixture);
 }
 
+static void assert_generic_enum_descriptor(
+    const CmHirDeclarationMetadata *metadata)
+{
+    const CmHirDeclarationItem *maybe;
+    const CmHirDeclarationItem *outcome;
+    uint32_t maybe_local;
+    uint32_t outcome_local;
+    uint32_t variant_locals[4];
+    size_t index;
+    unsigned int type_counts[4] = { 0u, 0u, 0u, 0u };
+    unsigned int value_counts[4] = { 0u, 0u, 0u, 0u };
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    maybe = find_declaration_item(metadata, "Maybe", &maybe_local);
+    outcome = find_declaration_item(metadata, "Outcome", &outcome_local);
+    assert(maybe != NULL && outcome != NULL
+        && maybe->kind == CM_HIR_DECL_ITEM_ENUM
+        && maybe->generic_count == 1u
+        && maybe->enum_repr_primitive == CM_HIR_DECL_ENUM_REPR_RUST
+        && maybe->enum_flags == CM_HIR_DECL_ENUM_HAS_LANG_ITEM
+        && declaration_string_is(maybe->enum_lang_item, "Maybe")
+        && declaration_string_is(maybe->diagnostic_item, "Maybe")
+        && maybe->variant_count == 2u
+        && maybe->variants[0].kind == CM_HIR_DECL_VARIANT_UNIT
+        && maybe->variants[0].field_count == 0u
+        && maybe->variants[0].fields == NULL
+        && maybe->variants[0].flags
+            == CM_HIR_DECL_VARIANT_HAS_LANG_ITEM
+        && declaration_string_is(maybe->variants[0].lang_item, "Nothing")
+        && maybe->variants[1].kind == CM_HIR_DECL_VARIANT_TUPLE
+        && maybe->variants[1].field_count == 1u
+        && maybe->variants[1].fields != NULL
+        && maybe->variants[1].fields[0].source_ordinal == 0u
+        && maybe->variants[1].fields[0].type_local != 0u
+        && declaration_string_is(maybe->variants[1].lang_item, "Just")
+        && outcome->kind == CM_HIR_DECL_ITEM_ENUM
+        && outcome->generic_count == 2u
+        && outcome->enum_flags == 0u
+        && outcome->enum_lang_item.data == NULL
+        && outcome->enum_lang_item.length == 0u
+        && declaration_string_is(outcome->diagnostic_item, "Outcome")
+        && outcome->variant_count == 2u
+        && outcome->variants[0].kind == CM_HIR_DECL_VARIANT_TUPLE
+        && outcome->variants[0].field_count == 1u
+        && declaration_string_is(outcome->variants[0].lang_item, "Good")
+        && outcome->variants[1].kind == CM_HIR_DECL_VARIANT_TUPLE
+        && outcome->variants[1].field_count == 1u
+        && declaration_string_is(outcome->variants[1].lang_item, "Bad"));
+    assert(metadata->types[maybe->variants[1].fields[0].type_local - 1u].kind
+            == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->generics[metadata->types[
+            maybe->variants[1].fields[0].type_local - 1u].generic_local - 1u]
+            .owner_kind == CM_HIR_DECL_GENERIC_ITEM
+        && metadata->generics[metadata->types[
+            maybe->variants[1].fields[0].type_local - 1u].generic_local - 1u]
+            .owner_local == maybe_local);
+    variant_locals[0] = declaration_variant_local(metadata, maybe_local, 0u);
+    variant_locals[1] = declaration_variant_local(metadata, maybe_local, 1u);
+    variant_locals[2] = declaration_variant_local(metadata, outcome_local, 0u);
+    variant_locals[3] = declaration_variant_local(metadata, outcome_local, 1u);
+    assert(variant_locals[0] != 0u && variant_locals[1] != 0u
+        && variant_locals[2] != 0u && variant_locals[3] != 0u);
+    for (index = 0u; index < metadata->namespace_count; ++index) {
+        const CmHirDeclarationNamespaceEntry *entry =
+            &metadata->namespace_entries[index];
+        uint32_t variant_index;
+        if (entry->target_kind != CM_HIR_DECL_TARGET_ENUM_VARIANT) continue;
+        for (variant_index = 0u; variant_index < 4u; ++variant_index) {
+            if (entry->target_local != variant_locals[variant_index])
+                continue;
+            if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE)
+                type_counts[variant_index] += 1u;
+            else if (entry->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE)
+                value_counts[variant_index] += 1u;
+        }
+    }
+    for (index = 0u; index < 4u; ++index)
+        assert(type_counts[index] == 2u && value_counts[index] == 2u);
+}
+
+static void test_generic_enum_projection_glob_and_field_boundary(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture no_field_attributes;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata no_field_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf no_field_bytes;
+    generic_enum_fixture_init(&first, 0, 1);
+    generic_enum_fixture_init(&noisy, 1, 1);
+    generic_enum_fixture_init(&no_field_attributes, 0, 0);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&no_field_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_OK) {
+        fprintf(stderr, "generic enum capture failed: %s stage=%s reason=%s "
+            "metadata=%s library=%s binding=%u ast=%u namespace=%u "
+            "item=%u def=%u:%u span=%u:%u-%u\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            cm_hir_declaration_metadata_status_name(result.metadata_status),
+            cm_hir_library_status_name(result.library_status),
+            (unsigned int)result.rejected_binding_kind,
+            (unsigned int)result.rejected_ast_item_kind,
+            (unsigned int)result.rejected_namespace_kind,
+            (unsigned int)result.rejected_item,
+            (unsigned int)result.rejected_definition.crate_id,
+            (unsigned int)result.rejected_definition.index,
+            (unsigned int)result.rejected_span.source,
+            (unsigned int)result.rejected_span.start,
+            (unsigned int)result.rejected_span.end);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 2u
+        && result.projected_semantic_attribute_count == 18u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION);
+    assert_generic_enum_descriptor(&first_metadata);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 18u);
+    assert_generic_enum_descriptor(&noisy_metadata);
+    input = capture_input(&no_field_attributes);
+    result = cm_hir_declaration_metadata_capture(&input, &no_field_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 18u);
+    assert_generic_enum_descriptor(&no_field_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&no_field_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&no_field_metadata,
+            &no_field_bytes) == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && first_bytes.len == no_field_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0
+        && memcmp(first_bytes.data, no_field_bytes.data,
+            first_bytes.len) == 0);
+    cm_byte_buf_destroy(&no_field_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&no_field_metadata);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&no_field_attributes);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_generic_enum_hostile_mutations_are_atomic(void)
+{
+    static const char source_template[] =
+        "#[doc(search_unbox)]\n"
+        "#[derive(Copy)]\n"
+        "#[rustc_diagnostic_item = \"Choice\"]\n"
+        "#[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+        "%s"
+        "pub enum Choice<%s> {\n%s}\n"
+        "#[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+        "#[%s]\n"
+        "pub use Choice::{A, B};\n"
+        "pub trait Gate<X: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const char good_variants[] =
+        "  #[lang = \"A\"]\n"
+        "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+        "  A,\n"
+        "  #[lang = \"B\"]\n"
+        "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+        "  B(T),\n";
+    static const struct {
+        const char *generic;
+        const char *item_extra;
+        const char *variants;
+        const char *reexport_doc;
+    } rejected[] = {
+        { "T: ?Sized", "", good_variants, "doc(no_inline)" },
+        { "T", "", "  #[lang = \"A\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  A,\n"
+            "  #[lang = \"B\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  B(u8),\n", "doc(no_inline)" },
+        { "T", "", "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  A,\n"
+            "  #[lang = \"B\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  B(T),\n", "doc(no_inline)" },
+        { "T", "", "  #[lang = \"A\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  A = 0,\n"
+            "  #[lang = \"B\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  B(T),\n", "doc(no_inline)" },
+        { "T", "#[repr(C)]\n", good_variants, "doc(no_inline)" },
+        { "T", "", good_variants, "doc(hidden)" },
+        { "T", "", "  #[lang = \"A\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  A,\n"
+            "  #[lang = \"B\"]\n"
+            "  #[stable(feature = \"choice\", since = \"1.0.0\")]\n"
+            "  B,\n", "doc(no_inline)" }
+    };
+    CaptureFixture good;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItem *outcome;
+    CmHirItemId outcome_id;
+    CmHirTypeId saved_type;
+    CmHirAggregateForm saved_form;
+    CmInternId saved_lang_item;
+    CmHirGenericParam *generic;
+    CmHirImportBinding *good_value = NULL;
+    CmHirDefId bad_definition;
+    CmHirDefId saved_binding_target;
+    int saved_relaxed;
+    size_t index;
+    generic_enum_fixture_init(&good, 0, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    outcome = (CmHirItem *)find_item(&good, "Outcome", &outcome_id);
+    assert(outcome != NULL && outcome->kind == CM_HIR_ITEM_ENUM
+        && outcome->generic_parameter_count == 2u
+        && outcome->data.enum_item.variant_count == 2u
+        && outcome->data.enum_item.variants[0].field_count == 1u
+        && outcome->data.enum_item.variants[1].field_count == 1u);
+
+#define ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input_) do { \
+    result = cm_hir_declaration_metadata_capture(&(input_), &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_type = outcome->data.enum_item.variants[0].fields[0].type;
+    outcome->data.enum_item.variants[0].fields[0].type =
+        outcome->data.enum_item.variants[1].fields[0].type;
+    ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input);
+    outcome->data.enum_item.variants[0].fields[0].type = saved_type;
+
+    saved_form = outcome->data.enum_item.variants[0].form;
+    outcome->data.enum_item.variants[0].form = CM_HIR_AGGREGATE_UNIT;
+    ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input);
+    outcome->data.enum_item.variants[0].form = saved_form;
+
+    generic = (CmHirGenericParam *)cm_hir_get_generic_param(&good.hir,
+        outcome->generic_parameter_start);
+    assert(generic != NULL);
+    saved_relaxed = generic->is_relaxed_sized;
+    generic->is_relaxed_sized = 1;
+    ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input);
+    generic->is_relaxed_sized = saved_relaxed;
+
+    saved_lang_item = outcome->data.enum_item.variants[0].lang_item;
+    assert(saved_lang_item != CM_INTERN_ID_NONE
+        && outcome->data.enum_item.variants[1].lang_item
+            != CM_INTERN_ID_NONE
+        && saved_lang_item
+            != outcome->data.enum_item.variants[1].lang_item);
+    outcome->data.enum_item.variants[0].lang_item =
+        outcome->data.enum_item.variants[1].lang_item;
+    ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input);
+    outcome->data.enum_item.variants[0].lang_item = saved_lang_item;
+
+    memset(&bad_definition, 0, sizeof(bad_definition));
+    for (index = 0u; index < good.hir.modules.len; ++index) {
+        CmHirModule *module = (CmHirModule *)cm_vec_at(&good.hir.modules,
+            index);
+        uint32_t import_index;
+        if (module == NULL
+            || module->crate_id != good.lower_result.crate_id) continue;
+        for (import_index = 0u; import_index < module->import_count;
+                ++import_index) {
+            CmHirImport *import = &module->imports[import_index];
+            uint32_t binding_index;
+            for (binding_index = 0u; binding_index < import->binding_count;
+                    ++binding_index) {
+                CmHirImportBinding *binding =
+                    &import->bindings[binding_index];
+                const CmInternedString *name = cm_interner_get(
+                    &good.hir.strings, binding->name);
+                if (binding->namespace_kind != CM_HIR_NAMESPACE_VALUE
+                    || name == NULL) continue;
+                if (name->len == strlen("Good")
+                    && memcmp(name->bytes, "Good", name->len) == 0)
+                    good_value = binding;
+                if (name->len == strlen("Bad")
+                    && memcmp(name->bytes, "Bad", name->len) == 0)
+                    bad_definition = binding->target;
+            }
+        }
+    }
+    assert(good_value != NULL && !cm_hir_def_id_is_none(bad_definition)
+        && !cm_hir_def_id_equal(good_value->target, bad_definition));
+    saved_binding_target = good_value->target;
+    good_value->target = bad_definition;
+    ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(input);
+    good_value->target = saved_binding_target;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]); ++index) {
+        CaptureFixture bad;
+        char source[4096];
+        int written = snprintf(source, sizeof(source), source_template,
+            rejected[index].item_extra, rejected[index].generic,
+            rejected[index].variants, rejected[index].reexport_doc);
+        CmHirDeclarationCaptureInput bad_input;
+        assert(written > 0 && (size_t)written < sizeof(source));
+        fixture_init_source(&bad, 0, "bad-generic-enum.rs",
+            (const unsigned char *)source, (size_t)written);
+        bad_input = capture_input(&bad);
+        ASSERT_GENERIC_ENUM_ATOMIC_FAILURE(bad_input);
+        fixture_destroy(&bad);
+    }
+    assert_generic_enum_descriptor(&metadata);
+#undef ASSERT_GENERIC_ENUM_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
 int main(void)
 {
+    test_generic_enum_projection_glob_and_field_boundary();
+    test_generic_enum_hostile_mutations_are_atomic();
     test_static_capture_and_determinism();
     test_static_hostile_mutations_are_atomic();
     test_static_type_dag_is_structurally_deduplicated();

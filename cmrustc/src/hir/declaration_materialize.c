@@ -483,7 +483,8 @@ static int cm_decl_application_schema_valid(
     }
     target = &metadata->items[wire->item_local - 1u];
     if ((target->kind != CM_HIR_DECL_ITEM_STRUCT
-            && target->kind != CM_HIR_DECL_ITEM_UNION)
+            && target->kind != CM_HIR_DECL_ITEM_UNION
+            && target->kind != CM_HIR_DECL_ITEM_ENUM)
         || target->generic_count != wire->argument_count
         || target->generic_start == 0u
         || (size_t)target->generic_start > metadata->generic_count
@@ -708,7 +709,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
     size_t index;
     for (index = 0u; index < metadata->item_count; ++index) {
         const CmHirDeclarationItem *wire;
-        CmHirAttribute item_attribute;
+        CmHirAttribute enum_attributes[2];
         CmHirAttribute aggregate_attributes[3];
         CmHirField *fields;
         CmHirVariant *variants;
@@ -728,7 +729,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         fields = NULL;
         variants = NULL;
         diagnostic_metadata = NULL;
-        memset(&item_attribute, 0, sizeof(item_attribute));
+        memset(enum_attributes, 0, sizeof(enum_attributes));
         memset(aggregate_attributes, 0, sizeof(aggregate_attributes));
         memset(&item, 0, sizeof(item));
         if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
@@ -809,8 +810,9 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
 
             int explicit_discriminants = wire->enum_repr_primitive
                 == CM_HIR_DECL_PRIMITIVE_U8;
-            if (wire->alias_target_type != 0u || wire->generic_start != 0u
-                || wire->generic_count != 0u
+            if (wire->alias_target_type != 0u
+                || (wire->enum_flags
+                    & (uint8_t)~CM_HIR_DECL_ENUM_HAS_LANG_ITEM) != 0u
                 || (!explicit_discriminants
                     && wire->enum_repr_primitive
                         != CM_HIR_DECL_ENUM_REPR_RUST)
@@ -820,7 +822,9 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
             }
             if (explicit_discriminants) {
                 if (wire->diagnostic_item.data != NULL
-                    || wire->diagnostic_item.length != 0u) {
+                    || wire->diagnostic_item.length != 0u
+                    || wire->generic_count != 0u
+                    || wire->enum_flags != 0u) {
                     return CM_HIR_INVARIANT_VIOLATION;
                 }
             } else {
@@ -850,13 +854,23 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 memcpy(diagnostic_metadata + prefix_length
                         + wire->diagnostic_item.length,
                     suffix, suffix_length);
-                item_attribute.metadata = cm_interner_intern(
+                enum_attributes[0].metadata = cm_interner_intern(
                     &context->strings, diagnostic_metadata,
                     metadata_length);
                 cm_free(diagnostic_metadata);
                 diagnostic_metadata = NULL;
-                if (item_attribute.metadata == CM_INTERN_ID_NONE)
+                if (enum_attributes[0].metadata == CM_INTERN_ID_NONE)
                     return CM_HIR_INVALID_ARGUMENT;
+                if ((wire->enum_flags
+                        & CM_HIR_DECL_ENUM_HAS_LANG_ITEM) != 0u) {
+                    enum_attributes[1].metadata = cm_decl_lang_attribute(
+                        context, wire->enum_lang_item);
+                    if (enum_attributes[1].metadata == CM_INTERN_ID_NONE)
+                        return CM_HIR_INVALID_ARGUMENT;
+                } else if (wire->enum_lang_item.data != NULL
+                        || wire->enum_lang_item.length != 0u) {
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
             }
             variants = (CmHirVariant *)cm_decl_array(wire->variant_count,
                 sizeof(*variants));
@@ -866,9 +880,19 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 const CmHirDeclarationVariant *wire_variant;
                 CmHirType discriminant_type;
                 CmHirTypeId discriminant_type_id;
+                uint32_t field_index;
 
                 wire_variant = &wire->variants[variant_index];
-                if (wire_variant->kind != CM_HIR_DECL_VARIANT_UNIT
+                if ((wire_variant->kind != CM_HIR_DECL_VARIANT_UNIT
+                        && wire_variant->kind
+                            != CM_HIR_DECL_VARIANT_TUPLE)
+                    || (wire_variant->kind == CM_HIR_DECL_VARIANT_UNIT
+                        && (wire_variant->field_count != 0u
+                            || wire_variant->fields != NULL))
+                    || (wire_variant->kind == CM_HIR_DECL_VARIANT_TUPLE
+                        && (explicit_discriminants
+                            || wire_variant->field_count == 0u
+                            || wire_variant->fields == NULL))
                     || (explicit_discriminants
                         ? (wire_variant->discriminant_primitive
                                 != CM_HIR_DECL_PRIMITIVE_ISIZE
@@ -878,15 +902,69 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                         : (wire_variant->discriminant_primitive
                                 != CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT
                             || wire_variant->discriminant_low != 0u
-                            || wire_variant->discriminant_high != 0u))) {
-                    cm_free(variants);
-                    return CM_HIR_INVARIANT_VIOLATION;
+                            || wire_variant->discriminant_high != 0u))
+                    || (wire_variant->flags
+                        & (uint16_t)~CM_HIR_DECL_VARIANT_HAS_LANG_ITEM)
+                        != 0u) {
+                    status = CM_HIR_INVARIANT_VIOLATION;
+                    goto enum_failure;
                 }
                 variants[variant_index].definition =
                     runtime->variants[index][variant_index];
                 variants[variant_index].name = cm_decl_intern(context,
                     wire_variant->name);
-                variants[variant_index].form = CM_HIR_AGGREGATE_UNIT;
+                if ((wire_variant->flags
+                        & CM_HIR_DECL_VARIANT_HAS_LANG_ITEM) != 0u) {
+                    variants[variant_index].lang_item = cm_decl_intern(
+                        context, wire_variant->lang_item);
+                    if (variants[variant_index].lang_item
+                            == CM_INTERN_ID_NONE) {
+                        status = CM_HIR_INVALID_ARGUMENT;
+                        goto enum_failure;
+                    }
+                } else if (wire_variant->lang_item.data != NULL
+                        || wire_variant->lang_item.length != 0u) {
+                    status = CM_HIR_INVARIANT_VIOLATION;
+                    goto enum_failure;
+                }
+                variants[variant_index].form = wire_variant->kind
+                        == CM_HIR_DECL_VARIANT_UNIT
+                    ? CM_HIR_AGGREGATE_UNIT : CM_HIR_AGGREGATE_TUPLE;
+                variants[variant_index].field_count =
+                    wire_variant->field_count;
+                variants[variant_index].fields = (CmHirField *)cm_decl_array(
+                    wire_variant->field_count,
+                    sizeof(*variants[variant_index].fields));
+                if (wire_variant->field_count != 0u
+                    && variants[variant_index].fields == NULL) {
+                    status = CM_HIR_INVALID_ARGUMENT;
+                    goto enum_failure;
+                }
+                for (field_index = 0u;
+                     field_index < wire_variant->field_count;
+                     ++field_index) {
+                    const CmHirDeclarationVariantField *wire_field;
+
+                    wire_field = &wire_variant->fields[field_index];
+                    if (wire_field->type_local == 0u
+                        || (size_t)wire_field->type_local
+                            > metadata->type_count
+                        || runtime->types[wire_field->type_local - 1u]
+                            == CM_HIR_TYPE_NONE) {
+                        status = CM_HIR_INVARIANT_VIOLATION;
+                        goto enum_failure;
+                    }
+                    variants[variant_index].fields[field_index].name =
+                        CM_INTERN_ID_NONE;
+                    variants[variant_index].fields[field_index].type =
+                        runtime->types[wire_field->type_local - 1u];
+                    variants[variant_index].fields[field_index].visibility
+                        .kind = CM_HIR_VIS_PRIVATE;
+                    variants[variant_index].fields[field_index].visibility
+                        .restriction = cm_hir_def_id_none();
+                    variants[variant_index].fields[field_index].span =
+                        cm_decl_span(source, wire_field->source_ordinal);
+                }
                 if (explicit_discriminants) {
                     memset(&discriminant_type, 0,
                         sizeof(discriminant_type));
@@ -898,8 +976,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                     status = cm_hir_add_type(context, &discriminant_type,
                         &discriminant_type_id);
                     if (status != CM_HIR_OK) {
-                        cm_free(variants);
-                        return status;
+                        goto enum_failure;
                     }
                     variants[variant_index].has_discriminant = 1;
                     variants[variant_index].discriminant.kind =
@@ -914,13 +991,27 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 variants[variant_index].span = cm_decl_span(source,
                     wire_variant->source_ordinal);
             }
-            if (explicit_discriminants)
-                item_attribute.metadata = cm_hir_intern(context, "repr(u8)");
-            item_attribute.span = item.span;
-            /* Synthetic metadata-origin attribute ordinal, always nonzero. */
-            item_attribute.source_attribute = 1u;
-            item.attributes = &item_attribute;
-            item.attribute_count = 1u;
+            if (explicit_discriminants) {
+                enum_attributes[0].metadata = cm_hir_intern(context,
+                    "repr(u8)");
+            }
+            {
+                uint32_t attribute_count;
+                uint32_t attribute_index;
+
+                attribute_count = explicit_discriminants ? 1u
+                    : (((wire->enum_flags
+                            & CM_HIR_DECL_ENUM_HAS_LANG_ITEM) != 0u)
+                        ? 2u : 1u);
+                for (attribute_index = 0u;
+                     attribute_index < attribute_count; ++attribute_index) {
+                    enum_attributes[attribute_index].span = item.span;
+                    enum_attributes[attribute_index].source_attribute =
+                        attribute_index + 1u;
+                }
+                item.attributes = enum_attributes;
+                item.attribute_count = attribute_count;
+            }
             item.data.enum_item.variants = variants;
             item.data.enum_item.variant_count = wire->variant_count;
         } else {
@@ -935,8 +1026,28 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         }
         status = cm_hir_add_item(context, &item, &item_id);
         cm_free(fields);
+        if (variants != NULL) {
+            uint32_t variant_index;
+            for (variant_index = 0u;
+                 variant_index < wire->variant_count; ++variant_index) {
+                cm_free(variants[variant_index].fields);
+            }
+        }
         cm_free(variants);
         if (status != CM_HIR_OK) return status;
+        continue;
+
+enum_failure:
+        if (variants != NULL) {
+            uint32_t cleanup_index;
+            for (cleanup_index = 0u;
+                 cleanup_index < wire->variant_count; ++cleanup_index) {
+                cm_free(variants[cleanup_index].fields);
+            }
+        }
+        cm_free(variants);
+        cm_free(fields);
+        return status;
     }
     return CM_HIR_OK;
 }

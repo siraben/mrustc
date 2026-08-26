@@ -26,7 +26,9 @@ typedef struct CmHirMetadataArtifactResult {
 } CmHirMetadataArtifactResult;
 
 /*
- * Encode one live library artifact into deterministic cmhir-meta-v1 bytes.
+ * Encode one live library artifact into deterministic cmhir-meta-v1.x bytes.
+ * Lang-free artifacts retain the exact v1.0 format; an artifact containing a
+ * retained enum-variant lang identity uses the additive v1.2 format.
  * The declaration slice accepts modules, extern types, structs, unions,
  * enums, free type aliases, lifetime/type/const generics and type defaults,
  * their supported structural types, public aliases/reexports, and builtin
@@ -51,8 +53,10 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_artifact(
 
 /*
  * Explicit cmhir-meta-v1.1 semantic boundary. It adds authenticated,
- * monomorphic trait/impl facts to the v1.0 declaration payload. The semantic
- * API accepts exact v1.1 only. The encoded universe is always open:
+ * monomorphic trait/impl facts to the v1.0 declaration payload. Lang-free
+ * artifacts retain exact v1.1; a retained enum-variant lang identity selects
+ * additive v1.3. The decoder dispatches exact v1.3 and then exact v1.1. The
+ * encoded universe is always open:
  * transported presence may prove a goal, but absence never proves that an
  * implementation does not exist.
  */
@@ -64,8 +68,10 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     CmSourceId metadata_source);
 
 /*
- * Exact cmhir-meta-v2.6 declaration encoder, with strict v2.6, v2.5, v2.4,
- * then v2.3 decoder dispatch. In addition to v2.3 values, v2.4 transports the
+ * Exact cmhir-meta-v2.6 declaration encoder for lang-free artifacts. A
+ * retained enum-variant lang identity selects additive v2.7; the decoder
+ * dispatches strict v2.7, v2.6, v2.5, v2.4, then v2.3. In addition to v2.3
+ * values, v2.4 transports the
  * bounded predicate shape used by generic public free functions: scope-free
  * trait predicates on direct function type parameters with type
  * arguments, zero-GAT associated-type

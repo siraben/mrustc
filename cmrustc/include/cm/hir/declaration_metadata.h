@@ -175,13 +175,23 @@ typedef struct CmHirDeclarationField {
 } CmHirDeclarationField;
 
 typedef enum CmHirDeclarationVariantKind {
-    CM_HIR_DECL_VARIANT_UNIT = 1
+    CM_HIR_DECL_VARIANT_UNIT = 1,
+    CM_HIR_DECL_VARIANT_TUPLE = 2
 } CmHirDeclarationVariantKind;
 
 /* Zero is reserved for the bounded Rust-default enum representation. */
 #define CM_HIR_DECL_ENUM_REPR_RUST UINT8_C(0)
 /* Zero denotes a source-level implicit discriminant in that representation. */
 #define CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT UINT8_C(0)
+
+#define CM_HIR_DECL_ENUM_HAS_LANG_ITEM UINT8_C(1)
+#define CM_HIR_DECL_VARIANT_HAS_LANG_ITEM UINT16_C(1)
+
+typedef struct CmHirDeclarationVariantField {
+    /* Source-order identity within the owning variant; zero is valid. */
+    uint32_t source_ordinal;
+    uint32_t type_local;
+} CmHirDeclarationVariantField;
 
 typedef struct CmHirDeclarationVariant {
     uint8_t kind;
@@ -190,16 +200,23 @@ typedef struct CmHirDeclarationVariant {
     uint8_t discriminant_primitive;
     uint64_t discriminant_low;
     uint64_t discriminant_high;
+    uint16_t flags;
+    uint32_t field_count;
+    CmHirDeclarationVariantField *fields;
+    /* Required exactly when flags has HAS_LANG_ITEM. */
+    CmHirDeclarationString lang_item;
 } CmHirDeclarationVariant;
 
 /*
  * The bounded ordinary ITEM slice includes public top-level unit and named
  * structs, named unions, repr(u8) unit-variant enums, Rust-default diagnostic
- * unit enums, and free type aliases to zero-argument STRUCT ITEMs. Structs and
- * unions may own type parameters; enums and aliases require zero
- * generic/predicate ranges. A unit STRUCT's public constructor availability is
- * represented by the complete VALUE namespace. Named structs, unions, and
- * enums are TYPE-only in module namespace metadata.
+ * unit enums, Rust-default generic UNIT/TUPLE enums, and free type aliases to
+ * zero-argument STRUCT ITEMs. Structs, unions, and the bounded generic enum
+ * profile may own type parameters; aliases require zero generic/predicate
+ * ranges and every enum requires zero predicates. A unit STRUCT's public
+ * constructor availability is represented by the complete VALUE namespace.
+ * Named structs, unions, and enum parents are TYPE-only in module namespace
+ * metadata; UNIT/TUPLE enum constructors use ENUM_VARIANT namespace targets.
  */
 typedef struct CmHirDeclarationItem {
     uint8_t kind;
@@ -226,6 +243,9 @@ typedef struct CmHirDeclarationItem {
     CmHirDeclarationVariant *variants;
     /* Required only by the Rust-default implicit diagnostic-enum profile. */
     CmHirDeclarationString diagnostic_item;
+    uint8_t enum_flags;
+    /* Required exactly when enum_flags has HAS_LANG_ITEM. */
+    CmHirDeclarationString enum_lang_item;
 } CmHirDeclarationItem;
 
 typedef struct CmHirDeclarationGeneric {

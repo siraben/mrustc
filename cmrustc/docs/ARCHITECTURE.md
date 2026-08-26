@@ -84,15 +84,20 @@ Version 2.5 adds a stable modifier byte and preserves REQUIRED,
 CONST_IF_CONST, and CONST without treating them as const-trait eligibility.
 Version 2.6 admits an opaque trait-alias NREF as the direct target of a PRED
 record, but forbids direct alias equalities and transports no alias expansion.
+Version 2.7 conditionally appends retained enum-variant `lang` identities;
+artifacts without that identity remain byte-identical v2.6. Generic and
+semantic metadata use the corresponding additive v1.2 and v1.3 envelopes,
+while lang-free artifacts retain v1.0 and v1.1 respectively.
 Referenced traits and associated types remain opaque RESERVED identities with
 authenticated names, owners, generic schemas, declaring parents, and explicit
 associated-availability witnesses; they create no item or namespace binding.
 Predicate-owned late-bound input regions are accepted only beneath their
 authenticating binder. Decoder preflight checks canonical ordering, aggregate
 resource limits, type reachability and nesting, generic provenance, and all
-cross-section references before reserving runtime definitions. Exact v2.6
-decode falls back through exact v2.5, v2.4, and v2.3 only for an unsupported version;
-malformed current-version payloads never fall through. None of these formats
+cross-section references before reserving runtime definitions. Exact v2.7
+decode falls back through exact v2.6, v2.5, v2.4, and v2.3 only for an
+unsupported version; malformed current-version payloads never fall through.
+None of these formats
 yet carries the complete core trait/alias/impl, body, instantiation,
 dependency-archive, or link-input surface, and none is yet a consumable core
 `.rmeta` or `.rlib`.
@@ -340,7 +345,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v36`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v37`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
@@ -360,6 +365,13 @@ semantic, CTFE, MIR, and code-generation entry points still receive no body
 authority and must reject an attempted evaluation. Static items, associated
 consts, mutable values, metadata declarations with bodies, and bodyless source
 free consts reject.
+
+`hir-v37` retains each enum variant's optional compiler language-item identity
+as structural HIR. Lowering authenticates graph-backed variant attributes
+against their source/effective declaration identity, metadata preserves the
+identity conditionally, and canonical dumps expose it without treating the
+identity as an ordinary projected attribute. Duplicate non-empty variant
+language-item identities within one enum reject.
 
 The generation-bound whole-local-body barrier now reaches a read-only REGIONS
 checkpoint after TYPED and MARKED. MARKED atomically records builtin-Copy
@@ -1414,7 +1426,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v36`.
+wrong-kind targets hard-error. The canonical format is `hir-v37`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

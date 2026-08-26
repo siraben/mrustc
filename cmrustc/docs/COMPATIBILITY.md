@@ -279,7 +279,7 @@ behavior. Signed subtraction, mixed scalar types, context-free literal
 defaulting, non-decimal or otherwise unsupported bare literals, malformed
 temporary graphs, general statements, and other expression forms hard-error
 on a reachable root. A private unsupported body outside root reachability
-remains omitted rather than guessed. Canonical dumps are `hir-v36` and
+remains omitted rather than guessed. Canonical dumps are `hir-v37` and
 `mir-v9`.
 
 Canonical `hir-v35` also dumps resolver-authenticated conservative
@@ -295,6 +295,12 @@ cannot be used as executable evidence. Source free consts and all statics still
 require a real body; trait-default promises remain represented separately.
 Deterministic dumps expose the provenance so declaration-only dependency HIR
 cannot compare equal to source/executable HIR by omission.
+
+Canonical `hir-v37` retains an enum variant's optional compiler `lang`
+identity as a closed model field and dumps it explicitly. Generic HIR
+metadata uses additive v1.2, semantic v1.3, and declaration v2.7 envelopes
+only when that identity is present; lang-free artifacts remain byte-identical
+to their prior formats.
 
 The all-local body manifest can now prove `MARKED -> REGIONS` for this bounded
 expression slice. The proof is read-only and covers bounded MARKED evidence,

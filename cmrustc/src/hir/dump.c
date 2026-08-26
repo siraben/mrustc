@@ -527,7 +527,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v36\n", stream);
+    fputs("hir-v37\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -1246,6 +1246,28 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 cm_hir_dump_string(stream, context, attribute->metadata);
                 fputs(" span=", stream);
                 cm_hir_dump_span(stream, attribute->span);
+                fputc('\n', stream);
+            }
+        }
+        if (item->kind == CM_HIR_ITEM_ENUM) {
+            uint32_t variant_index;
+
+            for (variant_index = 0u;
+                 variant_index < item->data.enum_item.variant_count;
+                 ++variant_index) {
+                const CmHirVariant *variant;
+
+                variant = &item->data.enum_item.variants[variant_index];
+                if (variant->lang_item == CM_INTERN_ID_NONE) continue;
+                fprintf(stream,
+                    "enum-variant-lang item#%u index=%u definition=",
+                    (unsigned int)(index + 1u),
+                    (unsigned int)variant_index);
+                cm_hir_dump_def(stream, variant->definition);
+                fputs(" name=", stream);
+                cm_hir_dump_string(stream, context, variant->name);
+                fputs(" lang=", stream);
+                cm_hir_dump_string(stream, context, variant->lang_item);
                 fputc('\n', stream);
             }
         }

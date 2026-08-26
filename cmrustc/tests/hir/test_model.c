@@ -383,10 +383,12 @@ static void test_enum_variant_definition_model(void)
     memset(variants, 0, sizeof(variants));
     variants[0].definition = variant_definitions[0];
     variants[0].name = cm_hir_intern(&context, "Unit");
+    variants[0].lang_item = cm_hir_intern(&context, "UnitLang");
     variants[0].form = CM_HIR_AGGREGATE_UNIT;
     variants[0].span = test_span(20u, 29u);
     variants[1].definition = variant_definitions[1];
     variants[1].name = cm_hir_intern(&context, "Tuple");
+    variants[1].lang_item = variants[0].lang_item;
     variants[1].form = CM_HIR_AGGREGATE_TUPLE;
     variants[1].fields = &tuple_field;
     variants[1].field_count = 1u;
@@ -402,6 +404,8 @@ static void test_enum_variant_definition_model(void)
         test_span(10u, 60u));
     item.data.enum_item.variants = variants;
     item.data.enum_item.variant_count = 3u;
+    assert(cm_hir_add_item(&context, &item, &item_id) != CM_HIR_OK);
+    variants[1].lang_item = cm_hir_intern(&context, "TupleLang");
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     stored = cm_hir_get_item(&context, item_id);
     assert(stored != NULL && stored->kind == CM_HIR_ITEM_ENUM
@@ -454,6 +458,8 @@ static void test_enum_variant_definition_model(void)
     dump = read_dump(dump_file);
     assert(strstr(dump, "enum-variant bound enum-item#1 variant=0")
         != NULL);
+    assert(strstr(dump, "enum-variant-lang item#1 index=0") != NULL
+        && strstr(dump, "lang=\"UnitLang\"") != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
     cm_hir_context_destroy(&context);
@@ -1402,7 +1408,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1661,7 +1667,7 @@ static void test_function_pointer_lifetime_binder_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+    assert(strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(dump,
             "type#4 for<\"'a\"> fn[\"Rust\"](ty#2)->ty#2 ") != NULL
         && strstr(dump,
@@ -3147,7 +3153,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -3391,7 +3397,7 @@ static void test_imported_value_declaration_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+    assert(strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(dump,
             "default-body=0 definition=metadata-declaration") != NULL);
     free(dump);
@@ -3688,7 +3694,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+    assert(strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -4375,7 +4381,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -4857,7 +4863,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -5374,7 +5380,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -6521,7 +6527,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -8561,7 +8567,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(strstr(dump,
         "trait-header item#2 safety=unsafe auto=1 const=1")
         != NULL);
@@ -8962,7 +8968,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -8990,6 +8996,115 @@ static void test_trait_alias_model_invariants(void)
     free(first_dump);
     assert(fclose(second_file) == 0);
     assert(fclose(first_file) == 0);
+    cm_hir_context_destroy(&context);
+}
+
+static void test_aggregate_field_generic_owner_scope(void)
+{
+    CmHirContext context;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_module;
+    CmHirDefId foreign_definition;
+    CmHirDefId option_definition;
+    CmHirGenericParam parameter;
+    CmHirGenericParamId foreign_parameter;
+    CmHirGenericParamId option_parameter;
+    CmHirType type;
+    CmHirTypeId foreign_parameter_type;
+    CmHirTypeId option_parameter_type;
+    CmHirTypeId foreign_application_type;
+    CmHirGenericArg argument;
+    CmHirField field;
+    CmHirVariant variants[2];
+    CmHirItem item;
+    CmHirItemId item_id;
+    size_t item_count;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context, cm_hir_intern(&context, "scope"),
+        CM_HIR_EDITION_2024, test_span(1u, 100u), &crate_id, &root_module)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_STRUCT, test_span(2u, 20u), &foreign_definition)
+        == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_ENUM, test_span(21u, 50u), &option_definition)
+        == CM_HIR_OK);
+
+    memset(&parameter, 0, sizeof(parameter));
+    parameter.kind = CM_HIR_GENERIC_TYPE;
+    parameter.owner = foreign_definition;
+    parameter.name = cm_hir_intern(&context, "W");
+    parameter.span = test_span(3u, 4u);
+    assert(cm_hir_add_generic_param(&context, &parameter,
+        &foreign_parameter) == CM_HIR_OK);
+    parameter.owner = option_definition;
+    parameter.name = cm_hir_intern(&context, "T");
+    parameter.span = test_span(22u, 23u);
+    assert(cm_hir_add_generic_param(&context, &parameter,
+        &option_parameter) == CM_HIR_OK);
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_PARAMETER_KIND;
+    type.span = test_span(4u, 5u);
+    type.data.parameter_type.parameter = foreign_parameter;
+    assert(cm_hir_add_type(&context, &type, &foreign_parameter_type)
+        == CM_HIR_OK);
+    type.span = test_span(23u, 24u);
+    type.data.parameter_type.parameter = option_parameter;
+    assert(cm_hir_add_type(&context, &type, &option_parameter_type)
+        == CM_HIR_OK);
+
+    memset(&field, 0, sizeof(field));
+    field.type = foreign_parameter_type;
+    field.visibility.kind = CM_HIR_VIS_PRIVATE;
+    field.span = test_span(5u, 6u);
+    init_test_item(&item, CM_HIR_ITEM_STRUCT, foreign_definition,
+        root_module, cm_hir_def_id_none(), cm_hir_intern(&context, "Foreign"),
+        test_span(2u, 20u));
+    item.generic_parameter_start = foreign_parameter;
+    item.generic_parameter_count = 1u;
+    item.data.aggregate_item.form = CM_HIR_AGGREGATE_TUPLE;
+    item.data.aggregate_item.fields = &field;
+    item.data.aggregate_item.field_count = 1u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
+    memset(variants, 0, sizeof(variants));
+    variants[0].name = cm_hir_intern(&context, "None");
+    variants[0].form = CM_HIR_AGGREGATE_UNIT;
+    variants[0].span = test_span(25u, 26u);
+    variants[1].name = cm_hir_intern(&context, "Some");
+    variants[1].form = CM_HIR_AGGREGATE_TUPLE;
+    variants[1].fields = &field;
+    variants[1].field_count = 1u;
+    variants[1].span = test_span(27u, 30u);
+    field.type = foreign_parameter_type;
+    field.span = test_span(28u, 29u);
+    init_test_item(&item, CM_HIR_ITEM_ENUM, option_definition,
+        root_module, cm_hir_def_id_none(), cm_hir_intern(&context, "Option"),
+        test_span(21u, 50u));
+    item.generic_parameter_start = option_parameter;
+    item.generic_parameter_count = 1u;
+    item.data.enum_item.variants = variants;
+    item.data.enum_item.variant_count = 2u;
+    item_count = context.items.len;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVARIANT_VIOLATION
+        && item_id == CM_HIR_ITEM_NONE && context.items.len == item_count);
+
+    memset(&argument, 0, sizeof(argument));
+    argument.kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument.data.type = option_parameter_type;
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_ADT_KIND;
+    type.span = test_span(31u, 35u);
+    type.data.named_type.definition = foreign_definition;
+    type.data.named_type.arguments = &argument;
+    type.data.named_type.argument_count = 1u;
+    assert(cm_hir_add_type(&context, &type, &foreign_application_type)
+        == CM_HIR_OK);
+    field.type = foreign_application_type;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
     cm_hir_context_destroy(&context);
 }
 
@@ -9511,7 +9626,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
+    assert(strncmp(first_dump, "hir-v37\n", strlen("hir-v37\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,
@@ -9575,5 +9690,6 @@ int main(void)
     test_const_generic_default_type_invariants();
     test_const_generic_trait_method_model();
     test_auto_trait_and_negative_impl_model();
+    test_aggregate_field_generic_owner_scope();
     return 0;
 }

@@ -90,6 +90,12 @@
 #define CM_META_MUT_IMMUTABLE UINT8_C(1)
 #define CM_META_MUT_MUTABLE UINT8_C(2)
 
+/* Additive formats used only when retained enum-variant lang identity exists.
+ * Encoders continue to produce the prior byte-for-byte format otherwise. */
+#define CM_META_VARIANT_LANG_MINOR UINT16_C(2)
+#define CM_META_SEMANTIC_VARIANT_LANG_MINOR UINT16_C(3)
+#define CM_META_DECLARATION_VARIANT_LANG_MINOR UINT16_C(7)
+
 static const unsigned char cm_meta_tag_crate[4] = {
     (unsigned char)'C', (unsigned char)'R',
     (unsigned char)'A', (unsigned char)'T'
@@ -318,6 +324,7 @@ typedef struct CmMetaWireField {
 
 typedef struct CmMetaWireVariant {
     CmMetaWireName name;
+    CmMetaWireName lang_item;
     uint8_t form;
     CmMetaWireField *fields;
     uint32_t field_count;
@@ -1225,6 +1232,16 @@ static int cm_meta_write_name(CmHirMetadataWriter *writer,
             == CM_HIR_METADATA_OK
         && cm_hir_metadata_write_bytes(writer, name->bytes, name->len)
             == CM_HIR_METADATA_OK;
+}
+
+static int cm_meta_write_optional_name(CmHirMetadataWriter *writer,
+    const CmInternedString *name)
+{
+    if (name == NULL) {
+        return cm_hir_metadata_write_u32(writer, UINT32_C(0))
+            == CM_HIR_METADATA_OK;
+    }
+    return cm_meta_write_name(writer, name);
 }
 
 static int cm_meta_write_string(CmHirMetadataWriter *writer,
@@ -2592,13 +2609,22 @@ static int cm_meta_collect_types(
         }
         if (item->kind == CM_HIR_ITEM_STRUCT
             || item->kind == CM_HIR_ITEM_UNION) {
+            provenance_generation += 1u;
             for (child = 0u; valid
                     && child < item->data.aggregate_item.field_count;
                     ++child) {
-                valid = cm_meta_collect_type(identity, items, generics, types,
-                    states, item->data.aggregate_item.fields[child].type, 0u);
+                valid = cm_meta_function_type_generics_supported_cached(
+                        identity->context,
+                        item->data.aggregate_item.fields[child].type,
+                        item->definition, item->generic_parameter_start,
+                        item->generic_parameter_count, 0u, 0,
+                        provenance_marks, provenance_generation)
+                    && cm_meta_collect_type(identity, items, generics, types,
+                        states, item->data.aggregate_item.fields[child].type,
+                        0u);
             }
         } else if (item->kind == CM_HIR_ITEM_ENUM) {
+            provenance_generation += 1u;
             for (child = 0u; valid
                     && child < item->data.enum_item.variant_count; ++child) {
                 const CmHirVariant *variant;
@@ -2607,8 +2633,13 @@ static int cm_meta_collect_types(
                 variant = &item->data.enum_item.variants[child];
                 for (field = 0u; valid && field < variant->field_count;
                         ++field) {
-                    valid = cm_meta_collect_type(identity, items, generics,
-                        types, states, variant->fields[field].type, 0u);
+                    valid = cm_meta_function_type_generics_supported_cached(
+                            identity->context, variant->fields[field].type,
+                            item->definition, item->generic_parameter_start,
+                            item->generic_parameter_count, 0u, 0,
+                            provenance_marks, provenance_generation)
+                        && cm_meta_collect_type(identity, items, generics,
+                            types, states, variant->fields[field].type, 0u);
                 }
                 if (valid && variant->has_discriminant) {
                     valid = variant->discriminant.kind == CM_HIR_CONST_VALUE
@@ -3330,7 +3361,7 @@ static int cm_meta_write_item(CmHirMetadataWriter *writer,
     const CmHirLibraryArtifactIdentity *identity,
     const CmMetaEncodeItem *encoded, const CmVec *modules,
     const CmVec *generics, const uint32_t *type_locals,
-    size_t type_local_count)
+    size_t type_local_count, int variant_lang_format)
 {
     const CmHirItem *item;
     uint32_t generic_start;
@@ -3415,6 +3446,11 @@ static int cm_meta_write_item(CmHirMetadataWriter *writer,
                         variant->discriminant.data.value.high_bits)
                         != CM_HIR_METADATA_OK) return 0;
             }
+            if (variant_lang_format
+                && !cm_meta_write_optional_name(writer,
+                    variant->lang_item == CM_INTERN_ID_NONE ? NULL
+                        : cm_interner_get(&identity->context->strings,
+                            variant->lang_item))) return 0;
         }
         return 1;
     }
@@ -3977,6 +4013,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     size_t module_index;
     size_t public_entry_count;
     int declaration_v24;
+    int variant_lang_format;
 
     result = cm_meta_result(CM_HIR_METADATA_ARTIFACT_INVALID_ARGUMENT);
     if (output == NULL || artifact == NULL || (semantic && declaration)
@@ -3987,8 +4024,10 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
         || owned->modules.len > (size_t)CM_META_MAX_MODULES
         || (crate_value = cm_hir_get_crate(identity.context,
             identity.crate_id)) == NULL) return result;
-    /* The current declaration encoder always emits the exact v2.6 family. */
+    /* Declaration payloads use v2.6 unless retained variant-lang identity
+     * requires the additive v2.7 item payload. */
     declaration_v24 = declaration;
+    variant_lang_format = 0;
     if (semantic) {
         size_t item_index;
 
@@ -4208,6 +4247,27 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
 
     cm_hir_metadata_writer_init(&writer, &item_section,
         CM_HIR_METADATA_MAX_PAYLOAD_SIZE);
+    for (module_index = 0u; module_index < items.len; ++module_index) {
+        const CmMetaEncodeItem *encoded_item;
+        uint32_t variant_index;
+
+        encoded_item = (const CmMetaEncodeItem *)cm_vec_at_const(&items,
+            module_index);
+        if (encoded_item == NULL || encoded_item->item == NULL) {
+            result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
+            goto cleanup_encode;
+        }
+        if (encoded_item->item->kind != CM_HIR_ITEM_ENUM) continue;
+        for (variant_index = 0u;
+             variant_index
+                < encoded_item->item->data.enum_item.variant_count;
+             ++variant_index) {
+            if (encoded_item->item->data.enum_item.variants[variant_index]
+                    .lang_item != CM_INTERN_ID_NONE) {
+                variant_lang_format = 1;
+            }
+        }
+    }
     if (cm_hir_metadata_write_u32(&writer, (uint32_t)items.len)
             != CM_HIR_METADATA_OK) goto encode_limit;
     for (module_index = 0u; module_index < items.len; ++module_index) {
@@ -4216,7 +4276,7 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
             module_index);
         if (encoded_item == NULL || !cm_meta_write_item(&writer, &identity,
                 encoded_item, &modules, &generics, type_locals,
-                type_local_count)) {
+                type_local_count, variant_lang_format)) {
             result.status = CM_HIR_METADATA_ARTIFACT_INVALID_HIR;
             goto cleanup_encode;
         }
@@ -4386,11 +4446,15 @@ static CmHirMetadataArtifactResult cm_meta_encode_artifact(
     codec_status = cm_hir_metadata_encode_envelope_version(output,
         (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MAJOR
             : CM_HIR_METADATA_MAJOR),
-        (uint16_t)(declaration ? (declaration_v24
-                ? CM_HIR_METADATA_DECLARATION_MINOR
-                : CM_HIR_METADATA_DECLARATION_LEGACY_MINOR)
-            : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
-                : CM_HIR_METADATA_MINOR)), UINT32_C(0), payload.data,
+        (uint16_t)(variant_lang_format
+            ? (declaration ? CM_META_DECLARATION_VARIANT_LANG_MINOR
+                : (semantic ? CM_META_SEMANTIC_VARIANT_LANG_MINOR
+                    : CM_META_VARIANT_LANG_MINOR))
+            : (declaration ? (declaration_v24
+                    ? CM_HIR_METADATA_DECLARATION_MINOR
+                    : CM_HIR_METADATA_DECLARATION_LEGACY_MINOR)
+                : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
+                    : CM_HIR_METADATA_MINOR))), UINT32_C(0), payload.data,
         payload.len);
     if (codec_status != CM_HIR_METADATA_OK) {
         result.status = cm_meta_codec_status(codec_status);
@@ -4969,7 +5033,7 @@ static int cm_meta_read_field(CmHirMetadataReader *reader,
 
 static int cm_meta_decode_items(const CmHirMetadataSection *section,
     uint32_t module_count, uint32_t generic_count, uint32_t type_count,
-    CmVec *items)
+    CmVec *items, int variant_lang_format)
 {
     CmHirMetadataReader reader;
     uint32_t count;
@@ -5076,6 +5140,9 @@ static int cm_meta_decode_items(const CmHirMetadataSection *section,
                         || cm_hir_metadata_read_u64(&reader,
                             &variant->discriminant_high)
                             != CM_HIR_METADATA_OK)) return 0;
+                if (variant_lang_format
+                    && !cm_meta_read_optional_name(&reader,
+                        &variant->lang_item)) return 0;
             }
         } else if (item.kind == CM_META_ITEM_ALIAS) {
             if (cm_hir_metadata_read_u32(&reader,
@@ -5531,9 +5598,10 @@ static int cm_meta_wire_type_requirements(const CmVec *types,
     return valid;
 }
 
-static int cm_meta_wire_function_type_generics_valid_cached(
+static int cm_meta_wire_type_generics_valid_cached(
     const CmVec *types,
-    const CmVec *generics, uint32_t type_local, uint32_t value_local,
+    const CmVec *generics, uint32_t type_local, uint8_t owner_kind,
+    uint32_t owner_local,
     uint32_t generic_start, uint32_t generic_count, size_t depth,
     int predicate_root, uint32_t *marks, uint32_t generation)
 {
@@ -5547,8 +5615,8 @@ static int cm_meta_wire_function_type_generics_valid_cached(
     type = (const CmMetaWireType *)cm_vec_at_const(types, type_local - 1u);
     if (type == NULL) return 0;
 #define CM_META_WIRE_FUNCTION_CHILD(child_local) \
-    cm_meta_wire_function_type_generics_valid_cached(types, generics, \
-        (child_local), value_local, generic_start, generic_count, \
+    cm_meta_wire_type_generics_valid_cached(types, generics, \
+        (child_local), owner_kind, owner_local, generic_start, generic_count, \
         depth + 1u, predicate_root, marks, generation)
 #define CM_META_WIRE_FUNCTION_GENERIC(local, expected_kind) do { \
         const CmMetaWireGeneric *owned_generic; \
@@ -5558,8 +5626,8 @@ static int cm_meta_wire_function_type_generics_valid_cached(
             : (const CmMetaWireGeneric *)cm_vec_at_const(generics, \
                 owned_local - 1u); \
         if (owned_generic == NULL \
-            || owned_generic->owner_kind != CM_META_GENERIC_OWNER_VALUE \
-            || owned_generic->owner != value_local \
+            || owned_generic->owner_kind != owner_kind \
+            || owned_generic->owner != owner_local \
             || owned_generic->kind != (expected_kind) \
             || generic_count == 0u || owned_local < generic_start \
             || owned_local - generic_start >= generic_count \
@@ -5641,6 +5709,60 @@ static int cm_meta_wire_function_type_generics_valid_cached(
 #undef CM_META_WIRE_FUNCTION_CHILD
 #undef CM_META_WIRE_FUNCTION_GENERIC
     return 1;
+}
+
+static int cm_meta_wire_item_field_generics_valid(const CmVec *types,
+    const CmVec *generics, const CmVec *items)
+{
+    uint32_t *marks;
+    uint32_t generation;
+    size_t index;
+    int valid;
+
+    marks = (uint32_t *)cm_alloc_zeroed(types->len, sizeof(uint32_t));
+    generation = 0u;
+    valid = 1;
+    for (index = 0u; valid && index < items->len; ++index) {
+        const CmMetaWireItem *item;
+        uint32_t child;
+
+        item = (const CmMetaWireItem *)cm_vec_at_const(items, index);
+        if (item == NULL) {
+            valid = 0;
+            break;
+        }
+        generation += 1u;
+        if (item->kind == CM_META_ITEM_STRUCT
+                || item->kind == CM_META_ITEM_UNION) {
+            for (child = 0u; valid
+                    && child < item->data.aggregate_item.field_count;
+                    ++child) {
+                valid = cm_meta_wire_type_generics_valid_cached(types,
+                    generics, item->data.aggregate_item.fields[child].type,
+                    CM_META_GENERIC_OWNER_ITEM, (uint32_t)index + 1u,
+                    item->generic_start, item->generic_count, 0u, 0,
+                    marks, generation);
+            }
+        } else if (item->kind == CM_META_ITEM_ENUM) {
+            for (child = 0u; valid
+                    && child < item->data.enum_item.variant_count; ++child) {
+                const CmMetaWireVariant *variant;
+                uint32_t field;
+
+                variant = &item->data.enum_item.variants[child];
+                for (field = 0u; valid && field < variant->field_count;
+                        ++field) {
+                    valid = cm_meta_wire_type_generics_valid_cached(types,
+                        generics, variant->fields[field].type,
+                        CM_META_GENERIC_OWNER_ITEM, (uint32_t)index + 1u,
+                        item->generic_start, item->generic_count, 0u, 0,
+                        marks, generation);
+                }
+            }
+        }
+    }
+    cm_free(marks);
+    return valid;
 }
 
 static int cm_meta_wire_nonpredicate_roots_valid(const CmVec *generics,
@@ -5906,10 +6028,11 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
                     && index < value->data.function.parameter_count; ++index) {
                 if (requirements[value->data.function.parameter_types[index]
                             - 1u] != 0u
-                    || !cm_meta_wire_function_type_generics_valid_cached(
+                    || !cm_meta_wire_type_generics_valid_cached(
                         types,
                         generics,
                         value->data.function.parameter_types[index],
+                        CM_META_GENERIC_OWNER_VALUE,
                         (uint32_t)group_index + 1u,
                         value->data.function.generic_start,
                         value->data.function.generic_count, 0u, 0,
@@ -5918,8 +6041,9 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
             }
             if (valid && (requirements[
                     value->data.function.return_type - 1u] != 0u
-                || !cm_meta_wire_function_type_generics_valid_cached(types,
+                || !cm_meta_wire_type_generics_valid_cached(types,
                     generics, value->data.function.return_type,
+                    CM_META_GENERIC_OWNER_VALUE,
                     (uint32_t)group_index + 1u,
                     value->data.function.generic_start,
                     value->data.function.generic_count, 0u, 0,
@@ -6019,8 +6143,9 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
                     payload->nominal_reference_count,
                     predicate->trait_reference)
                 || requirements[predicate->subject - 1u] != 0u
-                || !cm_meta_wire_function_type_generics_valid_cached(types,
-                    generics, predicate->subject, payload->value_local,
+                || !cm_meta_wire_type_generics_valid_cached(types,
+                    generics, predicate->subject,
+                    CM_META_GENERIC_OWNER_VALUE, payload->value_local,
                     value->data.function.generic_start,
                     value->data.function.generic_count, 0u, 1,
                     provenance_marks, provenance_generation))
@@ -6049,9 +6174,10 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
                     ++child) {
                 if (requirements[predicate->arguments[child] - 1u]
                         > predicate->binder_count
-                    || !cm_meta_wire_function_type_generics_valid_cached(
+                    || !cm_meta_wire_type_generics_valid_cached(
                         types,
                         generics, predicate->arguments[child],
+                        CM_META_GENERIC_OWNER_VALUE,
                         payload->value_local,
                         value->data.function.generic_start,
                         value->data.function.generic_count, 0u, 1,
@@ -6068,9 +6194,10 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
                             >= predicate->equality_associated[child])
                     || requirements[predicate->equality_values[child] - 1u]
                         > predicate->binder_count
-                    || !cm_meta_wire_function_type_generics_valid_cached(
+                    || !cm_meta_wire_type_generics_valid_cached(
                         types,
                         generics, predicate->equality_values[child],
+                        CM_META_GENERIC_OWNER_VALUE,
                         payload->value_local,
                         value->data.function.generic_start,
                         value->data.function.generic_count, 0u, 1,
@@ -6095,8 +6222,9 @@ static int cm_meta_wire_predicates_canonical(const CmVec *generics,
                 || subject_type->kind != CM_META_TYPE_PARAMETER
                 || requirements[payload->outlives_subjects[index] - 1u]
                     != 0u
-                || !cm_meta_wire_function_type_generics_valid_cached(types,
+                || !cm_meta_wire_type_generics_valid_cached(types,
                     generics, payload->outlives_subjects[index],
+                    CM_META_GENERIC_OWNER_VALUE,
                     payload->value_local,
                     value->data.function.generic_start,
                     value->data.function.generic_count, 0u, 1,
@@ -6870,6 +6998,8 @@ static int cm_meta_wire_valid(const CmVec *modules, const CmVec *generics,
             return 0;
         }
     }
+    if (!cm_meta_wire_item_field_generics_valid(types, generics, items))
+        return 0;
     for (index = 1u; index < entries->len; ++index) {
         const CmMetaWireEntry *prior;
         const CmMetaWireEntry *entry;
@@ -7245,6 +7375,9 @@ static int cm_meta_bind_runtime_item(CmHirContext *context,
             variant = &variants[index];
             variant->definition = wire_variant->runtime_definition;
             variant->name = cm_meta_intern_name(context, wire_variant->name);
+            variant->lang_item = wire_variant->lang_item.length == 0u
+                ? CM_INTERN_ID_NONE
+                : cm_meta_intern_name(context, wire_variant->lang_item);
             variant->span = span;
             valid = cm_meta_form_from_wire(wire_variant->form,
                 &variant->form);
@@ -7340,7 +7473,7 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     CmHirContext *context, CmHirLibraryArtifact *artifact,
     const void *encoded, size_t encoded_length, const char *extern_name,
     CmSourceId metadata_source, int semantic, int declaration,
-    uint16_t declaration_minor)
+    uint16_t declaration_minor, int variant_lang_format)
 {
     CmHirMetadataArtifactResult result;
     CmHirMetadataEnvelope envelope;
@@ -7396,8 +7529,11 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
         (uint16_t)(declaration ? CM_HIR_METADATA_DECLARATION_MAJOR
             : CM_HIR_METADATA_MAJOR),
         (uint16_t)(declaration ? declaration_minor
-            : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
-                : CM_HIR_METADATA_MINOR)), &envelope);
+            : (variant_lang_format
+                ? (semantic ? CM_META_SEMANTIC_VARIANT_LANG_MINOR
+                    : CM_META_VARIANT_LANG_MINOR)
+                : (semantic ? CM_HIR_METADATA_SEMANTIC_MINOR
+                    : CM_HIR_METADATA_MINOR))), &envelope);
     if (codec_status != CM_HIR_METADATA_OK) {
         result.status = cm_meta_codec_status(codec_status);
         return result;
@@ -7405,7 +7541,8 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
     cm_hir_metadata_reader_init(&section_reader, envelope.payload,
         envelope.payload_length);
     declaration_v24 = declaration
-        && (declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
+        && (declaration_minor == CM_META_DECLARATION_VARIANT_LANG_MINOR
+            || declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
             || declaration_minor
                 == CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR
             || declaration_minor
@@ -7474,7 +7611,8 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             &types, declaration_v24)
         || types.len != (size_t)type_count
         || !cm_meta_decode_items(&sections[4], (uint32_t)modules.len,
-            (uint32_t)generics.len, type_count, &items)
+            (uint32_t)generics.len, type_count, &items,
+            variant_lang_format)
         || items.len != (size_t)item_count
         || (declaration && !cm_meta_decode_values(&sections[5], type_count,
             (uint32_t)generics.len, &values))
@@ -7483,10 +7621,12 @@ static CmHirMetadataArtifactResult cm_meta_decode_artifact(
             (uint32_t)modules.len, &nominals))
         || (declaration_v24 && !cm_meta_decode_value_predicates(&sections[8],
             &values, &nominals, type_count,
-            declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
+            declaration_minor == CM_META_DECLARATION_VARIANT_LANG_MINOR
+                || declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR
                 || declaration_minor
                     == CM_HIR_METADATA_DECLARATION_MODIFIER_MINOR,
-            declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR,
+            declaration_minor == CM_META_DECLARATION_VARIANT_LANG_MINOR
+                || declaration_minor == CM_HIR_METADATA_DECLARATION_MINOR,
             &value_predicates))
         || (declaration_v24 && !cm_meta_wire_predicates_canonical(&generics,
             &types, &items, &values, &nominals, &value_predicates,
@@ -8275,8 +8415,21 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_artifact(
     const void *encoded, size_t encoded_length, const char *extern_name,
     CmSourceId metadata_source)
 {
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataStatus status;
+
+    memset(&envelope, 0, sizeof(envelope));
+    status = cm_hir_metadata_decode_envelope_version(encoded,
+        encoded_length, CM_HIR_METADATA_MAJOR,
+        CM_META_VARIANT_LANG_MINOR, &envelope);
+    if (status == CM_HIR_METADATA_OK) {
+        return cm_meta_decode_artifact(context, artifact, encoded,
+            encoded_length, extern_name, metadata_source, 0, 0, 0u, 1);
+    }
+    if (status != CM_HIR_METADATA_UNSUPPORTED_VERSION)
+        return cm_meta_result(cm_meta_codec_status(status));
     return cm_meta_decode_artifact(context, artifact, encoded,
-        encoded_length, extern_name, metadata_source, 0, 0, 0u);
+        encoded_length, extern_name, metadata_source, 0, 0, 0u, 0);
 }
 
 CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
@@ -8284,8 +8437,21 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_semantic_artifact(
     const void *encoded, size_t encoded_length, const char *extern_name,
     CmSourceId metadata_source)
 {
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataStatus status;
+
+    memset(&envelope, 0, sizeof(envelope));
+    status = cm_hir_metadata_decode_envelope_version(encoded,
+        encoded_length, CM_HIR_METADATA_MAJOR,
+        CM_META_SEMANTIC_VARIANT_LANG_MINOR, &envelope);
+    if (status == CM_HIR_METADATA_OK) {
+        return cm_meta_decode_artifact(context, artifact, encoded,
+            encoded_length, extern_name, metadata_source, 1, 0, 0u, 1);
+    }
+    if (status != CM_HIR_METADATA_UNSUPPORTED_VERSION)
+        return cm_meta_result(cm_meta_codec_status(status));
     return cm_meta_decode_artifact(context, artifact, encoded,
-        encoded_length, extern_name, metadata_source, 1, 0, 0u);
+        encoded_length, extern_name, metadata_source, 1, 0, 0u, 0);
 }
 
 CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
@@ -8298,6 +8464,16 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
     uint16_t minor;
 
     memset(&envelope, 0, sizeof(envelope));
+    status = cm_hir_metadata_decode_envelope_version(encoded, encoded_length,
+        CM_HIR_METADATA_DECLARATION_MAJOR,
+        CM_META_DECLARATION_VARIANT_LANG_MINOR, &envelope);
+    minor = CM_META_DECLARATION_VARIANT_LANG_MINOR;
+    if (status == CM_HIR_METADATA_OK) {
+        return cm_meta_decode_artifact(context, artifact, encoded,
+            encoded_length, extern_name, metadata_source, 0, 1, minor, 1);
+    }
+    if (status != CM_HIR_METADATA_UNSUPPORTED_VERSION)
+        return cm_meta_result(cm_meta_codec_status(status));
     status = cm_hir_metadata_decode_envelope_version(encoded, encoded_length,
         CM_HIR_METADATA_DECLARATION_MAJOR,
         CM_HIR_METADATA_DECLARATION_MINOR, &envelope);
@@ -8323,7 +8499,7 @@ CmHirMetadataArtifactResult cm_hir_metadata_decode_declaration_artifact(
     if (status != CM_HIR_METADATA_OK)
         return cm_meta_result(cm_meta_codec_status(status));
     return cm_meta_decode_artifact(context, artifact, encoded,
-        encoded_length, extern_name, metadata_source, 0, 1, minor);
+        encoded_length, extern_name, metadata_source, 0, 1, minor, 0);
 }
 
 const char *cm_hir_metadata_artifact_status_name(

@@ -320,7 +320,10 @@ static void test_complete_declarations(void)
         "}"
         "struct First { next: Second }"
         "struct Second { prior: *const First }"
-        "enum Maybe<T> { None, Some(T) }"
+        "enum Maybe<T> {"
+        " #[lang = \"None\"] None,"
+        " #[lang = \"Some\"] Some(T)"
+        "}"
         "type Bytes = [u8; 16];"
         "const LIMIT: usize = 16;"
         "static mut FLAG: u8 = 0;"
@@ -387,6 +390,24 @@ static void test_complete_declarations(void)
     declaration = find_item(&context, "declaration");
     assert(node != NULL && node->kind == CM_HIR_ITEM_STRUCT);
     assert(maybe != NULL && maybe->kind == CM_HIR_ITEM_ENUM);
+    assert(maybe->data.enum_item.variant_count == 2u
+        && maybe->data.enum_item.variants[0].lang_item
+            != CM_INTERN_ID_NONE
+        && maybe->data.enum_item.variants[1].lang_item
+            != CM_INTERN_ID_NONE);
+    {
+        const CmInternedString *none_lang = cm_interner_get(
+            &context.strings,
+            maybe->data.enum_item.variants[0].lang_item);
+        const CmInternedString *some_lang = cm_interner_get(
+            &context.strings,
+            maybe->data.enum_item.variants[1].lang_item);
+        assert(none_lang != NULL && none_lang->len == sizeof("None") - 1u
+            && memcmp(none_lang->bytes, "None", none_lang->len) == 0
+            && some_lang != NULL
+            && some_lang->len == sizeof("Some") - 1u
+            && memcmp(some_lang->bytes, "Some", some_lang->len) == 0);
+    }
     assert(first != NULL && first->kind == CM_HIR_ITEM_STRUCT);
     assert(second != NULL && second->kind == CM_HIR_ITEM_STRUCT);
     assert(bytes != NULL && bytes->kind == CM_HIR_ITEM_TYPE_ALIAS);

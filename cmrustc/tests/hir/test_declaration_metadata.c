@@ -94,6 +94,20 @@ typedef struct StaticFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[3];
 } StaticFixture;
 
+typedef struct GenericEnumFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[3];
+    CmHirDeclarationGeneric generics[3];
+    CmHirDeclarationType types[6];
+    uint32_t application_arguments[2];
+    CmHirDeclarationItem items[3];
+    CmHirDeclarationField aggregate_fields[4];
+    CmHirDeclarationVariant variants[4];
+    CmHirDeclarationVariantField variant_fields[3];
+    CmHirDeclarationValue values[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[16];
+} GenericEnumFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -327,17 +341,38 @@ static size_t item_record_offset(const CmByteBuf *bytes,
             uint32_t child;
             uint32_t variant_count;
             uint8_t representation;
+            uint8_t enum_flags;
             assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
             representation = bytes->data[cursor];
+            enum_flags = bytes->data[cursor + 1u];
             variant_count = get_u32(bytes->data + cursor + 4u);
             cursor += 8u;
             for (child = 0u; child < variant_count; ++child) {
+                uint8_t variant_kind;
+                uint16_t variant_flags;
                 assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+                variant_kind = bytes->data[cursor];
+                variant_flags = (uint16_t)bytes->data[cursor + 2u]
+                    | (uint16_t)((uint16_t)bytes->data[cursor + 3u] << 8u);
                 cursor = skip_string(bytes, cursor + 4u);
                 assert(cursor <= bytes->len && bytes->len - cursor >= 20u);
                 cursor += 20u;
+                if (variant_kind == CM_HIR_DECL_VARIANT_TUPLE) {
+                    uint32_t field_count;
+                    assert(cursor <= bytes->len
+                        && bytes->len - cursor >= 4u);
+                    field_count = get_u32(bytes->data + cursor);
+                    assert((size_t)field_count
+                        <= (bytes->len - cursor - 4u) / 8u);
+                    cursor += 4u + (size_t)field_count * 8u;
+                }
+                if ((variant_flags
+                        & CM_HIR_DECL_VARIANT_HAS_LANG_ITEM) != 0u)
+                    cursor = skip_string(bytes, cursor);
             }
             if (representation == CM_HIR_DECL_ENUM_REPR_RUST)
+                cursor = skip_string(bytes, cursor);
+            if ((enum_flags & CM_HIR_DECL_ENUM_HAS_LANG_ITEM) != 0u)
                 cursor = skip_string(bytes, cursor);
         } else if (kind == CM_HIR_DECL_ITEM_TYPE_ALIAS) cursor += 4u;
         else assert(0);
@@ -364,10 +399,25 @@ static size_t enum_variant_record_offset(const CmByteBuf *bytes,
     assert(wanted_variant < count);
     for (index = 0u; index < count; ++index) {
         size_t record = cursor;
+        uint8_t variant_kind;
+        uint16_t variant_flags;
         assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+        variant_kind = bytes->data[cursor];
+        variant_flags = (uint16_t)bytes->data[cursor + 2u]
+            | (uint16_t)((uint16_t)bytes->data[cursor + 3u] << 8u);
         cursor = skip_string(bytes, cursor + 4u);
         assert(cursor <= bytes->len && bytes->len - cursor >= 20u);
         cursor += 20u;
+        if (variant_kind == CM_HIR_DECL_VARIANT_TUPLE) {
+            uint32_t field_count;
+            assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+            field_count = get_u32(bytes->data + cursor);
+            assert((size_t)field_count
+                <= (bytes->len - cursor - 4u) / 8u);
+            cursor += 4u + (size_t)field_count * 8u;
+        }
+        if ((variant_flags & CM_HIR_DECL_VARIANT_HAS_LANG_ITEM) != 0u)
+            cursor = skip_string(bytes, cursor);
         if (index == wanted_variant) return record;
     }
     assert(0);
@@ -2120,6 +2170,13 @@ static void test_default_enum_variant_namespace(void)
     cm_byte_buf_init(&replay);
     assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
         == CM_HIR_DECL_METADATA_OK);
+    record = item_record_offset(&encoded, UINT32_C(0));
+    target = skip_string(&encoded, record + 8u) + 44u;
+    assert(encoded.data[target + 1u] == UINT8_C(0));
+    variant = enum_variant_record_offset(&encoded, UINT32_C(0),
+        UINT32_C(0));
+    assert(encoded.data[variant + 2u] == UINT8_C(0)
+        && encoded.data[variant + 3u] == UINT8_C(0));
     cm_hir_declaration_metadata_init(&decoded);
     assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
         &decoded) == CM_HIR_DECL_METADATA_OK);
@@ -2219,6 +2276,411 @@ static void test_default_enum_variant_namespace(void)
 
     cm_hir_declaration_metadata_destroy(&decoded);
     cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
+static void generic_enum_fixture_init(GenericEnumFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    uint32_t index;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("generic_enums");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-generic-enums-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    fixture->modules[1].parent_module = 1u;
+    fixture->modules[1].name = (CmHirDeclarationString)S("option");
+    fixture->modules[2].parent_module = 1u;
+    fixture->modules[2].name = (CmHirDeclarationString)S("prelude");
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 3u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[0].owner_module = 2u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Option");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 1u;
+    fixture->items[0].generic_start = 1u;
+    fixture->items[0].generic_count = 1u;
+    fixture->items[0].enum_repr_primitive = CM_HIR_DECL_ENUM_REPR_RUST;
+    fixture->items[0].variant_count = 2u;
+    fixture->items[0].variants = &fixture->variants[0];
+    fixture->items[0].diagnostic_item =
+        (CmHirDeclarationString)S("Option");
+    fixture->items[0].enum_flags = CM_HIR_DECL_ENUM_HAS_LANG_ITEM;
+    fixture->items[0].enum_lang_item =
+        (CmHirDeclarationString)S("option_type");
+
+    fixture->variants[0].kind = CM_HIR_DECL_VARIANT_UNIT;
+    fixture->variants[0].name = (CmHirDeclarationString)S("None");
+    fixture->variants[0].source_ordinal = 0u;
+    fixture->variants[0].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[0].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[0].lang_item = (CmHirDeclarationString)S("none_ctor");
+    fixture->variants[1].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[1].name = (CmHirDeclarationString)S("Some");
+    fixture->variants[1].source_ordinal = 1u;
+    fixture->variants[1].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[1].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[1].field_count = 1u;
+    fixture->variants[1].fields = &fixture->variant_fields[0];
+    fixture->variants[1].lang_item = (CmHirDeclarationString)S("some_ctor");
+    fixture->variant_fields[0].source_ordinal = 0u;
+    fixture->variant_fields[0].type_local = 3u;
+
+    fixture->items[1].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[1].owner_module = 2u;
+    fixture->items[1].name = (CmHirDeclarationString)S("Result");
+    fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[1].source_ordinal = 2u;
+    fixture->items[1].generic_start = 2u;
+    fixture->items[1].generic_count = 2u;
+    fixture->items[1].enum_repr_primitive = CM_HIR_DECL_ENUM_REPR_RUST;
+    fixture->items[1].variant_count = 2u;
+    fixture->items[1].variants = &fixture->variants[2];
+    fixture->items[1].diagnostic_item =
+        (CmHirDeclarationString)S("Result");
+    fixture->variants[2].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[2].name = (CmHirDeclarationString)S("Ok");
+    fixture->variants[2].source_ordinal = 0u;
+    fixture->variants[2].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[2].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[2].field_count = 1u;
+    fixture->variants[2].fields = &fixture->variant_fields[1];
+    fixture->variants[2].lang_item = (CmHirDeclarationString)S("ok_ctor");
+    fixture->variant_fields[1].source_ordinal = 0u;
+    fixture->variant_fields[1].type_local = 4u;
+    fixture->variants[3].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[3].name = (CmHirDeclarationString)S("Err");
+    fixture->variants[3].source_ordinal = 1u;
+    fixture->variants[3].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[3].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[3].field_count = 1u;
+    fixture->variants[3].fields = &fixture->variant_fields[2];
+    fixture->variants[3].lang_item = (CmHirDeclarationString)S("err_ctor");
+    fixture->variant_fields[2].source_ordinal = 0u;
+    fixture->variant_fields[2].type_local = 5u;
+
+    fixture->items[2].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[2].owner_module = 2u;
+    fixture->items[2].name = (CmHirDeclarationString)S("Tag");
+    fixture->items[2].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[2].source_ordinal = 3u;
+    fixture->items[2].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    fixture->items[2].aggregate_repr = CM_HIR_DECL_AGGREGATE_REPR_RUST;
+    fixture->items[2].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+    fixture->items[2].field_count = 4u;
+    fixture->items[2].fields = fixture->aggregate_fields;
+    fixture->items[2].lang_item =
+        (CmHirDeclarationString)S("aggregate_tag");
+    for (index = 0u; index < 4u; ++index) {
+        static unsigned char names[4][1] = { { 'a' }, { 'b' }, { 'c' },
+            { 'd' } };
+        fixture->aggregate_fields[index].name.data = names[index];
+        fixture->aggregate_fields[index].name.length = 1u;
+        fixture->aggregate_fields[index].visibility.kind =
+            CM_HIR_DECL_VISIBILITY_PUBLIC;
+        fixture->aggregate_fields[index].source_ordinal = index;
+        fixture->aggregate_fields[index].type_local = 1u;
+    }
+    metadata->items = fixture->items;
+    metadata->item_count = 3u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].name = (CmHirDeclarationString)S("T");
+    fixture->generics[1].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[1].owner_local = 2u;
+    fixture->generics[1].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[1].name = (CmHirDeclarationString)S("T");
+    fixture->generics[2].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[2].owner_local = 2u;
+    fixture->generics[2].index = 1u;
+    fixture->generics[2].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[2].name = (CmHirDeclarationString)S("E");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 3u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_BOOL;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[2].generic_local = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[3].generic_local = 2u;
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[4].generic_local = 3u;
+    fixture->application_arguments[0] = 2u;
+    fixture->types[5].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[5].item_local = 1u;
+    fixture->types[5].argument_count = 1u;
+    fixture->types[5].argument_types = fixture->application_arguments;
+    metadata->types = fixture->types;
+    metadata->type_count = 6u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_STATIC;
+    fixture->values[0].owner_module = 2u;
+    fixture->values[0].name = (CmHirDeclarationString)S("OPTION_U8");
+    fixture->values[0].source_ordinal = 4u;
+    fixture->values[0].declared_type = 6u;
+    fixture->values[0].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0] = (CmHirDeclarationNamespaceEntry){
+        1u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->modules[1].name,
+        CM_HIR_DECL_TARGET_MODULE, 2u, 1u };
+    fixture->namespace_entries[1] = (CmHirDeclarationNamespaceEntry){
+        1u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->modules[2].name,
+        CM_HIR_DECL_TARGET_MODULE, 3u, 2u };
+    fixture->namespace_entries[2] = (CmHirDeclarationNamespaceEntry){
+        2u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->items[0].name,
+        CM_HIR_DECL_TARGET_ITEM, 1u, 1u };
+    fixture->namespace_entries[3] = (CmHirDeclarationNamespaceEntry){
+        2u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->items[1].name,
+        CM_HIR_DECL_TARGET_ITEM, 2u, 2u };
+    fixture->namespace_entries[4] = (CmHirDeclarationNamespaceEntry){
+        2u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->items[2].name,
+        CM_HIR_DECL_TARGET_ITEM, 3u, 3u };
+    fixture->namespace_entries[5] = (CmHirDeclarationNamespaceEntry){
+        2u, CM_HIR_DECL_NAMESPACE_VALUE, fixture->values[0].name,
+        CM_HIR_DECL_TARGET_VALUE, 1u, 4u };
+    fixture->namespace_entries[6] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->variants[3].name,
+        CM_HIR_DECL_TARGET_ENUM_VARIANT, 4u, 2u };
+    fixture->namespace_entries[7] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->variants[0].name,
+        CM_HIR_DECL_TARGET_ENUM_VARIANT, 1u, 1u };
+    fixture->namespace_entries[8] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->variants[2].name,
+        CM_HIR_DECL_TARGET_ENUM_VARIANT, 3u, 2u };
+    fixture->namespace_entries[9] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->items[0].name,
+        CM_HIR_DECL_TARGET_ITEM, 1u, 1u };
+    fixture->namespace_entries[10] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->items[1].name,
+        CM_HIR_DECL_TARGET_ITEM, 2u, 2u };
+    fixture->namespace_entries[11] = (CmHirDeclarationNamespaceEntry){
+        3u, CM_HIR_DECL_NAMESPACE_TYPE, fixture->variants[1].name,
+        CM_HIR_DECL_TARGET_ENUM_VARIANT, 2u, 1u };
+    fixture->namespace_entries[12] = fixture->namespace_entries[6];
+    fixture->namespace_entries[12].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[13] = fixture->namespace_entries[7];
+    fixture->namespace_entries[13].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[14] = fixture->namespace_entries[8];
+    fixture->namespace_entries[14].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[15] = fixture->namespace_entries[11];
+    fixture->namespace_entries[15].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 16u;
+}
+
+static void test_generic_tuple_enum_family(void)
+{
+    GenericEnumFixture fixture;
+    GenericEnumFixture twin;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+    size_t payload;
+
+    generic_enum_fixture_init(&fixture);
+    generic_enum_fixture_init(&twin);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&twin.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.item_count == 3u && decoded.generic_count == 3u
+        && decoded.type_count == 6u
+        && decoded.items[0].generic_count == 1u
+        && decoded.items[0].enum_flags
+            == CM_HIR_DECL_ENUM_HAS_LANG_ITEM
+        && decoded.items[0].diagnostic_item.length == sizeof("Option") - 1u
+        && memcmp(decoded.items[0].diagnostic_item.data, "Option",
+            sizeof("Option") - 1u) == 0
+        && decoded.items[0].enum_lang_item.length
+            == sizeof("option_type") - 1u
+        && memcmp(decoded.items[0].enum_lang_item.data, "option_type",
+            sizeof("option_type") - 1u) == 0
+        && decoded.items[0].variants[0].kind
+            == CM_HIR_DECL_VARIANT_UNIT
+        && decoded.items[0].variants[0].lang_item.length
+            == sizeof("none_ctor") - 1u
+        && decoded.items[0].variants[1].kind
+            == CM_HIR_DECL_VARIANT_TUPLE
+        && decoded.items[0].variants[1].field_count == 1u
+        && decoded.items[0].variants[1].fields[0].source_ordinal == 0u
+        && decoded.items[0].variants[1].fields[0].type_local == 3u
+        && decoded.items[1].generic_count == 2u
+        && decoded.items[1].diagnostic_item.length == sizeof("Result") - 1u
+        && memcmp(decoded.items[1].diagnostic_item.data, "Result",
+            sizeof("Result") - 1u) == 0
+        && decoded.items[1].variants[0].lang_item.length
+            == sizeof("ok_ctor") - 1u
+        && decoded.items[1].variants[1].lang_item.length
+            == sizeof("err_ctor") - 1u
+        && decoded.items[1].variants[0].fields[0].type_local == 4u
+        && decoded.items[1].variants[1].fields[0].type_local == 5u
+        && decoded.types[5].kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && decoded.types[5].item_local == 1u
+        && decoded.namespace_entries[11].target_local == 2u
+        && decoded.namespace_entries[15].target_local == 2u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[1].field_count = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variant_fields[0].type_local = 4u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[2].field_count = 2u;
+    fixture.variants[2].fields = &fixture.variant_fields[1];
+    fixture.variant_fields[2].source_ordinal = 1u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.variant_fields[2].source_ordinal = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[1].fields = NULL;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[1].flags = 0u;
+    fixture.variants[1].lang_item = (CmHirDeclarationString){ NULL, 0u };
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.items[0].enum_lang_item = fixture.variants[0].lang_item;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.items[2].lang_item = fixture.items[0].enum_lang_item;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[2].lang_item = fixture.variants[3].lang_item;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.items[0].enum_flags = UINT8_C(2);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.variants[1].flags = UINT16_C(2);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture.items[0].diagnostic_item =
+        (CmHirDeclarationString){ NULL, 0u };
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.generics[0].is_relaxed_sized = 1u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.types[5].item_local = 2u;
+    fixture.types[5].argument_count = 2u;
+    fixture.application_arguments[1] = 1u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    generic_enum_fixture_init(&fixture);
+    fixture.variant_fields[2].type_local = 4u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.application_arguments[0] = 3u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.types[5].item_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.namespace_entries[15].target_local = 1u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    generic_enum_fixture_init(&fixture);
+    fixture.metadata.namespace_count = 15u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    record = enum_variant_record_offset(&encoded, UINT32_C(0), UINT32_C(1));
+    payload = skip_string(&encoded, record + 4u) + 20u;
+    assert(get_u32(encoded.data + payload) == UINT32_C(1));
+    bad = copy_bytes(&encoded);
+    record = enum_variant_record_offset(&bad, UINT32_C(0), UINT32_C(1));
+    payload = skip_string(&bad, record + 4u) + 20u;
+    put_u32(bad.data + payload, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = enum_variant_record_offset(&bad, UINT32_C(0), UINT32_C(1));
+    payload = skip_string(&bad, record + 4u) + 24u;
+    put_u32(bad.data + payload + 4u, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = enum_variant_record_offset(&bad, UINT32_C(0), UINT32_C(1));
+    put_u16(bad.data + record + 2u, UINT16_C(2));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
     cm_byte_buf_destroy(&encoded);
 }
 
@@ -2884,6 +3346,7 @@ int main(void)
     test_structural_type_family();
     test_enum_family();
     test_default_enum_variant_namespace();
+    test_generic_tuple_enum_family();
     test_enum_named_adt_signature();
     test_const_value_family();
     test_static_tuple_array_family();

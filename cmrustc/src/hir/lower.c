@@ -10624,6 +10624,194 @@ static int cm_lower_aggregate_item(CmLowerState *state,
     return !state->failed;
 }
 
+static int cm_lower_variant_lang_metadata(CmLowerState *state,
+    const CmInternedString *metadata, CmInternId *out_lang)
+{
+    static const unsigned char head[] = "lang";
+    size_t position;
+    size_t start;
+    size_t end;
+
+    if (metadata == NULL || out_lang == NULL) return 0;
+    position = 0u;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (metadata->len - position < sizeof(head) - 1u
+        || memcmp(metadata->bytes + position, head,
+            sizeof(head) - 1u) != 0) return 0;
+    position += sizeof(head) - 1u;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (position >= metadata->len
+        || metadata->bytes[position++] != (unsigned char)'=') return 0;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (position >= metadata->len
+        || metadata->bytes[position++] != (unsigned char)'"') return 0;
+    start = position;
+    if (position >= metadata->len
+        || !((metadata->bytes[position] >= (unsigned char)'a'
+                && metadata->bytes[position] <= (unsigned char)'z')
+            || (metadata->bytes[position] >= (unsigned char)'A'
+                && metadata->bytes[position] <= (unsigned char)'Z')
+            || metadata->bytes[position] == (unsigned char)'_')) return 0;
+    position += 1u;
+    while (position < metadata->len
+        && cm_lower_meta_identifier_continue(metadata->bytes[position])) {
+        position += 1u;
+    }
+    end = position;
+    if (position >= metadata->len
+        || metadata->bytes[position++] != (unsigned char)'"') return 0;
+    while (position < metadata->len
+        && cm_lower_meta_space(metadata->bytes[position])) position += 1u;
+    if (position != metadata->len) return 0;
+    *out_lang = cm_interner_intern(&state->hir->strings,
+        metadata->bytes + start, end - start);
+    return *out_lang != CM_INTERN_ID_NONE;
+}
+
+static int cm_lower_variant_lang(CmLowerState *state,
+    const CmLowerItemRecord *record, CmAstItemId ast_item_id,
+    const CmAstVariant *ast_variant, uint32_t variant_index,
+    uint32_t variant_count, CmSpan variant_span, CmInternId *out_lang)
+{
+    uint32_t index;
+
+    *out_lang = CM_INTERN_ID_NONE;
+    if (record->graph_effective_item != CM_RESOLVE_EFFECTIVE_ITEM_NONE) {
+        CmResolveEffectiveVariant effective;
+        CmResolveViewStatus status;
+        uint32_t effective_index;
+        int found;
+
+        found = 0;
+        status = CM_RESOLVE_VIEW_OUT_OF_RANGE;
+        for (effective_index = 0u; effective_index < variant_count;
+                ++effective_index) {
+            status = cm_module_graph_get_effective_variant(state->graph,
+                state->graph_revision, record->graph_module,
+                record->graph_effective_item, effective_index, &effective);
+            if (status == CM_RESOLVE_VIEW_OUT_OF_RANGE) break;
+            if (status != CM_RESOLVE_VIEW_OK) break;
+            if (effective.declaration.index == variant_index) {
+                found = 1;
+                break;
+            }
+        }
+        /* The raw AST still contains cfg-disabled variants.  They carry no
+         * effective attribute authority and therefore no retained lang
+         * identity.  Existing later census checks remain responsible for
+         * rejecting unsupported raw/effective shape mismatches. */
+        if (!found && status == CM_RESOLVE_VIEW_OUT_OF_RANGE) return 1;
+        if (!found || status != CM_RESOLVE_VIEW_OK
+            || effective.declaration.enumeration.source != record->source
+            || effective.declaration.enumeration.item != ast_item_id
+            || effective.span.source != variant_span.source
+            || effective.span.start != variant_span.start
+            || effective.span.end != variant_span.end
+            || effective.form != ast_variant->form
+            || effective.field_count != ast_variant->field_count
+            ) {
+            cm_lower_fail(state,
+                status == CM_RESOLVE_VIEW_STALE_REVISION
+                    ? CM_HIR_LOWER_STALE_GRAPH : CM_HIR_LOWER_INVALID_AST,
+                variant_span, ast_item_id, CM_AST_TYPE_NONE,
+                CM_AST_PATH_NONE, CM_HIR_OK,
+                "enum variant has inconsistent effective provenance");
+            return 0;
+        }
+        for (index = 0u; index < effective.attribute_count; ++index) {
+            CmResolveEffectiveAttribute attribute;
+            const CmAstAttribute *source_attribute;
+            CmInternId metadata_id;
+            const CmInternedString *metadata;
+            CmInternId lang;
+
+            status = cm_module_graph_get_effective_variant_attribute(
+                state->graph, state->graph_revision, record->graph_module,
+                record->graph_effective_item, effective_index, index,
+                &attribute);
+            source_attribute = status == CM_RESOLVE_VIEW_OK
+                ? cm_ast_get_attribute(state->ast,
+                    attribute.source_attribute) : NULL;
+            if (status != CM_RESOLVE_VIEW_OK || source_attribute == NULL
+                || attribute.source != record->source
+                || attribute.owner.source != record->source
+                || attribute.owner.item != ast_item_id
+                || attribute.owner_variant.enumeration.source
+                    != record->source
+                || attribute.owner_variant.enumeration.item != ast_item_id
+                || attribute.owner_variant.index != variant_index
+                || attribute.style != CM_AST_ATTR_OUTER
+                || source_attribute->style != CM_AST_ATTR_OUTER
+                || !cm_lower_attribute_id_in_list(
+                    attribute.source_attribute, ast_variant->attributes,
+                    ast_variant->attribute_count)
+                || attribute.span.source != variant_span.source
+                || attribute.span.start > attribute.span.end
+                || attribute.span.start < source_attribute->span.start
+                || attribute.span.end > source_attribute->span.end
+                || attribute.span.start < variant_span.start
+                || attribute.span.end > variant_span.end) {
+                cm_lower_fail(state,
+                    status == CM_RESOLVE_VIEW_STALE_REVISION
+                        ? CM_HIR_LOWER_STALE_GRAPH
+                        : CM_HIR_LOWER_INVALID_AST,
+                    variant_span, ast_item_id, CM_AST_TYPE_NONE,
+                    CM_AST_PATH_NONE, CM_HIR_OK,
+                    "enum variant attribute has invalid effective provenance");
+                return 0;
+            }
+            metadata_id = cm_lower_copy_graph_attribute_metadata(state,
+                state->graph, attribute.metadata, attribute.span,
+                ast_item_id);
+            metadata = cm_interner_get(&state->hir->strings, metadata_id);
+            lang = CM_INTERN_ID_NONE;
+            if (cm_lower_variant_lang_metadata(state, metadata, &lang)) {
+                if (*out_lang != CM_INTERN_ID_NONE) {
+                    cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                        variant_span, ast_item_id, CM_AST_TYPE_NONE,
+                        CM_AST_PATH_NONE, CM_HIR_OK,
+                        "enum variant has duplicate lang identity");
+                    return 0;
+                }
+                *out_lang = lang;
+            }
+        }
+        return !state->failed;
+    }
+    for (index = 0u; index < ast_variant->attribute_count; ++index) {
+        const CmAstAttribute *attribute;
+        const CmInternedString *raw;
+        CmInternedString metadata;
+        CmInternId lang;
+
+        attribute = cm_ast_get_attribute(state->ast,
+            ast_variant->attributes[index]);
+        raw = attribute == NULL ? NULL
+            : cm_ast_get_string(state->ast, attribute->text);
+        if (attribute == NULL || raw == NULL || raw->len < 3u
+            || raw->bytes[0] != (unsigned char)'#'
+            || raw->bytes[1] != (unsigned char)'['
+            || raw->bytes[raw->len - 1u] != (unsigned char)']') continue;
+        metadata.bytes = raw->bytes + 2u;
+        metadata.len = raw->len - 3u;
+        lang = CM_INTERN_ID_NONE;
+        if (cm_lower_variant_lang_metadata(state, &metadata, &lang)) {
+            if (*out_lang != CM_INTERN_ID_NONE) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
+                    variant_span, ast_item_id, CM_AST_TYPE_NONE,
+                    CM_AST_PATH_NONE, CM_HIR_OK,
+                    "enum variant has duplicate lang identity");
+                return 0;
+            }
+            *out_lang = lang;
+        }
+    }
+    return !state->failed;
+}
+
 static int cm_lower_enum_item(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item)
@@ -10771,6 +10959,9 @@ static int cm_lower_enum_item(CmLowerState *state,
         variants[index].definition = variant_record->definition;
         variants[index].name = cm_lower_copy_string(state,
             ast_variant->name, span, ast_item_id);
+        if (!cm_lower_variant_lang(state, record, ast_item_id, ast_variant,
+                index, enumeration->variant_count, variant_span,
+                &variants[index].lang_item)) break;
         variants[index].form = cm_lower_aggregate_form(ast_variant->form);
         variants[index].fields = cm_lower_fields(state, ast_variant->fields,
             ast_variant->field_count, ast_variant->form,

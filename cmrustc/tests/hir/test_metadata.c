@@ -421,7 +421,7 @@ static CmHirDefId add_wrapper(CmHirContext *context, CmHirCrateId crate_id,
 }
 
 static CmHirDefId add_choice(CmHirContext *context, CmHirCrateId crate_id,
-    CmHirModuleId owner, uint32_t start)
+    CmHirModuleId owner, uint32_t start, int retain_lang)
 {
     CmHirDefId definition;
     CmHirGenericParam parameter;
@@ -459,10 +459,14 @@ static CmHirDefId add_choice(CmHirContext *context, CmHirCrateId crate_id,
     memset(variants, 0, sizeof(variants));
     variants[0].definition = cm_hir_def_id_none();
     variants[0].name = cm_hir_intern(context, "None");
+    variants[0].lang_item = retain_lang
+        ? cm_hir_intern(context, "None") : CM_INTERN_ID_NONE;
     variants[0].form = CM_HIR_AGGREGATE_UNIT;
     variants[0].span = test_span(start + 4u, start + 5u);
     variants[1].definition = cm_hir_def_id_none();
     variants[1].name = cm_hir_intern(context, "Some");
+    variants[1].lang_item = retain_lang
+        ? cm_hir_intern(context, "Some") : CM_INTERN_ID_NONE;
     variants[1].form = CM_HIR_AGGREGATE_TUPLE;
     variants[1].fields = &some_field;
     variants[1].field_count = 1u;
@@ -686,7 +690,8 @@ static void declaration_producer_destroy(
     cm_hir_context_destroy(&fixture->context);
 }
 
-static void producer_init(ProducerFixture *fixture, int reverse_order)
+static void producer_init(ProducerFixture *fixture, int reverse_order,
+    int retain_variant_lang)
 {
     CmHirCrateId dummy_crate;
     CmHirModuleId dummy_root;
@@ -739,7 +744,7 @@ static void producer_init(ProducerFixture *fixture, int reverse_order)
         fixture->root_api = add_extern_type(&fixture->context,
             fixture->crate_id, fixture->root_module, "RootApi", 30u);
         fixture->choice = add_choice(&fixture->context, fixture->crate_id,
-            fixture->root_module, 70u);
+            fixture->root_module, 70u, retain_variant_lang);
         fixture->wrapper = add_wrapper(&fixture->context, fixture->crate_id,
             fixture->root_module, 50u);
     } else {
@@ -750,7 +755,7 @@ static void producer_init(ProducerFixture *fixture, int reverse_order)
         fixture->wrapper = add_wrapper(&fixture->context, fixture->crate_id,
             fixture->root_module, 50u);
         fixture->choice = add_choice(&fixture->context, fixture->crate_id,
-            fixture->root_module, 70u);
+            fixture->root_module, 70u, retain_variant_lang);
     }
     fixture->alias = add_alias(&fixture->context, fixture->crate_id,
         fixture->root_module, fixture->wrapper, 90u);
@@ -1504,6 +1509,192 @@ static void recompute_metadata_crc(CmByteBuf *encoded)
             = (unsigned char)(crc & UINT32_C(0xff));
         crc >>= 8u;
     }
+}
+
+static void test_metadata_read_name(CmHirMetadataReader *reader,
+    const unsigned char **out_bytes, uint32_t *out_length)
+{
+    assert(cm_hir_metadata_read_u32(reader, out_length)
+            == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_bytes(reader, *out_length, out_bytes)
+            == CM_HIR_METADATA_OK);
+}
+
+static void test_metadata_skip_visibility(CmHirMetadataReader *reader)
+{
+    uint8_t kind;
+    uint32_t restriction;
+
+    assert(cm_hir_metadata_read_u8(reader, &kind) == CM_HIR_METADATA_OK
+        && cm_hir_metadata_read_u32(reader, &restriction)
+            == CM_HIR_METADATA_OK);
+    (void)kind;
+    (void)restriction;
+}
+
+static uint32_t test_metadata_read_field(CmHirMetadataReader *reader,
+    const CmHirMetadataSection *section, size_t *out_type_offset)
+{
+    const unsigned char *name;
+    uint32_t name_length;
+    uint32_t type_local;
+
+    test_metadata_read_name(reader, &name, &name_length);
+    (void)name;
+    (void)name_length;
+    if (out_type_offset != NULL) *out_type_offset = reader->cursor;
+    assert(cm_hir_metadata_read_u32(reader, &type_local)
+        == CM_HIR_METADATA_OK);
+    test_metadata_skip_visibility(reader);
+    assert(reader->cursor <= section->length);
+    return type_local;
+}
+
+static void corrupt_choice_field_to_wrapper_generic(CmByteBuf *encoded,
+    uint16_t major, uint16_t minor, int variant_lang_format)
+{
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataReader sections;
+    CmHirMetadataSection section;
+    CmHirMetadataReader reader;
+    uint32_t item_count;
+    uint32_t item_index;
+    uint32_t wrapper_type_local;
+    uint32_t choice_type_local;
+    size_t choice_type_offset;
+    unsigned char *field_bytes;
+
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(encoded->data,
+        encoded->len, major, minor, &envelope) == CM_HIR_METADATA_OK);
+    cm_hir_metadata_reader_init(&sections, envelope.payload,
+        envelope.payload_length);
+    memset(&section, 0, sizeof(section));
+    for (item_index = 0u; item_index < 5u; ++item_index) {
+        assert(cm_hir_metadata_read_section(&sections, &section)
+            == CM_HIR_METADATA_OK);
+    }
+    assert(memcmp(section.tag, "ITEM", 4u) == 0);
+    cm_hir_metadata_reader_init(&reader, section.data, section.length);
+    assert(cm_hir_metadata_read_u32(&reader, &item_count)
+        == CM_HIR_METADATA_OK);
+    wrapper_type_local = UINT32_C(0);
+    choice_type_local = UINT32_C(0);
+    choice_type_offset = 0u;
+    for (item_index = 0u; item_index < item_count; ++item_index) {
+        uint8_t kind;
+        uint32_t ignored;
+        const unsigned char *item_name;
+        uint32_t item_name_length;
+
+        assert(cm_hir_metadata_read_u8(&reader, &kind)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK);
+        test_metadata_read_name(&reader, &item_name, &item_name_length);
+        test_metadata_skip_visibility(&reader);
+        assert(cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK
+            && cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK);
+        if (kind == UINT8_C(2) || kind == UINT8_C(3)) {
+            uint8_t form;
+            uint32_t field_count;
+            uint32_t field;
+
+            assert(cm_hir_metadata_read_u8(&reader, &form)
+                    == CM_HIR_METADATA_OK
+                && cm_hir_metadata_read_u32(&reader, &field_count)
+                    == CM_HIR_METADATA_OK);
+            for (field = 0u; field < field_count; ++field) {
+                uint32_t type_local;
+
+                type_local = test_metadata_read_field(&reader, &section,
+                    NULL);
+                if (item_name_length == sizeof("Wrapper") - 1u
+                    && memcmp(item_name, "Wrapper", item_name_length) == 0
+                    && field == 0u) wrapper_type_local = type_local;
+            }
+            (void)form;
+        } else if (kind == UINT8_C(4)) {
+            uint32_t variant_count;
+            uint32_t variant_index;
+
+            assert(cm_hir_metadata_read_u32(&reader, &variant_count)
+                == CM_HIR_METADATA_OK);
+            for (variant_index = 0u; variant_index < variant_count;
+                 ++variant_index) {
+                const unsigned char *variant_name;
+                uint32_t variant_name_length;
+                uint8_t form;
+                uint32_t field_count;
+                uint32_t field;
+                uint8_t has_discriminant;
+
+                test_metadata_read_name(&reader, &variant_name,
+                    &variant_name_length);
+                assert(cm_hir_metadata_read_u8(&reader, &form)
+                        == CM_HIR_METADATA_OK
+                    && cm_hir_metadata_read_u32(&reader, &field_count)
+                        == CM_HIR_METADATA_OK);
+                for (field = 0u; field < field_count; ++field) {
+                    size_t offset;
+                    uint32_t type_local;
+
+                    offset = 0u;
+                    type_local = test_metadata_read_field(&reader, &section,
+                        &offset);
+                    if (item_name_length == sizeof("Choice") - 1u
+                        && memcmp(item_name, "Choice", item_name_length) == 0
+                        && variant_name_length == sizeof("Some") - 1u
+                        && memcmp(variant_name, "Some",
+                            variant_name_length) == 0 && field == 0u) {
+                        choice_type_local = type_local;
+                        choice_type_offset = offset;
+                    }
+                }
+                assert(cm_hir_metadata_read_u8(&reader, &has_discriminant)
+                    == CM_HIR_METADATA_OK);
+                if (has_discriminant) {
+                    uint64_t scalar;
+
+                    assert(cm_hir_metadata_read_u32(&reader, &ignored)
+                            == CM_HIR_METADATA_OK
+                        && cm_hir_metadata_read_u64(&reader, &scalar)
+                            == CM_HIR_METADATA_OK
+                        && cm_hir_metadata_read_u64(&reader, &scalar)
+                            == CM_HIR_METADATA_OK);
+                }
+                if (variant_lang_format) {
+                    const unsigned char *lang;
+                    uint32_t lang_length;
+
+                    test_metadata_read_name(&reader, &lang, &lang_length);
+                    (void)lang;
+                    (void)lang_length;
+                }
+                (void)form;
+            }
+        } else if (kind == UINT8_C(5)) {
+            assert(cm_hir_metadata_read_u32(&reader, &ignored)
+                == CM_HIR_METADATA_OK);
+        } else {
+            assert(kind == UINT8_C(1));
+        }
+    }
+    assert(cm_hir_metadata_reader_finish(&reader) == CM_HIR_METADATA_OK
+        && wrapper_type_local != 0u && choice_type_local != 0u
+        && wrapper_type_local != choice_type_local
+        && choice_type_offset + 4u <= section.length);
+    field_bytes = (unsigned char *)section.data + choice_type_offset;
+    field_bytes[0] = (unsigned char)(wrapper_type_local & UINT32_C(0xff));
+    field_bytes[1] = (unsigned char)((wrapper_type_local >> 8u)
+        & UINT32_C(0xff));
+    field_bytes[2] = (unsigned char)((wrapper_type_local >> 16u)
+        & UINT32_C(0xff));
+    field_bytes[3] = (unsigned char)((wrapper_type_local >> 24u)
+        & UINT32_C(0xff));
+    recompute_metadata_crc(encoded);
 }
 
 static void corrupt_v24_section_byte(CmByteBuf *encoded,
@@ -3120,6 +3311,226 @@ static void test_bound_function_pointer_v2_rejected_transactionally(void)
     parsed_producer_destroy(&producer);
 }
 
+static void test_variant_lang_metadata_round_trip(void)
+{
+    ProducerFixture producer;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirMetadataEnvelope envelope;
+    CmHirMetadataArtifactResult result;
+    CmHirContext consumer;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryBinding choice_binding;
+    const CmHirItem *choice;
+    const CmInternedString *none_lang;
+    const CmInternedString *some_lang;
+
+    producer_init(&producer, 0, 1);
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_artifact(&encoded, &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    memset(&envelope, 0, sizeof(envelope));
+    /* v1.2 is emitted only when the additive variant-lang payload exists. */
+    assert(cm_hir_metadata_decode_envelope_version(encoded.data, encoded.len,
+        CM_HIR_METADATA_MAJOR, UINT16_C(2), &envelope)
+        == CM_HIR_METADATA_OK);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_artifact(&consumer, &artifact,
+        encoded.data, encoded.len, "dep", 112u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    choice_binding = lookup(&artifact, "dep", "Choice", NULL);
+    choice = binding_item(&consumer, choice_binding);
+    assert(choice != NULL && choice->kind == CM_HIR_ITEM_ENUM
+        && choice->data.enum_item.variant_count == 2u);
+    none_lang = cm_interner_get(&consumer.strings,
+        choice->data.enum_item.variants[0].lang_item);
+    some_lang = cm_interner_get(&consumer.strings,
+        choice->data.enum_item.variants[1].lang_item);
+    assert(none_lang != NULL && none_lang->len == sizeof("None") - 1u
+        && memcmp(none_lang->bytes, "None", none_lang->len) == 0
+        && some_lang != NULL && some_lang->len == sizeof("Some") - 1u
+        && memcmp(some_lang->bytes, "Some", some_lang->len) == 0);
+    cm_byte_buf_init(&replay);
+    result = cm_hir_metadata_encode_artifact(&replay, &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&replay);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_semantic_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(encoded.data, encoded.len,
+        CM_HIR_METADATA_MAJOR, UINT16_C(3), &envelope)
+        == CM_HIR_METADATA_OK);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_semantic_artifact(&consumer, &artifact,
+        encoded.data, encoded.len, "semantic_dep", 113u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    choice_binding = lookup(&artifact, "semantic_dep", "Choice", NULL);
+    choice = binding_item(&consumer, choice_binding);
+    assert(choice != NULL
+        && choice->data.enum_item.variants[1].lang_item
+            != CM_INTERN_ID_NONE);
+    cm_byte_buf_init(&replay);
+    result = cm_hir_metadata_encode_semantic_artifact(&replay, &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&replay);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+
+    cm_byte_buf_init(&encoded);
+    result = cm_hir_metadata_encode_declaration_artifact(&encoded,
+        &producer.artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    memset(&envelope, 0, sizeof(envelope));
+    assert(cm_hir_metadata_decode_envelope_version(encoded.data, encoded.len,
+        CM_HIR_METADATA_DECLARATION_MAJOR, UINT16_C(7), &envelope)
+        == CM_HIR_METADATA_OK);
+    cm_hir_context_init(&consumer);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_metadata_decode_declaration_artifact(&consumer,
+        &artifact, encoded.data, encoded.len, "declaration_dep", 114u);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+    choice_binding = lookup(&artifact, "declaration_dep", "Choice", NULL);
+    choice = binding_item(&consumer, choice_binding);
+    assert(choice != NULL
+        && choice->data.enum_item.variants[0].lang_item
+            != CM_INTERN_ID_NONE);
+    cm_byte_buf_init(&replay);
+    result = cm_hir_metadata_encode_declaration_artifact(&replay, &artifact);
+    assert(result.status == CM_HIR_METADATA_ARTIFACT_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+    cm_byte_buf_destroy(&replay);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&consumer);
+    cm_byte_buf_destroy(&encoded);
+    producer_destroy(&producer);
+}
+
+static void test_item_field_generic_owner_metadata_rejected(void)
+{
+    static const unsigned char sentinel[] = {
+        UINT8_C(0xa7), UINT8_C(0x3c), UINT8_C(0xd1)
+    };
+    ProducerFixture producer;
+    const CmHirDefinition *choice_definition;
+    const CmHirDefinition *wrapper_definition;
+    CmHirItem *choice;
+    CmHirItem *wrapper;
+    CmHirTypeId own_field_type;
+    CmHirTypeId foreign_field_type;
+    uint32_t format;
+
+    producer_init(&producer, 0, 1);
+    choice_definition = cm_hir_lookup_definition(&producer.context,
+        producer.choice);
+    wrapper_definition = cm_hir_lookup_definition(&producer.context,
+        producer.wrapper);
+    choice = choice_definition == NULL ? NULL : (CmHirItem *)cm_vec_at(
+        &producer.context.items,
+        (size_t)(choice_definition->entity.item_id - 1u));
+    wrapper = wrapper_definition == NULL ? NULL : (CmHirItem *)cm_vec_at(
+        &producer.context.items,
+        (size_t)(wrapper_definition->entity.item_id - 1u));
+    assert(choice != NULL && choice->kind == CM_HIR_ITEM_ENUM
+        && choice->data.enum_item.variant_count == 2u
+        && choice->data.enum_item.variants[1].field_count == 1u
+        && wrapper != NULL && wrapper->kind == CM_HIR_ITEM_STRUCT
+        && wrapper->data.aggregate_item.field_count == 1u);
+    own_field_type = choice->data.enum_item.variants[1].fields[0].type;
+    foreign_field_type = wrapper->data.aggregate_item.fields[0].type;
+    assert(own_field_type != foreign_field_type);
+
+    for (format = 0u; format < 3u; ++format) {
+        CmByteBuf encoded;
+        CmByteBuf corrupted;
+        CmHirMetadataArtifactResult result;
+        CmHirContext consumer;
+        CmHirLibraryArtifact artifact;
+        CmHirCrateId sentinel_crate;
+        CmHirModuleId sentinel_module;
+        CmHirLibraryArtifactIdentity sentinel_identity;
+        ContextLengths before;
+        uint16_t major;
+        uint16_t minor;
+
+        cm_byte_buf_init(&encoded);
+        result = format == 0u
+            ? cm_hir_metadata_encode_artifact(&encoded, &producer.artifact)
+            : format == 1u
+                ? cm_hir_metadata_encode_semantic_artifact(&encoded,
+                    &producer.artifact)
+                : cm_hir_metadata_encode_declaration_artifact(&encoded,
+                    &producer.artifact);
+        assert(result.status == CM_HIR_METADATA_ARTIFACT_OK);
+        cm_byte_buf_init(&corrupted);
+        cm_byte_buf_append(&corrupted, encoded.data, encoded.len);
+        major = format == 2u ? CM_HIR_METADATA_DECLARATION_MAJOR
+            : CM_HIR_METADATA_MAJOR;
+        minor = format == 0u ? UINT16_C(2)
+            : format == 1u ? UINT16_C(3) : UINT16_C(7);
+        corrupt_choice_field_to_wrapper_generic(&corrupted, major, minor, 1);
+        consumer_sentinel_init(&consumer, &artifact, &sentinel_crate,
+            &sentinel_module);
+        before = context_lengths(&consumer);
+        assert(cm_hir_library_artifact_identity(&artifact,
+            &sentinel_identity));
+        result = format == 0u
+            ? cm_hir_metadata_decode_artifact(&consumer, &artifact,
+                corrupted.data, corrupted.len, "broken", 116u)
+            : format == 1u
+                ? cm_hir_metadata_decode_semantic_artifact(&consumer,
+                    &artifact, corrupted.data, corrupted.len, "broken",
+                    116u)
+                : cm_hir_metadata_decode_declaration_artifact(&consumer,
+                    &artifact, corrupted.data, corrupted.len, "broken",
+                    116u);
+        assert(result.status == CM_HIR_METADATA_ARTIFACT_INVALID_FORMAT);
+        assert_sentinel_preserved(&consumer, &artifact, before,
+            &sentinel_identity);
+        cm_hir_library_artifact_destroy(&artifact);
+        cm_hir_context_destroy(&consumer);
+        cm_byte_buf_destroy(&corrupted);
+        cm_byte_buf_destroy(&encoded);
+        (void)sentinel_crate;
+        (void)sentinel_module;
+    }
+
+    choice->data.enum_item.variants[1].fields[0].type = foreign_field_type;
+    for (format = 0u; format < 3u; ++format) {
+        CmByteBuf rejected;
+        CmHirMetadataArtifactResult result;
+
+        cm_byte_buf_init(&rejected);
+        cm_byte_buf_append(&rejected, sentinel, sizeof(sentinel));
+        result = format == 0u
+            ? cm_hir_metadata_encode_artifact(&rejected, &producer.artifact)
+            : format == 1u
+                ? cm_hir_metadata_encode_semantic_artifact(&rejected,
+                    &producer.artifact)
+                : cm_hir_metadata_encode_declaration_artifact(&rejected,
+                    &producer.artifact);
+        assert(result.status == CM_HIR_METADATA_ARTIFACT_UNSUPPORTED_HIR
+            && rejected.len == sizeof(sentinel)
+            && memcmp(rejected.data, sentinel, sizeof(sentinel)) == 0);
+        cm_byte_buf_destroy(&rejected);
+    }
+    choice->data.enum_item.variants[1].fields[0].type = own_field_type;
+    producer_destroy(&producer);
+}
+
 static void test_semantic_round_trip(void)
 {
     ProducerFixture producer;
@@ -3142,7 +3553,7 @@ static void test_semantic_round_trip(void)
     const CmHirItem *item;
     ContextLengths before_failure;
 
-    producer_init(&producer, 0);
+    producer_init(&producer, 0, 0);
     cm_byte_buf_init(&first);
     cm_byte_buf_init(&second);
     encoded = cm_hir_metadata_encode_artifact(&first, &producer.artifact);
@@ -3150,6 +3561,13 @@ static void test_semantic_round_trip(void)
     assert(encoded.module_count == 3u);
     assert(encoded.public_entry_count == 8u);
     assert(first.len != 0u);
+    {
+        CmHirMetadataEnvelope old_envelope;
+        memset(&old_envelope, 0, sizeof(old_envelope));
+        assert(cm_hir_metadata_decode_envelope_version(first.data,
+            first.len, CM_HIR_METADATA_MAJOR, CM_HIR_METADATA_MINOR,
+            &old_envelope) == CM_HIR_METADATA_OK);
+    }
     encoded = cm_hir_metadata_encode_artifact(&second, &producer.artifact);
     assert(encoded.status == CM_HIR_METADATA_ARTIFACT_OK);
     assert(second.len == first.len);
@@ -3410,7 +3828,9 @@ static void test_declaration_v2_value_round_trip(void)
 static void test_parsed_declaration_v2_capture(void)
 {
     static const unsigned char source[] =
-        "pub struct Api;\n"
+        /* Keep this legacy generic-metadata fixture constructor-free: the
+         * old namespace wire has no struct-constructor binding family. */
+        "pub struct Api { hidden: u8 }\n"
         "pub unsafe extern \"C\" fn call(value: u32) -> bool { "
             "value == 0 }\n"
         "pub const LIMIT: u32 = 7;\n"
@@ -5531,12 +5951,13 @@ static void test_carrying_mul_add_modifier_round_trip(void)
     cm_byte_buf_init(&unsupported_version);
     assert(cm_hir_metadata_encode_envelope_version(&unsupported_version,
         CM_HIR_METADATA_DECLARATION_MAJOR,
-        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 1u), UINT32_C(0),
+        /* v2.7 is the additive variant-lang format; v2.8 is future. */
+        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 2u), UINT32_C(0),
         envelope.payload, envelope.payload_length) == CM_HIR_METADATA_OK);
     memset(&unsupported_envelope, 0, sizeof(unsupported_envelope));
     assert(cm_hir_metadata_decode_envelope_version(unsupported_version.data,
         unsupported_version.len, CM_HIR_METADATA_DECLARATION_MAJOR,
-        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 1u),
+        (uint16_t)(CM_HIR_METADATA_DECLARATION_MINOR + 2u),
         &unsupported_envelope) == CM_HIR_METADATA_OK);
     result = cm_hir_metadata_decode_declaration_artifact(&consumer,
         &artifact, unsupported_version.data, unsupported_version.len,
@@ -5944,6 +6365,8 @@ int main(int argc, char **argv)
     test_unsupported_hir_rejected();
     test_parsed_unsupported_hir_rejected();
     test_bound_function_pointer_v2_rejected_transactionally();
+    test_variant_lang_metadata_round_trip();
+    test_item_field_generic_owner_metadata_rejected();
     test_semantic_round_trip();
     test_declaration_v2_value_round_trip();
     test_declaration_v2_const_generic_round_trip();
