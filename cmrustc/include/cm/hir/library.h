@@ -29,10 +29,34 @@ typedef struct CmHirLibraryPathSegment {
     size_t length;
 } CmHirLibraryPathSegment;
 
+typedef enum CmHirLibraryBindingKind {
+    CM_HIR_LIBRARY_BINDING_TYPE = 0,
+    CM_HIR_LIBRARY_BINDING_MODULE,
+    CM_HIR_LIBRARY_BINDING_TRAIT,
+    CM_HIR_LIBRARY_BINDING_PRIMITIVE,
+    CM_HIR_LIBRARY_BINDING_VALUE,
+    /*
+     * Value-namespace constructor of a unit or tuple struct.  This is not a
+     * free function declaration: `definition` is the struct's DefId and the
+     * same public name must also bind that DefId as an ADT in TYPE namespace.
+     */
+    CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR,
+    /*
+     * Associated constructor/type identity of one enum variant.  The parent
+     * enum, exact variant index, and aggregate form authenticate this DefId;
+     * it is never represented as a free function or free value declaration.
+     */
+    CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+} CmHirLibraryBindingKind;
+
 typedef struct CmHirLibraryType {
+    CmHirLibraryBindingKind binding_kind;
     CmHirDefId definition;
     CmHirTypeKind kind;
     CmHirPrimitiveKind primitive_kind;
+    CmHirDefId enum_definition;
+    uint32_t enum_variant_index;
+    CmHirAggregateForm enum_variant_form;
 } CmHirLibraryType;
 
 typedef enum CmHirLibraryValueKind {
@@ -117,26 +141,16 @@ typedef struct CmHirLibraryValue {
     } data;
 } CmHirLibraryValue;
 
-typedef enum CmHirLibraryBindingKind {
-    CM_HIR_LIBRARY_BINDING_TYPE = 0,
-    CM_HIR_LIBRARY_BINDING_MODULE,
-    CM_HIR_LIBRARY_BINDING_TRAIT,
-    CM_HIR_LIBRARY_BINDING_PRIMITIVE,
-    CM_HIR_LIBRARY_BINDING_VALUE,
-    /*
-     * Value-namespace constructor of a unit or tuple struct.  This is not a
-     * free function declaration: `definition` is the struct's DefId and the
-     * same public name must also bind that DefId as an ADT in TYPE namespace.
-     */
-    CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
-} CmHirLibraryBindingKind;
-
 typedef struct CmHirLibraryBinding {
     CmHirLibraryBindingKind kind;
     CmHirDefId definition;
     CmHirTypeKind type_kind;
     CmHirPrimitiveKind primitive_kind;
     CmHirLibraryValueKind value_kind;
+    /* Populated only for CM_HIR_LIBRARY_BINDING_ENUM_VARIANT. */
+    CmHirDefId enum_definition;
+    uint32_t enum_variant_index;
+    CmHirAggregateForm enum_variant_form;
 } CmHirLibraryBinding;
 
 typedef struct CmHirLibraryImport {
@@ -211,7 +225,10 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
     const CmHirLibraryPathSegment *segments, size_t segment_count,
     CmHirLibraryValue *out_value);
 
-/* Resolves any exact public value-namespace binding, including constructors. */
+/*
+ * Resolves any exact public value-namespace binding, including struct
+ * constructors and associated unit enum variants.
+ */
 CmHirLibraryStatus cm_hir_library_artifact_lookup_value_binding(
     const CmHirLibraryArtifact *artifact,
     const CmHirLibraryPathSegment *segments, size_t segment_count,
@@ -238,7 +255,10 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_value_import(
     const CmHirLibraryPathSegment *local_name,
     CmHirLibraryImport *out_import);
 
-/* Resolves a type below one exactly authenticated imported module alias. */
+/*
+ * Resolves a type below one exactly authenticated imported module alias,
+ * including an associated unit enum variant below a retained enum type.
+ */
 CmHirLibraryStatus cm_hir_library_artifact_resolve_imported_type(
     const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,
     const CmModuleGraph *consumer,

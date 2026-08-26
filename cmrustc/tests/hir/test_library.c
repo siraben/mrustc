@@ -25,6 +25,12 @@ typedef struct OwnedDataView {
     size_t name_count;
 } OwnedDataView;
 
+typedef struct TestEnum {
+    CmHirDefId definition;
+    CmHirDefId variant_definition;
+    CmHirItemId item_id;
+} TestEnum;
+
 static CmSpan test_span(uint32_t start, uint32_t end)
 {
     CmSpan span;
@@ -118,6 +124,42 @@ static CmHirDefId add_public_struct(TestFixture *fixture, const char *name,
     assert(cm_hir_add_item(&fixture->context, &item, &item_id) == CM_HIR_OK);
     assert(item_id != CM_HIR_ITEM_NONE);
     return definition;
+}
+
+static TestEnum add_public_unit_enum(TestFixture *fixture, const char *name,
+    const char *variant_name, uint32_t start)
+{
+    TestEnum result;
+    CmHirVariant variant;
+    CmHirItem item;
+
+    memset(&result, 0, sizeof(result));
+    assert(cm_hir_reserve_item_definition_as(&fixture->context,
+        fixture->crate_id, CM_HIR_ITEM_ENUM, test_span(start, start + 9u),
+        &result.definition) == CM_HIR_OK);
+    assert(cm_hir_reserve_enum_variant_definition(&fixture->context,
+        fixture->crate_id, test_span(start + 2u, start + 6u),
+        &result.variant_definition) == CM_HIR_OK);
+    memset(&variant, 0, sizeof(variant));
+    variant.definition = result.variant_definition;
+    variant.name = cm_hir_intern(&fixture->context, variant_name);
+    variant.form = CM_HIR_AGGREGATE_UNIT;
+    variant.span = test_span(start + 2u, start + 6u);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_ENUM;
+    item.definition = result.definition;
+    item.owner_module = fixture->root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&fixture->context, name);
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(start, start + 9u);
+    item.data.enum_item.variants = &variant;
+    item.data.enum_item.variant_count = 1u;
+    assert(cm_hir_add_item(&fixture->context, &item, &result.item_id)
+        == CM_HIR_OK);
+    assert(result.item_id != CM_HIR_ITEM_NONE);
+    return result;
 }
 
 static void fixture_init(TestFixture *fixture)
@@ -649,6 +691,296 @@ static void test_struct_constructor_direct_capture(void)
     cm_source_set_destroy(&sources);
 }
 
+static void assert_unit_variant_binding(
+    const CmHirLibraryArtifact *artifact, const char *enum_name,
+    CmHirDefId enum_definition, CmHirDefId variant_definition)
+{
+    CmHirLibraryPathSegment path[3];
+    CmHirLibraryBinding binding;
+    CmHirLibraryType type;
+    CmHirLibraryValue value;
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)enum_name;
+    path[1].length = strlen(enum_name);
+    path[2].bytes = (const unsigned char *)"Null";
+    path[2].length = 4u;
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_binding(artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_OK);
+    assert(binding.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && binding.type_kind == CM_HIR_TYPE_ADT_KIND
+        && binding.primitive_kind == CM_HIR_PRIMITIVE_NONE
+        && binding.value_kind == CM_HIR_LIBRARY_VALUE_NONE
+        && cm_hir_def_id_equal(binding.definition, variant_definition)
+        && cm_hir_def_id_equal(binding.enum_definition, enum_definition)
+        && binding.enum_variant_index == 0u
+        && binding.enum_variant_form == CM_HIR_AGGREGATE_UNIT);
+    memset(&type, 0, sizeof(type));
+    assert(cm_hir_library_artifact_lookup_type(artifact, path, 3u, &type)
+        == CM_HIR_LIBRARY_OK);
+    assert(type.binding_kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && type.kind == CM_HIR_TYPE_ADT_KIND
+        && type.primitive_kind == CM_HIR_PRIMITIVE_NONE
+        && cm_hir_def_id_equal(type.definition, variant_definition)
+        && cm_hir_def_id_equal(type.enum_definition, enum_definition)
+        && type.enum_variant_index == 0u
+        && type.enum_variant_form == CM_HIR_AGGREGATE_UNIT);
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_value_binding(artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_OK);
+    assert(binding.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && cm_hir_def_id_equal(binding.definition, variant_definition)
+        && cm_hir_def_id_equal(binding.enum_definition, enum_definition));
+    memset(&value, 0, sizeof(value));
+    assert(cm_hir_library_artifact_lookup_value(artifact, path, 3u, &value)
+        == CM_HIR_LIBRARY_WRONG_NAMESPACE);
+}
+
+static void test_enum_variant_restore_scope(void)
+{
+    TestFixture fixture;
+    TestFixture fresh;
+    TestEnum enumeration;
+    TestEnum fresh_enumeration;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryOwnedData owned;
+    CmHirLibraryArtifactResult result;
+    CmHirLibraryBinding binding;
+    CmHirLibraryPathSegment path[3];
+    CmHirDefinition *variant_definition;
+    CmHirItem *enum_item;
+    CmHirItemId saved_parent;
+    uint32_t saved_index;
+    CmHirDefinitionState saved_state;
+    CmHirAggregateForm saved_form;
+    OwnedDataView before;
+    size_t root_index;
+
+    fixture_init(&fixture);
+    enumeration = add_public_unit_enum(&fixture, "Char", "Null", 90u);
+    cm_hir_library_artifact_init(&artifact);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = type_binding(fixture.api_definition);
+    add_binding_entry(&owned, root_index, "Api", &binding);
+    binding = adt_binding(enumeration.definition);
+    add_binding_entry(&owned, root_index, "Char", &binding);
+    add_binding_entry(&owned, root_index, "CharAlias", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact,
+        &fixture.context, fixture.crate_id, fixture.root_definition,
+        "dep", &owned);
+    assert(result.status == CM_HIR_LIBRARY_OK
+        && result.public_type_entry_count == 3u
+        && result.public_value_entry_count == 0u);
+    assert_unit_variant_binding(&artifact, "Char", enumeration.definition,
+        enumeration.variant_definition);
+    assert_unit_variant_binding(&artifact, "CharAlias",
+        enumeration.definition, enumeration.variant_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* A module-level variant claim cannot bypass its parent enum scope. */
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_ENUM_VARIANT;
+    binding.definition = enumeration.variant_definition;
+    binding.type_kind = CM_HIR_TYPE_ADT_KIND;
+    binding.enum_definition = enumeration.definition;
+    binding.enum_variant_form = CM_HIR_AGGREGATE_UNIT;
+    before = owned_data_view(&owned);
+    assert(cm_hir_library_owned_data_add_entry(&owned, root_index,
+        (const unsigned char *)"Null", 4u, &binding)
+        == CM_HIR_LIBRARY_UNSUPPORTED_IMPORT);
+    assert_owned_data_unchanged(&owned, before);
+    binding.enum_definition = cm_hir_def_id_none();
+    assert(cm_hir_library_owned_data_add_entry(&owned, root_index,
+        (const unsigned char *)"Null", 4u, &binding)
+        == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    binding.enum_definition = enumeration.definition;
+    binding.enum_variant_form = (CmHirAggregateForm)99;
+    assert(cm_hir_library_owned_data_add_entry(&owned, root_index,
+        (const unsigned char *)"Null", 4u, &binding)
+        == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    binding.enum_variant_form = CM_HIR_AGGREGATE_UNIT;
+    binding.enum_definition = enumeration.variant_definition;
+    assert(cm_hir_library_owned_data_add_entry(&owned, root_index,
+        (const unsigned char *)"Null", 4u, &binding)
+        == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)"Char";
+    path[1].length = 4u;
+    path[2].bytes = (const unsigned char *)"Null";
+    path[2].length = 4u;
+    variant_definition = (CmHirDefinition *)cm_hir_lookup_definition(
+        &fixture.context, enumeration.variant_definition);
+    enum_item = (CmHirItem *)cm_hir_get_item(&fixture.context,
+        enumeration.item_id);
+    assert(variant_definition != NULL && enum_item != NULL);
+    saved_parent = variant_definition->entity.enum_variant.enum_item_id;
+    variant_definition->entity.enum_variant.enum_item_id = CM_HIR_ITEM_NONE;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_INVALID_HIR);
+    variant_definition->entity.enum_variant.enum_item_id = saved_parent;
+    saved_index = variant_definition->entity.enum_variant.variant_index;
+    variant_definition->entity.enum_variant.variant_index = 1u;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_INVALID_HIR);
+    variant_definition->entity.enum_variant.variant_index = saved_index;
+    saved_state = variant_definition->state;
+    variant_definition->state = CM_HIR_DEFINITION_RESERVED;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_INVALID_HIR);
+    variant_definition->state = saved_state;
+    saved_form = enum_item->data.enum_item.variants[0].form;
+    enum_item->data.enum_item.variants[0].form = CM_HIR_AGGREGATE_TUPLE;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_UNSUPPORTED_IMPORT);
+    enum_item->data.enum_item.variants[0].form = saved_form;
+
+    /* Producer DefIds cannot be restored into a shifted fresh context. */
+    fixture_init(&fresh);
+    (void)add_public_extern_type(&fresh, "Shift", 45u);
+    fresh_enumeration = add_public_unit_enum(&fresh, "Char", "Null", 90u);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fresh.root_definition);
+    binding = adt_binding(enumeration.definition);
+    add_binding_entry(&owned, root_index, "Char", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact, &fresh.context,
+        fresh.crate_id, fresh.root_definition, "fresh_bad", &owned);
+    assert(result.status == CM_HIR_LIBRARY_INVALID_HIR
+        && owned.modules.len == 1u);
+    assert_unit_variant_binding(&artifact, "Char", enumeration.definition,
+        enumeration.variant_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fresh.root_definition);
+    binding = adt_binding(fresh_enumeration.definition);
+    add_binding_entry(&owned, root_index, "Char", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact, &fresh.context,
+        fresh.crate_id, fresh.root_definition, "dep", &owned);
+    assert(result.status == CM_HIR_LIBRARY_OK);
+    assert_unit_variant_binding(&artifact, "Char",
+        fresh_enumeration.definition, fresh_enumeration.variant_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&fresh.context);
+    cm_hir_context_destroy(&fixture.context);
+}
+
+static void test_enum_variant_direct_capture_and_public_reexport_rejection(
+    void)
+{
+    static const unsigned char source_text[] =
+        "pub enum Char { Null }\n"
+        "pub use Char as CharAlias;\n"
+        "use Char::Null as PrivateNull;\n";
+    static const unsigned char rejected_source_text[] =
+        "pub enum OtherChar { Null }\n"
+        "pub use OtherChar::*;\n";
+    CmSourceSet sources;
+    CmSourceSet rejected_sources;
+    CmSourceId root_source;
+    CmSourceId rejected_root_source;
+    CmCfgSet cfg;
+    CmModuleGraph graph;
+    CmModuleGraph rejected_graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmModuleGraphResult rejected_graph_result;
+    CmHirContext context;
+    CmHirContext rejected_context;
+    CmHirModuleMap map;
+    CmHirModuleMap rejected_map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    CmHirLowerResult rejected_lower_result;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactResult artifact_result;
+    const CmHirItem *item;
+    CmHirLibraryPathSegment stable_path[3];
+    CmHirLibraryBinding stable_binding;
+
+    cm_source_set_init(&sources);
+    cm_source_set_init(&rejected_sources);
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_init(&graph);
+    cm_module_graph_init(&rejected_graph);
+    cm_hir_context_init(&context);
+    cm_hir_context_init(&rejected_context);
+    cm_hir_module_map_init(&map);
+    cm_hir_module_map_init(&rejected_map);
+    cm_hir_library_artifact_init(&artifact);
+    assert(cm_source_add_memory(&sources, "enum.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "enum_scope";
+    lower_result = lower_test_graph(&context, &graph,
+        graph_result.revision, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    item = find_item_named(&context, "Char");
+    assert(item != NULL && item->kind == CM_HIR_ITEM_ENUM
+        && item->data.enum_item.variant_count == 1u);
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &context, lower_result.crate_id, &graph, graph_result.revision, &map,
+        "dep");
+    assert(artifact_result.status == CM_HIR_LIBRARY_OK
+        && artifact_result.public_type_entry_count == 2u
+        && artifact_result.public_value_entry_count == 0u);
+    assert_unit_variant_binding(&artifact, "Char", item->definition,
+        item->data.enum_item.variants[0].definition);
+    assert_unit_variant_binding(&artifact, "CharAlias", item->definition,
+        item->data.enum_item.variants[0].definition);
+
+    assert(cm_source_add_memory(&rejected_sources, "variant-reexport.rs",
+        rejected_source_text, sizeof(rejected_source_text) - 1u,
+        &rejected_root_source) == CM_SOURCE_OK);
+    rejected_graph_result = cm_module_graph_build(&rejected_graph,
+        &rejected_sources, rejected_root_source, &graph_options);
+    assert(rejected_graph_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "rejected_enum_scope";
+    rejected_lower_result = lower_test_graph(&rejected_context,
+        &rejected_graph, rejected_graph_result.revision, &rejected_map,
+        &lower_options);
+    assert(rejected_lower_result.error_count == 0u);
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &rejected_context, rejected_lower_result.crate_id, &rejected_graph,
+        rejected_graph_result.revision, &rejected_map, "rejected");
+    assert(artifact_result.status == CM_HIR_LIBRARY_INVALID_HIR);
+    stable_path[0].bytes = (const unsigned char *)"dep";
+    stable_path[0].length = 3u;
+    stable_path[1].bytes = (const unsigned char *)"Char";
+    stable_path[1].length = 4u;
+    stable_path[2].bytes = (const unsigned char *)"Null";
+    stable_path[2].length = 4u;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, stable_path,
+        3u, &stable_binding) == CM_HIR_LIBRARY_OK
+        && stable_binding.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && cm_hir_def_id_equal(stable_binding.definition,
+            item->data.enum_item.variants[0].definition));
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_module_map_destroy(&rejected_map);
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&rejected_context);
+    cm_hir_context_destroy(&context);
+    cm_module_graph_destroy(&rejected_graph);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&rejected_sources);
+    cm_source_set_destroy(&sources);
+}
+
 static void test_owned_restore_is_transactional(void)
 {
     TestFixture fixture;
@@ -1035,6 +1367,8 @@ int main(void)
     test_owned_restore_is_transactional();
     test_struct_constructor_restore();
     test_struct_constructor_direct_capture();
+    test_enum_variant_restore_scope();
+    test_enum_variant_direct_capture_and_public_reexport_rejection();
     test_owned_predicate_copy_and_equality();
     test_reserved_predicate_value_rejected();
     test_reserved_parameter_outlives_value_accepted();

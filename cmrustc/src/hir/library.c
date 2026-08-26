@@ -216,7 +216,13 @@ static int cm_hir_library_binding_shape_valid(
 {
     if (binding == NULL
         || (unsigned int)binding->kind
-            > (unsigned int)CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+            > (unsigned int)CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
+        return 0;
+    }
+    if (binding->kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && (!cm_hir_def_id_is_none(binding->enum_definition)
+            || binding->enum_variant_index != 0u
+            || binding->enum_variant_form != CM_HIR_AGGREGATE_UNIT)) {
         return 0;
     }
     if (binding->kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
@@ -236,6 +242,17 @@ static int cm_hir_library_binding_shape_valid(
     if (binding->kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
         return binding->type_kind == CM_HIR_TYPE_ADT_KIND
             && binding->value_kind == CM_HIR_LIBRARY_VALUE_NONE;
+    }
+    if (binding->kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
+        return binding->type_kind == CM_HIR_TYPE_ADT_KIND
+            && binding->value_kind == CM_HIR_LIBRARY_VALUE_NONE
+            && !cm_hir_def_id_is_none(binding->enum_definition)
+            && binding->enum_definition.crate_id
+                == binding->definition.crate_id
+            && !cm_hir_def_id_equal(binding->enum_definition,
+                binding->definition)
+            && (unsigned int)binding->enum_variant_form
+                <= (unsigned int)CM_HIR_AGGREGATE_NAMED;
     }
     if (binding->value_kind != CM_HIR_LIBRARY_VALUE_NONE) return 0;
     if (binding->kind == CM_HIR_LIBRARY_BINDING_TYPE) {
@@ -262,6 +279,9 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_entry(
         || !cm_hir_library_binding_shape_valid(binding)) {
         return CM_HIR_LIBRARY_INVALID_ARGUMENT;
     }
+    /* Associated enum scope is derived from its authenticated enum TYPE. */
+    if (binding->kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT)
+        return CM_HIR_LIBRARY_UNSUPPORTED_IMPORT;
     module = (CmHirLibraryOwnedModule *)cm_vec_at(&data->modules,
         module_index);
     if (module == NULL
@@ -1119,7 +1139,8 @@ static int cm_hir_library_add_entry(CmHirLibraryArtifactState *state,
 
     if (module == NULL || name == CM_INTERN_ID_NONE
         || (unsigned int)kind
-            > (unsigned int)CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+            > (unsigned int)CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        || kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
         || (kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE
             ? (!cm_hir_def_id_is_none(target)
                 || primitive_kind == CM_HIR_PRIMITIVE_NONE
@@ -2633,6 +2654,63 @@ static int cm_hir_library_definition_valid(
     return 0;
 }
 
+static int cm_hir_library_enum_scope_item(
+    const CmHirLibraryArtifactState *state, CmHirDefId definition,
+    const CmHirItem **out_item, CmHirItemId *out_item_id)
+{
+    const CmHirDefinition *resolved;
+    const CmHirItem *item;
+    uint32_t index;
+
+    if (out_item != NULL) *out_item = NULL;
+    if (out_item_id != NULL) *out_item_id = CM_HIR_ITEM_NONE;
+    if (state == NULL || out_item == NULL || out_item_id == NULL
+        || !cm_hir_library_definition_valid(state, definition,
+            CM_HIR_LIBRARY_BINDING_TYPE, CM_HIR_TYPE_ADT_KIND)) return 0;
+    resolved = cm_hir_lookup_definition(state->context, definition);
+    item = resolved == NULL ? NULL
+        : cm_hir_get_item(state->context, resolved->entity.item_id);
+    if (resolved == NULL || resolved->kind != CM_HIR_DEFINITION_ITEM
+        || item == NULL || item->kind != CM_HIR_ITEM_ENUM
+        || !cm_hir_def_id_equal(item->definition, definition)
+        || (item->data.enum_item.variant_count != 0u
+            && item->data.enum_item.variants == NULL)) return 0;
+    for (index = 0u; index < item->data.enum_item.variant_count; ++index) {
+        const CmHirVariant *variant;
+        const CmHirDefinition *variant_definition;
+        const CmInternedString *name;
+        uint32_t prior;
+
+        variant = &item->data.enum_item.variants[index];
+        variant_definition = cm_hir_lookup_definition(state->context,
+            variant->definition);
+        name = cm_interner_get(&state->context->strings, variant->name);
+        if (name == NULL || name->len == 0u
+            || (unsigned int)variant->form
+                > (unsigned int)CM_HIR_AGGREGATE_NAMED
+            || (variant->field_count != 0u && variant->fields == NULL)
+            || (variant->form == CM_HIR_AGGREGATE_UNIT
+                && (variant->field_count != 0u || variant->fields != NULL))
+            || variant_definition == NULL
+            || variant_definition->kind != CM_HIR_DEFINITION_ENUM_VARIANT
+            || variant_definition->state != CM_HIR_DEFINITION_BOUND
+            || variant_definition->id.crate_id != state->crate_id
+            || !cm_hir_library_span_equal(variant_definition->span,
+                variant->span)
+            || variant_definition->entity.enum_variant.enum_item_id
+                != resolved->entity.item_id
+            || variant_definition->entity.enum_variant.variant_index
+                != index) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (item->data.enum_item.variants[prior].name == variant->name)
+                return 0;
+        }
+    }
+    *out_item = item;
+    *out_item_id = resolved->entity.item_id;
+    return 1;
+}
+
 static int cm_hir_library_owned_module_present(
     const CmHirLibraryArtifactState *state, CmHirDefId definition)
 {
@@ -2764,10 +2842,32 @@ static int cm_hir_library_owned_data_validate(
                         entry->target, entry->kind, entry->type_kind)
                     || !cm_hir_library_constructor_has_type_mate(module,
                         entry)) return 0;
-            } else if (entry->kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE
-                && !cm_hir_library_definition_valid(candidate, entry->target,
-                    entry->kind, entry->type_kind)) {
-                return 0;
+            } else if (entry->kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
+                const CmHirDefinition *entry_definition;
+                const CmHirItem *enum_item;
+                CmHirItemId enum_item_id;
+
+                if (!cm_hir_library_definition_valid(candidate,
+                        entry->target, entry->kind, entry->type_kind)) {
+                    return 0;
+                }
+                entry_definition = cm_hir_lookup_definition(
+                    candidate->context, entry->target);
+                if (entry->kind == CM_HIR_LIBRARY_BINDING_TYPE
+                    && entry->type_kind == CM_HIR_TYPE_ADT_KIND
+                    && entry_definition != NULL
+                    && entry_definition->kind == CM_HIR_DEFINITION_ITEM) {
+                    const CmHirItem *entry_item;
+
+                    entry_item = cm_hir_get_item(candidate->context,
+                        entry_definition->entity.item_id);
+                    if (entry_item != NULL
+                        && entry_item->kind == CM_HIR_ITEM_ENUM
+                        && !cm_hir_library_enum_scope_item(candidate,
+                            entry->target, &enum_item, &enum_item_id)) {
+                        return 0;
+                    }
+                }
             }
             for (prior_index = 0u; prior_index < entry_index;
                     ++prior_index) {
@@ -3104,6 +3204,10 @@ static int cm_hir_library_add_public_imports(
                             name, binding->target, binding_kind,
                             type_kind, CM_HIR_PRIMITIVE_NONE,
                             value_kind))) return 0;
+            } else if (definition->kind
+                    == CM_HIR_DEFINITION_ENUM_VARIANT) {
+                /* Module-level public variant reexports are not transported. */
+                return 0;
             }
         }
     }
@@ -3330,6 +3434,61 @@ static int cm_hir_library_segment_is_c_str(
         && memcmp(segment->bytes, text, length) == 0;
 }
 
+static int cm_hir_library_hir_name_is(const CmHirContext *context,
+    CmInternId name_id, const CmHirLibraryPathSegment *segment)
+{
+    const CmInternedString *name;
+
+    if (context == NULL || segment == NULL || segment->bytes == NULL
+        || segment->length == 0u) return 0;
+    name = cm_interner_get(&context->strings, name_id);
+    return name != NULL && name->len == segment->length
+        && memcmp(name->bytes, segment->bytes, name->len) == 0;
+}
+
+static CmHirLibraryStatus cm_hir_library_lookup_enum_variant(
+    const CmHirLibraryArtifactState *state, CmHirDefId enum_definition,
+    const CmHirLibraryPathSegment *segment, CmHirLibraryBinding *out_binding)
+{
+    const CmHirItem *item;
+    const CmHirVariant *selected;
+    CmHirItemId item_id;
+    uint32_t selected_index;
+    uint32_t index;
+    size_t matches;
+
+    if (out_binding == NULL) return CM_HIR_LIBRARY_INVALID_ARGUMENT;
+    memset(out_binding, 0, sizeof(*out_binding));
+    if (!cm_hir_library_enum_scope_item(state, enum_definition, &item,
+            &item_id)) return CM_HIR_LIBRARY_INVALID_HIR;
+    selected = NULL;
+    selected_index = 0u;
+    matches = 0u;
+    for (index = 0u; index < item->data.enum_item.variant_count; ++index) {
+        const CmHirVariant *variant;
+
+        variant = &item->data.enum_item.variants[index];
+        if (!cm_hir_library_hir_name_is(state->context, variant->name,
+                segment)) continue;
+        selected = variant;
+        selected_index = index;
+        matches += 1u;
+    }
+    if (matches == 0u) return CM_HIR_LIBRARY_NOT_FOUND;
+    if (matches != 1u || selected == NULL) return CM_HIR_LIBRARY_AMBIGUOUS;
+    if (selected->form != CM_HIR_AGGREGATE_UNIT)
+        return CM_HIR_LIBRARY_UNSUPPORTED_IMPORT;
+    out_binding->kind = CM_HIR_LIBRARY_BINDING_ENUM_VARIANT;
+    out_binding->definition = selected->definition;
+    out_binding->type_kind = CM_HIR_TYPE_ADT_KIND;
+    out_binding->primitive_kind = CM_HIR_PRIMITIVE_NONE;
+    out_binding->value_kind = CM_HIR_LIBRARY_VALUE_NONE;
+    out_binding->enum_definition = enum_definition;
+    out_binding->enum_variant_index = selected_index;
+    out_binding->enum_variant_form = selected->form;
+    return CM_HIR_LIBRARY_OK;
+}
+
 static CmHirLibraryStatus cm_hir_library_lookup_from_module(
     const CmHirLibraryArtifactState *state, CmHirDefId current_module,
     const CmHirLibraryPathSegment *segments, size_t segment_count,
@@ -3367,7 +3526,8 @@ static CmHirLibraryStatus cm_hir_library_lookup_from_module(
             if (!cm_hir_library_entry_name_is(state, entry,
                     &segments[segment_index])) continue;
             if (segment_index + 1u < segment_count) {
-                if (entry->kind != CM_HIR_LIBRARY_BINDING_MODULE) continue;
+                if (entry->kind != CM_HIR_LIBRARY_BINDING_MODULE
+                    && entry->kind != CM_HIR_LIBRARY_BINDING_TYPE) continue;
             } else if (cm_hir_library_entry_is_value_namespace(entry)
                     != value_namespace) {
                 continue;
@@ -3393,6 +3553,37 @@ static CmHirLibraryStatus cm_hir_library_lookup_from_module(
         if (selected == NULL) return CM_HIR_LIBRARY_NOT_FOUND;
         if (saw_module && saw_nonmodule) return CM_HIR_LIBRARY_AMBIGUOUS;
         if (segment_index + 1u < segment_count) {
+            if (selected->kind == CM_HIR_LIBRARY_BINDING_TYPE) {
+                const CmHirDefinition *scope_definition;
+                const CmHirItem *scope_item;
+                const CmHirItem *enum_item;
+                CmHirItemId enum_item_id;
+
+                if (!cm_hir_library_definition_valid(state,
+                        selected->target, selected->kind,
+                        selected->type_kind)) {
+                    return CM_HIR_LIBRARY_INVALID_HIR;
+                }
+                scope_definition = cm_hir_lookup_definition(state->context,
+                    selected->target);
+                scope_item = scope_definition == NULL ? NULL
+                    : cm_hir_get_item(state->context,
+                        scope_definition->entity.item_id);
+                if (scope_item == NULL) return CM_HIR_LIBRARY_INVALID_HIR;
+                if (scope_item->kind != CM_HIR_ITEM_ENUM)
+                    return CM_HIR_LIBRARY_WRONG_NAMESPACE;
+                if (!cm_hir_library_enum_scope_item(state, selected->target,
+                        &enum_item, &enum_item_id)) {
+                    return CM_HIR_LIBRARY_INVALID_HIR;
+                }
+                (void)enum_item;
+                (void)enum_item_id;
+                if (segment_index + 2u != segment_count)
+                    return CM_HIR_LIBRARY_WRONG_NAMESPACE;
+                return cm_hir_library_lookup_enum_variant(state,
+                    selected->target, &segments[segment_index + 1u],
+                    out_binding);
+            }
             if (selected->kind != CM_HIR_LIBRARY_BINDING_MODULE)
                 return CM_HIR_LIBRARY_WRONG_NAMESPACE;
             if (!cm_hir_library_definition_valid(state, selected->target,
@@ -3474,11 +3665,16 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_type(
         segment_count, &binding);
     if (status != CM_HIR_LIBRARY_OK) return status;
     if (binding.kind != CM_HIR_LIBRARY_BINDING_TYPE
-        && binding.kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE)
+        && binding.kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE
+        && binding.kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT)
         return CM_HIR_LIBRARY_WRONG_NAMESPACE;
+    out_type->binding_kind = binding.kind;
     out_type->definition = binding.definition;
     out_type->kind = binding.type_kind;
     out_type->primitive_kind = binding.primitive_kind;
+    out_type->enum_definition = binding.enum_definition;
+    out_type->enum_variant_index = binding.enum_variant_index;
+    out_type->enum_variant_form = binding.enum_variant_form;
     return CM_HIR_LIBRARY_OK;
 }
 
@@ -3752,11 +3948,16 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_imported_type(
         local_module_name, suffix, suffix_count, &binding);
     if (status != CM_HIR_LIBRARY_OK) return status;
     if (binding.kind != CM_HIR_LIBRARY_BINDING_TYPE
-        && binding.kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE)
+        && binding.kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE
+        && binding.kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT)
         return CM_HIR_LIBRARY_WRONG_NAMESPACE;
+    out_type->binding_kind = binding.kind;
     out_type->definition = binding.definition;
     out_type->kind = binding.type_kind;
     out_type->primitive_kind = binding.primitive_kind;
+    out_type->enum_definition = binding.enum_definition;
+    out_type->enum_variant_index = binding.enum_variant_index;
+    out_type->enum_variant_form = binding.enum_variant_form;
     return CM_HIR_LIBRARY_OK;
 }
 
