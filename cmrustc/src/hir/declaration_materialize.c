@@ -232,16 +232,16 @@ static int cm_decl_primitive(uint8_t primitive, CmHirType *type)
     case CM_HIR_DECL_PRIMITIVE_ISIZE:
         type->kind = CM_HIR_TYPE_INTEGER_KIND;
         type->data.integer_type.kind = CM_HIR_INT_ISIZE; return 1;
-    case CM_HIR_DECL_PRIMITIVE_U8:
+    case CM_HIR_DECL_ENUM_REPR_U8:
         type->kind = CM_HIR_TYPE_INTEGER_KIND;
         type->data.integer_type.kind = CM_HIR_INT_U8; return 1;
-    case CM_HIR_DECL_PRIMITIVE_U16:
+    case CM_HIR_DECL_ENUM_REPR_U16:
         type->kind = CM_HIR_TYPE_INTEGER_KIND;
         type->data.integer_type.kind = CM_HIR_INT_U16; return 1;
-    case CM_HIR_DECL_PRIMITIVE_U32:
+    case CM_HIR_DECL_ENUM_REPR_U32:
         type->kind = CM_HIR_TYPE_INTEGER_KIND;
         type->data.integer_type.kind = CM_HIR_INT_U32; return 1;
-    case CM_HIR_DECL_PRIMITIVE_U64:
+    case CM_HIR_DECL_ENUM_REPR_U64:
         type->kind = CM_HIR_TYPE_INTEGER_KIND;
         type->data.integer_type.kind = CM_HIR_INT_U64; return 1;
     case CM_HIR_DECL_PRIMITIVE_U128:
@@ -527,6 +527,32 @@ static CmHirStatus cm_decl_aggregate_attributes(CmHirContext *context,
     }
     *out_count = count;
     return CM_HIR_OK;
+}
+
+static int cm_decl_explicit_enum_repr(uint8_t primitive,
+    uint64_t *out_maximum, const char **out_attribute)
+{
+    if (out_maximum == NULL || out_attribute == NULL) return 0;
+    switch (primitive) {
+    case CM_HIR_DECL_PRIMITIVE_U8:
+        *out_maximum = UINT8_MAX;
+        *out_attribute = "repr(u8)";
+        return 1;
+    case CM_HIR_DECL_PRIMITIVE_U16:
+        *out_maximum = UINT16_MAX;
+        *out_attribute = "repr(u16)";
+        return 1;
+    case CM_HIR_DECL_PRIMITIVE_U32:
+        *out_maximum = UINT32_MAX;
+        *out_attribute = "repr(u32)";
+        return 1;
+    case CM_HIR_DECL_PRIMITIVE_U64:
+        *out_maximum = UINT64_MAX;
+        *out_attribute = "repr(u64)";
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static int cm_decl_application_schema_valid(
@@ -992,7 +1018,9 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 && wire->kind != CM_HIR_DECL_ITEM_UNION
                 && wire->kind != CM_HIR_DECL_ITEM_ENUM
                 && wire->kind != CM_HIR_DECL_ITEM_TYPE_ALIAS)
-            || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
+            || (wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PRIVATE
+                && wire->visibility.kind
+                    != CM_HIR_DECL_VISIBILITY_PUBLIC)
             || wire->visibility.restriction_module != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
@@ -1015,8 +1043,8 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         item.owner_module = runtime->modules[wire->owner_module - 1u];
         item.parent_definition = cm_hir_def_id_none();
         item.name = cm_decl_intern(context, wire->name);
-        item.visibility.kind = CM_HIR_VIS_PUBLIC;
-        item.visibility.restriction = cm_hir_def_id_none();
+        if (!cm_decl_visibility(wire->visibility, &item.visibility))
+            return CM_HIR_INVARIANT_VIOLATION;
         item.span = cm_decl_span(source, wire->source_ordinal);
         item.generic_parameter_start = wire->generic_count == 0u
             ? CM_HIR_GENERIC_PARAM_NONE
@@ -1028,19 +1056,23 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
             uint32_t attribute_count;
             if ((wire->aggregate_form != CM_HIR_DECL_AGGREGATE_UNIT
                     && wire->aggregate_form
+                        != CM_HIR_DECL_AGGREGATE_TUPLE
+                    && wire->aggregate_form
                         != CM_HIR_DECL_AGGREGATE_NAMED)
                 || (wire->kind == CM_HIR_DECL_ITEM_UNION
                     && wire->aggregate_form
                         != CM_HIR_DECL_AGGREGATE_NAMED)
                 || (wire->aggregate_form == CM_HIR_DECL_AGGREGATE_UNIT
                     && (wire->field_count != 0u || wire->fields != NULL))
-                || (wire->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+                || (wire->aggregate_form != CM_HIR_DECL_AGGREGATE_UNIT
                     && (wire->field_count == 0u || wire->fields == NULL))) {
                 return CM_HIR_INVARIANT_VIOLATION;
             }
-            item.data.aggregate_item.form = wire->aggregate_form
-                    == CM_HIR_DECL_AGGREGATE_UNIT
-                ? CM_HIR_AGGREGATE_UNIT : CM_HIR_AGGREGATE_NAMED;
+            item.data.aggregate_item.form =
+                wire->aggregate_form == CM_HIR_DECL_AGGREGATE_UNIT
+                    ? CM_HIR_AGGREGATE_UNIT
+                    : wire->aggregate_form == CM_HIR_DECL_AGGREGATE_TUPLE
+                    ? CM_HIR_AGGREGATE_TUPLE : CM_HIR_AGGREGATE_NAMED;
             fields = (CmHirField *)cm_decl_array(wire->field_count,
                 sizeof(*fields));
             if (wire->field_count != 0u && fields == NULL)
@@ -1053,13 +1085,19 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                     || (size_t)field->type_local > metadata->type_count
                     || runtime->types[field->type_local - 1u]
                         == CM_HIR_TYPE_NONE
+                    || (wire->aggregate_form
+                            == CM_HIR_DECL_AGGREGATE_TUPLE
+                        && (field->name.data != NULL
+                            || field->name.length != 0u))
                     || !cm_decl_visibility(field->visibility,
                         &fields[field_index].visibility)) {
                     cm_free(fields);
                     return CM_HIR_INVARIANT_VIOLATION;
                 }
-                fields[field_index].name = cm_decl_intern(context,
-                    field->name);
+                fields[field_index].name = wire->aggregate_form
+                        == CM_HIR_DECL_AGGREGATE_TUPLE
+                    ? CM_INTERN_ID_NONE : cm_decl_intern(context,
+                        field->name);
                 fields[field_index].type =
                     runtime->types[field->type_local - 1u];
                 fields[field_index].span = cm_decl_span(source,
@@ -1078,8 +1116,11 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         } else if (wire->kind == CM_HIR_DECL_ITEM_ENUM) {
             uint32_t variant_index;
 
-            int explicit_discriminants = wire->enum_repr_primitive
-                == CM_HIR_DECL_PRIMITIVE_U8;
+            uint64_t maximum_discriminant = 0u;
+            const char *repr_attribute = NULL;
+            int explicit_discriminants = cm_decl_explicit_enum_repr(
+                wire->enum_repr_primitive, &maximum_discriminant,
+                &repr_attribute);
             if (wire->alias_target_type != 0u
                 || (wire->enum_flags
                     & (uint8_t)~CM_HIR_DECL_ENUM_HAS_LANG_ITEM) != 0u
@@ -1168,7 +1209,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                                 != CM_HIR_DECL_PRIMITIVE_ISIZE
                             || wire_variant->discriminant_high != 0u
                             || wire_variant->discriminant_low
-                                > UINT64_C(255))
+                                > maximum_discriminant)
                         : (wire_variant->discriminant_primitive
                                 != CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT
                             || wire_variant->discriminant_low != 0u
@@ -1263,7 +1304,11 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
             }
             if (explicit_discriminants) {
                 enum_attributes[0].metadata = cm_hir_intern(context,
-                    "repr(u8)");
+                    repr_attribute);
+                if (enum_attributes[0].metadata == CM_INTERN_ID_NONE) {
+                    status = CM_HIR_INVALID_ARGUMENT;
+                    goto enum_failure;
+                }
             }
             {
                 uint32_t attribute_count;

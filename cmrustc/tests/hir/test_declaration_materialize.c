@@ -103,6 +103,16 @@ typedef struct AggregateFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[6];
 } AggregateFixture;
 
+typedef struct LayoutFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationItem items[3];
+    CmHirDeclarationField fields[3];
+    CmHirDeclarationVariant variants[4];
+    CmHirDeclarationType types[3];
+    CmHirDeclarationNamespaceEntry namespace_entries[4];
+} LayoutFixture;
+
 #define PRIMITIVE_BINDING_COUNT 34u
 
 typedef struct PrimitiveFixture {
@@ -1215,6 +1225,121 @@ static void aggregate_fixture_init(AggregateFixture *fixture)
     metadata->namespace_count = 6u;
 }
 
+static void layout_fixture_init(LayoutFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    uint32_t index;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("layout_dep");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("layout-closure-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    fixture->types[1].item_local = 1u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    fixture->types[2].item_local = 2u;
+    metadata->types = fixture->types;
+    metadata->type_count = 3u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Alignment");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 1u;
+    fixture->items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_TUPLE;
+    fixture->items[0].aggregate_repr =
+        CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT;
+    fixture->items[0].field_count = 1u;
+    fixture->items[0].fields = fixture->fields;
+    fixture->fields[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->fields[0].source_ordinal = 0u;
+    fixture->fields[0].type_local = 3u;
+
+    fixture->items[1].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[1].owner_module = 1u;
+    fixture->items[1].name =
+        (CmHirDeclarationString)S("AlignmentEnum");
+    fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->items[1].source_ordinal = 2u;
+    fixture->items[1].enum_repr_primitive =
+        CM_HIR_DECL_ENUM_REPR_U64;
+    fixture->items[1].variant_count = 4u;
+    fixture->items[1].variants = fixture->variants;
+    for (index = 0u; index < 4u; ++index) {
+        fixture->variants[index].kind = CM_HIR_DECL_VARIANT_UNIT;
+        fixture->variants[index].source_ordinal = index;
+        fixture->variants[index].discriminant_primitive =
+            CM_HIR_DECL_PRIMITIVE_ISIZE;
+        fixture->variants[index].discriminant_low =
+            index == 0u ? UINT64_C(1)
+            : index == 1u ? UINT64_C(2)
+            : index == 2u ? UINT64_C(4) : UINT64_C(1) << 63;
+    }
+    fixture->variants[0].name = (CmHirDeclarationString)S("Align1");
+    fixture->variants[1].name = (CmHirDeclarationString)S("Align2");
+    fixture->variants[2].name = (CmHirDeclarationString)S("Align4");
+    fixture->variants[3].name = (CmHirDeclarationString)S("AlignHigh");
+
+    fixture->items[2].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[2].owner_module = 1u;
+    fixture->items[2].name = (CmHirDeclarationString)S("Layout");
+    fixture->items[2].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[2].source_ordinal = 4u;
+    fixture->items[2].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    fixture->items[2].aggregate_repr = CM_HIR_DECL_AGGREGATE_REPR_RUST;
+    fixture->items[2].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+    fixture->items[2].field_count = 2u;
+    fixture->items[2].fields = &fixture->fields[1];
+    fixture->items[2].lang_item =
+        (CmHirDeclarationString)S("alloc_layout");
+    fixture->fields[1].name = (CmHirDeclarationString)S("size");
+    fixture->fields[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->fields[1].source_ordinal = 0u;
+    fixture->fields[1].type_local = 1u;
+    fixture->fields[2].name = (CmHirDeclarationString)S("align");
+    fixture->fields[2].visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->fields[2].source_ordinal = 1u;
+    fixture->fields[2].type_local = 2u;
+    metadata->items = fixture->items;
+    metadata->item_count = 3u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("AlignmentReexport");
+    fixture->namespace_entries[1].export_ordinal = 5u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[0];
+    fixture->namespace_entries[2].name = fixture->items[2].name;
+    fixture->namespace_entries[2].target_local = 3u;
+    fixture->namespace_entries[2].export_ordinal = 4u;
+    fixture->namespace_entries[3] = fixture->namespace_entries[2];
+    fixture->namespace_entries[3].name =
+        (CmHirDeclarationString)S("LayoutReexport");
+    fixture->namespace_entries[3].export_ordinal = 6u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 4u;
+}
+
 static CmHirDeclarationMaterializeExpectation expectation_for(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -2053,6 +2178,75 @@ static void test_aggregate_fresh_consumer(CmHirContext *context,
             assert_u8_type(context,
                 type->data.named_type.arguments[0].data.type);
         }
+    }
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_layout_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId alignment,
+    CmHirDefId layout)
+{
+    static const unsigned char source_text[] =
+        "pub fn imported(_l: dep::Layout, _lr: dep::LayoutReexport, "
+        "_a: dep::Alignment, _ar: dep::AlignmentReexport) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    const CmHirItem *function;
+    CmHirDefId expected[4];
+    uint32_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "layout_consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "layout_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    function = find_item(context, CM_HIR_ITEM_FUNCTION, "imported");
+    assert(function != NULL
+        && function->data.function_item.signature.parameter_count == 4u);
+    expected[0] = layout;
+    expected[1] = layout;
+    expected[2] = alignment;
+    expected[3] = alignment;
+    for (index = 0u; index < 4u; ++index) {
+        const CmHirType *type = cm_hir_get_type(context,
+            function->data.function_item.signature.parameters[index].type);
+        assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+            && cm_hir_def_id_equal(type->data.named_type.definition,
+                expected[index])
+            && type->data.named_type.argument_count == 0u
+            && type->data.named_type.arguments == NULL);
     }
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
@@ -3385,6 +3579,275 @@ static void test_aggregate_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_layout_wide_enum_reprs(void)
+{
+    static const uint8_t representations[2] = {
+        CM_HIR_DECL_ENUM_REPR_U16, CM_HIR_DECL_ENUM_REPR_U32
+    };
+    static const uint64_t high_values[2] = {
+        UINT64_C(1) << 15, UINT64_C(1) << 31
+    };
+    static const char *const attributes[2] = {
+        "repr(u16)", "repr(u32)"
+    };
+    uint32_t index;
+
+    for (index = 0u; index < 2u; ++index) {
+        LayoutFixture fixture;
+        CmHirDeclarationMaterializeExpectation expectation;
+        CmHirDeclarationMaterializeResult result;
+        CmHirContext context;
+        CmHirLibraryArtifact artifact;
+        const CmHirItem *alignment_enum;
+        CmSourceId source = 189u + index;
+
+        layout_fixture_init(&fixture);
+        fixture.items[1].enum_repr_primitive = representations[index];
+        fixture.variants[3].discriminant_low = high_values[index];
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+            == CM_HIR_DECL_METADATA_OK);
+        expectation = expectation_for(&fixture.metadata);
+        cm_hir_context_init(&context);
+        cm_hir_library_artifact_init(&artifact);
+        result = cm_hir_declaration_metadata_materialize(&context,
+            &artifact, &fixture.metadata, &expectation, "dep", source);
+        assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+            && result.item_count == 3u
+            && result.public_type_entry_count == 4u
+            && result.public_value_entry_count == 0u);
+        alignment_enum = find_item(&context, CM_HIR_ITEM_ENUM,
+            "AlignmentEnum");
+        assert(alignment_enum != NULL
+            && alignment_enum->visibility.kind == CM_HIR_VIS_PRIVATE
+            && alignment_enum->data.enum_item.variant_count == 4u
+            && alignment_enum->data.enum_item.variants[3]
+                .discriminant.data.value.low_bits == high_values[index]);
+        assert_item_attribute(&context, alignment_enum, 0u,
+            attributes[index], source);
+        cm_hir_library_artifact_destroy(&artifact);
+        cm_hir_context_destroy(&context);
+    }
+}
+
+static void test_layout_materialize_and_consume(void)
+{
+    LayoutFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding alignment_binding;
+    CmHirLibraryBinding alignment_reexport;
+    CmHirLibraryBinding layout_binding;
+    CmHirLibraryBinding layout_reexport;
+    CmHirLibraryPathSegment private_path[2];
+    const CmHirItem *alignment;
+    const CmHirItem *alignment_enum;
+    const CmHirItem *layout;
+    const CmHirType *type;
+    ContextLengths lengths;
+    uint64_t saved_low;
+    uint64_t saved_high;
+    uint32_t saved_local;
+    uint8_t saved_byte;
+    uint32_t index;
+
+    layout_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 191u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 3u
+        && result.public_type_entry_count == 4u
+        && result.public_value_entry_count == 0u);
+
+    alignment = find_item(&context, CM_HIR_ITEM_STRUCT, "Alignment");
+    alignment_enum = find_item(&context, CM_HIR_ITEM_ENUM,
+        "AlignmentEnum");
+    layout = find_item(&context, CM_HIR_ITEM_STRUCT, "Layout");
+    assert(alignment != NULL && alignment_enum != NULL && layout != NULL
+        && alignment->visibility.kind == CM_HIR_VIS_PUBLIC
+        && alignment->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE
+        && alignment->data.aggregate_item.field_count == 1u
+        && alignment->data.aggregate_item.fields != NULL
+        && alignment->data.aggregate_item.fields[0].name
+            == CM_INTERN_ID_NONE
+        && alignment->data.aggregate_item.fields[0].visibility.kind
+            == CM_HIR_VIS_PRIVATE
+        && alignment_enum->visibility.kind == CM_HIR_VIS_PRIVATE
+        && alignment_enum->data.enum_item.variant_count == 4u
+        && layout->visibility.kind == CM_HIR_VIS_PUBLIC
+        && layout->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED
+        && layout->data.aggregate_item.field_count == 2u);
+    assert_item_attribute(&context, alignment, 0u, "repr(transparent)",
+        191u);
+    assert_item_attribute(&context, alignment_enum, 0u, "repr(u64)",
+        191u);
+    assert_item_attribute(&context, layout, 0u,
+        "lang = \"alloc_layout\"", 191u);
+
+    type = cm_hir_get_type(&context,
+        alignment->data.aggregate_item.fields[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type->data.named_type.definition,
+            alignment_enum->definition)
+        && type->data.named_type.argument_count == 0u);
+    type = cm_hir_get_type(&context,
+        layout->data.aggregate_item.fields[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_USIZE
+        && layout->data.aggregate_item.fields[0].visibility.kind
+            == CM_HIR_VIS_PRIVATE);
+    type = cm_hir_get_type(&context,
+        layout->data.aggregate_item.fields[1].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type->data.named_type.definition,
+            alignment->definition)
+        && layout->data.aggregate_item.fields[1].visibility.kind
+            == CM_HIR_VIS_PRIVATE);
+
+    for (index = 0u; index < 4u; ++index) {
+        const CmHirVariant *variant =
+            &alignment_enum->data.enum_item.variants[index];
+        const CmHirType *discriminant = cm_hir_get_type(&context,
+            variant->discriminant.type);
+        uint64_t expected = index == 0u ? UINT64_C(1)
+            : index == 1u ? UINT64_C(2)
+            : index == 2u ? UINT64_C(4) : UINT64_C(1) << 63;
+        assert(variant->form == CM_HIR_AGGREGATE_UNIT
+            && variant->field_count == 0u && variant->fields == NULL
+            && variant->has_discriminant
+            && variant->discriminant.kind == CM_HIR_CONST_VALUE
+            && variant->discriminant.data.value.low_bits == expected
+            && variant->discriminant.data.value.high_bits == 0u
+            && discriminant != NULL
+            && discriminant->kind == CM_HIR_TYPE_INTEGER_KIND
+            && discriminant->data.integer_type.kind == CM_HIR_INT_ISIZE);
+    }
+
+    alignment_binding = lookup_binding(&artifact, "Alignment");
+    alignment_reexport = lookup_binding(&artifact, "AlignmentReexport");
+    layout_binding = lookup_binding(&artifact, "Layout");
+    layout_reexport = lookup_binding(&artifact, "LayoutReexport");
+    assert(alignment_binding.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && alignment_reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && layout_binding.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && layout_reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && cm_hir_def_id_equal(alignment_binding.definition,
+            alignment_reexport.definition)
+        && cm_hir_def_id_equal(alignment_binding.definition,
+            alignment->definition)
+        && cm_hir_def_id_equal(layout_binding.definition,
+            layout_reexport.definition)
+        && cm_hir_def_id_equal(layout_binding.definition,
+            layout->definition)
+        && lookup_value_binding_status(&artifact, "Alignment")
+            == CM_HIR_LIBRARY_NOT_FOUND
+        && lookup_value_binding_status(&artifact, "Layout")
+            == CM_HIR_LIBRARY_NOT_FOUND);
+    private_path[0].bytes = (const unsigned char *)"dep";
+    private_path[0].length = sizeof("dep") - 1u;
+    private_path[1].bytes = (const unsigned char *)"AlignmentEnum";
+    private_path[1].length = sizeof("AlignmentEnum") - 1u;
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, private_path,
+        2u, &alignment_binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    test_layout_fresh_consumer(&context, &artifact, alignment->definition,
+        layout->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_byte = decoded.items[0].aggregate_form;
+    decoded.items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 192u);
+    decoded.items[0].aggregate_form = saved_byte;
+
+    decoded.items[0].fields[0].name =
+        (CmHirDeclarationString)S("private_field");
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 193u);
+    decoded.items[0].fields[0].name.data = NULL;
+    decoded.items[0].fields[0].name.length = 0u;
+
+    saved_byte = decoded.items[1].visibility.kind;
+    decoded.items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 194u);
+    decoded.items[1].visibility.kind = saved_byte;
+
+    saved_local = decoded.items[0].fields[0].type_local;
+    decoded.items[0].fields[0].type_local = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 195u);
+    decoded.items[0].fields[0].type_local = saved_local;
+
+    saved_local = decoded.namespace_entries[0].target_local;
+    decoded.namespace_entries[0].target_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 196u);
+    decoded.namespace_entries[0].target_local = saved_local;
+
+    saved_byte = decoded.items[1].enum_repr_primitive;
+    decoded.items[1].enum_repr_primitive = CM_HIR_DECL_ENUM_REPR_U32;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 197u);
+    decoded.items[1].enum_repr_primitive = saved_byte;
+
+    saved_byte = decoded.items[1].variants[0].discriminant_primitive;
+    decoded.items[1].variants[0].discriminant_primitive =
+        CM_HIR_DECL_PRIMITIVE_U64;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 198u);
+    decoded.items[1].variants[0].discriminant_primitive = saved_byte;
+
+    saved_high = decoded.items[1].variants[0].discriminant_high;
+    decoded.items[1].variants[0].discriminant_high = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 199u);
+    decoded.items[1].variants[0].discriminant_high = saved_high;
+
+    saved_low = decoded.items[1].variants[1].discriminant_low;
+    decoded.items[1].variants[1].discriminant_low =
+        decoded.items[1].variants[0].discriminant_low;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 200u);
+    decoded.items[1].variants[1].discriminant_low = saved_low;
+
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 201u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void assert_enum_variant_path(const CmHirLibraryArtifact *artifact,
     const char *enum_name, const char *variant_name,
     CmHirDefId enum_definition, CmHirDefId variant_definition,
@@ -4387,6 +4850,8 @@ int main(void)
     test_static_materialize_and_consume();
     test_primitive_materialize_and_consume();
     test_aggregate_materialize_and_consume();
+    test_layout_wide_enum_reprs();
+    test_layout_materialize_and_consume();
     test_enum_materialize_and_restore_scope();
     test_default_enum_materialize_and_variant_reexports();
     test_option_tuple_materialize_and_consume();
