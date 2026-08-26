@@ -123,6 +123,17 @@ staged capability is authenticated associated-method declaration/library
 transport; it does not yet provide the full nominal/signature closure or an
 object-bearing `core.rlib`.
 
+Commit `c74680bf` adds a real but bounded unsafe-trait METHOD declaration
+surface: exact trait-child identities, receivers, safety/default-body promises,
+`Self`, erased references, method predicates, associated library lookup, fresh
+materialization, and fail-closed unavailable bodies.  Legacy zero-AITM and
+free-function representations remain exact.  The next whole-core probe still
+measures Allocator at the same item/reason, now because its first method return
+contains a generic `Result` ENUM application outside capture's composite-type
+source/DAG support.  Slice/raw-pointer capture and the distinct elided
+`by_ref -> &Self` output-lifetime relation remain the immediate prerequisites;
+the full nominal/layout closure still follows.
+
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
 `--extern-cmrlib` path is deliberately the exact v3.2 executable-slice

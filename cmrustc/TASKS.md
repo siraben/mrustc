@@ -2040,6 +2040,20 @@ order, safety, receiver/default-body promises, `Self`, erased receiver
 references, method-owned predicates, and trait-owned library reachability;
 the full `Layout`/`NonNull`/`Result` closure follows before exact Allocator can
 be transported.
+Commit `c74680bf` lands that independently consumable foundation: byte-exact
+legacy zero-AITM compatibility, unsafe NOMD safety/ranges, trait-owned METHOD
+records, `Self`, erased shared receivers, method safety/default promises,
+method-owned marker predicates, complete library child authority and associated
+lookup, reserve-before-bind materialization, fresh consumer lowering, and
+atomic rollback.  It intentionally rejects ordinary elided `-> &Self`, whose
+live HIR region remains `INFER` rather than the receiver's `ERASED` region.
+The post-foundation pinned-core probe remains at the same exact Allocator item
+and `item-source-invalid` reason.  The first residual signature mismatch is
+`allocate`'s outer generic `Result` ENUM application; after that, `[u8]` needs
+SLICE capture and `by_ref` needs a narrowly authenticated receiver-driven
+output-elision relation.  Those types already exist in the wire/materializer,
+so the active step is capture DAG/source support plus the bounded lowering
+normalization, not a new opaque nominal shortcut.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

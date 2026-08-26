@@ -226,6 +226,18 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   reach trait-shape validation.  A bounded associated-method declaration and
   library foundation is next; exact Allocator additionally requires complete
   `Layout`, `NonNull`, `Result`, `Sized`, and method-signature closure.
+- Commit `c74680bf` provides the bounded associated-METHOD foundation without
+  pretending it is exact Allocator: unsafe trait safety/ranges, source-ordered
+  child methods, shared erased receivers, method safety/default promises,
+  `Self: Marker`, associated library reachability/lookup, fresh restoration,
+  and rollback are all green while old empty-AITM/free-function bytes remain
+  exact.  The following pinned-core probe remains at Allocator with the same
+  `item-source-invalid` report, now localized inside member signature
+  authentication.  `allocate` first fails on its generic `Result` ENUM
+  application, followed by the `[u8]` SLICE; later `by_ref -> &Self` retains an
+  `INFER` output region distinct from the erased receiver.  The next bounded
+  work reuses existing wire forms for enum applications/slices/raw pointers
+  and adds only an authenticated receiver-driven output-elision rule.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
