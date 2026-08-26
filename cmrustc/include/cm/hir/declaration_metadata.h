@@ -215,6 +215,7 @@ typedef enum CmHirDeclarationItemKind {
 
 typedef enum CmHirDeclarationAggregateForm {
     CM_HIR_DECL_AGGREGATE_UNIT = 1,
+    CM_HIR_DECL_AGGREGATE_TUPLE = 2,
     CM_HIR_DECL_AGGREGATE_NAMED = 3
 } CmHirDeclarationAggregateForm;
 
@@ -239,6 +240,10 @@ typedef enum CmHirDeclarationVariantKind {
 
 /* Zero is reserved for the bounded Rust-default enum representation. */
 #define CM_HIR_DECL_ENUM_REPR_RUST UINT8_C(0)
+#define CM_HIR_DECL_ENUM_REPR_U8 CM_HIR_DECL_PRIMITIVE_U8
+#define CM_HIR_DECL_ENUM_REPR_U16 CM_HIR_DECL_PRIMITIVE_U16
+#define CM_HIR_DECL_ENUM_REPR_U32 CM_HIR_DECL_PRIMITIVE_U32
+#define CM_HIR_DECL_ENUM_REPR_U64 CM_HIR_DECL_PRIMITIVE_U64
 /* Zero denotes a source-level implicit discriminant in that representation. */
 #define CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT UINT8_C(0)
 
@@ -266,14 +271,16 @@ typedef struct CmHirDeclarationVariant {
 } CmHirDeclarationVariant;
 
 /*
- * The bounded ordinary ITEM slice includes public top-level unit and named
- * structs, named unions, repr(u8) unit-variant enums, Rust-default diagnostic
- * unit enums, Rust-default generic UNIT/TUPLE enums, and free type aliases to
- * zero-argument STRUCT ITEMs. Structs, unions, and the bounded generic enum
- * profile may own type parameters; aliases require zero generic/predicate
+ * The bounded ordinary ITEM slice includes public top-level unit, tuple, and
+ * named structs, named unions, explicit repr(u8/u16/u32/u64) unit-variant
+ * enums, Rust-default diagnostic unit enums, Rust-default generic UNIT/TUPLE
+ * enums, and free type aliases to zero-argument STRUCT ITEMs. Private support
+ * ITEMs are retained only when transitively required by public declarations;
+ * they have no namespace entries. Structs, unions, and the bounded generic
+ * enum profile may own type parameters; aliases require zero generic/predicate
  * ranges and every enum requires zero predicates. A unit STRUCT's public
  * constructor availability is represented by the complete VALUE namespace.
- * Named structs, unions, and enum parents are TYPE-only in module namespace
+ * Other structs, unions, and enum parents are TYPE-only in module namespace
  * metadata; UNIT/TUPLE enum constructors use ENUM_VARIANT namespace targets.
  */
 typedef struct CmHirDeclarationItem {
