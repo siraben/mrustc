@@ -1300,7 +1300,8 @@ enum {
     CM_DECL_ATTR_DOC_HIDDEN = 1u << 12,
     CM_DECL_ATTR_DOC_NO_INLINE = 1u << 13,
     CM_DECL_ATTR_DOC_SEARCH_UNBOX = 1u << 14,
-    CM_DECL_ATTR_MUST_USE = 1u << 15
+    CM_DECL_ATTR_MUST_USE = 1u << 15,
+    CM_DECL_ATTR_RUSTFMT_SKIP = 1u << 16
 };
 
 enum {
@@ -2033,6 +2034,8 @@ static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
         return CM_DECL_ATTR_DOC_SEARCH_UNBOX;
     if (cm_decl_attribute_must_use_is(metadata))
         return CM_DECL_ATTR_MUST_USE;
+    if (cm_decl_attribute_bare_is(metadata, "rustfmt::skip"))
+        return CM_DECL_ATTR_RUSTFMT_SKIP;
     return 0u;
 }
 
@@ -2477,7 +2480,8 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
                     && kind != CM_DECL_ATTR_DEPRECATED
                     && kind != CM_DECL_ATTR_ALLOW
                     && kind != CM_DECL_ATTR_DOC_ALIAS
-                    && kind != CM_DECL_ATTR_DOC_NO_INLINE)
+                    && kind != CM_DECL_ATTR_DOC_NO_INLINE
+                    && kind != CM_DECL_ATTR_RUSTFMT_SKIP)
                 || (seen & kind) != 0u) {
                 return cm_decl_capture_reexport_failure(result,
                     CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,

@@ -393,6 +393,29 @@ static CmHirImport *find_unique_attributed_import(CaptureFixture *fixture)
     return result;
 }
 
+static CmHirImport *find_import_with_attribute_count(CaptureFixture *fixture,
+    uint32_t attribute_count)
+{
+    CmHirImport *result = NULL;
+    size_t module_index;
+    for (module_index = 0u; module_index < fixture->hir.modules.len;
+            ++module_index) {
+        CmHirModule *module = (CmHirModule *)cm_vec_at(
+            &fixture->hir.modules, module_index);
+        uint32_t import_index;
+        if (module == NULL
+            || module->crate_id != fixture->lower_result.crate_id) continue;
+        for (import_index = 0u; import_index < module->import_count;
+                ++import_index) {
+            CmHirImport *candidate = &module->imports[import_index];
+            if (candidate->attribute_count != attribute_count) continue;
+            assert(result == NULL);
+            result = candidate;
+        }
+    }
+    return result;
+}
+
 static int declaration_string_is(CmHirDeclarationString value,
     const char *text)
 {
@@ -1972,6 +1995,208 @@ static void test_reexport_provenance_and_generated_negatives(void)
     cm_hir_declaration_metadata_destroy(&metadata);
     fixture_destroy(&generated_attribute);
     fixture_destroy(&fixture);
+}
+
+static void test_rustfmt_skip_reexport_projection_and_negatives(void)
+{
+    static const unsigned char source[] =
+        "mod convert { pub struct CharTryFromError; }\n"
+        "#[rustfmt::skip]\n"
+        "#[stable(feature = \"try_from\", since = \"1.34.0\")]\n"
+        "pub use convert::CharTryFromError;\n"
+        "use convert::CharTryFromError as PrivateError;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char projected_source[] =
+        "mod convert { pub struct CharTryFromError; }\n"
+        "pub use convert::CharTryFromError;\n"
+        "#[rustfmt::skip]\n"
+        "use convert::CharTryFromError as PrivateError;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const struct {
+        const char *path;
+        const unsigned char *source;
+        size_t source_length;
+        uint32_t rejected_attribute;
+    } rejected[] = {
+        { "rustfmt-skip-call.rs",
+            (const unsigned char *)
+                "mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip()]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip()]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "rustfmt-skip-malformed.rs",
+            (const unsigned char *)
+                "mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip = \"yes\"]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip = \"yes\"]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "rustfmt-skip-duplicate.rs",
+            (const unsigned char *)
+                "mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip]\n"
+                "#[rustfmt::skip]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod convert { pub struct CharTryFromError; }\n"
+                "#[rustfmt::skip]\n"
+                "#[rustfmt::skip]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 1u },
+        { "rustfmt-skip-generated.rs",
+            (const unsigned char *)
+                "mod convert { pub struct CharTryFromError; }\n"
+                "#[cfg_attr(all(), rustfmt::skip)]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod convert { pub struct CharTryFromError; }\n"
+                "#[cfg_attr(all(), rustfmt::skip)]\n"
+                "pub use convert::CharTryFromError;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u }
+    };
+    static const unsigned char item_attribute_source[] =
+        "#[rustfmt::skip]\n"
+        "pub struct CharTryFromError;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture projected;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata projected_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirImport *import;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint32_t saved_source_attribute;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf projected_bytes;
+    size_t index;
+    fixture_init_source(&first, 0, "char-try-from-error.rs", source,
+        sizeof(source) - 1u);
+    fixture_init_source(&noisy, 1, "char-try-from-error.rs", source,
+        sizeof(source) - 1u);
+    fixture_init_source(&projected, 0, "char-try-from-error.rs",
+        projected_source, sizeof(projected_source) - 1u);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&projected_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u
+        && find_namespace_entry(&first_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "CharTryFromError") != NULL);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    input = capture_input(&projected);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &projected_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 0u);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&projected_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&projected_metadata,
+            &projected_bytes) == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0
+        && first_bytes.len == projected_bytes.len
+        && memcmp(first_bytes.data, projected_bytes.data,
+            first_bytes.len) == 0);
+    cm_byte_buf_destroy(&projected_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    saved_items = first_metadata.items;
+    saved_namespace = first_metadata.namespace_entries;
+    import = find_import_with_attribute_count(&first, 2u);
+    assert(import != NULL && import->attribute_count == 2u
+        && import->attributes != NULL);
+
+    saved_metadata = import->attributes[0].metadata;
+    import->attributes[0].metadata = cm_hir_intern(&first.hir,
+        "rustfmt::skip()");
+    assert_reexport_projection_failure(&first, &first_metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].metadata = saved_metadata;
+
+    saved_span = import->attributes[0].span;
+    import->attributes[0].span.start += 1u;
+    assert_reexport_projection_failure(&first, &first_metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].span = saved_span;
+
+    saved_source_attribute = import->attributes[0].source_attribute;
+    import->attributes[0].source_attribute += 1u;
+    assert_reexport_projection_failure(&first, &first_metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].source_attribute = saved_source_attribute;
+
+    import->attributes[0].expansion_depth = 1u;
+    assert_reexport_projection_failure(&first, &first_metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].expansion_depth = 0u;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+            ++index) {
+        CaptureFixture bad;
+        fixture_init_source(&bad, 0, rejected[index].path,
+            rejected[index].source, rejected[index].source_length);
+        assert_reexport_projection_failure(&bad, &first_metadata,
+            saved_items, saved_namespace, rejected[index].rejected_attribute);
+        fixture_destroy(&bad);
+    }
+    {
+        CaptureFixture item_attribute;
+        fixture_init_source(&item_attribute, 0, "rustfmt-skip-item.rs",
+            item_attribute_source, sizeof(item_attribute_source) - 1u);
+        input = capture_input(&item_attribute);
+        result = cm_hir_declaration_metadata_capture(&input,
+            &first_metadata);
+        assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+            && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+            && result.failure_reason
+                == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+            && first_metadata.items == saved_items
+            && first_metadata.namespace_entries == saved_namespace);
+        fixture_destroy(&item_attribute);
+    }
+    assert(cm_hir_declaration_metadata_validate(&first_metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&projected_metadata);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&projected);
+    fixture_destroy(&first);
 }
 
 static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
@@ -3641,6 +3866,7 @@ int main(void)
     test_enum_cfg_source_ordinal_and_atomic_negatives();
     test_reexport_alias_spelling_and_duplicate_negatives();
     test_reexport_provenance_and_generated_negatives();
+    test_rustfmt_skip_reexport_projection_and_negatives();
     test_alias_and_reexport_attributes_fail_closed_atomically();
     test_constructor_omission_authority_is_not_forgeable();
     test_many_private_bindings_do_not_consume_public_cap();
