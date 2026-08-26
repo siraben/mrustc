@@ -591,8 +591,9 @@ inference/error types, and closure identities reject this cross-crate profile.
 `ERASED` is a closed `LOWER_SAFE` transport marker, not a source lifetime
 identity or binder; its generic-local and binder-index payloads are zero. It
 is admitted only when every declaration root reaching it is an authenticated
-profile boundary: (1) the shared reference receiver of a supported associated
-`METHOD` and a receiver-related return type, never another method input; or
+profile boundary: (1) the shared or mutable reference receiver of a supported
+associated `METHOD` and a receiver-related return type, never another method
+input; or
 (2) the sole immutable direct `&T` parameter of a body-bearing const free
 `FUNCTION` with exactly one owner-local relaxed-Sized type generic, zero
 predicates, and exact immutable `&'static str` return. Aggregate, variant, and
@@ -608,6 +609,12 @@ than cyclic type-local edges. Projection validation checks that the associated
 item is a TYPE declaration available from the named trait and that its GAT
 arguments match the associated schema.
 
+The bounded array-declaration profile also admits a const-parameter length.
+Such an `ARRAY` names an exact owner-local `CONST` generic whose declared type
+is primitive `usize`; scalar length bits and the const-parameter local are
+mutually exclusive. The generic has no default. This is parameter identity,
+not evaluation or unevaluated-constant transport.
+
 ### `ITEM` and `VALU`
 
 `ITEM` retains extern types, structs, unions, enums, and free type aliases.
@@ -615,6 +622,23 @@ Records contain owner module, name, visibility, source ordinal, generic and
 predicate ranges, and their existing structural payload. Fields and variants
 retain semantic source order; enum variant identities are local to the item
 and stable by source ordinal. Alias targets are exact `type_local` values.
+
+Public roots may close over private, crate-visible, or exactly restricted
+aggregate and trait declarations. Every such non-public record must be
+transitively reachable through retained field, type, generic, predicate, or
+associated-signature edges, must retain its exact visibility restriction, and
+must have no `NSPC` entry. Orphan private records and namespace leakage reject.
+Associated methods of a non-public trait remain structural HIR children; they
+are not published as module values or public-library associated authority.
+
+The current `IntoIter` profile retains a const `N: usize`, a
+const-parameter-length array, the item-owned `DATA: PartialDrop` predicate,
+the diagnostic and insignificant-destructor identities, and the reachable
+non-public `PolymorphicIter`, `IndexRange`, and `PartialDrop` declarations.
+Capture authenticates the source alias `InnerSized<T, N>` and records its
+already-lowered normalized field type; it does not fabricate an alias item.
+Impls, drop glue, iterator behavior, method bodies, and executable authority
+remain absent and must fail closed in consumers that require them.
 
 `VALU` retains free functions, constants, and statics. Its common prefix is
 the same owner/name/visibility/source/generic/predicate information. Functions

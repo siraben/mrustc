@@ -292,6 +292,20 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `core/src/array/iter.rs:20`'s `IntoIter` (`def=1:19103`, source item
   `100:18`, rejected item `10819`) at
   `stage=items`/`item-shape-unsupported`.
+  Commit `112049fe` completes its exact const-generic declaration and
+  non-public structural dependency closure without claiming impl, drop-glue,
+  or executable-body authority.  The clean pinned-core probe at `112049fe`
+  keeps the zero-error graph/HIR and exact
+  451-module/1,658-type/20,747-value library census, then measures
+  `core/src/array/mod.rs:181`'s `TryFromSliceError` (`def=1:18905`, source item
+  `100:24`, rejected item `10808`) at
+  `stage=items`/`item-shape-unsupported`.
+  Commit `ba215beb` completes that exact zero-generic Rust-repr tuple-error
+  producer.  The clean pinned-core probe at `ba215beb` retains the zero-error
+  graph/HIR and exact 451-module/1,658-type/20,747-value library census, then
+  measures `core/src/array/mod.rs:108`'s `from_fn` (`def=1:18901`, source item
+  `100:20`, rejected item `10804`) at
+  `stage=items`/`item-source-invalid`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

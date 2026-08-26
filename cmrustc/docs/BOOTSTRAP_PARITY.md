@@ -194,6 +194,20 @@ zero-error graph/HIR and exact 451-module/1,658-type/20,747-value library
 census, then advances the measured frontier to `core/src/array/iter.rs:20`:
 `IntoIter` (`def=1:19103`, source item `100:18`, rejected item `10819`) fails
 at `stage=items` with `reason=item-shape-unsupported`.
+Commit `112049fe` captures and freshly materializes its exact const-generic
+declaration plus the reachable non-public `PolymorphicIter`, `IndexRange`, and
+`PartialDrop` structural closure; it does not claim impl, drop-glue, or body
+authority.  The clean pinned-core probe at `112049fe` retains the same
+zero-error graph/HIR and 451-module/1,658-type/20,747-value library census,
+then advances to `core/src/array/mod.rs:181`: `TryFromSliceError`
+(`def=1:18905`, source item `100:24`, rejected item `10808`) fails at
+`stage=items` with `reason=item-shape-unsupported`.
+Commit `ba215beb` captures that exact zero-generic Rust-repr tuple-error
+declaration.  The clean pinned-core probe at `ba215beb` again keeps the
+zero-error graph/HIR and 451-module/1,658-type/20,747-value library census,
+then advances to `core/src/array/mod.rs:108`: `from_fn` (`def=1:18901`, source
+item `100:20`, rejected item `10804`) fails at `stage=items` with
+`reason=item-source-invalid`.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

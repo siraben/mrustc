@@ -2112,6 +2112,18 @@ preserves the zero-error graph/HIR and exact
 451-module/1,658-type/20,747-value library census, then measures
 `core/src/array/iter.rs:20`'s `IntoIter` (`def=1:19103`, source item `100:18`,
 rejected item `10819`) at `stage=items`/`item-shape-unsupported`.
+Commit `112049fe` transports its exact const-generic declaration and reachable
+non-public structural closure while keeping impls, drop glue, and bodies
+unavailable.  The clean pinned-core probe at `112049fe` preserves the same
+zero-error graph/HIR and 451-module/1,658-type/20,747-value library census,
+then measures `core/src/array/mod.rs:181`'s `TryFromSliceError`
+(`def=1:18905`, source item `100:24`, rejected item `10808`) at
+`stage=items`/`item-shape-unsupported`.
+Commit `ba215beb` adds the exact zero-generic Rust-repr tuple-error producer.
+The clean pinned-core probe at `ba215beb` again preserves the zero-error
+graph/HIR and 451-module/1,658-type/20,747-value library census, then measures
+`core/src/array/mod.rs:108`'s `from_fn` (`def=1:18901`, source item `100:20`,
+rejected item `10804`) at `stage=items`/`item-source-invalid`.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
