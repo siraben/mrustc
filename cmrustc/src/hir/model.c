@@ -3457,7 +3457,6 @@ static int cm_hir_associated_equalities_valid(
             equality->associated_type);
         if (associated_definition == NULL
             || associated_definition->kind != CM_HIR_DEFINITION_ITEM
-            || equality->associated_type.crate_id != module->crate_id
             || !cm_hir_type_id_valid(context, equality->value)
             || !cm_hir_type_self_owner_valid(context, equality->value,
                 self_owner, 0u)

@@ -4180,9 +4180,10 @@ static void test_supertrait_equality_model_invariants(void)
     supertrait.equality_count = 1u;
     supertrait.trait_type.definition = other_target_definition;
     equalities[0].associated_type = other_output_definition;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
-    assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count
-        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert(item_id != CM_HIR_ITEM_NONE
+        && context.items.len == item_count + 1u
+        && cm_arena_bytes_used(&context.storage) >= arena_bytes);
 
     dump_file = tmpfile();
     assert(dump_file != NULL);
@@ -5127,6 +5128,8 @@ static void test_trait_predicate_equality_model_invariants(void)
     CmHirDefId other_item_definition;
     CmHirDefId gat_definition;
     CmHirDefId foreign_item_definition;
+    CmHirDefId foreign_output_definition;
+    CmHirDefId foreign_method_definition;
     CmHirDefId future_item_definition;
     CmHirDefId future_method_definition;
     CmHirDefId duplicate_a_definition;
@@ -5493,7 +5496,52 @@ static void test_trait_predicate_equality_model_invariants(void)
         &foreign_root_id) == CM_HIR_OK);
     foreign_item_definition = add_test_plain_trait(&context,
         foreign_crate_id, foreign_root_id, "Foreign", test_span(1u, 10u));
+    foreign_output_definition = add_test_associated_declaration(&context,
+        foreign_crate_id, foreign_root_id, foreign_item_definition,
+        "Output", test_span(11u, 12u));
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(121u, 130u), &foreign_method_definition) == CM_HIR_OK);
+    memset(equalities, 0, sizeof(equalities));
+    equalities[0].associated_type = foreign_output_definition;
+    equalities[0].value = u8_type;
+    equalities[0].span = test_span(123u, 124u);
+    memset(predicates, 0, sizeof(predicates));
+    predicates[0].subject = owner_type;
+    predicates[0].trait_type.definition = foreign_item_definition;
+    predicates[0].equalities = equalities;
+    predicates[0].equality_count = 1u;
+    predicates[0].span = test_span(122u, 125u);
+    init_test_trait_function(&context, &item, &function_parameter,
+        foreign_method_definition, root_id, owner_definition,
+        "foreign_equality", owner_self_type, u8_type,
+        test_span(121u, 130u));
+    item.predicates = predicates;
+    item.predicate_count = 1u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+
+    equalities[0].associated_type = foreign_output_definition;
+    equalities[0].associated_type.index += 100000u;
+    assert(cm_hir_reserve_item_definition(&context, crate_id,
+        test_span(125u, 130u), &foreign_method_definition) == CM_HIR_OK);
+    init_test_trait_function(&context, &item, &function_parameter,
+        foreign_method_definition, root_id, owner_definition,
+        "wrong_foreign_equality", owner_self_type, u8_type,
+        test_span(125u, 130u));
+    item.predicates = predicates;
+    item.predicate_count = 1u;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+
     equalities[0].associated_type = foreign_item_definition;
+    predicates[0].trait_type.definition = generic_trait_definition;
+    arguments[0].kind = CM_HIR_GENERIC_ARG_TYPE;
+    arguments[0].data.type = owner_reference_type;
+    predicates[0].trait_type.arguments = arguments;
+    predicates[0].trait_type.argument_count = 1u;
+    init_test_trait_function(&context, &item, &function_parameter,
+        rejected_definition, root_id, owner_definition, "rejected",
+        owner_self_type, u8_type, test_span(101u, 120u));
+    item.predicates = predicates;
+    item.predicate_count = 1u;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     equalities[0].associated_type = item_definition;
     equalities[1] = equalities[0];
