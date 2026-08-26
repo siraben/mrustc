@@ -139,11 +139,13 @@ typedef struct CmHirDeclarationCaptureResult {
  * `derive(...)`, and bare `non_exhaustive`.  The latter is the sole authority
  * for an absent public VALUE constructor mate. A supported free alias permits
  * only the stability/deprecation subset and must target a captured UNIT struct.
- * A public reexport permits only direct `stable(...)`, `deprecated(...)`, and
- * `allow(...)`. Every other item/reexport spelling, duplicate, generated
- * attribute, repr/lang/layout/ABI attribute, or inconsistent provenance
- * rejects. Attributes on other supported items also reject. Every successful
- * omission is reported through
+ * A public reexport permits only direct `stable(...)` or `unstable(...)`,
+ * `deprecated(...)`, `allow(...)`, and exact
+ * `doc(alias("IDENT"))`, where IDENT is a nonempty ASCII Rust identifier.
+ * Every other item/reexport spelling, duplicate, generated attribute,
+ * repr/lang/layout/ABI attribute, or inconsistent provenance rejects.
+ * Attributes on other supported items also reject. Every successful omission
+ * is reported through
  * `semantic_attributes` and `projected_semantic_attribute_count`; it is not
  * an unchanged-HIR round-trip claim and is not usable as attribute-complete
  * dependency metadata.

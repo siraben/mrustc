@@ -179,6 +179,28 @@ static const CmHirModule *find_module(const CaptureFixture *fixture,
     return NULL;
 }
 
+static CmHirImport *find_unique_attributed_import(CaptureFixture *fixture)
+{
+    CmHirImport *result = NULL;
+    size_t module_index;
+    for (module_index = 0u; module_index < fixture->hir.modules.len;
+            ++module_index) {
+        CmHirModule *module = (CmHirModule *)cm_vec_at(
+            &fixture->hir.modules, module_index);
+        uint32_t import_index;
+        if (module == NULL
+            || module->crate_id != fixture->lower_result.crate_id) continue;
+        for (import_index = 0u; import_index < module->import_count;
+                ++import_index) {
+            CmHirImport *candidate = &module->imports[import_index];
+            if (candidate->attribute_count == 0u) continue;
+            assert(result == NULL);
+            result = candidate;
+        }
+    }
+    return result;
+}
+
 static int declaration_string_is(CmHirDeclarationString value,
     const char *text)
 {
@@ -844,6 +866,243 @@ static void test_non_exhaustive_authorizes_missing_constructor_mate(void)
     fixture_destroy(&fixture);
 }
 
+static void test_char_shaped_reexport_projection(void)
+{
+    static const unsigned char attributed_source[] =
+        "mod ascii_char {\n"
+        "  #[non_exhaustive]\n"
+        "  pub struct AsciiChar;\n"
+        "}\n"
+        "#[doc(alias(\"AsciiChar\"))]\n"
+        "#[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "pub use ascii_char::AsciiChar as Char;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char plain_source[] =
+        "mod ascii_char {\n"
+        "  #[non_exhaustive]\n"
+        "  pub struct AsciiChar;\n"
+        "}\n"
+        "pub use ascii_char::AsciiChar as Char;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture attributed;
+    CaptureFixture plain;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata attributed_metadata;
+    CmHirDeclarationMetadata plain_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf attributed_bytes;
+    CmByteBuf plain_bytes;
+    const CmHirDeclarationNamespaceEntry *definition;
+    const CmHirDeclarationNamespaceEntry *reexport;
+    fixture_init_source(&attributed, 0, "ascii-char-projection.rs",
+        attributed_source, sizeof(attributed_source) - 1u);
+    fixture_init_source(&plain, 0, "ascii-char-projection.rs", plain_source,
+        sizeof(plain_source) - 1u);
+    cm_hir_declaration_metadata_init(&attributed_metadata);
+    cm_hir_declaration_metadata_init(&plain_metadata);
+    input = capture_input(&attributed);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 1u && result.namespace_count == 4u
+        && result.projected_semantic_attribute_count == 3u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION);
+    definition = find_namespace_entry(&attributed_metadata, 2u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "AsciiChar");
+    reexport = find_namespace_entry(&attributed_metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Char");
+    assert(definition != NULL && reexport != NULL
+        && definition->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && reexport->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && definition->target_local == reexport->target_local
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "Char") == NULL);
+    input = capture_input(&plain);
+    result = cm_hir_declaration_metadata_capture(&input, &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 1u);
+    cm_byte_buf_init(&attributed_bytes);
+    cm_byte_buf_init(&plain_bytes);
+    assert(cm_hir_declaration_metadata_encode(&attributed_metadata,
+            &attributed_bytes) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&plain_metadata, &plain_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && attributed_bytes.len == plain_bytes.len
+        && memcmp(attributed_bytes.data, plain_bytes.data,
+            attributed_bytes.len) == 0);
+    cm_byte_buf_destroy(&plain_bytes);
+    cm_byte_buf_destroy(&attributed_bytes);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
+    cm_hir_declaration_metadata_destroy(&attributed_metadata);
+    fixture_destroy(&plain);
+    fixture_destroy(&attributed);
+}
+
+static void assert_reexport_projection_failure(CaptureFixture *fixture,
+    CmHirDeclarationMetadata *metadata,
+    CmHirDeclarationItem *saved_items,
+    CmHirDeclarationNamespaceEntry *saved_namespace,
+    uint32_t rejected_attribute)
+{
+    CmHirDeclarationCaptureInput input = capture_input(fixture);
+    CmHirDeclarationCaptureResult result;
+    CmHirImport *import = find_unique_attributed_import(fixture);
+    CmSpan expected_span;
+    assert(import != NULL && import->attributes != NULL
+        && rejected_attribute < import->attribute_count);
+    expected_span = import->attributes[rejected_attribute].span;
+    result = cm_hir_declaration_metadata_capture(&input, metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED
+        && result.has_rejected_binding && result.has_rejected_target
+        && result.rejected_binding_kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && result.rejected_ast_item_kind == CM_AST_ITEM_STRUCT
+        && result.rejected_namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+        && result.rejected_definition.crate_id
+            == fixture->lower_result.crate_id
+        && result.rejected_definition.index != CM_HIR_DEF_INDEX_NONE
+        && result.rejected_source_item.source == import->span.source
+        && result.rejected_source_item.item == import->source_item
+        && result.has_rejected_span
+        && result.rejected_span.source == expected_span.source
+        && result.rejected_span.start == expected_span.start
+        && result.rejected_span.end == expected_span.end
+        && metadata->items == saved_items
+        && metadata->namespace_entries == saved_namespace);
+}
+
+static void test_reexport_alias_spelling_and_duplicate_negatives(void)
+{
+    static const char *const sources[] = {
+        "pub struct Unit;\n"
+        "#[doc(alias = \"Unit\")]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        "pub struct Unit;\n"
+        "#[doc(alias(\"\"))]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        "pub struct Unit;\n"
+        "#[doc(alias(\"not-an-identifier\"))]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        "pub struct Unit;\n"
+        "#[doc(alias(\"Unit\"))]\n"
+        "#[doc(alias(\"Other\"))]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        "pub struct Unit;\n"
+        "#[unstable(feature = \"unit\", issue = \"none\")]\n"
+        "#[unstable(feature = \"other\", issue = \"none\")]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n"
+    };
+    static const uint32_t rejected_attributes[] = { 0u, 0u, 0u, 1u, 1u };
+    CaptureFixture good;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    size_t index;
+    fixture_init(&good, 0);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    for (index = 0u; index < sizeof(sources) / sizeof(sources[0]); ++index) {
+        CaptureFixture rejected;
+        fixture_init_source(&rejected, 0, "bad-doc-alias.rs",
+            (const unsigned char *)sources[index], strlen(sources[index]));
+        assert_reexport_projection_failure(&rejected, &metadata, saved_items,
+            saved_namespace, rejected_attributes[index]);
+        fixture_destroy(&rejected);
+    }
+    assert_exact_descriptor(&metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
+static void test_reexport_provenance_and_generated_negatives(void)
+{
+    static const unsigned char source[] =
+        "pub struct Unit;\n"
+        "#[doc(alias(\"Unit\"))]\n"
+        "#[unstable(feature = \"unit\", issue = \"none\")]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char generated_attribute_source[] =
+        "pub struct Unit;\n"
+        "#[cfg_attr(all(), doc(alias(\"Unit\")))]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture fixture;
+    CaptureFixture generated_attribute;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirImport *import;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    fixture_init_source(&fixture, 0, "reexport-provenance.rs", source,
+        sizeof(source) - 1u);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    import = find_unique_attributed_import(&fixture);
+    assert(import != NULL && import->attribute_count == 2u
+        && import->attributes != NULL);
+
+    saved_metadata = import->attributes[0].metadata;
+    import->attributes[0].metadata = cm_hir_intern(&fixture.hir,
+        "doc(alias(\"Forged\"))");
+    assert_reexport_projection_failure(&fixture, &metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].metadata = saved_metadata;
+
+    saved_span = import->attributes[0].span;
+    import->attributes[0].span.start += 1u;
+    assert_reexport_projection_failure(&fixture, &metadata, saved_items,
+        saved_namespace, 0u);
+    import->attributes[0].span = saved_span;
+
+    import->attributes[1].expansion_depth = 1u;
+    assert_reexport_projection_failure(&fixture, &metadata, saved_items,
+        saved_namespace, 1u);
+    import->attributes[1].expansion_depth = 0u;
+
+    fixture_init_source(&generated_attribute, 0,
+        "generated-attribute-reexport.rs", generated_attribute_source,
+        sizeof(generated_attribute_source) - 1u);
+    assert_reexport_projection_failure(&generated_attribute, &metadata,
+        saved_items, saved_namespace, 0u);
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&generated_attribute);
+    fixture_destroy(&fixture);
+}
+
 static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
 {
     static const unsigned char bad_alias_attribute_source[] =
@@ -908,26 +1167,11 @@ static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
         && metadata.items == saved_items
         && metadata.namespace_entries == saved_namespace);
 
-    input = capture_input(&bad_reexport_attribute);
-    result = cm_hir_declaration_metadata_capture(&input, &metadata);
-    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
-        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
-        && result.failure_reason
-            == CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED
-        && strcmp(cm_hir_declaration_capture_reason_name(
-            result.failure_reason),
-            "reexport-attribute-projection-unsupported") == 0
-        && metadata.items == saved_items
-        && metadata.namespace_entries == saved_namespace);
+    assert_reexport_projection_failure(&bad_reexport_attribute, &metadata,
+        saved_items, saved_namespace, 0u);
 
-    input = capture_input(&conflicting_reexport_stability);
-    result = cm_hir_declaration_metadata_capture(&input, &metadata);
-    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
-        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
-        && result.failure_reason
-            == CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED
-        && metadata.items == saved_items
-        && metadata.namespace_entries == saved_namespace);
+    assert_reexport_projection_failure(&conflicting_reexport_stability,
+        &metadata, saved_items, saved_namespace, 1u);
 
     input = capture_input(&bad_alias_target);
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
@@ -1067,6 +1311,9 @@ int main(void)
     test_module_attribute_projection_and_provenance();
     test_item_shape_diagnostic();
     test_non_exhaustive_authorizes_missing_constructor_mate();
+    test_char_shaped_reexport_projection();
+    test_reexport_alias_spelling_and_duplicate_negatives();
+    test_reexport_provenance_and_generated_negatives();
     test_alias_and_reexport_attributes_fail_closed_atomically();
     test_constructor_omission_authority_is_not_forgeable();
     test_many_private_bindings_do_not_consume_public_cap();

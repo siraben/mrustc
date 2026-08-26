@@ -26,6 +26,7 @@ typedef struct CmDeclCaptureNamespace {
     CmAstItemKind item_kind;
     uint32_t export_ordinal;
     uint32_t source_attribute_count;
+    CmSpan introduction_span;
     int source_is_generated;
     int is_import;
 } CmDeclCaptureNamespace;
@@ -130,6 +131,34 @@ static void cm_decl_capture_item_failure(
         result->has_rejected_span = 1;
         result->rejected_span = item->span;
     }
+}
+
+static int cm_decl_capture_reexport_failure(
+    CmHirDeclarationCaptureResult *result,
+    CmHirDeclarationCaptureReason reason,
+    const CmDeclCaptureNamespace *entry, CmSpan span)
+{
+    if (result->failure_reason != CM_HIR_DECL_CAPTURE_REASON_NONE) return 0;
+    result->failure_stage = CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE;
+    result->failure_reason = reason;
+    if (entry != NULL) {
+        result->has_rejected_binding = 1;
+        result->has_rejected_target = 1;
+        result->rejected_binding_kind = entry->target.kind;
+        result->rejected_ast_item_kind = entry->item_kind;
+        result->rejected_namespace_kind = entry->namespace_kind
+                == CM_HIR_DECL_NAMESPACE_TYPE
+            ? CM_RESOLVE_NAMESPACE_TYPE : CM_RESOLVE_NAMESPACE_VALUE;
+        result->rejected_definition = entry->target.definition;
+        result->rejected_source_item = entry->introduced_by;
+    }
+    if (span.source == 0u && entry != NULL)
+        span = entry->introduction_span;
+    if (span.source != 0u) {
+        result->has_rejected_span = 1;
+        result->rejected_span = span;
+    }
+    return 0;
 }
 
 static int cm_decl_bytes_equal(const unsigned char *left, size_t left_length,
@@ -659,6 +688,7 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
                 entry->item_kind = binding.item_kind;
                 entry->export_ordinal = effective_index;
                 entry->source_attribute_count = effective.attribute_count;
+                entry->introduction_span = effective.span;
                 entry->source_is_generated = effective.is_generated;
                 entry->is_import = binding.is_import;
                 state->namespace_count += 1u;
@@ -961,8 +991,47 @@ enum {
     CM_DECL_ATTR_DEPRECATED = 1u << 2,
     CM_DECL_ATTR_DERIVE = 1u << 3,
     CM_DECL_ATTR_NON_EXHAUSTIVE = 1u << 4,
-    CM_DECL_ATTR_ALLOW = 1u << 5
+    CM_DECL_ATTR_ALLOW = 1u << 5,
+    CM_DECL_ATTR_DOC_ALIAS = 1u << 6
 };
+
+static int cm_decl_ascii_identifier(const unsigned char *bytes, size_t length)
+{
+    size_t index;
+    if (bytes == NULL || length == 0u
+        || !((bytes[0] >= (unsigned char)'a'
+                && bytes[0] <= (unsigned char)'z')
+            || (bytes[0] >= (unsigned char)'A'
+                && bytes[0] <= (unsigned char)'Z')
+            || bytes[0] == (unsigned char)'_')) return 0;
+    for (index = 1u; index < length; ++index) {
+        if (!((bytes[index] >= (unsigned char)'a'
+                    && bytes[index] <= (unsigned char)'z')
+                || (bytes[index] >= (unsigned char)'A'
+                    && bytes[index] <= (unsigned char)'Z')
+                || (bytes[index] >= (unsigned char)'0'
+                    && bytes[index] <= (unsigned char)'9')
+                || bytes[index] == (unsigned char)'_')) return 0;
+    }
+    return 1;
+}
+
+static int cm_decl_attribute_doc_alias_is(const CmInternedString *metadata)
+{
+    static const unsigned char prefix[] = "doc(alias(\"";
+    static const unsigned char suffix[] = "\"))";
+    size_t prefix_length = sizeof(prefix) - 1u;
+    size_t suffix_length = sizeof(suffix) - 1u;
+    size_t identifier_length;
+    if (metadata == NULL
+        || metadata->len <= prefix_length + suffix_length
+        || memcmp(metadata->bytes, prefix, prefix_length) != 0
+        || memcmp(metadata->bytes + metadata->len - suffix_length,
+            suffix, suffix_length) != 0) return 0;
+    identifier_length = metadata->len - prefix_length - suffix_length;
+    return cm_decl_ascii_identifier(metadata->bytes + prefix_length,
+        identifier_length);
+}
 
 static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
 {
@@ -978,6 +1047,8 @@ static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
         return CM_DECL_ATTR_NON_EXHAUSTIVE;
     if (cm_decl_attribute_call_is(metadata, "allow"))
         return CM_DECL_ATTR_ALLOW;
+    if (cm_decl_attribute_doc_alias_is(metadata))
+        return CM_DECL_ATTR_DOC_ALIAS;
     return 0u;
 }
 
@@ -1049,6 +1120,7 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
         uint32_t attribute_index;
         size_t prior;
         int first = 1;
+        CmResolveViewStatus effective_status;
         if (!entry->is_import) continue;
         for (prior = 0u; prior < entry_index; ++prior) {
             if (state->namespace_values[prior].is_import
@@ -1061,21 +1133,36 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
         }
         module = cm_decl_module_by_local(state, entry->owner_module);
         import = cm_decl_reexport_import(module, entry->introduced_by);
-        if (module == NULL || import == NULL
-            || cm_module_graph_get_effective_item(state->input->graph,
-                state->input->revision, module->graph.id,
-                entry->export_ordinal, &effective) != CM_RESOLVE_VIEW_OK
-            || effective.is_generated
-            || effective.item_kind != CM_AST_ITEM_USE
+        if (module == NULL || import == NULL) {
+            CmSpan span = import == NULL
+                ? (CmSpan){ 0u, 0u, 0u } : import->span;
+            return cm_decl_capture_reexport_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                entry, span);
+        }
+        effective_status = cm_module_graph_get_effective_item(
+            state->input->graph, state->input->revision, module->graph.id,
+            entry->export_ordinal, &effective);
+        if (effective_status != CM_RESOLVE_VIEW_OK) {
+            return cm_decl_capture_reexport_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                entry, import->span);
+        }
+        if (effective.is_generated) {
+            return cm_decl_capture_reexport_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                entry, effective.span);
+        }
+        if (effective.item_kind != CM_AST_ITEM_USE
             || !cm_decl_item_ref_equal(effective.declaration,
                 entry->introduced_by)
             || effective.attribute_count != entry->source_attribute_count
             || effective.attribute_count != import->attribute_count
             || ((import->attribute_count == 0u)
                 != (import->attributes == NULL))) {
-            return cm_decl_capture_fail(result,
-                CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
-                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+            return cm_decl_capture_reexport_failure(result,
+                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                entry, import->span);
         }
         for (attribute_index = 0u;
                 attribute_index < effective.attribute_count;
@@ -1099,12 +1186,14 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
                 || (kind == CM_DECL_ATTR_UNSTABLE
                     && (seen & CM_DECL_ATTR_STABLE) != 0u)
                 || (kind != CM_DECL_ATTR_STABLE
+                    && kind != CM_DECL_ATTR_UNSTABLE
                     && kind != CM_DECL_ATTR_DEPRECATED
-                    && kind != CM_DECL_ATTR_ALLOW)
+                    && kind != CM_DECL_ATTR_ALLOW
+                    && kind != CM_DECL_ATTR_DOC_ALIAS)
                 || (seen & kind) != 0u) {
-                return cm_decl_capture_fail(result,
-                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
-                    CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+                return cm_decl_capture_reexport_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                    entry, hir_attribute->span);
             }
             for (duplicate_index = 0u;
                     duplicate_index < attribute_index; ++duplicate_index) {
@@ -1112,9 +1201,9 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
                         == hir_attribute->span.source
                     && import->attributes[duplicate_index].source_attribute
                         == hir_attribute->source_attribute) {
-                    return cm_decl_capture_fail(result,
-                        CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
-                        CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+                    return cm_decl_capture_reexport_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                        entry, hir_attribute->span);
                 }
             }
             seen |= kind;
@@ -1122,9 +1211,9 @@ static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
         if (first) {
             if ((size_t)effective.attribute_count > SIZE_MAX
                     - state->projected_semantic_attribute_count) {
-                return cm_decl_capture_fail(result,
-                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
-                    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT);
+                return cm_decl_capture_reexport_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT,
+                    entry, import->span);
             }
             state->projected_semantic_attribute_count +=
                 effective.attribute_count;
