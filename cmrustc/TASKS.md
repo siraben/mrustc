@@ -1944,12 +1944,12 @@ focused executable metadata/capture/materialization/recipe tests.  M6-06 stays
 `ACTIVE` because no `core.rlib` exists and this exact profile rejects general
 library declarations, bodies, MIR, layout, and ABI.
 
-The review-hardened 2026-08-25 current tree revalidates M6-05 rather than
+The review-hardened 2026-08-26 current tree revalidates M6-05 rather than
 relying on the historical census.  Two optimized runs load 363 sources and
 451 modules, lower 38,176 items and 22,524 body records with zero graph,
-import, or HIR errors, and capture 451 modules, 1,632 public type entries, and
-20,721 public value entries after preserving independently visible struct
-constructors.  Complete strict GCC and TinyCC suites plus the
+import, or HIR errors, and capture 451 modules, 1,658 public type entries, and
+20,747 public value entries after preserving independently visible struct and
+enum-variant identities.  Complete strict GCC and TinyCC suites plus the
 focused Clang ASan/UBSan/LSan run pass.  Declaration v2.6 then rejects the
 known ITEM-family format boundary with zero output.  M6-06 therefore proceeds
 through real v3 ordinary items, values, types, traits, and namespace identity,
@@ -1977,12 +1977,20 @@ frontier as the `LayoutErr` type-alias reexport at
 `reason=binding-shape-unsupported`).  Bounded v3.0 now transports that free
 alias as a distinct ITEM, its named `LayoutError` ADT target and private
 defining module, while preserving constructor absence and fresh-consumer alias
-normalization.  The next optimized core probe reaches the same complete
-451/1,632/20,721 library census and rejects `ascii::Char` at
-`core/src/ascii.rs:20`, whose `AsciiChar` target is the first unsupported enum
-binding.  The next artifact work is therefore ordinary enum/aggregate/type
-and value shapes.  Exact trait-associated ownership follows those
-prerequisites, before projection and impl families.
+normalization.  Later bounded slices transport explicit and implicit unit
+enums, namespace aliases to exact enum variants, declaration-only CONST,
+and named aggregate/union profiles.  Commit `b78a18a8` preserves
+`Assume`, `ManuallyDrop<T: ?Sized>`, and `MaybeUninit<T>` through exact field,
+generic, lang, repr, direct/reexport, fresh-materialization, and rollback
+checks.  Its pinned-core probe reaches the complete 451/1,658/20,747 library
+census and measures the next v3.0 rejection at public static
+`CACHED_POW10`, `core/src/num/flt2dec/strategy/grisu.rs:29`
+(`stage=namespace`, `reason=binding-shape-unsupported`, `binding=value`,
+`ast_item=static`, `def=1:2845`).  The next artifact work is therefore a
+declaration-only STATIC plus tuple/array type closure and exact scalar array
+length.  Initializer/storage/CTFE transport remains a separate executable
+gate; exact trait-associated ownership follows the later declaration
+prerequisites before projection and impl families.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

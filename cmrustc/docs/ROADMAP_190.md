@@ -20,11 +20,11 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   is still incomplete, but `--emit-cmrlib` and dependency-aware `--emit-c`
   now expose the exact bounded v3.2 executable profile.
 - `make check-core-hir` is the strongest completed Rust-library gate.  On
-  2026-08-25 the review-hardened current working tree reproduced the complete
+  2026-08-26 the review-hardened current working tree reproduced the complete
   target-configured Rust 1.90 result twice: 363 sources and 451 modules with
   zero graph, import, or HIR errors, producing 38,176 items, 22,524 bodies,
-  and 159,528 types.  Constructor-aware library capture also succeeds with
-  451 modules, 1,632 public type entries, and 20,721 public value entries.
+  and 159,528 types.  Variant-aware library capture also succeeds with
+  451 modules, 1,658 public type entries, and 20,747 public value entries.
 - The next measured boundary contains 252 traits, 9,092 impls, and 9,854
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
@@ -162,6 +162,24 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   before that gate, macros and semantic attributes require cfg-active
   completeness, a closed normalization/rejection policy, and authenticated
   source/configuration/dependency closure.
+- Subsequent bounded v3.0 checkpoints crossed the `ascii::Char` enum and
+  public enum-variant reexport boundaries, then added declaration-only CONST,
+  default implicit diagnostic enums, and named aggregate/union transport.
+  The committed `b78a18a8` producer/codec/materializer slice preserves
+  `Assume`, `ManuallyDrop<T: ?Sized>`, and `MaybeUninit<T>` structural facts,
+  ITEM-owned generics, field order/visibility/types, lang identities,
+  transparent representation, and public aliases without inventing value
+  constructors.  Strict GCC, TinyCC, and Clang ASan/UBSan/LSan focused gates
+  and a fresh integrated strict run pass.
+- The post-`b78a18a8` pinned-core probe measures the current v3.0 frontier as
+  `CACHED_POW10` at `core/src/num/flt2dec/strategy/grisu.rs:29`:
+  `stage=namespace`, `reason=binding-shape-unsupported`, `binding=value`,
+  `ast_item=static`, `def=1:2845`.  Graph/HIR/library remain green at
+  363/451 sources/modules, 38,176 items, 22,524 bodies, 159,528 types, and
+  451/1,658/20,747 library entries.  The next bounded declaration step is a
+  real STATIC plus ordered tuple and fixed-array types with an exact scalar
+  `usize` length.  The table initializer and storage are not carried by v3.0
+  and remain a later body/object/link gate.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

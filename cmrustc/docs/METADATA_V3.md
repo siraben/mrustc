@@ -717,8 +717,13 @@ predicated, associated-member, or otherwise unsupported records.
 Each record contains owner module, namespace (`TYPE` or `VALUE`), name, target
 tag/local, visibility, and canonical source/export ordinal. A `MACRO`
 namespace tag is invalid in v3.0/v3.1/v3.2 because `MACROS` is `ABSENT`.
-Targets are `MODULE`, `ITEM`, `VALUE`, `NOMINAL`, or `PRIMITIVE`. Ordinary
-traits and trait aliases use `NOMINAL`; there is no fake type item for them.
+Targets are `MODULE`, `ITEM`, `VALUE`, `NOMINAL`, `PRIMITIVE`, or the bounded
+`ENUM_VARIANT` target. Ordinary traits and trait aliases use `NOMINAL`; there
+is no fake type item for them. `ENUM_VARIANT` uses the canonical flattened
+variant local obtained by walking ENUM ITEMs in ITEM-local order and their
+variants in retained source order. Its namespace record retains whether the
+alias inhabits TYPE or VALUE; constructible unit variants require exact paired
+TYPE/VALUE aliases, and no free ITEM or VALU is synthesized.
 In v3.0/v3.1, reexports point to the same canonical target handle as the
 defining entry. V3.2 applies its narrower exact capture rule above and rejects
 all reexports.

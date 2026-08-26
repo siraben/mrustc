@@ -50,8 +50,8 @@ The current tree has four important, but different, kinds of evidence:
 4. The review-hardened current tree passes the target-configured Rust 1.90
    `core` front end: 363 sources, 451 modules, 38,176 HIR items, 22,524 body
    records, and 159,528 types, with zero graph, import, or HIR errors.  Its
-   value-aware library capture contains 451 modules, 1,632 public type
-   entries, and 20,721 public value entries.  Body records are not equivalent
+   value-aware library capture contains 451 modules, 1,658 public type
+   entries, and 20,747 public value entries.  Body records are not equivalent
    to typed, executable bodies.
 
 The 2026-08-25 current-source repair implements bounded implicit-negative
@@ -69,23 +69,28 @@ The active G4 boundary is now declaration metadata, not G1.  Full library
 capture succeeds, but v2.6 rejects at its previously localized ITEM family and
 emits zero bytes because that format cannot represent complete traits,
 aliases, associated children, impl headers, or trait namespace entries.  The
-first real v3.0 ordinary-trait slice is green: `Gate<T: ?Sized>`,
-`GateReexport`, and `needs<X: Gate<u8>>` survive deterministic capture,
-encode/decode/re-encode, exact target/config expectation checks, transactional
-materialization, and fresh-consumer lowering.  A subsequent bounded ITEM slice
-preserves public unit structs and their independently visible value
-constructors, including constructor visibility across reexports.  The current
-whole-core probe reaches 451 modules, 1,632 public type entries, and 20,721
-public value entries.  The bounded alias slice now transports `LayoutErr` as
-a distinct alias ITEM targeting the named `LayoutError` ADT, through private
-module ownership, deterministic bytes, fresh materialization, and alias
-normalization without fabricating a `LayoutError` constructor.  The next
-optimized whole-core probe rejects the `ascii::Char` reexport target at
-`core/src/ascii.rs:20` because `AsciiChar` is an enum (`stage=namespace`,
-`reason=binding-shape-unsupported`).  Ordinary enum/aggregate/type/value
-structural parity is therefore the next measured dependency, before associated
-declarations, projections/function pointers, and cfg-complete impl headers.
-These remain bounded fixture profiles, not whole-core v3.
+bounded v3.0 `LOWER_SAFE` path now deterministically transports the original
+ordinary-trait/value fixture plus public unit structs and constructors, free
+aliases, zero-argument named ADTs, explicit and implicit unit enums, associated
+enum-variant namespace aliases, declaration-only free constants, structural
+slice/reference/pointer/application types, and the measured named-aggregate
+profiles for `Assume`, `ManuallyDrop<T: ?Sized>`, and `MaybeUninit<T>`.  These
+records survive decode/re-encode, transactional materialization, library
+restore, and focused fresh-consumer lowering without fabricating constructors,
+bodies, initializer values, or semantic completeness.
+
+At commit `b78a18a8`, the fresh Rust 1.90 whole-core probe again reports zero
+graph/import/HIR errors and the exact 451-module/1,658-type/20,747-value library
+census.  V3.0 then reaches the next measured namespace frontier at
+`core/src/num/flt2dec/strategy/grisu.rs:29`: public immutable static
+`CACHED_POW10` (`def=1:2845`) is rejected with `stage=namespace`,
+`reason=binding-shape-unsupported`, `binding=value`, and `ast_item=static`.
+The next dependency is therefore declaration-only `STATIC` identity plus its
+array-of-tuple type and exact scalar `usize` length.  Initializer/storage/CTFE
+authority remains a separate executable family.  Associated declarations,
+projections/function pointers, full ordinary aggregates, cfg-complete impl
+headers, macros, and complete semantic attributes remain later boundaries.
+These are bounded fixture profiles, not whole-core v3.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
