@@ -10447,6 +10447,84 @@ static int cm_lower_bounded_free_input_erasure(
         && cm_lower_plain_path_type_is_str(state, result->child);
 }
 
+/*
+ * Rust's unary free-function elision rule gives these two omitted reference
+ * roots one lifetime.  The current HIR has no item-signature lifetime binder,
+ * so this exact declaration profile uses a paired ERASED representation: one
+ * input root means the output relation is unambiguous.  No explicit lifetime,
+ * additional input, nested reference, or different result shape enters this
+ * normalization.
+ */
+static int cm_lower_bounded_free_mut_elision(
+    const CmLowerState *state, const CmAstItem *ast_item,
+    const CmLowerItemRecord *record)
+{
+    const CmAstFunction *function = &ast_item->data.function_item;
+    const CmAstGenericParam *ast_generic;
+    const CmHirGenericParam *hir_generic;
+    const CmAstPattern *pattern;
+    const CmAstType *parameter;
+    const CmAstType *result;
+    const CmAstType *array;
+
+    if (record->parent_kind != CM_LOWER_PARENT_NONE || record->is_foreign
+        || ast_item->visibility.kind != CM_AST_VIS_PUBLIC
+        || !function->is_const || function->is_async || function->is_safe
+        || function->is_unsafe || function->abi != CM_INTERN_ID_NONE
+        || function->body == CM_AST_EXPR_NONE
+        || function->parameter_count != 1u || function->parameters == NULL
+        || function->parameters[0].is_self
+        || ast_item->generic_parameter_count != 1u
+        || ast_item->generic_parameters == NULL
+        || ast_item->where_clause != CM_INTERN_ID_NONE
+        || ast_item->where_predicate_count != 0u
+        || ast_item->where_predicates != NULL
+        || record->generic_parameter_count != 1u
+        || record->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE) {
+        return 0;
+    }
+    ast_generic = &ast_item->generic_parameters[0];
+    hir_generic = cm_hir_get_generic_param(state->hir,
+        record->generic_parameter_start);
+    pattern = cm_ast_get_pattern(state->ast,
+        function->parameters[0].pattern);
+    parameter = cm_ast_get_type(state->ast,
+        function->parameters[0].type);
+    result = cm_ast_get_type(state->ast, function->return_type);
+    array = result == NULL || result->kind != CM_AST_TYPE_REFERENCE
+        ? NULL : cm_ast_get_type(state->ast, result->child);
+    return ast_generic->kind == CM_AST_PARAM_TYPE
+        && ast_generic->attributes == NULL
+        && ast_generic->attribute_count == 0u
+        && ast_generic->constraint == CM_INTERN_ID_NONE
+        && ast_generic->bounds == NULL && ast_generic->bound_count == 0u
+        && ast_generic->declared_type == CM_AST_TYPE_NONE
+        && ast_generic->default_type == CM_AST_TYPE_NONE
+        && ast_generic->default_const == CM_INTERN_ID_NONE
+        && ast_generic->default_const_expr == CM_AST_EXPR_NONE
+        && hir_generic != NULL && hir_generic->kind == CM_HIR_GENERIC_TYPE
+        && cm_hir_def_id_equal(hir_generic->owner, record->definition)
+        && hir_generic->index == 0u
+        && hir_generic->declared_type == CM_HIR_TYPE_NONE
+        && !hir_generic->is_relaxed_sized && !hir_generic->has_default
+        && pattern != NULL && pattern->kind == CM_AST_PATTERN_BINDING
+        && pattern->data.binding.name != CM_INTERN_ID_NONE
+        && pattern->data.binding.subpattern == CM_AST_PATTERN_NONE
+        && !pattern->data.binding.is_ref
+        && !pattern->data.binding.is_mutable
+        && parameter != NULL && parameter->kind == CM_AST_TYPE_REFERENCE
+        && parameter->is_mutable
+        && parameter->lifetime == CM_INTERN_ID_NONE
+        && cm_lower_plain_path_type_named(state, parameter->child,
+            ast_generic->name)
+        && result != NULL && result->kind == CM_AST_TYPE_REFERENCE
+        && result->is_mutable && result->lifetime == CM_INTERN_ID_NONE
+        && array != NULL && array->kind == CM_AST_TYPE_ARRAY
+        && cm_lower_plain_path_type_named(state, array->child,
+            ast_generic->name)
+        && cm_lower_string_is(state, array->text, "1");
+}
+
 static int cm_lower_function_item(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item)
@@ -10463,6 +10541,7 @@ static int cm_lower_function_item(CmLowerState *state,
     int previous_has_receiver_output_region;
     int previous_erase_bounded_free_input_lifetime;
     int erase_bounded_free_input_lifetime;
+    int erase_bounded_free_output_lifetime;
     int has_receiver_output_region;
     uint32_t index;
     uint32_t local_count;
@@ -10506,8 +10585,11 @@ static int cm_lower_function_item(CmLowerState *state,
         locals = (CmHirLocal *)cm_alloc_zeroed(
             (size_t)function->parameter_count * 2u, sizeof(CmHirLocal));
     }
+    erase_bounded_free_output_lifetime =
+        cm_lower_bounded_free_mut_elision(state, ast_item, record);
     erase_bounded_free_input_lifetime =
-        cm_lower_bounded_free_input_erasure(state, ast_item, record);
+        erase_bounded_free_output_lifetime
+        || cm_lower_bounded_free_input_erasure(state, ast_item, record);
     previous_erase_bounded_free_input_lifetime =
         state->erase_bounded_free_input_lifetime;
     state->erase_bounded_free_input_lifetime =
@@ -10708,6 +10790,21 @@ static int cm_lower_function_item(CmLowerState *state,
         cm_free(locals);
         cm_free(parameters);
         return 0;
+    }
+    if (erase_bounded_free_output_lifetime) {
+        if (has_receiver_output_region) {
+            cm_free(locals);
+            cm_free(parameters);
+            cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE, span,
+                ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "bounded free elision unexpectedly has a receiver region");
+            return 0;
+        }
+        memset(&receiver_output_region, 0,
+            sizeof(receiver_output_region));
+        receiver_output_region.kind = CM_HIR_REGION_ERASED;
+        has_receiver_output_region = 1;
     }
     state->receiver_output_region = receiver_output_region;
     state->has_receiver_output_region = has_receiver_output_region;

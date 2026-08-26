@@ -228,6 +228,22 @@ static const unsigned char from_fn_fixture_source[] =
     "pub fn build<T, const N: usize, F>(f: F) -> [T; N]\n"
     "where F: FnMut(usize) -> T { f }\n";
 
+static const unsigned char from_mut_fixture_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_mut\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_mut\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow<T>(s: &mut T) -> &mut [T; 1] { s }\n";
+
+static const unsigned char from_mut_explicit_infer_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_mut\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_mut\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow<T>(s: &'_ mut T) -> &'_ mut [T; 1] { s }\n";
+
 static const char generic_enum_fixture_template[] =
     "mod option_like {\n"
     "  #[doc(search_unbox)]\n"
@@ -607,6 +623,12 @@ static void from_fn_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "from-fn-like.rs",
         from_fn_fixture_source, sizeof(from_fn_fixture_source) - 1u);
+}
+
+static void from_mut_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "from-mut-like.rs",
+        from_mut_fixture_source, sizeof(from_mut_fixture_source) - 1u);
 }
 
 static void layout_dependency_fixture_init(CaptureFixture *fixture,
@@ -4812,6 +4834,220 @@ static void test_from_fn_hostile_mutations_are_atomic(void)
     fixture_destroy(&fixture);
 }
 
+static void test_from_mut_elision_profile_and_determinism(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureInput noisy_input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationValue *value;
+    const CmHirDeclarationType *input_reference;
+    const CmHirDeclarationType *output_reference;
+    const CmHirDeclarationType *array;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    from_mut_fixture_init(&fixture, 0);
+    from_mut_fixture_init(&noisy, 1);
+    input = capture_input(&fixture);
+    noisy_input = capture_input(&noisy);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    result = cm_hir_declaration_metadata_capture(&noisy_input,
+        &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    value = find_declaration_value(&metadata, "borrow", NULL);
+    assert(value != NULL && value->kind == CM_HIR_DECL_VALUE_FUNCTION
+        && value->generic_count == 1u && value->predicate_count == 0u
+        && value->parameter_count == 1u && value->parameter_types != NULL
+        && value->is_const == 1u && value->has_body == 1u);
+    input_reference = &metadata.types[value->parameter_types[0] - 1u];
+    output_reference = &metadata.types[value->return_type - 1u];
+    assert(input_reference->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && input_reference->mutability == CM_HIR_DECL_MUTABLE
+        && input_reference->region.kind == CM_HIR_DECL_REGION_ERASED
+        && output_reference->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && output_reference->mutability == CM_HIR_DECL_MUTABLE
+        && output_reference->region.kind == CM_HIR_DECL_REGION_ERASED);
+    array = &metadata.types[output_reference->child_type - 1u];
+    assert(array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && array->array_length_kind == CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+        && array->array_length_low_bits == 1u
+        && array->array_length_high_bits == 0u
+        && input_reference->child_type == array->child_type);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+}
+
+static void test_from_mut_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture explicit_infer;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirItem *item;
+    CmHirItemId item_id;
+    CmHirGenericParam *generic;
+    CmHirFunctionSignature *signature;
+    CmHirType *input_reference;
+    CmHirType *output_reference;
+    CmHirType *array;
+    CmHirBody *body;
+    CmHirRegionKind saved_region;
+    CmHirMutability saved_mutability;
+    uint64_t saved_low;
+    uint64_t saved_high;
+    CmHirTypeId saved_type;
+    int saved_flag;
+    CmHirDefId saved_definition;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+
+    from_mut_fixture_init(&fixture, 0);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    item = (CmHirItem *)find_item(&fixture, "borrow", &item_id);
+    assert(item != NULL && item->generic_parameter_count == 1u);
+    generic = (CmHirGenericParam *)cm_hir_get_generic_param(&fixture.hir,
+        item->generic_parameter_start);
+    signature = &item->data.function_item.signature;
+    input_reference = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        signature->parameters[0].type);
+    output_reference = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        signature->return_type);
+    array = output_reference == NULL ? NULL
+        : (CmHirType *)cm_hir_get_type(&fixture.hir,
+            output_reference->data.reference_type.pointee);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        item->data.function_item.body);
+    assert(generic != NULL && input_reference != NULL
+        && output_reference != NULL && array != NULL && body != NULL);
+
+#define ASSERT_FROM_MUT_ATOMIC_FAILURE(input_) do { \
+    result = cm_hir_declaration_metadata_capture(&(input_), &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_region = input_reference->data.reference_type.region.kind;
+    input_reference->data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    input_reference->data.reference_type.region.kind = saved_region;
+
+    saved_region = output_reference->data.reference_type.region.kind;
+    output_reference->data.reference_type.region.kind = CM_HIR_REGION_STATIC;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    output_reference->data.reference_type.region.kind = saved_region;
+
+    saved_mutability = input_reference->data.reference_type.mutability;
+    input_reference->data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    input_reference->data.reference_type.mutability = saved_mutability;
+
+    saved_mutability = output_reference->data.reference_type.mutability;
+    output_reference->data.reference_type.mutability = CM_HIR_IMMUTABLE;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    output_reference->data.reference_type.mutability = saved_mutability;
+
+    saved_low = array->data.array_type.length.data.value.low_bits;
+    array->data.array_type.length.data.value.low_bits = 2u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    array->data.array_type.length.data.value.low_bits = saved_low;
+
+    saved_high = array->data.array_type.length.data.value.high_bits;
+    array->data.array_type.length.data.value.high_bits = 1u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    array->data.array_type.length.data.value.high_bits = saved_high;
+
+    saved_type = array->data.array_type.element;
+    array->data.array_type.element = array->data.array_type.length.type;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    array->data.array_type.element = saved_type;
+
+    saved_flag = generic->is_relaxed_sized;
+    generic->is_relaxed_sized = 1;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    generic->is_relaxed_sized = saved_flag;
+
+    saved_definition = generic->owner;
+    generic->owner.index += 1000u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    generic->owner = saved_definition;
+
+    saved_flag = signature->is_const;
+    signature->is_const = 0;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    signature->is_const = saved_flag;
+
+    saved_type = body->expected_type;
+    body->expected_type = signature->parameters[0].type;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    body->expected_type = saved_type;
+
+    saved_type = body->locals[0].type;
+    body->locals[0].type = signature->return_type;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    body->locals[0].type = saved_type;
+
+    body->locals[0].parameter_index = 1u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    body->locals[0].parameter_index = 0u;
+
+    saved_definition = item->definition;
+    item->definition.index += 1000u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    item->definition = saved_definition;
+
+    assert(item->attribute_count == 2u && item->attributes != NULL);
+    saved_metadata = item->attributes[1].metadata;
+    item->attributes[1].metadata = item->attributes[0].metadata;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    item->attributes[1].metadata = saved_metadata;
+
+    saved_span = item->attributes[1].span;
+    item->attributes[1].span.start += 1u;
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    item->attributes[1].span = saved_span;
+
+    fixture_init_source(&explicit_infer, 0, "from-mut-explicit.rs",
+        from_mut_explicit_infer_source,
+        sizeof(from_mut_explicit_infer_source) - 1u);
+    input = capture_input(&explicit_infer);
+    ASSERT_FROM_MUT_ATOMIC_FAILURE(input);
+    fixture_destroy(&explicit_infer);
+
+#undef ASSERT_FROM_MUT_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static const CmHirDeclarationType *type_id_like_array(
     const CmHirDeclarationMetadata *metadata, uint64_t expected_length)
 {
@@ -7988,6 +8224,8 @@ int main(void)
     test_into_iter_hostile_shapes_are_atomic();
     test_from_fn_callable_closure_and_determinism();
     test_from_fn_hostile_mutations_are_atomic();
+    test_from_mut_elision_profile_and_determinism();
+    test_from_mut_hostile_mutations_are_atomic();
     test_type_id_like_target_capture_and_determinism();
     test_type_id_like_hostile_mutations_are_atomic();
     test_layout_private_dependency_closure_and_determinism();

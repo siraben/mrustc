@@ -2950,7 +2950,7 @@ static int cm_decl_validate_self_type_scopes(
     return valid;
 }
 
-static int cm_decl_bounded_free_erased_input(
+static int cm_decl_bounded_type_name_of_val_erased_input(
     const CmHirDeclarationMetadata *metadata,
     const CmHirDeclarationValue *value, uint32_t value_local)
 {
@@ -2986,6 +2986,73 @@ static int cm_decl_bounded_free_erased_input(
         && parameter_child->generic_local == value->generic_start
         && result_child->kind == CM_HIR_DECL_TYPE_PRIMITIVE
         && result_child->primitive == CM_HIR_DECL_PRIMITIVE_STR;
+}
+
+/*
+ * The source-elision rule for a free function with exactly one borrowed
+ * input relates every omitted output lifetime to that input.  The producer
+ * normalizes the two independently allocated HIR inference regions only
+ * after authenticating this exact source shape.  ERASED therefore carries a
+ * single, bounded relation here; it is not admitted as a general free-
+ * function lifetime.
+ */
+static int cm_decl_bounded_from_mut_erased_pair(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationValue *value, uint32_t value_local)
+{
+    const CmHirDeclarationGeneric *generic;
+    const CmHirDeclarationType *parameter;
+    const CmHirDeclarationType *parameter_child;
+    const CmHirDeclarationType *result;
+    const CmHirDeclarationType *array;
+    const CmHirDeclarationType *array_child;
+    const CmHirDeclarationType *length_type;
+    if (value->kind != CM_HIR_DECL_VALUE_FUNCTION
+        || value->is_const != 1u || value->has_body != 1u
+        || value->generic_count != 1u || value->generic_start == 0u
+        || value->predicate_start != 0u || value->predicate_count != 0u
+        || value->parameter_count != 1u
+        || value->parameter_types == NULL) {
+        return 0;
+    }
+    generic = &metadata->generics[value->generic_start - 1u];
+    parameter = &metadata->types[value->parameter_types[0] - 1u];
+    result = &metadata->types[value->return_type - 1u];
+    if (generic->owner_kind != CM_HIR_DECL_GENERIC_VALUE
+        || generic->owner_local != value_local || generic->index != 0u
+        || generic->kind != CM_HIR_DECL_GENERIC_TYPE
+        || generic->is_relaxed_sized != 0u
+        || generic->has_default != 0u || generic->declared_type != 0u
+        || parameter->kind != CM_HIR_DECL_TYPE_REFERENCE
+        || parameter->mutability != CM_HIR_DECL_MUTABLE
+        || parameter->region.kind != CM_HIR_DECL_REGION_ERASED
+        || result->kind != CM_HIR_DECL_TYPE_REFERENCE
+        || result->mutability != CM_HIR_DECL_MUTABLE
+        || result->region.kind != CM_HIR_DECL_REGION_ERASED) return 0;
+    parameter_child = &metadata->types[parameter->child_type - 1u];
+    array = &metadata->types[result->child_type - 1u];
+    if (parameter_child->kind != CM_HIR_DECL_TYPE_GENERIC
+        || parameter_child->generic_local != value->generic_start
+        || array->kind != CM_HIR_DECL_TYPE_ARRAY
+        || array->array_length_kind != CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+        || array->array_length_low_bits != UINT64_C(1)
+        || array->array_length_high_bits != UINT64_C(0)) return 0;
+    array_child = &metadata->types[array->child_type - 1u];
+    length_type = &metadata->types[array->array_length_type - 1u];
+    return array_child->kind == CM_HIR_DECL_TYPE_GENERIC
+        && array_child->generic_local == value->generic_start
+        && length_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && length_type->primitive == CM_HIR_DECL_PRIMITIVE_USIZE;
+}
+
+static int cm_decl_bounded_free_erased_value(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationValue *value, uint32_t value_local)
+{
+    return cm_decl_bounded_type_name_of_val_erased_input(metadata, value,
+            value_local)
+        || cm_decl_bounded_from_mut_erased_pair(metadata, value,
+            value_local);
 }
 
 /*
@@ -3050,7 +3117,7 @@ static int cm_decl_validate_erased_type_roots(
                 if (contains_erased[value->parameter_types[child] - 1u])
                     has_erased = 1;
             }
-            if (has_erased && !cm_decl_bounded_free_erased_input(metadata,
+            if (has_erased && !cm_decl_bounded_free_erased_value(metadata,
                     value, (uint32_t)(index + 1u))) valid = 0;
         } else if (contains_erased[value->declared_type - 1u]) {
             valid = 0;

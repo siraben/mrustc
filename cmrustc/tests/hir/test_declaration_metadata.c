@@ -170,6 +170,16 @@ typedef struct TypeNameFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } TypeNameFixture;
 
+typedef struct FromMutFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationGeneric generics[1];
+    CmHirDeclarationType types[6];
+    CmHirDeclarationValue values[2];
+    uint32_t parameters[2];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} FromMutFixture;
+
 typedef struct UnitFunctionFixture {
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationModule modules[1];
@@ -1563,6 +1573,85 @@ static void type_name_of_val_fixture_init(TypeNameFixture *fixture)
     fixture->namespace_entries[0].export_ordinal = 1u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 1u;
+}
+
+static void from_mut_fixture_init(FromMutFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("from_mut_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-from-mut-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].index = 0u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].name = (CmHirDeclarationString)S("T");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[1].generic_local = 1u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[2].child_type = 2u;
+    fixture->types[2].mutability = CM_HIR_DECL_MUTABLE;
+    fixture->types[2].region.kind = CM_HIR_DECL_REGION_ERASED;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_ARRAY;
+    fixture->types[3].child_type = 2u;
+    fixture->types[3].array_length_kind =
+        CM_HIR_DECL_ARRAY_LENGTH_SCALAR;
+    fixture->types[3].array_length_type = 1u;
+    fixture->types[3].array_length_low_bits = UINT64_C(1);
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[4].child_type = 4u;
+    fixture->types[4].mutability = CM_HIR_DECL_MUTABLE;
+    fixture->types[4].region.kind = CM_HIR_DECL_REGION_ERASED;
+    metadata->types = fixture->types;
+    metadata->type_count = 5u;
+
+    fixture->parameters[0] = 3u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("from_mut");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].generic_start = 1u;
+    fixture->values[0].generic_count = 1u;
+    fixture->values[0].parameter_count = 1u;
+    fixture->values[0].parameter_types = fixture->parameters;
+    fixture->values[0].return_type = 5u;
+    fixture->values[0].has_body = 1u;
+    fixture->values[0].is_const = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("from_mut_alias");
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static void unit_function_fixture_init(UnitFunctionFixture *fixture)
@@ -4698,6 +4787,153 @@ static void test_contextual_erased_reference_roots(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_from_mut_erased_pair(void)
+{
+    FromMutFixture fixture;
+    FromMutFixture repeated;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated_bytes;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+
+    from_mut_fixture_init(&fixture);
+    from_mut_fixture_init(&repeated);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated_bytes);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated.metadata,
+            &repeated_bytes) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated_bytes.len
+        && memcmp(encoded.data, repeated_bytes.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.generic_count == 1u && decoded.type_count == 5u
+        && decoded.value_count == 1u && decoded.namespace_count == 2u
+        && decoded.values[0].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && decoded.values[0].is_const == 1u
+        && decoded.values[0].has_body == 1u
+        && decoded.values[0].generic_start == 1u
+        && decoded.values[0].generic_count == 1u
+        && decoded.values[0].predicate_start == 0u
+        && decoded.values[0].predicate_count == 0u
+        && decoded.values[0].parameter_count == 1u
+        && decoded.values[0].parameter_types[0] == 3u
+        && decoded.values[0].return_type == 5u
+        && decoded.types[2].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[2].mutability == CM_HIR_DECL_MUTABLE
+        && decoded.types[2].region.kind == CM_HIR_DECL_REGION_ERASED
+        && decoded.types[3].kind == CM_HIR_DECL_TYPE_ARRAY
+        && decoded.types[3].array_length_kind
+            == CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+        && decoded.types[3].array_length_type == 1u
+        && decoded.types[3].array_length_low_bits == UINT64_C(1)
+        && decoded.types[3].array_length_high_bits == UINT64_C(0)
+        && decoded.types[4].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[4].mutability == CM_HIR_DECL_MUTABLE
+        && decoded.types[4].region.kind == CM_HIR_DECL_REGION_ERASED
+        && cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+#define ASSERT_INVALID_FROM_MUT(change_) do { \
+        from_mut_fixture_init(&fixture); \
+        change_; \
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+    } while (0)
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].is_const = 0u);
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].has_body = 0u);
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].generic_start = 0u);
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].generic_count = 2u);
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].predicate_start = 1u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.parameters[1] = 3u;
+        fixture.values[0].parameter_count = 2u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.generics[0].is_relaxed_sized = 1u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.generics[0].owner_local = 2u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[2].mutability = CM_HIR_DECL_IMMUTABLE);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[4].mutability = CM_HIR_DECL_IMMUTABLE);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[2].region.kind = CM_HIR_DECL_REGION_STATIC);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[4].region.kind = CM_HIR_DECL_REGION_STATIC);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[2].region.generic_local = 1u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[4].region.binder_index = 1u);
+    ASSERT_INVALID_FROM_MUT(fixture.values[0].return_type = 4u);
+    ASSERT_INVALID_FROM_MUT(fixture.types[3].child_type = 1u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[3].array_length_type = 2u);
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[3].array_length_low_bits = UINT64_C(2));
+    ASSERT_INVALID_FROM_MUT(
+        fixture.types[3].array_length_high_bits = UINT64_C(1));
+    ASSERT_INVALID_FROM_MUT(
+        fixture.namespace_entries[1].target_local = 0u);
+#undef ASSERT_INVALID_FROM_MUT
+
+    /* A second declaration may use ordinary closed types, but cannot share
+     * either side of the authenticated ERASED relation. */
+    from_mut_fixture_init(&fixture);
+    fixture.values[1].kind = CM_HIR_DECL_VALUE_CONST;
+    fixture.values[1].owner_module = 1u;
+    fixture.values[1].name = (CmHirDeclarationString)S("z_value");
+    fixture.values[1].source_ordinal = 2u;
+    fixture.values[1].declared_type = 1u;
+    fixture.values[1].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture.values[1].has_body = 1u;
+    fixture.metadata.value_count = 2u;
+    fixture.namespace_entries[1].name = fixture.values[1].name;
+    fixture.namespace_entries[1].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.values[1].declared_type = 3u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.values[1].declared_type = 5u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* CRC-correct semantic mutations and truncation remain transactional. */
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(2));
+    bad.data[record + 4u] = CM_HIR_DECL_REGION_STATIC;
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(4));
+    bad.data[record + 16u] = CM_HIR_DECL_IMMUTABLE;
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated_bytes);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_static_tuple_array_family(void)
 {
     StaticFixture fixture;
@@ -6211,6 +6447,7 @@ int main(void)
     test_const_function_value_family();
     test_zero_generic_unit_function_family();
     test_contextual_erased_reference_roots();
+    test_from_mut_erased_pair();
     test_static_tuple_array_family();
     test_named_aggregate_family();
     test_type_id_crate_field_family();

@@ -11329,6 +11329,7 @@ static void test_hir_library_artifact_types(void)
     CmHirLibraryOwnedEntry saved_alloc_error_type_entry;
     CmHirLibraryOwnedEntry saved_alloc_error_constructor_entry;
     CmHirContext stale_artifact_hir;
+    CmHirContextMark cross_equality_mark;
     CmHirDefId producer_root_definition;
     CmHirDefId producer_alloc_error_definition;
     CmHirDefId shared_definition;
@@ -12060,6 +12061,8 @@ static void test_hir_library_artifact_types(void)
     cross_equality_graph_result = cm_module_graph_build(
         &cross_equality_graph, &cross_equality_sources,
         cross_equality_root, &graph_options);
+    check(cm_hir_context_mark(&hir, &cross_equality_mark) == CM_HIR_OK,
+        "could not mark HIR before cross-crate equality lowering");
     cm_hir_lower_options_init(&lower_options);
     lower_options.crate_name = "cross_equality_consumer";
     lower_options.dependency_libraries = libraries;
@@ -12068,17 +12071,39 @@ static void test_hir_library_artifact_types(void)
         &cross_equality_graph, cross_equality_graph_result.revision,
         &cross_equality_map, &lower_options);
     check(cross_equality_graph_result.error_count == 0u
-        && cross_equality_lower.error_count == 1u
-        && cross_equality_lower.first_error.kind
-            == CM_HIR_LOWER_HIR_FAILURE
-        && cm_hir_module_map_count(&cross_equality_map) == 0u
+        && cross_equality_lower.error_count == 0u
+        && cm_hir_module_map_count(&cross_equality_map) != 0u
+        && hir.crates.len == saved_crates + 1u
+        && hir.modules.len > saved_modules
+        && hir.items.len > saved_items
+        && hir.types.len > saved_types
+        && hir.definitions.len > saved_definitions,
+        "authenticated cross-crate supertrait equality did not lower");
+    {
+        const CmHirItem *cross_equality_item =
+            find_hir_item_anywhere(&hir, "Rejected");
+        const CmHirSupertrait *cross_supertrait =
+            cross_equality_item == NULL
+                || cross_equality_item->kind != CM_HIR_ITEM_TRAIT
+                || cross_equality_item->data.trait_item.supertrait_count != 1u
+                ? NULL : &cross_equality_item->data.trait_item.supertraits[0];
+        check(cross_supertrait != NULL
+            && cross_supertrait->equality_count == 1u
+            && cm_hir_def_id_equal(
+                cross_supertrait->equalities[0].associated_type,
+                with_assoc_associated_definition),
+            "cross-crate supertrait equality lost its associated DefId");
+    }
+    check(cm_hir_context_rewind(&hir, &cross_equality_mark) == CM_HIR_OK
         && hir.crates.len == saved_crates
         && hir.modules.len == saved_modules
         && hir.items.len == saved_items
         && hir.types.len == saved_types
         && hir.definitions.len == saved_definitions
         && cm_interner_length(&hir.strings) == saved_strings,
-        "cross-crate supertrait equality did not reject transactionally");
+        "cross-crate equality test did not rewind its successful lowering");
+    cm_hir_module_map_destroy(&cross_equality_map);
+    cm_hir_module_map_init(&cross_equality_map);
     cm_hir_module_map_destroy(&private_map);
     cm_hir_module_map_init(&private_map);
     libraries[1] = &artifact;
@@ -13428,7 +13453,22 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
         "pub fn nonconst<T: ?Sized>(_value: &T) -> &'static str { \"\" }\n"
         "pub const fn constrained<T: ?Sized>(_value: &T) -> &'static str "
             "where T: Marker { \"\" }\n"
-        "pub const fn inheriting<T: ?Sized>(_value: &T) -> &T { _value }\n";
+        "pub const fn inheriting<T: ?Sized>(_value: &T) -> &T { _value }\n"
+        "pub const fn paired<T>(s: &mut T) -> &mut [T; 1] { s }\n"
+        "pub const fn paired_input_placeholder<T>(s: &'_ mut T) "
+            "-> &mut [T; 1] { s }\n"
+        "pub const fn paired_output_placeholder<T>(s: &mut T) "
+            "-> &'_ mut [T; 1] { s }\n"
+        "pub const fn paired_two<T>(s: &mut T, _other: &mut T) "
+            "-> &mut [T; 1] { s }\n"
+        "pub const fn paired_two_length<T>(s: &mut T) "
+            "-> &mut [T; 2] { s }\n"
+        "pub const fn paired_binding_mut<T>(mut s: &mut T) "
+            "-> &mut [T; 1] { s }\n"
+        "pub const fn paired_named<'a, T>(s: &'a mut T) "
+            "-> &'a mut [T; 1] { s }\n"
+        "pub const fn paired_static<T>(s: &'static mut T) "
+            "-> &'static mut [T; 1] { s }\n";
     static const char *const names[] = {
         "admitted", "placeholder", "named", "static_input", "mutable",
         "sized", "nonconst", "constrained"
@@ -13484,7 +13524,7 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
             result.first_error.message);
     }
     check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 10u,
+        && result.lowered_item_count == 18u,
         "bounded free input lifetime fixture did not lower exactly");
     for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
         const CmHirItem *item = find_hir_item_anywhere(&hir, names[index]);
@@ -13538,6 +13578,96 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
         && inheriting_output->data.reference_type.region.kind
             == CM_HIR_REGION_INFER,
         "output-inheriting free function entered bounded input erasure");
+    {
+        static const char *const paired_names[] = {
+            "paired", "paired_input_placeholder",
+            "paired_output_placeholder", "paired_two",
+            "paired_two_length", "paired_binding_mut"
+        };
+        size_t paired_index;
+
+        for (paired_index = 0u;
+             paired_index < sizeof(paired_names) / sizeof(paired_names[0]);
+             ++paired_index) {
+            const CmHirItem *item = find_hir_item_anywhere(&hir,
+                paired_names[paired_index]);
+            const CmHirType *input = item == NULL
+                    || item->data.function_item.signature.parameter_count
+                        == 0u
+                ? NULL : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.parameters[0].type);
+            const CmHirType *output = item == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.return_type);
+
+            check(input != NULL && output != NULL
+                && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && input->data.reference_type.mutability == CM_HIR_MUTABLE
+                && output->data.reference_type.mutability == CM_HIR_MUTABLE
+                && input->data.reference_type.region.kind
+                    == (paired_index == 0u
+                        ? CM_HIR_REGION_ERASED : CM_HIR_REGION_INFER)
+                && output->data.reference_type.region.kind
+                    == (paired_index == 0u
+                        ? CM_HIR_REGION_ERASED : CM_HIR_REGION_INFER),
+                "bounded paired free elision admitted a mutated source "
+                "shape or lost the unary input/output relation");
+            if (paired_index == 0u) {
+                const CmHirType *array = cm_hir_get_type(&hir,
+                    output->data.reference_type.pointee);
+                const CmHirGenericParam *generic = cm_hir_get_generic_param(
+                    &hir, item->generic_parameter_start);
+                check(item->data.function_item.signature.is_const
+                    && item->generic_parameter_count == 1u
+                    && generic != NULL
+                    && generic->kind == CM_HIR_GENERIC_TYPE
+                    && !generic->is_relaxed_sized
+                    && array != NULL && array->kind == CM_HIR_TYPE_ARRAY_KIND
+                    && array->data.array_type.length.kind
+                        == CM_HIR_CONST_VALUE
+                    && array->data.array_type.length.data.value.low_bits
+                        == UINT64_C(1)
+                    && array->data.array_type.length.data.value.high_bits
+                        == UINT64_C(0),
+                    "bounded paired free elision lost its exact generic "
+                    "array signature");
+            }
+        }
+    }
+    {
+        static const char *const explicit_names[] = {
+            "paired_named", "paired_static"
+        };
+        static const CmHirRegionKind expected_regions[] = {
+            CM_HIR_REGION_EARLY_BOUND, CM_HIR_REGION_STATIC
+        };
+        size_t explicit_index;
+
+        for (explicit_index = 0u;
+             explicit_index
+                < sizeof(explicit_names) / sizeof(explicit_names[0]);
+             ++explicit_index) {
+            const CmHirItem *item = find_hir_item_anywhere(&hir,
+                explicit_names[explicit_index]);
+            const CmHirType *input = item == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.parameters[0].type);
+            const CmHirType *output = item == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.return_type);
+
+            check(input != NULL && output != NULL
+                && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && input->data.reference_type.region.kind
+                    == expected_regions[explicit_index]
+                && output->data.reference_type.region.kind
+                    == expected_regions[explicit_index],
+                "bounded paired free elision rewrote an explicit named or "
+                "static lifetime");
+        }
+    }
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
