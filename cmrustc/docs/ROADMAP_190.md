@@ -323,6 +323,16 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   twin `core/src/array/mod.rs:165`'s `from_ref` (`def=1:18903`, source item
   `100:22`, rejected item `10806`) at
   `stage=items`/`item-source-invalid`.
+- Commit `fbe4cee4` extends the same exact paired boundary to shared/shared
+  roots without admitting mixed mutability. The clean pinned-core probe at
+  `fbe4cee4` preserves zero graph/import/HIR errors, 38,176 HIR items, and the
+  exact 451-module/1,658-type/20,747-value library census. It clears both array
+  reference helpers and measures the next v3.0 frontier at
+  `core/src/array/mod.rs:54`: `repeat<T: Clone, const N: usize>`
+  (`def=1:18900`, source item `100:19`, rejected item `10803`) at
+  `stage=items`/`item-source-invalid`. The next capability must retain the
+  exact `T: Clone` declaration predicate and const-generic array result while
+  keeping the generic inline body unavailable.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

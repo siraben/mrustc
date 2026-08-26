@@ -2141,6 +2141,18 @@ probe at `292adaf1` preserves the zero-error graph/HIR and exact
 `core/src/array/mod.rs:165`'s shared twin `from_ref` (`def=1:18903`, source
 item `100:22`, rejected item `10806`) at
 `stage=items`/`item-source-invalid`.
+Commit `fbe4cee4` generalizes that exact paired-erasure boundary to matching
+shared/shared as well as mutable/mutable array-reference declarations, while
+mixed mutability and lifetime-sensitive roots remain closed. The clean pinned
+Rust 1.90 probe at `fbe4cee4` again reports zero graph/import/HIR errors,
+38,176 HIR items, and the exact 451-module/1,658-type/20,747-value library
+census. It clears both `from_ref` and `from_mut`, then measures the next v3.0
+frontier at `core/src/array/mod.rs:54`: `repeat<T: Clone, const N: usize>`
+(`def=1:18900`, source item `100:19`, rejected item `10803`) fails at
+`stage=items` with `reason=item-source-invalid` as a public VALUE/FUNCTION
+declaration. Its declaration requires the already-retained value-owned const
+generic and `[T; N]` return plus an exact `T: Clone` predicate closure; the
+generic inline body remains outside declaration metadata.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

@@ -225,6 +225,16 @@ zero-error census and exact library totals, then advances to the shared twin
 at `core/src/array/mod.rs:165`: `from_ref` (`def=1:18903`, source item
 `100:22`, rejected item `10806`) at `stage=items` with
 `reason=item-source-invalid`.
+Commit `fbe4cee4` admits the exact shared/shared twin while retaining the
+mutable/mutable profile and rejecting mixed roots. Its clean pinned-core probe
+again reports zero graph/import/HIR errors, 38,176 HIR items, and the exact
+451-module/1,658-type/20,747-value library census. Both reference helpers now
+clear, and the measured v3.0 frontier advances to
+`core/src/array/mod.rs:54`: `repeat<T: Clone, const N: usize>`
+(`def=1:18900`, source item `100:19`, rejected item `10803`) at
+`stage=items`/`item-source-invalid`. This is a declaration-only generic
+function boundary: its callable body is not evidence until executable generic
+body transport exists.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
