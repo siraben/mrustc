@@ -229,9 +229,17 @@ typedef struct CmHirDeclarationCaptureResult {
  * Erased shared references remain supported, while inferred reference regions
  * are not normalized and fail closed. Methods may have optional default bodies
  * and optional required `Self: Marker` predicates. Auto/const traits,
- * supertraits, other associated-item kinds, unsupported receiver/type forms,
+ * other associated-item kinds, unsupported receiver/type forms,
  * cross-owner generic leaves, and incomplete child/library identities fail
  * closed.
+ * A second exact member-bearing profile covers a SAFE zero-generic trait with
+ * one source-authenticated `Self: 'static` lifetime super-bound, one retained
+ * `rustc_diagnostic_item = "IDENT"`, and one required safe shared-`&self`
+ * method returning a captured public zero-argument named STRUCT. The trait and
+ * method each require direct `stable(...)`, which is projected and counted;
+ * the diagnostic identity and nominal-owned static outlives predicate are
+ * retained. Other supertrait/outlives forms and additional safe members remain
+ * unsupported.
  *
  * A supported free const is public, top-level, immutable, explicitly typed by
  * a v3.0-representable primitive, zero-generic/predicate, and has one

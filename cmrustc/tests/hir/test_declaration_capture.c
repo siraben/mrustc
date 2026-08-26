@@ -229,6 +229,18 @@ static const unsigned char safe_associated_trait_fixture_source[] =
     "pub trait SafeLike { fn ping(&self); }\n"
     "pub fn needs<X: Marker>() {}\n";
 
+static const unsigned char any_like_fixture_source[] =
+    "#[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+    "#[rustc_diagnostic_item = \"AnyLike\"]\n"
+    "pub trait AnyLike: 'static {\n"
+    "  #[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+    "  fn type_id(&self) -> TypeIdLike;\n"
+    "}\n"
+    "pub struct OtherId;\n"
+    "pub struct TypeIdLike;\n"
+    "pub trait Marker {}\n"
+    "pub fn needs<X: Marker>() {}\n";
+
 static const unsigned char inline_free_function_fixture_source[] =
     "pub trait Marker {}\n"
     "#[inline(always)]\n"
@@ -516,6 +528,12 @@ static void allocator_like_fixture_init_hints(CaptureFixture *fixture,
     assert(written > 0 && (size_t)written < sizeof(source));
     fixture_init_source(fixture, 0, "allocator-like-hint.rs",
         (const unsigned char *)source, (size_t)written);
+}
+
+static void any_like_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "any-like.rs",
+        any_like_fixture_source, sizeof(any_like_fixture_source) - 1u);
 }
 
 static void composite_associated_fixture_init(CaptureFixture *fixture,
@@ -5142,6 +5160,252 @@ static void test_allocator_like_associated_method_capture(void)
     fixture_destroy(&first);
 }
 
+static void test_any_like_safe_static_trait_capture(void)
+{
+    static const unsigned char missing_static_source[] =
+        "#[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+        "#[rustc_diagnostic_item = \"AnyLike\"]\n"
+        "pub trait AnyLike {\n"
+        "  #[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+        "  fn type_id(&self) -> TypeIdLike;\n"
+        "}\n"
+        "pub struct TypeIdLike;\n"
+        "pub trait Marker {}\n"
+        "pub fn needs<X: Marker>() {}\n";
+    static const unsigned char duplicate_diagnostic_source[] =
+        "#[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+        "#[rustc_diagnostic_item = \"AnyLike\"]\n"
+        "#[rustc_diagnostic_item = \"OtherAnyLike\"]\n"
+        "pub trait AnyLike: 'static {\n"
+        "  #[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+        "  fn type_id(&self) -> TypeIdLike;\n"
+        "}\n"
+        "pub struct TypeIdLike;\n"
+        "pub trait Marker {}\n"
+        "pub fn needs<X: Marker>() {}\n";
+    static const unsigned char unstable_trait_source[] =
+        "#[unstable(feature = \"type_id_like\", issue = \"none\")]\n"
+        "#[rustc_diagnostic_item = \"AnyLike\"]\n"
+        "pub trait AnyLike: 'static {\n"
+        "  #[stable(feature = \"type_id_like\", since = \"1.0.0\")]\n"
+        "  fn type_id(&self) -> TypeIdLike;\n"
+        "}\n"
+        "pub struct TypeIdLike;\n"
+        "pub trait Marker {}\n"
+        "pub fn needs<X: Marker>() {}\n";
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture rejected;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    const CmHirDeclarationTrait *any_wire = NULL;
+    const CmHirDeclarationAssociatedItem *method_wire = NULL;
+    const CmHirDeclarationOutlivesPredicate *outlives;
+    const CmHirDeclarationType *subject;
+    const CmHirDeclarationType *return_type;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItem *trait_item;
+    CmHirItem *method_item;
+    const CmHirItem *other_item;
+    CmHirItemId trait_id;
+    CmHirItemId method_id;
+    CmHirItemId other_id;
+    CmHirOutlivesPredicate *hir_outlives;
+    CmHirFunctionSignature *signature;
+    CmHirType *receiver;
+    CmHirType *method_return;
+    CmHirDefId saved_definition;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint32_t saved_source_attribute;
+    CmHirRegion saved_bound;
+    CmHirTypeId saved_subject;
+    CmHirSafety saved_safety;
+    CmHirMutability saved_mutability;
+    size_t index;
+    any_like_fixture_init(&first, 0);
+    any_like_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == 2u && result.associated_count == 1u
+        && result.item_count == 2u && result.value_count == 1u
+        && result.projected_semantic_attribute_count == 2u
+        && metadata.outlives_predicate_count == 1u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    for (index = 0u; index < metadata.trait_count; ++index)
+        if (declaration_string_is(metadata.traits[index].name, "AnyLike"))
+            any_wire = &metadata.traits[index];
+    for (index = 0u; index < metadata.associated_count; ++index)
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "type_id")) method_wire = &metadata.associated_items[index];
+    assert(any_wire != NULL && method_wire != NULL
+        && any_wire->safety == CM_HIR_DECL_SAFETY_SAFE
+        && any_wire->associated_count == 1u
+        && any_wire->outlives_count == 1u
+        && any_wire->predicate_scope_count == 0u
+        && any_wire->predicate_count == 0u
+        && any_wire->flags == CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        && declaration_string_is(any_wire->diagnostic_item, "AnyLike")
+        && method_wire->parent_local
+            == (uint32_t)(any_wire - metadata.traits + 1)
+        && method_wire->receiver == CM_HIR_DECL_RECEIVER_REF_SHARED
+        && method_wire->parameter_count == 1u
+        && method_wire->safety == CM_HIR_DECL_SAFETY_SAFE
+        && method_wire->has_default_body == 0u
+        && method_wire->predicate_count == 0u);
+    outlives = &metadata.outlives_predicates[0];
+    subject = &metadata.types[outlives->subject_type - 1u];
+    return_type = &metadata.types[method_wire->return_type - 1u];
+    assert(outlives->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_NOMINAL
+        && outlives->owner_local == method_wire->parent_local
+        && outlives->ordinal == 0u && outlives->scope == 0u
+        && outlives->bound.kind == CM_HIR_DECL_REGION_STATIC
+        && subject->kind == CM_HIR_DECL_TYPE_SELF
+        && subject->self_trait_local == method_wire->parent_local
+        && return_type->kind == CM_HIR_DECL_TYPE_NAMED_ADT
+        && declaration_string_is(metadata.items[
+            return_type->item_local - 1u].name, "TypeIdLike")
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+
+    saved_traits = metadata.traits;
+    saved_associated = metadata.associated_items;
+    saved_namespace = metadata.namespace_entries;
+    trait_item = (CmHirItem *)find_item(&first, "AnyLike", &trait_id);
+    method_item = (CmHirItem *)find_item(&first, "type_id", &method_id);
+    assert(trait_item != NULL && method_item != NULL
+        && trait_item->outlives_predicate_count == 1u
+        && trait_item->outlives_predicates != NULL
+        && trait_item->attribute_count == 2u
+        && method_item->attribute_count == 1u);
+    hir_outlives = &trait_item->outlives_predicates[0];
+    signature = &method_item->data.function_item.signature;
+    receiver = (CmHirType *)cm_hir_get_type(&first.hir,
+        signature->parameters[0].type);
+    method_return = (CmHirType *)cm_hir_get_type(&first.hir,
+        signature->return_type);
+    other_item = find_item(&first, "OtherId", &other_id);
+    assert(receiver != NULL && receiver->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && method_return != NULL && method_return->kind == CM_HIR_TYPE_ADT_KIND
+        && other_item != NULL);
+#define ASSERT_ANY_ATOMIC_FAILURE() do { \
+    input = capture_input(&first); \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.traits == saved_traits \
+        && metadata.associated_items == saved_associated \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+    saved_metadata = trait_item->attributes[1].metadata;
+    trait_item->attributes[1].metadata = cm_hir_intern(&first.hir,
+        "rustc_diagnostic_item = \"ForgedAnyLike\"");
+    ASSERT_ANY_ATOMIC_FAILURE();
+    trait_item->attributes[1].metadata = saved_metadata;
+
+    saved_span = trait_item->attributes[1].span;
+    trait_item->attributes[1].span.start += 1u;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    trait_item->attributes[1].span = saved_span;
+
+    saved_source_attribute = trait_item->attributes[1].source_attribute;
+    trait_item->attributes[1].source_attribute += 1u;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    trait_item->attributes[1].source_attribute = saved_source_attribute;
+
+    trait_item->attributes[1].expansion_depth = 1u;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    trait_item->attributes[1].expansion_depth = 0u;
+
+    saved_bound = hir_outlives->bound;
+    hir_outlives->bound.kind = CM_HIR_REGION_ERASED;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    hir_outlives->bound = saved_bound;
+
+    saved_subject = hir_outlives->subject.type;
+    hir_outlives->subject.type = signature->return_type;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    hir_outlives->subject.type = saved_subject;
+
+    saved_span = hir_outlives->span;
+    hir_outlives->span.start += 1u;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    hir_outlives->span = saved_span;
+
+    saved_safety = trait_item->data.trait_item.safety;
+    trait_item->data.trait_item.safety = CM_HIR_UNSAFE;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    trait_item->data.trait_item.safety = saved_safety;
+
+    saved_mutability = receiver->data.reference_type.mutability;
+    receiver->data.reference_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    receiver->data.reference_type.mutability = saved_mutability;
+
+    saved_definition = method_return->data.named_type.definition;
+    method_return->data.named_type.definition = other_item->definition;
+    ASSERT_ANY_ATOMIC_FAILURE();
+    method_return->data.named_type.definition = saved_definition;
+#undef ASSERT_ANY_ATOMIC_FAILURE
+
+    fixture_init_source(&rejected, 0, "any-like-missing-static.rs",
+        missing_static_source, sizeof(missing_static_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && metadata.traits == saved_traits
+        && metadata.associated_items == saved_associated
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
+
+    fixture_init_source(&rejected, 0, "any-like-duplicate-diagnostic.rs",
+        duplicate_diagnostic_source,
+        sizeof(duplicate_diagnostic_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && metadata.traits == saved_traits
+        && metadata.associated_items == saved_associated
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
+
+    fixture_init_source(&rejected, 0, "any-like-unstable-trait.rs",
+        unstable_trait_source, sizeof(unstable_trait_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && metadata.traits == saved_traits
+        && metadata.associated_items == saved_associated
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
+
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
 static void test_associated_composite_type_capture(void)
 {
     CaptureFixture first;
@@ -5732,6 +5996,7 @@ int main(void)
     test_primitive_reexports_and_determinism();
     test_primitive_reexport_hostile_mutations_are_atomic();
     test_allocator_like_associated_method_capture();
+    test_any_like_safe_static_trait_capture();
     test_associated_composite_type_capture();
     test_reachable_canonical_type_caps();
     test_many_unique_type_canonicalization_is_order_independent();
