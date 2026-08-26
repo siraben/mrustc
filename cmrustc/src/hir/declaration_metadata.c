@@ -2262,6 +2262,163 @@ static int cm_decl_validate_self_type_scopes(
     return valid;
 }
 
+static int cm_decl_bounded_free_erased_input(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationValue *value, uint32_t value_local)
+{
+    const CmHirDeclarationGeneric *generic;
+    const CmHirDeclarationType *parameter;
+    const CmHirDeclarationType *parameter_child;
+    const CmHirDeclarationType *result;
+    const CmHirDeclarationType *result_child;
+    if (value->kind != CM_HIR_DECL_VALUE_FUNCTION
+        || value->is_const != 1u || value->has_body != 1u
+        || value->generic_count != 1u || value->generic_start == 0u
+        || value->predicate_start != 0u || value->predicate_count != 0u
+        || value->parameter_count != 1u
+        || value->parameter_types == NULL) {
+        return 0;
+    }
+    generic = &metadata->generics[value->generic_start - 1u];
+    parameter = &metadata->types[value->parameter_types[0] - 1u];
+    result = &metadata->types[value->return_type - 1u];
+    if (generic->owner_kind != CM_HIR_DECL_GENERIC_VALUE
+        || generic->owner_local != value_local || generic->index != 0u
+        || generic->kind != CM_HIR_DECL_GENERIC_TYPE
+        || generic->is_relaxed_sized != 1u
+        || parameter->kind != CM_HIR_DECL_TYPE_REFERENCE
+        || parameter->mutability != CM_HIR_DECL_IMMUTABLE
+        || parameter->region.kind != CM_HIR_DECL_REGION_ERASED
+        || result->kind != CM_HIR_DECL_TYPE_REFERENCE
+        || result->mutability != CM_HIR_DECL_IMMUTABLE
+        || result->region.kind != CM_HIR_DECL_REGION_STATIC) return 0;
+    parameter_child = &metadata->types[parameter->child_type - 1u];
+    result_child = &metadata->types[result->child_type - 1u];
+    return parameter_child->kind == CM_HIR_DECL_TYPE_GENERIC
+        && parameter_child->generic_local == value->generic_start
+        && result_child->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && result_child->primitive == CM_HIR_DECL_PRIMITIVE_STR;
+}
+
+/*
+ * ERASED is a deliberately lossy transport marker, not a general lifetime or
+ * binder.  Validate every declaration root that can reach one so a canonical
+ * TYPE node cannot be shared from an authenticated receiver/input boundary
+ * into an unrelated field, predicate, value, or parameter.
+ */
+static int cm_decl_validate_erased_type_roots(
+    const CmHirDeclarationMetadata *metadata)
+{
+    unsigned char *contains_erased;
+    size_t index;
+    int valid = 1;
+    contains_erased = metadata->type_count == 0u ? NULL
+        : (unsigned char *)cm_alloc_zeroed(metadata->type_count,
+            sizeof(*contains_erased));
+    for (index = 0u; index < metadata->type_count; ++index) {
+        const CmHirDeclarationType *type = &metadata->types[index];
+        uint32_t child;
+        if (type->kind == CM_HIR_DECL_TYPE_REFERENCE
+            && type->region.kind == CM_HIR_DECL_REGION_ERASED) {
+            contains_erased[index] = 1u;
+        }
+        if (type->kind == CM_HIR_DECL_TYPE_SLICE
+                || type->kind == CM_HIR_DECL_TYPE_RAW_POINTER
+                || type->kind == CM_HIR_DECL_TYPE_REFERENCE) {
+            if (contains_erased[type->child_type - 1u])
+                contains_erased[index] = 1u;
+        } else if (type->kind
+                == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
+            for (child = 0u; child < type->argument_count; ++child) {
+                if (contains_erased[type->argument_types[child] - 1u])
+                    contains_erased[index] = 1u;
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            for (child = 0u; child < type->element_count; ++child) {
+                if (contains_erased[type->element_types[child] - 1u])
+                    contains_erased[index] = 1u;
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY
+            && (contains_erased[type->child_type - 1u]
+                || contains_erased[type->array_length_type - 1u])) {
+            contains_erased[index] = 1u;
+        }
+    }
+    for (index = 0u; index < metadata->value_count && valid; ++index) {
+        const CmHirDeclarationValue *value = &metadata->values[index];
+        uint32_t child;
+        int has_erased = 0;
+        if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            has_erased = contains_erased[value->return_type - 1u] != 0u;
+            for (child = 0u; child < value->parameter_count; ++child) {
+                if (contains_erased[value->parameter_types[child] - 1u])
+                    has_erased = 1;
+            }
+            if (has_erased && !cm_decl_bounded_free_erased_input(metadata,
+                    value, (uint32_t)(index + 1u))) valid = 0;
+        } else if (contains_erased[value->declared_type - 1u]) {
+            valid = 0;
+        }
+    }
+    for (index = 0u; index < metadata->associated_count && valid; ++index) {
+        const CmHirDeclarationAssociatedItem *associated =
+            &metadata->associated_items[index];
+        uint32_t child;
+        /* Slot zero is the separately authenticated shared receiver.  An
+         * ERASED return may preserve receiver-driven output elision. */
+        for (child = 1u; child < associated->parameter_count; ++child) {
+            if (contains_erased[associated->parameter_types[child] - 1u]) {
+                valid = 0;
+                break;
+            }
+        }
+    }
+    for (index = 0u; index < metadata->item_count && valid; ++index) {
+        const CmHirDeclarationItem *item = &metadata->items[index];
+        uint32_t child;
+        if (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
+            && contains_erased[item->alias_target_type - 1u]) valid = 0;
+        for (child = 0u; child < item->field_count && valid; ++child) {
+            if (contains_erased[item->fields[child].type_local - 1u])
+                valid = 0;
+        }
+        if (item->kind == CM_HIR_DECL_ITEM_ENUM) {
+            uint32_t variant;
+            for (variant = 0u; variant < item->variant_count && valid;
+                    ++variant) {
+                uint32_t field;
+                for (field = 0u;
+                        field < item->variants[variant].field_count;
+                        ++field) {
+                    if (contains_erased[item->variants[variant]
+                            .fields[field].type_local - 1u]) {
+                        valid = 0;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for (index = 0u; index < metadata->predicate_count && valid; ++index) {
+        const CmHirDeclarationPredicate *predicate =
+            &metadata->predicates[index];
+        uint32_t child;
+        if (contains_erased[predicate->subject_type - 1u]) valid = 0;
+        for (child = 0u; child < predicate->argument_count && valid;
+                ++child) {
+            if (contains_erased[predicate->argument_types[child] - 1u])
+                valid = 0;
+        }
+    }
+    for (index = 0u; index < metadata->outlives_predicate_count && valid;
+            ++index) {
+        if (contains_erased[metadata->outlives_predicates[index]
+                .subject_type - 1u]) valid = 0;
+    }
+    cm_free(contains_erased);
+    return valid;
+}
+
 static int cm_decl_namespace_compare(
     const CmHirDeclarationNamespaceEntry *left,
     const CmHirDeclarationNamespaceEntry *right)
@@ -2797,6 +2954,7 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_validate(
         || !cm_decl_validate_outlives_predicates(metadata)
         || !cm_decl_validate_value_type_scopes(metadata)
         || !cm_decl_validate_self_type_scopes(metadata)
+        || !cm_decl_validate_erased_type_roots(metadata)
         || !cm_decl_validate_type_reachability(metadata)
         || !cm_decl_validate_namespace(metadata))
         return CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR;

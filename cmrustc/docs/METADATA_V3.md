@@ -586,8 +586,21 @@ type disclosure policy; v3.0/v3.1/v3.2 have no such declaration record and rejec
 it rather than treating it as an argument-only named type. Constants initially
 include exact scalar bits, an authenticated
 generic parameter, or an authenticated unevaluated const definition with its
-substitutions. Inference, erased/error regions, inference/error constants,
+substitutions. Inference and error regions, inference/error constants,
 inference/error types, and closure identities reject this cross-crate profile.
+`ERASED` is a closed `LOWER_SAFE` transport marker, not a source lifetime
+identity or binder; its generic-local and binder-index payloads are zero. It
+is admitted only when every declaration root reaching it is an authenticated
+profile boundary: (1) the shared reference receiver of a supported associated
+`METHOD` and a receiver-related return type, never another method input; or
+(2) the sole immutable direct `&T` parameter of a body-bearing const free
+`FUNCTION` with exactly one owner-local relaxed-Sized type generic, zero
+predicates, and exact immutable `&'static str` return. Aggregate, variant, and
+alias fields, `CONST`/`STATIC` types, predicate and outlives roots, arbitrary
+free parameters or returns, mixed-sharing roots, explicit `'_`, named, or
+static input lifetimes, and remaining inference regions reject. `ERASED` does
+not encode equality, outlives evidence, or a late-bound binder; artifacts that
+require lifetime-sensitive selection need a later exact profile.
 
 Type records form a canonical DAG. Structural child type locals precede their
 parents. Nominal recursive references occur through definition handles rather

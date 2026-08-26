@@ -164,9 +164,10 @@ typedef struct TypeNameFixture {
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationModule modules[1];
     CmHirDeclarationGeneric generics[1];
-    CmHirDeclarationType types[3];
-    CmHirDeclarationValue values[1];
-    CmHirDeclarationNamespaceEntry namespace_entries[1];
+    CmHirDeclarationType types[4];
+    CmHirDeclarationValue values[2];
+    uint32_t parameters[2];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
 } TypeNameFixture;
 
 static void put_u16(unsigned char *bytes, uint16_t value)
@@ -1379,6 +1380,77 @@ static void type_name_fixture_init(TypeNameFixture *fixture)
     fixture->values[0].generic_start = 1u;
     fixture->values[0].generic_count = 1u;
     fixture->values[0].return_type = 2u;
+    fixture->values[0].has_body = 1u;
+    fixture->values[0].is_const = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 1u;
+}
+
+static void type_name_of_val_fixture_init(TypeNameFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("type_name_of_val_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-type-name-of-val-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].index = 0u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].is_relaxed_sized = 1u;
+    fixture->generics[0].name = (CmHirDeclarationString)S("T");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_STR;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[1].generic_local = 1u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[2].child_type = 1u;
+    fixture->types[2].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[2].region.kind = CM_HIR_DECL_REGION_STATIC;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[3].child_type = 2u;
+    fixture->types[3].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[3].region.kind = CM_HIR_DECL_REGION_ERASED;
+    metadata->types = fixture->types;
+    metadata->type_count = 4u;
+
+    fixture->parameters[0] = 4u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name =
+        (CmHirDeclarationString)S("type_name_of_val");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].generic_start = 1u;
+    fixture->values[0].generic_count = 1u;
+    fixture->values[0].parameter_count = 1u;
+    fixture->values[0].parameter_types = fixture->parameters;
+    fixture->values[0].return_type = 3u;
     fixture->values[0].has_body = 1u;
     fixture->values[0].is_const = 1u;
     metadata->values = fixture->values;
@@ -3677,6 +3749,145 @@ static void test_const_function_value_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_contextual_erased_reference_roots(void)
+{
+    TypeNameFixture first;
+    TypeNameFixture repeated;
+    AssociatedMethodFixture associated;
+    AggregateFixture aggregate;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated_bytes;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+
+    type_name_of_val_fixture_init(&first);
+    type_name_of_val_fixture_init(&repeated);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated_bytes);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated.metadata,
+            &repeated_bytes) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated_bytes.len
+        && memcmp(encoded.data, repeated_bytes.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.value_count == 1u && decoded.type_count == 4u
+        && decoded.values[0].is_const == 1u
+        && decoded.values[0].parameter_count == 1u
+        && decoded.types[decoded.values[0].parameter_types[0] - 1u]
+            .region.kind == CM_HIR_DECL_REGION_ERASED
+        && decoded.types[decoded.values[0].return_type - 1u].region.kind
+            == CM_HIR_DECL_REGION_STATIC
+        && cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    type_name_of_val_fixture_init(&first);
+    first.values[0].is_const = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_of_val_fixture_init(&first);
+    first.values[0].has_body = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_of_val_fixture_init(&first);
+    first.generics[0].is_relaxed_sized = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_of_val_fixture_init(&first);
+    first.parameters[1] = 4u;
+    first.values[0].parameter_count = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_of_val_fixture_init(&first);
+    first.types[3].mutability = CM_HIR_DECL_MUTABLE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_of_val_fixture_init(&first);
+    first.types[2].region.kind = CM_HIR_DECL_REGION_ERASED;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* A STATIC reference is an ordinary closed CONST/STATIC type.  Sharing
+     * the exact ERASED input node into either declaration is forbidden. */
+    type_name_of_val_fixture_init(&first);
+    first.values[1].kind = CM_HIR_DECL_VALUE_CONST;
+    first.values[1].owner_module = 1u;
+    first.values[1].name = (CmHirDeclarationString)S("z_value");
+    first.values[1].source_ordinal = 2u;
+    first.values[1].declared_type = 3u;
+    first.values[1].mutability = CM_HIR_DECL_IMMUTABLE;
+    first.values[1].has_body = 1u;
+    first.metadata.value_count = 2u;
+    first.namespace_entries[1].owner_module = 1u;
+    first.namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    first.namespace_entries[1].name = first.values[1].name;
+    first.namespace_entries[1].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    first.namespace_entries[1].target_local = 2u;
+    first.namespace_entries[1].export_ordinal = 2u;
+    first.metadata.namespace_count = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    first.values[1].declared_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.values[1].kind = CM_HIR_DECL_VALUE_STATIC;
+    first.values[1].declared_type = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    first.values[1].declared_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* The receiver root and a receiver-related output are admitted, but an
+     * additional input may not reuse the ERASED receiver node. */
+    associated_method_fixture_init(&associated);
+    associated.associated_items[1].return_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&associated.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    associated.allocate_parameters[1] = 4u;
+    assert(cm_hir_declaration_metadata_validate(&associated.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* Aggregate roots are never authenticated erasure boundaries. */
+    aggregate_fixture_init(&aggregate);
+    aggregate.types[5] = aggregate.types[4];
+    memset(&aggregate.types[4], 0, sizeof(aggregate.types[4]));
+    aggregate.types[4].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    aggregate.types[4].child_type = 3u;
+    aggregate.types[4].mutability = CM_HIR_DECL_IMMUTABLE;
+    aggregate.types[4].region.kind = CM_HIR_DECL_REGION_ERASED;
+    aggregate.application_arguments[0] = 4u;
+    aggregate.types[5].argument_types = aggregate.application_arguments;
+    aggregate.maybe_uninit_fields[1].type_local = 6u;
+    aggregate.manually_drop_fields[0].type_local = 5u;
+    aggregate.metadata.type_count = 6u;
+    assert(cm_hir_declaration_metadata_validate(&aggregate.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* A CRC-correct hostile TYPE mutation still fails transactionally. */
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(2));
+    bad.data[record + 1u] = CM_HIR_DECL_REGION_ERASED;
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated_bytes);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_static_tuple_array_family(void)
 {
     StaticFixture fixture;
@@ -4837,6 +5048,7 @@ int main(void)
     test_enum_named_adt_signature();
     test_const_value_family();
     test_const_function_value_family();
+    test_contextual_erased_reference_roots();
     test_static_tuple_array_family();
     test_named_aggregate_family();
     test_type_id_crate_field_family();
