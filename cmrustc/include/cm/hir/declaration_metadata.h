@@ -379,11 +379,13 @@ typedef struct CmHirDeclarationValue {
     uint32_t *parameter_types;
     /* UNIT is a real nonzero TYPE local; local zero is never a return type. */
     uint32_t return_type;
-    /* Required only for CONST; functions require this to remain zero. */
+    /* Required only for CONST/STATIC; functions require this to remain zero. */
     uint32_t declared_type;
-    /* Required only for CONST, which must be immutable in this slice. */
+    /* Required only for CONST/STATIC; CONST must be immutable. */
     uint8_t mutability;
     uint8_t has_body;
+    /* FUNCTION-only boolean; free-function safety/ABI remain fixed. */
+    uint8_t is_const;
 } CmHirDeclarationValue;
 
 typedef struct CmHirDeclarationPredicate {

@@ -1611,10 +1611,10 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
             || !cm_decl_identifier(value->name)
             || !cm_decl_range(value->predicate_start,
                 value->predicate_count, metadata->predicate_count)
-            || value->has_body > 1u) return 0;
+            || value->has_body > 1u
+            || value->is_const > 1u) return 0;
         if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
             if (value->generic_count == 0u
-                || value->predicate_count == 0u
                 || value->parameter_count
                     > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
                 || !cm_size_add(total_parameters, value->parameter_count,
@@ -1638,7 +1638,8 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
                 || value->parameter_types != NULL
                 || value->return_type != 0u
                 || !cm_decl_type_local(metadata, value->declared_type)
-                || value->has_body != 1u) return 0;
+                || value->has_body != 1u
+                || value->is_const != 0u) return 0;
             if (value->kind == CM_HIR_DECL_VALUE_CONST
                 && value->mutability != CM_HIR_DECL_IMMUTABLE) return 0;
             if (value->kind == CM_HIR_DECL_VALUE_STATIC
@@ -3167,7 +3168,7 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
                     value->parameter_types[child]);
             cm_hir_metadata_write_u32(&writer, value->return_type);
             cm_hir_metadata_write_u8(&writer, value->has_body);
-            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u8(&writer, value->is_const);
             cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         } else {
             cm_hir_metadata_write_u32(&writer, value->declared_type);
@@ -4105,7 +4106,8 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
                     != CM_HIR_METADATA_OK
                 || cm_hir_metadata_read_u8(&reader, &value->has_body)
                     != CM_HIR_METADATA_OK
-                || !cm_decl_read_u8(&reader, UINT8_C(0))
+                || cm_hir_metadata_read_u8(&reader, &value->is_const)
+                    != CM_HIR_METADATA_OK
                 || !cm_decl_read_u16(&reader, UINT16_C(0))) return 0;
         } else {
             if (cm_hir_metadata_read_u32(&reader, &value->declared_type)

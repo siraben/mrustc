@@ -160,6 +160,15 @@ typedef struct TypeIdFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[1];
 } TypeIdFixture;
 
+typedef struct TypeNameFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationGeneric generics[1];
+    CmHirDeclarationType types[3];
+    CmHirDeclarationValue values[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[1];
+} TypeNameFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -1323,6 +1332,67 @@ static void const_fixture_init(ConstFixture *fixture)
     fixture->namespace_entries[2].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 3u;
+}
+
+static void type_name_fixture_init(TypeNameFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("type_name_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-type-name-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].index = 0u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].is_relaxed_sized = 1u;
+    fixture->generics[0].name = (CmHirDeclarationString)S("T");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_STR;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[1].child_type = 1u;
+    fixture->types[1].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[1].region.kind = CM_HIR_DECL_REGION_STATIC;
+    metadata->types = fixture->types;
+    metadata->type_count = 2u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("type_name");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].generic_start = 1u;
+    fixture->values[0].generic_count = 1u;
+    fixture->values[0].return_type = 2u;
+    fixture->values[0].has_body = 1u;
+    fixture->values[0].is_const = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 1u;
 }
 
 static void static_fixture_init(StaticFixture *fixture)
@@ -3470,6 +3540,143 @@ static void test_const_value_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_const_function_value_family(void)
+{
+    TypeNameFixture fixture;
+    TypeNameFixture repeated_fixture;
+    ConstFixture const_fixture;
+    StaticFixture static_fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+    size_t common;
+    size_t payload;
+
+    type_name_fixture_init(&fixture);
+    type_name_fixture_init(&repeated_fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated_fixture.metadata,
+            &repeated) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    record = value_record_offset(&encoded, UINT32_C(0));
+    common = skip_string(&encoded, record + 8u);
+    payload = common + 44u;
+    assert(encoded.data[record] == CM_HIR_DECL_VALUE_FUNCTION
+        && get_u32(encoded.data + common + 12u) == UINT32_C(1)
+        && get_u32(encoded.data + common + 16u) == UINT32_C(1)
+        && get_u32(encoded.data + common + 28u) == UINT32_C(0)
+        && get_u32(encoded.data + common + 32u) == UINT32_C(0)
+        && get_u32(encoded.data + payload + 4u) == UINT32_C(0)
+        && get_u32(encoded.data + payload + 8u) == UINT32_C(2)
+        && encoded.data[payload + 12u] == UINT8_C(1)
+        && encoded.data[payload + 13u] == UINT8_C(1)
+        && encoded.data[payload + 14u] == UINT8_C(0)
+        && encoded.data[payload + 15u] == UINT8_C(0));
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.value_count == 1u
+        && decoded.values[0].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && decoded.values[0].generic_count == 1u
+        && decoded.values[0].predicate_start == 0u
+        && decoded.values[0].predicate_count == 0u
+        && decoded.values[0].parameter_count == 0u
+        && decoded.values[0].return_type == 2u
+        && decoded.values[0].has_body == 1u
+        && decoded.values[0].is_const == 1u
+        && decoded.generic_count == 1u
+        && decoded.generics[0].is_relaxed_sized == 1u
+        && decoded.type_count == 2u
+        && decoded.types[0].primitive == CM_HIR_DECL_PRIMITIVE_STR
+        && decoded.types[1].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[1].region.kind == CM_HIR_DECL_REGION_STATIC);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    fixture.values[0].is_const = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_fixture_init(&fixture);
+    fixture.values[0].predicate_start = 1u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_fixture_init(&fixture);
+    fixture.values[0].generic_start = 0u;
+    fixture.values[0].generic_count = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    type_name_fixture_init(&fixture);
+    fixture.generics[0].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* Declared-but-unused T has no TYPE_GENERIC node; an orphan one fails. */
+    type_name_fixture_init(&fixture);
+    fixture.types[2] = fixture.types[1];
+    memset(&fixture.types[1], 0, sizeof(fixture.types[1]));
+    fixture.types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture.types[1].generic_local = 1u;
+    fixture.metadata.type_count = 3u;
+    fixture.values[0].return_type = 3u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    type_name_fixture_init(&fixture);
+    fixture.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    const_fixture_init(&const_fixture);
+    const_fixture.values[0].is_const = 1u;
+    assert(cm_hir_declaration_metadata_validate(&const_fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&static_fixture);
+    static_fixture.values[0].is_const = 1u;
+    assert(cm_hir_declaration_metadata_validate(&static_fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+#define ASSERT_BAD_CONST_FUNCTION_BYTE(offset_, value_) do { \
+        bad = copy_bytes(&encoded); \
+        bad.data[(offset_)] = (unsigned char)(value_); \
+        recompute_family_crc(&bad, UINT8_C(3), "VALU"); \
+        assert_failed_transaction(&bad); \
+        cm_byte_buf_destroy(&bad); \
+    } while (0)
+    ASSERT_BAD_CONST_FUNCTION_BYTE(payload + 13u, UINT8_C(2));
+    ASSERT_BAD_CONST_FUNCTION_BYTE(payload + 14u, UINT8_C(1));
+#undef ASSERT_BAD_CONST_FUNCTION_BYTE
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + common + 28u, UINT32_C(1));
+    recompute_family_crc(&bad, UINT8_C(3), "VALU");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_static_tuple_array_family(void)
 {
     StaticFixture fixture;
@@ -4629,6 +4836,7 @@ int main(void)
     test_generic_tuple_enum_family();
     test_enum_named_adt_signature();
     test_const_value_family();
+    test_const_function_value_family();
     test_static_tuple_array_family();
     test_named_aggregate_family();
     test_type_id_crate_field_family();
@@ -4655,6 +4863,7 @@ int main(void)
         && decoded.generics[0].is_relaxed_sized == 1u
         && decoded.types[0].primitive == CM_HIR_DECL_PRIMITIVE_UNIT
         && decoded.values[0].return_type == 1u
+        && decoded.values[0].is_const == 0u
         && decoded.namespace_entries[1].target_local
             == decoded.namespace_entries[2].target_local);
     assert(cm_hir_declaration_metadata_encode(&decoded, &bytes3)
