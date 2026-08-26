@@ -264,6 +264,19 @@ typedef struct CmHirDeclarationCaptureResult {
  * bit are captured. The initializer, an evaluated value, and CTFE IR are not
  * transported by v3.0, whose BODIES_CONST_IR family remains absent.
  *
+ * The attributed const-function profile is public, top-level, safe Rust ABI,
+ * has one relaxed-Sized type generic and no predicates, and returns an exact
+ * immutable `&'static str`. It admits either no parameters, or exactly one
+ * ordinary named immutable move parameter whose direct type is `&T`. In the
+ * latter form the source lifetime must be omitted and the authoritative HIR
+ * must already contain the lowerer's bounded ERASED normalization with zero
+ * payload; capture never rewrites INFER, explicit `'_`, named, or static
+ * regions. The AST parameter, HIR signature, declaration-library copy, and
+ * unlowered body local must agree in type, name, span, source slot, and owner.
+ * Its exact `must_use`, stability, and `rustc_const_unstable` attributes are
+ * projected and counted. Only declaration and body-presence facts are
+ * transported; executable body or CTFE authority remains absent.
+ *
  * A supported free static is public, top-level, zero-generic/predicate, has
  * an explicit source type made only from representable primitives, nonempty
  * tuples, and fixed-size arrays, and has one authenticated source-owned body.

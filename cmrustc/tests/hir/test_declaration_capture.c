@@ -6584,32 +6584,326 @@ static void test_type_name_const_function_hostiles_are_atomic(void)
     fixture_destroy(&fixture);
 }
 
-static void test_type_name_of_val_inferred_input_fails_closed(void)
+static void test_type_name_of_val_const_function_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationValue *value;
+    const CmHirDeclarationType *parameter;
+    const CmHirDeclarationType *parameter_child;
+    const CmHirDeclarationType *return_type;
+    const CmHirDeclarationType *return_child;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf decoded_bytes;
+    type_name_of_val_fixture_init(&first, 0);
+    type_name_of_val_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.value_count == 1u && result.trait_count == 1u
+        && result.projected_semantic_attribute_count == 3u
+        && first_metadata.generic_count == 1u
+        && first_metadata.predicate_count == 0u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 3u);
+    value = find_declaration_value(&first_metadata,
+        "type_name_of_val_like", NULL);
+    assert(value != NULL && value->kind == CM_HIR_DECL_VALUE_FUNCTION
+        && value->is_const == 1u && value->has_body == 1u
+        && value->generic_count == 1u && value->predicate_start == 0u
+        && value->predicate_count == 0u && value->parameter_count == 1u
+        && value->parameter_types != NULL);
+    parameter = &first_metadata.types[value->parameter_types[0] - 1u];
+    assert(parameter->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && parameter->mutability == CM_HIR_DECL_IMMUTABLE
+        && parameter->region.kind == CM_HIR_DECL_REGION_ERASED);
+    parameter_child = &first_metadata.types[parameter->child_type - 1u];
+    assert(parameter_child->kind == CM_HIR_DECL_TYPE_GENERIC
+        && parameter_child->generic_local == value->generic_start);
+    return_type = &first_metadata.types[value->return_type - 1u];
+    assert(return_type->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && return_type->mutability == CM_HIR_DECL_IMMUTABLE
+        && return_type->region.kind == CM_HIR_DECL_REGION_STATIC);
+    return_child = &first_metadata.types[return_type->child_type - 1u];
+    assert(return_child->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && return_child->primitive == CM_HIR_DECL_PRIMITIVE_STR);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&decoded_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(first_bytes.data,
+                first_bytes.len, &decoded) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&decoded, &decoded_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == decoded_bytes.len
+        && memcmp(first_bytes.data, decoded_bytes.data,
+            first_bytes.len) == 0);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&decoded_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void assert_type_name_of_val_source_fails(
+    const unsigned char *source, size_t source_length)
 {
     CaptureFixture fixture;
     CmHirDeclarationCaptureInput input;
     CmHirDeclarationMetadata sentinel;
     CmHirDeclarationCaptureResult result;
-    const CmHirItem *item;
-    const CmHirType *parameter;
     CmHirItemId item_id;
-    type_name_of_val_fixture_init(&fixture, 0);
-    item = find_item(&fixture, "type_name_of_val_like", &item_id);
-    assert(item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
-        && item->data.function_item.signature.parameter_count == 1u);
-    parameter = cm_hir_get_type(&fixture.hir,
-        item->data.function_item.signature.parameters[0].type);
-    assert(parameter != NULL && parameter->kind == CM_HIR_TYPE_REFERENCE_KIND
-        && parameter->data.reference_type.region.kind == CM_HIR_REGION_INFER);
+    assert(source != NULL && source_length != 0u);
+    fixture_init_source(&fixture, 0, "type-name-of-val-negative.rs",
+        source, source_length);
+    assert(find_item(&fixture, "type_name_of_val_like", &item_id) != NULL);
     memset(&sentinel, 0, sizeof(sentinel));
     sentinel.root_module = UINT32_C(77);
     input = capture_input(&fixture);
     result = cm_hir_declaration_metadata_capture(&input, &sentinel);
     assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
         && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
-        && result.failure_reason == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
         && result.rejected_item == item_id
         && sentinel.root_module == UINT32_C(77));
+    fixture_destroy(&fixture);
+}
+
+static void test_type_name_of_val_unsupported_lifetimes_fail_closed(void)
+{
+    static const unsigned char explicit_placeholder[] =
+        "pub trait Marker {}\n"
+        "#[must_use]\n#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[rustc_const_unstable(feature=\"x\",issue=\"none\")]\n"
+        "pub const fn type_name_of_val_like<T:?Sized>(_val: &'_ T) "
+        "-> &'static str { \"\" }\n";
+    static const unsigned char explicit_named[] =
+        "pub trait Marker {}\n"
+        "#[must_use]\n#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[rustc_const_unstable(feature=\"x\",issue=\"none\")]\n"
+        "pub const fn type_name_of_val_like<'a,T:?Sized>(_val: &'a T) "
+        "-> &'static str { \"\" }\n";
+    static const unsigned char explicit_static[] =
+        "pub trait Marker {}\n"
+        "#[must_use]\n#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[rustc_const_unstable(feature=\"x\",issue=\"none\")]\n"
+        "pub const fn type_name_of_val_like<T:?Sized>(_val: &'static T) "
+        "-> &'static str { \"\" }\n";
+    static const unsigned char second_input[] =
+        "pub trait Marker {}\n"
+        "#[must_use]\n#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[rustc_const_unstable(feature=\"x\",issue=\"none\")]\n"
+        "pub const fn type_name_of_val_like<T:?Sized>(_val: &T, _b: &T) "
+        "-> &'static str { \"\" }\n";
+    static const unsigned char omitted_output[] =
+        "pub trait Marker {}\n"
+        "#[must_use]\n#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[rustc_const_unstable(feature=\"x\",issue=\"none\")]\n"
+        "pub const fn type_name_of_val_like<T:?Sized>(_val: &T) "
+        "-> &str { \"\" }\n";
+    assert_type_name_of_val_source_fails(explicit_placeholder,
+        sizeof(explicit_placeholder) - 1u);
+    assert_type_name_of_val_source_fails(explicit_named,
+        sizeof(explicit_named) - 1u);
+    assert_type_name_of_val_source_fails(explicit_static,
+        sizeof(explicit_static) - 1u);
+    assert_type_name_of_val_source_fails(second_input,
+        sizeof(second_input) - 1u);
+    assert_type_name_of_val_source_fails(omitted_output,
+        sizeof(omitted_output) - 1u);
+}
+
+static void test_type_name_of_val_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItem *item;
+    CmHirItemId ignored_id;
+    CmHirFunctionParameter *parameter;
+    CmHirType *parameter_type;
+    CmHirTypeId saved_pointee;
+    CmHirRegion saved_region;
+    CmHirMutability saved_mutability;
+    CmHirBindingKind saved_binding_kind;
+    CmInternId saved_name;
+    CmSpan saved_span;
+    CmHirParameterBindingMode saved_binding_mode;
+    CmHirBody *body;
+    CmHirTypeId saved_local_type;
+    uint32_t saved_parameter_index;
+    CmModuleId root_module;
+    const CmAst *borrowed_ast;
+    CmAstItem *ast_item = NULL;
+    CmAstType *ast_parameter_type;
+    CmAstPattern *ast_pattern;
+    CmResolveEffectiveItem effective;
+    uint32_t ordinal;
+    type_name_of_val_fixture_init(&fixture, 1);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)(void *)find_item(&fixture,
+        "type_name_of_val_like", &ignored_id);
+    assert(item != NULL
+        && item->data.function_item.signature.parameter_count == 1u);
+    parameter = &item->data.function_item.signature.parameters[0];
+    parameter_type = (CmHirType *)(void *)cm_hir_get_type(&fixture.hir,
+        parameter->type);
+    body = (CmHirBody *)(void *)cm_hir_get_body(&fixture.hir,
+        item->data.function_item.body);
+    assert(parameter_type != NULL
+        && parameter_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && parameter_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && body != NULL && body->local_count == 1u && body->locals != NULL);
+
+#define ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values && metadata.types == saved_types \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_region = parameter_type->data.reference_type.region;
+    parameter_type->data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    parameter_type->data.reference_type.region.data.inference_variable = 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter_type->data.reference_type.region = saved_region;
+    parameter_type->data.reference_type.region.data.inference_variable = 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter_type->data.reference_type.region = saved_region;
+
+    saved_pointee = parameter_type->data.reference_type.pointee;
+    parameter_type->data.reference_type.pointee =
+        item->data.function_item.signature.return_type;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter_type->data.reference_type.pointee = saved_pointee;
+    saved_mutability = parameter_type->data.reference_type.mutability;
+    parameter_type->data.reference_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter_type->data.reference_type.mutability = saved_mutability;
+    parameter_type->span.start += 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter_type->span.start -= 1u;
+
+    saved_name = parameter->name;
+    parameter->name = CM_INTERN_ID_NONE;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter->name = saved_name;
+    saved_span = parameter->span;
+    parameter->span.start += 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter->span = saved_span;
+    saved_binding_kind = parameter->binding_kind;
+    parameter->binding_kind = CM_HIR_BINDING_DISCARD;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter->binding_kind = saved_binding_kind;
+    saved_binding_mode = parameter->binding_mode;
+    parameter->binding_mode = CM_HIR_PARAMETER_BINDING_REF_SHARED;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    parameter->binding_mode = saved_binding_mode;
+
+    saved_local_type = body->locals[0].type;
+    body->locals[0].type = item->data.function_item.signature.return_type;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].type = saved_local_type;
+    body->locals[0].name = CM_INTERN_ID_NONE;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].name = parameter->name;
+    body->locals[0].mutability = CM_HIR_MUTABLE;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].mutability = CM_HIR_IMMUTABLE;
+    saved_parameter_index = body->locals[0].parameter_index;
+    body->locals[0].parameter_index = 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].parameter_index = saved_parameter_index;
+    body->locals[0].span.start += 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].span = parameter->span;
+    body->locals[0].parameter_binding_index = 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->locals[0].parameter_binding_index = 0u;
+    body->parameter_count = 0u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    body->parameter_count = 1u;
+
+    assert(cm_module_graph_get_root(&fixture.graph, &root_module)
+        && cm_module_graph_borrow_ast(&fixture.graph, root_module,
+            &borrowed_ast));
+    for (ordinal = 0u; ordinal < 2u; ++ordinal) {
+        const CmAstItem *candidate;
+        const CmInternedString *name;
+        assert(cm_module_graph_get_effective_item(&fixture.graph,
+            fixture.graph_result.revision, root_module, ordinal,
+            &effective) == CM_RESOLVE_VIEW_OK);
+        candidate = cm_ast_get_item(borrowed_ast,
+            effective.declaration.item);
+        name = candidate == NULL ? NULL
+            : cm_ast_get_string(borrowed_ast, candidate->name);
+        if (name != NULL && name->len == strlen("type_name_of_val_like")
+            && memcmp(name->bytes, "type_name_of_val_like", name->len) == 0) {
+            ast_item = (CmAstItem *)(void *)candidate;
+            break;
+        }
+    }
+    assert(ast_item != NULL
+        && ast_item->data.function_item.parameter_count == 1u);
+    ast_parameter_type = (CmAstType *)(void *)cm_ast_get_type(borrowed_ast,
+        ast_item->data.function_item.parameters[0].type);
+    ast_pattern = (CmAstPattern *)(void *)cm_ast_get_pattern(borrowed_ast,
+        ast_item->data.function_item.parameters[0].pattern);
+    assert(ast_parameter_type != NULL
+        && ast_parameter_type->kind == CM_AST_TYPE_REFERENCE
+        && ast_pattern != NULL && ast_pattern->kind == CM_AST_PATTERN_BINDING);
+    ast_parameter_type->lifetime = ast_item->name;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    ast_parameter_type->lifetime = CM_INTERN_ID_NONE;
+    ast_parameter_type->is_mutable = 1;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    ast_parameter_type->is_mutable = 0;
+    ast_parameter_type->span.start += 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    ast_parameter_type->span.start -= 1u;
+    ast_pattern->data.binding.is_mutable = 1;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    ast_pattern->data.binding.is_mutable = 0;
+    ast_pattern->span.start += 1u;
+    ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE();
+    ast_pattern->span.start -= 1u;
+
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+#undef ASSERT_TYPE_NAME_OF_VAL_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
     fixture_destroy(&fixture);
 }
 
@@ -6617,7 +6911,9 @@ int main(void)
 {
     test_type_name_const_functions_and_determinism();
     test_type_name_const_function_hostiles_are_atomic();
-    test_type_name_of_val_inferred_input_fails_closed();
+    test_type_name_of_val_const_function_and_determinism();
+    test_type_name_of_val_unsupported_lifetimes_fail_closed();
+    test_type_name_of_val_hostile_mutations_are_atomic();
     test_primitive_reexports_and_determinism();
     test_primitive_reexport_hostile_mutations_are_atomic();
     test_allocator_like_associated_method_capture();

@@ -3323,6 +3323,9 @@ static int cm_decl_legacy_function_shape(CmDeclCaptureState *state,
     return 1;
 }
 
+static int cm_decl_ast_name_matches_hir(const CmAst *ast, CmInternId ast_id,
+    const CmHirContext *hir, CmInternId hir_id);
+
 static int cm_decl_function_shape(CmDeclCaptureState *state,
     const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal,
     size_t *out_projected_count)
@@ -3337,6 +3340,12 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
     const CmAstItem *ast_item = NULL;
     const CmAstType *ast_return;
     const CmAstExpr *ast_body;
+    const CmAstFunctionParam *ast_parameter = NULL;
+    const CmAstPattern *ast_pattern = NULL;
+    const CmAstType *ast_parameter_type = NULL;
+    const CmHirFunctionParameter *parameter = NULL;
+    const CmHirType *parameter_type = NULL;
+    const CmHirType *parameter_child = NULL;
     CmDeclCaptureModule *module = NULL;
     CmResolveEffectiveItem effective;
     uint32_t namespace_module = 0u;
@@ -3377,7 +3386,9 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
         || signature->safety != CM_HIR_SAFE || !signature->is_const
         || signature->is_async || signature->is_variadic
         || !cm_decl_string_is(state->hir, signature->abi, "Rust")
-        || signature->parameter_count != 0u || signature->parameters != NULL
+        || signature->parameter_count > 1u
+        || ((signature->parameter_count == 0u)
+            != (signature->parameters == NULL))
         || ast_item->is_default
         || ast_item->visibility.kind != CM_AST_VIS_PUBLIC
         || ast_item->visibility.restriction != CM_AST_PATH_NONE
@@ -3387,8 +3398,10 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
         || ast_item->data.function_item.is_unsafe
         || ast_item->data.function_item.abi != CM_INTERN_ID_NONE
         || ast_item->data.function_item.body == CM_AST_EXPR_NONE
-        || ast_item->data.function_item.parameter_count != 0u
-        || ast_item->data.function_item.parameters != NULL
+        || ast_item->data.function_item.parameter_count
+            != signature->parameter_count
+        || ((ast_item->data.function_item.parameter_count == 0u)
+            != (ast_item->data.function_item.parameters == NULL))
         || ast_item->data.function_item.return_type == CM_AST_TYPE_NONE
         || (return_type = cm_hir_get_type(state->hir,
             signature->return_type)) == NULL
@@ -3403,6 +3416,51 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
             ast_item->data.function_item.return_type)) == NULL
         || !cm_decl_ast_type_matches_hir_field(state, ast, ast_return,
             return_type, item, 0u)) return 0;
+    if (signature->parameter_count == 1u) {
+        parameter = &signature->parameters[0];
+        ast_parameter = &ast_item->data.function_item.parameters[0];
+        ast_pattern = cm_ast_get_pattern(ast, ast_parameter->pattern);
+        ast_parameter_type = cm_ast_get_type(ast, ast_parameter->type);
+        parameter_type = cm_hir_get_type(state->hir, parameter->type);
+        parameter_child = parameter_type == NULL
+                || parameter_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(state->hir,
+                parameter_type->data.reference_type.pointee);
+        if (ast_parameter->is_self
+            || ast_parameter->receiver_lifetime != CM_INTERN_ID_NONE
+            || ast_parameter->type == CM_AST_TYPE_NONE
+            || ast_pattern == NULL
+            || ast_pattern->kind != CM_AST_PATTERN_BINDING
+            || ast_pattern->data.binding.subpattern != CM_AST_PATTERN_NONE
+            || ast_pattern->data.binding.is_ref
+            || ast_pattern->data.binding.is_mutable
+            || ast_parameter_type == NULL
+            || ast_parameter_type->kind != CM_AST_TYPE_REFERENCE
+            || ast_parameter_type->lifetime != CM_INTERN_ID_NONE
+            || ast_parameter_type->is_mutable
+            || parameter->name == CM_INTERN_ID_NONE
+            || !cm_decl_ast_name_matches_hir(ast,
+                ast_pattern->data.binding.name, state->hir, parameter->name)
+            || parameter->span.source != item->span.source
+            || parameter->span.start != ast_pattern->span.start
+            || parameter->span.end != ast_pattern->span.end
+            || parameter->binding_kind != CM_HIR_BINDING_NAMED
+            || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+            || parameter_type == NULL
+            || parameter_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+            || parameter_type->data.reference_type.mutability
+                != CM_HIR_IMMUTABLE
+            || parameter_type->data.reference_type.region.kind
+                != CM_HIR_REGION_ERASED
+            || parameter_type->data.reference_type.region.data
+                .inference_variable != 0u
+            || parameter_child == NULL
+            || parameter_child->kind != CM_HIR_TYPE_PARAMETER_KIND
+            || parameter_child->data.parameter_type.parameter
+                != item->generic_parameter_start
+            || !cm_decl_ast_type_matches_hir_field(state, ast,
+                ast_parameter_type, parameter_type, item, 0u)) return 0;
+    }
     owned = cm_decl_owned_value(state->owned, item->definition);
     if (owned == NULL
         || owned->storage_kind != CM_HIR_LIBRARY_VALUE_FUNCTION
@@ -3413,8 +3471,11 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
             owned->declaration.data.function.parent_trait)
         || owned->declaration.data.function.receiver != CM_HIR_RECEIVER_NONE
         || owned->declaration.data.function.has_default_body
-        || owned->declaration.data.function.parameter_count != 0u
-        || owned->parameter_count != 0u || owned->parameter_types != NULL
+        || owned->declaration.data.function.parameter_count
+            != signature->parameter_count
+        || owned->parameter_count != signature->parameter_count
+        || ((owned->parameter_count == 0u)
+            != (owned->parameter_types == NULL))
         || owned->declaration.data.function.return_type
             != signature->return_type
         || owned->declaration.data.function.generic_parameter_start
@@ -3445,7 +3506,9 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
         || owned->declaration.data.function.is_const != signature->is_const
         || owned->declaration.data.function.is_async != signature->is_async
         || owned->declaration.data.function.is_variadic
-            != signature->is_variadic) return 0;
+            != signature->is_variadic
+        || (signature->parameter_count == 1u
+            && owned->parameter_types[0] != parameter->type)) return 0;
     body = cm_hir_get_body(state->hir, item->data.function_item.body);
     ast_body = cm_ast_get_expr(ast, ast_item->data.function_item.body);
     if (body == NULL || ast_body == NULL
@@ -3464,8 +3527,9 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
             body->origin.data.item_source.item_definition, item->definition)
         || body->state != CM_HIR_BODY_UNLOWERED
         || body->expected_type != signature->return_type
-        || body->parameter_count != 0u || body->locals != NULL
-        || body->local_count != 0u
+        || body->parameter_count != signature->parameter_count
+        || body->local_count != signature->parameter_count
+        || ((body->local_count == 0u) != (body->locals == NULL))
         || body->source != effective.declaration.source
         || body->source != item->span.source
         || body->source_expression_id != ast_item->data.function_item.body
@@ -3474,6 +3538,15 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
         || body->span.source != item->span.source
         || body->span.start != item->span.start
         || body->span.end != item->span.end) return 0;
+    if (signature->parameter_count == 1u
+        && (body->locals[0].name != parameter->name
+            || body->locals[0].type != parameter->type
+            || body->locals[0].mutability != CM_HIR_IMMUTABLE
+            || body->locals[0].span.source != parameter->span.source
+            || body->locals[0].span.start != parameter->span.start
+            || body->locals[0].span.end != parameter->span.end
+            || body->locals[0].parameter_index != 0u
+            || body->locals[0].parameter_binding_index != 0u)) return 0;
     return 1;
 }
 
