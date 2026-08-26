@@ -54,6 +54,7 @@ typedef enum CmHirDeclarationPanicStrategy {
 
 typedef enum CmHirDeclarationGenericOwner {
     CM_HIR_DECL_GENERIC_NOMINAL = 1,
+    CM_HIR_DECL_GENERIC_ITEM = 3,
     CM_HIR_DECL_GENERIC_VALUE = 4
 } CmHirDeclarationGenericOwner;
 
@@ -88,8 +89,32 @@ typedef enum CmHirDeclarationTypeKind {
     CM_HIR_DECL_TYPE_PRIMITIVE = 1,
     CM_HIR_DECL_TYPE_GENERIC = 2,
     /* Exact zero-argument reference to a STRUCT ITEM in this artifact. */
-    CM_HIR_DECL_TYPE_NAMED_ADT = 3
+    CM_HIR_DECL_TYPE_NAMED_ADT = 3,
+    /* Reserved until an associated declaration provides an honest root. */
+    CM_HIR_DECL_TYPE_SELF = 4,
+    CM_HIR_DECL_TYPE_SLICE = 5,
+    CM_HIR_DECL_TYPE_RAW_POINTER = 6,
+    CM_HIR_DECL_TYPE_REFERENCE = 7,
+    /* Nonempty ordered type arguments; zero arguments use NAMED_ADT. */
+    CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION = 8
 } CmHirDeclarationTypeKind;
+
+typedef enum CmHirDeclarationMutability {
+    CM_HIR_DECL_IMMUTABLE = 1,
+    CM_HIR_DECL_MUTABLE = 2
+} CmHirDeclarationMutability;
+
+typedef enum CmHirDeclarationRegionKind {
+    CM_HIR_DECL_REGION_STATIC = 1,
+    CM_HIR_DECL_REGION_EARLY_BOUND = 2,
+    CM_HIR_DECL_REGION_LATE_BOUND = 3
+} CmHirDeclarationRegionKind;
+
+typedef struct CmHirDeclarationRegion {
+    uint8_t kind;
+    uint32_t generic_local;
+    uint32_t binder_index;
+} CmHirDeclarationRegion;
 
 typedef struct CmHirDeclarationModule {
     uint32_t parent_module;
@@ -123,10 +148,11 @@ typedef enum CmHirDeclarationItemKind {
 } CmHirDeclarationItemKind;
 
 /*
- * The first ordinary ITEM slice is a public, top-level, nongeneric unit
- * struct or free type alias. Generic, predicate, field, attribute, and repr
- * payloads are canonical zero. A STRUCT's public constructor availability is
- * represented exactly by the complete VALUE namespace, not by this record.
+ * The first ordinary ITEM slice is a public, top-level unit struct or free
+ * type alias. Unit structs may own type parameters; aliases and all
+ * predicate, field, attribute, and repr payloads remain canonical zero. A
+ * STRUCT's public constructor availability is represented exactly by the
+ * complete VALUE namespace, not by this record.
  */
 typedef struct CmHirDeclarationItem {
     uint8_t kind;
@@ -136,6 +162,9 @@ typedef struct CmHirDeclarationItem {
     uint32_t source_ordinal;
     /* Required only for TYPE_ALIAS; zero for STRUCT. */
     uint32_t alias_target_type;
+    /* A contiguous ITEM-owned GPAR range; aliases require zero. */
+    uint32_t generic_start;
+    uint32_t generic_count;
 } CmHirDeclarationItem;
 
 typedef struct CmHirDeclarationGeneric {
@@ -151,8 +180,19 @@ typedef struct CmHirDeclarationType {
     uint8_t kind;
     uint8_t primitive;
     uint32_t generic_local;
-    /* Required only for zero-argument NAMED_ADT; zero otherwise. */
+    /* Required for NAMED_ADT and NAMED_ADT_APPLICATION. */
     uint32_t item_local;
+    /* Required for SLICE, RAW_POINTER, and REFERENCE. */
+    uint32_t child_type;
+    /* Reserved for SELF; SELF is not accepted by this bounded slice. */
+    uint32_t self_trait_local;
+    /* Required for RAW_POINTER and REFERENCE. */
+    uint8_t mutability;
+    /* Required for REFERENCE; this slice accepts STATIC only. */
+    CmHirDeclarationRegion region;
+    /* Required and nonempty for NAMED_ADT_APPLICATION. */
+    uint32_t argument_count;
+    uint32_t *argument_types;
 } CmHirDeclarationType;
 
 typedef struct CmHirDeclarationValue {

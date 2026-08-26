@@ -229,9 +229,21 @@ static CmHirStatus cm_decl_add_generics(CmHirContext *context,
         CmHirStatus status;
         memset(&parameter, 0, sizeof(parameter));
         parameter.kind = CM_HIR_GENERIC_TYPE;
-        parameter.owner = wire->owner_kind == CM_HIR_DECL_GENERIC_NOMINAL
-            ? runtime->traits[wire->owner_local - 1u]
-            : runtime->values[wire->owner_local - 1u];
+        if (wire->owner_kind == CM_HIR_DECL_GENERIC_NOMINAL
+            && wire->owner_local != 0u
+            && (size_t)wire->owner_local <= metadata->trait_count) {
+            parameter.owner = runtime->traits[wire->owner_local - 1u];
+        } else if (wire->owner_kind == CM_HIR_DECL_GENERIC_ITEM
+            && wire->owner_local != 0u
+            && (size_t)wire->owner_local <= metadata->item_count) {
+            parameter.owner = runtime->items[wire->owner_local - 1u];
+        } else if (wire->owner_kind == CM_HIR_DECL_GENERIC_VALUE
+            && wire->owner_local != 0u
+            && (size_t)wire->owner_local <= metadata->value_count) {
+            parameter.owner = runtime->values[wire->owner_local - 1u];
+        } else {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
         parameter.index = wire->index;
         parameter.name = cm_decl_intern(context, wire->name);
         parameter.span = cm_decl_span(source, (uint32_t)(index + 1u));
@@ -243,6 +255,50 @@ static CmHirStatus cm_decl_add_generics(CmHirContext *context,
     return CM_HIR_OK;
 }
 
+static int cm_decl_mutability(uint8_t wire, CmHirMutability *out)
+{
+    if (wire == CM_HIR_DECL_IMMUTABLE) {
+        *out = CM_HIR_IMMUTABLE;
+        return 1;
+    }
+    if (wire == CM_HIR_DECL_MUTABLE) {
+        *out = CM_HIR_MUTABLE;
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_decl_application_schema_valid(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationType *wire)
+{
+    const CmHirDeclarationItem *target;
+    uint32_t index;
+    if (wire->item_local == 0u
+        || (size_t)wire->item_local > metadata->item_count
+        || wire->argument_count == 0u || wire->argument_types == NULL) {
+        return 0;
+    }
+    target = &metadata->items[wire->item_local - 1u];
+    if (target->kind != CM_HIR_DECL_ITEM_STRUCT
+        || target->generic_count != wire->argument_count
+        || target->generic_start == 0u
+        || (size_t)target->generic_start > metadata->generic_count
+        || (size_t)target->generic_count
+            > metadata->generic_count - (size_t)target->generic_start + 1u) {
+        return 0;
+    }
+    for (index = 0u; index < target->generic_count; ++index) {
+        const CmHirDeclarationGeneric *generic = &metadata->generics[
+            target->generic_start - 1u + index];
+        if (generic->owner_kind != CM_HIR_DECL_GENERIC_ITEM
+            || generic->owner_local != wire->item_local
+            || generic->index != index
+            || generic->kind != CM_HIR_DECL_GENERIC_TYPE) return 0;
+    }
+    return 1;
+}
+
 static CmHirStatus cm_decl_add_types(CmHirContext *context,
     const CmHirDeclarationMetadata *metadata, CmDeclRuntime *runtime,
     CmSourceId source)
@@ -250,6 +306,7 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
     size_t index;
     for (index = 0u; index < metadata->type_count; ++index) {
         const CmHirDeclarationType *wire = &metadata->types[index];
+        CmHirGenericArg *arguments = NULL;
         CmHirType type;
         CmHirStatus status;
         if (wire->kind == CM_HIR_DECL_TYPE_PRIMITIVE) {
@@ -264,18 +321,92 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
             if (wire->item_local == 0u
                 || (size_t)wire->item_local > metadata->item_count
                 || metadata->items[wire->item_local - 1u].kind
-                    != CM_HIR_DECL_ITEM_STRUCT) {
+                    != CM_HIR_DECL_ITEM_STRUCT
+                || metadata->items[wire->item_local - 1u].generic_count
+                    != 0u) {
                 return CM_HIR_INVARIANT_VIOLATION;
             }
             memset(&type, 0, sizeof(type));
             type.kind = CM_HIR_TYPE_ADT_KIND;
             type.data.named_type.definition =
                 runtime->items[wire->item_local - 1u];
+        } else if (wire->kind == CM_HIR_DECL_TYPE_SLICE) {
+            if (wire->child_type == 0u
+                || (size_t)wire->child_type > index
+                || runtime->types[wire->child_type - 1u]
+                    == CM_HIR_TYPE_NONE) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_SLICE_KIND;
+            type.data.slice_type.element =
+                runtime->types[wire->child_type - 1u];
+        } else if (wire->kind == CM_HIR_DECL_TYPE_RAW_POINTER) {
+            if (wire->child_type == 0u
+                || (size_t)wire->child_type > index
+                || runtime->types[wire->child_type - 1u]
+                    == CM_HIR_TYPE_NONE) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_RAW_POINTER_KIND;
+            type.data.raw_pointer_type.pointee =
+                runtime->types[wire->child_type - 1u];
+            if (!cm_decl_mutability(wire->mutability,
+                    &type.data.raw_pointer_type.mutability)) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+        } else if (wire->kind == CM_HIR_DECL_TYPE_REFERENCE) {
+            if (wire->child_type == 0u
+                || (size_t)wire->child_type > index
+                || runtime->types[wire->child_type - 1u]
+                    == CM_HIR_TYPE_NONE
+                || wire->region.kind != CM_HIR_DECL_REGION_STATIC
+                || wire->region.generic_local != 0u
+                || wire->region.binder_index != 0u) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_REFERENCE_KIND;
+            type.data.reference_type.pointee =
+                runtime->types[wire->child_type - 1u];
+            type.data.reference_type.region.kind = CM_HIR_REGION_STATIC;
+            if (!cm_decl_mutability(wire->mutability,
+                    &type.data.reference_type.mutability)) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+        } else if (wire->kind
+                == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
+            uint32_t child;
+            if (!cm_decl_application_schema_valid(metadata, wire)) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            arguments = (CmHirGenericArg *)cm_decl_array(
+                wire->argument_count, sizeof(*arguments));
+            if (arguments == NULL) return CM_HIR_INVALID_ARGUMENT;
+            for (child = 0u; child < wire->argument_count; ++child) {
+                uint32_t argument = wire->argument_types[child];
+                if (argument == 0u || (size_t)argument > index
+                    || runtime->types[argument - 1u] == CM_HIR_TYPE_NONE) {
+                    cm_free(arguments);
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
+                arguments[child].kind = CM_HIR_GENERIC_ARG_TYPE;
+                arguments[child].data.type = runtime->types[argument - 1u];
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_ADT_KIND;
+            type.data.named_type.definition =
+                runtime->items[wire->item_local - 1u];
+            type.data.named_type.arguments = arguments;
+            type.data.named_type.argument_count = wire->argument_count;
         } else {
+            /* SELF and non-structural future tags fail closed here. */
             return CM_HIR_INVARIANT_VIOLATION;
         }
         type.span = cm_decl_span(source, (uint32_t)(index + 1u));
         status = cm_hir_add_type(context, &type, &runtime->types[index]);
+        cm_free(arguments);
         if (status != CM_HIR_OK) return status;
     }
     return CM_HIR_OK;
@@ -338,6 +469,10 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         item.visibility.kind = CM_HIR_VIS_PUBLIC;
         item.visibility.restriction = cm_hir_def_id_none();
         item.span = cm_decl_span(source, wire->source_ordinal);
+        item.generic_parameter_start = wire->generic_count == 0u
+            ? CM_HIR_GENERIC_PARAM_NONE
+            : runtime->generics[wire->generic_start - 1u];
+        item.generic_parameter_count = wire->generic_count;
         if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
             item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
         } else {

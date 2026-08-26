@@ -31,6 +31,21 @@ typedef struct AliasFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[8];
 } AliasFixture;
 
+typedef struct StructuralFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[2];
+    CmHirDeclarationTrait traits[1];
+    CmHirDeclarationGeneric generics[3];
+    CmHirDeclarationType types[6];
+    uint32_t application_arguments[1];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationValue values[1];
+    uint32_t parameters[2];
+    CmHirDeclarationPredicate predicates[1];
+    uint32_t predicate_arguments[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[5];
+} StructuralFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -136,12 +151,42 @@ static size_t type_record_offset(const CmByteBuf *bytes,
 {
     size_t cursor;
     uint32_t count;
+    uint32_t index;
     cursor = section_offset(bytes, "TYPE") + 12u;
     assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
     count = get_u32(bytes->data + cursor);
+    cursor += 4u;
     assert(wanted_index < count);
-    /* Every currently supported canonical TYPE record is eight bytes. */
-    return cursor + 4u + (size_t)wanted_index * 8u;
+    for (index = 0u; index < count; ++index) {
+        size_t record;
+        uint8_t kind;
+        record = cursor;
+        assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+        kind = bytes->data[cursor];
+        if (kind == CM_HIR_DECL_TYPE_PRIMITIVE
+            || kind == CM_HIR_DECL_TYPE_GENERIC
+            || kind == CM_HIR_DECL_TYPE_NAMED_ADT
+            || kind == CM_HIR_DECL_TYPE_SELF
+            || kind == CM_HIR_DECL_TYPE_SLICE) {
+            cursor += 8u;
+        } else if (kind == CM_HIR_DECL_TYPE_RAW_POINTER) {
+            cursor += 12u;
+        } else if (kind == CM_HIR_DECL_TYPE_REFERENCE) {
+            cursor += 24u;
+        } else if (kind == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
+            uint32_t argument_count;
+            assert(cursor <= bytes->len && bytes->len - cursor >= 12u);
+            argument_count = get_u32(bytes->data + cursor + 8u);
+            assert((size_t)argument_count <= (bytes->len - cursor - 12u) / 4u);
+            cursor += 12u + (size_t)argument_count * 4u;
+        } else {
+            assert(0);
+        }
+        assert(cursor <= bytes->len);
+        if (index == wanted_index) return record;
+    }
+    assert(0);
+    return 0u;
 }
 
 static size_t item_record_offset(const CmByteBuf *bytes,
@@ -463,6 +508,144 @@ static void alias_fixture_init(AliasFixture *fixture)
     fixture->namespace_entries[4] = fixture->namespace_entries[2];
     fixture->namespace_entries[4].owner_module = 3u;
     fixture->namespace_entries[4].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 5u;
+}
+
+static void structural_fixture_init(StructuralFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("structural");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-structural-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    fixture->modules[1].parent_module = 1u;
+    fixture->modules[1].name = (CmHirDeclarationString)S("api");
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 2u;
+
+    fixture->traits[0].owner_module = 2u;
+    fixture->traits[0].name = (CmHirDeclarationString)S("Gate");
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].generic_start = 1u;
+    fixture->traits[0].generic_count = 1u;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 1u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 2u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Wrap");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 2u;
+    fixture->items[0].generic_start = 2u;
+    fixture->items[0].generic_count = 1u;
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].is_relaxed_sized = 1u;
+    fixture->generics[0].name = (CmHirDeclarationString)S("A");
+    fixture->generics[1].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[1].owner_local = 1u;
+    fixture->generics[1].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[1].is_relaxed_sized = 1u;
+    fixture->generics[1].name = (CmHirDeclarationString)S("W");
+    fixture->generics[2].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[2].owner_local = 1u;
+    fixture->generics[2].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[2].is_relaxed_sized = 1u;
+    fixture->generics[2].name = (CmHirDeclarationString)S("T");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 3u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[1].generic_local = 3u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_SLICE;
+    fixture->types[2].child_type = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_RAW_POINTER;
+    fixture->types[3].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[3].child_type = 2u;
+    fixture->application_arguments[0] = 2u;
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[4].item_local = 1u;
+    fixture->types[4].argument_count = 1u;
+    fixture->types[4].argument_types = fixture->application_arguments;
+    fixture->types[5].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[5].region.kind = CM_HIR_DECL_REGION_STATIC;
+    fixture->types[5].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[5].child_type = 3u;
+    metadata->types = fixture->types;
+    metadata->type_count = 6u;
+
+    fixture->parameters[0] = 4u;
+    fixture->parameters[1] = 6u;
+    fixture->values[0].owner_module = 2u;
+    fixture->values[0].name = (CmHirDeclarationString)S("shape");
+    fixture->values[0].source_ordinal = 3u;
+    fixture->values[0].generic_start = 3u;
+    fixture->values[0].generic_count = 1u;
+    fixture->values[0].predicate_start = 1u;
+    fixture->values[0].predicate_count = 1u;
+    fixture->values[0].parameter_count = 2u;
+    fixture->values[0].parameter_types = fixture->parameters;
+    fixture->values[0].return_type = 5u;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->predicate_arguments[0] = 1u;
+    fixture->predicates[0].owner_value = 1u;
+    fixture->predicates[0].subject_type = 2u;
+    fixture->predicates[0].trait_local = 1u;
+    fixture->predicates[0].argument_count = 1u;
+    fixture->predicates[0].argument_types = fixture->predicate_arguments;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->modules[1].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_MODULE;
+    fixture->namespace_entries[0].target_local = 2u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1].owner_module = 2u;
+    fixture->namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[1].name = fixture->traits[0].name;
+    fixture->namespace_entries[1].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[1].target_local = 1u;
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    fixture->namespace_entries[2].owner_module = 2u;
+    fixture->namespace_entries[2].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[2].name = fixture->items[0].name;
+    fixture->namespace_entries[2].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[2].target_local = 1u;
+    fixture->namespace_entries[2].export_ordinal = 2u;
+    fixture->namespace_entries[3] = fixture->namespace_entries[2];
+    fixture->namespace_entries[3].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[4].owner_module = 2u;
+    fixture->namespace_entries[4].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[4].name = fixture->values[0].name;
+    fixture->namespace_entries[4].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[4].target_local = 1u;
+    fixture->namespace_entries[4].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 5u;
 }
@@ -876,6 +1059,258 @@ static void test_type_alias_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_structural_type_family(void)
+{
+    StructuralFixture first;
+    StructuralFixture second;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf rebuilt;
+    CmByteBuf bad;
+    size_t record;
+    size_t payload;
+
+    structural_fixture_init(&first);
+    structural_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&rebuilt);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.generic_count == 3u
+        && decoded.generics[1].owner_kind == CM_HIR_DECL_GENERIC_ITEM
+        && decoded.items[0].generic_start == 2u
+        && decoded.items[0].generic_count == 1u
+        && decoded.type_count == 6u
+        && decoded.types[2].kind == CM_HIR_DECL_TYPE_SLICE
+        && decoded.types[2].child_type == 1u
+        && decoded.types[3].kind == CM_HIR_DECL_TYPE_RAW_POINTER
+        && decoded.types[3].mutability == CM_HIR_DECL_IMMUTABLE
+        && decoded.types[3].child_type == 2u
+        && decoded.types[4].kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && decoded.types[4].item_local == 1u
+        && decoded.types[4].argument_count == 1u
+        && decoded.types[4].argument_types[0] == 2u
+        && decoded.types[5].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[5].region.kind == CM_HIR_DECL_REGION_STATIC
+        && decoded.types[5].mutability == CM_HIR_DECL_IMMUTABLE
+        && decoded.types[5].child_type == 3u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &rebuilt)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == rebuilt.len
+        && memcmp(encoded.data, rebuilt.data, encoded.len) == 0);
+
+    structural_fixture_init(&first);
+    first.generics[1].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.items[0].generic_start = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[2].child_type = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[2].child_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[3].mutability = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[3].mutability = CM_HIR_DECL_MUTABLE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    structural_fixture_init(&first);
+    first.types[5].region.kind = CM_HIR_DECL_REGION_EARLY_BOUND;
+    first.types[5].region.generic_local = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[5].region.generic_local = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[4].argument_count = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[4].argument_types = NULL;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[4].argument_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.application_arguments[0] = 6u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.application_arguments[0] = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[4].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    first.types[4].argument_count = 0u;
+    first.types[4].argument_types = NULL;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.values[0].return_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    first.types[2].kind = CM_HIR_DECL_TYPE_SELF;
+    first.types[2].child_type = 0u;
+    first.types[2].self_trait_local = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    structural_fixture_init(&first);
+    memset(first.types, 0, sizeof(first.types));
+    first.types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    first.types[0].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    first.types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    first.types[1].generic_local = 2u; /* Wrap's W, not shape's X. */
+    first.types[2].kind = CM_HIR_DECL_TYPE_GENERIC;
+    first.types[2].generic_local = 3u;
+    first.application_arguments[0] = 2u;
+    first.types[3].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    first.types[3].item_local = 1u;
+    first.types[3].argument_count = 1u;
+    first.types[3].argument_types = first.application_arguments;
+    first.types[4].kind = CM_HIR_DECL_TYPE_RAW_POINTER;
+    first.types[4].mutability = CM_HIR_DECL_IMMUTABLE;
+    first.types[4].child_type = 4u;
+    first.types[5].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    first.types[5].region.kind = CM_HIR_DECL_REGION_STATIC;
+    first.types[5].mutability = CM_HIR_DECL_IMMUTABLE;
+    first.types[5].child_type = 5u;
+    first.parameters[0] = 6u;
+    first.values[0].parameter_count = 1u;
+    first.values[0].return_type = 1u;
+    first.predicates[0].subject_type = 3u;
+    /* Canonical &'static *const Wrap<W> must not escape ITEM scope into f<X>. */
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* All checksummed malformed structural records fail transactionally. */
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(2));
+    put_u32(bad.data + record + 4u, UINT32_C(0));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(3));
+    bad.data[record + 4u] = UINT8_C(0);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(4));
+    put_u32(bad.data + record + 8u, UINT32_C(0));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(4));
+    put_u32(bad.data + record + 8u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + 1u);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(4));
+    put_u32(bad.data + record + 12u, UINT32_C(6));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(5));
+    bad.data[record + 4u] = CM_HIR_DECL_REGION_EARLY_BOUND;
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(2));
+    bad.data[record] = CM_HIR_DECL_TYPE_SELF;
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = item_record_offset(&bad, UINT32_C(0));
+    payload = skip_string(&bad, record + 8u);
+    put_u32(bad.data + payload + 12u, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    /* The same hostile graph is rejected after bounded wire parsing. Its
+     * records occupy exactly the valid fixture's TYPE section length. */
+    bad = copy_bytes(&encoded);
+    payload = section_offset(&bad, "TYPE") + 12u;
+    assert(get_u32(bad.data + payload) == UINT32_C(6));
+    record = payload + 4u;
+    assert(get_u64(bad.data + payload - 8u) == UINT64_C(80));
+    memset(bad.data + record, 0, 76u);
+    bad.data[record] = CM_HIR_DECL_TYPE_PRIMITIVE;
+    bad.data[record + 4u] = CM_HIR_DECL_PRIMITIVE_U8;
+    record += 8u;
+    bad.data[record] = CM_HIR_DECL_TYPE_GENERIC;
+    put_u32(bad.data + record + 4u, UINT32_C(2));
+    record += 8u;
+    bad.data[record] = CM_HIR_DECL_TYPE_GENERIC;
+    put_u32(bad.data + record + 4u, UINT32_C(3));
+    record += 8u;
+    bad.data[record] = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    put_u32(bad.data + record + 4u, UINT32_C(1));
+    put_u32(bad.data + record + 8u, UINT32_C(1));
+    put_u32(bad.data + record + 12u, UINT32_C(2));
+    record += 16u;
+    bad.data[record] = CM_HIR_DECL_TYPE_RAW_POINTER;
+    bad.data[record + 4u] = CM_HIR_DECL_IMMUTABLE;
+    put_u32(bad.data + record + 8u, UINT32_C(4));
+    record += 12u;
+    bad.data[record] = CM_HIR_DECL_TYPE_REFERENCE;
+    bad.data[record + 4u] = CM_HIR_DECL_REGION_STATIC;
+    bad.data[record + 16u] = CM_HIR_DECL_IMMUTABLE;
+    put_u32(bad.data + record + 20u, UINT32_C(5));
+    payload = section_offset(&bad, "PRED") + 12u;
+    put_u32(bad.data + payload + 24u, UINT32_C(3));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&rebuilt);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -893,6 +1328,7 @@ int main(void)
     test_family_count_limits();
     test_item_family();
     test_type_alias_family();
+    test_structural_type_family();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

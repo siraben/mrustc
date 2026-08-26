@@ -29,6 +29,21 @@ typedef struct AliasFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[6];
 } AliasFixture;
 
+typedef struct CompositeFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[1];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationGeneric generics[3];
+    CmHirDeclarationType types[7];
+    uint32_t application_arguments[1];
+    CmHirDeclarationValue values[1];
+    uint32_t parameters[4];
+    CmHirDeclarationPredicate predicates[1];
+    uint32_t predicate_arguments[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[4];
+} CompositeFixture;
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -255,6 +270,131 @@ static void alias_fixture_init(AliasFixture *fixture)
         CM_HIR_DECL_NAMESPACE_VALUE;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 6u;
+}
+
+static void composite_fixture_init(CompositeFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("depcrate");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("composite-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].name = (CmHirDeclarationString)S("Gate");
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].generic_start = 1u;
+    fixture->traits[0].generic_count = 1u;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 1u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Wrap");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 2u;
+    fixture->items[0].generic_start = 2u;
+    fixture->items[0].generic_count = 1u;
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].name = (CmHirDeclarationString)S("G");
+    fixture->generics[1].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[1].owner_local = 1u;
+    fixture->generics[1].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[1].name = (CmHirDeclarationString)S("T");
+    fixture->generics[2].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[2].owner_local = 1u;
+    fixture->generics[2].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[2].name = (CmHirDeclarationString)S("X");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 3u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[2].generic_local = 3u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_SLICE;
+    fixture->types[3].child_type = 2u;
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_RAW_POINTER;
+    fixture->types[4].child_type = 2u;
+    fixture->types[4].mutability = CM_HIR_DECL_MUTABLE;
+    fixture->types[5].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[5].child_type = 2u;
+    fixture->types[5].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[5].region.kind = CM_HIR_DECL_REGION_STATIC;
+    fixture->application_arguments[0] = 2u;
+    fixture->types[6].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[6].item_local = 1u;
+    fixture->types[6].argument_count = 1u;
+    fixture->types[6].argument_types = fixture->application_arguments;
+    metadata->types = fixture->types;
+    metadata->type_count = 7u;
+
+    fixture->parameters[0] = 4u;
+    fixture->parameters[1] = 5u;
+    fixture->parameters[2] = 6u;
+    fixture->parameters[3] = 7u;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("inspect");
+    fixture->values[0].source_ordinal = 3u;
+    fixture->values[0].generic_start = 3u;
+    fixture->values[0].generic_count = 1u;
+    fixture->values[0].predicate_start = 1u;
+    fixture->values[0].predicate_count = 1u;
+    fixture->values[0].parameter_count = 4u;
+    fixture->values[0].parameter_types = fixture->parameters;
+    fixture->values[0].return_type = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->predicate_arguments[0] = 2u;
+    fixture->predicates[0].owner_value = 1u;
+    fixture->predicates[0].subject_type = 3u;
+    fixture->predicates[0].trait_local = 1u;
+    fixture->predicates[0].argument_count = 1u;
+    fixture->predicates[0].argument_types = fixture->predicate_arguments;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->traits[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->items[0].name;
+    fixture->namespace_entries[1].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[1];
+    fixture->namespace_entries[2].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[3].owner_module = 1u;
+    fixture->namespace_entries[3].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[3].name = fixture->values[0].name;
+    fixture->namespace_entries[3].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[3].target_local = 1u;
+    fixture->namespace_entries[3].export_ordinal = 3u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 4u;
 }
 
 static CmHirDeclarationMaterializeExpectation expectation_for(
@@ -567,6 +707,133 @@ static void test_alias_fresh_consumer(CmHirContext *context,
     assert_item_parameter(context,
         find_item(context, CM_HIR_ITEM_FUNCTION, "alias_reexport"),
         layout_error);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void assert_u8_type(const CmHirContext *context, CmHirTypeId id)
+{
+    const CmHirType *type = cm_hir_get_type(context, id);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_INTEGER_KIND
+        && type->data.integer_type.kind == CM_HIR_INT_U8);
+}
+
+static void assert_composite_signature(const CmHirContext *context,
+    const CmHirItem *function, CmHirDefId wrap)
+{
+    const CmHirFunctionSignature *signature;
+    const CmHirType *type;
+    assert(function != NULL && function->kind == CM_HIR_ITEM_FUNCTION);
+    signature = &function->data.function_item.signature;
+    assert(signature->parameter_count == 4u);
+    type = cm_hir_get_type(context, signature->parameters[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_SLICE_KIND);
+    assert_u8_type(context, type->data.slice_type.element);
+    type = cm_hir_get_type(context, signature->parameters[1].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+        && type->data.raw_pointer_type.mutability == CM_HIR_MUTABLE);
+    assert_u8_type(context, type->data.raw_pointer_type.pointee);
+    type = cm_hir_get_type(context, signature->parameters[2].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && type->data.reference_type.region.kind == CM_HIR_REGION_STATIC);
+    assert_u8_type(context, type->data.reference_type.pointee);
+    type = cm_hir_get_type(context, signature->parameters[3].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type->data.named_type.definition, wrap)
+        && type->data.named_type.argument_count == 1u
+        && type->data.named_type.arguments != NULL
+        && type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_TYPE);
+    assert_u8_type(context, type->data.named_type.arguments[0].data.type);
+}
+
+static void assert_imported_composite_signature(const CmHirContext *context,
+    const CmHirItem *function, CmHirDefId wrap)
+{
+    const CmHirType *reference;
+    const CmHirType *slice;
+    assert(function != NULL && function->kind == CM_HIR_ITEM_FUNCTION
+        && function->data.function_item.signature.parameter_count == 4u);
+    reference = cm_hir_get_type(context,
+        function->data.function_item.signature.parameters[0].type);
+    assert(reference != NULL
+        && reference->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && reference->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && reference->data.reference_type.region.kind == CM_HIR_REGION_STATIC);
+    slice = cm_hir_get_type(context, reference->data.reference_type.pointee);
+    assert(slice != NULL && slice->kind == CM_HIR_TYPE_SLICE_KIND);
+    assert_u8_type(context, slice->data.slice_type.element);
+    {
+        const CmHirFunctionSignature *signature =
+            &function->data.function_item.signature;
+        const CmHirType *type = cm_hir_get_type(context,
+            signature->parameters[1].type);
+        assert(type != NULL && type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+            && type->data.raw_pointer_type.mutability == CM_HIR_MUTABLE);
+        assert_u8_type(context, type->data.raw_pointer_type.pointee);
+        type = cm_hir_get_type(context, signature->parameters[2].type);
+        assert(type != NULL && type->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && type->data.reference_type.region.kind == CM_HIR_REGION_STATIC);
+        assert_u8_type(context, type->data.reference_type.pointee);
+        type = cm_hir_get_type(context, signature->parameters[3].type);
+        assert(type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+            && cm_hir_def_id_equal(type->data.named_type.definition, wrap)
+            && type->data.named_type.argument_count == 1u
+            && type->data.named_type.arguments[0].kind
+                == CM_HIR_GENERIC_ARG_TYPE);
+        assert_u8_type(context,
+            type->data.named_type.arguments[0].data.type);
+    }
+}
+
+static void test_composite_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId wrap)
+{
+    static const unsigned char source_text[] =
+        "pub fn imported(_a: &'static [u8], _b: *mut u8, "
+        "_c: &'static u8, _d: dep::Wrap<u8>) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "composite_consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "composite_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    assert_imported_composite_signature(context,
+        find_item(context, CM_HIR_ITEM_FUNCTION, "imported"), wrap);
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
@@ -1087,10 +1354,107 @@ static void test_alias_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_composite_materialize_and_consume(void)
+{
+    CompositeFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding wrap_binding;
+    const CmHirItem *wrap;
+    const CmHirItem *inspect;
+    const CmHirGenericParam *parameter;
+    ContextLengths lengths;
+    uint8_t saved_kind;
+    uint32_t saved_count;
+    uint32_t saved_local;
+
+    composite_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 121u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 1u
+        && result.public_type_entry_count == 2u
+        && result.public_value_entry_count == 2u);
+    wrap_binding = lookup_binding(&artifact, "Wrap");
+    wrap = find_item(&context, CM_HIR_ITEM_STRUCT, "Wrap");
+    inspect = find_item(&context, CM_HIR_ITEM_FUNCTION, "inspect");
+    assert(wrap_binding.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && wrap_binding.type_kind == CM_HIR_TYPE_ADT_KIND
+        && wrap != NULL
+        && cm_hir_def_id_equal(wrap_binding.definition, wrap->definition)
+        && wrap->generic_parameter_count == 1u
+        && wrap->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        && wrap->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT);
+    parameter = cm_hir_get_generic_param(&context,
+        wrap->generic_parameter_start);
+    assert(parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE
+        && parameter->index == 0u
+        && cm_hir_def_id_equal(parameter->owner, wrap->definition));
+    assert_composite_signature(&context, inspect, wrap->definition);
+    test_composite_fresh_consumer(&context, &artifact, wrap->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_kind = decoded.types[5].region.kind;
+    decoded.types[5].region.kind = CM_HIR_DECL_REGION_EARLY_BOUND;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 122u);
+    decoded.types[5].region.kind = saved_kind;
+
+    saved_count = decoded.types[6].argument_count;
+    decoded.types[6].argument_count = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 123u);
+    decoded.types[6].argument_count = saved_count;
+
+    saved_local = decoded.generics[1].owner_local;
+    decoded.generics[1].owner_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 124u);
+    decoded.generics[1].owner_local = saved_local;
+
+    saved_kind = decoded.types[3].kind;
+    decoded.types[3].kind = CM_HIR_DECL_TYPE_SELF;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 125u);
+    decoded.types[3].kind = saved_kind;
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
     test_item_materialize_and_consume();
     test_alias_materialize_and_consume();
+    test_composite_materialize_and_consume();
     return 0;
 }
