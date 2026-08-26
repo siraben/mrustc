@@ -8351,6 +8351,607 @@ static void test_generic_trait_impl_method(void)
     cm_source_set_destroy(&sources);
 }
 
+static void test_trait_receiver_output_lifetime_normalization(void)
+{
+    static const unsigned char source[] =
+        "struct Holder<'a, T>(&'a T);\n"
+        "struct Value;\n"
+        "trait Relations {\n"
+        "fn by_ref(&self) -> &Self;\n"
+        "fn explicit<'a>(&'a self) -> &'a Self;\n"
+        "fn different<'a, 'b>(&'a self) -> &'b Self;\n"
+        "fn named_output<'a>(&'a self) -> &Self;\n"
+        "fn placeholder_nested(&'_ self) -> (&[u8],);\n"
+        "fn static_generic(&'static self) -> Holder<u8>;\n"
+        "fn placeholder(&self) -> &'_ Self;\n"
+        "fn multiple(&self, other: &Self) -> &Self;\n"
+        "fn mutable(&mut self) -> &Self;\n"
+        "fn mutable_output(&mut self) -> &mut Self;\n"
+        "fn no_receiver(input: &Self) -> &Self;\n"
+        "fn nested(&self) -> (&Self, &[u8]);\n"
+        "fn generic<T>(&self, value: T) -> Holder<T>;\n"
+        "fn generic_placeholder<T>(&self) -> Holder<'_, T>;\n"
+        "fn callable(&self) -> fn(&u8) -> &u8;\n"
+        "}\n"
+        "trait Implemented {\n"
+        "fn paired(&self, extra: &u8) -> (&Self, &[u8]);\n"
+        "}\n"
+        "impl Value {\n"
+        "fn inherent(&self) -> (&Self, &[u8]) { loop {} }\n"
+        "}\n"
+        "impl Implemented for Value {\n"
+        "fn paired(&self, extra: &u8) -> (&Self, &[u8]) { loop {} }\n"
+        "}\n"
+        "fn free(input: &u8) -> &u8 { input }\n"
+        "fn free_holder<T>(input: Holder<T>) -> Holder<T> { input }\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *owner;
+    const CmHirItem *by_ref;
+    const CmHirItem *explicit_method;
+    const CmHirItem *different;
+    const CmHirItem *named_output;
+    const CmHirItem *placeholder_nested;
+    const CmHirItem *static_generic;
+    const CmHirItem *placeholder;
+    const CmHirItem *multiple;
+    const CmHirItem *mutable_method;
+    const CmHirItem *mutable_output;
+    const CmHirItem *no_receiver;
+    const CmHirItem *nested;
+    const CmHirItem *generic;
+    const CmHirItem *generic_placeholder;
+    const CmHirItem *callable;
+    const CmHirItem *value_item;
+    const CmHirItem *implemented_trait;
+    const CmHirItem *implemented_method;
+    const CmHirItem *inherent_impl;
+    const CmHirItem *trait_impl;
+    const CmHirItem *inherent_method;
+    const CmHirItem *trait_impl_method;
+    const CmHirItem *free_function;
+    const CmHirItem *free_holder;
+    const CmHirType *receiver_type;
+    const CmHirType *return_type;
+    const CmHirType *other_type;
+    const CmHirType *free_input;
+    const CmHirType *nested_element;
+    const CmHirType *nested_bytes;
+    const CmHirType *nested_slice;
+    const CmHirType *generic_type;
+    const CmHirType *generic_argument;
+    const CmHirType *callable_input;
+    const CmHirType *callable_output;
+    const CmHirType *impl_return;
+    const CmHirType *impl_first;
+    const CmHirType *impl_second;
+    const CmHirGenericParam *holder_parameter;
+    size_t item_index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "receiver-output/lib.rs", source,
+        sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add receiver-output lifetime fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "hir-graph-lower receiver output: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    owner = find_hir_item_anywhere(&hir, "Relations");
+    by_ref = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "by_ref");
+    explicit_method = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "explicit");
+    different = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "different");
+    named_output = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "named_output");
+    placeholder_nested = owner == NULL ? NULL
+        : find_hir_associated_item(&hir, owner->definition,
+            CM_HIR_ITEM_FUNCTION, "placeholder_nested");
+    static_generic = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "static_generic");
+    placeholder = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "placeholder");
+    multiple = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "multiple");
+    mutable_method = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "mutable");
+    mutable_output = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "mutable_output");
+    no_receiver = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "no_receiver");
+    nested = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "nested");
+    generic = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "generic");
+    generic_placeholder = owner == NULL ? NULL
+        : find_hir_associated_item(&hir, owner->definition,
+            CM_HIR_ITEM_FUNCTION, "generic_placeholder");
+    callable = owner == NULL ? NULL : find_hir_associated_item(&hir,
+        owner->definition, CM_HIR_ITEM_FUNCTION, "callable");
+    value_item = find_hir_item_anywhere(&hir, "Value");
+    implemented_trait = find_hir_item_anywhere(&hir, "Implemented");
+    implemented_method = implemented_trait == NULL ? NULL
+        : find_hir_associated_item(&hir, implemented_trait->definition,
+            CM_HIR_ITEM_FUNCTION, "paired");
+    inherent_impl = NULL;
+    trait_impl = NULL;
+    for (item_index = 0u; item_index < hir.items.len; ++item_index) {
+        const CmHirItem *candidate;
+        const CmHirType *self_type;
+
+        candidate = (const CmHirItem *)cm_vec_at_const(&hir.items,
+            item_index);
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_IMPL
+            || value_item == NULL) {
+            continue;
+        }
+        self_type = cm_hir_get_type(&hir,
+            candidate->data.impl_item.self_type);
+        if (self_type == NULL || self_type->kind != CM_HIR_TYPE_ADT_KIND
+            || !cm_hir_def_id_equal(
+                self_type->data.named_type.definition,
+                value_item->definition)) {
+            continue;
+        }
+        if (candidate->data.impl_item.has_trait) {
+            trait_impl = candidate;
+        } else {
+            inherent_impl = candidate;
+        }
+    }
+    inherent_method = inherent_impl == NULL ? NULL
+        : find_hir_associated_item(&hir, inherent_impl->definition,
+            CM_HIR_ITEM_FUNCTION, "inherent");
+    trait_impl_method = trait_impl == NULL ? NULL
+        : find_hir_associated_item(&hir, trait_impl->definition,
+            CM_HIR_ITEM_FUNCTION, "paired");
+    free_function = find_hir_item_anywhere(&hir, "free");
+    free_holder = find_hir_item_anywhere(&hir, "free_holder");
+    check(graph_result.error_count == 0u && result.error_count == 0u
+        && owner != NULL && owner->kind == CM_HIR_ITEM_TRAIT
+        && by_ref != NULL && explicit_method != NULL && different != NULL
+        && named_output != NULL && placeholder_nested != NULL
+        && static_generic != NULL
+        && placeholder != NULL && multiple != NULL
+        && mutable_method != NULL && mutable_output != NULL
+        && no_receiver != NULL && nested != NULL && generic != NULL
+        && generic_placeholder != NULL && callable != NULL
+        && value_item != NULL && implemented_trait != NULL
+        && implemented_method != NULL && inherent_impl != NULL
+        && trait_impl != NULL && inherent_method != NULL
+        && trait_impl_method != NULL && free_function != NULL
+        && free_holder != NULL,
+        "receiver-output lifetime fixture did not lower completely");
+
+    receiver_type = by_ref == NULL ? NULL : cm_hir_get_type(&hir,
+        by_ref->data.function_item.signature.parameters[0].type);
+    return_type = by_ref == NULL ? NULL : cm_hir_get_type(&hir,
+        by_ref->data.function_item.signature.return_type);
+    check(by_ref != NULL
+        && by_ref->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && by_ref->data.function_item.signature.parameter_count == 1u
+        && receiver_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && hir_type_is_self(&hir,
+            receiver_type->data.reference_type.pointee, owner->definition)
+        && hir_type_is_self(&hir,
+            return_type->data.reference_type.pointee, owner->definition),
+        "elided trait &self output did not retain the receiver relation");
+
+    receiver_type = explicit_method == NULL ? NULL : cm_hir_get_type(&hir,
+        explicit_method->data.function_item.signature.parameters[0].type);
+    return_type = explicit_method == NULL ? NULL : cm_hir_get_type(&hir,
+        explicit_method->data.function_item.signature.return_type);
+    check(receiver_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && receiver_type->data.reference_type.region.data.parameter
+            == return_type->data.reference_type.region.data.parameter,
+        "explicit matching method lifetimes were rewritten");
+
+    receiver_type = different == NULL ? NULL : cm_hir_get_type(&hir,
+        different->data.function_item.signature.parameters[0].type);
+    return_type = different == NULL ? NULL : cm_hir_get_type(&hir,
+        different->data.function_item.signature.return_type);
+    check(receiver_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && receiver_type->data.reference_type.region.data.parameter
+            != return_type->data.reference_type.region.data.parameter,
+        "different explicit method lifetimes were conflated");
+
+    receiver_type = named_output == NULL ? NULL : cm_hir_get_type(&hir,
+        named_output->data.function_item.signature.parameters[0].type);
+    return_type = named_output == NULL ? NULL : cm_hir_get_type(&hir,
+        named_output->data.function_item.signature.return_type);
+    check(receiver_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_EARLY_BOUND
+        && receiver_type->data.reference_type.region.data.parameter
+            == return_type->data.reference_type.region.data.parameter,
+        "named receiver lifetime did not govern omitted output lifetime");
+
+    receiver_type = placeholder_nested == NULL ? NULL
+        : cm_hir_get_type(&hir,
+            placeholder_nested->data.function_item.signature.parameters[0]
+                .type);
+    return_type = placeholder_nested == NULL ? NULL
+        : cm_hir_get_type(&hir,
+            placeholder_nested->data.function_item.signature.return_type);
+    nested_element = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_TUPLE_KIND
+            || return_type->data.tuple_type.element_count != 1u
+            || return_type->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.tuple_type.elements[0]);
+    check(receiver_type != NULL && nested_element != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && nested_element->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && nested_element->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER
+        && receiver_type->data.reference_type.region.data.inference_variable
+            == nested_element->data.reference_type.region.data
+                .inference_variable,
+        "placeholder receiver lifetime did not govern nested omitted output");
+
+    receiver_type = static_generic == NULL ? NULL : cm_hir_get_type(&hir,
+        static_generic->data.function_item.signature.parameters[0].type);
+    generic_type = static_generic == NULL ? NULL : cm_hir_get_type(&hir,
+        static_generic->data.function_item.signature.return_type);
+    generic_argument = generic_type == NULL
+            || generic_type->kind != CM_HIR_TYPE_ADT_KIND
+            || generic_type->data.named_type.argument_count != 2u
+            || generic_type->data.named_type.arguments == NULL
+            || generic_type->data.named_type.arguments[1].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&hir,
+            generic_type->data.named_type.arguments[1].data.type);
+    check(receiver_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_STATIC
+        && generic_type != NULL && generic_type->kind == CM_HIR_TYPE_ADT_KIND
+        && generic_type->data.named_type.argument_count == 2u
+        && generic_type->data.named_type.arguments != NULL
+        && generic_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && generic_type->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_STATIC
+        && generic_argument != NULL
+        && generic_argument->kind == CM_HIR_TYPE_INTEGER_KIND
+        && generic_argument->data.integer_type.kind == CM_HIR_INT_U8,
+        "static receiver or omitted-leading ADT lifetime mapping was lost");
+
+    return_type = placeholder == NULL ? NULL : cm_hir_get_type(&hir,
+        placeholder->data.function_item.signature.return_type);
+    check(return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_INFER,
+        "explicit placeholder output lifetime was normalized as omitted");
+
+    receiver_type = multiple == NULL ? NULL : cm_hir_get_type(&hir,
+        multiple->data.function_item.signature.parameters[0].type);
+    other_type = multiple == NULL ? NULL : cm_hir_get_type(&hir,
+        multiple->data.function_item.signature.parameters[1].type);
+    return_type = multiple == NULL ? NULL : cm_hir_get_type(&hir,
+        multiple->data.function_item.signature.return_type);
+    check(receiver_type != NULL && other_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && other_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && other_type->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED,
+        "multi-input method lost receiver-driven output elision");
+
+    receiver_type = mutable_method == NULL ? NULL : cm_hir_get_type(&hir,
+        mutable_method->data.function_item.signature.parameters[0].type);
+    return_type = mutable_method == NULL ? NULL : cm_hir_get_type(&hir,
+        mutable_method->data.function_item.signature.return_type);
+    check(receiver_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED,
+        "mutable receiver did not govern its immutable output reference");
+
+    receiver_type = mutable_output == NULL ? NULL : cm_hir_get_type(&hir,
+        mutable_output->data.function_item.signature.parameters[0].type);
+    return_type = mutable_output == NULL ? NULL : cm_hir_get_type(&hir,
+        mutable_output->data.function_item.signature.return_type);
+    check(receiver_type != NULL && return_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.mutability == CM_HIR_MUTABLE
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.mutability == CM_HIR_MUTABLE
+        && return_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED,
+        "mutable receiver/output references lost their elided relation");
+
+    free_input = no_receiver == NULL ? NULL : cm_hir_get_type(&hir,
+        no_receiver->data.function_item.signature.parameters[0].type);
+    return_type = no_receiver == NULL ? NULL : cm_hir_get_type(&hir,
+        no_receiver->data.function_item.signature.return_type);
+    check(no_receiver != NULL
+        && no_receiver->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_NONE
+        && free_input != NULL && return_type != NULL
+        && free_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && free_input->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind == CM_HIR_REGION_INFER,
+        "nonreceiver trait method lifetime inference was rewritten");
+
+    return_type = nested == NULL ? NULL : cm_hir_get_type(&hir,
+        nested->data.function_item.signature.return_type);
+    nested_element = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_TUPLE_KIND
+            || return_type->data.tuple_type.element_count != 2u
+            || return_type->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.tuple_type.elements[0]);
+    nested_bytes = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_TUPLE_KIND
+            || return_type->data.tuple_type.element_count != 2u
+            || return_type->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.tuple_type.elements[1]);
+    nested_slice = nested_bytes == NULL
+            || nested_bytes->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&hir,
+            nested_bytes->data.reference_type.pointee);
+    check(return_type != NULL && return_type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && nested_element != NULL
+        && nested_element->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && nested_element->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && nested_bytes != NULL
+        && nested_bytes->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && nested_bytes->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && nested_slice != NULL && nested_slice->kind == CM_HIR_TYPE_SLICE_KIND,
+        "nested Self/non-Self outputs lost receiver-driven elision");
+
+    generic_type = generic == NULL ? NULL : cm_hir_get_type(&hir,
+        generic->data.function_item.signature.return_type);
+    generic_argument = generic_type == NULL
+            || generic_type->kind != CM_HIR_TYPE_ADT_KIND
+            || generic_type->data.named_type.argument_count != 2u
+            || generic_type->data.named_type.arguments == NULL
+            || generic_type->data.named_type.arguments[1].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&hir,
+            generic_type->data.named_type.arguments[1].data.type);
+    check(generic_type != NULL && generic_type->kind == CM_HIR_TYPE_ADT_KIND
+        && generic != NULL && generic->generic_parameter_count == 1u
+        && generic_type->data.named_type.argument_count == 2u
+        && generic_type->data.named_type.arguments != NULL
+        && generic_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && generic_type->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_ERASED
+        && generic_argument != NULL
+        && generic_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && generic_argument->data.parameter_type.parameter
+            == generic->generic_parameter_start,
+        "omitted generic lifetime argument lost receiver-driven elision");
+    generic_type = generic_placeholder == NULL ? NULL
+        : cm_hir_get_type(&hir,
+            generic_placeholder->data.function_item.signature.return_type);
+    check(generic_type != NULL && generic_type->kind == CM_HIR_TYPE_ADT_KIND
+        && generic_placeholder != NULL
+        && generic_placeholder->generic_parameter_count == 1u
+        && generic_type->data.named_type.argument_count == 2u
+        && generic_type->data.named_type.arguments != NULL
+        && generic_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && generic_type->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && generic_type->data.named_type.arguments[1].kind
+            == CM_HIR_GENERIC_ARG_TYPE
+        && cm_hir_get_type(&hir,
+            generic_type->data.named_type.arguments[1].data.type) != NULL
+        && cm_hir_get_type(&hir,
+            generic_type->data.named_type.arguments[1].data.type)->kind
+            == CM_HIR_TYPE_PARAMETER_KIND
+        && cm_hir_get_type(&hir,
+            generic_type->data.named_type.arguments[1].data.type)->data
+                .parameter_type.parameter
+            == generic_placeholder->generic_parameter_start,
+        "explicit placeholder generic lifetime was receiver-normalized");
+
+    return_type = callable == NULL ? NULL : cm_hir_get_type(&hir,
+        callable->data.function_item.signature.return_type);
+    callable_input = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_FN_POINTER_KIND
+            || return_type->data.fn_pointer_type.parameter_count != 1u
+            || return_type->data.fn_pointer_type.parameters == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.fn_pointer_type.parameters[0]);
+    callable_output = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_FN_POINTER_KIND
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.fn_pointer_type.return_type);
+    check(return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && return_type->data.fn_pointer_type.binder.lifetime_count == 1u
+        && callable_input != NULL
+        && callable_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && callable_input->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && callable_input->data.reference_type.region.data.binder_index == 0u
+        && callable_output != NULL
+        && callable_output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && callable_output->data.reference_type.region.kind
+            == CM_HIR_REGION_LATE_BOUND
+        && callable_output->data.reference_type.region.data.binder_index
+            == 0u,
+        "nested callable binder was captured by the receiver output scope");
+
+    impl_return = inherent_method == NULL ? NULL : cm_hir_get_type(&hir,
+        inherent_method->data.function_item.signature.return_type);
+    impl_first = impl_return == NULL
+            || impl_return->kind != CM_HIR_TYPE_TUPLE_KIND
+            || impl_return->data.tuple_type.element_count != 2u
+            || impl_return->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            impl_return->data.tuple_type.elements[0]);
+    impl_second = impl_return == NULL
+            || impl_return->kind != CM_HIR_TYPE_TUPLE_KIND
+            || impl_return->data.tuple_type.element_count != 2u
+            || impl_return->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            impl_return->data.tuple_type.elements[1]);
+    check(impl_first != NULL
+        && impl_first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && impl_first->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && impl_second != NULL
+        && impl_second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && impl_second->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED,
+        "inherent method did not apply recursive receiver output elision");
+
+    impl_return = trait_impl_method == NULL ? NULL : cm_hir_get_type(&hir,
+        trait_impl_method->data.function_item.signature.return_type);
+    impl_first = impl_return == NULL
+            || impl_return->kind != CM_HIR_TYPE_TUPLE_KIND
+            || impl_return->data.tuple_type.element_count != 2u
+            || impl_return->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            impl_return->data.tuple_type.elements[0]);
+    impl_second = impl_return == NULL
+            || impl_return->kind != CM_HIR_TYPE_TUPLE_KIND
+            || impl_return->data.tuple_type.element_count != 2u
+            || impl_return->data.tuple_type.elements == NULL
+        ? NULL : cm_hir_get_type(&hir,
+            impl_return->data.tuple_type.elements[1]);
+    check(impl_first != NULL
+        && impl_first->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && impl_first->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && impl_second != NULL
+        && impl_second->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && impl_second->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED
+        && cm_hir_def_id_equal(
+            trait_impl_method->data.function_item.trait_item_definition,
+            implemented_method->definition),
+        "trait impl method did not match recursive receiver output elision");
+
+    free_input = free_function == NULL ? NULL : cm_hir_get_type(&hir,
+        free_function->data.function_item.signature.parameters[0].type);
+    return_type = free_function == NULL ? NULL : cm_hir_get_type(&hir,
+        free_function->data.function_item.signature.return_type);
+    check(free_input != NULL && return_type != NULL
+        && free_input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && free_input->data.reference_type.region.kind == CM_HIR_REGION_INFER
+        && return_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && return_type->data.reference_type.region.kind == CM_HIR_REGION_INFER,
+        "free-function elision was changed by receiver normalization");
+
+    free_input = free_holder == NULL ? NULL : cm_hir_get_type(&hir,
+        free_holder->data.function_item.signature.parameters[0].type);
+    return_type = free_holder == NULL ? NULL : cm_hir_get_type(&hir,
+        free_holder->data.function_item.signature.return_type);
+    generic_argument = free_input == NULL
+            || free_input->kind != CM_HIR_TYPE_ADT_KIND
+            || free_input->data.named_type.argument_count != 2u
+            || free_input->data.named_type.arguments == NULL
+            || free_input->data.named_type.arguments[1].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&hir,
+            free_input->data.named_type.arguments[1].data.type);
+    other_type = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_ADT_KIND
+            || return_type->data.named_type.argument_count != 2u
+            || return_type->data.named_type.arguments == NULL
+            || return_type->data.named_type.arguments[1].kind
+                != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&hir,
+            return_type->data.named_type.arguments[1].data.type);
+    holder_parameter = free_holder == NULL ? NULL
+        : cm_hir_get_generic_param(&hir,
+            free_holder->generic_parameter_start);
+    check(free_input != NULL && free_input->kind == CM_HIR_TYPE_ADT_KIND
+        && free_input->data.named_type.argument_count == 2u
+        && free_input->data.named_type.arguments != NULL
+        && free_input->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && free_input->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && return_type != NULL && return_type->kind == CM_HIR_TYPE_ADT_KIND
+        && return_type->data.named_type.argument_count == 2u
+        && return_type->data.named_type.arguments != NULL
+        && return_type->data.named_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && return_type->data.named_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && free_holder != NULL && free_holder->generic_parameter_count == 1u
+        && holder_parameter != NULL
+        && holder_parameter->kind == CM_HIR_GENERIC_TYPE
+        && generic_argument != NULL && other_type != NULL
+        && generic_argument->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && other_type->kind == CM_HIR_TYPE_PARAMETER_KIND
+        && generic_argument->data.parameter_type.parameter
+            == free_holder->generic_parameter_start
+        && other_type->data.parameter_type.parameter
+            == free_holder->generic_parameter_start,
+        "nonreceiver ADT omitted lifetime did not precede explicit type");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
 static void test_lifetime_generic_default_trait_method(void)
 {
     static const unsigned char source[] =
@@ -12855,6 +13456,7 @@ int main(void)
     test_ordered_generic_impl_selection();
     test_inherent_method_bound_lifetime_binder();
     test_generic_trait_impl_method();
+    test_trait_receiver_output_lifetime_normalization();
     test_lifetime_generic_default_trait_method();
     test_adt_generic_type_defaults();
     test_lifetime_generic_trait_outlives();

@@ -147,6 +147,8 @@ typedef struct CmLowerState {
     int ambiguous_callable_input_region;
     int reject_callable_input_elision;
     int reject_callable_output_elision;
+    CmHirRegion receiver_output_region;
+    int has_receiver_output_region;
     uint32_t next_type_inference;
     uint32_t next_region_inference;
     CmSpan generated_span;
@@ -3074,6 +3076,11 @@ static int cm_lower_lifetime(CmLowerState *state, CmInternId lifetime,
                 CM_HIR_OK, "callable trait output lifetime is ambiguous");
             return 0;
         }
+        if (lifetime == CM_INTERN_ID_NONE
+            && state->has_receiver_output_region) {
+            *out_region = state->receiver_output_region;
+            return cm_lower_finish_lifetime(state, out_region);
+        }
         out_region->kind = CM_HIR_REGION_INFER;
         out_region->data.inference_variable = state->next_region_inference;
         state->next_region_inference += 1u;
@@ -3526,13 +3533,11 @@ static int cm_lower_alias_arguments(CmLowerState *state,
         : (CmHirGenericArg *)cm_alloc_zeroed(
             (size_t)argument_count, sizeof(*arguments));
     for (parameter_index = 0u;
-         parameter_index < inferred_lifetime_count;
+         parameter_index < inferred_lifetime_count && !state->failed;
          ++parameter_index) {
         arguments[parameter_index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
-        arguments[parameter_index].data.lifetime.kind = CM_HIR_REGION_INFER;
-        arguments[parameter_index].data.lifetime.data.inference_variable =
-            state->next_region_inference;
-        state->next_region_inference += 1u;
+        (void)cm_lower_lifetime(state, CM_INTERN_ID_NONE, owner, span,
+            &arguments[parameter_index].data.lifetime);
     }
     for (explicit_index = 0u;
          explicit_index < segment->argument_count && !state->failed;
@@ -3742,12 +3747,16 @@ static int cm_lower_adt_arguments(CmLowerState *state,
     CmHirDefId definition, const CmLowerItemRecord *record, CmSpan span,
     CmHirGenericArg **out_arguments, uint32_t *out_count)
 {
-    CmHirGenericArg *explicit_arguments;
     CmHirGenericArg *arguments;
     CmHirGenericParamId parameter_start;
     uint32_t parameter_count;
+    uint32_t lifetime_count;
+    uint32_t explicit_lifetime_count;
+    uint32_t inferred_lifetime_count;
     uint32_t explicit_count;
-    uint32_t index;
+    uint32_t argument_count;
+    uint32_t parameter_index;
+    uint32_t explicit_index;
 
     *out_arguments = NULL;
     *out_count = 0u;
@@ -3758,19 +3767,59 @@ static int cm_lower_adt_arguments(CmLowerState *state,
             CM_HIR_INVALID_ID, "ADT has no bound generic signature");
         return 0;
     }
-    explicit_arguments = segment->argument_count == 0u ? NULL
-        : (CmHirGenericArg *)cm_alloc_zeroed(
-            (size_t)segment->argument_count, sizeof(*explicit_arguments));
     explicit_count = segment->argument_count;
     if ((segment->argument_count == 0u) != (segment->arguments == NULL)) {
-        cm_free(explicit_arguments);
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
             CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "ADT generic argument count and storage disagree");
         return 0;
     }
-    if (explicit_count > parameter_count) {
-        cm_free(explicit_arguments);
+    lifetime_count = 0u;
+    for (parameter_index = 0u; parameter_index < parameter_count;
+         ++parameter_index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            parameter_start + parameter_index);
+        if (parameter == NULL
+            || !cm_hir_def_id_equal(parameter->owner, definition)
+            || parameter->index != parameter_index) {
+            cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                CM_HIR_INVARIANT_VIOLATION,
+                "ADT has an invalid authenticated generic signature");
+            return 0;
+        }
+        if (parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            if (parameter_index != lifetime_count) {
+                cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
+                    CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+                    CM_HIR_INVARIANT_VIOLATION,
+                    "ADT lifetime parameters are not leading");
+                return 0;
+            }
+            lifetime_count += 1u;
+        }
+    }
+    explicit_lifetime_count = 0u;
+    for (explicit_index = 0u; explicit_index < explicit_count;
+         ++explicit_index) {
+        if (segment->arguments[explicit_index].kind
+                == CM_AST_GENERIC_LIFETIME) {
+            explicit_lifetime_count += 1u;
+        }
+    }
+    inferred_lifetime_count = explicit_lifetime_count == 0u
+        ? lifetime_count : 0u;
+    if (explicit_count > UINT32_MAX - inferred_lifetime_count) {
+        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
+            CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_ID_EXHAUSTED,
+            "ADT type application generic argument count overflow");
+        return 0;
+    }
+    argument_count = inferred_lifetime_count + explicit_count;
+    if (argument_count > parameter_count) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
             CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "ADT type application supplies too many generic arguments");
@@ -3779,21 +3828,30 @@ static int cm_lower_adt_arguments(CmLowerState *state,
     arguments = parameter_count == 0u ? NULL
         : (CmHirGenericArg *)cm_alloc_zeroed(
             (size_t)parameter_count, sizeof(*arguments));
-    for (index = 0u; index < explicit_count; ++index) {
+    for (parameter_index = 0u;
+         parameter_index < inferred_lifetime_count && !state->failed;
+         ++parameter_index) {
+        arguments[parameter_index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+        (void)cm_lower_lifetime(state, CM_INTERN_ID_NONE, owner, span,
+            &arguments[parameter_index].data.lifetime);
+    }
+    for (explicit_index = 0u;
+         explicit_index < explicit_count && !state->failed;
+         ++explicit_index) {
         const CmAstGenericArg *ast_argument;
         const CmHirGenericParam *parameter;
+        CmHirGenericArg *argument;
 
-        ast_argument = &segment->arguments[index];
+        ast_argument = &segment->arguments[explicit_index];
+        parameter_index = inferred_lifetime_count + explicit_index;
         if (!cm_lower_validate_generic_constraint(state, CM_AST_ITEM_NONE,
                 CM_AST_PATH_NONE, ast_argument)) {
             cm_free(arguments);
-            cm_free(explicit_arguments);
             return 0;
         }
         if (ast_argument->kind == CM_AST_GENERIC_BINDING
             || ast_argument->kind == CM_AST_GENERIC_CONSTRAINT) {
             cm_free(arguments);
-            cm_free(explicit_arguments);
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
                 CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
                 CM_HIR_OK,
@@ -3802,12 +3860,12 @@ static int cm_lower_adt_arguments(CmLowerState *state,
             return 0;
         }
         parameter = cm_hir_get_generic_param(state->hir,
-            parameter_start + index);
+            parameter_start + parameter_index);
+        argument = &arguments[parameter_index];
         if (parameter == NULL
             || !cm_hir_def_id_equal(parameter->owner, definition)
-            || parameter->index != index) {
+            || parameter->index != parameter_index) {
             cm_free(arguments);
-            cm_free(explicit_arguments);
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_INVARIANT_VIOLATION,
@@ -3816,29 +3874,26 @@ static int cm_lower_adt_arguments(CmLowerState *state,
         }
         if (parameter->kind == CM_HIR_GENERIC_TYPE
             && ast_argument->kind == CM_AST_GENERIC_TYPE) {
-            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_TYPE;
-            explicit_arguments[index].data.type = cm_lower_type(state,
+            argument->kind = CM_HIR_GENERIC_ARG_TYPE;
+            argument->data.type = cm_lower_type(state,
                 ast_argument->type, module, owner);
         } else if (parameter->kind == CM_HIR_GENERIC_LIFETIME
             && ast_argument->kind == CM_AST_GENERIC_LIFETIME) {
-            explicit_arguments[index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+            argument->kind = CM_HIR_GENERIC_ARG_LIFETIME;
             (void)cm_lower_lifetime(state, ast_argument->text, owner, span,
-                &explicit_arguments[index].data.lifetime);
+                &argument->data.lifetime);
         } else if (parameter->kind == CM_HIR_GENERIC_CONST
             && ast_argument->kind == CM_AST_GENERIC_TYPE) {
             if (!cm_lower_const_path_argument(state, ast_argument, owner,
-                    parameter, span, &explicit_arguments[index])) {
+                    parameter, span, argument)) {
                 cm_free(arguments);
-                cm_free(explicit_arguments);
                 return 0;
             }
         } else if (parameter->kind == CM_HIR_GENERIC_CONST
             && ast_argument->kind == CM_AST_GENERIC_CONST) {
             if (!cm_lower_literal_const_argument(state, ast_argument,
-                    parameter, definition, index,
-                    &explicit_arguments[index])) {
+                    parameter, definition, parameter_index, argument)) {
                 cm_free(arguments);
-                cm_free(explicit_arguments);
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                     span, CM_AST_ITEM_NONE, ast_argument->type,
                     CM_AST_PATH_NONE, CM_HIR_OK,
@@ -3848,7 +3903,6 @@ static int cm_lower_adt_arguments(CmLowerState *state,
             }
         } else {
             cm_free(arguments);
-            cm_free(explicit_arguments);
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC, span,
                 CM_AST_ITEM_NONE, ast_argument->type, CM_AST_PATH_NONE,
                 CM_HIR_OK,
@@ -3857,17 +3911,28 @@ static int cm_lower_adt_arguments(CmLowerState *state,
         }
         if (state->failed) {
             cm_free(arguments);
-            cm_free(explicit_arguments);
             return 0;
         }
-        arguments[index] = explicit_arguments[index];
     }
-    cm_free(explicit_arguments);
-    for (index = explicit_count; index < parameter_count && !state->failed;
-         ++index) {
-        if (!cm_lower_adt_default_argument(state, definition,
-                parameter_start, index, arguments, span,
-                &arguments[index])) {
+    for (parameter_index = argument_count;
+         parameter_index < parameter_count && !state->failed;
+         ++parameter_index) {
+        const CmHirGenericParam *parameter;
+
+        parameter = cm_hir_get_generic_param(state->hir,
+            parameter_start + parameter_index);
+        if (parameter != NULL
+            && cm_hir_def_id_equal(parameter->owner, definition)
+            && parameter->index == parameter_index
+            && parameter->kind == CM_HIR_GENERIC_LIFETIME) {
+            arguments[parameter_index].kind = CM_HIR_GENERIC_ARG_LIFETIME;
+            if (!cm_lower_lifetime(state, CM_INTERN_ID_NONE, owner, span,
+                    &arguments[parameter_index].data.lifetime)) {
+                break;
+            }
+        } else if (!cm_lower_adt_default_argument(state, definition,
+                       parameter_start, parameter_index, arguments, span,
+                       &arguments[parameter_index])) {
             break;
         }
     }
@@ -9561,6 +9626,69 @@ static CmHirTypeId cm_lower_receiver_type(CmLowerState *state,
     return cm_lower_add_type(state, &reference, CM_AST_TYPE_NONE);
 }
 
+/* Authenticate the receiver relation before making it available while the
+ * method return root is lowered.  The scoped lifetime fallback is recursive,
+ * while nearer callable binders retain priority in cm_lower_lifetime. */
+static int cm_lower_receiver_output_context(CmLowerState *state,
+    const CmAstFunction *function, const CmLowerItemRecord *record,
+    const CmHirFunctionParameter *parameters, CmHirReceiverKind receiver,
+    CmHirRegion *out_region, int *out_has_region)
+{
+    const CmHirType *receiver_type;
+    const CmHirType *receiver_pointee;
+
+    memset(out_region, 0, sizeof(*out_region));
+    *out_has_region = 0;
+    if (state->failed || function == NULL || record == NULL
+        || (record->parent_kind != CM_LOWER_PARENT_TRAIT
+            && record->parent_kind != CM_LOWER_PARENT_IMPL)
+        || function->parameter_count == 0u
+        || function->parameters == NULL
+        || !function->parameters[0].is_self
+        || function->parameters[0].type != CM_AST_TYPE_NONE
+        || (receiver != CM_HIR_RECEIVER_REF_SHARED
+            && receiver != CM_HIR_RECEIVER_REF_MUTABLE)) {
+        return !state->failed;
+    }
+    if (parameters == NULL) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE,
+            cm_lower_span(state, (CmAstSpan){ 0u, 0u }),
+            record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "implicit receiver has no lowered parameter storage");
+        return 0;
+    }
+    receiver_type = cm_hir_get_type(state->hir, parameters[0].type);
+    if (receiver_type == NULL
+        || receiver_type->kind != CM_HIR_TYPE_REFERENCE_KIND
+        || receiver_type->data.reference_type.mutability
+            != (receiver == CM_HIR_RECEIVER_REF_MUTABLE
+                ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE)) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE,
+            parameters[0].span,
+            record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "implicit reference receiver lost its authenticated HIR shape");
+        return 0;
+    }
+    receiver_pointee = cm_hir_get_type(state->hir,
+        receiver_type->data.reference_type.pointee);
+    if (receiver_pointee == NULL
+        || receiver_pointee->kind != CM_HIR_TYPE_SELF_KIND
+        || !cm_hir_def_id_equal(receiver_pointee->data.self_type.owner,
+            record->parent_definition)) {
+        cm_lower_fail(state, CM_HIR_LOWER_HIR_FAILURE,
+            parameters[0].span,
+            record->ast_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_INVARIANT_VIOLATION,
+            "implicit reference receiver lost its enclosing Self identity");
+        return 0;
+    }
+    *out_region = receiver_type->data.reference_type.region;
+    *out_has_region = 1;
+    return 1;
+}
+
 static const CmHirItem *cm_lower_find_associated_method(
     const CmLowerState *state, CmHirDefId trait_definition,
     CmInternId ast_name, uint32_t *out_matches)
@@ -10220,7 +10348,11 @@ static int cm_lower_function_item(CmLowerState *state,
     CmHirTypeId return_type;
     CmHirReceiverKind receiver;
     CmHirDefId trait_item_definition;
+    CmHirRegion previous_receiver_output_region;
+    CmHirRegion receiver_output_region;
     CmSpan span;
+    int previous_has_receiver_output_region;
+    int has_receiver_output_region;
     uint32_t index;
     uint32_t local_count;
 
@@ -10449,12 +10581,26 @@ static int cm_lower_function_item(CmLowerState *state,
         cm_free(parameters);
         return 0;
     }
+    previous_receiver_output_region = state->receiver_output_region;
+    previous_has_receiver_output_region = state->has_receiver_output_region;
+    if (!cm_lower_receiver_output_context(state, function, record,
+            parameters, receiver, &receiver_output_region,
+            &has_receiver_output_region)) {
+        cm_free(locals);
+        cm_free(parameters);
+        return 0;
+    }
+    state->receiver_output_region = receiver_output_region;
+    state->has_receiver_output_region = has_receiver_output_region;
     if (function->return_type == CM_AST_TYPE_NONE) {
         return_type = cm_lower_unit_type(state, span, ast_item_id);
     } else {
         return_type = cm_lower_type(state, function->return_type,
             record->owner_module, record->definition);
     }
+    state->receiver_output_region = previous_receiver_output_region;
+    state->has_receiver_output_region =
+        previous_has_receiver_output_region;
     if (state->failed) {
         cm_free(locals);
         cm_free(parameters);
