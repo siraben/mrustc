@@ -146,7 +146,17 @@ public private-field `Layout` struct, transparent tuple `Alignment`, and its
 private cfg-selected repr(u64) `AlignmentEnum`; no declaration metadata or
 object artifact succeeds yet.  Commit `e79c819e` independently makes reachable
 declaration TYPE canonicalization bounded and deterministic in multi-crate
-hostile inputs; it does not broaden the semantic frontier.
+hostile inputs; it does not broaden the semantic frontier.  Commits
+`b4c065aa`, `e1eba5b9`, and `c5b4d093` then encode, materialize, and capture
+that complete private dependency chain without publishing `AlignmentEnum`.
+The clean pinned Rust 1.90 probe at `c5b4d093` again reports zero graph/import/
+HIR errors, 38,176 HIR items, and the exact 451-module/1,658-type/20,747-value
+library census.  It advances the measured v3.0 frontier to
+`core/src/any.rs:113`: safe trait `Any` (`def=1:18858`, source item `99:3`,
+rejected item `110`) fails at `stage=items` with `reason=item-source-invalid`.
+The next declaration slice must retain its diagnostic identity, exact
+`Self: 'static` outlives requirement, and safe-parent associated `type_id`
+method; none may be projected into an unsafe or childless stand-in.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

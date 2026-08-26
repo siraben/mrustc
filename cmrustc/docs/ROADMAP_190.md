@@ -251,7 +251,16 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   separately replaces repeated TYPE-arena rescans with memoized depth
   traversal, exact-key stable sorting, adjacent deduplication, and a
   multi-crate DefId index, satisfying the hostile resource bound without a
-  wire change.
+  wire change.  Commits `b4c065aa`, `e1eba5b9`, and `c5b4d093` complete the
+  Layout descriptor, consumer, and producer slices.  A clean pinned-core run
+  at `c5b4d093` keeps the zero-error 363-source/451-module graph, 38,176-item
+  HIR, and 451/1,658/20,747 library census, and advances to
+  `core/src/any.rs:113`: `Any` (`def=1:18858`, source item `99:3`, rejected
+  item `110`) fails at `stage=items`/`item-source-invalid`.  The active exact
+  facts are the retained `rustc_diagnostic_item = "Any"` identity,
+  `Self: 'static`, and a required safe shared-receiver associated method.
+  `TypeId` remains a following structural dependency rather than permission
+  to fabricate an opaque return type.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

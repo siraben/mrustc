@@ -2066,7 +2066,18 @@ private enum as a namespace binding or replace it with an opaque nominal.
 Commit `e79c819e` also replaces the capture TYPE
 canonicalizer's repeated scans with a memoized, stable `O(E log E)` pipeline
 and an authenticated multi-crate trait DefId index; this resource hardening
-does not itself change the whole-core semantic frontier.
+does not itself change the whole-core semantic frontier.  Commits `b4c065aa`,
+`e1eba5b9`, and `c5b4d093` implement the complete Layout descriptor,
+materializer, and producer chain, including tuple fields, exact u8/u16/u32/u64
+enum reprs, high-bit ISIZE-carried discriminants, and public-rooted private
+dependency closure.  The clean `c5b4d093` pinned-core probe preserves the
+zero-error 363-source/451-module graph, 38,176-item HIR, and exact
+451/1,658/20,747 library census, then measures the new frontier at
+`core/src/any.rs:113`: `Any` (`def=1:18858`, source item `99:3`, rejected item
+`110`) fails with `stage=items` and `reason=item-source-invalid`.  The active
+slice is an exact safe trait with retained diagnostic identity, a
+`Self: 'static` outlives fact, and its required shared-receiver associated
+method; a childless or unsafe substitute would not clear the real boundary.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
