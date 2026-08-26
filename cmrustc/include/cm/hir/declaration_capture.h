@@ -106,6 +106,7 @@ typedef struct CmHirDeclarationCaptureResult {
     CmHirTypeId rejected_type;
     size_t module_count;
     size_t trait_count;
+    size_t associated_count;
     size_t item_count;
     size_t value_count;
     size_t predicate_count;
@@ -208,6 +209,18 @@ typedef struct CmHirDeclarationCaptureResult {
  * `semantic_attributes` and `projected_semantic_attribute_count`; it is not
  * an unchanged-HIR round-trip claim and is not usable as attribute-complete
  * dependency metadata.
+ *
+ * A supported ordinary trait is source-authenticated against its complete
+ * cfg-effective direct-child census. Direct `stable(...)`, `unstable(...)`,
+ * and `deprecated(...)` attributes on the trait and its methods are projected
+ * with exact graph/HIR provenance. Marker traits retain their existing safe
+ * zero-member profile. The first member-bearing profile retains UNSAFE trait
+ * safety and source-ordered private methods with shared `&self`
+ * receivers, exact Rust ABI, zero method generics, primitive/`Self`/erased
+ * shared-reference signature types, optional default bodies, and optional
+ * required `Self: Marker` predicates. Auto/const traits, supertraits, other
+ * associated-item kinds, receiver/type forms, and incomplete child/library
+ * identities fail closed.
  *
  * A supported free const is public, top-level, immutable, explicitly typed by
  * a v3.0-representable primitive, zero-generic/predicate, and has one

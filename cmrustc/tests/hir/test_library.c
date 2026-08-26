@@ -19,6 +19,8 @@ typedef struct TestFixture {
 typedef struct OwnedDataView {
     unsigned char *modules_data;
     size_t module_count;
+    unsigned char *values_data;
+    size_t value_count;
     unsigned char *entries_data;
     size_t entry_count;
     unsigned char *names_data;
@@ -263,6 +265,8 @@ static OwnedDataView owned_data_view(const CmHirLibraryOwnedData *data)
     memset(&view, 0, sizeof(view));
     view.modules_data = data->modules.data;
     view.module_count = data->modules.len;
+    view.values_data = data->values.data;
+    view.value_count = data->values.len;
     view.names_data = data->names.entries.data;
     view.name_count = cm_interner_length(&data->names);
     module = (const CmHirLibraryOwnedModule *)cm_vec_at_const(
@@ -282,10 +286,67 @@ static void assert_owned_data_unchanged(const CmHirLibraryOwnedData *data,
     after = owned_data_view(data);
     assert(after.modules_data == before.modules_data);
     assert(after.module_count == before.module_count);
+    assert(after.values_data == before.values_data);
+    assert(after.value_count == before.value_count);
     assert(after.entries_data == before.entries_data);
     assert(after.entry_count == before.entry_count);
     assert(after.names_data == before.names_data);
     assert(after.name_count == before.name_count);
+}
+
+static void owned_data_copy(CmHirLibraryOwnedData *target,
+    const CmHirLibraryOwnedData *source)
+{
+    size_t module_index;
+    size_t value_index;
+
+    cm_hir_library_owned_data_init(target);
+    for (module_index = 0u; module_index < source->modules.len;
+            ++module_index) {
+        const CmHirLibraryOwnedModule *module;
+        size_t target_module;
+        size_t entry_index;
+
+        module = (const CmHirLibraryOwnedModule *)cm_vec_at_const(
+            &source->modules, module_index);
+        assert(module != NULL);
+        assert(cm_hir_library_owned_data_add_module(target,
+            module->definition, &target_module) == CM_HIR_LIBRARY_OK);
+        for (entry_index = 0u; entry_index < module->entries.len;
+                ++entry_index) {
+            const CmHirLibraryOwnedEntry *entry;
+            const CmInternedString *name;
+            CmHirLibraryBinding binding;
+
+            entry = (const CmHirLibraryOwnedEntry *)cm_vec_at_const(
+                &module->entries, entry_index);
+            name = entry == NULL ? NULL
+                : cm_interner_get(&source->names, entry->name);
+            assert(entry != NULL && name != NULL);
+            memset(&binding, 0, sizeof(binding));
+            binding.kind = entry->kind;
+            binding.definition = entry->target;
+            binding.type_kind = entry->type_kind;
+            binding.primitive_kind = entry->primitive_kind;
+            binding.value_kind = entry->value_kind;
+            binding.enum_definition = entry->enum_definition;
+            binding.enum_variant_index = entry->enum_variant_index;
+            binding.enum_variant_form = entry->enum_variant_form;
+            binding.enum_variant_namespace = entry->enum_variant_namespace;
+            assert(cm_hir_library_owned_data_add_entry(target,
+                target_module, name->bytes, name->len, &binding)
+                == CM_HIR_LIBRARY_OK);
+        }
+    }
+    for (value_index = 0u; value_index < source->values.len; ++value_index) {
+        const CmHirLibraryOwnedValue *value;
+
+        value = (const CmHirLibraryOwnedValue *)cm_vec_at_const(
+            &source->values, value_index);
+        assert(value != NULL);
+        assert(cm_hir_library_owned_data_add_value(target,
+            &value->declaration) == CM_HIR_LIBRARY_OK);
+    }
 }
 
 static void assert_artifact_entry(const CmHirLibraryArtifact *artifact,
@@ -573,6 +634,220 @@ static CmHirLowerResult lower_test_graph(CmHirContext *context,
         map, options);
     cm_import_resolver_destroy(&imports);
     return result;
+}
+
+static CmHirLibraryValue lookup_associated_method(
+    const CmHirLibraryArtifact *artifact, CmHirDefId trait_definition,
+    const char *name)
+{
+    CmHirLibraryPathSegment segment;
+    CmHirLibraryValue value;
+
+    segment.bytes = (const unsigned char *)name;
+    segment.length = strlen(name);
+    memset(&value, 0, sizeof(value));
+    assert(cm_hir_library_artifact_lookup_associated_method(artifact,
+        trait_definition, &segment, &value) == CM_HIR_LIBRARY_OK);
+    assert(value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION);
+    assert(cm_hir_def_id_equal(value.data.function.parent_trait,
+        trait_definition));
+    return value;
+}
+
+static void test_associated_method_capture_and_restore(void)
+{
+    static const unsigned char source_text[] =
+        "pub unsafe trait AllocatorLike {\n"
+        "    fn allocate(&self, amount: usize) -> usize;\n"
+        "    fn allocate_zeroed(&self, amount: usize) -> usize { amount }\n"
+        "    unsafe fn deallocate(&self, pointer: *mut u8);\n"
+        "}\n"
+        "pub use AllocatorLike as AllocatorAlias;\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmCfgSet cfg;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmHirContext context;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifact restored;
+    CmHirLibraryArtifactResult artifact_result;
+    CmHirLibraryArtifactResult restore_result;
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryPathSegment missing_name;
+    CmHirLibraryBinding direct_binding;
+    CmHirLibraryBinding alias_binding;
+    CmHirLibraryBinding missing_binding;
+    CmHirLibraryValue allocate;
+    CmHirLibraryValue allocate_zeroed;
+    CmHirLibraryValue deallocate;
+    CmHirLibraryValue missing_value;
+    const CmHirItem *trait_item;
+    const CmHirItem *allocate_item;
+    const CmHirItem *zeroed_item;
+    const CmHirItem *deallocate_item;
+    const CmHirLibraryOwnedData *captured;
+    CmHirLibraryOwnedData candidate;
+    unsigned int mutation;
+
+    cm_source_set_init(&sources);
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_init(&graph);
+    cm_hir_context_init(&context);
+    cm_hir_module_map_init(&map);
+    cm_hir_library_artifact_init(&artifact);
+    cm_hir_library_artifact_init(&restored);
+    assert(cm_source_add_memory(&sources, "associated-methods.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "associated_methods";
+    lower_result = lower_test_graph(&context, &graph,
+        graph_result.revision, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    trait_item = find_item_named(&context, "AllocatorLike");
+    allocate_item = find_item_named(&context, "allocate");
+    zeroed_item = find_item_named(&context, "allocate_zeroed");
+    deallocate_item = find_item_named(&context, "deallocate");
+    assert(trait_item != NULL && trait_item->kind == CM_HIR_ITEM_TRAIT
+        && trait_item->data.trait_item.safety == CM_HIR_UNSAFE);
+    assert(allocate_item != NULL && zeroed_item != NULL
+        && deallocate_item != NULL
+        && cm_hir_def_id_equal(allocate_item->parent_definition,
+            trait_item->definition)
+        && cm_hir_def_id_equal(zeroed_item->parent_definition,
+            trait_item->definition)
+        && cm_hir_def_id_equal(deallocate_item->parent_definition,
+            trait_item->definition));
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &context, lower_result.crate_id, &graph, graph_result.revision, &map,
+        "dep");
+    assert(artifact_result.status == CM_HIR_LIBRARY_OK
+        && artifact_result.public_type_entry_count == 2u
+        && artifact_result.public_value_entry_count == 0u);
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)"AllocatorLike";
+    path[1].length = 13u;
+    memset(&direct_binding, 0, sizeof(direct_binding));
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 2u,
+        &direct_binding) == CM_HIR_LIBRARY_OK
+        && direct_binding.kind == CM_HIR_LIBRARY_BINDING_TRAIT);
+    path[1].bytes = (const unsigned char *)"AllocatorAlias";
+    path[1].length = 14u;
+    memset(&alias_binding, 0, sizeof(alias_binding));
+    assert(cm_hir_library_artifact_lookup_binding(&artifact, path, 2u,
+        &alias_binding) == CM_HIR_LIBRARY_OK
+        && alias_binding.kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && cm_hir_def_id_equal(alias_binding.definition,
+            direct_binding.definition));
+
+    allocate = lookup_associated_method(&artifact, direct_binding.definition,
+        "allocate");
+    allocate_zeroed = lookup_associated_method(&artifact,
+        alias_binding.definition, "allocate_zeroed");
+    deallocate = lookup_associated_method(&artifact,
+        direct_binding.definition, "deallocate");
+    assert(cm_hir_def_id_equal(allocate.definition,
+            allocate_item->definition)
+        && allocate.data.function.receiver == CM_HIR_RECEIVER_REF_SHARED
+        && allocate.data.function.safety == CM_HIR_SAFE
+        && allocate.data.function.has_default_body == 0
+        && cm_hir_def_id_equal(allocate_zeroed.definition,
+            zeroed_item->definition)
+        && allocate_zeroed.data.function.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && allocate_zeroed.data.function.safety == CM_HIR_SAFE
+        && allocate_zeroed.data.function.has_default_body == 1
+        && cm_hir_def_id_equal(deallocate.definition,
+            deallocate_item->definition)
+        && deallocate.data.function.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && deallocate.data.function.safety == CM_HIR_UNSAFE
+        && deallocate.data.function.has_default_body == 0);
+
+    /* A trait method is not a module VALUE binding. */
+    path[1].bytes = (const unsigned char *)"allocate";
+    path[1].length = 8u;
+    memset(&missing_value, 0, sizeof(missing_value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u,
+        &missing_value) == CM_HIR_LIBRARY_NOT_FOUND);
+    memset(&missing_binding, 0, sizeof(missing_binding));
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &missing_binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    missing_name.bytes = (const unsigned char *)"missing";
+    missing_name.length = 7u;
+    assert(cm_hir_library_artifact_lookup_associated_method(&artifact,
+        trait_item->definition, &missing_name, &missing_value)
+        == CM_HIR_LIBRARY_NOT_FOUND);
+
+    captured = cm_hir_library_artifact_owned_data_const(&artifact);
+    assert(captured != NULL && captured->values.len == 3u);
+    owned_data_copy(&candidate, captured);
+    restore_result = cm_hir_library_artifact_restore_owned(&restored,
+        &context, lower_result.crate_id,
+        ((const CmHirModule *)cm_hir_get_module(&context,
+            lower_result.root_module))->definition, "fresh", &candidate);
+    assert(restore_result.status == CM_HIR_LIBRARY_OK
+        && candidate.modules.len == 0u && candidate.values.len == 0u);
+    (void)lookup_associated_method(&restored, trait_item->definition,
+        "allocate");
+    cm_hir_library_owned_data_destroy(&candidate);
+
+    /* Every authority field and the complete child census are atomic. */
+    for (mutation = 0u; mutation < 5u; ++mutation) {
+        CmHirLibraryOwnedValue *owned_method;
+        OwnedDataView before;
+        size_t saved_count;
+
+        owned_data_copy(&candidate, captured);
+        owned_method = (CmHirLibraryOwnedValue *)cm_vec_at(
+            &candidate.values, 0u);
+        assert(owned_method != NULL);
+        saved_count = candidate.values.len;
+        if (mutation == 0u) {
+            owned_method->declaration.data.function.parent_trait =
+                allocate_item->definition;
+        } else if (mutation == 1u) {
+            owned_method->declaration.data.function.receiver =
+                CM_HIR_RECEIVER_REF_MUTABLE;
+        } else if (mutation == 2u) {
+            owned_method->declaration.data.function.has_default_body = 1;
+        } else if (mutation == 3u) {
+            owned_method->declaration.definition = trait_item->definition;
+        } else {
+            candidate.values.len -= 1u;
+        }
+        before = owned_data_view(&candidate);
+        restore_result = cm_hir_library_artifact_restore_owned(&restored,
+            &context, lower_result.crate_id,
+            ((const CmHirModule *)cm_hir_get_module(&context,
+                lower_result.root_module))->definition, "mutated",
+            &candidate);
+        assert(restore_result.status == CM_HIR_LIBRARY_INVALID_HIR);
+        assert_owned_data_unchanged(&candidate, before);
+        (void)lookup_associated_method(&restored, trait_item->definition,
+            "allocate");
+        candidate.values.len = saved_count;
+        cm_hir_library_owned_data_destroy(&candidate);
+    }
+
+    cm_hir_library_artifact_destroy(&restored);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&context);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
 }
 
 static void test_struct_constructor_direct_capture(void)
@@ -1559,6 +1834,7 @@ int main(void)
     test_owned_restore_is_transactional();
     test_struct_constructor_restore();
     test_struct_constructor_direct_capture();
+    test_associated_method_capture_and_restore();
     test_enum_variant_restore_scope();
     test_enum_variant_direct_capture_and_public_reexports();
     test_owned_predicate_copy_and_equality();

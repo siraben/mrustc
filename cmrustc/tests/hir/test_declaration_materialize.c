@@ -118,6 +118,18 @@ typedef struct PrimitiveBindingSpec {
     CmHirPrimitiveKind hir_kind;
 } PrimitiveBindingSpec;
 
+typedef struct AssociatedMethodFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[2];
+    CmHirDeclarationAssociatedItem associated_items[2];
+    uint32_t allocate_parameters[2];
+    uint32_t fallback_parameters[1];
+    CmHirDeclarationType types[4];
+    CmHirDeclarationPredicate predicates[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[3];
+} AssociatedMethodFixture;
+
 /* TYPE namespace canonical order: aliases first, then primitive spellings. */
 static const PrimitiveBindingSpec primitive_binding_specs[
         PRIMITIVE_BINDING_COUNT] = {
@@ -156,6 +168,118 @@ static const PrimitiveBindingSpec primitive_binding_specs[
     { "u8", CM_HIR_DECL_PRIMITIVE_U8, CM_HIR_PRIMITIVE_U8 },
     { "usize", CM_HIR_DECL_PRIMITIVE_USIZE, CM_HIR_PRIMITIVE_USIZE }
 };
+
+static void associated_method_fixture_init(AssociatedMethodFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    CmHirDeclarationAssociatedItem *allocate;
+    CmHirDeclarationAssociatedItem *fallback;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("allocator_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-method-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].name =
+        (CmHirDeclarationString)S("AllocatorLike");
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].associated_start = 1u;
+    fixture->traits[0].associated_count = 2u;
+    fixture->traits[0].safety = CM_HIR_DECL_SAFETY_UNSAFE;
+    fixture->traits[1].owner_module = 1u;
+    fixture->traits[1].name = (CmHirDeclarationString)S("SizedLike");
+    fixture->traits[1].source_ordinal = 5u;
+    fixture->traits[1].safety = CM_HIR_DECL_SAFETY_SAFE;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 2u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_SELF;
+    fixture->types[2].self_trait_local = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[3].child_type = 3u;
+    fixture->types[3].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[3].region.kind = CM_HIR_DECL_REGION_ERASED;
+    metadata->types = fixture->types;
+    metadata->type_count = 4u;
+
+    fixture->allocate_parameters[0] = 4u;
+    fixture->allocate_parameters[1] = 2u;
+    allocate = &fixture->associated_items[0];
+    allocate->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    allocate->parent_kind = CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+    allocate->parent_local = 1u;
+    allocate->name = (CmHirDeclarationString)S("allocate");
+    allocate->visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    allocate->source_ordinal = 2u;
+    allocate->receiver = CM_HIR_DECL_RECEIVER_REF_SHARED;
+    allocate->parameter_count = 2u;
+    allocate->parameter_types = fixture->allocate_parameters;
+    allocate->return_type = 1u;
+    allocate->abi = (CmHirDeclarationString)S("Rust");
+    allocate->safety = CM_HIR_DECL_SAFETY_UNSAFE;
+
+    fixture->fallback_parameters[0] = 4u;
+    fallback = &fixture->associated_items[1];
+    fallback->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fallback->parent_kind = CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+    fallback->parent_local = 1u;
+    fallback->name = (CmHirDeclarationString)S("fallback");
+    fallback->visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fallback->source_ordinal = 3u;
+    fallback->predicate_start = 1u;
+    fallback->predicate_count = 1u;
+    fallback->receiver = CM_HIR_DECL_RECEIVER_REF_SHARED;
+    fallback->parameter_count = 1u;
+    fallback->parameter_types = fixture->fallback_parameters;
+    fallback->return_type = 1u;
+    fallback->abi = (CmHirDeclarationString)S("Rust");
+    fallback->safety = CM_HIR_DECL_SAFETY_SAFE;
+    fallback->has_default_body = 1u;
+    metadata->associated_items = fixture->associated_items;
+    metadata->associated_count = 2u;
+
+    fixture->predicates[0].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED;
+    fixture->predicates[0].owner_associated = 2u;
+    fixture->predicates[0].subject_type = 3u;
+    fixture->predicates[0].trait_local = 2u;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name =
+        (CmHirDeclarationString)S("AllocatorAlias");
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 4u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->traits[0].name;
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[0];
+    fixture->namespace_entries[2].name = fixture->traits[1].name;
+    fixture->namespace_entries[2].target_local = 2u;
+    fixture->namespace_entries[2].export_ordinal = 5u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 3u;
+}
 
 typedef struct ContextLengths {
     size_t crates;
@@ -4031,6 +4155,228 @@ static void test_option_tuple_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_associated_method_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId allocator_trait)
+{
+    static const unsigned char source_text[] =
+        "pub fn direct<A: dep::AllocatorLike>(_value: &A) {}\n"
+        "pub fn via_alias<A: dep::AllocatorAlias>(_value: &A) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    const CmHirItem *direct;
+    const CmHirItem *via_alias;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "associated-consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "associated_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    direct = find_item(context, CM_HIR_ITEM_FUNCTION, "direct");
+    via_alias = find_item(context, CM_HIR_ITEM_FUNCTION, "via_alias");
+    assert(direct != NULL && via_alias != NULL
+        && direct->predicate_count == 1u
+        && via_alias->predicate_count == 1u
+        && cm_hir_def_id_equal(
+            direct->predicates[0].trait_type.definition, allocator_trait)
+        && cm_hir_def_id_equal(
+            via_alias->predicates[0].trait_type.definition,
+            allocator_trait));
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_associated_method_materialize_and_restore(void)
+{
+    AssociatedMethodFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    const CmHirItem *trait_item;
+    const CmHirItem *sized_item;
+    const CmHirItem *allocate_item;
+    const CmHirItem *fallback_item;
+    const CmHirType *receiver_type;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding alias;
+    CmHirLibraryPathSegment method_name;
+    CmHirLibraryValue method;
+    ContextLengths lengths;
+    CmHirLibraryArtifactIdentity identity;
+    uint32_t saved_local;
+    uint8_t saved_byte;
+
+    associated_method_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 181u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 0u
+        && result.public_type_entry_count == 3u
+        && result.public_value_entry_count == 0u);
+    trait_item = find_item(&context, CM_HIR_ITEM_TRAIT, "AllocatorLike");
+    sized_item = find_item(&context, CM_HIR_ITEM_TRAIT, "SizedLike");
+    allocate_item = find_item(&context, CM_HIR_ITEM_FUNCTION, "allocate");
+    fallback_item = find_item(&context, CM_HIR_ITEM_FUNCTION, "fallback");
+    assert(trait_item != NULL && sized_item != NULL && allocate_item != NULL
+        && fallback_item != NULL
+        && trait_item->data.trait_item.safety == CM_HIR_UNSAFE
+        && cm_hir_def_id_equal(allocate_item->parent_definition,
+            trait_item->definition)
+        && allocate_item->data.function_item.body == CM_HIR_BODY_NONE
+        && cm_hir_get_body(&context,
+            allocate_item->data.function_item.body) == NULL
+        && allocate_item->data.function_item.has_default_body == 0
+        && allocate_item->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && allocate_item->data.function_item.signature.safety
+            == CM_HIR_UNSAFE
+        && fallback_item->data.function_item.body == CM_HIR_BODY_NONE
+        && cm_hir_get_body(&context,
+            fallback_item->data.function_item.body) == NULL
+        && fallback_item->data.function_item.has_default_body == 1
+        && fallback_item->predicate_count == 1u
+        && fallback_item->predicates[0].subject != CM_HIR_TYPE_NONE
+        && cm_hir_def_id_equal(
+            fallback_item->predicates[0].trait_type.definition,
+            sized_item->definition)
+        && fallback_item->predicates[0].trait_type.argument_count == 0u);
+    receiver_type = cm_hir_get_type(&context,
+        allocate_item->data.function_item.signature.parameters[0].type);
+    assert(receiver_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && receiver_type->data.reference_type.region.kind
+            == CM_HIR_REGION_ERASED);
+    receiver_type = cm_hir_get_type(&context,
+        receiver_type->data.reference_type.pointee);
+    assert(receiver_type != NULL
+        && receiver_type->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(receiver_type->data.self_type.owner,
+            trait_item->definition));
+
+    direct = lookup_binding(&artifact, "AllocatorLike");
+    alias = lookup_binding(&artifact, "AllocatorAlias");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && alias.kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && cm_hir_def_id_equal(direct.definition, alias.definition));
+    method_name.bytes = (const unsigned char *)"allocate";
+    method_name.length = sizeof("allocate") - 1u;
+    memset(&method, 0, sizeof(method));
+    assert(cm_hir_library_artifact_lookup_associated_method(&artifact,
+        direct.definition, &method_name, &method) == CM_HIR_LIBRARY_OK
+        && cm_hir_def_id_equal(method.definition,
+            allocate_item->definition)
+        && method.data.function.receiver == CM_HIR_RECEIVER_REF_SHARED
+        && method.data.function.safety == CM_HIR_UNSAFE
+        && method.data.function.has_default_body == 0);
+    method_name.bytes = (const unsigned char *)"fallback";
+    method_name.length = sizeof("fallback") - 1u;
+    assert(cm_hir_library_artifact_lookup_associated_method(&artifact,
+        alias.definition, &method_name, &method) == CM_HIR_LIBRARY_OK
+        && cm_hir_def_id_equal(method.definition,
+            fallback_item->definition)
+        && method.data.function.has_default_body == 1
+        && method.data.function.predicate_count == 1u
+        && method.data.function.nominal_reference_count == 1u
+        && cm_hir_def_id_equal(
+            method.data.function.nominal_references[0].definition,
+            sized_item->definition));
+    assert(lookup_value_binding_status(&artifact, "allocate")
+        == CM_HIR_LIBRARY_NOT_FOUND);
+    test_associated_method_fresh_consumer(&context, &artifact,
+        trait_item->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+    saved_local = decoded.types[2].self_trait_local;
+    decoded.types[2].self_trait_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 182u);
+    decoded.types[2].self_trait_local = saved_local;
+    saved_byte = decoded.types[3].region.kind;
+    decoded.types[3].region.kind = CM_HIR_DECL_REGION_STATIC;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 183u);
+    decoded.types[3].region.kind = saved_byte;
+    saved_local = decoded.associated_items[0].parent_local;
+    decoded.associated_items[0].parent_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 184u);
+    decoded.associated_items[0].parent_local = saved_local;
+    saved_byte = decoded.associated_items[1].has_default_body;
+    decoded.associated_items[1].has_default_body = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 185u);
+    decoded.associated_items[1].has_default_body = saved_byte;
+    saved_byte = decoded.associated_items[0].kind;
+    decoded.associated_items[0].kind = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 186u);
+    decoded.associated_items[0].kind = saved_byte;
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 187u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
@@ -4044,5 +4390,6 @@ int main(void)
     test_enum_materialize_and_restore_scope();
     test_default_enum_materialize_and_variant_reexports();
     test_option_tuple_materialize_and_consume();
+    test_associated_method_materialize_and_restore();
     return 0;
 }

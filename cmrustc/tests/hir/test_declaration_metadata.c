@@ -114,6 +114,19 @@ typedef struct PrimitiveNamespaceFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } PrimitiveNamespaceFixture;
 
+typedef struct AssociatedMethodFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[2];
+    CmHirDeclarationAssociatedItem associated_items[2];
+    uint32_t allocate_parameters[2];
+    uint32_t fallback_parameters[1];
+    CmHirDeclarationGeneric generics[1];
+    CmHirDeclarationType types[6];
+    CmHirDeclarationPredicate predicates[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} AssociatedMethodFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -299,6 +312,37 @@ static size_t value_record_offset(const CmByteBuf *bytes,
             assert(0);
         }
         assert(cursor <= bytes->len);
+        if (index == wanted_index) return record;
+    }
+    assert(0);
+    return 0u;
+}
+
+static size_t associated_record_offset(const CmByteBuf *bytes,
+    uint32_t wanted_index)
+{
+    size_t cursor;
+    uint32_t count;
+    uint32_t index;
+    cursor = section_offset(bytes, "AITM") + 12u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    count = get_u32(bytes->data + cursor);
+    cursor += 4u;
+    assert(wanted_index < count);
+    for (index = 0u; index < count; ++index) {
+        size_t record = cursor;
+        uint32_t parameter_count;
+        assert(cursor <= bytes->len && bytes->len - cursor >= 12u);
+        cursor = skip_string(bytes, cursor + 12u);
+        assert(cursor <= bytes->len && bytes->len - cursor >= 56u);
+        cursor += 48u;
+        parameter_count = get_u32(bytes->data + cursor + 4u);
+        assert((size_t)parameter_count
+            <= (bytes->len - cursor - 12u) / 4u);
+        cursor += 12u + (size_t)parameter_count * 4u;
+        cursor = skip_string(bytes, cursor);
+        assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+        cursor += 8u;
         if (index == wanted_index) return record;
     }
     assert(0);
@@ -644,6 +688,119 @@ static void primitive_namespace_fixture_init(
     fixture->namespace_entries[1].name =
         (CmHirDeclarationString)S("boolean");
     fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
+}
+
+static void associated_method_fixture_init(AssociatedMethodFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    CmHirDeclarationAssociatedItem *allocate;
+    CmHirDeclarationAssociatedItem *fallback;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("allocator_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-method-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].name =
+        (CmHirDeclarationString)S("AllocatorLike");
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].associated_start = 1u;
+    fixture->traits[0].associated_count = 2u;
+    fixture->traits[0].safety = CM_HIR_DECL_SAFETY_UNSAFE;
+    fixture->traits[1].owner_module = 1u;
+    fixture->traits[1].name = (CmHirDeclarationString)S("SizedLike");
+    fixture->traits[1].source_ordinal = 4u;
+    fixture->traits[1].safety = CM_HIR_DECL_SAFETY_SAFE;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 2u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_SELF;
+    fixture->types[2].self_trait_local = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[3].child_type = 3u;
+    fixture->types[3].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[3].region.kind = CM_HIR_DECL_REGION_ERASED;
+    metadata->types = fixture->types;
+    metadata->type_count = 4u;
+
+    fixture->allocate_parameters[0] = 4u;
+    fixture->allocate_parameters[1] = 2u;
+    allocate = &fixture->associated_items[0];
+    allocate->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    allocate->parent_kind = CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+    allocate->parent_local = 1u;
+    allocate->name = (CmHirDeclarationString)S("allocate");
+    allocate->visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    allocate->source_ordinal = 2u;
+    allocate->receiver = CM_HIR_DECL_RECEIVER_REF_SHARED;
+    allocate->parameter_count = 2u;
+    allocate->parameter_types = fixture->allocate_parameters;
+    allocate->return_type = 1u;
+    allocate->abi = (CmHirDeclarationString)S("Rust");
+    allocate->safety = CM_HIR_DECL_SAFETY_UNSAFE;
+
+    fixture->fallback_parameters[0] = 4u;
+    fallback = &fixture->associated_items[1];
+    fallback->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fallback->parent_kind = CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+    fallback->parent_local = 1u;
+    fallback->name = (CmHirDeclarationString)S("fallback");
+    fallback->visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fallback->source_ordinal = 3u;
+    fallback->predicate_start = 1u;
+    fallback->predicate_count = 1u;
+    fallback->receiver = CM_HIR_DECL_RECEIVER_REF_SHARED;
+    fallback->parameter_count = 1u;
+    fallback->parameter_types = fixture->fallback_parameters;
+    fallback->return_type = 1u;
+    fallback->abi = (CmHirDeclarationString)S("Rust");
+    fallback->safety = CM_HIR_DECL_SAFETY_SAFE;
+    fallback->has_default_body = 1u;
+    metadata->associated_items = fixture->associated_items;
+    metadata->associated_count = 2u;
+
+    fixture->predicates[0].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED;
+    fixture->predicates[0].owner_associated = 2u;
+    fixture->predicates[0].subject_type = 3u;
+    fixture->predicates[0].trait_local = 2u;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->traits[0].name;
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1].owner_module = 1u;
+    fixture->namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[1].name = fixture->traits[1].name;
+    fixture->namespace_entries[1].target_kind =
+        CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[1].target_local = 2u;
+    fixture->namespace_entries[1].export_ordinal = 4u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 2u;
 }
@@ -3371,6 +3528,198 @@ static void test_named_aggregate_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_associated_method_family(void)
+{
+    AssociatedMethodFixture first;
+    AssociatedMethodFixture second;
+    TestFixture old_fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf old_bytes;
+    CmByteBuf bad;
+    size_t record;
+    size_t cursor;
+    size_t predicate_record;
+    size_t aitm;
+
+    associated_method_fixture_init(&first);
+    associated_method_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    cm_byte_buf_init(&old_bytes);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+    assert(get_u32(encoded.data
+        + manifest_family_offset(&encoded, UINT8_C(6)) + 4u) == 2u);
+
+    record = associated_record_offset(&encoded, UINT32_C(0));
+    assert(encoded.data[record] == CM_HIR_DECL_ASSOCIATED_METHOD
+        && encoded.data[record + 1u]
+            == CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL
+        && get_u32(encoded.data + record + 4u) == 1u);
+    cursor = skip_string(&encoded, record + 12u) + 48u;
+    assert(encoded.data[cursor] == CM_HIR_DECL_RECEIVER_REF_SHARED
+        && get_u32(encoded.data + cursor + 4u) == 2u);
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.associated_count == 2u
+        && decoded.traits[0].safety == CM_HIR_DECL_SAFETY_UNSAFE
+        && decoded.traits[0].associated_start == 1u
+        && decoded.traits[0].associated_count == 2u
+        && decoded.associated_items[0].receiver
+            == CM_HIR_DECL_RECEIVER_REF_SHARED
+        && decoded.associated_items[0].parameter_count == 2u
+        && decoded.associated_items[0].parameter_types[0] == 4u
+        && decoded.associated_items[1].has_default_body == 1u
+        && decoded.types[2].kind == CM_HIR_DECL_TYPE_SELF
+        && decoded.types[3].region.kind == CM_HIR_DECL_REGION_ERASED
+        && decoded.predicates[0].owner_kind
+            == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+        && decoded.predicates[0].owner_associated == 2u
+        && decoded.predicates[0].owner_value == 0u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    fixture_init(&old_fixture);
+    assert(cm_hir_declaration_metadata_encode(&old_fixture.metadata,
+        &old_bytes) == CM_HIR_DECL_METADATA_OK);
+    aitm = section_offset(&old_bytes, "AITM");
+    assert(get_u64(old_bytes.data + aitm + 4u) == UINT64_C(4)
+        && get_u32(old_bytes.data + aitm + 12u) == 0u
+        && get_u32(old_bytes.data
+            + manifest_family_offset(&old_bytes, UINT8_C(6)) + 4u) == 0u);
+
+    associated_method_fixture_init(&first);
+    first.traits[0].associated_count = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.traits[0].safety = CM_HIR_DECL_SAFETY_SAFE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.associated_items[1].source_ordinal = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.associated_items[1].name = first.associated_items[0].name;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.associated_items[0].receiver = CM_HIR_DECL_RECEIVER_REF_MUTABLE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.allocate_parameters[0] = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.types[3].region.kind = CM_HIR_DECL_REGION_STATIC;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.types[2].self_trait_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.associated_items[0].abi = (CmHirDeclarationString)S("C");
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.predicates[0].owner_associated = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.predicates[0].owner_kind = CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    first.predicates[0].owner_associated = 0u;
+    first.predicates[0].owner_value = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    associated_method_fixture_init(&first);
+    first.generics[0].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    first.generics[0].owner_local = 1u;
+    first.generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    first.generics[0].name = (CmHirDeclarationString)S("T");
+    first.metadata.generics = first.generics;
+    first.metadata.generic_count = 1u;
+    first.traits[0].generic_start = 1u;
+    first.traits[0].generic_count = 1u;
+    memset(&first.types[2], 0, 4u * sizeof(first.types[0]));
+    first.types[2].kind = CM_HIR_DECL_TYPE_GENERIC;
+    first.types[2].generic_local = 1u;
+    first.types[3].kind = CM_HIR_DECL_TYPE_SELF;
+    first.types[3].self_trait_local = 1u;
+    first.types[4].kind = CM_HIR_DECL_TYPE_RAW_POINTER;
+    first.types[4].child_type = 3u;
+    first.types[4].mutability = CM_HIR_DECL_IMMUTABLE;
+    first.types[5].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    first.types[5].child_type = 4u;
+    first.types[5].mutability = CM_HIR_DECL_IMMUTABLE;
+    first.types[5].region.kind = CM_HIR_DECL_REGION_ERASED;
+    first.metadata.type_count = 6u;
+    first.allocate_parameters[0] = 6u;
+    first.allocate_parameters[1] = 5u;
+    first.fallback_parameters[0] = 6u;
+    first.predicates[0].subject_type = 4u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    bad = copy_bytes(&encoded);
+    record = associated_record_offset(&bad, UINT32_C(0));
+    bad.data[record] = UINT8_C(2);
+    recompute_family_crc(&bad, UINT8_C(6), "AITM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = associated_record_offset(&bad, UINT32_C(0));
+    cursor = skip_string(&bad, record + 12u) + 48u;
+    bad.data[cursor] = CM_HIR_DECL_RECEIVER_REF_MUTABLE;
+    recompute_family_crc(&bad, UINT8_C(6), "AITM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    predicate_record = section_offset(&bad, "PRED") + 24u;
+    bad.data[predicate_record + 1u] = UINT8_C(2);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    aitm = section_offset(&bad, "AITM");
+    put_u32(bad.data + aitm + 12u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS + 1u);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    --bad.len;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&old_bytes);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_primitive_namespace_target(void)
 {
     PrimitiveNamespaceFixture first;
@@ -3513,6 +3862,7 @@ int main(void)
     test_const_value_family();
     test_static_tuple_array_family();
     test_named_aggregate_family();
+    test_associated_method_family();
     test_primitive_namespace_target();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);

@@ -134,6 +134,14 @@ typedef struct CmHirLibraryFunctionSignature {
     int is_const;
     int is_async;
     int is_variadic;
+    /*
+     * Exact association authority.  Free functions use NONE/NONE/0.
+     * Associated methods name their bound parent TRAIT and retain receiver
+     * and default-body declaration facts without retaining a body.
+     */
+    CmHirDefId parent_trait;
+    CmHirReceiverKind receiver;
+    int has_default_body;
 } CmHirLibraryFunctionSignature;
 
 /*
@@ -202,13 +210,14 @@ CmHirLibraryArtifactResult cm_hir_library_artifact_build(
     const char *extern_name);
 
 /*
- * Builds the declaration-v2 library view. In addition to the legacy type
- * namespace, it authenticates predicate-free public free functions, consts,
- * and statics, unit/tuple struct constructors, plus same-crate value
- * reexports, including authenticated enum-variant reexports in their exact
- * TYPE/VALUE namespaces. Constructors retain their nominal DefIds and are
- * never represented as free functions. Bodies, evaluated consts, external
- * reexports, macros, predicates, and link objects are not represented.
+ * Builds the declaration library view. In addition to the legacy type
+ * namespace, it authenticates public free functions, consts, and statics,
+ * associated methods reachable through exported traits, unit/tuple struct
+ * constructors, plus same-crate value reexports, including authenticated
+ * enum-variant reexports in their exact TYPE/VALUE namespaces. Constructors
+ * and associated methods are never represented as module free functions.
+ * Bodies, evaluated consts, external reexports, macros, and link objects are
+ * not represented.
  */
 CmHirLibraryArtifactResult cm_hir_library_declaration_artifact_build(
     CmHirLibraryArtifact *artifact, const CmHirContext *context,
@@ -236,6 +245,16 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_type(
 CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
     const CmHirLibraryArtifact *artifact,
     const CmHirLibraryPathSegment *segments, size_t segment_count,
+    CmHirLibraryValue *out_value);
+
+/*
+ * Resolves one authenticated method below an exported trait identity.
+ * Associated methods are not module VALUE bindings and are never returned
+ * by `cm_hir_library_artifact_lookup_value`.
+ */
+CmHirLibraryStatus cm_hir_library_artifact_lookup_associated_method(
+    const CmHirLibraryArtifact *artifact, CmHirDefId parent_trait,
+    const CmHirLibraryPathSegment *method_name,
     CmHirLibraryValue *out_value);
 
 /*

@@ -185,6 +185,43 @@ static const unsigned char primitive_reexport_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char allocator_like_fixture_source[] =
+    "#[stable(feature = \"marker\", since = \"1.0.0\")]\n"
+    "pub trait Marker {}\n"
+    "#[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
+    "pub unsafe trait AllocatorLike {\n"
+    "  #[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
+    "  fn allocate(&self, size: usize) -> usize;\n"
+    "  #[stable(feature = \"allocator_like\", since = \"1.0.0\")]\n"
+    "  fn allocate_zeroed(&self, size: usize) -> usize { size }\n"
+    "  #[deprecated(since = \"1.1.0\", note = \"example\")]\n"
+    "  unsafe fn deallocate(&self, token: usize);\n"
+    "  #[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
+    "  unsafe fn grow(&self, token: usize, new_size: usize) -> usize "
+        "{ new_size }\n"
+    "  #[stable(feature = \"allocator_like\", since = \"1.0.0\")]\n"
+    "  unsafe fn grow_zeroed(&self, token: usize, new_size: usize) -> usize "
+        "{ new_size }\n"
+    "  #[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
+    "  unsafe fn shrink(&self, token: usize, new_size: usize) -> usize "
+        "{ new_size }\n"
+    "  #[stable(feature = \"allocator_like\", since = \"1.0.0\")]\n"
+    "  fn by_ref(&self) where Self: Marker {}\n"
+    "}\n"
+    "pub fn needs<X: Marker>() {}\n";
+
+static const unsigned char inferred_associated_return_fixture_source[] =
+    "pub trait Marker {}\n"
+    "pub unsafe trait AllocatorLike {\n"
+    "  fn by_ref(&self) -> &Self where Self: Marker;\n"
+    "}\n"
+    "pub fn needs<X: Marker>() {}\n";
+
+static const unsigned char safe_associated_trait_fixture_source[] =
+    "pub trait Marker {}\n"
+    "pub trait SafeLike { fn ping(&self); }\n"
+    "pub fn needs<X: Marker>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -303,6 +340,14 @@ static void primitive_reexport_fixture_init(CaptureFixture *fixture,
     fixture_init_source(fixture, with_noise,
         "v30-primitive-reexports.rs", primitive_reexport_fixture_source,
         sizeof(primitive_reexport_fixture_source) - 1u);
+}
+
+static void allocator_like_fixture_init(CaptureFixture *fixture,
+    int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "allocator-like.rs",
+        allocator_like_fixture_source,
+        sizeof(allocator_like_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -4264,10 +4309,212 @@ static void test_primitive_reexport_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static void test_allocator_like_associated_method_capture(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture rejected;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationTrait *allocator = NULL;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId trait_id;
+    CmHirItemId method_id;
+    CmHirItem *trait_item;
+    CmHirItem *method;
+    CmInternId saved_metadata;
+    CmHirDefId saved_parent;
+    CmHirSafety saved_safety;
+    int saved_default;
+    CmHirBodyId saved_body;
+    CmHirReceiverKind saved_receiver;
+    size_t saved_hir_item_count;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    size_t index;
+    allocator_like_fixture_init(&first, 0);
+    allocator_like_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == 2u && result.associated_count == 7u
+        && result.projected_semantic_attribute_count == 9u
+        && metadata.associated_count == 7u);
+    for (index = 0u; index < metadata.trait_count; ++index) {
+        if (declaration_string_is(metadata.traits[index].name,
+                "AllocatorLike")) allocator = &metadata.traits[index];
+    }
+    assert(allocator != NULL
+        && allocator->safety == CM_HIR_DECL_SAFETY_UNSAFE
+        && allocator->associated_start == 1u
+        && allocator->associated_count == 7u);
+    for (index = 0u; index < metadata.associated_count; ++index) {
+        const CmHirDeclarationAssociatedItem *associated =
+            &metadata.associated_items[index];
+        assert(associated->kind == CM_HIR_DECL_ASSOCIATED_METHOD
+            && associated->parent_kind
+                == CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL
+            && associated->parent_local == 1u
+            && associated->visibility.kind
+                == CM_HIR_DECL_VISIBILITY_PRIVATE
+            && associated->source_ordinal == index
+            && associated->receiver == CM_HIR_DECL_RECEIVER_REF_SHARED
+            && associated->parameter_count >= 1u
+            && associated->parameter_types != NULL
+            && associated->return_type != 0u
+            && declaration_string_is(associated->abi, "Rust")
+            && associated->is_const == 0u && associated->is_async == 0u
+            && associated->is_variadic == 0u);
+    }
+    assert(declaration_string_is(metadata.associated_items[0].name,
+            "allocate")
+        && metadata.associated_items[0].has_default_body == 0u
+        && declaration_string_is(metadata.associated_items[1].name,
+            "allocate_zeroed")
+        && metadata.associated_items[1].has_default_body == 1u
+        && metadata.associated_items[2].safety
+            == CM_HIR_DECL_SAFETY_UNSAFE
+        && declaration_string_is(metadata.associated_items[6].name,
+            "by_ref")
+        && metadata.associated_items[6].predicate_count == 1u
+        && metadata.predicate_count == 2u
+        && metadata.predicates[1].owner_kind
+            == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+        && metadata.predicates[1].owner_value == 0u
+        && metadata.predicates[1].owner_associated == 7u
+        && metadata.predicates[1].argument_count == 0u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.associated_count == 7u);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+
+    saved_associated = metadata.associated_items;
+    saved_traits = metadata.traits;
+    saved_namespace = metadata.namespace_entries;
+    trait_item = (CmHirItem *)find_item(&first, "AllocatorLike", &trait_id);
+    method = (CmHirItem *)find_item(&first, "allocate_zeroed", &method_id);
+    assert(trait_item != NULL && method != NULL
+        && method->attribute_count == 1u && method->attributes != NULL);
+#define ASSERT_ATOMIC_TRAIT_FAILURE(reason_) do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR \
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS \
+        && result.failure_reason == (reason_) \
+        && metadata.associated_items == saved_associated \
+        && metadata.traits == saved_traits \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+    input = capture_input(&first);
+    saved_safety = trait_item->data.trait_item.safety;
+    trait_item->data.trait_item.safety = CM_HIR_SAFE;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    trait_item->data.trait_item.safety = saved_safety;
+
+    saved_parent = method->parent_definition;
+    method->parent_definition = cm_hir_def_id_none();
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    method->parent_definition = saved_parent;
+
+    saved_safety = method->data.function_item.signature.safety;
+    method->data.function_item.signature.safety = CM_HIR_UNSAFE;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    method->data.function_item.signature.safety = saved_safety;
+
+    saved_default = method->data.function_item.has_default_body;
+    method->data.function_item.has_default_body = !saved_default;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    method->data.function_item.has_default_body = saved_default;
+
+    saved_body = method->data.function_item.body;
+    assert(saved_body != CM_HIR_BODY_NONE);
+    method->data.function_item.body = CM_HIR_BODY_NONE;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    method->data.function_item.body = saved_body;
+
+    saved_metadata = method->attributes[0].metadata;
+    method->attributes[0].metadata = cm_hir_intern(&first.hir,
+        "doc(notable_trait)");
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    method->attributes[0].metadata = saved_metadata;
+
+    saved_receiver = method->data.function_item.signature.receiver;
+    method->data.function_item.signature.receiver =
+        CM_HIR_RECEIVER_REF_MUTABLE;
+    ASSERT_ATOMIC_TRAIT_FAILURE(
+        CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED);
+    method->data.function_item.signature.receiver = saved_receiver;
+#undef ASSERT_ATOMIC_TRAIT_FAILURE
+
+    saved_hir_item_count = first.hir.items.len;
+    first.hir.items.len = CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS + 1u;
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED
+        && metadata.associated_items == saved_associated
+        && metadata.traits == saved_traits
+        && metadata.namespace_entries == saved_namespace);
+    first.hir.items.len = saved_hir_item_count;
+
+    fixture_init_source(&rejected, 0, "associated-inferred-return.rs",
+        inferred_associated_return_fixture_source,
+        sizeof(inferred_associated_return_fixture_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
+        && metadata.associated_items == saved_associated
+        && metadata.traits == saved_traits
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
+
+    fixture_init_source(&rejected, 0, "associated-safe-trait.rs",
+        safe_associated_trait_fixture_source,
+        sizeof(safe_associated_trait_fixture_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED
+        && metadata.associated_items == saved_associated
+        && metadata.traits == saved_traits
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
+
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
 int main(void)
 {
     test_primitive_reexports_and_determinism();
     test_primitive_reexport_hostile_mutations_are_atomic();
+    test_allocator_like_associated_method_capture();
     test_generic_enum_projection_glob_and_field_boundary();
     test_generic_enum_hostile_mutations_are_atomic();
     test_static_capture_and_determinism();

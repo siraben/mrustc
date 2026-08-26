@@ -35,6 +35,10 @@ typedef struct CmHirLibraryOwnedModule {
 } CmHirLibraryOwnedModule;
 
 typedef struct CmHirLibraryOwnedValue {
+    /*
+     * FUNCTION declarations with a non-none parent_trait are associated
+     * methods reachable through that exported trait, not module entries.
+     */
     CmHirLibraryValue declaration;
     CmHirLibraryValueKind storage_kind;
     CmHirTypeId *parameter_types;

@@ -113,8 +113,15 @@ typedef enum CmHirDeclarationMutability {
 typedef enum CmHirDeclarationRegionKind {
     CM_HIR_DECL_REGION_STATIC = 1,
     CM_HIR_DECL_REGION_EARLY_BOUND = 2,
-    CM_HIR_DECL_REGION_LATE_BOUND = 3
+    CM_HIR_DECL_REGION_LATE_BOUND = 3,
+    CM_HIR_DECL_REGION_ERASED = 4
 } CmHirDeclarationRegionKind;
+
+typedef enum CmHirDeclarationSafety {
+    /* These tags intentionally match the existing HIR safety lattice. */
+    CM_HIR_DECL_SAFETY_SAFE = 0,
+    CM_HIR_DECL_SAFETY_UNSAFE = 1
+} CmHirDeclarationSafety;
 
 typedef struct CmHirDeclarationRegion {
     uint8_t kind;
@@ -133,6 +140,10 @@ typedef struct CmHirDeclarationTrait {
     uint32_t source_ordinal;
     uint32_t generic_start;
     uint32_t generic_count;
+    /* Contiguous nominal-owned AITM range; zero count requires zero start. */
+    uint32_t associated_start;
+    uint32_t associated_count;
+    uint8_t safety;
 } CmHirDeclarationTrait;
 
 typedef enum CmHirDeclarationVisibilityKind {
@@ -147,6 +158,53 @@ typedef struct CmHirDeclarationVisibility {
     /* Nonzero only for RESTRICTED; this first ITEM slice accepts PUBLIC. */
     uint32_t restriction_module;
 } CmHirDeclarationVisibility;
+
+typedef enum CmHirDeclarationAssociatedKind {
+    CM_HIR_DECL_ASSOCIATED_METHOD = 3
+} CmHirDeclarationAssociatedKind;
+
+typedef enum CmHirDeclarationAssociatedParentKind {
+    CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL = 1
+} CmHirDeclarationAssociatedParentKind;
+
+typedef enum CmHirDeclarationReceiverKind {
+    CM_HIR_DECL_RECEIVER_NONE = 0,
+    CM_HIR_DECL_RECEIVER_VALUE = 1,
+    CM_HIR_DECL_RECEIVER_REF_SHARED = 2,
+    CM_HIR_DECL_RECEIVER_REF_MUTABLE = 3,
+    CM_HIR_DECL_RECEIVER_CUSTOM = 4
+} CmHirDeclarationReceiverKind;
+
+/*
+ * First bounded nominal-owned METHOD record. Parameter types include the
+ * receiver in source slot zero. The current profile accepts only shared-ref
+ * receivers, exact Rust ABI, zero method generics, and non-const/non-async/
+ * non-variadic declarations; explicit fields keep those facts authenticated.
+ */
+typedef struct CmHirDeclarationAssociatedItem {
+    uint8_t kind;
+    uint8_t parent_kind;
+    uint32_t parent_local;
+    uint32_t implemented_associated_local;
+    CmHirDeclarationString name;
+    CmHirDeclarationVisibility visibility;
+    uint32_t source_ordinal;
+    uint8_t is_specializable;
+    uint32_t generic_start;
+    uint32_t generic_count;
+    uint32_t predicate_start;
+    uint32_t predicate_count;
+    uint8_t receiver;
+    uint32_t parameter_count;
+    uint32_t *parameter_types;
+    uint32_t return_type;
+    CmHirDeclarationString abi;
+    uint8_t safety;
+    uint8_t is_const;
+    uint8_t is_async;
+    uint8_t is_variadic;
+    uint8_t has_default_body;
+} CmHirDeclarationAssociatedItem;
 
 typedef enum CmHirDeclarationItemKind {
     CM_HIR_DECL_ITEM_STRUCT = 2,
@@ -265,11 +323,11 @@ typedef struct CmHirDeclarationType {
     uint32_t item_local;
     /* Required for SLICE, RAW_POINTER, and REFERENCE. */
     uint32_t child_type;
-    /* Reserved for SELF; SELF is not accepted by this bounded slice. */
+    /* Required for SELF and names its exact enclosing trait. */
     uint32_t self_trait_local;
     /* Required for RAW_POINTER and REFERENCE. */
     uint8_t mutability;
-    /* Required for REFERENCE; this slice accepts STATIC only. */
+    /* Required for REFERENCE; this slice accepts STATIC or ERASED. */
     CmHirDeclarationRegion region;
     /* Required and nonempty for NAMED_ADT_APPLICATION. */
     uint32_t argument_count;
@@ -316,7 +374,16 @@ typedef struct CmHirDeclarationPredicate {
     uint32_t trait_local;
     uint32_t argument_count;
     uint32_t *argument_types;
+    /* VALUE=0 preserves the original v3.0 predicate bytes. */
+    uint8_t owner_kind;
+    /* Required only for ASSOCIATED; owner_value is then zero. */
+    uint32_t owner_associated;
 } CmHirDeclarationPredicate;
+
+typedef enum CmHirDeclarationPredicateOwnerKind {
+    CM_HIR_DECL_PREDICATE_OWNER_VALUE = 0,
+    CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED = 1
+} CmHirDeclarationPredicateOwnerKind;
 
 typedef enum CmHirDeclarationNamespace {
     CM_HIR_DECL_NAMESPACE_TYPE = 1,
@@ -367,6 +434,8 @@ typedef struct CmHirDeclarationMetadata {
     size_t module_count;
     CmHirDeclarationTrait *traits;
     size_t trait_count;
+    CmHirDeclarationAssociatedItem *associated_items;
+    size_t associated_count;
     CmHirDeclarationGeneric *generics;
     size_t generic_count;
     CmHirDeclarationType *types;

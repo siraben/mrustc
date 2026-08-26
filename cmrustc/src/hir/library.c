@@ -577,7 +577,13 @@ static int cm_hir_library_value_equal(const CmHirLibraryValue *left,
             || left->data.function.is_const != right->data.function.is_const
             || left->data.function.is_async != right->data.function.is_async
             || left->data.function.is_variadic
-                != right->data.function.is_variadic) return 0;
+                != right->data.function.is_variadic
+            || !cm_hir_def_id_equal(left->data.function.parent_trait,
+                right->data.function.parent_trait)
+            || left->data.function.receiver
+                != right->data.function.receiver
+            || left->data.function.has_default_body
+                != right->data.function.has_default_body) return 0;
         for (index = 0u; index < left->data.function.parameter_count;
                 ++index) {
             if (left->data.function.parameter_types[index]
@@ -654,6 +660,25 @@ static int cm_hir_library_function_array_shapes_valid(
                 function->nominal_references[index].generic_parameter_kinds,
                 function->nominal_references[index].generic_parameter_count,
                 sizeof(CmHirGenericParamKind))) return 0;
+    }
+    return 1;
+}
+
+static int cm_hir_library_function_association_shape_valid(
+    const CmHirLibraryFunctionSignature *function)
+{
+    if (function == NULL
+        || (unsigned int)function->receiver
+            > (unsigned int)CM_HIR_RECEIVER_CUSTOM
+        || (function->has_default_body != 0
+            && function->has_default_body != 1)
+        || ((function->parent_trait.crate_id == CM_HIR_CRATE_NONE)
+            != (function->parent_trait.index == CM_HIR_DEF_INDEX_NONE))) {
+        return 0;
+    }
+    if (cm_hir_def_id_is_none(function->parent_trait)) {
+        return function->receiver == CM_HIR_RECEIVER_NONE
+            && function->has_default_body == 0;
     }
     return 1;
 }
@@ -820,6 +845,8 @@ CmHirLibraryStatus cm_hir_library_owned_data_add_value(
     if (value->kind == CM_HIR_LIBRARY_VALUE_FUNCTION) {
         if (value->data.function.return_type == CM_HIR_TYPE_NONE
             || !cm_hir_library_function_array_shapes_valid(
+                &value->data.function)
+            || !cm_hir_library_function_association_shape_valid(
                 &value->data.function)
             || (value->data.function.generic_parameter_count == 0u
                 ? value->data.function.generic_parameter_start
@@ -1639,9 +1666,8 @@ static int cm_hir_library_add_value_from_item(
 
     if (state == NULL || item == NULL
         || cm_hir_def_id_is_none(item->definition)
-        || !cm_hir_def_id_is_none(item->parent_definition)
-        || (item->kind == CM_HIR_ITEM_FUNCTION
-            && item->data.function_item.has_default_body)
+        || (item->kind != CM_HIR_ITEM_FUNCTION
+            && !cm_hir_def_id_is_none(item->parent_definition))
         || ((item->kind == CM_HIR_ITEM_CONST
                 || item->kind == CM_HIR_ITEM_STATIC)
             && item->data.value_item.has_default_body)
@@ -1661,7 +1687,9 @@ static int cm_hir_library_add_value_from_item(
         const CmHirFunctionSignature *signature;
 
         signature = &item->data.function_item.signature;
-        if (signature->receiver != CM_HIR_RECEIVER_NONE
+        if ((cm_hir_def_id_is_none(item->parent_definition)
+                && (signature->receiver != CM_HIR_RECEIVER_NONE
+                    || item->data.function_item.has_default_body))
             || (signature->parameter_count != 0u
                 && signature->parameters == NULL)) return 0;
         if (!cm_hir_library_collect_nominal_references(state->context,
@@ -1712,6 +1740,10 @@ static int cm_hir_library_add_value_from_item(
         value.data.function.is_const = signature->is_const;
         value.data.function.is_async = signature->is_async;
         value.data.function.is_variadic = signature->is_variadic;
+        value.data.function.parent_trait = item->parent_definition;
+        value.data.function.receiver = signature->receiver;
+        value.data.function.has_default_body =
+            item->data.function_item.has_default_body;
     } else {
         value.data.value.type = item->data.value_item.type;
         value.data.value.mutability = item->data.value_item.mutability;
@@ -2456,9 +2488,8 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
     if (value == NULL || item == NULL
         || value->kind != cm_hir_library_value_kind(item->kind)
         || !cm_hir_def_id_equal(value->definition, item->definition)
-        || !cm_hir_def_id_is_none(item->parent_definition)
-        || (item->kind == CM_HIR_ITEM_FUNCTION
-            && item->data.function_item.has_default_body)
+        || (item->kind != CM_HIR_ITEM_FUNCTION
+            && !cm_hir_def_id_is_none(item->parent_definition))
         || ((item->kind == CM_HIR_ITEM_CONST
                 || item->kind == CM_HIR_ITEM_STATIC)
             && item->data.value_item.has_default_body)
@@ -2472,7 +2503,11 @@ static int cm_hir_library_value_shape_equal(const CmHirLibraryValue *value,
         CmHirLibraryFunctionSignature item_function;
 
         signature = &item->data.function_item.signature;
-        if (signature->receiver != CM_HIR_RECEIVER_NONE
+        if (!cm_hir_def_id_equal(value->data.function.parent_trait,
+                item->parent_definition)
+            || value->data.function.receiver != signature->receiver
+            || value->data.function.has_default_body
+                != item->data.function_item.has_default_body
             || value->data.function.parameter_count
                 != signature->parameter_count
             || value->data.function.return_type != signature->return_type
@@ -2529,6 +2564,8 @@ static int cm_hir_library_owned_value_valid(
                 value->data.function.return_type)
             || !cm_hir_library_owned_function_storage_valid(
                 &state->owned.names, owned_value)
+            || !cm_hir_library_function_association_shape_valid(
+                &value->data.function)
             || !cm_hir_library_function_references_structurally_valid(
                 state->context, &value->data.function)
             || (value->data.function.generic_parameter_count == 0u
@@ -2567,6 +2604,23 @@ static int cm_hir_library_owned_value_valid(
                 || !cm_hir_def_id_equal(parameter->owner,
                     value->definition)
                 || parameter->index != index) return 0;
+        }
+        if (!cm_hir_def_id_is_none(value->data.function.parent_trait)) {
+            const CmHirDefinition *parent_definition;
+            const CmHirItem *parent_item;
+
+            parent_definition = cm_hir_lookup_definition(state->context,
+                value->data.function.parent_trait);
+            parent_item = parent_definition == NULL
+                    || parent_definition->state != CM_HIR_DEFINITION_BOUND
+                    || parent_definition->kind != CM_HIR_DEFINITION_ITEM
+                ? NULL : cm_hir_get_item(state->context,
+                    parent_definition->entity.item_id);
+            if (value->data.function.parent_trait.crate_id != state->crate_id
+                || parent_item == NULL
+                || parent_item->kind != CM_HIR_ITEM_TRAIT
+                || !cm_hir_def_id_equal(parent_item->definition,
+                    value->data.function.parent_trait)) return 0;
         }
         break;
     case CM_HIR_LIBRARY_VALUE_CONST:
@@ -2629,8 +2683,9 @@ static int cm_hir_library_owned_value_valid(
         || !definition->has_reserved_item_kind
         || definition->reserved_item_kind != expected_kind) return 0;
     if (definition->state == CM_HIR_DEFINITION_RESERVED) {
-        return value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION
-            || cm_hir_library_reserved_function_predicates_valid(
+        if (value->kind != CM_HIR_LIBRARY_VALUE_FUNCTION) return 1;
+        return cm_hir_def_id_is_none(value->data.function.parent_trait)
+            && cm_hir_library_reserved_function_predicates_valid(
                 state->context, value->definition, &value->data.function);
     }
     if (definition->state == CM_HIR_DEFINITION_BOUND) {
@@ -2803,6 +2858,57 @@ static int cm_hir_library_owned_module_present(
     const CmHirLibraryArtifactState *state, CmHirDefId definition)
 {
     return cm_hir_library_find_definition_module(state, definition) != NULL;
+}
+
+static int cm_hir_library_trait_is_exported(
+    const CmHirLibraryArtifactState *state, CmHirDefId trait_definition)
+{
+    size_t module_index;
+
+    if (state == NULL || cm_hir_def_id_is_none(trait_definition)) return 0;
+    for (module_index = 0u; module_index < state->owned.modules.len;
+            ++module_index) {
+        const CmHirLibraryOwnedModule *module;
+        size_t entry_index;
+
+        module = (const CmHirLibraryOwnedModule *)cm_vec_at_const(
+            &state->owned.modules, module_index);
+        if (module == NULL) return 0;
+        for (entry_index = 0u; entry_index < module->entries.len;
+                ++entry_index) {
+            const CmHirLibraryOwnedEntry *entry;
+
+            entry = (const CmHirLibraryOwnedEntry *)cm_vec_at_const(
+                &module->entries, entry_index);
+            if (entry != NULL && entry->kind == CM_HIR_LIBRARY_BINDING_TRAIT
+                && cm_hir_def_id_equal(entry->target, trait_definition)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int cm_hir_library_add_exported_trait_methods(
+    CmHirLibraryArtifactState *state)
+{
+    size_t item_index;
+
+    if (state == NULL || state->context == NULL) return 0;
+    for (item_index = 0u; item_index < state->context->items.len;
+            ++item_index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&state->context->items,
+            item_index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->definition.crate_id != state->crate_id
+            || cm_hir_def_id_is_none(item->parent_definition)
+            || !cm_hir_library_trait_is_exported(state,
+                item->parent_definition)) continue;
+        if (!cm_hir_library_add_value_from_item(state, item)) return 0;
+    }
+    return 1;
 }
 
 static int cm_hir_library_entry_is_value_namespace(
@@ -3006,7 +3112,12 @@ static int cm_hir_library_owned_data_validate(
 
         value = (const CmHirLibraryOwnedValue *)cm_vec_at_const(
             &candidate->owned.values, value_index);
-        referenced = 0;
+        referenced = value != NULL
+                && value->declaration.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+                && !cm_hir_def_id_is_none(
+                    value->declaration.data.function.parent_trait)
+            ? cm_hir_library_trait_is_exported(candidate,
+                value->declaration.data.function.parent_trait) : 0;
         for (module_index = 0u;
                 module_index < candidate->owned.modules.len; ++module_index) {
             const CmHirLibraryOwnedModule *module;
@@ -3028,6 +3139,25 @@ static int cm_hir_library_owned_data_validate(
             }
         }
         if (!referenced) return 0;
+    }
+    for (value_index = 0u; value_index < candidate->context->items.len;
+            ++value_index) {
+        const CmHirItem *item;
+        const CmHirLibraryOwnedValue *value;
+
+        item = (const CmHirItem *)cm_vec_at_const(
+            &candidate->context->items, value_index);
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || item->definition.crate_id != candidate->crate_id
+            || cm_hir_def_id_is_none(item->parent_definition)
+            || !cm_hir_library_trait_is_exported(candidate,
+                item->parent_definition)) continue;
+        value = cm_hir_library_find_value(candidate, item->definition);
+        if (value == NULL
+            || value->declaration.kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+            || !cm_hir_def_id_equal(
+                value->declaration.data.function.parent_trait,
+                item->parent_definition)) return 0;
     }
     *out_public_type_entry_count = public_type_entry_count;
     *out_public_value_entry_count = public_value_entry_count;
@@ -3473,6 +3603,11 @@ static CmHirLibraryArtifactResult cm_hir_library_artifact_build_internal(
             goto fail_candidate;
         }
     }
+    if (include_values
+        && !cm_hir_library_add_exported_trait_methods(&candidate)) {
+        result.status = CM_HIR_LIBRARY_INVALID_HIR;
+        goto fail_candidate;
+    }
     result = cm_hir_library_artifact_restore_owned(artifact, context,
         crate_id, root_module->definition, extern_name, &candidate.owned);
     cm_hir_library_owned_data_destroy(&candidate.owned);
@@ -3905,6 +4040,81 @@ static int cm_hir_library_segment_identifier_valid(
                 || segment->bytes[index] == (unsigned char)'_')) return 0;
     }
     return 1;
+}
+
+CmHirLibraryStatus cm_hir_library_artifact_lookup_associated_method(
+    const CmHirLibraryArtifact *artifact, CmHirDefId parent_trait,
+    const CmHirLibraryPathSegment *method_name,
+    CmHirLibraryValue *out_value)
+{
+    const CmHirLibraryArtifactState *state;
+    const CmHirLibraryOwnedValue *matched;
+    const CmHirDefinition *parent_definition;
+    const CmHirItem *parent_item;
+    size_t value_index;
+    uint32_t matches;
+
+    if (out_value != NULL) memset(out_value, 0, sizeof(*out_value));
+    state = cm_hir_library_state_const(artifact);
+    if (state == NULL || out_value == NULL
+        || !cm_hir_library_segment_identifier_valid(method_name)
+        || cm_hir_def_id_is_none(parent_trait)
+        || ((parent_trait.crate_id == CM_HIR_CRATE_NONE)
+            != (parent_trait.index == CM_HIR_DEF_INDEX_NONE))
+        || state->context == NULL) return CM_HIR_LIBRARY_INVALID_ARGUMENT;
+    if (!cm_hir_library_trait_is_exported(state, parent_trait))
+        return CM_HIR_LIBRARY_NOT_FOUND;
+    parent_definition = cm_hir_lookup_definition(state->context,
+        parent_trait);
+    parent_item = parent_definition == NULL
+            || parent_definition->state != CM_HIR_DEFINITION_BOUND
+            || parent_definition->kind != CM_HIR_DEFINITION_ITEM
+        ? NULL : cm_hir_get_item(state->context,
+            parent_definition->entity.item_id);
+    if (parent_item == NULL || parent_item->kind != CM_HIR_ITEM_TRAIT
+        || !cm_hir_def_id_equal(parent_item->definition, parent_trait)) {
+        return CM_HIR_LIBRARY_INVALID_HIR;
+    }
+    matched = NULL;
+    matches = 0u;
+    for (value_index = 0u; value_index < state->owned.values.len;
+            ++value_index) {
+        const CmHirLibraryOwnedValue *owned_value;
+        const CmHirDefinition *definition;
+        const CmHirItem *item;
+        const CmInternedString *name;
+
+        owned_value = (const CmHirLibraryOwnedValue *)cm_vec_at_const(
+            &state->owned.values, value_index);
+        if (owned_value == NULL
+            || owned_value->declaration.kind
+                != CM_HIR_LIBRARY_VALUE_FUNCTION
+            || !cm_hir_def_id_equal(
+                owned_value->declaration.data.function.parent_trait,
+                parent_trait)) continue;
+        if (!cm_hir_library_owned_value_valid(state, owned_value))
+            return CM_HIR_LIBRARY_INVALID_HIR;
+        definition = cm_hir_lookup_definition(state->context,
+            owned_value->declaration.definition);
+        item = definition == NULL
+                || definition->state != CM_HIR_DEFINITION_BOUND
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+            ? NULL : cm_hir_get_item(state->context,
+                definition->entity.item_id);
+        name = item == NULL ? NULL
+            : cm_interner_get(&state->context->strings, item->name);
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || name == NULL || name->len != method_name->length
+            || memcmp(name->bytes, method_name->bytes, name->len) != 0) {
+            continue;
+        }
+        matched = owned_value;
+        matches += 1u;
+    }
+    if (matches == 0u) return CM_HIR_LIBRARY_NOT_FOUND;
+    if (matches != 1u || matched == NULL) return CM_HIR_LIBRARY_AMBIGUOUS;
+    *out_value = matched->declaration;
+    return CM_HIR_LIBRARY_OK;
 }
 
 static int cm_hir_library_import_name_is(const CmImportResolver *imports,
