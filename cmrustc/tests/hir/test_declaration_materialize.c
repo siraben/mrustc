@@ -21,6 +21,14 @@ typedef struct TestFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[8];
 } TestFixture;
 
+typedef struct AliasFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationType types[1];
+    CmHirDeclarationItem items[3];
+    CmHirDeclarationNamespaceEntry namespace_entries[6];
+} AliasFixture;
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -177,6 +185,78 @@ static void item_fixture_init(TestFixture *fixture)
     metadata->namespace_count = 7u;
 }
 
+static void alias_fixture_init(AliasFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("depcrate");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("layout-error-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("AllocError");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 1u;
+    fixture->items[1].kind = CM_HIR_DECL_ITEM_TYPE_ALIAS;
+    fixture->items[1].owner_module = 1u;
+    fixture->items[1].name = (CmHirDeclarationString)S("LayoutErr");
+    fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[1].source_ordinal = 2u;
+    fixture->items[1].alias_target_type = 1u;
+    fixture->items[2].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[2].owner_module = 1u;
+    fixture->items[2].name = (CmHirDeclarationString)S("LayoutError");
+    fixture->items[2].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[2].source_ordinal = 3u;
+    metadata->items = fixture->items;
+    metadata->item_count = 3u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    fixture->types[0].item_local = 3u;
+    metadata->types = fixture->types;
+    metadata->type_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->items[1].name;
+    fixture->namespace_entries[1].target_local = 2u;
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[1];
+    fixture->namespace_entries[2].name =
+        (CmHirDeclarationString)S("LayoutErrReexport");
+    fixture->namespace_entries[2].export_ordinal = 4u;
+    fixture->namespace_entries[3] = fixture->namespace_entries[0];
+    fixture->namespace_entries[3].name = fixture->items[2].name;
+    fixture->namespace_entries[3].target_local = 3u;
+    fixture->namespace_entries[3].export_ordinal = 3u;
+    fixture->namespace_entries[4] = fixture->namespace_entries[3];
+    fixture->namespace_entries[4].name =
+        (CmHirDeclarationString)S("LayoutErrorReexport");
+    fixture->namespace_entries[4].export_ordinal = 5u;
+    fixture->namespace_entries[5] = fixture->namespace_entries[0];
+    fixture->namespace_entries[5].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 6u;
+}
+
 static CmHirDeclarationMaterializeExpectation expectation_for(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -251,6 +331,20 @@ static CmHirLibraryBinding lookup_value_binding(
     assert(cm_hir_library_artifact_lookup_value_binding(artifact, path, 2u,
         &binding) == CM_HIR_LIBRARY_OK);
     return binding;
+}
+
+static CmHirLibraryStatus lookup_value_binding_status(
+    const CmHirLibraryArtifact *artifact, const char *name)
+{
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryBinding binding;
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = sizeof("dep") - 1u;
+    path[1].bytes = (const unsigned char *)name;
+    path[1].length = strlen(name);
+    memset(&binding, 0, sizeof(binding));
+    return cm_hir_library_artifact_lookup_value_binding(artifact, path, 2u,
+        &binding);
 }
 
 static const CmHirItem *find_item(const CmHirContext *context,
@@ -414,6 +508,65 @@ static void test_item_fresh_consumer(CmHirContext *context,
         "reexported_item");
     assert_item_parameter(context, direct, item_definition);
     assert_item_parameter(context, reexported, item_definition);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_alias_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId layout_error)
+{
+    static const unsigned char source_text[] =
+        "pub fn direct(_x: dep::LayoutError) {}\n"
+        "pub fn direct_reexport(_x: dep::LayoutErrorReexport) {}\n"
+        "pub fn alias(_x: dep::LayoutErr) {}\n"
+        "pub fn alias_reexport(_x: dep::LayoutErrReexport) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "alias_consumer.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "alias_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    assert_item_parameter(context,
+        find_item(context, CM_HIR_ITEM_FUNCTION, "direct"), layout_error);
+    assert_item_parameter(context,
+        find_item(context, CM_HIR_ITEM_FUNCTION, "direct_reexport"),
+        layout_error);
+    assert_item_parameter(context,
+        find_item(context, CM_HIR_ITEM_FUNCTION, "alias"), layout_error);
+    assert_item_parameter(context,
+        find_item(context, CM_HIR_ITEM_FUNCTION, "alias_reexport"),
+        layout_error);
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
@@ -777,9 +930,167 @@ static void test_item_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_alias_materialize_and_consume(void)
+{
+    AliasFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding alloc_error;
+    CmHirLibraryBinding alias;
+    CmHirLibraryBinding alias_reexport;
+    CmHirLibraryBinding layout_error;
+    CmHirLibraryBinding layout_error_reexport;
+    const CmHirItem *alias_item;
+    const CmHirItem *layout_error_item;
+    const CmHirDefinition *alias_definition;
+    const CmHirDefinition *layout_error_definition;
+    const CmHirType *alias_target;
+    ContextLengths lengths;
+    uint8_t saved_kind;
+    uint32_t saved_local;
+
+    alias_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 111u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.module_count == 1u
+        && result.item_count == 3u
+        && result.public_type_entry_count == 5u
+        && result.public_value_entry_count == 1u);
+
+    alloc_error = lookup_value_binding(&artifact, "AllocError");
+    alias = lookup_binding(&artifact, "LayoutErr");
+    alias_reexport = lookup_binding(&artifact, "LayoutErrReexport");
+    layout_error = lookup_binding(&artifact, "LayoutError");
+    layout_error_reexport = lookup_binding(&artifact,
+        "LayoutErrorReexport");
+    assert(alloc_error.kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+        && alias.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && alias.type_kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
+        && alias_reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && alias_reexport.type_kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND
+        && layout_error.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && layout_error.type_kind == CM_HIR_TYPE_ADT_KIND
+        && layout_error_reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && layout_error_reexport.type_kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(alias.definition,
+            alias_reexport.definition)
+        && cm_hir_def_id_equal(layout_error.definition,
+            layout_error_reexport.definition)
+        && !cm_hir_def_id_equal(alias.definition, layout_error.definition));
+    assert(lookup_value_binding_status(&artifact, "LayoutErr")
+            == CM_HIR_LIBRARY_NOT_FOUND
+        && lookup_value_binding_status(&artifact, "LayoutErrReexport")
+            == CM_HIR_LIBRARY_NOT_FOUND
+        && lookup_value_binding_status(&artifact, "LayoutError")
+            == CM_HIR_LIBRARY_NOT_FOUND
+        && lookup_value_binding_status(&artifact, "LayoutErrorReexport")
+            == CM_HIR_LIBRARY_NOT_FOUND);
+
+    alias_item = find_item(&context, CM_HIR_ITEM_TYPE_ALIAS, "LayoutErr");
+    layout_error_item = find_item(&context, CM_HIR_ITEM_STRUCT,
+        "LayoutError");
+    alias_definition = alias_item == NULL ? NULL
+        : cm_hir_lookup_definition(&context, alias_item->definition);
+    layout_error_definition = layout_error_item == NULL ? NULL
+        : cm_hir_lookup_definition(&context, layout_error_item->definition);
+    alias_target = alias_item == NULL ? NULL : cm_hir_get_type(&context,
+        alias_item->data.type_alias_item.target);
+    assert(alias_item != NULL && layout_error_item != NULL
+        && alias_definition != NULL
+        && alias_definition->state == CM_HIR_DEFINITION_BOUND
+        && alias_definition->kind == CM_HIR_DEFINITION_ITEM
+        && alias_definition->has_reserved_item_kind
+        && alias_definition->reserved_item_kind == CM_HIR_ITEM_TYPE_ALIAS
+        && layout_error_definition != NULL
+        && layout_error_definition->state == CM_HIR_DEFINITION_BOUND
+        && layout_error_definition->kind == CM_HIR_DEFINITION_ITEM
+        && layout_error_definition->has_reserved_item_kind
+        && layout_error_definition->reserved_item_kind == CM_HIR_ITEM_STRUCT
+        && cm_hir_def_id_equal(alias_item->definition, alias.definition)
+        && cm_hir_def_id_equal(layout_error_item->definition,
+            layout_error.definition)
+        && cm_hir_def_id_is_none(alias_item->parent_definition)
+        && cm_hir_def_id_is_none(
+            alias_item->data.type_alias_item.trait_item_definition)
+        && alias_item->data.type_alias_item.bound_count == 0u
+        && alias_item->data.type_alias_item.bounds == NULL
+        && alias_target != NULL && alias_target->kind == CM_HIR_TYPE_ADT_KIND
+        && alias_target->data.named_type.argument_count == 0u
+        && cm_hir_def_id_equal(alias_target->data.named_type.definition,
+            layout_error.definition)
+        && layout_error_item->data.aggregate_item.form
+            == CM_HIR_AGGREGATE_UNIT);
+
+    test_alias_fresh_consumer(&context, &artifact,
+        layout_error.definition);
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_local = decoded.items[1].alias_target_type;
+    decoded.items[1].alias_target_type = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 112u);
+    decoded.items[1].alias_target_type = saved_local;
+
+    saved_local = decoded.types[0].item_local;
+    decoded.types[0].item_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 113u);
+    decoded.types[0].item_local = saved_local;
+
+    saved_local = decoded.namespace_entries[5].target_local;
+    decoded.namespace_entries[5].target_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 114u);
+    decoded.namespace_entries[5].target_local = saved_local;
+
+    saved_kind = decoded.items[1].kind;
+    decoded.items[1].kind = CM_HIR_DECL_ITEM_STRUCT;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 115u);
+    decoded.items[1].kind = saved_kind;
+
+    saved_local = decoded.namespace_entries[1].target_local;
+    decoded.namespace_entries[1].target_local = 3u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 116u);
+    decoded.namespace_entries[1].target_local = saved_local;
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
     test_item_materialize_and_consume();
+    test_alias_materialize_and_consume();
     return 0;
 }

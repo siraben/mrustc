@@ -197,8 +197,17 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         if (status != CM_HIR_OK) return status;
     }
     for (index = 0u; index < metadata->item_count; ++index) {
+        CmHirItemKind kind;
+        if (metadata->items[index].kind == CM_HIR_DECL_ITEM_STRUCT) {
+            kind = CM_HIR_ITEM_STRUCT;
+        } else if (metadata->items[index].kind
+                == CM_HIR_DECL_ITEM_TYPE_ALIAS) {
+            kind = CM_HIR_ITEM_TYPE_ALIAS;
+        } else {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
         status = cm_hir_reserve_item_definition_as(context, crate_id,
-            CM_HIR_ITEM_STRUCT, span, &runtime->items[index]);
+            kind, span, &runtime->items[index]);
         if (status != CM_HIR_OK) return status;
     }
     for (index = 0u; index < metadata->value_count; ++index) {
@@ -246,11 +255,24 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
         if (wire->kind == CM_HIR_DECL_TYPE_PRIMITIVE) {
             if (!cm_decl_primitive(wire->primitive, &type))
                 return CM_HIR_INVARIANT_VIOLATION;
-        } else {
+        } else if (wire->kind == CM_HIR_DECL_TYPE_GENERIC) {
             memset(&type, 0, sizeof(type));
             type.kind = CM_HIR_TYPE_PARAMETER_KIND;
             type.data.parameter_type.parameter =
                 runtime->generics[wire->generic_local - 1u];
+        } else if (wire->kind == CM_HIR_DECL_TYPE_NAMED_ADT) {
+            if (wire->item_local == 0u
+                || (size_t)wire->item_local > metadata->item_count
+                || metadata->items[wire->item_local - 1u].kind
+                    != CM_HIR_DECL_ITEM_STRUCT) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_ADT_KIND;
+            type.data.named_type.definition =
+                runtime->items[wire->item_local - 1u];
+        } else {
+            return CM_HIR_INVARIANT_VIOLATION;
         }
         type.span = cm_decl_span(source, (uint32_t)(index + 1u));
         status = cm_hir_add_type(context, &type, &runtime->types[index]);
@@ -300,13 +322,15 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         CmHirItemId item_id;
         CmHirStatus status;
         wire = &metadata->items[index];
-        if (wire->kind != CM_HIR_DECL_ITEM_STRUCT
+        if ((wire->kind != CM_HIR_DECL_ITEM_STRUCT
+                && wire->kind != CM_HIR_DECL_ITEM_TYPE_ALIAS)
             || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
             || wire->visibility.restriction_module != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
         memset(&item, 0, sizeof(item));
-        item.kind = CM_HIR_ITEM_STRUCT;
+        item.kind = wire->kind == CM_HIR_DECL_ITEM_STRUCT
+            ? CM_HIR_ITEM_STRUCT : CM_HIR_ITEM_TYPE_ALIAS;
         item.definition = runtime->items[index];
         item.owner_module = runtime->modules[wire->owner_module - 1u];
         item.parent_definition = cm_hir_def_id_none();
@@ -314,7 +338,18 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         item.visibility.kind = CM_HIR_VIS_PUBLIC;
         item.visibility.restriction = cm_hir_def_id_none();
         item.span = cm_decl_span(source, wire->source_ordinal);
-        item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+        if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
+            item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+        } else {
+            if (wire->alias_target_type == 0u
+                || (size_t)wire->alias_target_type > metadata->type_count) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            item.data.type_alias_item.target =
+                runtime->types[wire->alias_target_type - 1u];
+            item.data.type_alias_item.trait_item_definition =
+                cm_hir_def_id_none();
+        }
         status = cm_hir_add_item(context, &item, &item_id);
         if (status != CM_HIR_OK) return status;
     }
@@ -574,12 +609,23 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
             binding.kind = CM_HIR_LIBRARY_BINDING_TRAIT;
             binding.definition = runtime->traits[entry->target_local - 1u];
         } else if (entry->target_kind == CM_HIR_DECL_TARGET_ITEM) {
+            const CmHirDeclarationItem *item = &metadata->items[
+                entry->target_local - 1u];
             binding.definition = runtime->items[entry->target_local - 1u];
-            binding.type_kind = CM_HIR_TYPE_ADT_KIND;
-            binding.kind = entry->namespace_kind
-                    == CM_HIR_DECL_NAMESPACE_VALUE
-                ? CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
-                : CM_HIR_LIBRARY_BINDING_TYPE;
+            if (item->kind == CM_HIR_DECL_ITEM_STRUCT) {
+                binding.type_kind = CM_HIR_TYPE_ADT_KIND;
+                binding.kind = entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_VALUE
+                    ? CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+                    : CM_HIR_LIBRARY_BINDING_TYPE;
+            } else if (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
+                    && entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_TYPE) {
+                binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
+                binding.type_kind = CM_HIR_TYPE_ALIAS_APPLICATION_KIND;
+            } else {
+                return CM_HIR_LIBRARY_INVALID_HIR;
+            }
         } else if (entry->target_kind == CM_HIR_DECL_TARGET_VALUE) {
             binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
             binding.definition = runtime->values[entry->target_local - 1u];

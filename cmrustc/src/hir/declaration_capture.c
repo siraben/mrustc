@@ -57,6 +57,7 @@ typedef struct CmDeclCaptureState {
     uint32_t *generic_locals;
     unsigned char primitive_types[CM_HIR_DECL_PRIMITIVE_F64 + 1u];
     unsigned char *generic_types;
+    unsigned char *named_item_types;
 } CmDeclCaptureState;
 
 static CmHirDeclarationCaptureResult cm_decl_capture_result(
@@ -293,6 +294,15 @@ static CmDeclCaptureModule *cm_decl_module_by_definition(
     return NULL;
 }
 
+static CmDeclCaptureModule *cm_decl_module_by_local(
+    CmDeclCaptureState *state, uint32_t local)
+{
+    size_t index;
+    for (index = 0u; index < state->module_count; ++index)
+        if (state->modules[index].local == local) return &state->modules[index];
+    return NULL;
+}
+
 static int cm_decl_project_module_attributes(CmDeclCaptureState *state,
     const CmHirAttribute *attributes, uint32_t attribute_count,
     CmHirDeclarationCaptureResult *result)
@@ -482,8 +492,10 @@ static int cm_decl_namespace_target_shape(const CmResolvedBinding *binding,
             && target->value_kind == CM_HIR_LIBRARY_VALUE_FUNCTION;
     if (target->kind == CM_HIR_LIBRARY_BINDING_TYPE)
         return binding->namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
-            && binding->item_kind == CM_AST_ITEM_STRUCT
-            && target->type_kind == CM_HIR_TYPE_ADT_KIND
+            && (binding->item_kind == CM_AST_ITEM_STRUCT
+                || binding->item_kind == CM_AST_ITEM_TYPE_ALIAS)
+            && target->type_kind == (binding->item_kind == CM_AST_ITEM_STRUCT
+                ? CM_HIR_TYPE_ADT_KIND : CM_HIR_TYPE_ALIAS_APPLICATION_KIND)
             && target->primitive_kind == CM_HIR_PRIMITIVE_NONE
             && target->value_kind == CM_HIR_LIBRARY_VALUE_NONE;
     if (target->kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR)
@@ -734,7 +746,8 @@ static int cm_decl_struct_entry_mate(const CmDeclCaptureState *state,
 }
 
 static int cm_decl_struct_source(const CmDeclCaptureState *state,
-    const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal)
+    const CmHirItem *item, int non_exhaustive, uint32_t *out_module,
+    uint32_t *out_ordinal)
 {
     const CmInternedString *item_name = cm_decl_item_name(state, item);
     const CmDeclCaptureNamespace *type_source = NULL;
@@ -749,8 +762,12 @@ static int cm_decl_struct_source(const CmDeclCaptureState *state,
         if (entry->item_kind != CM_AST_ITEM_STRUCT
             || (entry->target.kind != CM_HIR_LIBRARY_BINDING_TYPE
                 && entry->target.kind
-                    != CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR)
-            || !cm_decl_struct_entry_mate(state, index)) return 0;
+                    != CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR)) return 0;
+        if (non_exhaustive) {
+            if (entry->target.kind
+                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+                || cm_decl_struct_entry_mate(state, index)) return 0;
+        } else if (!cm_decl_struct_entry_mate(state, index)) return 0;
         if (entry->source_is_generated) return 0;
         if (!entry->is_import) {
             if (!cm_decl_item_ref_equal(entry->declaration,
@@ -766,30 +783,128 @@ static int cm_decl_struct_source(const CmDeclCaptureState *state,
             }
         }
     }
-    if (type_source == NULL || constructor_source == NULL
-        || type_source->owner_module != constructor_source->owner_module
-        || type_source->export_ordinal != constructor_source->export_ordinal
-        || !cm_decl_item_ref_equal(type_source->declaration,
-            constructor_source->declaration)
-        || !cm_decl_item_ref_equal(type_source->introduced_by,
-            constructor_source->introduced_by)) return 0;
+    if (type_source == NULL
+        || (non_exhaustive && constructor_source != NULL)
+        || (!non_exhaustive && (constructor_source == NULL
+            || type_source->owner_module != constructor_source->owner_module
+            || type_source->export_ordinal
+                != constructor_source->export_ordinal
+            || !cm_decl_item_ref_equal(type_source->declaration,
+                constructor_source->declaration)
+            || !cm_decl_item_ref_equal(type_source->introduced_by,
+                constructor_source->introduced_by)))) return 0;
     *out_module = type_source->owner_module;
     *out_ordinal = type_source->export_ordinal;
     return 1;
 }
 
-static int cm_decl_struct_attribute_provenance(
-    const CmDeclCaptureState *state, const CmHirItem *item)
+static int cm_decl_alias_source(const CmDeclCaptureState *state,
+    const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal)
 {
+    const CmInternedString *item_name = cm_decl_item_name(state, item);
+    const CmDeclCaptureNamespace *source = NULL;
     size_t index;
+    size_t direct_count = 0u;
+    if (item_name == NULL || item_name->len == 0u) return 0;
     for (index = 0u; index < state->namespace_count; ++index) {
         const CmDeclCaptureNamespace *entry =
             &state->namespace_values[index];
         if (!cm_hir_def_id_equal(entry->target.definition,
                 item->definition)) continue;
-        if ((entry->is_import && entry->source_attribute_count != 0u)
-            || (!entry->is_import && entry->source_attribute_count
-                != item->attribute_count)) return 0;
+        if (entry->item_kind != CM_AST_ITEM_TYPE_ALIAS
+            || entry->target.kind != CM_HIR_LIBRARY_BINDING_TYPE
+            || entry->namespace_kind != CM_HIR_DECL_NAMESPACE_TYPE
+            || entry->source_is_generated) return 0;
+        if (!entry->is_import) {
+            if (!cm_decl_item_ref_equal(entry->declaration,
+                    entry->introduced_by)
+                || !cm_decl_bytes_equal(entry->name, entry->name_length,
+                    item_name->bytes, item_name->len)) return 0;
+            source = entry;
+            direct_count += 1u;
+        }
+    }
+    if (direct_count != 1u || source == NULL) return 0;
+    *out_module = source->owner_module;
+    *out_ordinal = source->export_ordinal;
+    return 1;
+}
+
+static int cm_decl_effective_attribute_matches_hir(
+    const CmDeclCaptureState *state,
+    const CmResolveEffectiveAttribute *effective,
+    const CmHirAttribute *attribute, CmResolveItemRef owner)
+{
+    unsigned char *metadata = NULL;
+    size_t metadata_length = 0u;
+    const CmInternedString *hir_metadata = cm_interner_get(
+        &state->hir->strings, attribute->metadata);
+    int equal;
+    if (effective->source != owner.source
+        || !cm_decl_item_ref_equal(effective->owner, owner)
+        || effective->style != CM_AST_ATTR_OUTER
+        || effective->source_attribute != attribute->source_attribute
+        || effective->expansion_depth != attribute->expansion_depth
+        || effective->span.source != attribute->span.source
+        || effective->span.start != attribute->span.start
+        || effective->span.end != attribute->span.end
+        || hir_metadata == NULL || hir_metadata->len == 0u
+        || !cm_decl_copy_graph_string(state->input->graph,
+            effective->metadata, &metadata, &metadata_length)) return 0;
+    equal = cm_decl_bytes_equal(metadata, metadata_length,
+        hir_metadata->bytes, hir_metadata->len);
+    cm_free(metadata);
+    return equal;
+}
+
+static int cm_decl_item_attribute_provenance(
+    const CmDeclCaptureState *state, const CmHirItem *item,
+    CmAstItemKind expected_kind)
+{
+    const CmDeclCaptureNamespace *source = NULL;
+    CmDeclCaptureModule *module;
+    CmResolveEffectiveItem effective;
+    uint32_t index;
+    size_t namespace_index;
+    size_t matches = 0u;
+    for (namespace_index = 0u; namespace_index < state->namespace_count;
+            ++namespace_index) {
+        const CmDeclCaptureNamespace *entry =
+            &state->namespace_values[namespace_index];
+        if (!cm_hir_def_id_equal(entry->target.definition,
+                item->definition)) continue;
+        if (!entry->is_import
+            && entry->source_attribute_count != item->attribute_count)
+            return 0;
+        if (!entry->is_import
+            && entry->target.kind == CM_HIR_LIBRARY_BINDING_TYPE
+            && entry->item_kind == expected_kind) {
+            source = entry;
+            matches += 1u;
+        }
+    }
+    if (matches != 1u || source == NULL || source->source_is_generated
+        || !cm_decl_item_ref_equal(source->declaration,
+            source->introduced_by)) return 0;
+    module = cm_decl_module_by_local((CmDeclCaptureState *)state,
+        source->owner_module);
+    if (module == NULL
+        || cm_module_graph_get_effective_item(state->input->graph,
+            state->input->revision, module->graph.id, source->export_ordinal,
+            &effective) != CM_RESOLVE_VIEW_OK
+        || effective.is_generated || effective.item_kind != expected_kind
+        || !cm_decl_item_ref_equal(effective.declaration,
+            source->declaration)
+        || effective.attribute_count != item->attribute_count) return 0;
+    for (index = 0u; index < effective.attribute_count; ++index) {
+        CmResolveEffectiveAttribute graph_attribute;
+        if (cm_module_graph_get_effective_item_attribute(
+                state->input->graph, state->input->revision,
+                module->graph.id, effective.id, index, &graph_attribute)
+                != CM_RESOLVE_VIEW_OK
+            || !cm_decl_effective_attribute_matches_hir(state,
+                &graph_attribute, &item->attributes[index],
+                source->declaration)) return 0;
     }
     return 1;
 }
@@ -832,36 +947,188 @@ static int cm_decl_attribute_call_is(const CmInternedString *metadata,
         && metadata->bytes[metadata->len - 1u] == (unsigned char)')';
 }
 
-static int cm_decl_unit_struct_attributes(const CmDeclCaptureState *state,
-    const CmHirItem *item, size_t *out_projected_count)
+static int cm_decl_attribute_bare_is(const CmInternedString *metadata,
+    const char *name)
+{
+    size_t length = strlen(name);
+    return metadata != NULL && metadata->len == length
+        && memcmp(metadata->bytes, name, length) == 0;
+}
+
+enum {
+    CM_DECL_ATTR_STABLE = 1u << 0,
+    CM_DECL_ATTR_UNSTABLE = 1u << 1,
+    CM_DECL_ATTR_DEPRECATED = 1u << 2,
+    CM_DECL_ATTR_DERIVE = 1u << 3,
+    CM_DECL_ATTR_NON_EXHAUSTIVE = 1u << 4,
+    CM_DECL_ATTR_ALLOW = 1u << 5
+};
+
+static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
+{
+    if (cm_decl_attribute_call_is(metadata, "stable"))
+        return CM_DECL_ATTR_STABLE;
+    if (cm_decl_attribute_call_is(metadata, "unstable"))
+        return CM_DECL_ATTR_UNSTABLE;
+    if (cm_decl_attribute_call_is(metadata, "deprecated"))
+        return CM_DECL_ATTR_DEPRECATED;
+    if (cm_decl_attribute_call_is(metadata, "derive"))
+        return CM_DECL_ATTR_DERIVE;
+    if (cm_decl_attribute_bare_is(metadata, "non_exhaustive"))
+        return CM_DECL_ATTR_NON_EXHAUSTIVE;
+    if (cm_decl_attribute_call_is(metadata, "allow"))
+        return CM_DECL_ATTR_ALLOW;
+    return 0u;
+}
+
+static int cm_decl_project_item_attributes(const CmDeclCaptureState *state,
+    const CmHirItem *item, unsigned int allowed,
+    size_t *out_projected_count, int *out_non_exhaustive)
 {
     uint32_t index;
-    int saw_unstable = 0;
-    int saw_derive = 0;
-    uint32_t first_source_attribute = 0u;
+    unsigned int seen = 0u;
     *out_projected_count = 0u;
+    *out_non_exhaustive = 0;
     if ((item->attribute_count == 0u) != (item->attributes == NULL)) return 0;
     for (index = 0u; index < item->attribute_count; ++index) {
         const CmHirAttribute *attribute = &item->attributes[index];
         const CmInternedString *metadata = cm_interner_get(
             &state->hir->strings, attribute->metadata);
-        int is_unstable = cm_decl_attribute_call_is(metadata, "unstable");
-        int is_derive = cm_decl_attribute_call_is(metadata, "derive");
+        unsigned int kind = cm_decl_attribute_kind(metadata);
+        uint32_t prior;
         if (attribute->source_attribute == 0u
             || attribute->expansion_depth != 0u
             || attribute->span.source == 0u
             || attribute->span.source != item->span.source
             || attribute->span.start > attribute->span.end
-            || (first_source_attribute != 0u
-                && attribute->source_attribute == first_source_attribute)
-            || (!is_unstable && !is_derive)
-            || (is_unstable && saw_unstable)
-            || (is_derive && saw_derive)) return 0;
-        saw_unstable |= is_unstable;
-        saw_derive |= is_derive;
-        if (first_source_attribute == 0u)
-            first_source_attribute = attribute->source_attribute;
+            || kind == 0u || (allowed & kind) == 0u
+            || (seen & kind) != 0u) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (item->attributes[prior].span.source == attribute->span.source
+                && item->attributes[prior].source_attribute
+                    == attribute->source_attribute) return 0;
+        }
+        seen |= kind;
         *out_projected_count += 1u;
+    }
+    if ((seen & CM_DECL_ATTR_STABLE) != 0u
+        && (seen & CM_DECL_ATTR_UNSTABLE) != 0u) return 0;
+    *out_non_exhaustive = (seen & CM_DECL_ATTR_NON_EXHAUSTIVE) != 0u;
+    return 1;
+}
+
+static const CmHirImport *cm_decl_reexport_import(
+    const CmDeclCaptureModule *module, CmResolveItemRef declaration)
+{
+    const CmHirImport *match = NULL;
+    uint32_t index;
+    if (module == NULL || module->hir == NULL) return NULL;
+    for (index = 0u; index < module->hir->import_count; ++index) {
+        const CmHirImport *candidate = &module->hir->imports[index];
+        if (candidate->span.source == declaration.source
+            && candidate->source_item == declaration.item) {
+            if (match != NULL) return NULL;
+            match = candidate;
+        }
+    }
+    return match;
+}
+
+static int cm_decl_reexport_attributes(CmDeclCaptureState *state,
+    CmHirDeclarationCaptureResult *result)
+{
+    size_t entry_index;
+    for (entry_index = 0u; entry_index < state->namespace_count;
+            ++entry_index) {
+        const CmDeclCaptureNamespace *entry =
+            &state->namespace_values[entry_index];
+        CmDeclCaptureModule *module;
+        CmResolveEffectiveItem effective;
+        const CmHirImport *import;
+        unsigned int seen = 0u;
+        uint32_t attribute_index;
+        size_t prior;
+        int first = 1;
+        if (!entry->is_import) continue;
+        for (prior = 0u; prior < entry_index; ++prior) {
+            if (state->namespace_values[prior].is_import
+                && cm_decl_item_ref_equal(
+                    state->namespace_values[prior].introduced_by,
+                    entry->introduced_by)) {
+                first = 0;
+                break;
+            }
+        }
+        module = cm_decl_module_by_local(state, entry->owner_module);
+        import = cm_decl_reexport_import(module, entry->introduced_by);
+        if (module == NULL || import == NULL
+            || cm_module_graph_get_effective_item(state->input->graph,
+                state->input->revision, module->graph.id,
+                entry->export_ordinal, &effective) != CM_RESOLVE_VIEW_OK
+            || effective.is_generated
+            || effective.item_kind != CM_AST_ITEM_USE
+            || !cm_decl_item_ref_equal(effective.declaration,
+                entry->introduced_by)
+            || effective.attribute_count != entry->source_attribute_count
+            || effective.attribute_count != import->attribute_count
+            || ((import->attribute_count == 0u)
+                != (import->attributes == NULL))) {
+            return cm_decl_capture_fail(result,
+                CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+        }
+        for (attribute_index = 0u;
+                attribute_index < effective.attribute_count;
+                ++attribute_index) {
+            CmResolveEffectiveAttribute graph_attribute;
+            const CmHirAttribute *hir_attribute =
+                &import->attributes[attribute_index];
+            const CmInternedString *metadata = cm_interner_get(
+                &state->hir->strings, hir_attribute->metadata);
+            unsigned int kind = cm_decl_attribute_kind(metadata);
+            uint32_t duplicate_index;
+            if (cm_module_graph_get_effective_item_attribute(
+                    state->input->graph, state->input->revision,
+                    module->graph.id, effective.id, attribute_index,
+                    &graph_attribute) != CM_RESOLVE_VIEW_OK
+                || !cm_decl_effective_attribute_matches_hir(state,
+                    &graph_attribute, hir_attribute, entry->introduced_by)
+                || hir_attribute->expansion_depth != 0u
+                || (kind == CM_DECL_ATTR_STABLE
+                    && (seen & CM_DECL_ATTR_UNSTABLE) != 0u)
+                || (kind == CM_DECL_ATTR_UNSTABLE
+                    && (seen & CM_DECL_ATTR_STABLE) != 0u)
+                || (kind != CM_DECL_ATTR_STABLE
+                    && kind != CM_DECL_ATTR_DEPRECATED
+                    && kind != CM_DECL_ATTR_ALLOW)
+                || (seen & kind) != 0u) {
+                return cm_decl_capture_fail(result,
+                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                    CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+            }
+            for (duplicate_index = 0u;
+                    duplicate_index < attribute_index; ++duplicate_index) {
+                if (import->attributes[duplicate_index].span.source
+                        == hir_attribute->span.source
+                    && import->attributes[duplicate_index].source_attribute
+                        == hir_attribute->source_attribute) {
+                    return cm_decl_capture_fail(result,
+                        CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                        CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+                }
+            }
+            seen |= kind;
+        }
+        if (first) {
+            if ((size_t)effective.attribute_count > SIZE_MAX
+                    - state->projected_semantic_attribute_count) {
+                return cm_decl_capture_fail(result,
+                    CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE,
+                    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT);
+            }
+            state->projected_semantic_attribute_count +=
+                effective.attribute_count;
+        }
     }
     return 1;
 }
@@ -883,6 +1150,38 @@ static int cm_decl_unit_struct_shape(const CmHirItem *item)
         && item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT
         && item->data.aggregate_item.fields == NULL
         && item->data.aggregate_item.field_count == 0u;
+}
+
+static int cm_decl_type_alias_shape(const CmDeclCaptureState *state,
+    const CmHirItem *item)
+{
+    const CmHirType *target;
+    const CmHirItem *target_item;
+    CmHirItemId target_id;
+    if (item->kind != CM_HIR_ITEM_TYPE_ALIAS
+        || !cm_decl_plain_visibility(item)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->is_specializable
+        || item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count != 0u
+        || item->predicate_scopes != NULL || item->predicate_scope_count != 0u
+        || item->predicates != NULL || item->predicate_count != 0u
+        || item->outlives_predicates != NULL
+        || item->outlives_predicate_count != 0u
+        || !cm_hir_def_id_is_none(
+            item->data.type_alias_item.trait_item_definition)
+        || item->data.type_alias_item.bounds != NULL
+        || item->data.type_alias_item.bound_count != 0u
+        || (target = cm_hir_get_type(state->hir,
+            item->data.type_alias_item.target)) == NULL
+        || target->kind != CM_HIR_TYPE_ADT_KIND
+        || target->data.named_type.argument_count != 0u
+        || target->data.named_type.arguments != NULL
+        || target->data.named_type.definition.crate_id
+            != state->input->crate_id) return 0;
+    target_item = cm_decl_bound_item(state->hir,
+        target->data.named_type.definition, &target_id);
+    return target_item != NULL && cm_decl_unit_struct_shape(target_item);
 }
 
 static int cm_decl_generics_shape(const CmDeclCaptureState *state,
@@ -967,6 +1266,7 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
     CmHirDeclarationCaptureResult *result)
 {
     size_t index;
+    if (!cm_decl_reexport_attributes(state, result)) return 0;
     state->traits = (CmDeclCaptureItem *)cm_alloc_zeroed(
         state->namespace_count, sizeof(*state->traits));
     state->items = (CmDeclCaptureItem *)cm_alloc_zeroed(
@@ -1018,6 +1318,7 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
             || entry->target.kind
                 == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
             size_t projected_count;
+            int non_exhaustive;
             if (cm_decl_item_already(state->items, state->item_count,
                     value.item->definition)) continue;
             if (state->item_count == CM_HIR_DECL_METADATA_MAX_ITEMS) {
@@ -1026,24 +1327,62 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
                     entry, value.item, value.id);
                 return 0;
             }
-            if (!cm_decl_struct_source(state, value.item,
-                    &value.owner_module, &value.source_ordinal)) {
-                cm_decl_capture_item_failure(result,
-                    CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
-                    entry, value.item, value.id);
-                return 0;
-            }
-            if (!cm_decl_unit_struct_shape(value.item)) {
+            if (value.item->kind == CM_HIR_ITEM_STRUCT) {
+                if (!cm_decl_unit_struct_shape(value.item)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_project_item_attributes(state, value.item,
+                        CM_DECL_ATTR_STABLE | CM_DECL_ATTR_UNSTABLE
+                            | CM_DECL_ATTR_DEPRECATED | CM_DECL_ATTR_DERIVE
+                            | CM_DECL_ATTR_NON_EXHAUSTIVE,
+                        &projected_count, &non_exhaustive)
+                    || !cm_decl_item_attribute_provenance(state, value.item,
+                        CM_AST_ITEM_STRUCT)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_struct_source(state, value.item, non_exhaustive,
+                        &value.owner_module, &value.source_ordinal)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+            } else if (value.item->kind == CM_HIR_ITEM_TYPE_ALIAS
+                && entry->target.kind == CM_HIR_LIBRARY_BINDING_TYPE) {
+                if (!cm_decl_type_alias_shape(state, value.item)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_project_item_attributes(state, value.item,
+                        CM_DECL_ATTR_STABLE | CM_DECL_ATTR_UNSTABLE
+                            | CM_DECL_ATTR_DEPRECATED,
+                        &projected_count, &non_exhaustive)
+                    || non_exhaustive
+                    || !cm_decl_item_attribute_provenance(state, value.item,
+                        CM_AST_ITEM_TYPE_ALIAS)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_alias_source(state, value.item,
+                        &value.owner_module, &value.source_ordinal)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+            } else {
                 cm_decl_capture_item_failure(result,
                     CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
-                    entry, value.item, value.id);
-                return 0;
-            }
-            if (!cm_decl_struct_attribute_provenance(state, value.item)
-                || !cm_decl_unit_struct_attributes(state, value.item,
-                    &projected_count)) {
-                cm_decl_capture_item_failure(result,
-                    CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
                     entry, value.item, value.id);
                 return 0;
             }
@@ -1180,6 +1519,32 @@ static int cm_decl_mark_type(CmDeclCaptureState *state, CmHirTypeId type_id,
     return 0;
 }
 
+static int cm_decl_mark_named_adt(CmDeclCaptureState *state,
+    CmHirTypeId type_id, CmHirDeclarationCaptureResult *result)
+{
+    const CmHirType *type = cm_hir_get_type(state->hir, type_id);
+    uint32_t item_local;
+    if (type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && type->data.named_type.argument_count == 0u
+        && type->data.named_type.arguments == NULL
+        && (item_local = cm_decl_item_local(state,
+            type->data.named_type.definition)) != 0u
+        && state->items[item_local - 1u].item->kind == CM_HIR_ITEM_STRUCT) {
+        state->named_item_types[item_local - 1u] = 1u;
+        return 1;
+    }
+    if (result->failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE) {
+        result->failure_stage = CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA;
+        result->failure_reason = CM_HIR_DECL_CAPTURE_REASON_TYPE_UNSUPPORTED;
+        result->rejected_type = type_id;
+        if (type != NULL) {
+            result->has_rejected_span = 1;
+            result->rejected_span = type->span;
+        }
+    }
+    return 0;
+}
+
 static uint32_t cm_decl_type_local(const CmDeclCaptureState *state,
     const CmHirDeclarationMetadata *metadata, CmHirTypeId type_id)
 {
@@ -1200,6 +1565,16 @@ static uint32_t cm_decl_type_local(const CmDeclCaptureState *state,
         for (index = 0u; index < metadata->type_count; ++index)
             if (metadata->types[index].kind == CM_HIR_DECL_TYPE_GENERIC
                 && metadata->types[index].generic_local == generic)
+                return (uint32_t)(index + 1u);
+    }
+    if (type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
+        && type->data.named_type.argument_count == 0u
+        && type->data.named_type.arguments == NULL) {
+        uint32_t item_local = cm_decl_item_local(state,
+            type->data.named_type.definition);
+        for (index = 0u; index < metadata->type_count; ++index)
+            if (metadata->types[index].kind == CM_HIR_DECL_TYPE_NAMED_ADT
+                && metadata->types[index].item_local == item_local)
                 return (uint32_t)(index + 1u);
     }
     return 0u;
@@ -1304,7 +1679,8 @@ static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
     for (index = 0u; index < state->item_count; ++index) {
         const CmDeclCaptureItem *capture = &state->items[index];
         CmHirDeclarationItem *wire = &metadata->items[index];
-        wire->kind = CM_HIR_DECL_ITEM_STRUCT;
+        wire->kind = capture->item->kind == CM_HIR_ITEM_STRUCT
+            ? CM_HIR_DECL_ITEM_STRUCT : CM_HIR_DECL_ITEM_TYPE_ALIAS;
         wire->owner_module = capture->owner_module;
         wire->source_ordinal = capture->source_ordinal;
         wire->visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
@@ -1360,6 +1736,14 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
     size_t cursor;
     state->generic_types = (unsigned char *)cm_alloc_zeroed(
         metadata->generic_count, sizeof(*state->generic_types));
+    state->named_item_types = (unsigned char *)cm_alloc_zeroed(
+        metadata->item_count, sizeof(*state->named_item_types));
+    for (index = 0u; index < state->item_count; ++index) {
+        const CmHirItem *item = state->items[index].item;
+        if (item->kind == CM_HIR_ITEM_TYPE_ALIAS
+            && !cm_decl_mark_named_adt(state,
+                item->data.type_alias_item.target, result)) return 0;
+    }
     for (index = 0u; index < state->value_count; ++index) {
         const CmHirItem *item = state->values[index].item;
         const CmHirFunctionSignature *signature =
@@ -1401,6 +1785,8 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
         if (state->primitive_types[index]) type_count += 1u;
     for (index = 0u; index < metadata->generic_count; ++index)
         if (state->generic_types[index]) type_count += 1u;
+    for (index = 0u; index < metadata->item_count; ++index)
+        if (state->named_item_types[index]) type_count += 1u;
     metadata->type_count = type_count;
     metadata->types = (CmHirDeclarationType *)cm_alloc_zeroed(type_count,
         sizeof(*metadata->types));
@@ -1418,6 +1804,21 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             metadata->types[cursor].kind = CM_HIR_DECL_TYPE_GENERIC;
             metadata->types[cursor].generic_local = (uint32_t)(index + 1u);
             cursor += 1u;
+        }
+    }
+    for (index = 0u; index < metadata->item_count; ++index) {
+        if (state->named_item_types[index]) {
+            metadata->types[cursor].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+            metadata->types[cursor].item_local = (uint32_t)(index + 1u);
+            cursor += 1u;
+        }
+    }
+    for (index = 0u; index < state->item_count; ++index) {
+        const CmHirItem *item = state->items[index].item;
+        if (item->kind == CM_HIR_ITEM_TYPE_ALIAS) {
+            metadata->items[index].alias_target_type = cm_decl_type_local(
+                state, metadata, item->data.type_alias_item.target);
+            if (metadata->items[index].alias_target_type == 0u) return 0;
         }
     }
     metadata->predicate_count = predicate_count;
@@ -1527,6 +1928,7 @@ static void cm_decl_state_destroy(CmDeclCaptureState *state)
     cm_free(state->values);
     cm_free(state->generic_locals);
     cm_free(state->generic_types);
+    cm_free(state->named_item_types);
 }
 
 CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
@@ -1786,6 +2188,8 @@ const char *cm_hir_declaration_capture_reason_name(
         return "item-shape-unsupported";
     case CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED:
         return "item-attribute-projection-unsupported";
+    case CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED:
+        return "reexport-attribute-projection-unsupported";
     case CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED:
         return "value-shape-unsupported";
     case CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING:

@@ -18,6 +18,21 @@ typedef struct CaptureFixture {
 } CaptureFixture;
 
 static const unsigned char fixture_source[] =
+    "mod layout {\n"
+    "  #[stable(feature = \"alloc_layout\", since = \"1.28.0\")]\n"
+    "  #[deprecated(since = \"1.52.0\", note = \"use LayoutError\")]\n"
+    "  pub type LayoutErr = LayoutError;\n"
+    "  #[stable(feature = \"alloc_layout_error\", since = \"1.50.0\")]\n"
+    "  #[non_exhaustive]\n"
+    "  #[derive(Clone, PartialEq, Eq, Debug)]\n"
+    "  pub struct LayoutError;\n"
+    "}\n"
+    "#[stable(feature = \"alloc_layout\", since = \"1.28.0\")]\n"
+    "#[deprecated(since = \"1.52.0\", note = \"use LayoutError\")]\n"
+    "#[allow(deprecated, deprecated_in_future)]\n"
+    "pub use layout::LayoutErr;\n"
+    "#[stable(feature = \"alloc_layout_error\", since = \"1.50.0\")]\n"
+    "pub use layout::LayoutError;\n"
     "#[unstable(feature = \"allocator_api\", issue = \"32838\")]\n"
     "#[derive(Copy, Clone, PartialEq, Eq, Debug)]\n"
     "pub struct AllocError;\n"
@@ -164,6 +179,29 @@ static const CmHirModule *find_module(const CaptureFixture *fixture,
     return NULL;
 }
 
+static int declaration_string_is(CmHirDeclarationString value,
+    const char *text)
+{
+    size_t length = strlen(text);
+    return value.length == length
+        && memcmp(value.data, text, length) == 0;
+}
+
+static const CmHirDeclarationNamespaceEntry *find_namespace_entry(
+    const CmHirDeclarationMetadata *metadata, uint32_t owner_module,
+    uint8_t namespace_kind, const char *name)
+{
+    size_t index;
+    for (index = 0u; index < metadata->namespace_count; ++index) {
+        const CmHirDeclarationNamespaceEntry *entry =
+            &metadata->namespace_entries[index];
+        if (entry->owner_module == owner_module
+            && entry->namespace_kind == namespace_kind
+            && declaration_string_is(entry->name, name)) return entry;
+    }
+    return NULL;
+}
+
 static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
 {
     const CmHirDeclarationNamespaceEntry *alloc_alias_type;
@@ -172,23 +210,39 @@ static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
     const CmHirDeclarationNamespaceEntry *gate_alias;
     const CmHirDeclarationNamespaceEntry *alloc_alias_value;
     const CmHirDeclarationNamespaceEntry *alloc_error_value;
+    const CmHirDeclarationNamespaceEntry *layout_err_direct;
+    const CmHirDeclarationNamespaceEntry *layout_err_export;
+    const CmHirDeclarationNamespaceEntry *layout_error_direct;
+    const CmHirDeclarationNamespaceEntry *layout_error_export;
     const CmHirDeclarationNamespaceEntry *needs;
     assert(cm_hir_declaration_metadata_validate(metadata)
         == CM_HIR_DECL_METADATA_OK);
-    assert(metadata->module_count == 1u && metadata->root_module == 1u);
+    assert(metadata->module_count == 2u && metadata->root_module == 1u
+        && metadata->modules[1].parent_module == 1u
+        && declaration_string_is(metadata->modules[1].name, "layout"));
     assert(metadata->trait_count == 1u && metadata->generic_count == 2u);
-    assert(metadata->item_count == 1u
+    assert(metadata->item_count == 3u
         && metadata->items[0].kind == CM_HIR_DECL_ITEM_STRUCT
         && metadata->items[0].owner_module == 1u
         && metadata->items[0].visibility.kind
             == CM_HIR_DECL_VISIBILITY_PUBLIC
         && metadata->items[0].visibility.restriction_module == 0u
-        && metadata->items[0].source_ordinal == 0u
-        && metadata->items[0].name.length == strlen("AllocError")
-        && memcmp(metadata->items[0].name.data, "AllocError",
-            strlen("AllocError")) == 0);
-    assert(metadata->type_count == 3u && metadata->value_count == 1u);
-    assert(metadata->predicate_count == 1u && metadata->namespace_count == 7u);
+        && metadata->items[0].source_ordinal == 3u
+        && metadata->items[0].alias_target_type == 0u
+        && declaration_string_is(metadata->items[0].name, "AllocError")
+        && metadata->items[1].kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
+        && metadata->items[1].owner_module == 2u
+        && metadata->items[1].source_ordinal == 0u
+        && metadata->items[1].alias_target_type == 4u
+        && declaration_string_is(metadata->items[1].name, "LayoutErr")
+        && metadata->items[2].kind == CM_HIR_DECL_ITEM_STRUCT
+        && metadata->items[2].owner_module == 2u
+        && metadata->items[2].source_ordinal == 1u
+        && metadata->items[2].alias_target_type == 0u
+        && declaration_string_is(metadata->items[2].name, "LayoutError"));
+    assert(metadata->type_count == 4u && metadata->value_count == 1u);
+    assert(metadata->predicate_count == 1u
+        && metadata->namespace_count == 11u);
     assert(metadata->generics[0].owner_kind == CM_HIR_DECL_GENERIC_NOMINAL
         && metadata->generics[0].owner_local == 1u
         && metadata->generics[0].index == 0u
@@ -202,7 +256,9 @@ static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
     assert(metadata->types[1].kind == CM_HIR_DECL_TYPE_PRIMITIVE
         && metadata->types[1].primitive == CM_HIR_DECL_PRIMITIVE_U8);
     assert(metadata->types[2].kind == CM_HIR_DECL_TYPE_GENERIC
-        && metadata->types[2].generic_local == 2u);
+        && metadata->types[2].generic_local == 2u
+        && metadata->types[3].kind == CM_HIR_DECL_TYPE_NAMED_ADT
+        && metadata->types[3].item_local == 3u);
     assert(metadata->values[0].parameter_count == 0u
         && metadata->values[0].parameter_types == NULL
         && metadata->values[0].return_type == 1u
@@ -215,39 +271,79 @@ static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
         && metadata->predicates[0].trait_local == 1u
         && metadata->predicates[0].argument_count == 1u
         && metadata->predicates[0].argument_types[0] == 2u);
-    alloc_alias_type = &metadata->namespace_entries[0];
-    alloc_error_type = &metadata->namespace_entries[1];
-    gate = &metadata->namespace_entries[2];
-    gate_alias = &metadata->namespace_entries[3];
-    alloc_alias_value = &metadata->namespace_entries[4];
-    alloc_error_value = &metadata->namespace_entries[5];
-    needs = &metadata->namespace_entries[6];
+    alloc_alias_type = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "AllocAlias");
+    alloc_error_type = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "AllocError");
+    gate = find_namespace_entry(metadata, 1u, CM_HIR_DECL_NAMESPACE_TYPE,
+        "Gate");
+    gate_alias = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "GateReexport");
+    layout_err_export = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "LayoutErr");
+    layout_error_export = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "LayoutError");
+    alloc_alias_value = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "AllocAlias");
+    alloc_error_value = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "AllocError");
+    needs = find_namespace_entry(metadata, 1u, CM_HIR_DECL_NAMESPACE_VALUE,
+        "needs");
+    layout_err_direct = find_namespace_entry(metadata, 2u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "LayoutErr");
+    layout_error_direct = find_namespace_entry(metadata, 2u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "LayoutError");
+    assert(alloc_alias_type != NULL && alloc_error_type != NULL
+        && gate != NULL && gate_alias != NULL && layout_err_export != NULL
+        && layout_error_export != NULL && alloc_alias_value != NULL
+        && alloc_error_value != NULL && needs != NULL
+        && layout_err_direct != NULL && layout_error_direct != NULL);
     assert(alloc_alias_type->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
         && alloc_alias_type->target_kind == CM_HIR_DECL_TARGET_ITEM
         && alloc_alias_type->target_local == 1u
-        && alloc_alias_type->export_ordinal == 1u
+        && alloc_alias_type->export_ordinal == 4u
         && alloc_error_type->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
         && alloc_error_type->target_kind == CM_HIR_DECL_TARGET_ITEM
         && alloc_error_type->target_local == 1u
-        && alloc_error_type->export_ordinal == 0u);
+        && alloc_error_type->export_ordinal == 3u);
     assert(gate->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
         && gate_alias->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
         && gate->target_kind == CM_HIR_DECL_TARGET_NOMINAL
         && gate_alias->target_kind == CM_HIR_DECL_TARGET_NOMINAL
         && gate->target_local == 1u && gate_alias->target_local == 1u
-        && gate->export_ordinal == 2u
-        && gate_alias->export_ordinal == 3u);
+        && gate->export_ordinal == 5u
+        && gate_alias->export_ordinal == 6u);
+    assert(layout_err_export->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && layout_err_export->target_local == 2u
+        && layout_err_export->export_ordinal == 1u
+        && layout_err_direct->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && layout_err_direct->target_local == 2u
+        && layout_err_direct->export_ordinal == 0u
+        && layout_error_export->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && layout_error_export->target_local == 3u
+        && layout_error_export->export_ordinal == 2u
+        && layout_error_direct->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && layout_error_direct->target_local == 3u
+        && layout_error_direct->export_ordinal == 1u
+        && find_namespace_entry(metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "LayoutErr") == NULL
+        && find_namespace_entry(metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "LayoutError") == NULL
+        && find_namespace_entry(metadata, 2u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "LayoutErr") == NULL
+        && find_namespace_entry(metadata, 2u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "LayoutError") == NULL);
     assert(alloc_alias_value->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE
         && alloc_alias_value->target_kind == CM_HIR_DECL_TARGET_ITEM
         && alloc_alias_value->target_local == 1u
-        && alloc_alias_value->export_ordinal == 1u
+        && alloc_alias_value->export_ordinal == 4u
         && alloc_error_value->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE
         && alloc_error_value->target_kind == CM_HIR_DECL_TARGET_ITEM
         && alloc_error_value->target_local == 1u
-        && alloc_error_value->export_ordinal == 0u);
+        && alloc_error_value->export_ordinal == 3u);
     assert(needs->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE
         && needs->target_kind == CM_HIR_DECL_TARGET_VALUE
-        && needs->target_local == 1u && needs->export_ordinal == 4u);
+        && needs->target_local == 1u && needs->export_ordinal == 7u);
 }
 
 static void test_fixture_and_determinism(void)
@@ -283,11 +379,11 @@ static void test_fixture_and_determinism(void)
     assert(result.status == CM_HIR_DECL_CAPTURE_OK
         && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NONE
         && result.failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE
-        && result.trait_count == 1u && result.item_count == 1u
-        && result.value_count == 1u && result.namespace_count == 7u
+        && result.trait_count == 1u && result.item_count == 3u
+        && result.value_count == 1u && result.namespace_count == 11u
         && result.semantic_attributes
             == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION
-        && result.projected_semantic_attribute_count == 2u);
+        && result.projected_semantic_attribute_count == 11u);
     result = cm_hir_declaration_metadata_capture(&noisy_input,
         &noisy_metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_OK);
@@ -491,6 +587,8 @@ static void test_plain_unit_struct_has_exact_empty_attribute_profile(void)
     CmHirDeclarationCaptureInput input;
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationNamespaceEntry *plain_type;
+    const CmHirDeclarationNamespaceEntry *plain_value;
     fixture_init_source(&fixture, 0, "plain-unit.rs", plain_source,
         sizeof(plain_source) - 1u);
     input = capture_input(&fixture);
@@ -504,6 +602,15 @@ static void test_plain_unit_struct_has_exact_empty_attribute_profile(void)
         && result.projected_semantic_attribute_count == 0u
         && cm_hir_declaration_metadata_validate(&metadata)
             == CM_HIR_DECL_METADATA_OK);
+    plain_type = find_namespace_entry(&metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Plain");
+    plain_value = find_namespace_entry(&metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "Plain");
+    assert(plain_type != NULL && plain_value != NULL
+        && plain_type->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && plain_value->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && plain_type->target_local == plain_value->target_local
+        && plain_type->export_ordinal == plain_value->export_ordinal);
     cm_hir_declaration_metadata_destroy(&metadata);
     fixture_destroy(&fixture);
 }
@@ -693,7 +800,7 @@ static void test_item_shape_diagnostic(void)
     fixture_destroy(&fixture);
 }
 
-static void test_non_exhaustive_constructor_mate_is_required(void)
+static void test_non_exhaustive_authorizes_missing_constructor_mate(void)
 {
     static const unsigned char non_exhaustive_source[] =
         "#[non_exhaustive]\n"
@@ -701,51 +808,217 @@ static void test_non_exhaustive_constructor_mate_is_required(void)
         "pub use SealedUnit as SealedAlias;\n"
         "pub trait Gate<T: ?Sized> {}\n"
         "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationNamespaceEntry *sealed;
+    const CmHirDeclarationNamespaceEntry *sealed_alias;
+
+    fixture_init_source(&fixture, 0, "non-exhaustive-unit.rs",
+        non_exhaustive_source, sizeof(non_exhaustive_source) - 1u);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 1u && result.namespace_count == 4u
+        && result.projected_semantic_attribute_count == 1u
+        && metadata.item_count == 1u
+        && metadata.items[0].kind == CM_HIR_DECL_ITEM_STRUCT
+        && declaration_string_is(metadata.items[0].name, "SealedUnit"));
+    sealed = find_namespace_entry(&metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "SealedUnit");
+    sealed_alias = find_namespace_entry(&metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "SealedAlias");
+    assert(sealed != NULL && sealed_alias != NULL
+        && sealed->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && sealed_alias->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && sealed->target_local == 1u && sealed_alias->target_local == 1u
+        && find_namespace_entry(&metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "SealedUnit") == NULL
+        && find_namespace_entry(&metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "SealedAlias") == NULL
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
+{
+    static const unsigned char bad_alias_attribute_source[] =
+        "pub struct Unit;\n"
+        "#[repr(C)]\n"
+        "pub type Alias = Unit;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char bad_reexport_attribute_source[] =
+        "pub struct Unit;\n"
+        "#[doc(hidden)]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char conflicting_reexport_stability_source[] =
+        "pub struct Unit;\n"
+        "#[stable(feature = \"unit\", since = \"1.0.0\")]\n"
+        "#[unstable(feature = \"unit_next\", issue = \"none\")]\n"
+        "pub use Unit as Alias;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char bad_alias_target_source[] =
+        "pub type Alias = u8;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
     CaptureFixture good;
-    CaptureFixture blocked;
-    CmHirDeclarationCaptureInput good_input;
-    CmHirDeclarationCaptureInput blocked_input;
+    CaptureFixture bad_alias_attribute;
+    CaptureFixture bad_reexport_attribute;
+    CaptureFixture conflicting_reexport_stability;
+    CaptureFixture bad_alias_target;
+    CmHirDeclarationCaptureInput input;
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationCaptureResult result;
     CmHirDeclarationItem *saved_items;
     CmHirDeclarationNamespaceEntry *saved_namespace;
-    CmResolveModuleInfo root_module;
-    CmResolveEffectiveItem alias_effective;
 
     fixture_init(&good, 0);
-    fixture_init_source(&blocked, 0, "non-exhaustive-unit.rs",
-        non_exhaustive_source, sizeof(non_exhaustive_source) - 1u);
-    good_input = capture_input(&good);
-    blocked_input = capture_input(&blocked);
+    fixture_init_source(&bad_alias_attribute, 0, "bad-alias-attr.rs",
+        bad_alias_attribute_source, sizeof(bad_alias_attribute_source) - 1u);
+    fixture_init_source(&bad_reexport_attribute, 0,
+        "bad-reexport-attr.rs", bad_reexport_attribute_source,
+        sizeof(bad_reexport_attribute_source) - 1u);
+    fixture_init_source(&conflicting_reexport_stability, 0,
+        "conflicting-reexport-stability.rs",
+        conflicting_reexport_stability_source,
+        sizeof(conflicting_reexport_stability_source) - 1u);
+    fixture_init_source(&bad_alias_target, 0, "bad-alias-target.rs",
+        bad_alias_target_source, sizeof(bad_alias_target_source) - 1u);
     cm_hir_declaration_metadata_init(&metadata);
-    result = cm_hir_declaration_metadata_capture(&good_input, &metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_OK);
     saved_items = metadata.items;
     saved_namespace = metadata.namespace_entries;
-    assert(cm_module_graph_get_module_at(&blocked.graph, 0u, &root_module)
-        && cm_module_graph_get_effective_item(&blocked.graph,
-            blocked.graph_result.revision, root_module.id, 1u,
-            &alias_effective) == CM_RESOLVE_VIEW_OK);
 
-    result = cm_hir_declaration_metadata_capture(&blocked_input, &metadata);
+    input = capture_input(&bad_alias_attribute);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
         && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
         && result.failure_reason
-            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
-        && result.has_rejected_binding && result.has_rejected_target
-        && result.rejected_binding_kind == CM_HIR_LIBRARY_BINDING_TYPE
-        && result.rejected_ast_item_kind == CM_AST_ITEM_STRUCT
-        && result.rejected_namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
-        && result.rejected_source_item.source
-            == alias_effective.declaration.source
-        && result.rejected_source_item.item
-            == alias_effective.declaration.item
-        && result.has_rejected_span
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+
+    input = capture_input(&bad_reexport_attribute);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED
+        && strcmp(cm_hir_declaration_capture_reason_name(
+            result.failure_reason),
+            "reexport-attribute-projection-unsupported") == 0
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+
+    input = capture_input(&conflicting_reexport_stability);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NAMESPACE
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+
+    input = capture_input(&bad_alias_target);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED
         && metadata.items == saved_items
         && metadata.namespace_entries == saved_namespace);
     assert_exact_descriptor(&metadata);
     cm_hir_declaration_metadata_destroy(&metadata);
-    fixture_destroy(&blocked);
+    fixture_destroy(&bad_alias_target);
+    fixture_destroy(&conflicting_reexport_stability);
+    fixture_destroy(&bad_reexport_attribute);
+    fixture_destroy(&bad_alias_attribute);
+    fixture_destroy(&good);
+}
+
+static void test_constructor_omission_authority_is_not_forgeable(void)
+{
+    static const unsigned char omitted_source[] =
+        "#[non_exhaustive]\n"
+        "pub struct Omitted;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char paired_source[] =
+        "#[stable(feature = \"paired\", since = \"1.0.0\")]\n"
+        "pub struct Paired;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture good;
+    CaptureFixture omitted;
+    CaptureFixture paired;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmInternId saved_metadata;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+
+    fixture_init(&good, 0);
+    fixture_init_source(&omitted, 0, "omitted-constructor.rs",
+        omitted_source, sizeof(omitted_source) - 1u);
+    fixture_init_source(&paired, 0, "paired-constructor.rs", paired_source,
+        sizeof(paired_source) - 1u);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+
+    item = (CmHirItem *)find_item(&omitted, "Omitted", &item_id);
+    assert(item != NULL && item->attribute_count == 1u
+        && item->attributes != NULL);
+    item->attribute_count = 0u;
+    input = capture_input(&omitted);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.rejected_item == item_id
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+    item->attribute_count = 1u;
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = cm_hir_intern(&omitted.hir,
+        "stable(feature = \"forged\", since = \"1.0.0\")");
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+    item->attributes[0].metadata = saved_metadata;
+
+    item = (CmHirItem *)find_item(&paired, "Paired", &item_id);
+    assert(item != NULL && item->attribute_count == 1u);
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = cm_hir_intern(&paired.hir,
+        "non_exhaustive");
+    input = capture_input(&paired);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+    item->attributes[0].metadata = saved_metadata;
+    assert_exact_descriptor(&metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&paired);
+    fixture_destroy(&omitted);
     fixture_destroy(&good);
 }
 
@@ -777,9 +1050,9 @@ static void test_many_private_bindings_do_not_consume_public_cap(void)
     assert(result.status == CM_HIR_DECL_CAPTURE_OK
         && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_NONE
         && result.failure_reason == CM_HIR_DECL_CAPTURE_REASON_NONE
-        && result.namespace_count == 7u
-        && result.item_count == 1u
-        && result.projected_semantic_attribute_count == 2u);
+        && result.namespace_count == 11u
+        && result.item_count == 3u
+        && result.projected_semantic_attribute_count == 11u);
     assert_exact_descriptor(&metadata);
     cm_hir_declaration_metadata_destroy(&metadata);
     fixture_destroy(&fixture);
@@ -793,7 +1066,9 @@ int main(void)
     test_plain_unit_struct_has_exact_empty_attribute_profile();
     test_module_attribute_projection_and_provenance();
     test_item_shape_diagnostic();
-    test_non_exhaustive_constructor_mate_is_required();
+    test_non_exhaustive_authorizes_missing_constructor_mate();
+    test_alias_and_reexport_attributes_fail_closed_atomically();
+    test_constructor_omission_authority_is_not_forgeable();
     test_many_private_bindings_do_not_consume_public_cap();
     return 0;
 }

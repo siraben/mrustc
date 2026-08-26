@@ -23,6 +23,14 @@ typedef struct TestFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[8];
 } TestFixture;
 
+typedef struct AliasFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[3];
+    CmHirDeclarationType types[2];
+    CmHirDeclarationItem items[2];
+    CmHirDeclarationNamespaceEntry namespace_entries[8];
+} AliasFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -117,6 +125,49 @@ static size_t namespace_record_offset(const CmByteBuf *bytes,
         cursor = skip_string(bytes, cursor + 8u);
         assert(cursor <= bytes->len && bytes->len - cursor >= 16u);
         cursor += 16u;
+        if (index == wanted_index) return record;
+    }
+    assert(0);
+    return 0u;
+}
+
+static size_t type_record_offset(const CmByteBuf *bytes,
+    uint32_t wanted_index)
+{
+    size_t cursor;
+    uint32_t count;
+    cursor = section_offset(bytes, "TYPE") + 12u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    count = get_u32(bytes->data + cursor);
+    assert(wanted_index < count);
+    /* Every currently supported canonical TYPE record is eight bytes. */
+    return cursor + 4u + (size_t)wanted_index * 8u;
+}
+
+static size_t item_record_offset(const CmByteBuf *bytes,
+    uint32_t wanted_index)
+{
+    size_t cursor;
+    uint32_t count;
+    uint32_t index;
+    cursor = section_offset(bytes, "ITEM") + 12u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+    count = get_u32(bytes->data + cursor);
+    cursor += 4u;
+    assert(wanted_index < count);
+    for (index = 0u; index < count; ++index) {
+        size_t record;
+        uint8_t kind;
+        record = cursor;
+        assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+        kind = bytes->data[cursor];
+        cursor = skip_string(bytes, cursor + 8u);
+        assert(cursor <= bytes->len && bytes->len - cursor >= 44u);
+        cursor += 44u;
+        if (kind == CM_HIR_DECL_ITEM_STRUCT) cursor += 8u;
+        else if (kind == CM_HIR_DECL_ITEM_TYPE_ALIAS) cursor += 4u;
+        else assert(0);
+        assert(cursor <= bytes->len);
         if (index == wanted_index) return record;
     }
     assert(0);
@@ -342,6 +393,78 @@ static void item_fixture_init(TestFixture *fixture)
     fixture->namespace_entries[7].target_local = 1u;
     fixture->namespace_entries[7].export_ordinal = 3u;
     metadata->namespace_count = 8u;
+}
+
+static void alias_fixture_init(AliasFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("dep");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-alias-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    fixture->modules[1].parent_module = 1u;
+    fixture->modules[1].name = (CmHirDeclarationString)S("alloc");
+    fixture->modules[2].parent_module = 2u;
+    fixture->modules[2].name = (CmHirDeclarationString)S("layout");
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 3u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_TYPE_ALIAS;
+    fixture->items[0].owner_module = 3u;
+    fixture->items[0].name = (CmHirDeclarationString)S("LayoutErr");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 1u;
+    fixture->items[0].alias_target_type = 1u;
+    fixture->items[1].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[1].owner_module = 3u;
+    fixture->items[1].name = (CmHirDeclarationString)S("LayoutError");
+    fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[1].source_ordinal = 2u;
+    metadata->items = fixture->items;
+    metadata->item_count = 2u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    fixture->types[0].item_local = 2u;
+    metadata->types = fixture->types;
+    metadata->type_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->modules[1].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_MODULE;
+    fixture->namespace_entries[0].target_local = 2u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1].owner_module = 2u;
+    fixture->namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[1].name = fixture->items[0].name;
+    fixture->namespace_entries[1].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[1].target_local = 1u;
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[1];
+    fixture->namespace_entries[2].name = fixture->items[1].name;
+    fixture->namespace_entries[2].target_local = 2u;
+    fixture->namespace_entries[2].export_ordinal = 2u;
+    /* `layout` is a complete private module owner and therefore has no
+     * fabricated public module binding in NSPC. */
+    fixture->namespace_entries[3] = fixture->namespace_entries[1];
+    fixture->namespace_entries[3].owner_module = 3u;
+    fixture->namespace_entries[3].export_ordinal = 1u;
+    fixture->namespace_entries[4] = fixture->namespace_entries[2];
+    fixture->namespace_entries[4].owner_module = 3u;
+    fixture->namespace_entries[4].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 5u;
 }
 
 static void assert_failed_transaction(const CmByteBuf *bytes)
@@ -573,6 +696,186 @@ static void test_item_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_type_alias_family(void)
+{
+    AliasFixture first;
+    AliasFixture second;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf rebuilt;
+    CmByteBuf bad;
+    size_t record;
+    size_t payload;
+
+    alias_fixture_init(&first);
+    alias_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&rebuilt);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    /* LayoutError is public as a type but exposes no public constructor. */
+    assert(first.metadata.namespace_count == 5u);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.item_count == 2u && decoded.type_count == 1u
+        && decoded.items[0].kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
+        && decoded.items[0].alias_target_type == 1u
+        && decoded.items[1].kind == CM_HIR_DECL_ITEM_STRUCT
+        && decoded.items[1].alias_target_type == 0u
+        && decoded.types[0].kind == CM_HIR_DECL_TYPE_NAMED_ADT
+        && decoded.types[0].item_local == 2u
+        && decoded.namespace_entries[1].target_local
+            == decoded.namespace_entries[3].target_local
+        && decoded.namespace_entries[1].target_local == 1u
+        && decoded.namespace_entries[1].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_TYPE
+        && decoded.namespace_entries[3].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_TYPE);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &rebuilt)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == rebuilt.len
+        && memcmp(encoded.data, rebuilt.data, encoded.len) == 0);
+
+    /* A STRUCT may instead have an exact defining TYPE/VALUE constructor mate. */
+    first.namespace_entries[6] = first.namespace_entries[4];
+    first.namespace_entries[6].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    first.namespace_entries[5] = first.namespace_entries[4];
+    first.namespace_entries[4] = first.namespace_entries[3];
+    first.namespace_entries[3] = first.namespace_entries[2];
+    first.namespace_entries[3].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    first.metadata.namespace_count = 7u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    alias_fixture_init(&first);
+
+    /* Publishing the child module is optional, but any such binding must be
+     * its exact parent/name/local identity. */
+    first.namespace_entries[5] = first.namespace_entries[4];
+    first.namespace_entries[4] = first.namespace_entries[3];
+    first.namespace_entries[3] = first.namespace_entries[1];
+    first.namespace_entries[3].name = first.modules[2].name;
+    first.namespace_entries[3].target_kind = CM_HIR_DECL_TARGET_MODULE;
+    first.namespace_entries[3].target_local = 3u;
+    first.namespace_entries[3].export_ordinal = 3u;
+    first.metadata.namespace_count = 6u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    first.namespace_entries[3].name = (CmHirDeclarationString)S("forged");
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+
+    first.items[0].alias_target_type = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.items[0].alias_target_type = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.items[1].alias_target_type = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.types[0].item_local = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.types[0].item_local = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    /* Alias-directed named types (and thus alias cycles) are not representable. */
+    first.types[0].item_local = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    first.types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    first.types[0].item_local = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    alias_fixture_init(&first);
+    first.types[1] = first.types[0];
+    first.types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    first.types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    first.types[0].item_local = 0u;
+    first.items[0].alias_target_type = 2u;
+    first.metadata.type_count = 2u;
+    /* The otherwise-canonical UNIT record is unused and must be rejected. */
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    first.types[0] = first.types[1];
+    first.items[0].alias_target_type = 1u;
+    /* Duplicate NAMED_ADT keys violate canonical TYPE identity. */
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    alias_fixture_init(&first);
+    first.namespace_entries[3].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    alias_fixture_init(&first);
+    first.namespace_entries[5] = first.namespace_entries[3];
+    first.namespace_entries[5].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    first.metadata.namespace_count = 6u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* Corrupt-but-checksummed alias target is rejected transactionally. */
+    bad = copy_bytes(&encoded);
+    record = item_record_offset(&bad, UINT32_C(0));
+    payload = skip_string(&bad, record + 8u) + 44u;
+    put_u32(bad.data + payload, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    /* A checksummed public module binding cannot be retargeted to a private
+     * non-child module. */
+    bad = copy_bytes(&encoded);
+    record = namespace_record_offset(&bad, UINT32_C(0));
+    payload = skip_string(&bad, record + 8u);
+    put_u32(bad.data + payload, UINT32_C(3));
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    /* A NAMED_ADT may not target the alias ITEM, even on valid wire shape. */
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(0));
+    put_u32(bad.data + record + 4u, UINT32_C(1));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = item_record_offset(&bad, UINT32_C(0));
+    bad.data[record] = UINT8_C(4);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&rebuilt);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -589,6 +892,7 @@ int main(void)
     fixture_init(&second);
     test_family_count_limits();
     test_item_family();
+    test_type_alias_family();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

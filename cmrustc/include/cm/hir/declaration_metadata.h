@@ -86,7 +86,9 @@ typedef enum CmHirDeclarationPrimitive {
 
 typedef enum CmHirDeclarationTypeKind {
     CM_HIR_DECL_TYPE_PRIMITIVE = 1,
-    CM_HIR_DECL_TYPE_GENERIC = 2
+    CM_HIR_DECL_TYPE_GENERIC = 2,
+    /* Exact zero-argument reference to a STRUCT ITEM in this artifact. */
+    CM_HIR_DECL_TYPE_NAMED_ADT = 3
 } CmHirDeclarationTypeKind;
 
 typedef struct CmHirDeclarationModule {
@@ -116,12 +118,15 @@ typedef struct CmHirDeclarationVisibility {
 } CmHirDeclarationVisibility;
 
 typedef enum CmHirDeclarationItemKind {
-    CM_HIR_DECL_ITEM_STRUCT = 2
+    CM_HIR_DECL_ITEM_STRUCT = 2,
+    CM_HIR_DECL_ITEM_TYPE_ALIAS = 5
 } CmHirDeclarationItemKind;
 
 /*
- * The first ordinary ITEM slice is exactly a public, top-level unit struct.
- * Generic, predicate, field, attribute, and repr payloads are canonical zero.
+ * The first ordinary ITEM slice is a public, top-level, nongeneric unit
+ * struct or free type alias. Generic, predicate, field, attribute, and repr
+ * payloads are canonical zero. A STRUCT's public constructor availability is
+ * represented exactly by the complete VALUE namespace, not by this record.
  */
 typedef struct CmHirDeclarationItem {
     uint8_t kind;
@@ -129,6 +134,8 @@ typedef struct CmHirDeclarationItem {
     CmHirDeclarationString name;
     CmHirDeclarationVisibility visibility;
     uint32_t source_ordinal;
+    /* Required only for TYPE_ALIAS; zero for STRUCT. */
+    uint32_t alias_target_type;
 } CmHirDeclarationItem;
 
 typedef struct CmHirDeclarationGeneric {
@@ -144,6 +151,8 @@ typedef struct CmHirDeclarationType {
     uint8_t kind;
     uint8_t primitive;
     uint32_t generic_local;
+    /* Required only for zero-argument NAMED_ADT; zero otherwise. */
+    uint32_t item_local;
 } CmHirDeclarationType;
 
 typedef struct CmHirDeclarationValue {

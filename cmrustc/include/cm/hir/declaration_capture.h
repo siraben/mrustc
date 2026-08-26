@@ -57,6 +57,7 @@ typedef enum CmHirDeclarationCaptureReason {
     CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_REEXPORT_ATTRIBUTE_PROJECTION_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING,
     CM_HIR_DECL_CAPTURE_REASON_IDENTITY_UNSUPPORTED,
@@ -76,8 +77,9 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /*
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
-     * structs, only the stricter LOWER_SAFE `unstable(...)`/`derive(...)`
-     * allowlist.  This does not call any projected attribute inert.
+     * structs/type aliases/reexports, only the stricter LOWER_SAFE allowlist
+     * documented on the capture entry point. This does not call any projected
+     * attribute inert.
      */
     CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION = 1
 } CmHirDeclarationCaptureSemanticAttributes;
@@ -132,12 +134,16 @@ typedef struct CmHirDeclarationCaptureResult {
  * v3.0's SEMANTIC_ATTRIBUTES family is absent.  Authenticated crate/module
  * attributes are therefore projected from this LOWER_SAFE descriptor and
  * included in `projected_semantic_attribute_count`.  For a supported public
- * top-level UNIT struct, the stricter item allowlist permits at most one
- * direct `unstable(...)` and at most one direct, unexpanded `derive(...)`
- * attribute.  Every other item-attribute spelling, duplicate, generated
- * attribute, repr/lang/layout/ABI attribute, or inconsistent pointer/count
- * shape rejects.  Import attributes and attributes on other supported items
- * also reject.  Every successful omission is reported through
+ * top-level UNIT struct, the stricter item allowlist permits one each of
+ * direct `stable(...)` or `unstable(...)`, `deprecated(...)`, unexpanded
+ * `derive(...)`, and bare `non_exhaustive`.  The latter is the sole authority
+ * for an absent public VALUE constructor mate. A supported free alias permits
+ * only the stability/deprecation subset and must target a captured UNIT struct.
+ * A public reexport permits only direct `stable(...)`, `deprecated(...)`, and
+ * `allow(...)`. Every other item/reexport spelling, duplicate, generated
+ * attribute, repr/lang/layout/ABI attribute, or inconsistent provenance
+ * rejects. Attributes on other supported items also reject. Every successful
+ * omission is reported through
  * `semantic_attributes` and `projected_semantic_attribute_count`; it is not
  * an unchanged-HIR round-trip claim and is not usable as attribute-complete
  * dependency metadata.
