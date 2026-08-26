@@ -76,10 +76,14 @@ materialization, and fresh-consumer lowering.  A subsequent bounded ITEM slice
 preserves public unit structs and their independently visible value
 constructors, including constructor visibility across reexports.  The current
 whole-core probe reaches 451 modules, 1,632 public type entries, and 20,721
-public value entries before rejecting the `LayoutErr` type-alias reexport at
-`core/src/alloc/mod.rs:19` with `stage=namespace` and
-`reason=binding-shape-unsupported`.  Ordinary alias/ADT/type/value structural
-parity is therefore the next measured dependency, before associated
+public value entries.  The bounded alias slice now transports `LayoutErr` as
+a distinct alias ITEM targeting the named `LayoutError` ADT, through private
+module ownership, deterministic bytes, fresh materialization, and alias
+normalization without fabricating a `LayoutError` constructor.  The next
+optimized whole-core probe rejects the `ascii::Char` reexport target at
+`core/src/ascii.rs:20` because `AsciiChar` is an enum (`stage=namespace`,
+`reason=binding-shape-unsupported`).  Ordinary enum/aggregate/type/value
+structural parity is therefore the next measured dependency, before associated
 declarations, projections/function pointers, and cfg-complete impl headers.
 These remain bounded fixture profiles, not whole-core v3.
 

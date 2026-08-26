@@ -1974,10 +1974,15 @@ constructor-aware core probe reaches 451 modules, 1,632 public type entries,
 and 20,721 public value entries, then identifies the exact current v3.0
 frontier as the `LayoutErr` type-alias reexport at
 `core/src/alloc/mod.rs:19` (`stage=namespace`,
-`reason=binding-shape-unsupported`).  The next artifact work is therefore
-ordinary free aliases and their named ADT targets, followed by the remaining
-ordinary ITEM/value/type shapes.  Exact trait-associated ownership follows
-those prerequisites, before projection and impl families.
+`reason=binding-shape-unsupported`).  Bounded v3.0 now transports that free
+alias as a distinct ITEM, its named `LayoutError` ADT target and private
+defining module, while preserving constructor absence and fresh-consumer alias
+normalization.  The next optimized core probe reaches the same complete
+451/1,632/20,721 library census and rejects `ascii::Char` at
+`core/src/ascii.rs:20`, whose `AsciiChar` target is the first unsupported enum
+binding.  The next artifact work is therefore ordinary enum/aggregate/type
+and value shapes.  Exact trait-associated ownership follows those
+prerequisites, before projection and impl families.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

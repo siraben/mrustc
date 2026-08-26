@@ -143,11 +143,18 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   probe completes the zero-error 363-source/451-module HIR census and
   constructor-aware 451/1,632/20,721 library capture.  After explicit
   declaration-only projection of validated crate/module attributes, v3.0
-  reaches the public `LayoutErr` type-alias reexport at
-  `core/src/alloc/mod.rs:19` and rejects it exactly with `stage=namespace`,
-  `reason=binding-shape-unsupported`, and zero output.  This measures ordinary
-  alias/named-ADT structural transport as the next capability; associated
-  declarations are not yet the immediate frontier.
+  reached the public `LayoutErr` type-alias reexport at
+  `core/src/alloc/mod.rs:19` and rejected it exactly with `stage=namespace`,
+  `reason=binding-shape-unsupported`, and zero output.  Bounded v3.0 now
+  transports that free alias, its zero-argument named-ADT target, private
+  defining module, distinct alias/struct DefIds, and constructorless
+  `LayoutError` through deterministic capture, decode/re-encode,
+  materialization, and fresh-consumer normalization.  The next optimized core
+  probe completes the same 451/1,632/20,721 library census and rejects the
+  `ascii::Char` reexport at `core/src/ascii.rs:20`: its target `AsciiChar` is
+  the first unsupported enum binding.  Ordinary enum/aggregate transport is
+  therefore the next measured capability; associated declarations are not
+  yet the immediate frontier.
 - The v3.0 crate/module attribute projection above is valid only for its
   deliberately narrow declaration-name/DefId lookup consumer.  Its `ABSENT`
   family state means semantic-attribute records are unavailable, not that the
