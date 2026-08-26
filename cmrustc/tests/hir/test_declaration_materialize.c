@@ -52,6 +52,14 @@ typedef struct EnumFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } EnumFixture;
 
+typedef struct ConstFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationType types[1];
+    CmHirDeclarationValue values[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} ConstFixture;
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -119,6 +127,7 @@ static void fixture_init(TestFixture *fixture)
     metadata->type_count = 3u;
 
     fixture->parameters[0] = 3u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
     fixture->values[0].owner_module = 1u;
     fixture->values[0].name = (CmHirDeclarationString)S("needs");
     fixture->values[0].source_ordinal = 2u;
@@ -162,7 +171,7 @@ static void fixture_init(TestFixture *fixture)
     fixture->namespace_entries[2].name = fixture->values[0].name;
     fixture->namespace_entries[2].target_kind = CM_HIR_DECL_TARGET_VALUE;
     fixture->namespace_entries[2].target_local = 1u;
-    fixture->namespace_entries[2].export_ordinal = 3u;
+    fixture->namespace_entries[2].export_ordinal = 2u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 3u;
 }
@@ -204,7 +213,7 @@ static void item_fixture_init(TestFixture *fixture)
     fixture->namespace_entries[6].name = fixture->values[0].name;
     fixture->namespace_entries[6].target_kind = CM_HIR_DECL_TARGET_VALUE;
     fixture->namespace_entries[6].target_local = 1u;
-    fixture->namespace_entries[6].export_ordinal = 5u;
+    fixture->namespace_entries[6].export_ordinal = 2u;
     metadata->namespace_count = 7u;
 }
 
@@ -358,6 +367,7 @@ static void composite_fixture_init(CompositeFixture *fixture)
     fixture->parameters[1] = 5u;
     fixture->parameters[2] = 6u;
     fixture->parameters[3] = 7u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
     fixture->values[0].owner_module = 1u;
     fixture->values[0].name = (CmHirDeclarationString)S("inspect");
     fixture->values[0].source_ordinal = 3u;
@@ -460,6 +470,55 @@ static void enum_fixture_init(EnumFixture *fixture)
     fixture->namespace_entries[1].name =
         (CmHirDeclarationString)S("CharReexport");
     fixture->namespace_entries[1].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
+}
+
+static void const_fixture_init(ConstFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("depcrate");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("char-const-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_CHAR;
+    metadata->types = fixture->types;
+    metadata->type_count = 1u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_CONST;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("MAX");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].declared_type = 1u;
+    fixture->values[0].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("MAX_REEXPORT");
+    fixture->namespace_entries[1].export_ordinal = 2u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 2u;
 }
@@ -647,6 +706,79 @@ static void test_fresh_consumer(CmHirContext *context,
     via_alias = find_item(context, CM_HIR_ITEM_FUNCTION, "via_alias");
     assert_gate_predicate(context, direct, gate);
     assert_gate_predicate(context, via_alias, gate);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_const_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId constant)
+{
+    static const unsigned char source_text[] =
+        "use dep::MAX;\n"
+        "use dep::MAX_REEXPORT;\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    const CmHirModule *root;
+    uint32_t import_index;
+    uint32_t matched;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "const_consumer.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "const_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    root = cm_hir_get_module(context, lower_result.root_module);
+    assert(root != NULL && root->import_count == 2u);
+    matched = 0u;
+    for (import_index = 0u; import_index < root->import_count; ++import_index) {
+        const CmHirImport *import_value = &root->imports[import_index];
+        const CmHirImportBinding *binding;
+        const CmInternedString *name;
+        assert(import_value->binding_count == 1u
+            && import_value->bindings != NULL);
+        binding = &import_value->bindings[0];
+        name = cm_interner_get(&context->strings, binding->name);
+        assert(binding->namespace_kind == CM_HIR_NAMESPACE_VALUE
+            && cm_hir_def_id_equal(binding->target, constant)
+            && name != NULL
+            && ((name->len == sizeof("MAX") - 1u
+                    && memcmp(name->bytes, "MAX", name->len) == 0)
+                || (name->len == sizeof("MAX_REEXPORT") - 1u
+                    && memcmp(name->bytes, "MAX_REEXPORT", name->len)
+                        == 0)));
+        matched += 1u;
+    }
+    assert(matched == 2u);
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
@@ -1517,6 +1649,161 @@ static void test_composite_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_const_materialize_and_consume(void)
+{
+    ConstFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding reexport;
+    CmHirLibraryValue direct_value;
+    CmHirLibraryValue reexport_value;
+    CmHirLibraryPathSegment path[2];
+    const CmHirItem *constant;
+    const CmHirDefinition *definition;
+    const CmHirType *declared_type;
+    ContextLengths lengths;
+    uint32_t saved_local;
+    uint8_t saved_byte;
+
+    const_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 141u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.module_count == 1u && result.item_count == 0u
+        && result.public_type_entry_count == 0u
+        && result.public_value_entry_count == 2u
+        && context.bodies.len == 0u);
+    direct = lookup_value_binding(&artifact, "MAX");
+    reexport = lookup_value_binding(&artifact, "MAX_REEXPORT");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && direct.value_kind == CM_HIR_LIBRARY_VALUE_CONST
+        && reexport.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && reexport.value_kind == CM_HIR_LIBRARY_VALUE_CONST
+        && cm_hir_def_id_equal(direct.definition, reexport.definition));
+
+    constant = find_item(&context, CM_HIR_ITEM_CONST, "MAX");
+    definition = constant == NULL ? NULL
+        : cm_hir_lookup_definition(&context, constant->definition);
+    declared_type = constant == NULL ? NULL
+        : cm_hir_get_type(&context, constant->data.value_item.type);
+    assert(constant != NULL && definition != NULL
+        && definition->kind == CM_HIR_DEFINITION_ITEM
+        && definition->state == CM_HIR_DEFINITION_BOUND
+        && definition->has_reserved_item_kind
+        && definition->reserved_item_kind == CM_HIR_ITEM_CONST
+        && cm_hir_def_id_equal(constant->definition, direct.definition)
+        && cm_hir_def_id_is_none(constant->parent_definition)
+        && constant->generic_parameter_count == 0u
+        && constant->predicate_count == 0u
+        && constant->data.value_item.body == CM_HIR_BODY_NONE
+        && constant->data.value_item.definition_kind
+            == CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION
+        && constant->data.value_item.has_default_body == 0
+        && constant->data.value_item.mutability == CM_HIR_IMMUTABLE
+        && cm_hir_def_id_is_none(
+            constant->data.value_item.trait_item_definition)
+        && declared_type != NULL
+        && declared_type->kind == CM_HIR_TYPE_CHAR_KIND);
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = sizeof("dep") - 1u;
+    path[1].bytes = (const unsigned char *)"MAX";
+    path[1].length = sizeof("MAX") - 1u;
+    memset(&direct_value, 0, sizeof(direct_value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u,
+        &direct_value) == CM_HIR_LIBRARY_OK);
+    path[1].bytes = (const unsigned char *)"MAX_REEXPORT";
+    path[1].length = sizeof("MAX_REEXPORT") - 1u;
+    memset(&reexport_value, 0, sizeof(reexport_value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u,
+        &reexport_value) == CM_HIR_LIBRARY_OK
+        && direct_value.kind == CM_HIR_LIBRARY_VALUE_CONST
+        && reexport_value.kind == CM_HIR_LIBRARY_VALUE_CONST
+        && cm_hir_def_id_equal(direct_value.definition,
+            reexport_value.definition)
+        && direct_value.data.value.type == constant->data.value_item.type
+        && reexport_value.data.value.type == constant->data.value_item.type
+        && direct_value.data.value.mutability == CM_HIR_IMMUTABLE
+        && reexport_value.data.value.mutability == CM_HIR_IMMUTABLE);
+
+    test_const_fresh_consumer(&context, &artifact, constant->definition);
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_byte = decoded.values[0].kind;
+    decoded.values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 142u);
+    decoded.values[0].kind = saved_byte;
+
+    saved_local = decoded.values[0].declared_type;
+    decoded.values[0].declared_type = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 143u);
+    decoded.values[0].declared_type = saved_local;
+
+    saved_byte = decoded.values[0].mutability;
+    decoded.values[0].mutability = CM_HIR_DECL_MUTABLE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 144u);
+    decoded.values[0].mutability = saved_byte;
+
+    saved_byte = decoded.values[0].has_body;
+    decoded.values[0].has_body = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 145u);
+    decoded.values[0].has_body = saved_byte;
+
+    saved_local = decoded.values[0].return_type;
+    decoded.values[0].return_type = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 146u);
+    decoded.values[0].return_type = saved_local;
+
+    saved_local = decoded.namespace_entries[1].target_local;
+    decoded.namespace_entries[1].target_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 147u);
+    decoded.namespace_entries[1].target_local = saved_local;
+
+    saved_byte = decoded.namespace_entries[0].namespace_kind;
+    decoded.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 148u);
+    decoded.namespace_entries[0].namespace_kind = saved_byte;
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void assert_enum_variant_path(const CmHirLibraryArtifact *artifact,
     const char *enum_name, CmHirDefId enum_definition,
     CmHirDefId variant_definition)
@@ -1744,6 +2031,7 @@ int main(void)
     test_item_materialize_and_consume();
     test_alias_materialize_and_consume();
     test_composite_materialize_and_consume();
+    test_const_materialize_and_consume();
     test_enum_materialize_and_restore_scope();
     return 0;
 }

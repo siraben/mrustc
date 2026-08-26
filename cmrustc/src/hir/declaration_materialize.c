@@ -257,8 +257,17 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         }
     }
     for (index = 0u; index < metadata->value_count; ++index) {
+        CmHirItemKind kind;
+        if (metadata->values[index].kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            kind = CM_HIR_ITEM_FUNCTION;
+        } else if (metadata->values[index].kind
+                == CM_HIR_DECL_VALUE_CONST) {
+            kind = CM_HIR_ITEM_CONST;
+        } else {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
         status = cm_hir_reserve_item_definition_as(context, crate_id,
-            CM_HIR_ITEM_FUNCTION, span, &runtime->values[index]);
+            kind, span, &runtime->values[index]);
         if (status != CM_HIR_OK) return status;
     }
     return CM_HIR_OK;
@@ -635,6 +644,32 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
     CmHirItemId item_id;
     CmHirStatus status;
     size_t index;
+    if (wire->kind == CM_HIR_DECL_VALUE_CONST) {
+        CmHirMutability mutability;
+        if (!cm_decl_mutability(wire->mutability, &mutability)
+            || mutability != CM_HIR_IMMUTABLE) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        memset(&item, 0, sizeof(item));
+        item.kind = CM_HIR_ITEM_CONST;
+        item.definition = runtime->values[value_index];
+        item.owner_module = runtime->modules[wire->owner_module - 1u];
+        item.parent_definition = cm_hir_def_id_none();
+        item.name = cm_decl_intern(context, wire->name);
+        item.visibility.kind = CM_HIR_VIS_PUBLIC;
+        item.visibility.restriction = cm_hir_def_id_none();
+        item.span = cm_decl_span(source, wire->source_ordinal);
+        item.data.value_item.type = runtime->types[wire->declared_type - 1u];
+        item.data.value_item.body = CM_HIR_BODY_NONE;
+        item.data.value_item.definition_kind =
+            CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+        item.data.value_item.has_default_body = 0;
+        item.data.value_item.mutability = mutability;
+        item.data.value_item.trait_item_definition = cm_hir_def_id_none();
+        return cm_hir_add_item(context, &item, &item_id);
+    }
+    if (wire->kind != CM_HIR_DECL_VALUE_FUNCTION)
+        return CM_HIR_INVARIANT_VIOLATION;
     parameters = (CmHirFunctionParameter *)cm_decl_array(
         wire->parameter_count, sizeof(*parameters));
     predicates = (CmHirTraitPredicate *)cm_decl_array(wire->predicate_count,
@@ -725,7 +760,23 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
     definition = cm_hir_lookup_definition(context, runtime->values[value_index]);
     item = definition == NULL ? NULL
         : cm_hir_get_item(context, definition->entity.item_id);
-    if (definition == NULL || item == NULL
+    if (definition == NULL || item == NULL) return CM_HIR_LIBRARY_INVALID_HIR;
+    if (wire->kind == CM_HIR_DECL_VALUE_CONST) {
+        if (item->kind != CM_HIR_ITEM_CONST
+            || item->data.value_item.definition_kind
+                != CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION
+            || item->data.value_item.body != CM_HIR_BODY_NONE
+            || item->data.value_item.mutability != CM_HIR_IMMUTABLE) {
+            return CM_HIR_LIBRARY_INVALID_HIR;
+        }
+        memset(&value, 0, sizeof(value));
+        value.definition = item->definition;
+        value.kind = CM_HIR_LIBRARY_VALUE_CONST;
+        value.data.value.type = item->data.value_item.type;
+        value.data.value.mutability = item->data.value_item.mutability;
+        return cm_hir_library_owned_data_add_value(owned, &value);
+    }
+    if (wire->kind != CM_HIR_DECL_VALUE_FUNCTION
         || item->kind != CM_HIR_ITEM_FUNCTION)
         return CM_HIR_LIBRARY_INVALID_HIR;
     references = (CmHirLibraryNominalReference *)cm_decl_array(
@@ -890,9 +941,17 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
                 return CM_HIR_LIBRARY_INVALID_HIR;
             }
         } else if (entry->target_kind == CM_HIR_DECL_TARGET_VALUE) {
+            const CmHirDeclarationValue *value = &metadata->values[
+                entry->target_local - 1u];
             binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
             binding.definition = runtime->values[entry->target_local - 1u];
-            binding.value_kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+            if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
+                binding.value_kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+            } else if (value->kind == CM_HIR_DECL_VALUE_CONST) {
+                binding.value_kind = CM_HIR_LIBRARY_VALUE_CONST;
+            } else {
+                return CM_HIR_LIBRARY_INVALID_HIR;
+            }
         } else {
             return CM_HIR_LIBRARY_INVALID_HIR;
         }
