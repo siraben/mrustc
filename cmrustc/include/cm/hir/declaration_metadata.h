@@ -140,11 +140,23 @@ typedef struct CmHirDeclarationTrait {
     uint32_t source_ordinal;
     uint32_t generic_start;
     uint32_t generic_count;
+    /* This bounded slice reserves trait predicates but carries outlives. */
+    uint32_t predicate_scope_start;
+    uint32_t predicate_scope_count;
+    uint32_t predicate_start;
+    uint32_t predicate_count;
+    uint32_t outlives_start;
+    uint32_t outlives_count;
     /* Contiguous nominal-owned AITM range; zero count requires zero start. */
     uint32_t associated_start;
     uint32_t associated_count;
     uint8_t safety;
+    uint8_t flags;
+    /* Present exactly when CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM is set. */
+    CmHirDeclarationString diagnostic_item;
 } CmHirDeclarationTrait;
+
+#define CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM UINT8_C(1)
 
 typedef enum CmHirDeclarationVisibilityKind {
     CM_HIR_DECL_VISIBILITY_PRIVATE = 1,
@@ -389,8 +401,20 @@ typedef struct CmHirDeclarationPredicate {
 
 typedef enum CmHirDeclarationPredicateOwnerKind {
     CM_HIR_DECL_PREDICATE_OWNER_VALUE = 0,
-    CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED = 1
+    CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED = 1,
+    CM_HIR_DECL_PREDICATE_OWNER_NOMINAL = 2
 } CmHirDeclarationPredicateOwnerKind;
+
+typedef struct CmHirDeclarationOutlivesPredicate {
+    /* The current slice accepts NOMINAL owners only. */
+    uint8_t owner_kind;
+    uint32_t owner_local;
+    uint32_t ordinal;
+    uint32_t subject_type;
+    CmHirDeclarationRegion bound;
+    /* Exact HIR predicate scope; this slice accepts the root scope only. */
+    uint32_t scope;
+} CmHirDeclarationOutlivesPredicate;
 
 typedef enum CmHirDeclarationNamespace {
     CM_HIR_DECL_NAMESPACE_TYPE = 1,
@@ -453,6 +477,8 @@ typedef struct CmHirDeclarationMetadata {
     size_t value_count;
     CmHirDeclarationPredicate *predicates;
     size_t predicate_count;
+    CmHirDeclarationOutlivesPredicate *outlives_predicates;
+    size_t outlives_predicate_count;
     CmHirDeclarationNamespaceEntry *namespace_entries;
     size_t namespace_count;
     int owns_storage;
