@@ -388,6 +388,92 @@ static void aggregate_fixture_init(CaptureFixture *fixture, int with_noise)
         aggregate_fixture_source, sizeof(aggregate_fixture_source) - 1u);
 }
 
+static void layout_dependency_fixture_init(CaptureFixture *fixture,
+    int with_noise)
+{
+    CmByteBuf source;
+    size_t index;
+    char variant[64];
+    int written;
+    cm_byte_buf_init(&source);
+    cm_byte_buf_append(&source, (const unsigned char *)
+        "mod ptr {\n"
+        "  #[unstable(feature = \"ptr_alignment_type\", issue = \"102070\")]\n"
+        "  #[derive(Copy, Clone, PartialEq, Eq)]\n"
+        "  #[repr(transparent)]\n"
+        "  pub struct Alignment(AlignmentEnum);\n"
+        "  #[cfg(any())]\n"
+        "  #[derive(Copy, Clone)]\n"
+        "  #[repr(u16)]\n"
+        "  enum AlignmentEnum { Disabled = 2 }\n"
+        "  #[cfg(all())]\n"
+        "  #[derive(Copy, Clone, PartialEq, Eq)]\n"
+        "  #[repr(u64)]\n"
+        "  enum AlignmentEnum {\n",
+        sizeof("mod ptr {\n"
+        "  #[unstable(feature = \"ptr_alignment_type\", issue = \"102070\")]\n"
+        "  #[derive(Copy, Clone, PartialEq, Eq)]\n"
+        "  #[repr(transparent)]\n"
+        "  pub struct Alignment(AlignmentEnum);\n"
+        "  #[cfg(any())]\n"
+        "  #[derive(Copy, Clone)]\n"
+        "  #[repr(u16)]\n"
+        "  enum AlignmentEnum { Disabled = 2 }\n"
+        "  #[cfg(all())]\n"
+        "  #[derive(Copy, Clone, PartialEq, Eq)]\n"
+        "  #[repr(u64)]\n"
+        "  enum AlignmentEnum {\n") - 1u);
+    for (index = 0u; index < 64u; ++index) {
+        written = snprintf(variant, sizeof(variant),
+            "    Align%lu = 1 << %lu,\n", (unsigned long)index,
+            (unsigned long)index);
+        assert(written > 0 && (size_t)written < sizeof(variant));
+        cm_byte_buf_append(&source, (const unsigned char *)variant,
+            (size_t)written);
+    }
+    cm_byte_buf_append(&source, (const unsigned char *)
+        "  }\n"
+        "  #[stable(feature = \"orphan\", since = \"1.0.0\")]\n"
+        "  #[derive(Copy, Clone)]\n"
+        "  struct Orphan { value: usize }\n"
+        "}\n"
+        "#[stable(feature = \"alloc_layout\", since = \"1.28.0\")]\n"
+        "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]\n"
+        "#[lang = \"alloc_layout\"]\n"
+        "pub struct Layout { size: usize, align: ptr::Alignment }\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        sizeof("  }\n"
+        "  #[stable(feature = \"orphan\", since = \"1.0.0\")]\n"
+        "  #[derive(Copy, Clone)]\n"
+        "  struct Orphan { value: usize }\n"
+        "}\n"
+        "#[stable(feature = \"alloc_layout\", since = \"1.28.0\")]\n"
+        "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]\n"
+        "#[lang = \"alloc_layout\"]\n"
+        "pub struct Layout { size: usize, align: ptr::Alignment }\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n") - 1u);
+    fixture_init_source(fixture, with_noise, "layout-dependency.rs",
+        source.data, source.len);
+    cm_byte_buf_destroy(&source);
+}
+
+static void wide_enum_fixture_init(CaptureFixture *fixture,
+    const char *repr, const char *high)
+{
+    char source[2048];
+    int written = snprintf(source, sizeof(source),
+        "#[derive(Copy, Clone)]\n"
+        "#[repr(%s)]\n"
+        "pub enum Wide { Low = 1, High = %s }\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n", repr, high);
+    assert(written > 0 && (size_t)written < sizeof(source));
+    fixture_init_source(fixture, 0, "wide-enum.rs",
+        (const unsigned char *)source, (size_t)written);
+}
+
 static void generic_enum_fixture_init(CaptureFixture *fixture,
     int with_noise, int with_field_stability)
 {
@@ -1961,9 +2047,6 @@ static void test_enum_cfg_source_ordinal_and_atomic_negatives(void)
           "unstable(feature = \"ascii_char\", issue = \"110998\")",
           "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
           "TooLarge = 256,\n", "" },
-        { "enum-repr.rs", "repr(u16)",
-          "unstable(feature = \"ascii_char\", issue = \"110998\")",
-          good_variants, "" },
         { "enum-item-attr.rs", "repr(u8)",
           "stable(feature = \"ascii_char\", since = \"1.0.0\")",
           good_variants, "" },
@@ -3492,6 +3575,241 @@ static void test_named_aggregate_capture_and_determinism(void)
     cm_hir_declaration_metadata_destroy(&first_metadata);
     fixture_destroy(&noisy);
     fixture_destroy(&first);
+}
+
+static void test_layout_private_dependency_closure_and_determinism(void)
+{
+    static const struct {
+        const char *repr;
+        const char *high;
+        uint8_t expected_repr;
+        uint64_t expected_high;
+    } wide_cases[] = {
+        { "u16", "65535", CM_HIR_DECL_ENUM_REPR_U16, UINT64_C(65535) },
+        { "u32", "1 << 31", CM_HIR_DECL_ENUM_REPR_U32,
+            UINT64_C(2147483648) }
+    };
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationItem *layout;
+    const CmHirDeclarationItem *alignment;
+    const CmHirDeclarationItem *alignment_enum;
+    uint32_t layout_local = 0u;
+    uint32_t alignment_local = 0u;
+    uint32_t enum_local = 0u;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    size_t index;
+    layout_dependency_fixture_init(&first, 0);
+    layout_dependency_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_OK) {
+        fprintf(stderr, "layout capture failed status=%s stage=%s reason=%s "
+            "item=%u type=%u\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            (unsigned int)result.rejected_item,
+            (unsigned int)result.rejected_type);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 3u
+        && result.projected_semantic_attribute_count == 5u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 5u);
+    layout = find_declaration_item(&metadata, "Layout", &layout_local);
+    alignment = find_declaration_item(&metadata, "Alignment",
+        &alignment_local);
+    alignment_enum = find_declaration_item(&metadata, "AlignmentEnum",
+        &enum_local);
+    assert(find_declaration_item(&metadata, "Orphan", NULL) == NULL);
+    assert(layout != NULL && alignment != NULL && alignment_enum != NULL
+        && layout->kind == CM_HIR_DECL_ITEM_STRUCT
+        && layout->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && layout->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+        && layout->aggregate_repr == CM_HIR_DECL_AGGREGATE_REPR_RUST
+        && layout->aggregate_flags == CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        && declaration_string_is(layout->lang_item, "alloc_layout")
+        && layout->field_count == 2u
+        && declaration_string_is(layout->fields[0].name, "size")
+        && declaration_string_is(layout->fields[1].name, "align")
+        && layout->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && layout->fields[1].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && alignment->kind == CM_HIR_DECL_ITEM_STRUCT
+        && alignment->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && alignment->aggregate_form == CM_HIR_DECL_AGGREGATE_TUPLE
+        && alignment->aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT
+        && alignment->aggregate_flags == 0u
+        && alignment->field_count == 1u
+        && alignment->fields[0].name.data == NULL
+        && alignment->fields[0].name.length == 0u
+        && alignment->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && alignment_enum->kind == CM_HIR_DECL_ITEM_ENUM
+        && alignment_enum->visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && alignment_enum->enum_repr_primitive
+            == CM_HIR_DECL_ENUM_REPR_U64
+        && alignment_enum->variant_count == 64u
+        && alignment_enum->variants[0].discriminant_low == UINT64_C(1)
+        && alignment_enum->variants[63].discriminant_low
+            == (UINT64_C(1) << 63)
+        && alignment_enum->variants[63].discriminant_high == 0u);
+    assert(layout_local != 0u && alignment_local != 0u && enum_local != 0u);
+    for (index = 0u; index < metadata.namespace_count; ++index)
+        assert(metadata.namespace_entries[index].target_kind
+                != CM_HIR_DECL_TARGET_ITEM
+            || metadata.namespace_entries[index].target_local != enum_local);
+    assert(find_namespace_entry(&metadata, layout->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "Layout") != NULL
+        && find_namespace_entry(&metadata, alignment->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "Alignment") != NULL
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+
+    for (index = 0u; index < sizeof(wide_cases) / sizeof(wide_cases[0]);
+            ++index) {
+        CaptureFixture wide;
+        CmHirDeclarationMetadata wide_metadata;
+        const CmHirDeclarationItem *wide_item;
+        uint32_t wide_local = 0u;
+        wide_enum_fixture_init(&wide, wide_cases[index].repr,
+            wide_cases[index].high);
+        cm_hir_declaration_metadata_init(&wide_metadata);
+        input = capture_input(&wide);
+        result = cm_hir_declaration_metadata_capture(&input, &wide_metadata);
+        wide_item = find_declaration_item(&wide_metadata, "Wide",
+            &wide_local);
+        assert(result.status == CM_HIR_DECL_CAPTURE_OK
+            && wide_item != NULL && wide_local != 0u
+            && wide_item->enum_repr_primitive
+                == wide_cases[index].expected_repr
+            && wide_item->variants[1].discriminant_low
+                == wide_cases[index].expected_high
+            && cm_hir_declaration_metadata_validate(&wide_metadata)
+                == CM_HIR_DECL_METADATA_OK);
+        cm_hir_declaration_metadata_destroy(&wide_metadata);
+        fixture_destroy(&wide);
+    }
+}
+
+static void test_layout_private_dependency_hostiles_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId layout_id;
+    CmHirItemId alignment_id;
+    CmHirItemId enum_id;
+    CmHirItem *layout;
+    CmHirItem *alignment;
+    CmHirItem *alignment_enum;
+    CmHirType *alignment_type;
+    CmHirDefId saved_definition;
+    CmHirVisibility saved_visibility;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint64_t saved_discriminant;
+    layout_dependency_fixture_init(&fixture, 0);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    layout = (CmHirItem *)find_item(&fixture, "Layout", &layout_id);
+    alignment = (CmHirItem *)find_item(&fixture, "Alignment",
+        &alignment_id);
+    alignment_enum = (CmHirItem *)find_item(&fixture, "AlignmentEnum",
+        &enum_id);
+    assert(layout != NULL && alignment != NULL && alignment_enum != NULL
+        && layout->data.aggregate_item.field_count == 2u
+        && alignment->data.aggregate_item.field_count == 1u
+        && alignment_enum->data.enum_item.variant_count == 64u);
+#define ASSERT_ATOMIC_LAYOUT_FAILURE() do { \
+    input = capture_input(&fixture); \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+    alignment_type = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        layout->data.aggregate_item.fields[1].type);
+    assert(alignment_type != NULL && alignment_type->kind
+        == CM_HIR_TYPE_ADT_KIND);
+    saved_definition = alignment_type->data.named_type.definition;
+    alignment_type->data.named_type.definition = layout->definition;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment_type->data.named_type.definition = saved_definition;
+
+    saved_visibility = alignment_enum->visibility;
+    alignment_enum->visibility.kind = CM_HIR_VIS_PUBLIC;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment_enum->visibility = saved_visibility;
+
+    saved_metadata = alignment_enum->attributes[1].metadata;
+    alignment_enum->attributes[1].metadata = cm_hir_intern(&fixture.hir,
+        "repr(u32)");
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment_enum->attributes[1].metadata = saved_metadata;
+
+    saved_span = alignment->attributes[2].span;
+    alignment->attributes[2].span.start += 1u;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment->attributes[2].span = saved_span;
+
+    saved_visibility = alignment->data.aggregate_item.fields[0].visibility;
+    alignment->data.aggregate_item.fields[0].visibility.kind =
+        CM_HIR_VIS_PUBLIC;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment->data.aggregate_item.fields[0].visibility = saved_visibility;
+
+    saved_discriminant = alignment_enum->data.enum_item.variants[63]
+        .discriminant.data.value.low_bits;
+    alignment_enum->data.enum_item.variants[63].discriminant.data.value
+        .low_bits = UINT64_C(1) << 62;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment_enum->data.enum_item.variants[63].discriminant.data.value
+        .low_bits = saved_discriminant;
+
+    saved_definition = alignment_enum->definition;
+    alignment_enum->definition = layout->definition;
+    ASSERT_ATOMIC_LAYOUT_FAILURE();
+    alignment_enum->definition = saved_definition;
+#undef ASSERT_ATOMIC_LAYOUT_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
 }
 
 static void test_named_aggregate_hostile_mutations_are_atomic(void)
@@ -5425,6 +5743,8 @@ int main(void)
     test_static_type_dag_is_structurally_deduplicated();
     test_named_aggregate_capture_and_determinism();
     test_named_aggregate_hostile_mutations_are_atomic();
+    test_layout_private_dependency_closure_and_determinism();
+    test_layout_private_dependency_hostiles_are_atomic();
     test_default_enum_variant_capture_and_determinism();
     test_default_enum_hostile_mutations_are_atomic();
     test_char_const_capture_and_determinism();

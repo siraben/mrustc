@@ -141,23 +141,26 @@ typedef struct CmHirDeclarationCaptureResult {
  * `derive(...)`, and bare `non_exhaustive`.  The latter is the sole authority
  * for an absent public VALUE constructor mate. A supported free alias permits
  * only the stability/deprecation subset and must target a captured UNIT struct.
- * Three source-authenticated named aggregate profiles are also supported,
- * without declaration-name checks: a Rust-repr, zero-generic struct with one
- * retained lang identity and exactly four public BOOL fields; a transparent,
- * pub-transparent one-generic struct whose relaxed-Sized type parameter is its
- * sole private field; and a transparent, pub-transparent one-generic union
- * whose ordinary-Sized parameter appears in one UNIT field and one application
- * of the captured `manually_drop` lang wrapper. Named aggregates are TYPE-only
- * and retain their lang, representation, pub-transparent flag, field order,
- * visibility, types, and ITEM-owned generic shape. Their authenticated
- * stability and derive attributes are projected; layout/lang attributes are
- * normalized into retained ITEM facts. Predicated aggregates remain outside
- * this bounded profile and fail closed.
- * A supported enum is public, top-level, predicate-free and uses one of three
- * exact profiles. The first is zero-generic `repr(u8)` with source-ordered UNIT
- * variants and explicit decimal ISIZE scalar discriminants in the u8 range;
- * it has exactly direct `derive(...)`, `unstable(...)`, and normalized
- * `repr(u8)` item attributes and one direct `unstable(...)` per variant. The
+ * Source-authenticated non-unit aggregate records retain their item and field
+ * visibility, named or tuple form, Rust or transparent repr, field order and
+ * types, optional lang identity, pub-transparent flag, and ITEM-owned generic
+ * shape. The bounded generic wrapper/union profiles remain exact; zero-generic
+ * named Rust-repr structs and zero-generic transparent tuple structs are also
+ * supported. Their closed stability/deprecation/derive attributes are
+ * projected while repr/lang facts are normalized into ITEM. Starting only
+ * from captured public declarations, the capture recursively admits same-crate
+ * private aggregate/enum ITEM dependencies referenced by retained field/type
+ * edges. Such private ITEMs must be transitively reachable and have no NSPC
+ * identity; an orphan private item is never discovered or emitted. Predicated
+ * aggregates remain outside this bounded profile and fail closed.
+ * A supported enum is top-level, predicate-free and uses one of three exact
+ * profiles. The first is zero-generic explicit `repr(u8|u16|u32|u64)` with
+ * source-ordered UNIT variants and exact source-authenticated ISIZE scalar
+ * discriminants in the repr range (including the full u64 low-bit range).
+ * It has direct `derive(...)`, one normalized repr attribute, an optional
+ * stability/deprecation projection, and matching projected variant stability
+ * facts. An explicit enum may be a transitively reached private dependency;
+ * public enums remain TYPE-only. The
  * second is zero-generic with Rust's default repr, only
  * implicit-discriminant UNIT variants, no variant attributes, and exactly one
  * direct `rustc_diagnostic_item =
