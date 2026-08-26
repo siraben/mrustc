@@ -293,16 +293,65 @@ static CmDeclCaptureModule *cm_decl_module_by_definition(
     return NULL;
 }
 
-static int cm_decl_collect_modules(CmDeclCaptureState *state)
+static int cm_decl_project_module_attributes(CmDeclCaptureState *state,
+    const CmHirAttribute *attributes, uint32_t attribute_count,
+    CmHirDeclarationCaptureResult *result)
+{
+    uint32_t index;
+    if ((attribute_count == 0u) != (attributes == NULL))
+        return cm_decl_capture_fail(result,
+            CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+            CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID);
+    if ((size_t)attribute_count > SIZE_MAX
+            - state->projected_semantic_attribute_count)
+        return cm_decl_capture_fail(result,
+            CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+            CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT);
+    for (index = 0u; index < attribute_count; ++index) {
+        const CmHirAttribute *attribute = &attributes[index];
+        const CmInternedString *metadata = cm_interner_get(
+            &state->hir->strings, attribute->metadata);
+        uint32_t prior;
+        if (metadata == NULL || metadata->len == 0u
+            || attribute->source_attribute == 0u
+            || attribute->span.source == 0u
+            || attribute->span.start > attribute->span.end) {
+            if (result->failure_reason
+                    == CM_HIR_DECL_CAPTURE_REASON_NONE) {
+                result->has_rejected_span = attribute->span.source != 0u;
+                result->rejected_span = attribute->span;
+            }
+            return cm_decl_capture_fail(result,
+                CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+                CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID);
+        }
+        for (prior = 0u; prior < index; ++prior) {
+            if (attributes[prior].span.source == attribute->span.source
+                && attributes[prior].source_attribute
+                    == attribute->source_attribute) {
+                result->has_rejected_span = 1;
+                result->rejected_span = attribute->span;
+                return cm_decl_capture_fail(result,
+                    CM_HIR_DECL_CAPTURE_STAGE_MODULES,
+                    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID);
+            }
+        }
+    }
+    state->projected_semantic_attribute_count += attribute_count;
+    return 1;
+}
+
+static int cm_decl_collect_modules(CmDeclCaptureState *state,
+    CmHirDeclarationCaptureResult *result)
 {
     const CmModuleGraph *graph = state->input->graph;
     size_t index;
-    if ((state->crate_value->inner_attribute_count == 0u)
-            != (state->crate_value->inner_attributes == NULL)
-        || state->crate_value->inner_attribute_count != 0u) return 0;
+    if (!cm_decl_project_module_attributes(state,
+            state->crate_value->inner_attributes,
+            state->crate_value->inner_attribute_count, result)) return 0;
     state->module_count = cm_module_graph_module_count(graph);
     if (state->module_count == 0u
-        || state->module_count > CM_HIR_DECL_METADATA_MAX_RECORDS
+        || state->module_count > CM_HIR_DECL_METADATA_MAX_MODULES
         || cm_hir_module_map_count(state->input->modules)
             != state->module_count) return 0;
     state->modules = (CmDeclCaptureModule *)cm_alloc_zeroed(
@@ -316,12 +365,14 @@ static int cm_decl_collect_modules(CmDeclCaptureState *state)
             || (module->hir = cm_hir_get_module(state->hir,
                 module->hir_id)) == NULL
             || module->hir->crate_id != state->input->crate_id
-            || module->hir->outer_attribute_count != 0u
-            || module->hir->outer_attributes != NULL
-            || module->hir->inner_attribute_count != 0u
-            || module->hir->inner_attributes != NULL
             || !cm_decl_copy_graph_string(graph, module->graph.absolute_path,
                 &module->path, &module->path_length)) return 0;
+        if (!cm_decl_project_module_attributes(state,
+                module->hir->outer_attributes,
+                module->hir->outer_attribute_count, result)
+            || !cm_decl_project_module_attributes(state,
+                module->hir->inner_attributes,
+                module->hir->inner_attribute_count, result)) return 0;
     }
     qsort(state->modules, state->module_count, sizeof(*state->modules),
         cm_decl_module_compare);
@@ -1000,7 +1051,7 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
                     - state->projected_semantic_attribute_count)
                 return cm_decl_capture_fail(result,
                     CM_HIR_DECL_CAPTURE_STAGE_ITEMS,
-                    CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED);
+                    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT);
             state->projected_semantic_attribute_count += projected_count;
             state->items[state->item_count++] = value;
         } else if (entry->target.kind == CM_HIR_LIBRARY_BINDING_VALUE) {
@@ -1557,7 +1608,7 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
             CM_HIR_DECL_CAPTURE_REASON_OWNED_DATA_MISSING);
         goto done;
     }
-    if (!cm_decl_collect_modules(&state)) {
+    if (!cm_decl_collect_modules(&state, &result)) {
         cm_decl_capture_fail(&result, CM_HIR_DECL_CAPTURE_STAGE_MODULES,
             CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID);
         goto done;
@@ -1638,7 +1689,7 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
         state.projected_semantic_attribute_count;
     result.semantic_attributes = state.projected_semantic_attribute_count == 0u
         ? CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_EXACT_NONE
-        : CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_ALLOWLISTED_UNIT_STRUCT;
+        : CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION;
 done:
     cm_hir_declaration_metadata_destroy(&candidate);
     cm_decl_state_destroy(&state);
@@ -1701,6 +1752,10 @@ const char *cm_hir_declaration_capture_reason_name(
         return "owned-data-missing";
     case CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID:
         return "module-census-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID:
+        return "semantic-attribute-provenance-invalid";
+    case CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT:
+        return "semantic-attribute-projection-limit";
     case CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_MODULE_MISSING:
         return "namespace-module-missing";
     case CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT:

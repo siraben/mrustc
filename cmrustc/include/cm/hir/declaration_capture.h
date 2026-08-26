@@ -40,6 +40,8 @@ typedef enum CmHirDeclarationCaptureReason {
     CM_HIR_DECL_CAPTURE_REASON_LIBRARY_REJECTED,
     CM_HIR_DECL_CAPTURE_REASON_OWNED_DATA_MISSING,
     CM_HIR_DECL_CAPTURE_REASON_MODULE_CENSUS_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID,
+    CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROJECTION_LIMIT,
     CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_MODULE_MISSING,
     CM_HIR_DECL_CAPTURE_REASON_NAMESPACE_LIMIT,
     CM_HIR_DECL_CAPTURE_REASON_BINDING_LOOKUP_FAILED,
@@ -72,12 +74,12 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /* No semantic attribute was omitted from the v3.0 descriptor. */
     CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_EXACT_NONE = 0,
     /*
-     * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture accepted and
-     * deliberately omitted only the LOWER_SAFE allowlist of authenticated,
-     * direct `unstable(...)` and/or unexpanded `derive(...)` attributes on
-     * supported UNIT structs.  This does not call either attribute inert.
+     * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
+     * projected authenticated crate/module attributes and, on supported UNIT
+     * structs, only the stricter LOWER_SAFE `unstable(...)`/`derive(...)`
+     * allowlist.  This does not call any projected attribute inert.
      */
-    CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_ALLOWLISTED_UNIT_STRUCT = 1
+    CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION = 1
 } CmHirDeclarationCaptureSemanticAttributes;
 
 typedef struct CmHirDeclarationCaptureInput {
@@ -127,17 +129,18 @@ typedef struct CmHirDeclarationCaptureResult {
  * is the completeness authority; unsupported active public facts reject the
  * complete transaction.  No declaration name has special meaning.
  *
- * v3.0's SEMANTIC_ATTRIBUTES family is absent.  For the supported public
- * top-level UNIT-struct projection, capture may omit at most one direct
- * `unstable(...)` and at most one direct, unexpanded `derive(...)` attribute.
- * Every other attribute spelling, duplicate, generated attribute, repr/lang/
- * layout/ABI attribute, or inconsistent pointer/count shape rejects.  A
- * crate/module/import attribute and an attribute on any other supported item
- * also reject; the allowlist applies only to the UNIT struct declaration.  A
- * successful omission is reported explicitly through `semantic_attributes`
- * and `projected_semantic_attribute_count`; it is not an unchanged-HIR
- * round-trip claim and is not usable as attribute-complete dependency
- * metadata.
+ * v3.0's SEMANTIC_ATTRIBUTES family is absent.  Authenticated crate/module
+ * attributes are therefore projected from this LOWER_SAFE descriptor and
+ * included in `projected_semantic_attribute_count`.  For a supported public
+ * top-level UNIT struct, the stricter item allowlist permits at most one
+ * direct `unstable(...)` and at most one direct, unexpanded `derive(...)`
+ * attribute.  Every other item-attribute spelling, duplicate, generated
+ * attribute, repr/lang/layout/ABI attribute, or inconsistent pointer/count
+ * shape rejects.  Import attributes and attributes on other supported items
+ * also reject.  Every successful omission is reported through
+ * `semantic_attributes` and `projected_semantic_attribute_count`; it is not
+ * an unchanged-HIR round-trip claim and is not usable as attribute-complete
+ * dependency metadata.
  *
  * On success output owns all descriptor storage.  Failure leaves an already
  * initialized output unchanged.

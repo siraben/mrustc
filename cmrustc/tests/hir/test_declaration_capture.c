@@ -147,6 +147,23 @@ static const CmHirItem *find_item(const CaptureFixture *fixture,
     return NULL;
 }
 
+static const CmHirModule *find_module(const CaptureFixture *fixture,
+    const char *name)
+{
+    size_t index;
+    size_t length = strlen(name);
+    for (index = 0u; index < fixture->hir.modules.len; ++index) {
+        const CmHirModule *module = (const CmHirModule *)cm_vec_at_const(
+            &fixture->hir.modules, index);
+        const CmInternedString *module_name = module == NULL ? NULL
+            : cm_interner_get(&fixture->hir.strings, module->name);
+        if (module != NULL && module_name != NULL
+            && module_name->len == length
+            && memcmp(module_name->bytes, name, length) == 0) return module;
+    }
+    return NULL;
+}
+
 static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
 {
     const CmHirDeclarationNamespaceEntry *alloc_alias_type;
@@ -269,7 +286,7 @@ static void test_fixture_and_determinism(void)
         && result.trait_count == 1u && result.item_count == 1u
         && result.value_count == 1u && result.namespace_count == 7u
         && result.semantic_attributes
-            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_ALLOWLISTED_UNIT_STRUCT
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION
         && result.projected_semantic_attribute_count == 2u);
     result = cm_hir_declaration_metadata_capture(&noisy_input,
         &noisy_metadata);
@@ -491,6 +508,130 @@ static void test_plain_unit_struct_has_exact_empty_attribute_profile(void)
     fixture_destroy(&fixture);
 }
 
+static void test_module_attribute_projection_and_provenance(void)
+{
+    static const unsigned char plain_source[] =
+        "pub mod child {}\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char attributed_source[] =
+        "#![allow(dead_code)]\n"
+        "#[allow(non_snake_case)]\n"
+        "pub mod child { #![allow(unused)] }\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture plain;
+    CaptureFixture attributed;
+    CmHirDeclarationCaptureInput plain_input;
+    CmHirDeclarationCaptureInput attributed_input;
+    CmHirDeclarationMetadata plain_metadata;
+    CmHirDeclarationMetadata attributed_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf plain_bytes;
+    CmByteBuf attributed_bytes;
+    CmHirCrate *crate_value;
+    CmHirModule *child;
+    CmHirAttribute *saved_child_attributes;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    CmHirDeclarationModule *saved_modules;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+
+    fixture_init_source(&plain, 0, "module-attributes.rs", plain_source,
+        sizeof(plain_source) - 1u);
+    fixture_init_source(&attributed, 0, "module-attributes.rs",
+        attributed_source, sizeof(attributed_source) - 1u);
+    plain_input = capture_input(&plain);
+    attributed_input = capture_input(&attributed);
+    cm_hir_declaration_metadata_init(&plain_metadata);
+    cm_hir_declaration_metadata_init(&attributed_metadata);
+    result = cm_hir_declaration_metadata_capture(&plain_input,
+        &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 0u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_EXACT_NONE);
+    result = cm_hir_declaration_metadata_capture(&attributed_input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 3u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION);
+    cm_byte_buf_init(&plain_bytes);
+    cm_byte_buf_init(&attributed_bytes);
+    assert(cm_hir_declaration_metadata_encode(&plain_metadata, &plain_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&attributed_metadata,
+            &attributed_bytes) == CM_HIR_DECL_METADATA_OK
+        && plain_bytes.len == attributed_bytes.len
+        && memcmp(plain_bytes.data, attributed_bytes.data,
+            plain_bytes.len) == 0);
+
+    saved_modules = attributed_metadata.modules;
+    saved_namespace = attributed_metadata.namespace_entries;
+    crate_value = (CmHirCrate *)cm_hir_get_crate(&attributed.hir,
+        attributed.lower_result.crate_id);
+    child = (CmHirModule *)find_module(&attributed, "child");
+    assert(crate_value != NULL && crate_value->inner_attribute_count == 1u
+        && crate_value->inner_attributes != NULL && child != NULL
+        && child->outer_attribute_count == 1u
+        && child->inner_attribute_count == 1u
+        && child->inner_attributes != NULL);
+
+    crate_value->inner_attribute_count = 0u;
+    result = cm_hir_declaration_metadata_capture(&attributed_input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_MODULES
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID
+        && attributed_metadata.modules == saved_modules
+        && attributed_metadata.namespace_entries == saved_namespace);
+    crate_value->inner_attribute_count = 1u;
+
+    saved_metadata = crate_value->inner_attributes[0].metadata;
+    crate_value->inner_attributes[0].metadata = CM_INTERN_ID_NONE;
+    result = cm_hir_declaration_metadata_capture(&attributed_input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID
+        && attributed_metadata.modules == saved_modules
+        && attributed_metadata.namespace_entries == saved_namespace);
+    crate_value->inner_attributes[0].metadata = saved_metadata;
+
+    saved_span = crate_value->inner_attributes[0].span;
+    crate_value->inner_attributes[0].span.start = 2u;
+    crate_value->inner_attributes[0].span.end = 1u;
+    result = cm_hir_declaration_metadata_capture(&attributed_input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID
+        && result.has_rejected_span
+        && attributed_metadata.modules == saved_modules
+        && attributed_metadata.namespace_entries == saved_namespace);
+    crate_value->inner_attributes[0].span = saved_span;
+
+    saved_child_attributes = child->inner_attributes;
+    child->inner_attributes = NULL;
+    result = cm_hir_declaration_metadata_capture(&attributed_input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_SEMANTIC_ATTRIBUTE_PROVENANCE_INVALID
+        && attributed_metadata.modules == saved_modules
+        && attributed_metadata.namespace_entries == saved_namespace);
+    child->inner_attributes = saved_child_attributes;
+
+    cm_byte_buf_destroy(&attributed_bytes);
+    cm_byte_buf_destroy(&plain_bytes);
+    cm_hir_declaration_metadata_destroy(&attributed_metadata);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
+    fixture_destroy(&attributed);
+    fixture_destroy(&plain);
+}
+
 static void test_item_shape_diagnostic(void)
 {
     static const unsigned char unsupported_source[] =
@@ -650,6 +791,7 @@ int main(void)
     test_failure_is_atomic();
     test_zero_item_gate_path();
     test_plain_unit_struct_has_exact_empty_attribute_profile();
+    test_module_attribute_projection_and_provenance();
     test_item_shape_diagnostic();
     test_non_exhaustive_constructor_mate_is_required();
     test_many_private_bindings_do_not_consume_public_cap();
