@@ -51,7 +51,7 @@ The current tree has four important, but different, kinds of evidence:
    `core` front end: 363 sources, 451 modules, 38,176 HIR items, 22,524 body
    records, and 159,528 types, with zero graph, import, or HIR errors.  Its
    value-aware library capture contains 451 modules, 1,632 public type
-   entries, and 20,692 public value entries.  Body records are not equivalent
+   entries, and 20,721 public value entries.  Body records are not equivalent
    to typed, executable bodies.
 
 The 2026-08-25 current-source repair implements bounded implicit-negative
@@ -69,13 +69,19 @@ The active G4 boundary is now declaration metadata, not G1.  Full library
 capture succeeds, but v2.6 rejects at its previously localized ITEM family and
 emits zero bytes because that format cannot represent complete traits,
 aliases, associated children, impl headers, or trait namespace entries.  The
-first real v3.0 ordinary-trait slice is now green: `Gate<T: ?Sized>`,
+first real v3.0 ordinary-trait slice is green: `Gate<T: ?Sized>`,
 `GateReexport`, and `needs<X: Gate<u8>>` survive deterministic capture,
 encode/decode/re-encode, exact target/config expectation checks, transactional
-materialization, and fresh-consumer lowering.  This is deliberately a bounded
-fixture profile, not whole-core v3.  The next dependency-ordered capability is
-associated declarations and their exact trait ownership, followed by trait
-aliases, projections/function pointers, and cfg-complete impl headers.
+materialization, and fresh-consumer lowering.  A subsequent bounded ITEM slice
+preserves public unit structs and their independently visible value
+constructors, including constructor visibility across reexports.  The current
+whole-core probe reaches 451 modules, 1,632 public type entries, and 20,721
+public value entries before rejecting the `LayoutErr` type-alias reexport at
+`core/src/alloc/mod.rs:19` with `stage=namespace` and
+`reason=binding-shape-unsupported`.  Ordinary alias/ADT/type/value structural
+parity is therefore the next measured dependency, before associated
+declarations, projections/function pointers, and cfg-complete impl headers.
+These remain bounded fixture profiles, not whole-core v3.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

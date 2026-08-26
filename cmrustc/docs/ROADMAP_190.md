@@ -23,8 +23,8 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   2026-08-25 the review-hardened current working tree reproduced the complete
   target-configured Rust 1.90 result twice: 363 sources and 451 modules with
   zero graph, import, or HIR errors, producing 38,176 items, 22,524 bodies,
-  and 159,528 types.  Value-aware library capture also succeeds with 451
-  modules, 1,632 public type entries, and 20,692 public value entries.
+  and 159,528 types.  Constructor-aware library capture also succeeds with
+  451 modules, 1,632 public type entries, and 20,721 public value entries.
 - The next measured boundary contains 252 traits, 9,092 impls, and 9,854
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
@@ -135,6 +135,26 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   ASan/UBSan/LSan pass.  This slice covers no associated item, alias body,
   projection, impl, macro, semantic attribute, general body, or link input;
   it therefore does not make a core artifact or close M6-06.
+- Bounded ordinary ITEM transport now also preserves a public top-level unit
+  struct and the independent visibility of its value constructor.  Public
+  type reexports no longer publish private, crate-only, or
+  `#[non_exhaustive]` constructors, and fresh materialization retains the
+  struct DefId without fabricating a function.  The current optimized core
+  probe completes the zero-error 363-source/451-module HIR census and
+  constructor-aware 451/1,632/20,721 library capture.  After explicit
+  declaration-only projection of validated crate/module attributes, v3.0
+  reaches the public `LayoutErr` type-alias reexport at
+  `core/src/alloc/mod.rs:19` and rejects it exactly with `stage=namespace`,
+  `reason=binding-shape-unsupported`, and zero output.  This measures ordinary
+  alias/named-ADT structural transport as the next capability; associated
+  declarations are not yet the immediate frontier.
+- The v3.0 crate/module attribute projection above is valid only for its
+  deliberately narrow declaration-name/DefId lookup consumer.  Its `ABSENT`
+  family state means semantic-attribute records are unavailable, not that the
+  source contained no attributes.  `alloc` must not consume this profile:
+  before that gate, macros and semantic attributes require cfg-active
+  completeness, a closed normalization/rejection policy, and authenticated
+  source/configuration/dependency closure.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
@@ -196,8 +216,9 @@ coverage.  The canary is intentionally `no_core`; M6-08 remains open until a
 real core/alloc-linked executable runs.
 
 After this passes, broaden the same capability-manifested artifact along the
-first real-`core` failure: traits and aliases, associated declarations and
-projections, impl completeness, dependency identities, macros, semantic
+first real-`core` failure: ordinary items, values, and types; traits and
+aliases; associated declarations and projections; impl completeness;
+dependency identities, macros, semantic
 attributes, generic bodies/const IR, link inputs, and object members. A real
 `core.rlib` requires a fresh linked consumer; a complete metadata census is
 only an intermediate diagnostic.

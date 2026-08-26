@@ -1948,12 +1948,13 @@ The review-hardened 2026-08-25 current tree revalidates M6-05 rather than
 relying on the historical census.  Two optimized runs load 363 sources and
 451 modules, lower 38,176 items and 22,524 body records with zero graph,
 import, or HIR errors, and capture 451 modules, 1,632 public type entries, and
-20,692 public value entries.  Complete strict GCC and TinyCC suites plus the
+20,721 public value entries after preserving independently visible struct
+constructors.  Complete strict GCC and TinyCC suites plus the
 focused Clang ASan/UBSan/LSan run pass.  Declaration v2.6 then rejects the
 known ITEM-family format boundary with zero output.  M6-06 therefore proceeds
-through real v3 trait declarations and namespace identity, followed by
-associated declarations, aliases, and impl headers; another opaque v2
-reference or skipped family would not be a consumable `core` artifact.
+through real v3 ordinary items, values, types, traits, and namespace identity,
+followed by aliases, associated declarations, and impl headers; another opaque
+v2 reference or skipped family would not be a consumable `core` artifact.
 
 The first bounded v3.0 declaration step is now complete and consumed in a
 fresh HIR context.  `declaration_capture` lowers the focused
@@ -1966,10 +1967,17 @@ namespace state.  A new consumer successfully lowers direct and reexported
 trait predicates to one DefId.  Strict GCC and TinyCC full suites and focused
 Clang ASan/UBSan/LSan pass.  M3-04 and M6-06 remain `ACTIVE`: the implemented
 profile intentionally rejects associated declarations, trait aliases,
-projections, function pointers, impls, macros, semantic attributes, and
-general executable bodies.  The next artifact frontier is exact
-trait-associated declarations and ownership, then alias/projection and impl
-families, followed by another whole-core capture attempt.
+projections, function pointers, impls, macros, complete semantic attributes,
+and general executable bodies.  A later bounded ITEM slice transports public
+unit structs and their independently visible constructors.  The fresh
+constructor-aware core probe reaches 451 modules, 1,632 public type entries,
+and 20,721 public value entries, then identifies the exact current v3.0
+frontier as the `LayoutErr` type-alias reexport at
+`core/src/alloc/mod.rs:19` (`stage=namespace`,
+`reason=binding-shape-unsupported`).  The next artifact work is therefore
+ordinary free aliases and their named ADT targets, followed by the remaining
+ordinary ITEM/value/type shapes.  Exact trait-associated ownership follows
+those prerequisites, before projection and impl families.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
