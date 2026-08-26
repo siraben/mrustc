@@ -170,6 +170,8 @@ typedef struct CmHirDeclarationTrait {
     uint32_t associated_count;
     uint8_t safety;
     uint8_t flags;
+    /* Retained compiler-semantic attributes in the latent NOMD u16 slot. */
+    uint16_t compiler_flags;
     /* Present exactly when CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM is set. */
     CmHirDeclarationString diagnostic_item;
     /* Ordered direct supertraits; the first bounded slice is binder-free. */
@@ -186,6 +188,10 @@ typedef struct CmHirDeclarationTrait {
 #define CM_HIR_DECL_TRAIT_FUNDAMENTAL UINT8_C(16)
 #define CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL UINT8_C(32)
 #define CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT UINT8_C(64)
+
+#define CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION UINT16_C(1)
+#define CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE UINT16_C(2)
+#define CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS UINT16_C(4)
 
 typedef enum CmHirDeclarationSupertraitModifier {
     CM_HIR_DECL_SUPERTRAIT_REQUIRED = 1
@@ -468,7 +474,15 @@ typedef struct CmHirDeclarationPredicate {
     uint32_t owner_item;
     /* Required only for NOMINAL; every other owner local is then zero. */
     uint32_t owner_nominal;
+    /* Wire tag is modifier + 1, preserving REQUIRED as the legacy byte 1. */
+    uint8_t modifier;
 } CmHirDeclarationPredicate;
+
+typedef enum CmHirDeclarationPredicateModifier {
+    CM_HIR_DECL_PREDICATE_REQUIRED = 0,
+    CM_HIR_DECL_PREDICATE_CONST_IF_CONST = 1,
+    CM_HIR_DECL_PREDICATE_CONST = 2
+} CmHirDeclarationPredicateModifier;
 
 typedef struct CmHirDeclarationPredicateEquality {
     uint32_t associated_local;

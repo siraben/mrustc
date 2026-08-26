@@ -13481,7 +13481,27 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
         "pub const fn paired_mixed_input_mut<T>(s: &mut T) "
             "-> &[T; 1] { s }\n"
         "pub const fn paired_mixed_output_mut<T>(s: &T) "
-            "-> &mut [T; 1] { s }\n";
+            "-> &mut [T; 1] { s }\n"
+        "#[lang = \"destruct\"] #[const_trait] pub trait DropBoundary {}\n"
+        "#[lang = \"clone\"] #[rustc_trivial_field_reads] "
+            "#[const_trait] pub trait CloneBoundary {\n"
+        "fn clone_input_exact(&mut self, source: &Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_placeholder(&mut self, source: &'_ Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_named<'a>(&mut self, source: &'a Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_static(&mut self, source: &'static Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_mutable(&mut self, source: &mut Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_related(&mut self, source: &Self) -> &Self "
+            "where Self: ~const DropBoundary { source }\n"
+        "fn clone_input_extra(&mut self, source: &Self, other: &Self) "
+            "where Self: ~const DropBoundary {}\n"
+        "fn clone_input_required(&mut self, source: &Self) "
+            "where Self: DropBoundary {}\n"
+        "}\n";
     static const char *const names[] = {
         "admitted", "placeholder", "named", "static_input", "mutable",
         "sized", "nonconst", "constrained"
@@ -13537,7 +13557,7 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
             result.first_error.message);
     }
     check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 25u,
+        && result.lowered_item_count == 35u,
         "bounded free input lifetime fixture did not lower exactly");
     for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
         const CmHirItem *item = find_hir_item_anywhere(&hir, names[index]);
@@ -13720,6 +13740,71 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
                         == CM_HIR_IMMUTABLE,
                     "bounded shared free elision changed mutability");
             }
+        }
+    }
+    {
+        static const char *const method_names[] = {
+            "clone_input_exact", "clone_input_placeholder",
+            "clone_input_named", "clone_input_static",
+            "clone_input_mutable", "clone_input_related",
+            "clone_input_extra", "clone_input_required"
+        };
+        static const CmHirRegionKind expected_inputs[] = {
+            CM_HIR_REGION_ERASED, CM_HIR_REGION_INFER,
+            CM_HIR_REGION_EARLY_BOUND, CM_HIR_REGION_STATIC,
+            CM_HIR_REGION_INFER, CM_HIR_REGION_INFER,
+            CM_HIR_REGION_INFER, CM_HIR_REGION_INFER
+        };
+        size_t method_index;
+
+        for (method_index = 0u;
+             method_index < sizeof(method_names) / sizeof(method_names[0]);
+             ++method_index) {
+            const CmHirItem *method = find_hir_item_anywhere(&hir,
+                method_names[method_index]);
+            const CmHirType *receiver = method == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    method->data.function_item.signature.parameters[0].type);
+            const CmHirType *input = method == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    method->data.function_item.signature.parameters[1].type);
+
+            check(method != NULL
+                && method->data.function_item.signature.receiver
+                    == CM_HIR_RECEIVER_REF_MUTABLE
+                && receiver != NULL
+                && receiver->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && receiver->data.reference_type.region.kind
+                    == CM_HIR_REGION_ERASED
+                && input != NULL
+                && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && input->data.reference_type.mutability
+                    == (method_index == 4u
+                        ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE)
+                && input->data.reference_type.region.kind
+                    == expected_inputs[method_index],
+                "bounded const-trait method input erasure admitted a "
+                "mutated or lifetime-related source shape");
+        }
+        {
+            const CmHirItem *exact = find_hir_item_anywhere(&hir,
+                "clone_input_exact");
+            const CmHirItem *destruct = find_hir_item_anywhere(&hir,
+                "DropBoundary");
+            const CmHirType *subject = exact == NULL
+                    || exact->predicate_count != 1u
+                ? NULL : cm_hir_get_type(&hir,
+                    exact->predicates[0].subject);
+            check(exact != NULL && destruct != NULL
+                && exact->predicate_count == 1u
+                && exact->predicates[0].modifier
+                    == CM_HIR_PREDICATE_CONST_IF_CONST
+                && exact->predicates[0].scope == CM_HIR_PREDICATE_SCOPE_NONE
+                && subject != NULL && subject->kind == CM_HIR_TYPE_SELF_KIND
+                && cm_hir_def_id_equal(exact->predicates[0]
+                    .trait_type.definition, destruct->definition),
+                "bounded const-trait erasure lost its authenticated "
+                "conditional-const predicate");
         }
     }
     cm_hir_module_map_destroy(&map);

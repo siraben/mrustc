@@ -10525,6 +10525,121 @@ static int cm_lower_bounded_free_array_ref_elision(
         && cm_lower_string_is(state, array->text, "1");
 }
 
+/*
+ * A shared nonreceiver borrow in this exact default const-trait method has no
+ * output lifetime relation: the result is unit, while the mutable receiver
+ * already carries its own authenticated ERASED region.  Preserve the omitted
+ * source borrow as ERASED only after both the source topology and the lowered
+ * `Self: ~const Destruct` semantic identity agree.  This does not generalize
+ * ERASED to arbitrary method inputs.
+ */
+static int cm_lower_bounded_const_trait_shared_input_erasure(
+    const CmLowerState *state, const CmAstItem *ast_item,
+    const CmLowerItemRecord *record, const CmHirItem *hir_item)
+{
+    const CmAstFunction *function = &ast_item->data.function_item;
+    const CmAstPattern *receiver_pattern;
+    const CmAstPattern *receiver_binding;
+    const CmAstPattern *input_pattern;
+    const CmAstType *input_type;
+    const CmAstWherePredicate *where_predicate;
+    const CmAstWhereBound *where_bound;
+    const CmHirItem *parent_trait;
+    const CmHirTraitPredicate *predicate;
+    const CmHirType *subject;
+    const CmHirItem *predicate_trait;
+    CmInternId self_name;
+
+    if (record->parent_kind != CM_LOWER_PARENT_TRAIT || record->is_foreign
+        || function->is_const || function->is_async || function->is_safe
+        || function->is_unsafe || function->abi != CM_INTERN_ID_NONE
+        || function->body == CM_AST_EXPR_NONE
+        || function->parameter_count != 2u || function->parameters == NULL
+        || !function->parameters[0].is_self
+        || function->parameters[0].type != CM_AST_TYPE_NONE
+        || function->parameters[0].receiver_lifetime != CM_INTERN_ID_NONE
+        || function->parameters[1].is_self
+        || function->parameters[1].receiver_lifetime != CM_INTERN_ID_NONE
+        || function->return_type != CM_AST_TYPE_NONE
+        || ast_item->generic_parameter_count != 0u
+        || ast_item->generic_parameters != NULL
+        || ast_item->where_clause == CM_INTERN_ID_NONE
+        || ast_item->where_predicate_count != 1u
+        || ast_item->where_predicates == NULL
+        || record->generic_parameter_count != 0u
+        || hir_item->predicate_count != 1u
+        || hir_item->predicates == NULL) return 0;
+    receiver_pattern = cm_ast_get_pattern(state->ast,
+        function->parameters[0].pattern);
+    receiver_binding = receiver_pattern == NULL
+            || receiver_pattern->kind != CM_AST_PATTERN_REFERENCE
+        ? NULL : cm_ast_get_pattern(state->ast,
+            receiver_pattern->data.reference.pattern);
+    input_pattern = cm_ast_get_pattern(state->ast,
+        function->parameters[1].pattern);
+    input_type = cm_ast_get_type(state->ast,
+        function->parameters[1].type);
+    self_name = cm_interner_lookup(&state->ast->strings,
+        (const unsigned char *)"Self", sizeof("Self") - 1u);
+    where_predicate = &ast_item->where_predicates[0];
+    where_bound = where_predicate->bounds == NULL
+            || where_predicate->bound_count != 1u
+        ? NULL : &where_predicate->bounds[0];
+    parent_trait = cm_lower_bound_item(state, record->parent_definition);
+    predicate = &hir_item->predicates[0];
+    subject = cm_hir_get_type(state->hir, predicate->subject);
+    predicate_trait = cm_lower_bound_item(state,
+        predicate->trait_type.definition);
+    return receiver_pattern != NULL
+        && receiver_pattern->kind == CM_AST_PATTERN_REFERENCE
+        && receiver_pattern->data.reference.is_mutable
+        && receiver_binding != NULL
+        && receiver_binding->kind == CM_AST_PATTERN_BINDING
+        && receiver_binding->data.binding.subpattern == CM_AST_PATTERN_NONE
+        && !receiver_binding->data.binding.is_ref
+        && !receiver_binding->data.binding.is_mutable
+        && cm_lower_string_is(state,
+            receiver_binding->data.binding.name, "self")
+        && input_pattern != NULL
+        && input_pattern->kind == CM_AST_PATTERN_BINDING
+        && input_pattern->data.binding.name != CM_INTERN_ID_NONE
+        && input_pattern->data.binding.subpattern == CM_AST_PATTERN_NONE
+        && !input_pattern->data.binding.is_ref
+        && !input_pattern->data.binding.is_mutable
+        && input_type != NULL && input_type->kind == CM_AST_TYPE_REFERENCE
+        && !input_type->is_mutable
+        && input_type->lifetime == CM_INTERN_ID_NONE
+        && self_name != CM_INTERN_ID_NONE
+        && cm_lower_plain_path_type_named(state, input_type->child, self_name)
+        && where_predicate->kind == CM_AST_WHERE_PREDICATE_TYPE
+        && where_predicate->binder.lifetime_count == 0u
+        && where_predicate->binder.lifetimes == NULL
+        && cm_lower_plain_path_type_named(state,
+            where_predicate->subject, self_name)
+        && where_bound != NULL
+        && where_bound->kind == CM_AST_WHERE_BOUND_TRAIT
+        && where_bound->modifier
+            == CM_AST_WHERE_BOUND_CONDITIONALLY_CONST
+        && where_bound->binder.lifetime_count == 0u
+        && where_bound->binder.lifetimes == NULL
+        && parent_trait != NULL && parent_trait->kind == CM_HIR_ITEM_TRAIT
+        && parent_trait->data.trait_item.is_const
+        && cm_lower_item_has_exact_attribute(state, parent_trait,
+            "lang = \"clone\"")
+        && cm_lower_item_has_exact_attribute(state, parent_trait,
+            "rustc_trivial_field_reads")
+        && predicate->modifier == CM_HIR_PREDICATE_CONST_IF_CONST
+        && predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+        && subject != NULL && subject->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(subject->data.self_type.owner,
+            record->parent_definition)
+        && predicate_trait != NULL
+        && predicate_trait->kind == CM_HIR_ITEM_TRAIT
+        && predicate_trait->data.trait_item.is_const
+        && cm_lower_item_has_exact_attribute(state, predicate_trait,
+            "lang = \"destruct\"");
+}
+
 static int cm_lower_function_item(CmLowerState *state,
     CmAstItemId ast_item_id, const CmAstItem *ast_item,
     const CmLowerItemRecord *record, CmHirItem *hir_item)
@@ -10589,7 +10704,9 @@ static int cm_lower_function_item(CmLowerState *state,
         cm_lower_bounded_free_array_ref_elision(state, ast_item, record);
     erase_bounded_free_input_lifetime =
         erase_bounded_free_output_lifetime
-        || cm_lower_bounded_free_input_erasure(state, ast_item, record);
+        || cm_lower_bounded_free_input_erasure(state, ast_item, record)
+        || cm_lower_bounded_const_trait_shared_input_erasure(state,
+            ast_item, record, hir_item);
     previous_erase_bounded_free_input_lifetime =
         state->erase_bounded_free_input_lifetime;
     state->erase_bounded_free_input_lifetime =

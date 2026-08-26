@@ -41,6 +41,7 @@ typedef struct CmDeclCaptureItem {
     uint8_t enum_repr;
     uint8_t has_static_outlives;
     uint8_t trait_flags;
+    uint16_t trait_compiler_flags;
     uint16_t aggregate_flags;
     const unsigned char *lang_item;
     size_t lang_item_length;
@@ -2506,6 +2507,17 @@ static int cm_decl_attribute_doc_alias_is(const CmInternedString *metadata)
         identifier_length);
 }
 
+/* Exact source spelling used by the built-in Sized marker declaration. */
+static int cm_decl_sized_doc_aliases_are_exact(
+    const CmInternedString *metadata)
+{
+    static const unsigned char expected[] =
+        "doc(alias = \"?\", alias = \"?Sized\")";
+    return metadata != NULL
+        && cm_decl_bytes_equal(metadata->bytes, metadata->len, expected,
+            sizeof(expected) - 1u);
+}
+
 static int cm_decl_attribute_must_use_is(const CmInternedString *metadata)
 {
     static const unsigned char prefix[] = "must_use = \"";
@@ -3212,6 +3224,20 @@ static int cm_decl_callable_trait_shape(const CmDeclCaptureState *state,
         | CM_HIR_DECL_TRAIT_IS_CONST
         | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
         | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
+    const uint8_t marker_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint8_t destruct_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint8_t clone_flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
+    const uint16_t marker_compiler =
+        CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
+        | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE;
     const CmHirItem *item = capture->item;
     const CmHirGenericParam *generic;
     const CmHirTraitPredicate *predicate;
@@ -3226,9 +3252,226 @@ static int cm_decl_callable_trait_shape(const CmDeclCaptureState *state,
         || item->is_specializable || item->data.trait_item.is_auto
         || item->data.trait_item.safety != CM_HIR_SAFE
         || capture->lang_item == NULL || capture->lang_item_length == 0u
-        || capture->diagnostic_item != NULL
-        || capture->diagnostic_item_length != 0u
+        || (capture->trait_compiler_flags
+                != CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+            && (capture->diagnostic_item != NULL
+                || capture->diagnostic_item_length != 0u))
         || capture->has_static_outlives) return 0;
+    if (capture->trait_flags == marker_flags
+        && capture->trait_compiler_flags == marker_compiler) {
+        uint32_t current = capture->local;
+        size_t steps = 0u;
+        if (item->data.trait_item.is_const
+            || item->generic_parameter_count != 0u
+            || item->predicate_count != 0u
+            || capture->associated_count != 0u) return 0;
+        while (current != 0u) {
+            const CmDeclCaptureItem *node;
+            const CmHirItem *node_item;
+            const CmHirSupertrait *supertrait;
+            if ((size_t)current > state->trait_count
+                || steps++ >= state->trait_count) return 0;
+            node = &state->traits[current - 1u];
+            node_item = node->item;
+            if (node->trait_flags != marker_flags
+                || node->trait_compiler_flags != marker_compiler
+                || node_item->generic_parameter_count != 0u
+                || node_item->predicate_count != 0u
+                || node->associated_count != 0u
+                || node_item->data.trait_item.supertrait_count > 1u)
+                return 0;
+            if (node_item->data.trait_item.supertrait_count == 0u) {
+                if (node_item->data.trait_item.supertraits != NULL) return 0;
+                current = 0u;
+                continue;
+            }
+            supertrait = &node_item->data.trait_item.supertraits[0];
+            if (supertrait->modifier != CM_HIR_SUPERTRAIT_REQUIRED
+                || supertrait->trait_type.argument_count != 0u
+                || supertrait->trait_type.arguments != NULL
+                || supertrait->equality_count != 0u
+                || supertrait->equalities != NULL
+                || (current = cm_decl_trait_local(state,
+                    supertrait->trait_type.definition)) == 0u) return 0;
+        }
+        return 1;
+    }
+    if (capture->trait_flags == destruct_flags
+        && capture->trait_compiler_flags == 0u) {
+        return item->data.trait_item.is_const
+            && item->generic_parameter_count == 0u
+            && item->predicate_count == 0u
+            && item->data.trait_item.supertrait_count == 0u
+            && item->data.trait_item.supertraits == NULL
+            && capture->associated_count == 0u;
+    }
+    if (capture->trait_flags == clone_flags
+        && capture->trait_compiler_flags
+            == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS) {
+        const CmHirSupertrait *supertrait;
+        uint32_t supertrait_local;
+        const CmDeclCaptureItem *supertrait_capture;
+        const CmDeclCaptureItem *clone_method;
+        const CmDeclCaptureItem *default_method;
+        const CmHirFunctionSignature *clone_signature;
+        const CmHirFunctionSignature *default_signature;
+        const CmHirType *clone_receiver;
+        const CmHirType *clone_receiver_self;
+        const CmHirType *clone_return;
+        const CmHirType *default_receiver;
+        const CmHirType *default_receiver_self;
+        const CmHirType *default_source;
+        const CmHirType *default_source_self;
+        const CmHirType *default_return;
+        const CmHirTraitPredicate *default_predicate;
+        const CmHirType *predicate_subject;
+        uint32_t destruct_local;
+        const CmDeclCaptureItem *destruct_capture;
+        if (!item->data.trait_item.is_const
+            || capture->diagnostic_item == NULL
+            || capture->diagnostic_item_length == 0u
+            || item->generic_parameter_count != 0u
+            || item->predicate_count != 0u
+            || item->data.trait_item.supertrait_count != 1u
+            || item->data.trait_item.supertraits == NULL
+            || capture->associated_count != 2u
+            || capture->associated_start == 0u) return 0;
+        supertrait = &item->data.trait_item.supertraits[0];
+        supertrait_local = cm_decl_trait_local(state,
+            supertrait->trait_type.definition);
+        supertrait_capture = supertrait_local == 0u ? NULL
+            : &state->traits[supertrait_local - 1u];
+        if (supertrait->modifier != CM_HIR_SUPERTRAIT_REQUIRED
+            || supertrait->trait_type.argument_count != 0u
+            || supertrait->trait_type.arguments != NULL
+            || supertrait->equality_count != 0u
+            || supertrait->equalities != NULL
+            || supertrait_capture == NULL
+            || supertrait_capture->trait_flags != marker_flags
+            || supertrait_capture->trait_compiler_flags != marker_compiler)
+            return 0;
+        clone_method = &state->associated_items[
+            capture->associated_start - 1u];
+        default_method = &state->associated_items[capture->associated_start];
+        if (clone_method->item == NULL || default_method->item == NULL
+            || clone_method->item->kind != CM_HIR_ITEM_FUNCTION
+            || default_method->item->kind != CM_HIR_ITEM_FUNCTION
+            || clone_method->lang_item == NULL
+            || clone_method->lang_item_length == 0u
+            || default_method->lang_item != NULL
+            || default_method->lang_item_length != 0u
+            || clone_method->source_ordinal >= default_method->source_ordinal)
+            return 0;
+        clone_signature = &clone_method->item->data.function_item.signature;
+        default_signature =
+            &default_method->item->data.function_item.signature;
+        clone_receiver = clone_signature->parameter_count == 1u
+                && clone_signature->parameters != NULL
+            ? cm_hir_get_type(state->hir,
+                clone_signature->parameters[0].type) : NULL;
+        clone_receiver_self = clone_receiver == NULL
+                || clone_receiver->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(state->hir,
+                clone_receiver->data.reference_type.pointee);
+        clone_return = cm_hir_get_type(state->hir,
+            clone_signature->return_type);
+        if (clone_method->item->generic_parameter_count != 0u
+            || clone_method->item->predicate_count != 0u
+            || clone_method->item->data.function_item.has_default_body
+            || clone_method->item->data.function_item.body != CM_HIR_BODY_NONE
+            || clone_signature->receiver != CM_HIR_RECEIVER_REF_SHARED
+            || clone_signature->safety != CM_HIR_SAFE
+            || clone_signature->is_const || clone_signature->is_async
+            || clone_signature->is_variadic
+            || !cm_decl_string_is(state->hir, clone_signature->abi, "Rust")
+            || clone_receiver == NULL
+            || clone_receiver->data.reference_type.mutability
+                != CM_HIR_IMMUTABLE
+            || clone_receiver->data.reference_type.region.kind
+                != CM_HIR_REGION_ERASED
+            || clone_receiver_self == NULL
+            || clone_receiver_self->kind != CM_HIR_TYPE_SELF_KIND
+            || !cm_hir_def_id_equal(clone_receiver_self->data.self_type.owner,
+                item->definition)
+            || clone_return == NULL
+            || clone_return->kind != CM_HIR_TYPE_SELF_KIND
+            || !cm_hir_def_id_equal(clone_return->data.self_type.owner,
+                item->definition)) return 0;
+        default_receiver = default_signature->parameter_count == 2u
+                && default_signature->parameters != NULL
+            ? cm_hir_get_type(state->hir,
+                default_signature->parameters[0].type) : NULL;
+        default_source = default_signature->parameter_count == 2u
+                && default_signature->parameters != NULL
+            ? cm_hir_get_type(state->hir,
+                default_signature->parameters[1].type) : NULL;
+        default_receiver_self = default_receiver == NULL
+                || default_receiver->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(state->hir,
+                default_receiver->data.reference_type.pointee);
+        default_source_self = default_source == NULL
+                || default_source->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(state->hir,
+                default_source->data.reference_type.pointee);
+        default_return = cm_hir_get_type(state->hir,
+            default_signature->return_type);
+        default_predicate = default_method->item->predicate_count == 1u
+                && default_method->item->predicates != NULL
+            ? &default_method->item->predicates[0] : NULL;
+        predicate_subject = default_predicate == NULL ? NULL
+            : cm_hir_get_type(state->hir, default_predicate->subject);
+        destruct_local = default_predicate == NULL ? 0u
+            : cm_decl_trait_local(state,
+                default_predicate->trait_type.definition);
+        destruct_capture = destruct_local == 0u ? NULL
+            : &state->traits[destruct_local - 1u];
+        return default_method->item->generic_parameter_count == 0u
+            && default_method->item->predicate_count == 1u
+            && default_method->item->data.function_item.has_default_body
+            && default_method->item->data.function_item.body
+                != CM_HIR_BODY_NONE
+            && default_signature->receiver == CM_HIR_RECEIVER_REF_MUTABLE
+            && default_signature->safety == CM_HIR_SAFE
+            && !default_signature->is_const && !default_signature->is_async
+            && !default_signature->is_variadic
+            && cm_decl_string_is(state->hir, default_signature->abi, "Rust")
+            && default_receiver != NULL
+            && default_receiver->data.reference_type.mutability
+                == CM_HIR_MUTABLE
+            && default_receiver->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED
+            && default_receiver_self != NULL
+            && default_receiver_self->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(default_receiver_self->data.self_type.owner,
+                item->definition)
+            && default_source != NULL
+            && default_source->data.reference_type.mutability
+                == CM_HIR_IMMUTABLE
+            && default_source->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED
+            && default_source_self != NULL
+            && default_source_self->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(default_source_self->data.self_type.owner,
+                item->definition)
+            && cm_decl_primitive(default_return) == CM_HIR_DECL_PRIMITIVE_UNIT
+            && default_predicate != NULL
+            && default_predicate->scope == CM_HIR_PREDICATE_SCOPE_NONE
+            && default_predicate->binder.lifetime_count == 0u
+            && default_predicate->binder.lifetimes == NULL
+            && default_predicate->modifier
+                == CM_HIR_PREDICATE_CONST_IF_CONST
+            && default_predicate->trait_type.argument_count == 0u
+            && default_predicate->trait_type.arguments == NULL
+            && default_predicate->equality_count == 0u
+            && default_predicate->equalities == NULL
+            && predicate_subject != NULL
+            && predicate_subject->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(predicate_subject->data.self_type.owner,
+                item->definition)
+            && destruct_capture != NULL
+            && destruct_capture->trait_flags == destruct_flags
+            && destruct_capture->trait_compiler_flags == 0u;
+    }
     if (capture->trait_flags == tuple_flags)
         return !item->data.trait_item.is_const
             && item->generic_parameter_count == 0u
@@ -3797,6 +4040,204 @@ static int cm_decl_simple_unit_function_shape(CmDeclCaptureState *state,
 static int cm_decl_ast_name_matches_hir(const CmAst *ast, CmInternId ast_id,
     const CmHirContext *hir, CmInternId hir_id);
 
+static int cm_decl_repeat_generics_source(const CmDeclCaptureState *state,
+    const CmAst *ast, const CmAstItem *ast_item, const CmHirItem *item,
+    const CmHirLibraryOwnedValue *owned)
+{
+    const CmAstGenericParam *ast_type_generic;
+    const CmAstGenericParam *ast_const_generic;
+    const CmAstGenericParamBound *ast_bound;
+    const CmAstType *ast_bound_type;
+    const CmAstPath *ast_bound_path;
+    const CmAstType *ast_declared;
+    const CmHirGenericParam *type_generic;
+    const CmHirGenericParam *const_generic;
+    const CmHirType *declared;
+    const CmHirTraitPredicate *predicate;
+    const CmHirTraitPredicate *owned_predicate;
+    const CmHirType *subject;
+    const CmHirItem *trait_item;
+    const CmHirItem *closure_items[4];
+    uint32_t closure_index;
+    CmHirItemId ignored_id;
+    if (item->generic_parameter_count != 2u
+        || item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        || item->predicate_scope_count != 0u || item->predicate_scopes != NULL
+        || item->outlives_predicate_count != 0u
+        || item->outlives_predicates != NULL
+        || item->predicate_count != 1u || item->predicates == NULL
+        || ast_item->generic_parameter_count != 2u
+        || ast_item->generic_parameters == NULL
+        || ast_item->where_clause != CM_INTERN_ID_NONE
+        || ast_item->where_predicate_count != 0u
+        || ast_item->where_predicates != NULL
+        || owned == NULL || owned->predicate_count != 1u
+        || owned->predicates == NULL || owned->predicate_arguments == NULL
+        || owned->predicate_equalities == NULL
+        || owned->predicate_lifetimes == NULL) return 0;
+    ast_type_generic = &ast_item->generic_parameters[0];
+    ast_const_generic = &ast_item->generic_parameters[1];
+    ast_bound = ast_type_generic->bound_count == 1u
+            && ast_type_generic->bounds != NULL
+        ? &ast_type_generic->bounds[0] : NULL;
+    ast_bound_type = ast_bound == NULL ? NULL
+        : cm_ast_get_type(ast, ast_bound->trait_type);
+    ast_bound_path = ast_bound_type == NULL
+            || ast_bound_type->kind != CM_AST_TYPE_PATH
+        ? NULL : cm_ast_get_path(ast, ast_bound_type->path);
+    ast_declared = cm_ast_get_type(ast, ast_const_generic->declared_type);
+    type_generic = cm_hir_get_generic_param(state->hir,
+        item->generic_parameter_start);
+    const_generic = cm_hir_get_generic_param(state->hir,
+        item->generic_parameter_start + 1u);
+    declared = const_generic == NULL ? NULL
+        : cm_hir_get_type(state->hir, const_generic->declared_type);
+    predicate = &item->predicates[0];
+    owned_predicate = &owned->predicates[0];
+    subject = cm_hir_get_type(state->hir, predicate->subject);
+    trait_item = cm_decl_bound_item(state->hir,
+        predicate->trait_type.definition, &ignored_id);
+    if (type_generic == NULL || type_generic->kind != CM_HIR_GENERIC_TYPE
+        || type_generic->index != 0u
+        || !cm_hir_def_id_equal(type_generic->owner, item->definition)
+        || type_generic->declared_type != CM_HIR_TYPE_NONE
+        || type_generic->is_relaxed_sized || type_generic->has_default
+        || const_generic == NULL
+        || const_generic->kind != CM_HIR_GENERIC_CONST
+        || const_generic->index != 1u
+        || !cm_hir_def_id_equal(const_generic->owner, item->definition)
+        || const_generic->is_relaxed_sized || const_generic->has_default
+        || declared == NULL
+        || cm_decl_primitive(declared) != CM_HIR_DECL_PRIMITIVE_USIZE
+        || type_generic->span.source != item->span.source
+        || type_generic->span.start != item->span.start
+        || type_generic->span.end != item->span.end
+        || const_generic->span.source != item->span.source
+        || const_generic->span.start != item->span.start
+        || const_generic->span.end != item->span.end
+        || ast_type_generic->kind != CM_AST_PARAM_TYPE
+        || ast_type_generic->attributes != NULL
+        || ast_type_generic->attribute_count != 0u
+        || ast_type_generic->constraint == CM_INTERN_ID_NONE
+        || ast_bound == NULL
+        || ast_bound->kind != CM_AST_GENERIC_BOUND_TRAIT
+        || ast_bound->modifier != CM_AST_GENERIC_BOUND_REQUIRED
+        || ast_bound->lifetime != CM_INTERN_ID_NONE
+        || ast_bound_type == NULL || ast_bound_path == NULL
+        || ast_type_generic->declared_type != CM_AST_TYPE_NONE
+        || ast_type_generic->default_type != CM_AST_TYPE_NONE
+        || ast_type_generic->default_const != CM_INTERN_ID_NONE
+        || ast_type_generic->default_const_expr != CM_AST_EXPR_NONE
+        || ast_const_generic->kind != CM_AST_PARAM_CONST
+        || ast_const_generic->attributes != NULL
+        || ast_const_generic->attribute_count != 0u
+        || ast_const_generic->constraint == CM_INTERN_ID_NONE
+        || ast_const_generic->bounds != NULL
+        || ast_const_generic->bound_count != 0u
+        || ast_declared == NULL
+        || !cm_decl_ast_type_matches_hir_primitive(ast, ast_declared,
+            declared)
+        || ast_const_generic->default_type != CM_AST_TYPE_NONE
+        || ast_const_generic->default_const != CM_INTERN_ID_NONE
+        || ast_const_generic->default_const_expr != CM_AST_EXPR_NONE
+        || !cm_decl_ast_name_matches_hir(ast, ast_type_generic->name,
+            state->hir, type_generic->name)
+        || !cm_decl_ast_name_matches_hir(ast, ast_const_generic->name,
+            state->hir, const_generic->name)
+        || trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || !cm_decl_ast_path_resolves_item(state, ast, ast_bound_path, item,
+            trait_item)
+        || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+        || predicate->binder.lifetime_count != 0u
+        || predicate->binder.lifetimes != NULL
+        || predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+        || predicate->trait_type.argument_count != 0u
+        || predicate->trait_type.arguments != NULL
+        || predicate->equality_count != 0u || predicate->equalities != NULL
+        || subject == NULL || subject->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || subject->data.parameter_type.parameter
+            != item->generic_parameter_start
+        || predicate->span.source != item->span.source
+        || predicate->span.start != ast_bound->span.start
+        || predicate->span.end != ast_bound->span.end
+        || owned_predicate->scope != predicate->scope
+        || owned_predicate->modifier != predicate->modifier
+        || owned_predicate->subject != predicate->subject
+        || !cm_hir_def_id_equal(owned_predicate->trait_type.definition,
+            predicate->trait_type.definition)
+        || owned_predicate->trait_type.argument_count != 0u
+        || owned_predicate->trait_type.arguments != NULL
+        || owned_predicate->equality_count != 0u
+        || owned_predicate->equalities != NULL
+        || owned_predicate->binder.lifetime_count != 0u
+        || owned_predicate->binder.lifetimes != NULL
+        || owned_predicate->span.source != predicate->span.source
+        || owned_predicate->span.start != predicate->span.start
+        || owned_predicate->span.end != predicate->span.end
+        || owned->predicate_arguments[0] != NULL
+        || owned->predicate_equalities[0] != NULL
+        || owned->predicate_lifetimes[0] != NULL
+        || owned->nominal_reference_count != 4u
+        || owned->nominal_references == NULL
+        || owned->nominal_reference_names == NULL
+        || owned->nominal_reference_generic_kinds == NULL
+        || owned->associated_availability_count != 0u
+        || owned->associated_availability != NULL) return 0;
+    closure_items[0] = trait_item;
+    for (closure_index = 1u; closure_index < 4u; ++closure_index) {
+        const CmHirItem *prior = closure_items[closure_index - 1u];
+        const CmHirSupertrait *supertrait;
+        if (prior->kind != CM_HIR_ITEM_TRAIT
+            || prior->data.trait_item.supertrait_count != 1u
+            || prior->data.trait_item.supertraits == NULL) return 0;
+        supertrait = &prior->data.trait_item.supertraits[0];
+        if (supertrait->modifier != CM_HIR_SUPERTRAIT_REQUIRED
+            || supertrait->trait_type.argument_count != 0u
+            || supertrait->trait_type.arguments != NULL
+            || supertrait->equality_count != 0u
+            || supertrait->equalities != NULL) return 0;
+        closure_items[closure_index] = cm_decl_bound_item(state->hir,
+            supertrait->trait_type.definition, &ignored_id);
+        if (closure_items[closure_index] == NULL
+            || closure_items[closure_index]->kind != CM_HIR_ITEM_TRAIT)
+            return 0;
+    }
+    if (closure_items[3]->data.trait_item.supertrait_count != 0u
+        || closure_items[3]->data.trait_item.supertraits != NULL) return 0;
+    for (closure_index = 0u; closure_index < 4u; ++closure_index) {
+        const CmHirItem *expected = closure_items[closure_index];
+        const CmInternedString *expected_name = cm_decl_item_name(state,
+            expected);
+        const CmHirModule *expected_module = cm_hir_get_module(state->hir,
+            expected->owner_module);
+        uint32_t reference_index;
+        uint32_t matches = 0u;
+        if (expected_name == NULL || expected_name->len == 0u
+            || expected_module == NULL) return 0;
+        for (reference_index = 0u;
+                reference_index < owned->nominal_reference_count;
+                ++reference_index) {
+            const CmHirLibraryNominalReference *reference =
+                &owned->nominal_references[reference_index];
+            if (!cm_hir_def_id_equal(reference->definition,
+                    expected->definition)) continue;
+            if (reference->kind != CM_HIR_LIBRARY_NOMINAL_TRAIT
+                || reference->use != CM_HIR_LIBRARY_REFERENCE_ONLY
+                || !cm_hir_def_id_equal(reference->owner_module,
+                    expected_module->definition)
+                || !cm_hir_def_id_is_none(reference->declaring_trait)
+                || reference->generic_parameter_count != 0u
+                || reference->generic_parameter_kinds != NULL
+                || !cm_decl_bytes_equal(reference->name.bytes,
+                    reference->name.length, expected_name->bytes,
+                    expected_name->len)) return 0;
+            matches += 1u;
+        }
+        if (matches != 1u) return 0;
+    }
+    return 1;
+}
+
 static int cm_decl_from_fn_generics_source(const CmDeclCaptureState *state,
     const CmAst *ast, const CmAstItem *ast_item, const CmHirItem *item)
 {
@@ -4083,6 +4524,182 @@ static int cm_decl_from_fn_predicate_source(
     }
     return saw_direct_trait == 1 && saw_declaring_trait == 1
         && saw_associated == 1;
+}
+
+static int cm_decl_repeat_function_shape(CmDeclCaptureState *state,
+    const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal,
+    size_t *out_projected_count)
+{
+    const CmHirFunctionSignature *signature =
+        &item->data.function_item.signature;
+    const CmHirLibraryOwnedValue *owned;
+    const CmHirFunctionParameter *parameter;
+    const CmHirType *parameter_type;
+    const CmHirType *return_type;
+    const CmHirType *return_element;
+    const CmHirBody *body;
+    const CmAst *ast = NULL;
+    const CmAstItem *ast_item = NULL;
+    const CmAstFunctionParam *ast_parameter;
+    const CmAstPattern *ast_pattern;
+    const CmAstType *ast_parameter_type;
+    const CmAstType *ast_return;
+    const CmAstExpr *ast_body;
+    CmDeclCaptureModule *module = NULL;
+    CmResolveEffectiveItem effective;
+    uint32_t namespace_module = 0u;
+    uint32_t namespace_ordinal = 0u;
+    if (!cm_decl_plain_visibility(item)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->is_specializable
+        || item->data.function_item.has_default_body
+        || item->data.function_item.body == CM_HIR_BODY_NONE
+        || !cm_hir_def_id_is_none(
+            item->data.function_item.trait_item_definition)
+        || signature->receiver != CM_HIR_RECEIVER_NONE
+        || signature->parameter_count != 1u || signature->parameters == NULL
+        || signature->safety != CM_HIR_SAFE || signature->is_const
+        || signature->is_async || signature->is_variadic
+        || !cm_decl_string_is(state->hir, signature->abi, "Rust")
+        || !cm_decl_generics_shape(state, item)
+        || !cm_decl_free_value_source(state, item, CM_AST_ITEM_FUNCTION,
+            CM_HIR_LIBRARY_VALUE_FUNCTION, &namespace_module,
+            &namespace_ordinal)
+        || !cm_decl_item_source_view(state, item, CM_AST_ITEM_FUNCTION,
+            &module, out_ordinal, &effective, &ast, &ast_item)
+        || module == NULL || ast == NULL || ast_item == NULL
+        || namespace_module != module->local
+        || namespace_ordinal != *out_ordinal
+        || !cm_decl_simple_unit_function_attributes(state, item,
+            out_projected_count)) return 0;
+    *out_module = module->local;
+    owned = cm_decl_owned_value(state->owned, item->definition);
+    if (!cm_decl_repeat_generics_source(state, ast, ast_item, item, owned))
+        return 0;
+    parameter = &signature->parameters[0];
+    parameter_type = cm_hir_get_type(state->hir, parameter->type);
+    return_type = cm_hir_get_type(state->hir, signature->return_type);
+    return_element = return_type == NULL
+            || return_type->kind != CM_HIR_TYPE_ARRAY_KIND
+        ? NULL : cm_hir_get_type(state->hir,
+            return_type->data.array_type.element);
+    ast_parameter = ast_item->data.function_item.parameter_count == 1u
+            && ast_item->data.function_item.parameters != NULL
+        ? &ast_item->data.function_item.parameters[0] : NULL;
+    ast_pattern = ast_parameter == NULL ? NULL
+        : cm_ast_get_pattern(ast, ast_parameter->pattern);
+    ast_parameter_type = ast_parameter == NULL ? NULL
+        : cm_ast_get_type(ast, ast_parameter->type);
+    ast_return = cm_ast_get_type(ast,
+        ast_item->data.function_item.return_type);
+    if (ast_item->is_default
+        || ast_item->visibility.kind != CM_AST_VIS_PUBLIC
+        || ast_item->visibility.restriction != CM_AST_PATH_NONE
+        || ast_item->data.function_item.abi != CM_INTERN_ID_NONE
+        || ast_item->data.function_item.is_const
+        || ast_item->data.function_item.is_async
+        || ast_item->data.function_item.is_safe
+        || ast_item->data.function_item.is_unsafe
+        || ast_item->data.function_item.body == CM_AST_EXPR_NONE
+        || ast_parameter == NULL || ast_parameter->is_self
+        || ast_parameter->receiver_lifetime != CM_INTERN_ID_NONE
+        || ast_parameter_type == NULL || ast_pattern == NULL
+        || ast_pattern->kind != CM_AST_PATTERN_BINDING
+        || ast_pattern->data.binding.subpattern != CM_AST_PATTERN_NONE
+        || ast_pattern->data.binding.is_ref
+        || ast_pattern->data.binding.is_mutable
+        || parameter->binding_kind != CM_HIR_BINDING_NAMED
+        || parameter->binding_mode != CM_HIR_PARAMETER_BINDING_MOVE
+        || !cm_decl_ast_name_matches_hir(ast,
+            ast_pattern->data.binding.name, state->hir, parameter->name)
+        || parameter->span.source != item->span.source
+        || parameter->span.start != ast_pattern->span.start
+        || parameter->span.end != ast_pattern->span.end
+        || parameter_type == NULL
+        || parameter_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || parameter_type->data.parameter_type.parameter
+            != item->generic_parameter_start
+        || !cm_decl_ast_type_matches_hir_field(state, ast,
+            ast_parameter_type, parameter_type, item, 0u)
+        || ast_return == NULL || return_type == NULL
+        || return_element == NULL
+        || !cm_decl_ast_type_matches_hir_field(state, ast, ast_return,
+            return_type, item, 0u)
+        || return_element->kind != CM_HIR_TYPE_PARAMETER_KIND
+        || return_element->data.parameter_type.parameter
+            != item->generic_parameter_start
+        || return_type->data.array_type.length.kind
+            != CM_HIR_CONST_PARAMETER
+        || return_type->data.array_type.length.data.parameter
+            != item->generic_parameter_start + 1u) return 0;
+    if (owned == NULL
+        || owned->storage_kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || owned->declaration.kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || !cm_hir_def_id_equal(owned->declaration.definition,
+            item->definition)
+        || !cm_hir_def_id_is_none(
+            owned->declaration.data.function.parent_trait)
+        || owned->declaration.data.function.receiver != CM_HIR_RECEIVER_NONE
+        || owned->declaration.data.function.has_default_body
+        || owned->parameter_count != 1u || owned->parameter_types == NULL
+        || owned->declaration.data.function.parameter_count != 1u
+        || owned->declaration.data.function.parameter_types
+            != owned->parameter_types
+        || owned->parameter_types[0] != parameter->type
+        || owned->declaration.data.function.return_type
+            != signature->return_type
+        || owned->declaration.data.function.generic_parameter_start
+            != item->generic_parameter_start
+        || owned->declaration.data.function.generic_parameter_count != 2u
+        || owned->declaration.data.function.predicate_scope_count != 0u
+        || owned->predicate_scope_count != 0u
+        || owned->predicate_scopes != NULL
+        || owned->predicate_scope_lifetimes != NULL
+        || owned->declaration.data.function.predicate_count != 1u
+        || owned->declaration.data.function.predicates != owned->predicates
+        || owned->declaration.data.function.outlives_predicate_count != 0u
+        || owned->outlives_predicate_count != 0u
+        || owned->outlives_predicates != NULL
+        || owned->declaration.data.function.abi != signature->abi
+        || owned->declaration.data.function.safety != signature->safety
+        || owned->declaration.data.function.is_const
+        || owned->declaration.data.function.is_async
+        || owned->declaration.data.function.is_variadic) return 0;
+    body = cm_hir_get_body(state->hir, item->data.function_item.body);
+    ast_body = cm_ast_get_expr(ast, ast_item->data.function_item.body);
+    if (body == NULL || ast_body == NULL
+        || ast_body->attribute_count != 0u || ast_body->attributes != NULL
+        || ast_body->span.start > ast_body->span.end
+        || ast_body->span.start < ast_item->span.start
+        || ast_body->span.end > ast_item->span.end
+        || !cm_hir_def_id_equal(body->owner, item->definition)
+        || body->origin.kind != CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        || !cm_hir_def_id_equal(body->origin.definition, item->definition)
+        || !cm_hir_def_id_equal(body->origin.enclosing_definition,
+            item->definition)
+        || !cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition, item->definition)
+        || body->state != CM_HIR_BODY_UNLOWERED
+        || body->expected_type != signature->return_type
+        || body->parameter_count != 1u
+        || body->local_count != 1u || body->locals == NULL
+        || body->locals[0].name != parameter->name
+        || body->locals[0].type != parameter->type
+        || body->locals[0].mutability != CM_HIR_IMMUTABLE
+        || body->locals[0].parameter_index != 0u
+        || body->locals[0].parameter_binding_index != 0u
+        || body->locals[0].span.source != parameter->span.source
+        || body->locals[0].span.start != parameter->span.start
+        || body->locals[0].span.end != parameter->span.end
+        || body->source != effective.declaration.source
+        || body->source != item->span.source
+        || body->source_expression_id != ast_item->data.function_item.body
+        || body->root_expression != CM_HIR_EXPR_NONE
+        || body->error_reason != CM_INTERN_ID_NONE
+        || body->span.source != item->span.source
+        || body->span.start != item->span.start
+        || body->span.end != item->span.end) return 0;
+    return 1;
 }
 
 static int cm_decl_from_fn_function_shape(CmDeclCaptureState *state,
@@ -4611,6 +5228,10 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
         && item->predicate_count == 0u)
         return cm_decl_simple_unit_function_shape(state, item, out_module,
             out_ordinal, out_projected_count);
+    if (!signature->is_const && item->generic_parameter_count == 2u
+        && item->predicate_count == 1u
+        && cm_decl_repeat_function_shape(state, item, out_module,
+            out_ordinal, out_projected_count)) return 1;
     if (!signature->is_const && item->generic_parameter_count == 3u
         && item->predicate_count == 1u)
         return cm_decl_from_fn_function_shape(state, item, out_module,
@@ -5007,7 +5628,9 @@ static int cm_decl_trait_attributes(const CmDeclCaptureState *state,
 static int cm_decl_callable_trait_attributes(
     const CmDeclCaptureState *state, const CmHirItem *item,
     size_t *out_projected_count, uint8_t *out_flags,
-    const unsigned char **out_lang, size_t *out_lang_length)
+    uint16_t *out_compiler_flags, const unsigned char **out_lang,
+    size_t *out_lang_length, const unsigned char **out_diagnostic,
+    size_t *out_diagnostic_length)
 {
     const unsigned int tuple_required = CM_DECL_ATTR_UNSTABLE
         | CM_DECL_ATTR_LANG_ITEM
@@ -5019,27 +5642,61 @@ static int cm_decl_callable_trait_attributes(
         | CM_DECL_ATTR_ON_UNIMPLEMENTED | CM_DECL_ATTR_FUNDAMENTAL
         | CM_DECL_ATTR_MUST_USE | CM_DECL_ATTR_CONST_TRAIT
         | CM_DECL_ATTR_RUSTC_CONST_UNSTABLE;
+    const unsigned int marker_required = CM_DECL_ATTR_LANG_ITEM
+        | CM_DECL_ATTR_ON_UNIMPLEMENTED | CM_DECL_ATTR_FUNDAMENTAL
+        | CM_DECL_ATTR_RUSTC_DENY_EXPLICIT_IMPL
+        | CM_DECL_ATTR_RUSTC_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const unsigned int destruct_required = CM_DECL_ATTR_UNSTABLE
+        | CM_DECL_ATTR_RUSTC_CONST_UNSTABLE | CM_DECL_ATTR_LANG_ITEM
+        | CM_DECL_ATTR_ON_UNIMPLEMENTED | CM_DECL_ATTR_CONST_TRAIT
+        | CM_DECL_ATTR_RUSTC_DENY_EXPLICIT_IMPL
+        | CM_DECL_ATTR_RUSTC_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const unsigned int clone_required = CM_DECL_ATTR_STABLE
+        | CM_DECL_ATTR_LANG_ITEM | CM_DECL_ATTR_DIAGNOSTIC_ITEM
+        | CM_DECL_ATTR_RUSTC_CONST_UNSTABLE | CM_DECL_ATTR_CONST_TRAIT;
+    const uint16_t marker_compiler =
+        CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
+        | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE;
     unsigned int seen = 0u;
+    uint16_t compiler_seen = 0u;
     int saw_diagnostic_on_unimplemented = 0;
     int saw_rustc_on_unimplemented = 0;
     uint32_t index;
     *out_projected_count = 0u;
     *out_flags = 0u;
+    *out_compiler_flags = 0u;
     *out_lang = NULL;
     *out_lang_length = 0u;
+    *out_diagnostic = NULL;
+    *out_diagnostic_length = 0u;
     if (item->attribute_count == 0u || item->attributes == NULL) return 0;
     for (index = 0u; index < item->attribute_count; ++index) {
         const CmHirAttribute *attribute = &item->attributes[index];
         const CmInternedString *metadata = cm_interner_get(
             &state->hir->strings, attribute->metadata);
         unsigned int kind = cm_decl_attribute_kind(metadata);
+        uint16_t compiler_kind = 0u;
         uint32_t prior;
+        if (kind == 0u && cm_decl_sized_doc_aliases_are_exact(metadata))
+            kind = CM_DECL_ATTR_DOC_ALIAS;
+        if (kind == 0u && cm_decl_attribute_bare_is(metadata,
+                "rustc_specialization_trait"))
+            compiler_kind = CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION;
+        else if (kind == 0u && cm_decl_attribute_bare_is(metadata,
+                "rustc_coinductive"))
+            compiler_kind = CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE;
+        else if (kind == 0u && cm_decl_attribute_bare_is(metadata,
+                "rustc_trivial_field_reads"))
+            compiler_kind = CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS;
         if (attribute->source_attribute == 0u
             || attribute->expansion_depth != 0u
             || attribute->span.source == 0u
             || attribute->span.source != item->span.source
             || attribute->span.start > attribute->span.end
-            || kind == 0u || (seen & kind) != 0u) return 0;
+            || (kind == 0u && compiler_kind == 0u)
+            || (kind != 0u && (seen & kind) != 0u)
+            || (compiler_kind != 0u
+                && (compiler_seen & compiler_kind) != 0u)) return 0;
         for (prior = 0u; prior < index; ++prior)
             if (item->attributes[prior].span.source == attribute->span.source
                 && item->attributes[prior].source_attribute
@@ -5048,6 +5705,9 @@ static int cm_decl_callable_trait_attributes(
             if (!cm_decl_lang_item_name(metadata, out_lang,
                     out_lang_length)) return 0;
         }
+        if (kind == CM_DECL_ATTR_DIAGNOSTIC_ITEM
+            && !cm_decl_diagnostic_item_name(metadata, out_diagnostic,
+                out_diagnostic_length)) return 0;
         if (kind == CM_DECL_ATTR_ON_UNIMPLEMENTED) {
             saw_diagnostic_on_unimplemented = cm_decl_attribute_call_is(
                 metadata, "diagnostic::on_unimplemented");
@@ -5057,6 +5717,7 @@ static int cm_decl_callable_trait_attributes(
                     == saw_rustc_on_unimplemented) return 0;
         }
         seen |= kind;
+        compiler_seen |= compiler_kind;
     }
     if (seen == tuple_required && saw_diagnostic_on_unimplemented
         && !saw_rustc_on_unimplemented) {
@@ -5064,7 +5725,8 @@ static int cm_decl_callable_trait_attributes(
             | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
             | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
         *out_projected_count = 2u;
-        return 1;
+        *out_compiler_flags = compiler_seen;
+        return compiler_seen == 0u && *out_diagnostic == NULL;
     }
     if (seen == callable_required && saw_rustc_on_unimplemented
         && !saw_diagnostic_on_unimplemented) {
@@ -5073,6 +5735,45 @@ static int cm_decl_callable_trait_attributes(
             | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
             | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
         *out_projected_count = 4u;
+        *out_compiler_flags = compiler_seen;
+        return compiler_seen == 0u;
+    }
+    if ((seen & marker_required) == marker_required
+        && (seen & ~(marker_required | CM_DECL_ATTR_STABLE
+            | CM_DECL_ATTR_UNSTABLE | CM_DECL_ATTR_DOC_ALIAS)) == 0u
+        && ((seen & CM_DECL_ATTR_STABLE) != 0u)
+            != ((seen & CM_DECL_ATTR_UNSTABLE) != 0u)
+        && saw_diagnostic_on_unimplemented
+        && !saw_rustc_on_unimplemented && compiler_seen == marker_compiler) {
+        *out_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+            | CM_HIR_DECL_TRAIT_FUNDAMENTAL
+            | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+            | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+        *out_compiler_flags = compiler_seen;
+        *out_projected_count = 2u
+            + ((seen & CM_DECL_ATTR_DOC_ALIAS) != 0u ? 1u : 0u);
+        return 1;
+    }
+    if (seen == destruct_required && compiler_seen == 0u
+        && saw_rustc_on_unimplemented
+        && !saw_diagnostic_on_unimplemented) {
+        *out_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+            | CM_HIR_DECL_TRAIT_IS_CONST
+            | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+            | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+        *out_projected_count = 3u;
+        return 1;
+    }
+    if (seen == clone_required
+        && compiler_seen == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+        && !saw_rustc_on_unimplemented
+        && !saw_diagnostic_on_unimplemented
+        && *out_diagnostic != NULL && *out_diagnostic_length != 0u) {
+        *out_flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+            | CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+            | CM_HIR_DECL_TRAIT_IS_CONST;
+        *out_compiler_flags = compiler_seen;
+        *out_projected_count = 2u;
         return 1;
     }
     return 0;
@@ -5122,19 +5823,70 @@ static CmHirItemKind cm_decl_hir_kind_for_ast(CmAstItemKind kind)
     }
 }
 
+static int cm_decl_clone_method_attributes(
+    const CmDeclCaptureState *state, const CmHirItem *item,
+    size_t *out_projected_count, const unsigned char **out_lang,
+    size_t *out_lang_length)
+{
+    const unsigned int clone_required = CM_DECL_ATTR_STABLE
+        | CM_DECL_ATTR_MUST_USE | CM_DECL_ATTR_LANG_ITEM;
+    const unsigned int default_required = CM_DECL_ATTR_STABLE
+        | CM_DECL_ATTR_INLINE_HINT;
+    unsigned int seen = 0u;
+    uint32_t index;
+    *out_projected_count = 0u;
+    *out_lang = NULL;
+    *out_lang_length = 0u;
+    if (item->kind != CM_HIR_ITEM_FUNCTION
+        || item->attribute_count == 0u || item->attributes == NULL) return 0;
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmHirAttribute *attribute = &item->attributes[index];
+        const CmInternedString *metadata = cm_interner_get(
+            &state->hir->strings, attribute->metadata);
+        unsigned int kind = cm_decl_attribute_kind(metadata);
+        uint32_t prior;
+        if (attribute->source_attribute == 0u
+            || attribute->expansion_depth != 0u
+            || attribute->span.source == 0u
+            || attribute->span.source != item->span.source
+            || attribute->span.start > attribute->span.end
+            || kind == 0u || (seen & kind) != 0u) return 0;
+        for (prior = 0u; prior < index; ++prior)
+            if (item->attributes[prior].span.source == attribute->span.source
+                && item->attributes[prior].source_attribute
+                    == attribute->source_attribute) return 0;
+        if (kind == CM_DECL_ATTR_LANG_ITEM
+            && !cm_decl_lang_item_name(metadata, out_lang,
+                out_lang_length)) return 0;
+        seen |= kind;
+    }
+    if (seen == clone_required && item->attribute_count == 3u
+        && *out_lang != NULL && *out_lang_length != 0u) {
+        *out_projected_count = 2u;
+        return 1;
+    }
+    if (seen == default_required && item->attribute_count == 2u
+        && *out_lang == NULL) {
+        *out_projected_count = 2u;
+        return 1;
+    }
+    return 0;
+}
+
 static int cm_decl_trait_member_source_shape(
     const CmDeclCaptureState *state, const CmDeclCaptureItem *parent,
     const CmResolveEffectiveItem *effective, const CmAst *ast,
     const CmAstItem *ast_item, const CmHirItem *item, CmHirItemId item_id,
-    size_t *out_projected_count)
+    size_t *out_projected_count, const unsigned char **out_lang,
+    size_t *out_lang_length)
 {
     const CmHirDefinition *definition = cm_hir_lookup_definition(state->hir,
         item->definition);
     const CmDeclCaptureModule *module = cm_decl_module_by_local(
         (CmDeclCaptureState *)state, parent->owner_module);
     int ignored_const_trait;
-    const unsigned char *ignored_lang = NULL;
-    size_t ignored_lang_length = 0u;
+    *out_lang = NULL;
+    *out_lang_length = 0u;
     uint32_t attribute_index;
     if (module == NULL || effective->is_generated
         || effective->id == CM_RESOLVE_EFFECTIVE_ITEM_NONE
@@ -5170,12 +5922,14 @@ static int cm_decl_trait_member_source_shape(
         || definition->span.end != item->span.end
         || (item->kind == CM_HIR_ITEM_TYPE_ALIAS
             ? !cm_decl_associated_type_attributes(state, item,
-                out_projected_count, &ignored_lang, &ignored_lang_length)
-            : (!cm_decl_trait_attributes(state, item, 0,
+                out_projected_count, out_lang, out_lang_length)
+            : (parent->trait_compiler_flags
+                    == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+                ? !cm_decl_clone_method_attributes(state, item,
+                    out_projected_count, out_lang, out_lang_length)
+                : (!cm_decl_trait_attributes(state, item, 0,
                 out_projected_count, &ignored_const_trait, NULL, NULL)
-                || ignored_const_trait))) return 0;
-    (void)ignored_lang;
-    (void)ignored_lang_length;
+                || ignored_const_trait)))) return 0;
     for (attribute_index = 0u; attribute_index < effective->attribute_count;
             ++attribute_index) {
         CmResolveEffectiveAttribute graph_attribute;
@@ -5287,17 +6041,75 @@ static int cm_decl_trait_member_source_shape(
                 return 0;
             if (parameter_index == 0u
                 && signature->receiver != CM_HIR_RECEIVER_NONE) {
+                const CmAstPattern *receiver_pattern = cm_ast_get_pattern(
+                    ast, ast_parameter->pattern);
+                const CmAstPattern *receiver_binding;
                 if (!ast_parameter->is_self
                     || ast_parameter->type != CM_AST_TYPE_NONE
-                    || hir_type == NULL) return 0;
+                    || hir_type == NULL || receiver_pattern == NULL)
+                    return 0;
+                receiver_binding = receiver_pattern->kind
+                        == CM_AST_PATTERN_REFERENCE
+                    ? cm_ast_get_pattern(ast,
+                        receiver_pattern->data.reference.pattern)
+                    : receiver_pattern;
+                if (parent->trait_compiler_flags
+                        == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+                    && (receiver_binding == NULL
+                    || receiver_binding->kind != CM_AST_PATTERN_BINDING
+                    || receiver_binding->data.binding.subpattern
+                        != CM_AST_PATTERN_NONE
+                    || receiver_binding->data.binding.is_ref
+                    || !cm_decl_ast_name_matches_hir(ast,
+                        receiver_binding->data.binding.name, state->hir,
+                        signature->parameters[parameter_index].name)
+                    || signature->parameters[parameter_index].span.source
+                        != item->span.source
+                    || signature->parameters[parameter_index].span.start
+                        != receiver_pattern->span.start
+                    || signature->parameters[parameter_index].span.end
+                        != receiver_pattern->span.end
+                    || (signature->receiver == CM_HIR_RECEIVER_REF_SHARED
+                        && (receiver_pattern->kind
+                                != CM_AST_PATTERN_REFERENCE
+                            || receiver_pattern->data.reference.is_mutable))
+                    || (signature->receiver == CM_HIR_RECEIVER_REF_MUTABLE
+                        && (receiver_pattern->kind
+                                != CM_AST_PATTERN_REFERENCE
+                            || !receiver_pattern->data.reference.is_mutable
+                            || receiver_binding->data.binding.is_mutable))))
+                    return 0;
             } else {
                 const CmAstType *ast_type;
+                const CmAstPattern *ast_pattern = cm_ast_get_pattern(ast,
+                    ast_parameter->pattern);
                 if (ast_parameter->is_self
                     || ast_parameter->type == CM_AST_TYPE_NONE
                     || (ast_type = cm_ast_get_type(ast,
                         ast_parameter->type)) == NULL
                     || !cm_decl_ast_type_matches_hir_field(state, ast,
                         ast_type, hir_type, item, 0u)) return 0;
+                if (parent->trait_compiler_flags
+                        == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+                    && (ast_pattern == NULL
+                        || ast_pattern->kind != CM_AST_PATTERN_BINDING
+                        || ast_pattern->data.binding.subpattern
+                            != CM_AST_PATTERN_NONE
+                        || ast_pattern->data.binding.is_ref
+                        || ast_pattern->data.binding.is_mutable
+                        || signature->parameters[parameter_index].binding_kind
+                            != CM_HIR_BINDING_NAMED
+                        || signature->parameters[parameter_index].binding_mode
+                            != CM_HIR_PARAMETER_BINDING_MOVE
+                        || !cm_decl_ast_name_matches_hir(ast,
+                            ast_pattern->data.binding.name, state->hir,
+                            signature->parameters[parameter_index].name)
+                        || signature->parameters[parameter_index].span.source
+                            != item->span.source
+                        || signature->parameters[parameter_index].span.start
+                            != ast_pattern->span.start
+                        || signature->parameters[parameter_index].span.end
+                            != ast_pattern->span.end)) return 0;
             }
         }
         {
@@ -5369,7 +6181,15 @@ static int cm_decl_trait_member_source_shape(
                     || ast_trait_type->kind != CM_AST_TYPE_PATH
                 ? NULL : cm_ast_get_path(ast, ast_trait_type->path);
             if (ast_bound->kind != CM_AST_WHERE_BOUND_TRAIT
-                || ast_bound->modifier != CM_AST_WHERE_BOUND_REQUIRED
+                || (parent->trait_compiler_flags
+                        == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+                    ? (ast_bound->modifier
+                            != CM_AST_WHERE_BOUND_CONDITIONALLY_CONST
+                        || hir_predicate->modifier
+                            != CM_HIR_PREDICATE_CONST_IF_CONST)
+                    : (ast_bound->modifier != CM_AST_WHERE_BOUND_REQUIRED
+                        || hir_predicate->modifier
+                            != CM_HIR_PREDICATE_REQUIRED))
                 || ast_bound->binder.lifetime_count != 0u
                 || ast_bound->binder.lifetimes != NULL
                 || ast_bound->lifetime != CM_INTERN_ID_NONE
@@ -5381,6 +6201,109 @@ static int cm_decl_trait_member_source_shape(
                 || !cm_decl_ast_name_matches_hir(ast,
                     ast_trait_path->segments[0].name, state->hir,
                     hir_trait->name)) return 0;
+        }
+        if (parent->trait_compiler_flags
+                == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS) {
+            const CmHirBody *body;
+            const CmAstExpr *ast_body;
+            if (item->predicate_count == 0u) {
+                if (owned->nominal_reference_count != 0u
+                    || owned->nominal_references != NULL
+                    || owned->nominal_reference_names != NULL
+                    || owned->nominal_reference_generic_kinds != NULL)
+                    return 0;
+            } else {
+                const CmHirItem *bound_trait;
+                const CmHirModule *bound_module;
+                const CmInternedString *bound_name;
+                const CmHirLibraryNominalReference *reference;
+                CmHirItemId bound_id;
+                bound_trait = cm_decl_bound_item(state->hir,
+                    item->predicates[0].trait_type.definition, &bound_id);
+                bound_module = bound_trait == NULL ? NULL
+                    : cm_hir_get_module(state->hir,
+                        bound_trait->owner_module);
+                bound_name = bound_trait == NULL ? NULL
+                    : cm_decl_item_name(state, bound_trait);
+                reference = owned->nominal_reference_count == 1u
+                        && owned->nominal_references != NULL
+                    ? &owned->nominal_references[0] : NULL;
+                if (reference == NULL || bound_trait == NULL
+                    || bound_module == NULL || bound_name == NULL
+                    || owned->nominal_reference_names == NULL
+                    || owned->nominal_reference_generic_kinds == NULL
+                    || reference->kind != CM_HIR_LIBRARY_NOMINAL_TRAIT
+                    || reference->use != CM_HIR_LIBRARY_REFERENCE_ONLY
+                    || !cm_hir_def_id_equal(reference->definition,
+                        bound_trait->definition)
+                    || !cm_hir_def_id_equal(reference->owner_module,
+                        bound_module->definition)
+                    || !cm_hir_def_id_is_none(
+                        reference->declaring_trait)
+                    || reference->generic_parameter_count != 0u
+                    || reference->generic_parameter_kinds != NULL
+                    || !cm_decl_bytes_equal(reference->name.bytes,
+                        reference->name.length, bound_name->bytes,
+                        bound_name->len)) return 0;
+            }
+            if (owned->associated_availability_count != 0u
+                || owned->associated_availability != NULL) return 0;
+            if (!item->data.function_item.has_default_body) {
+                if (item->data.function_item.body != CM_HIR_BODY_NONE)
+                    return 0;
+            } else {
+                body = cm_hir_get_body(state->hir,
+                    item->data.function_item.body);
+                ast_body = cm_ast_get_expr(ast,
+                    ast_item->data.function_item.body);
+                if (body == NULL || ast_body == NULL
+                    || ast_body->attribute_count != 0u
+                    || ast_body->attributes != NULL
+                    || ast_body->span.start > ast_body->span.end
+                    || ast_body->span.start < ast_item->span.start
+                    || ast_body->span.end > ast_item->span.end
+                    || !cm_hir_def_id_equal(body->owner, item->definition)
+                    || body->origin.kind != CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+                    || !cm_hir_def_id_equal(body->origin.definition,
+                        item->definition)
+                    || !cm_hir_def_id_equal(
+                        body->origin.enclosing_definition,
+                        item->definition)
+                    || !cm_hir_def_id_equal(
+                        body->origin.data.item_source.item_definition,
+                        item->definition)
+                    || body->state != CM_HIR_BODY_UNLOWERED
+                    || body->expected_type != signature->return_type
+                    || body->parameter_count != signature->parameter_count
+                    || body->local_count != signature->parameter_count
+                    || body->locals == NULL
+                    || body->source != effective->declaration.source
+                    || body->source != item->span.source
+                    || body->source_expression_id
+                        != ast_item->data.function_item.body
+                    || body->root_expression != CM_HIR_EXPR_NONE
+                    || body->error_reason != CM_INTERN_ID_NONE
+                    || body->span.source != item->span.source
+                    || body->span.start != item->span.start
+                    || body->span.end != item->span.end) return 0;
+                for (parameter_index = 0u;
+                        parameter_index < signature->parameter_count;
+                        ++parameter_index) {
+                    const CmHirLocal *local = &body->locals[parameter_index];
+                    const CmHirFunctionParameter *body_parameter =
+                        &signature->parameters[parameter_index];
+                    if (local->name != body_parameter->name
+                        || local->type != body_parameter->type
+                        || local->mutability != CM_HIR_IMMUTABLE
+                        || local->parameter_index != parameter_index
+                        || local->parameter_binding_index != 0u
+                        || local->span.source
+                            != body_parameter->span.source
+                        || local->span.start != body_parameter->span.start
+                        || local->span.end != body_parameter->span.end)
+                        return 0;
+                }
+            }
         }
     } else if (item->kind == CM_HIR_ITEM_CONST) {
         if (ast_item->data.value_item.is_mutable
@@ -5464,6 +6387,17 @@ static int cm_decl_callable_trait_header_source(
         | CM_HIR_DECL_TRAIT_IS_CONST
         | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
         | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
+    const uint8_t marker_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint8_t destruct_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint8_t clone_flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
     const CmAstGenericParam *ast_generic;
     const CmAstGenericParamBound *ast_bound;
     const CmHirGenericParam *generic;
@@ -5490,6 +6424,75 @@ static int cm_decl_callable_trait_header_source(
             && item->data.trait_item.safety == CM_HIR_SAFE
             && !item->data.trait_item.is_auto
             && !item->data.trait_item.is_const;
+    }
+    if (capture->trait_flags == marker_flags
+        || capture->trait_flags == destruct_flags
+        || (capture->trait_flags == clone_flags
+            && capture->trait_compiler_flags
+                == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS)) {
+        if (item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+            || item->generic_parameter_count != 0u
+            || ast_item->generic_parameters != NULL
+            || ast_item->generic_parameter_count != 0u
+            || item->predicates != NULL || item->predicate_count != 0u
+            || ast_item->where_clause != CM_INTERN_ID_NONE
+            || ast_item->where_predicates != NULL
+            || ast_item->where_predicate_count != 0u
+            || item->data.trait_item.safety != CM_HIR_SAFE
+            || item->data.trait_item.is_auto
+            || item->data.trait_item.is_const
+                != ((capture->trait_flags & CM_HIR_DECL_TRAIT_IS_CONST)
+                    != 0u)
+            || item->predicate_scope_count != 0u
+            || item->predicate_scopes != NULL
+            || item->outlives_predicate_count != 0u
+            || item->outlives_predicates != NULL
+            || item->data.trait_item.supertrait_count > 1u
+            || (item->data.trait_item.supertrait_count == 0u)
+                != (item->data.trait_item.supertraits == NULL)) return 0;
+        if (item->data.trait_item.supertrait_count == 0u)
+            return ast_item->data.trait_item.supertraits == CM_INTERN_ID_NONE
+                && ast_item->data.trait_item.structured_supertraits == NULL
+                && ast_item->data.trait_item.structured_supertrait_count == 0u;
+        {
+            const CmHirSupertrait *source_supertrait =
+                &item->data.trait_item.supertraits[0];
+            const CmAstSupertrait *ast_supertrait;
+            const CmAstType *ast_supertrait_type;
+            const CmAstPath *ast_supertrait_path;
+            const CmHirItem *supertrait_item;
+            CmHirItemId supertrait_id;
+            if (ast_item->data.trait_item.supertraits == CM_INTERN_ID_NONE
+                || ast_item->data.trait_item.structured_supertrait_count != 1u
+                || ast_item->data.trait_item.structured_supertraits == NULL)
+                return 0;
+            ast_supertrait =
+                &ast_item->data.trait_item.structured_supertraits[0];
+            ast_supertrait_type = cm_ast_get_type(ast,
+                ast_supertrait->type);
+            ast_supertrait_path = ast_supertrait_type == NULL
+                    || ast_supertrait_type->kind != CM_AST_TYPE_PATH
+                ? NULL : cm_ast_get_path(ast, ast_supertrait_type->path);
+            supertrait_item = cm_decl_bound_item(state->hir,
+                source_supertrait->trait_type.definition, &supertrait_id);
+            return ast_supertrait->kind == CM_AST_SUPERTRAIT_TRAIT
+                && ast_supertrait->modifier == CM_AST_SUPERTRAIT_REQUIRED
+                && ast_supertrait->lifetime == CM_INTERN_ID_NONE
+                && ast_supertrait_path != NULL && supertrait_item != NULL
+                && supertrait_id != CM_HIR_ITEM_NONE
+                && supertrait_item->kind == CM_HIR_ITEM_TRAIT
+                && cm_decl_ast_path_resolves_item(state, ast,
+                    ast_supertrait_path, item, supertrait_item)
+                && source_supertrait->modifier
+                    == CM_HIR_SUPERTRAIT_REQUIRED
+                && source_supertrait->trait_type.argument_count == 0u
+                && source_supertrait->trait_type.arguments == NULL
+                && source_supertrait->equality_count == 0u
+                && source_supertrait->equalities == NULL
+                && source_supertrait->span.source == item->span.source
+                && source_supertrait->span.start == ast_supertrait->span.start
+                && source_supertrait->span.end == ast_supertrait->span.end;
+        }
     }
     if (capture->trait_flags != callable_flags
         || item->generic_parameter_count != 1u
@@ -5670,7 +6673,9 @@ static int cm_decl_trait_source_and_members(CmDeclCaptureState *state,
             &capture->diagnostic_item_length)) {
         if (!cm_decl_callable_trait_attributes(state, item,
                 &projected_count, &capture->trait_flags,
-                &capture->lang_item, &capture->lang_item_length)) return 0;
+                &capture->trait_compiler_flags, &capture->lang_item,
+                &capture->lang_item_length, &capture->diagnostic_item,
+                &capture->diagnostic_item_length)) return 0;
         callable_attributes = 1;
         const_trait = (capture->trait_flags
             & CM_HIR_DECL_TRAIT_IS_CONST) != 0u;
@@ -5767,6 +6772,8 @@ static int cm_decl_trait_source_and_members(CmDeclCaptureState *state,
         uint32_t raw_index;
         size_t matches = 0u;
         size_t child_projected_count;
+        const unsigned char *child_lang = NULL;
+        size_t child_lang_length = 0u;
         if (cm_module_graph_get_effective_child(state->input->graph,
                 state->input->revision, module->graph.id, effective.id,
                 child_index, &child_effective) != CM_RESOLVE_VIEW_OK
@@ -5805,7 +6812,7 @@ static int cm_decl_trait_source_and_members(CmDeclCaptureState *state,
         if (matches != 1u || child_hir == NULL
             || !cm_decl_trait_member_source_shape(state, capture,
                 &child_effective, ast, child_ast, child_hir, child_hir_id,
-                &child_projected_count)
+                &child_projected_count, &child_lang, &child_lang_length)
             || projected_count > SIZE_MAX - child_projected_count
             || state->associated_count
                 >= CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS) return 0;
@@ -5816,16 +6823,10 @@ static int cm_decl_trait_source_and_members(CmDeclCaptureState *state,
             source->owner_module;
         state->associated_items[state->associated_count].source_ordinal =
             raw_index;
-        if (child_hir->kind == CM_HIR_ITEM_TYPE_ALIAS) {
-            size_t ignored_projected;
-            if (!cm_decl_associated_type_attributes(state, child_hir,
-                    &ignored_projected,
-                    &state->associated_items[state->associated_count]
-                        .lang_item,
-                    &state->associated_items[state->associated_count]
-                        .lang_item_length)
-                || ignored_projected != child_projected_count) return 0;
-        }
+        state->associated_items[state->associated_count].lang_item =
+            child_lang;
+        state->associated_items[state->associated_count].lang_item_length =
+            child_lang_length;
         state->associated_count += 1u;
     }
     *out_projected_count = projected_count;
@@ -6832,6 +7833,8 @@ static int cm_decl_capture_private_trait(CmDeclCaptureState *state,
     size_t matches = 0u;
     size_t parent_projected = 0u;
     size_t child_projected = 0u;
+    const unsigned char *child_lang = NULL;
+    size_t child_lang_length = 0u;
     int ignored_non_exhaustive = 0;
     if (item == NULL || capture == NULL || out_projected_count == NULL
         || item->kind != CM_HIR_ITEM_TRAIT
@@ -6906,7 +7909,8 @@ static int cm_decl_capture_private_trait(CmDeclCaptureState *state,
             >= CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS
         || !cm_decl_trait_member_source_shape(state, capture,
             &child_effective, ast, child_ast, child_hir, child_hir_id,
-            &child_projected)) return 0;
+            &child_projected, &child_lang, &child_lang_length)
+        || child_lang != NULL || child_lang_length != 0u) return 0;
     state->associated_items[state->associated_count].item = child_hir;
     state->associated_items[state->associated_count].id = child_hir_id;
     state->associated_items[state->associated_count].owner_module =
@@ -8486,6 +9490,8 @@ static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
         metadata->traits[index].safety =
             (uint8_t)capture->item->data.trait_item.safety;
         metadata->traits[index].flags = capture->trait_flags;
+        metadata->traits[index].compiler_flags =
+            capture->trait_compiler_flags;
         if ((capture->trait_flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) != 0u
             && !cm_decl_copy_bytes(&metadata->traits[index].lang_item,
                 capture->lang_item, capture->lang_item_length)) return 0;
@@ -8541,6 +9547,12 @@ static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
             wire->is_variadic = (uint8_t)signature->is_variadic;
             wire->has_default_body =
                 (uint8_t)item->data.function_item.has_default_body;
+            if (capture->lang_item_length != 0u) {
+                wire->flags = CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+                if (!cm_decl_copy_bytes(&wire->lang_item,
+                        capture->lang_item, capture->lang_item_length))
+                    return 0;
+            }
             if (!cm_decl_copy_intern(&wire->abi,
                     cm_interner_get(&state->hir->strings, signature->abi)))
                 return 0;
@@ -9372,6 +10384,12 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             uint32_t argument;
             wire->owner_value = (uint32_t)(index + 1u);
             wire->ordinal = child;
+            wire->modifier = predicate->modifier
+                    == CM_HIR_PREDICATE_CONST_IF_CONST
+                ? CM_HIR_DECL_PREDICATE_CONST_IF_CONST
+                : predicate->modifier == CM_HIR_PREDICATE_CONST
+                    ? CM_HIR_DECL_PREDICATE_CONST
+                    : CM_HIR_DECL_PREDICATE_REQUIRED;
             wire->subject_type = cm_decl_type_local(state, metadata,
                 predicate->subject);
             wire->trait_local = cm_decl_trait_local(state,
@@ -9435,6 +10453,12 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             wire->owner_value = 0u;
             wire->owner_associated = (uint32_t)(index + 1u);
             wire->ordinal = child;
+            wire->modifier = predicate->modifier
+                    == CM_HIR_PREDICATE_CONST_IF_CONST
+                ? CM_HIR_DECL_PREDICATE_CONST_IF_CONST
+                : predicate->modifier == CM_HIR_PREDICATE_CONST
+                    ? CM_HIR_DECL_PREDICATE_CONST
+                    : CM_HIR_DECL_PREDICATE_REQUIRED;
             wire->subject_type = cm_decl_type_local(state, metadata,
                 predicate->subject);
             wire->trait_local = cm_decl_trait_local(state,
@@ -9460,6 +10484,12 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             wire->owner_kind = CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
             wire->owner_nominal = (uint32_t)(index + 1u);
             wire->ordinal = child;
+            wire->modifier = predicate->modifier
+                    == CM_HIR_PREDICATE_CONST_IF_CONST
+                ? CM_HIR_DECL_PREDICATE_CONST_IF_CONST
+                : predicate->modifier == CM_HIR_PREDICATE_CONST
+                    ? CM_HIR_DECL_PREDICATE_CONST
+                    : CM_HIR_DECL_PREDICATE_REQUIRED;
             wire->subject_type = cm_decl_type_local(state, metadata,
                 predicate->subject);
             wire->trait_local = cm_decl_trait_local(state,
@@ -9488,6 +10518,12 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             wire->owner_associated = 0u;
             wire->owner_item = (uint32_t)(index + 1u);
             wire->ordinal = child;
+            wire->modifier = predicate->modifier
+                    == CM_HIR_PREDICATE_CONST_IF_CONST
+                ? CM_HIR_DECL_PREDICATE_CONST_IF_CONST
+                : predicate->modifier == CM_HIR_PREDICATE_CONST
+                    ? CM_HIR_DECL_PREDICATE_CONST
+                    : CM_HIR_DECL_PREDICATE_REQUIRED;
             wire->subject_type = cm_decl_type_local(state, metadata,
                 predicate->subject);
             wire->trait_local = cm_decl_trait_local(state,

@@ -483,7 +483,11 @@ The stable nominal declaration states are `REFERENCE_ONLY = 1` and
 profiles accept only `COMPLETE_DECLARATION`.
 
 `TRAIT` then contains safety, authenticated `is_auto`, authenticated
-`is_const_trait`, and the ordered supertrait array. Each supertrait has
+`is_const_trait`, closed compiler-semantic flags, and the ordered supertrait
+array. The currently retained compiler flags are specialization-trait,
+coinductive, and trivial-field-reads; every unknown bit rejects. These flags
+occupy a formerly reserved zero `NOMD` slot, so declarations without them keep
+their prior bytes. Each supertrait has
 modifier, a complete named trait reference, associated equalities, and its
 bound-position lifetime binder. `is_const_trait` is the exact lowered
 `#[const_trait]` fact and belongs to the complete trait declaration rather
@@ -592,8 +596,10 @@ inference/error types, and closure identities reject this cross-crate profile.
 identity or binder; its generic-local and binder-index payloads are zero. It
 is admitted only when every declaration root reaching it is an authenticated
 profile boundary: (1) the shared or mutable reference receiver of a supported
-associated `METHOD` and a receiver-related return type, never another method
-input; or
+associated `METHOD` and a receiver-related return type; the sole additional
+input exception is `Clone::clone_from`'s immutable omitted-lifetime `&Self`
+source under the complete const `Clone`/`Destruct` declaration profile, whose
+result is unit and therefore carries no output lifetime relation; or
 (2) the sole immutable direct `&T` parameter of a body-bearing const free
 `FUNCTION` with exactly one owner-local relaxed-Sized type generic, zero
 predicates, and exact immutable `&'static str` return; or (3) both roots of the
@@ -671,6 +677,21 @@ the source-owned body but projects them from declaration bytes. Materialization
 binds the function with `BODY_NONE`: importing and inspecting the declaration
 is supported, while MIR, monomorphization, execution, and code generation fail
 closed until an executable family transports that authority.
+
+The current `repeat` declaration profile retains the ordered value-owned
+generics `T` and `const N: usize`, parameter `T`, return type `[T; N]`, and
+required `T: Clone` predicate. Its nominal closure is the complete const
+`Clone` declaration, `Clone: Sized`, the `Sized: MetaSized: PointeeSized`
+marker chain, `Destruct`, required `clone(&self) -> Self`, and default
+`clone_from(&mut self, &Self)` with its exact `Self: ~const Destruct`
+predicate. The retained language, diagnostic, const-trait,
+specialization-trait, coinductive, trivial-field-reads, fundamental,
+deny-explicit-impl, do-not-implement-via-object, method-language, receiver,
+default-body, and predicate-modifier facts are declaration authority; ordinary
+stability, inline, must-use, const-unstable, and diagnostic text are
+source-authenticated projections. Materialization keeps every implementation
+body absent, including `clone_from` and `repeat`; this profile does not grant
+clone shims, generic MIR, monomorphization, or execution authority.
 
 The current `from_ref`/`from_mut` profile similarly transports only the
 declaration. It retains ordinary `T`, one erased reference parameter to `T`,

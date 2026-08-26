@@ -276,6 +276,71 @@ static const unsigned char from_ref_extra_input_source[] =
         "since = \"1.83.0\")]\n"
     "pub const fn borrow_shared<T>(s: &T, extra: &T) -> &[T; 1] { s }\n";
 
+static const unsigned char repeat_fixture_source[] =
+    "pub mod marker_like {\n"
+    "  #[unstable(feature = \"sized_hierarchy\", issue = \"none\")]\n"
+    "  #[lang = \"pointee_sized\"]\n"
+    "  #[diagnostic::on_unimplemented(message = \"not pointee sized\")]\n"
+    "  #[fundamental]\n"
+    "  #[rustc_specialization_trait]\n"
+    "  #[rustc_deny_explicit_impl]\n"
+    "  #[rustc_do_not_implement_via_object]\n"
+    "  #[rustc_coinductive]\n"
+    "  pub trait PointeeSizedLike {}\n"
+    "  #[unstable(feature = \"sized_hierarchy\", issue = \"none\")]\n"
+    "  #[lang = \"meta_sized\"]\n"
+    "  #[diagnostic::on_unimplemented(message = \"not meta sized\")]\n"
+    "  #[fundamental]\n"
+    "  #[rustc_specialization_trait]\n"
+    "  #[rustc_deny_explicit_impl]\n"
+    "  #[rustc_do_not_implement_via_object]\n"
+    "  #[rustc_coinductive]\n"
+    "  pub trait MetaSizedLike: PointeeSizedLike {}\n"
+    "  #[doc(alias = \"?\", alias = \"?Sized\")]\n"
+    "  #[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "  #[lang = \"sized\"]\n"
+    "  #[diagnostic::on_unimplemented(message = \"not sized\")]\n"
+    "  #[fundamental]\n"
+    "  #[rustc_specialization_trait]\n"
+    "  #[rustc_deny_explicit_impl]\n"
+    "  #[rustc_do_not_implement_via_object]\n"
+    "  #[rustc_coinductive]\n"
+    "  pub trait SizedLike: MetaSizedLike {}\n"
+    "  #[unstable(feature = \"const_destruct\", issue = \"none\")]\n"
+    "  #[rustc_const_unstable(feature = \"const_destruct\", "
+        "issue = \"none\")]\n"
+    "  #[lang = \"destruct\"]\n"
+    "  #[rustc_on_unimplemented(message = \"cannot drop\")]\n"
+    "  #[rustc_deny_explicit_impl]\n"
+    "  #[rustc_do_not_implement_via_object]\n"
+    "  #[const_trait]\n"
+    "  pub trait DestructLike {}\n"
+    "}\n"
+    "pub mod clone_like {\n"
+    "  use crate::marker_like::{DestructLike, SizedLike};\n"
+    "  #[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "  #[lang = \"clone\"]\n"
+    "  #[rustc_diagnostic_item = \"Clone\"]\n"
+    "  #[rustc_trivial_field_reads]\n"
+    "  #[rustc_const_unstable(feature = \"const_clone\", "
+        "issue = \"none\")]\n"
+    "  #[const_trait]\n"
+    "  pub trait CloneLike: SizedLike {\n"
+    "    #[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "    #[must_use = \"cloning is expensive\"]\n"
+    "    #[lang = \"clone_fn\"]\n"
+    "    fn clone(&self) -> Self;\n"
+    "    #[inline]\n"
+    "    #[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "    fn clone_from(&mut self, source: &Self)\n"
+    "    where Self: ~const DestructLike { source; }\n"
+    "  }\n"
+    "}\n"
+    "#[inline]\n"
+    "#[unstable(feature = \"array_repeat\", issue = \"none\")]\n"
+    "pub fn repeat_like<T: clone_like::CloneLike, const N: usize>"
+        "(val: T) -> [T; N] { val }\n";
+
 static const char generic_enum_fixture_template[] =
     "mod option_like {\n"
     "  #[doc(search_unbox)]\n"
@@ -667,6 +732,12 @@ static void from_ref_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "from-ref-like.rs",
         from_ref_fixture_source, sizeof(from_ref_fixture_source) - 1u);
+}
+
+static void repeat_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "repeat-like.rs",
+        repeat_fixture_source, sizeof(repeat_fixture_source) - 1u);
 }
 
 static void layout_dependency_fixture_init(CaptureFixture *fixture,
@@ -4741,6 +4812,291 @@ static void test_from_fn_callable_closure_and_determinism(void)
     fixture_destroy(&fixture);
 }
 
+static void test_repeat_clone_closure_and_determinism(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    const CmHirDeclarationValue *repeat;
+    const CmHirDeclarationTrait *clone_trait = NULL;
+    const CmHirDeclarationAssociatedItem *clone_method = NULL;
+    const CmHirDeclarationAssociatedItem *clone_from = NULL;
+    uint32_t clone_local = 0u;
+    size_t index;
+    repeat_fixture_init(&fixture, 0);
+    repeat_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 18u);
+    for (index = 0u; index < metadata.trait_count; ++index) {
+        if (declaration_string_is(metadata.traits[index].lang_item,
+                "clone")) {
+            clone_trait = &metadata.traits[index];
+            clone_local = (uint32_t)(index + 1u);
+        }
+    }
+    for (index = 0u; index < metadata.associated_count; ++index) {
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "clone")) clone_method = &metadata.associated_items[index];
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "clone_from")) clone_from = &metadata.associated_items[index];
+    }
+    repeat = find_declaration_value(&metadata, "repeat_like", NULL);
+    assert(repeat != NULL && clone_trait != NULL && clone_local != 0u
+        && clone_method != NULL && clone_from != NULL
+        && result.trait_count == 5u && result.associated_count == 2u
+        && result.value_count == 1u && result.predicate_count == 2u
+        && repeat->generic_count == 2u && repeat->predicate_count == 1u
+        && repeat->parameter_count == 1u && repeat->has_body == 1u
+        && metadata.predicates[repeat->predicate_start - 1u].trait_local
+            == clone_local
+        && metadata.predicates[repeat->predicate_start - 1u].modifier
+            == CM_HIR_DECL_PREDICATE_REQUIRED
+        && clone_trait->compiler_flags
+            == CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+        && clone_trait->associated_count == 2u
+        && declaration_string_is(clone_method->lang_item, "clone_fn")
+        && clone_from->predicate_count == 1u
+        && metadata.predicates[clone_from->predicate_start - 1u].modifier
+            == CM_HIR_DECL_PREDICATE_CONST_IF_CONST);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 18u);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+}
+
+static void test_repeat_clone_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirItem *repeat;
+    CmHirItem *clone_trait;
+    CmHirItem *clone_from;
+    CmHirItem *sized_trait;
+    CmHirItem *pointee_trait;
+    CmHirGenericParam *const_generic;
+    CmHirType *repeat_return;
+    CmHirType *clone_source;
+    CmHirBody *repeat_body;
+    CmHirBody *clone_body;
+    CmHirItemId ignored_id;
+    CmHirGenericParamKind saved_generic_kind;
+    CmHirTypeId saved_type_id;
+    CmHirGenericParamId saved_generic_local;
+    CmHirTraitPredicateModifier saved_modifier;
+    CmHirDefId saved_definition;
+    CmHirRegionKind saved_region_kind;
+    CmHirMutability saved_mutability;
+    CmInternId saved_metadata;
+    uint32_t saved_source_attribute;
+    uint32_t saved_owner_module;
+    CmSpan saved_span;
+
+    repeat_fixture_init(&fixture, 0);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_traits = metadata.traits;
+    saved_associated = metadata.associated_items;
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    repeat = (CmHirItem *)(void *)find_item(&fixture, "repeat_like",
+        &ignored_id);
+    clone_trait = (CmHirItem *)(void *)find_item(&fixture, "CloneLike",
+        &ignored_id);
+    clone_from = (CmHirItem *)(void *)find_item(&fixture, "clone_from",
+        &ignored_id);
+    sized_trait = (CmHirItem *)(void *)find_item(&fixture, "SizedLike",
+        &ignored_id);
+    pointee_trait = (CmHirItem *)(void *)find_item(&fixture,
+        "PointeeSizedLike", &ignored_id);
+    assert(repeat != NULL && clone_trait != NULL && clone_from != NULL
+        && sized_trait != NULL && pointee_trait != NULL
+        && repeat->generic_parameter_count == 2u
+        && repeat->predicate_count == 1u
+        && clone_from->predicate_count == 1u
+        && clone_from->data.function_item.signature.parameter_count == 2u);
+    const_generic = (CmHirGenericParam *)cm_hir_get_generic_param(
+        &fixture.hir, repeat->generic_parameter_start + 1u);
+    repeat_return = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        repeat->data.function_item.signature.return_type);
+    clone_source = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        clone_from->data.function_item.signature.parameters[1].type);
+    repeat_body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        repeat->data.function_item.body);
+    clone_body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        clone_from->data.function_item.body);
+    assert(const_generic != NULL && repeat_return != NULL
+        && repeat_return->kind == CM_HIR_TYPE_ARRAY_KIND
+        && clone_source != NULL
+        && clone_source->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && repeat_body != NULL && clone_body != NULL
+        && repeat->attribute_count == 2u && repeat->attributes != NULL
+        && clone_trait->attribute_count == 6u
+        && clone_trait->attributes != NULL);
+
+#define ASSERT_REPEAT_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.traits == saved_traits \
+        && metadata.associated_items == saved_associated \
+        && metadata.values == saved_values \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_generic_kind = const_generic->kind;
+    const_generic->kind = CM_HIR_GENERIC_TYPE;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    const_generic->kind = saved_generic_kind;
+
+    saved_type_id = const_generic->declared_type;
+    const_generic->declared_type = CM_HIR_TYPE_NONE;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    const_generic->declared_type = saved_type_id;
+
+    saved_definition = const_generic->owner;
+    const_generic->owner = clone_trait->definition;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    const_generic->owner = saved_definition;
+
+    saved_generic_local =
+        repeat_return->data.array_type.length.data.parameter;
+    repeat_return->data.array_type.length.data.parameter =
+        repeat->generic_parameter_start;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat_return->data.array_type.length.data.parameter =
+        saved_generic_local;
+
+    saved_modifier = repeat->predicates[0].modifier;
+    repeat->predicates[0].modifier = CM_HIR_PREDICATE_CONST_IF_CONST;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->predicates[0].modifier = saved_modifier;
+
+    saved_definition = repeat->predicates[0].trait_type.definition;
+    repeat->predicates[0].trait_type.definition =
+        pointee_trait->definition;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->predicates[0].trait_type.definition = saved_definition;
+
+    saved_type_id = repeat->data.function_item.signature.parameters[0].type;
+    repeat->data.function_item.signature.parameters[0].type =
+        repeat->data.function_item.signature.return_type;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->data.function_item.signature.parameters[0].type = saved_type_id;
+
+    saved_type_id = repeat_body->expected_type;
+    repeat_body->expected_type =
+        repeat->data.function_item.signature.parameters[0].type;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat_body->expected_type = saved_type_id;
+
+    saved_metadata = repeat->attributes[0].metadata;
+    repeat->attributes[0].metadata = cm_hir_intern(&fixture.hir,
+        "inline(sometimes)");
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->attributes[0].metadata = saved_metadata;
+
+    saved_source_attribute = repeat->attributes[1].source_attribute;
+    repeat->attributes[1].source_attribute = saved_source_attribute + 1u;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->attributes[1].source_attribute = saved_source_attribute;
+
+    saved_span = repeat->attributes[1].span;
+    repeat->attributes[1].span.start += 1u;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    repeat->attributes[1].span = saved_span;
+
+    saved_owner_module = pointee_trait->owner_module;
+    pointee_trait->owner_module = clone_trait->owner_module;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    pointee_trait->owner_module = saved_owner_module;
+
+    saved_definition = sized_trait->data.trait_item.supertraits[0]
+        .trait_type.definition;
+    sized_trait->data.trait_item.supertraits[0].trait_type.definition =
+        pointee_trait->definition;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    sized_trait->data.trait_item.supertraits[0].trait_type.definition =
+        saved_definition;
+
+    saved_metadata = clone_trait->attributes[3].metadata;
+    clone_trait->attributes[3].metadata = cm_hir_intern(&fixture.hir,
+        "rustc_coinductive");
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_trait->attributes[3].metadata = saved_metadata;
+
+    saved_region_kind = clone_source->data.reference_type.region.kind;
+    clone_source->data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_source->data.reference_type.region.kind = saved_region_kind;
+
+    saved_mutability = clone_source->data.reference_type.mutability;
+    clone_source->data.reference_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_source->data.reference_type.mutability = saved_mutability;
+
+    saved_modifier = clone_from->predicates[0].modifier;
+    clone_from->predicates[0].modifier = CM_HIR_PREDICATE_REQUIRED;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_from->predicates[0].modifier = saved_modifier;
+
+    saved_type_id = clone_body->expected_type;
+    clone_body->expected_type = clone_source->data.reference_type.pointee;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_body->expected_type = saved_type_id;
+
+    saved_source_attribute = clone_trait->attributes[3].source_attribute;
+    clone_trait->attributes[3].source_attribute =
+        saved_source_attribute + 1u;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_trait->attributes[3].source_attribute = saved_source_attribute;
+
+    saved_span = clone_trait->attributes[3].span;
+    clone_trait->attributes[3].span.end -= 1u;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_trait->attributes[3].span = saved_span;
+
+    saved_source_attribute = clone_body->source_expression_id;
+    clone_body->source_expression_id = saved_source_attribute + 1u;
+    ASSERT_REPEAT_ATOMIC_FAILURE();
+    clone_body->source_expression_id = saved_source_attribute;
+
+#undef ASSERT_REPEAT_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static void test_from_fn_hostile_mutations_are_atomic(void)
 {
     CaptureFixture fixture;
@@ -8427,6 +8783,8 @@ int main(void)
     test_into_iter_hostile_shapes_are_atomic();
     test_from_fn_callable_closure_and_determinism();
     test_from_fn_hostile_mutations_are_atomic();
+    test_repeat_clone_closure_and_determinism();
+    test_repeat_clone_hostile_mutations_are_atomic();
     test_from_mut_elision_profile_and_determinism();
     test_from_mut_hostile_mutations_are_atomic();
     test_from_ref_elision_profile_and_negatives();

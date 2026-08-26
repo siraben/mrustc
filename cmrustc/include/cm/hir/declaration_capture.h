@@ -254,6 +254,16 @@ typedef struct CmHirDeclarationCaptureResult {
  * the diagnostic identity and nominal-owned static outlives predicate are
  * retained. Other supertrait/outlives forms and additional safe members remain
  * unsupported.
+ * A third exact reachable profile carries the built-in Clone declaration
+ * closure: const safe Clone with retained lang/diagnostic/trivial-field-read
+ * facts, its required Sized -> MetaSized -> PointeeSized supertrait chain,
+ * and the const Destruct marker. Clone's source-ordered `clone` and
+ * `clone_from` methods retain receiver/signature/default-body/lang facts;
+ * `clone_from` carries the exact source-authenticated
+ * `Self: ~const Destruct` predicate. Its omitted shared source lifetime must
+ * already be the lowerer's narrowly authenticated ERASED form. Method bodies
+ * remain declaration-only: capture authenticates source ownership and local
+ * provenance but transports no executable body.
  *
  * A supported free const is public, top-level, immutable, explicitly typed by
  * a v3.0-representable primitive, zero-generic/predicate, and has one
@@ -273,6 +283,13 @@ typedef struct CmHirDeclarationCaptureResult {
  * hint; both are source-authenticated, projected, counted, and byte-neutral.
  * The source-owned UNLOWERED body and declaration-library identity are
  * authenticated, but executable body authority is not transported.
+ * The repeat-style free-function profile is likewise public, safe Rust and
+ * bodyful, with exact `inline` plus stability projection. It has one ordinary
+ * type generic with a required zero-argument Clone predicate, one `usize`
+ * const generic, a by-value `T` parameter, and `[T; N]` result. Capture
+ * authenticates the complete four-trait nominal-reference closure stored by
+ * the declaration library, including exact defining module identities; it
+ * never treats Clone as an opaque or name-selected bound.
  *
  * The attributed const-function profile is public, top-level, safe Rust ABI,
  * has one relaxed-Sized type generic and no predicates, and returns an exact

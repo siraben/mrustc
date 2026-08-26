@@ -486,6 +486,11 @@ static int cm_decl_validate_traits(const CmHirDeclarationMetadata *metadata)
                     | CM_HIR_DECL_TRAIT_FUNDAMENTAL
                     | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
                     | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT)) != 0u
+            || (trait_value->compiler_flags
+                & (uint16_t)~(CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
+                    | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE
+                    | CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS))
+                != 0u
             || ((trait_value->flags
                     & CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u
                 ? !cm_decl_identifier(trait_value->diagnostic_item)
@@ -627,8 +632,7 @@ static int cm_decl_validate_associated_items(
                 || associated->is_const != 0u
                 || associated->is_async != 0u
                 || associated->is_variadic != 0u
-                || associated->has_default_body > 1u
-                || associated->flags != 0u) {
+                || associated->has_default_body > 1u) {
             cm_free(seen);
             return 0;
         }
@@ -2208,7 +2212,8 @@ static int cm_decl_validate_predicates(
         }
         if (predicate->trait_local == 0u
             || (size_t)predicate->trait_local > metadata->trait_count
-            || !cm_decl_type_local(metadata, predicate->subject_type)) {
+            || !cm_decl_type_local(metadata, predicate->subject_type)
+            || predicate->modifier > CM_HIR_DECL_PREDICATE_CONST) {
             cm_free(seen);
             return 0;
         }
@@ -3056,6 +3061,41 @@ static int cm_decl_bounded_free_erased_value(
             value_local);
 }
 
+static int cm_decl_bounded_clone_from_erased_source(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationAssociatedItem *associated)
+{
+    const CmHirDeclarationTrait *parent;
+    const CmHirDeclarationType *source;
+    const CmHirDeclarationType *source_self;
+    const CmHirDeclarationType *result;
+    if (associated->parent_local == 0u
+        || (size_t)associated->parent_local > metadata->trait_count
+        || associated->kind != CM_HIR_DECL_ASSOCIATED_METHOD
+        || associated->receiver != CM_HIR_DECL_RECEIVER_REF_MUTABLE
+        || associated->parameter_count != 2u
+        || associated->parameter_types == NULL
+        || !cm_decl_string_is(associated->name, "clone_from")
+        || !cm_decl_string_is(associated->abi, "Rust")
+        || associated->safety != CM_HIR_DECL_SAFETY_SAFE
+        || associated->is_const != 0u || associated->is_async != 0u
+        || associated->is_variadic != 0u
+        || associated->has_default_body != 1u) return 0;
+    parent = &metadata->traits[associated->parent_local - 1u];
+    source = &metadata->types[associated->parameter_types[1] - 1u];
+    result = &metadata->types[associated->return_type - 1u];
+    if ((parent->flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) == 0u
+        || !cm_decl_string_is(parent->lang_item, "clone")
+        || source->kind != CM_HIR_DECL_TYPE_REFERENCE
+        || source->mutability != CM_HIR_DECL_IMMUTABLE
+        || source->region.kind != CM_HIR_DECL_REGION_ERASED
+        || result->kind != CM_HIR_DECL_TYPE_PRIMITIVE
+        || result->primitive != CM_HIR_DECL_PRIMITIVE_UNIT) return 0;
+    source_self = &metadata->types[source->child_type - 1u];
+    return source_self->kind == CM_HIR_DECL_TYPE_SELF
+        && source_self->self_trait_local == associated->parent_local;
+}
+
 /*
  * ERASED is a deliberately lossy transport marker, not a general lifetime or
  * binder.  Validate every declaration root that can reach one so a canonical
@@ -3132,7 +3172,9 @@ static int cm_decl_validate_erased_type_roots(
          * ERASED return may preserve receiver-driven output elision. */
         for (child = 1u; child < associated->parameter_count; ++child) {
             if (contains_erased[associated->parameter_types[child] - 1u]) {
-                valid = 0;
+                if (child != 1u
+                    || !cm_decl_bounded_clone_from_erased_source(metadata,
+                        associated)) valid = 0;
                 break;
             }
         }
@@ -3383,6 +3425,7 @@ static int cm_decl_validate_callable_profile(
         uint32_t local = (uint32_t)(index + 1u);
         if ((trait_value->flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) == 0u) {
             if (trait_value->supertrait_count != 0u
+                || trait_value->compiler_flags != 0u
                 || (trait_value->flags & (uint8_t)~
                     CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u)
                 return 0;
@@ -3390,6 +3433,7 @@ static int cm_decl_validate_callable_profile(
         }
         if (local == tuple_trait) {
             if (trait_value->flags != tuple_flags
+                || trait_value->compiler_flags != 0u
                 || trait_value->safety != CM_HIR_DECL_SAFETY_SAFE
                 || trait_value->generic_start != 0u
                 || trait_value->generic_count != 0u
@@ -3404,6 +3448,7 @@ static int cm_decl_validate_callable_profile(
             const CmHirDeclarationGeneric *generic;
             const CmHirDeclarationPredicate *predicate;
             if (trait_value->flags != callable_flags
+                || trait_value->compiler_flags != 0u
                 || trait_value->safety != CM_HIR_DECL_SAFETY_SAFE
                 || trait_value->generic_count != 1u
                 || trait_value->generic_start == 0u
@@ -3462,6 +3507,13 @@ static int cm_decl_validate_callable_profile(
                         trait_value->generic_start, fn_once_trait,
                         output_associated, 1)) return 0;
             }
+        } else if (cm_decl_string_is(trait_value->lang_item, "clone")
+                || cm_decl_string_is(trait_value->lang_item, "destruct")
+                || cm_decl_string_is(trait_value->lang_item, "meta_sized")
+                || cm_decl_string_is(trait_value->lang_item,
+                    "pointee_sized")
+                || cm_decl_string_is(trait_value->lang_item, "sized")) {
+            continue;
         } else {
             return 0;
         }
@@ -3486,9 +3538,280 @@ static int cm_decl_validate_callable_profile(
     return 1;
 }
 
+static int cm_decl_zero_arg_supertrait_is(
+    const CmHirDeclarationTrait *trait_value, uint32_t target_local)
+{
+    return trait_value->supertrait_count == 1u
+        && trait_value->supertraits != NULL
+        && trait_value->supertraits[0].modifier
+            == CM_HIR_DECL_SUPERTRAIT_REQUIRED
+        && trait_value->supertraits[0].trait_local == target_local
+        && trait_value->supertraits[0].argument_count == 0u
+        && trait_value->supertraits[0].argument_types == NULL;
+}
+
+static int cm_decl_clone_marker_trait_common(
+    const CmHirDeclarationTrait *trait_value, uint8_t flags,
+    uint16_t compiler_flags)
+{
+    return trait_value->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && trait_value->visibility.restriction_module == 0u
+        && trait_value->safety == CM_HIR_DECL_SAFETY_SAFE
+        && trait_value->flags == flags
+        && trait_value->compiler_flags == compiler_flags
+        && trait_value->generic_start == 0u
+        && trait_value->generic_count == 0u
+        && trait_value->predicate_start == 0u
+        && trait_value->predicate_count == 0u
+        && trait_value->outlives_start == 0u
+        && trait_value->outlives_count == 0u;
+}
+
+static int cm_decl_clone_method_common(
+    const CmHirDeclarationAssociatedItem *method, uint32_t parent_local,
+    uint8_t receiver, uint32_t parameter_count, int has_default_body)
+{
+    return method->kind == CM_HIR_DECL_ASSOCIATED_METHOD
+        && method->parent_kind == CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL
+        && method->parent_local == parent_local
+        && method->implemented_associated_local == 0u
+        && method->visibility.kind == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && method->visibility.restriction_module == 0u
+        && method->is_specializable == 0u
+        && method->generic_start == 0u && method->generic_count == 0u
+        && method->receiver == receiver
+        && method->parameter_count == parameter_count
+        && method->parameter_types != NULL
+        && cm_decl_string_is(method->abi, "Rust")
+        && method->safety == CM_HIR_DECL_SAFETY_SAFE
+        && method->is_const == 0u && method->is_async == 0u
+        && method->is_variadic == 0u
+        && method->has_default_body == (uint8_t)has_default_body;
+}
+
+static int cm_decl_reference_to_self_is(
+    const CmHirDeclarationMetadata *metadata, uint32_t type_local,
+    uint32_t trait_local, uint8_t mutability)
+{
+    const CmHirDeclarationType *reference;
+    if (!cm_decl_type_local(metadata, type_local)) return 0;
+    reference = &metadata->types[type_local - 1u];
+    return reference->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && reference->region.kind == CM_HIR_DECL_REGION_ERASED
+        && reference->region.generic_local == 0u
+        && reference->region.binder_index == 0u
+        && reference->mutability == mutability
+        && cm_decl_type_is_self(metadata, reference->child_type,
+            trait_local);
+}
+
+/*
+ * Exact reachable declaration closure for `T: Clone`: the const Clone trait,
+ * its two methods, Sized hierarchy, and the const-if-const Destruct predicate
+ * on clone_from.  The semantic lang identities are the authority; ordinary
+ * names are checked only for the two associated source declarations.
+ */
+static int cm_decl_validate_clone_profile(
+    const CmHirDeclarationMetadata *metadata)
+{
+    const uint8_t clone_flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_HAS_LANG_ITEM | CM_HIR_DECL_TRAIT_IS_CONST;
+    const uint8_t marker_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint8_t destruct_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    const uint16_t marker_compiler_flags =
+        CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
+        | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE;
+    uint32_t clone_local = cm_decl_trait_with_lang(metadata, "clone");
+    uint32_t destruct_local = cm_decl_trait_with_lang(metadata, "destruct");
+    uint32_t meta_local = cm_decl_trait_with_lang(metadata, "meta_sized");
+    uint32_t pointee_local = cm_decl_trait_with_lang(metadata,
+        "pointee_sized");
+    uint32_t sized_local = cm_decl_trait_with_lang(metadata, "sized");
+    uint32_t clone_method_local = cm_decl_associated_with_lang(metadata,
+        "clone_fn");
+    const CmHirDeclarationTrait *clone_trait;
+    const CmHirDeclarationTrait *destruct_trait;
+    const CmHirDeclarationTrait *meta_trait;
+    const CmHirDeclarationTrait *pointee_trait;
+    const CmHirDeclarationTrait *sized_trait;
+    const CmHirDeclarationAssociatedItem *clone_method;
+    const CmHirDeclarationAssociatedItem *clone_from;
+    const CmHirDeclarationPredicate *predicate;
+    const CmHirDeclarationType *unit;
+    size_t index;
+    int any = clone_local != 0u || destruct_local != 0u || meta_local != 0u
+        || pointee_local != 0u || sized_local != 0u
+        || clone_method_local != 0u;
+    if (!any) {
+        for (index = 0u; index < metadata->trait_count; ++index)
+            if (metadata->traits[index].compiler_flags != 0u) return 0;
+        for (index = 0u; index < metadata->associated_count; ++index) {
+            const CmHirDeclarationAssociatedItem *associated =
+                &metadata->associated_items[index];
+            if (associated->kind == CM_HIR_DECL_ASSOCIATED_METHOD
+                && associated->flags != 0u) return 0;
+        }
+        for (index = 0u; index < metadata->predicate_count; ++index)
+            if (metadata->predicates[index].modifier
+                    != CM_HIR_DECL_PREDICATE_REQUIRED) return 0;
+        return 1;
+    }
+    if (clone_local == 0u || destruct_local == 0u || meta_local == 0u
+        || pointee_local == 0u || sized_local == 0u
+        || clone_method_local == 0u) return 0;
+    clone_trait = &metadata->traits[clone_local - 1u];
+    destruct_trait = &metadata->traits[destruct_local - 1u];
+    meta_trait = &metadata->traits[meta_local - 1u];
+    pointee_trait = &metadata->traits[pointee_local - 1u];
+    sized_trait = &metadata->traits[sized_local - 1u];
+    if (!cm_decl_clone_marker_trait_common(clone_trait, clone_flags,
+            CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS)
+        || !cm_decl_string_is(clone_trait->diagnostic_item, "Clone")
+        || clone_trait->associated_count != 2u
+        || clone_trait->associated_start == 0u
+        || clone_method_local != clone_trait->associated_start
+        || !cm_decl_zero_arg_supertrait_is(clone_trait, sized_local)
+        || !cm_decl_clone_marker_trait_common(destruct_trait,
+            destruct_flags, UINT16_C(0))
+        || destruct_trait->associated_start != 0u
+        || destruct_trait->associated_count != 0u
+        || destruct_trait->supertrait_count != 0u
+        || !cm_decl_clone_marker_trait_common(meta_trait, marker_flags,
+            marker_compiler_flags)
+        || meta_trait->associated_start != 0u
+        || meta_trait->associated_count != 0u
+        || !cm_decl_zero_arg_supertrait_is(meta_trait, pointee_local)
+        || !cm_decl_clone_marker_trait_common(pointee_trait, marker_flags,
+            marker_compiler_flags)
+        || pointee_trait->associated_start != 0u
+        || pointee_trait->associated_count != 0u
+        || pointee_trait->supertrait_count != 0u
+        || !cm_decl_clone_marker_trait_common(sized_trait, marker_flags,
+            marker_compiler_flags)
+        || sized_trait->associated_start != 0u
+        || sized_trait->associated_count != 0u
+        || !cm_decl_zero_arg_supertrait_is(sized_trait, meta_local)) return 0;
+    clone_method = &metadata->associated_items[clone_method_local - 1u];
+    clone_from = &metadata->associated_items[clone_method_local];
+    if (!cm_decl_clone_method_common(clone_method, clone_local,
+            CM_HIR_DECL_RECEIVER_REF_SHARED, 1u, 0)
+        || !cm_decl_string_is(clone_method->name, "clone")
+        || clone_method->flags != CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM
+        || !cm_decl_string_is(clone_method->lang_item, "clone_fn")
+        || clone_method->predicate_start != 0u
+        || clone_method->predicate_count != 0u
+        || !cm_decl_reference_to_self_is(metadata,
+            clone_method->parameter_types[0], clone_local,
+            CM_HIR_DECL_IMMUTABLE)
+        || !cm_decl_type_is_self(metadata, clone_method->return_type,
+            clone_local)
+        || !cm_decl_clone_method_common(clone_from, clone_local,
+            CM_HIR_DECL_RECEIVER_REF_MUTABLE, 2u, 1)
+        || !cm_decl_string_is(clone_from->name, "clone_from")
+        || clone_from->flags != 0u
+        || clone_from->predicate_count != 1u
+        || clone_from->predicate_start == 0u
+        || !cm_decl_reference_to_self_is(metadata,
+            clone_from->parameter_types[0], clone_local,
+            CM_HIR_DECL_MUTABLE)
+        || !cm_decl_reference_to_self_is(metadata,
+            clone_from->parameter_types[1], clone_local,
+            CM_HIR_DECL_IMMUTABLE)) return 0;
+    unit = &metadata->types[clone_from->return_type - 1u];
+    predicate = &metadata->predicates[clone_from->predicate_start - 1u];
+    if (unit->kind != CM_HIR_DECL_TYPE_PRIMITIVE
+        || unit->primitive != CM_HIR_DECL_PRIMITIVE_UNIT
+        || predicate->owner_kind
+            != CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+        || predicate->owner_associated != clone_method_local + 1u
+        || predicate->ordinal != 0u
+        || !cm_decl_type_is_self(metadata, predicate->subject_type,
+            clone_local)
+        || predicate->trait_local != destruct_local
+        || predicate->argument_count != 0u
+        || predicate->equality_count != 0u
+        || predicate->modifier
+            != CM_HIR_DECL_PREDICATE_CONST_IF_CONST) return 0;
+    for (index = 0u; index < metadata->associated_count; ++index) {
+        const CmHirDeclarationAssociatedItem *associated =
+            &metadata->associated_items[index];
+        if (associated->kind == CM_HIR_DECL_ASSOCIATED_METHOD
+            && associated->flags != 0u
+            && (uint32_t)(index + 1u) != clone_method_local) return 0;
+    }
+    for (index = 0u; index < metadata->predicate_count; ++index) {
+        const CmHirDeclarationPredicate *candidate =
+            &metadata->predicates[index];
+        if (candidate->modifier != CM_HIR_DECL_PREDICATE_REQUIRED
+            && candidate != predicate) return 0;
+    }
+    return 1;
+}
+
+static int cm_decl_repeat_value_profile(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationValue *value, uint32_t value_local,
+    uint32_t clone_local)
+{
+    const CmHirDeclarationGeneric *type_generic;
+    const CmHirDeclarationGeneric *const_generic;
+    const CmHirDeclarationType *const_type;
+    const CmHirDeclarationType *result;
+    const CmHirDeclarationPredicate *predicate;
+    if (clone_local == 0u || value->generic_start == 0u
+        || value->generic_count != 2u || value->predicate_start == 0u
+        || value->predicate_count != 1u || value->parameter_count != 1u
+        || value->parameter_types == NULL || value->has_body != 1u
+        || value->is_const != 0u) return 0;
+    type_generic = &metadata->generics[value->generic_start - 1u];
+    const_generic = &metadata->generics[value->generic_start];
+    const_type = &metadata->types[const_generic->declared_type - 1u];
+    result = &metadata->types[value->return_type - 1u];
+    predicate = &metadata->predicates[value->predicate_start - 1u];
+    return type_generic->owner_kind == CM_HIR_DECL_GENERIC_VALUE
+        && type_generic->owner_local == value_local
+        && type_generic->index == 0u
+        && type_generic->kind == CM_HIR_DECL_GENERIC_TYPE
+        && type_generic->is_relaxed_sized == 0u
+        && type_generic->has_default == 0u
+        && type_generic->declared_type == 0u
+        && const_generic->owner_kind == CM_HIR_DECL_GENERIC_VALUE
+        && const_generic->owner_local == value_local
+        && const_generic->index == 1u
+        && const_generic->kind == CM_HIR_DECL_GENERIC_CONST
+        && const_generic->is_relaxed_sized == 0u
+        && const_generic->has_default == 0u
+        && const_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && const_type->primitive == CM_HIR_DECL_PRIMITIVE_USIZE
+        && cm_decl_type_is_generic(metadata, value->parameter_types[0],
+            value->generic_start)
+        && result->kind == CM_HIR_DECL_TYPE_ARRAY
+        && cm_decl_type_is_generic(metadata, result->child_type,
+            value->generic_start)
+        && result->array_length_kind
+            == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER
+        && result->array_length_generic_local == value->generic_start + 1u
+        && predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_VALUE
+        && predicate->owner_value == value_local
+        && predicate->ordinal == 0u
+        && cm_decl_type_is_generic(metadata, predicate->subject_type,
+            value->generic_start)
+        && predicate->trait_local == clone_local
+        && predicate->argument_count == 0u
+        && predicate->equality_count == 0u
+        && predicate->modifier == CM_HIR_DECL_PREDICATE_REQUIRED;
+}
+
 static int cm_decl_validate_from_fn_profile(
     const CmHirDeclarationMetadata *metadata)
 {
+    uint32_t clone_trait = cm_decl_trait_with_lang(metadata, "clone");
     uint32_t fn_mut_trait = cm_decl_trait_with_lang(metadata, "fn_mut");
     uint32_t output_associated = cm_decl_associated_with_lang(metadata,
         "fn_once_output");
@@ -3529,6 +3852,8 @@ static int cm_decl_validate_from_fn_profile(
             }
         }
         if (!uses_new_profile) continue;
+        if (cm_decl_repeat_value_profile(metadata, value,
+                (uint32_t)(index + 1u), clone_trait)) continue;
         if (value->generic_count != 3u || value->parameter_count != 1u
             || value->parameter_types == NULL
             || value->predicate_count != 1u || value->predicate_start == 0u
@@ -4308,6 +4633,7 @@ CmHirDeclarationMetadataStatus cm_hir_declaration_metadata_validate(
         || !cm_decl_validate_self_type_scopes(metadata)
         || !cm_decl_validate_erased_type_roots(metadata)
         || !cm_decl_validate_callable_profile(metadata)
+        || !cm_decl_validate_clone_profile(metadata)
         || !cm_decl_validate_from_fn_profile(metadata)
         || !cm_decl_validate_type_reachability(metadata)
         || !cm_decl_validate_namespace(metadata))
@@ -4418,8 +4744,7 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u32(&writer, trait_value->associated_count);
         cm_hir_metadata_write_u8(&writer, trait_value->safety);
         cm_hir_metadata_write_u8(&writer, trait_value->flags);
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+        cm_hir_metadata_write_u16(&writer, trait_value->compiler_flags);
         cm_hir_metadata_write_u32(&writer,
             trait_value->supertrait_count);
         for (child = 0u; child < trait_value->supertrait_count; ++child) {
@@ -4784,7 +5109,8 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         }
         cm_hir_metadata_write_u32(&writer, UINT32_C(0));
         cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(1));
+        cm_hir_metadata_write_u8(&writer,
+            (uint8_t)(predicate->modifier + UINT8_C(1)));
         cm_hir_metadata_write_u8(&writer, UINT8_C(0));
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
     }
@@ -5205,8 +5531,8 @@ static int cm_decl_parse_traits(const CmHirMetadataSection *section,
                 != CM_HIR_METADATA_OK
             || cm_hir_metadata_read_u8(&reader, &trait_value->flags)
                 != CM_HIR_METADATA_OK
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
+            || cm_hir_metadata_read_u16(&reader,
+                &trait_value->compiler_flags) != CM_HIR_METADATA_OK
             || cm_hir_metadata_read_u32(&reader,
                 &trait_value->supertrait_count) != CM_HIR_METADATA_OK
             || trait_value->supertrait_count
@@ -5913,11 +6239,17 @@ static int cm_decl_parse_predicates(const CmHirMetadataSection *section,
                     &predicate->equalities[child].value_type)
                     != CM_HIR_METADATA_OK) return 0;
         }
-        if (!cm_decl_read_u32(&reader, UINT32_C(0))
+        {
+            uint8_t modifier_tag;
+            if (!cm_decl_read_u32(&reader, UINT32_C(0))
             || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(1))
+            || cm_hir_metadata_read_u8(&reader, &modifier_tag)
+                != CM_HIR_METADATA_OK
+            || modifier_tag < UINT8_C(1) || modifier_tag > UINT8_C(3)
             || !cm_decl_read_u8(&reader, UINT8_C(0))
             || !cm_decl_read_u16(&reader, UINT16_C(0))) return 0;
+            predicate->modifier = (uint8_t)(modifier_tag - UINT8_C(1));
+        }
     }
     metadata->outlives_predicate_count = outlives_count;
     metadata->outlives_predicates = outlives_count == 0u ? NULL
