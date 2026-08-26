@@ -333,6 +333,17 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `stage=items`/`item-source-invalid`. The next capability must retain the
   exact `T: Clone` declaration predicate and const-generic array result while
   keeping the generic inline body unavailable.
+- Commit `9c8f6439` transports that exact declaration and the complete
+  reachable `Clone`/`Sized`/`MetaSized`/`PointeeSized`/`Destruct` declaration
+  closure while preserving compiler flags and predicate modifiers. Its clean
+  pinned Rust 1.90 probe again reports zero graph/import/HIR errors, 38,176
+  HIR items, and the exact 451-module/1,658-type/20,747-value library census.
+  It measures the next v3.0 frontier at `core/src/array/mod.rs:146`:
+  `try_from_fn<R, const N: usize, F>` (`def=1:18902`, source item `100:21`,
+  rejected item `10805`) at `stage=items`/`item-source-invalid`. The next
+  declaration slice must preserve its exact `Try`/`Residual` projections and
+  associated equalities; its generic inline body remains outside executable
+  metadata.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

@@ -235,6 +235,18 @@ clear, and the measured v3.0 frontier advances to
 `stage=items`/`item-source-invalid`. This is a declaration-only generic
 function boundary: its callable body is not evidence until executable generic
 body transport exists.
+Commit `9c8f6439` captures and freshly materializes that exact declaration and
+the complete reachable `Clone`/`Sized`/`MetaSized`/`PointeeSized`/`Destruct`
+declaration closure, preserving compiler flags and predicate modifiers while
+leaving imported bodies unavailable. Its clean pinned Rust 1.90 probe again
+reports zero graph/import/HIR errors, 38,176 HIR items, and the exact
+451-module/1,658-type/20,747-value library census. The measured v3.0 frontier
+now advances to `core/src/array/mod.rs:146`: `try_from_fn<R, const N: usize,
+F>` (`def=1:18902`, source item `100:21`, rejected item `10805`) at
+`stage=items`/`item-source-invalid`. The next declaration capability must
+retain the exact `Try`/`Residual` projection and associated-equality closure
+used by `ChangeOutputType<R, [R::Output; N]>`; it must not treat the generic
+inline body as transported executable authority.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

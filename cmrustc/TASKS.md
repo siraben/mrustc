@@ -2153,6 +2153,19 @@ frontier at `core/src/array/mod.rs:54`: `repeat<T: Clone, const N: usize>`
 declaration. Its declaration requires the already-retained value-owned const
 generic and `[T; N]` return plus an exact `T: Clone` predicate closure; the
 generic inline body remains outside declaration metadata.
+Commit `9c8f6439` transports that exact declaration together with the complete
+reachable `Clone`/`Sized`/`MetaSized`/`PointeeSized`/`Destruct` declaration
+closure, including `clone`, `clone_from`, compiler flags, and the
+`CONST_IF_CONST` predicate, while keeping every imported body unavailable.
+The clean pinned Rust 1.90 probe at `9c8f6439` again reports zero graph,
+import, and HIR errors, 38,176 HIR items, and the exact
+451-module/1,658-type/20,747-value library census. It advances the v3.0
+frontier to `core/src/array/mod.rs:146`: `try_from_fn<R, const N: usize, F>`
+(`def=1:18902`, source item `100:21`, rejected item `10805`) fails at
+`stage=items` with `reason=item-source-invalid`. Its declaration introduces
+the exact `Try`/`Residual` projection and associated-equality closure used by
+`ChangeOutputType<R, [R::Output; N]>`; its generic inline body remains a
+separate executable-metadata boundary.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
