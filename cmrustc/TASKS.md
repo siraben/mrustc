@@ -2078,6 +2078,16 @@ zero-error 363-source/451-module graph, 38,176-item HIR, and exact
 slice is an exact safe trait with retained diagnostic identity, a
 `Self: 'static` outlives fact, and its required shared-receiver associated
 method; a childless or unsafe substitute would not clear the real boundary.
+Commits `0f7b9fb7`, `c0189406`, and `0256f506` implement the descriptor,
+materializer, and capture portions of that exact shape.  Their clean pinned
+Rust 1.90 probe preserves the zero-error graph/HIR and exact library census,
+then advances to `core/src/any.rs:711`: `TypeId` (`def=1:18886`, source item
+`99:30`, rejected item `10800`) fails at `stage=items` with
+`reason=item-shape-unsupported`.  The active bounded dependency is its exact
+crate-visible `data` field of type
+`[*const (); 16 / size_of::<*const ()>()]`: field visibility must not collapse
+to private, and the evaluated array length must derive from the configured
+target pointer width rather than `sizeof(void *)` on the bootstrap host.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

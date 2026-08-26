@@ -260,7 +260,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   facts are the retained `rustc_diagnostic_item = "Any"` identity,
   `Self: 'static`, and a required safe shared-receiver associated method.
   `TypeId` remains a following structural dependency rather than permission
-  to fabricate an opaque return type.
+  to fabricate an opaque return type.  Commits `0f7b9fb7`, `c0189406`, and
+  `0256f506` close the exact Any declaration path.  The next clean whole-core
+  run measures `TypeId` itself at `core/src/any.rs:711` (`def=1:18886`, source
+  item `99:30`, rejected item `10800`) with
+  `stage=items`/`item-shape-unsupported`.  Its single `pub(crate)` field is an
+  array of immutable unit raw pointers whose length is the target-dependent
+  result of `16 / size_of::<*const ()>()`; the next slice must carry exact
+  crate visibility and configured-target evaluation, not host `sizeof`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

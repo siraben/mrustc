@@ -156,7 +156,15 @@ library census.  It advances the measured v3.0 frontier to
 rejected item `110`) fails at `stage=items` with `reason=item-source-invalid`.
 The next declaration slice must retain its diagnostic identity, exact
 `Self: 'static` outlives requirement, and safe-parent associated `type_id`
-method; none may be projected into an unsafe or childless stand-in.
+method; none may be projected into an unsafe or childless stand-in.  Commits
+`0f7b9fb7`, `c0189406`, and `0256f506` implement that descriptor, consumer,
+and producer path.  The following clean pinned-core probe advances to
+`core/src/any.rs:711`: `TypeId` (`def=1:18886`, source item `99:30`, rejected
+item `10800`) fails at `stage=items` with `reason=item-shape-unsupported`.
+Its exact declaration requires a retained crate-visible field containing
+`[*const (); 16 / size_of::<*const ()>()]`; the active work must preserve
+crate visibility and bind the evaluated array length to the configured target
+pointer width rather than the bootstrap host width.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
