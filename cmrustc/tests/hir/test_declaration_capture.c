@@ -190,9 +190,10 @@ static const unsigned char primitive_reexport_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
-static const unsigned char allocator_like_fixture_source[] =
+static const char allocator_like_fixture_template[] =
     "#[stable(feature = \"marker\", since = \"1.0.0\")]\n"
     "pub trait Marker {}\n"
+    "%s"
     "#[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
     "pub unsafe trait AllocatorLike {\n"
     "  #[unstable(feature = \"allocator_like\", issue = \"none\")]\n"
@@ -211,6 +212,7 @@ static const unsigned char allocator_like_fixture_source[] =
     "  unsafe fn shrink(&self, token: usize, new_size: usize) -> usize "
         "{ new_size }\n"
     "  #[stable(feature = \"allocator_like\", since = \"1.0.0\")]\n"
+    "%s"
     "  fn by_ref(&self) where Self: Marker {}\n"
     "}\n"
     "pub fn needs<X: Marker>() {}\n";
@@ -225,6 +227,11 @@ static const unsigned char inferred_associated_return_fixture_source[] =
 static const unsigned char safe_associated_trait_fixture_source[] =
     "pub trait Marker {}\n"
     "pub trait SafeLike { fn ping(&self); }\n"
+    "pub fn needs<X: Marker>() {}\n";
+
+static const unsigned char inline_free_function_fixture_source[] =
+    "pub trait Marker {}\n"
+    "#[inline(always)]\n"
     "pub fn needs<X: Marker>() {}\n";
 
 static const unsigned char composite_associated_fixture_source[] =
@@ -406,9 +413,23 @@ static void primitive_reexport_fixture_init(CaptureFixture *fixture,
 static void allocator_like_fixture_init(CaptureFixture *fixture,
     int with_noise)
 {
+    char source[8192];
+    int written = snprintf(source, sizeof(source),
+        allocator_like_fixture_template, "", "  #[inline(always)]\n");
+    assert(written > 0 && (size_t)written < sizeof(source));
     fixture_init_source(fixture, with_noise, "allocator-like.rs",
-        allocator_like_fixture_source,
-        sizeof(allocator_like_fixture_source) - 1u);
+        (const unsigned char *)source, (size_t)written);
+}
+
+static void allocator_like_fixture_init_hints(CaptureFixture *fixture,
+    const char *outer_hint, const char *method_hint)
+{
+    char source[8192];
+    int written = snprintf(source, sizeof(source),
+        allocator_like_fixture_template, outer_hint, method_hint);
+    assert(written > 0 && (size_t)written < sizeof(source));
+    fixture_init_source(fixture, 0, "allocator-like-hint.rs",
+        (const unsigned char *)source, (size_t)written);
 }
 
 static void composite_associated_fixture_init(CaptureFixture *fixture,
@@ -4482,10 +4503,12 @@ static void test_allocator_like_associated_method_capture(void)
 {
     CaptureFixture first;
     CaptureFixture noisy;
+    CaptureFixture plain;
     CaptureFixture rejected;
     CmHirDeclarationCaptureInput input;
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata plain_metadata;
     CmHirDeclarationCaptureResult result;
     CmHirDeclarationTrait *allocator = NULL;
     CmHirDeclarationAssociatedItem *saved_associated;
@@ -4495,7 +4518,11 @@ static void test_allocator_like_associated_method_capture(void)
     CmHirItemId method_id;
     CmHirItem *trait_item;
     CmHirItem *method;
+    CmHirItem *by_ref_method;
     CmInternId saved_metadata;
+    uint32_t saved_source_attribute;
+    uint32_t saved_expansion_depth;
+    CmSpan saved_attribute_span;
     CmHirDefId saved_parent;
     CmHirSafety saved_safety;
     int saved_default;
@@ -4505,16 +4532,19 @@ static void test_allocator_like_associated_method_capture(void)
     size_t saved_hir_item_count;
     CmByteBuf bytes;
     CmByteBuf noisy_bytes;
+    CmByteBuf plain_bytes;
     size_t index;
     allocator_like_fixture_init(&first, 0);
     allocator_like_fixture_init(&noisy, 1);
+    allocator_like_fixture_init_hints(&plain, "", "");
     cm_hir_declaration_metadata_init(&metadata);
     cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&plain_metadata);
     input = capture_input(&first);
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_OK
         && result.trait_count == 2u && result.associated_count == 7u
-        && result.projected_semantic_attribute_count == 9u
+        && result.projected_semantic_attribute_count == 10u
         && metadata.associated_count == 7u);
     for (index = 0u; index < metadata.trait_count; ++index) {
         if (declaration_string_is(metadata.traits[index].name,
@@ -4562,15 +4592,55 @@ static void test_allocator_like_associated_method_capture(void)
     input = capture_input(&noisy);
     result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_OK
-        && result.associated_count == 7u);
+        && result.associated_count == 7u
+        && result.projected_semantic_attribute_count == 10u);
+    input = capture_input(&plain);
+    result = cm_hir_declaration_metadata_capture(&input, &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.associated_count == 7u
+        && result.projected_semantic_attribute_count == 9u);
     cm_byte_buf_init(&bytes);
     cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&plain_bytes);
     assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
             == CM_HIR_DECL_METADATA_OK
         && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
             == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&plain_metadata, &plain_bytes)
+            == CM_HIR_DECL_METADATA_OK
         && bytes.len == noisy_bytes.len
-        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+        && bytes.len == plain_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0
+        && memcmp(bytes.data, plain_bytes.data, bytes.len) == 0);
+    {
+        static const char *const hints[] = {
+            "  #[inline]\n", "  #[inline(never)]\n"
+        };
+        size_t hint_index;
+        for (hint_index = 0u;
+                hint_index < sizeof(hints) / sizeof(hints[0]); ++hint_index) {
+            CaptureFixture variant;
+            CmHirDeclarationMetadata variant_metadata;
+            CmByteBuf variant_bytes;
+            allocator_like_fixture_init_hints(&variant, "",
+                hints[hint_index]);
+            cm_hir_declaration_metadata_init(&variant_metadata);
+            input = capture_input(&variant);
+            result = cm_hir_declaration_metadata_capture(&input,
+                &variant_metadata);
+            assert(result.status == CM_HIR_DECL_CAPTURE_OK
+                && result.projected_semantic_attribute_count == 10u);
+            cm_byte_buf_init(&variant_bytes);
+            assert(cm_hir_declaration_metadata_encode(&variant_metadata,
+                        &variant_bytes) == CM_HIR_DECL_METADATA_OK
+                && variant_bytes.len == bytes.len
+                && memcmp(variant_bytes.data, bytes.data, bytes.len) == 0);
+            cm_byte_buf_destroy(&variant_bytes);
+            cm_hir_declaration_metadata_destroy(&variant_metadata);
+            fixture_destroy(&variant);
+        }
+    }
+    cm_byte_buf_destroy(&plain_bytes);
     cm_byte_buf_destroy(&noisy_bytes);
     cm_byte_buf_destroy(&bytes);
 
@@ -4579,8 +4649,11 @@ static void test_allocator_like_associated_method_capture(void)
     saved_namespace = metadata.namespace_entries;
     trait_item = (CmHirItem *)find_item(&first, "AllocatorLike", &trait_id);
     method = (CmHirItem *)find_item(&first, "allocate_zeroed", &method_id);
-    assert(trait_item != NULL && method != NULL
-        && method->attribute_count == 1u && method->attributes != NULL);
+    by_ref_method = (CmHirItem *)find_item(&first, "by_ref", &method_id);
+    assert(trait_item != NULL && method != NULL && by_ref_method != NULL
+        && method->attribute_count == 1u && method->attributes != NULL
+        && by_ref_method->attribute_count == 2u
+        && by_ref_method->attributes != NULL);
 #define ASSERT_ATOMIC_TRAIT_FAILURE(reason_) do { \
     result = cm_hir_declaration_metadata_capture(&input, &metadata); \
     assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR \
@@ -4629,7 +4702,69 @@ static void test_allocator_like_associated_method_capture(void)
     ASSERT_ATOMIC_TRAIT_FAILURE(
         CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED);
     method->data.function_item.signature.receiver = saved_receiver;
+
+    saved_metadata = by_ref_method->attributes[1].metadata;
+    by_ref_method->attributes[1].metadata = cm_hir_intern(&first.hir,
+        "inline(never)");
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    by_ref_method->attributes[1].metadata = saved_metadata;
+
+    saved_expansion_depth = by_ref_method->attributes[1].expansion_depth;
+    by_ref_method->attributes[1].expansion_depth = 1u;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    by_ref_method->attributes[1].expansion_depth = saved_expansion_depth;
+
+    saved_source_attribute = by_ref_method->attributes[1].source_attribute;
+    assert(saved_source_attribute != UINT32_MAX);
+    by_ref_method->attributes[1].source_attribute =
+        saved_source_attribute + 1u;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    by_ref_method->attributes[1].source_attribute = saved_source_attribute;
+
+    saved_attribute_span = by_ref_method->attributes[1].span;
+    by_ref_method->attributes[1].span.start += 1u;
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    by_ref_method->attributes[1].span = saved_attribute_span;
+
+    allocator_like_fixture_init_hints(&rejected, "",
+        "  #[inline(sometimes)]\n");
+    input = capture_input(&rejected);
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    fixture_destroy(&rejected);
+
+    allocator_like_fixture_init_hints(&rejected, "",
+        "  #[inline]\n  #[inline(never)]\n");
+    input = capture_input(&rejected);
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    fixture_destroy(&rejected);
+
+    allocator_like_fixture_init_hints(&rejected, "#[inline]\n", "");
+    input = capture_input(&rejected);
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    fixture_destroy(&rejected);
+
+    allocator_like_fixture_init_hints(&rejected, "",
+        "  #[cfg_attr(all(), inline(always))]\n");
+    input = capture_input(&rejected);
+    ASSERT_ATOMIC_TRAIT_FAILURE(CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    fixture_destroy(&rejected);
+
+    input = capture_input(&first);
 #undef ASSERT_ATOMIC_TRAIT_FAILURE
+
+    fixture_init_source(&rejected, 0, "inline-free-function.rs",
+        inline_free_function_fixture_source,
+        sizeof(inline_free_function_fixture_source) - 1u);
+    input = capture_input(&rejected);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
+        && metadata.associated_items == saved_associated
+        && metadata.traits == saved_traits
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&rejected);
 
     saved_hir_item_count = first.hir.items.len;
     first.hir.items.len = CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS + 1u;
@@ -4681,8 +4816,10 @@ static void test_allocator_like_associated_method_capture(void)
 
     assert(cm_hir_declaration_metadata_validate(&metadata)
         == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
     cm_hir_declaration_metadata_destroy(&noisy_metadata);
     cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&plain);
     fixture_destroy(&noisy);
     fixture_destroy(&first);
 }

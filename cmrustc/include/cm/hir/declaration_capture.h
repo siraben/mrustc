@@ -213,7 +213,10 @@ typedef struct CmHirDeclarationCaptureResult {
  * A supported ordinary trait is source-authenticated against its complete
  * cfg-effective direct-child census. Direct `stable(...)`, `unstable(...)`,
  * and `deprecated(...)` attributes on the trait and its methods are projected
- * with exact graph/HIR provenance. Marker traits retain their existing safe
+ * with exact graph/HIR provenance. Associated FUNCTION children additionally
+ * permit exactly one direct `inline`, `inline(always)`, or `inline(never)`
+ * hint; it is counted and projected byte-neutrally, and remains forbidden on
+ * the parent trait and every other item kind. Marker traits retain their safe
  * zero-member profile. The first member-bearing profile retains UNSAFE trait
  * safety and source-ordered private methods with shared `&self`
  * receivers, exact Rust ABI, zero method generics, and source-authenticated

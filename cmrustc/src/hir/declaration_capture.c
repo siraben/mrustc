@@ -1328,7 +1328,8 @@ enum {
     CM_DECL_ATTR_MUST_USE = 1u << 15,
     CM_DECL_ATTR_RUSTFMT_SKIP = 1u << 16,
     CM_DECL_ATTR_DOC_INLINE = 1u << 17,
-    CM_DECL_ATTR_CONST_TRAIT = 1u << 18
+    CM_DECL_ATTR_CONST_TRAIT = 1u << 18,
+    CM_DECL_ATTR_INLINE_HINT = 1u << 19
 };
 
 enum {
@@ -2033,6 +2034,14 @@ static int cm_decl_attribute_must_use_is(const CmInternedString *metadata)
         && metadata->bytes[metadata->len - 1u] == (unsigned char)'\"';
 }
 
+static int cm_decl_attribute_inline_hint_is(
+    const CmInternedString *metadata)
+{
+    return cm_decl_attribute_bare_is(metadata, "inline")
+        || cm_decl_attribute_bare_is(metadata, "inline(always)")
+        || cm_decl_attribute_bare_is(metadata, "inline(never)");
+}
+
 static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
 {
     if (cm_decl_attribute_call_is(metadata, "stable"))
@@ -2073,6 +2082,8 @@ static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
         return CM_DECL_ATTR_DOC_INLINE;
     if (cm_decl_attribute_bare_is(metadata, "const_trait"))
         return CM_DECL_ATTR_CONST_TRAIT;
+    if (cm_decl_attribute_inline_hint_is(metadata))
+        return CM_DECL_ATTR_INLINE_HINT;
     return 0u;
 }
 
@@ -2893,7 +2904,9 @@ static int cm_decl_trait_attributes(const CmDeclCaptureState *state,
             || (kind != CM_DECL_ATTR_STABLE
                 && kind != CM_DECL_ATTR_UNSTABLE
                 && kind != CM_DECL_ATTR_DEPRECATED
-                && !(parent_trait && kind == CM_DECL_ATTR_CONST_TRAIT))
+                && !(parent_trait && kind == CM_DECL_ATTR_CONST_TRAIT)
+                && !(!parent_trait && item->kind == CM_HIR_ITEM_FUNCTION
+                    && kind == CM_DECL_ATTR_INLINE_HINT))
             || (seen & kind) != 0u) return 0;
         for (prior = 0u; prior < index; ++prior) {
             if (item->attributes[prior].span.source == attribute->span.source
