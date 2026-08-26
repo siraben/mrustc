@@ -87,6 +87,8 @@ static const char *declaration_binding_kind_name(
     case CM_HIR_LIBRARY_BINDING_VALUE: return "value";
     case CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR:
         return "struct-constructor";
+    case CM_HIR_LIBRARY_BINDING_ENUM_VARIANT:
+        return "enum-variant";
     }
     return "unknown";
 }

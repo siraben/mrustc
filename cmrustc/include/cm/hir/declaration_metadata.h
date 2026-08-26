@@ -22,6 +22,8 @@
 #define CM_HIR_DECL_METADATA_MAX_IMPLS ((size_t)131072u)
 #define CM_HIR_DECL_METADATA_MAX_NAMESPACE_ENTRIES ((size_t)131072u)
 #define CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES ((size_t)131072u)
+#define CM_HIR_DECL_METADATA_MAX_VARIANTS \
+    CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
 
 /* Kept for capture callers until they migrate to the family-specific names. */
 #define CM_HIR_DECL_METADATA_MAX_RECORDS \
@@ -88,7 +90,7 @@ typedef enum CmHirDeclarationPrimitive {
 typedef enum CmHirDeclarationTypeKind {
     CM_HIR_DECL_TYPE_PRIMITIVE = 1,
     CM_HIR_DECL_TYPE_GENERIC = 2,
-    /* Exact zero-argument reference to a STRUCT ITEM in this artifact. */
+    /* Exact zero-argument reference to a STRUCT or ENUM ITEM. */
     CM_HIR_DECL_TYPE_NAMED_ADT = 3,
     /* Reserved until an associated declaration provides an honest root. */
     CM_HIR_DECL_TYPE_SELF = 4,
@@ -144,15 +146,30 @@ typedef struct CmHirDeclarationVisibility {
 
 typedef enum CmHirDeclarationItemKind {
     CM_HIR_DECL_ITEM_STRUCT = 2,
+    CM_HIR_DECL_ITEM_ENUM = 4,
     CM_HIR_DECL_ITEM_TYPE_ALIAS = 5
 } CmHirDeclarationItemKind;
 
+typedef enum CmHirDeclarationVariantKind {
+    CM_HIR_DECL_VARIANT_UNIT = 1
+} CmHirDeclarationVariantKind;
+
+typedef struct CmHirDeclarationVariant {
+    uint8_t kind;
+    CmHirDeclarationString name;
+    uint32_t source_ordinal;
+    uint8_t discriminant_primitive;
+    uint64_t discriminant_low;
+    uint64_t discriminant_high;
+} CmHirDeclarationVariant;
+
 /*
- * The first ordinary ITEM slice is a public, top-level unit struct or free
- * type alias. Unit structs may own type parameters; aliases and all
- * predicate, field, attribute, and repr payloads remain canonical zero. A
- * STRUCT's public constructor availability is represented exactly by the
- * complete VALUE namespace, not by this record.
+ * The bounded ordinary ITEM slice includes public top-level unit structs,
+ * repr(u8) unit-variant enums, and free type aliases to zero-argument STRUCT
+ * ITEMs. Unit structs may own type parameters; enums and aliases require zero
+ * generic/predicate ranges.
+ * A STRUCT's public constructor availability is represented by the complete
+ * VALUE namespace. ENUM variants are item-owned and never module VALUE mates.
  */
 typedef struct CmHirDeclarationItem {
     uint8_t kind;
@@ -160,11 +177,15 @@ typedef struct CmHirDeclarationItem {
     CmHirDeclarationString name;
     CmHirDeclarationVisibility visibility;
     uint32_t source_ordinal;
-    /* Required only for TYPE_ALIAS; zero for STRUCT. */
+    /* Required only for TYPE_ALIAS and names a NAMED_ADT STRUCT type. */
     uint32_t alias_target_type;
     /* A contiguous ITEM-owned GPAR range; aliases require zero. */
     uint32_t generic_start;
     uint32_t generic_count;
+    /* ENUM requires U8 and a nonempty owned source-ordered variant array. */
+    uint8_t enum_repr_primitive;
+    uint32_t variant_count;
+    CmHirDeclarationVariant *variants;
 } CmHirDeclarationItem;
 
 typedef struct CmHirDeclarationGeneric {

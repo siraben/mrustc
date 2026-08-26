@@ -462,7 +462,8 @@ static int cm_decl_library_binding(const CmHirLibraryOwnedData *owned,
         int entry_value = entry != NULL
             && (entry->kind == CM_HIR_LIBRARY_BINDING_VALUE
                 || entry->kind
-                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR);
+                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+                || entry->kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT);
         if (entry_name != NULL && entry_value == value_namespace
             && cm_decl_bytes_equal(entry_name->bytes, entry_name->len,
                 name, name_length)) {
@@ -522,8 +523,10 @@ static int cm_decl_namespace_target_shape(const CmResolvedBinding *binding,
     if (target->kind == CM_HIR_LIBRARY_BINDING_TYPE)
         return binding->namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
             && (binding->item_kind == CM_AST_ITEM_STRUCT
+                || binding->item_kind == CM_AST_ITEM_ENUM
                 || binding->item_kind == CM_AST_ITEM_TYPE_ALIAS)
             && target->type_kind == (binding->item_kind == CM_AST_ITEM_STRUCT
+                    || binding->item_kind == CM_AST_ITEM_ENUM
                 ? CM_HIR_TYPE_ADT_KIND : CM_HIR_TYPE_ALIAS_APPLICATION_KIND)
             && target->primitive_kind == CM_HIR_PRIMITIVE_NONE
             && target->value_kind == CM_HIR_LIBRARY_VALUE_NONE;
@@ -860,6 +863,40 @@ static int cm_decl_alias_source(const CmDeclCaptureState *state,
     return 1;
 }
 
+static int cm_decl_enum_source(const CmDeclCaptureState *state,
+    const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal)
+{
+    const CmInternedString *item_name = cm_decl_item_name(state, item);
+    const CmDeclCaptureNamespace *source = NULL;
+    size_t index;
+    size_t direct_count = 0u;
+    if (item_name == NULL || item_name->len == 0u) return 0;
+    for (index = 0u; index < state->namespace_count; ++index) {
+        const CmDeclCaptureNamespace *entry =
+            &state->namespace_values[index];
+        if (!cm_hir_def_id_equal(entry->target.definition,
+                item->definition)) continue;
+        /* ENUM identities are module TYPE bindings only. Variants are owned
+         * by the ITEM and never fabricate a module VALUE mate. */
+        if (entry->item_kind != CM_AST_ITEM_ENUM
+            || entry->target.kind != CM_HIR_LIBRARY_BINDING_TYPE
+            || entry->namespace_kind != CM_HIR_DECL_NAMESPACE_TYPE
+            || entry->source_is_generated) return 0;
+        if (!entry->is_import) {
+            if (!cm_decl_item_ref_equal(entry->declaration,
+                    entry->introduced_by)
+                || !cm_decl_bytes_equal(entry->name, entry->name_length,
+                    item_name->bytes, item_name->len)) return 0;
+            source = entry;
+            direct_count += 1u;
+        }
+    }
+    if (direct_count != 1u || source == NULL) return 0;
+    *out_module = source->owner_module;
+    *out_ordinal = source->export_ordinal;
+    return 1;
+}
+
 static int cm_decl_effective_attribute_matches_hir(
     const CmDeclCaptureState *state,
     const CmResolveEffectiveAttribute *effective,
@@ -939,6 +976,277 @@ static int cm_decl_item_attribute_provenance(
     return 1;
 }
 
+enum {
+    CM_DECL_ATTR_STABLE = 1u << 0,
+    CM_DECL_ATTR_UNSTABLE = 1u << 1,
+    CM_DECL_ATTR_DEPRECATED = 1u << 2,
+    CM_DECL_ATTR_DERIVE = 1u << 3,
+    CM_DECL_ATTR_NON_EXHAUSTIVE = 1u << 4,
+    CM_DECL_ATTR_ALLOW = 1u << 5,
+    CM_DECL_ATTR_DOC_ALIAS = 1u << 6,
+    CM_DECL_ATTR_REPR_U8 = 1u << 7
+};
+
+static int cm_decl_plain_visibility(const CmHirItem *item);
+static unsigned int cm_decl_attribute_kind(
+    const CmInternedString *metadata);
+
+static int cm_decl_graph_string_matches_intern(
+    const CmDeclCaptureState *state, CmResolveStringId graph_id,
+    CmInternId hir_id)
+{
+    unsigned char *graph_bytes = NULL;
+    size_t graph_length = 0u;
+    const CmInternedString *hir_value = cm_interner_get(
+        &state->hir->strings, hir_id);
+    int equal;
+    if (hir_value == NULL || hir_value->len == 0u
+        || !cm_decl_copy_graph_string(state->input->graph, graph_id,
+            &graph_bytes, &graph_length)) return 0;
+    equal = cm_decl_bytes_equal(graph_bytes, graph_length,
+        hir_value->bytes, hir_value->len);
+    cm_free(graph_bytes);
+    return equal;
+}
+
+static int cm_decl_enum_item_attributes(const CmDeclCaptureState *state,
+    const CmHirItem *item, size_t *out_projected_count)
+{
+    uint32_t index;
+    unsigned int seen = 0u;
+    if ((item->attribute_count == 0u) != (item->attributes == NULL)) return 0;
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmHirAttribute *attribute = &item->attributes[index];
+        const CmInternedString *metadata = cm_interner_get(
+            &state->hir->strings, attribute->metadata);
+        unsigned int kind = cm_decl_attribute_kind(metadata);
+        uint32_t prior;
+        if (attribute->source_attribute == 0u
+            || attribute->expansion_depth != 0u
+            || attribute->span.source == 0u
+            || attribute->span.source != item->span.source
+            || attribute->span.start > attribute->span.end
+            || (kind != CM_DECL_ATTR_DERIVE
+                && kind != CM_DECL_ATTR_UNSTABLE
+                && kind != CM_DECL_ATTR_REPR_U8)
+            || (seen & kind) != 0u) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (item->attributes[prior].span.source == attribute->span.source
+                && item->attributes[prior].source_attribute
+                    == attribute->source_attribute) return 0;
+        }
+        seen |= kind;
+    }
+    if (seen != (CM_DECL_ATTR_DERIVE | CM_DECL_ATTR_UNSTABLE
+            | CM_DECL_ATTR_REPR_U8)
+        || !cm_decl_item_attribute_provenance(state, item,
+            CM_AST_ITEM_ENUM)) return 0;
+    /* repr(u8) is normalized into ITEM; derive and unstable are omitted. */
+    *out_projected_count = 2u;
+    return 1;
+}
+
+static int cm_decl_enum_variant_attribute(
+    const CmDeclCaptureState *state, const CmDeclCaptureModule *module,
+    const CmResolveEffectiveItem *enumeration,
+    const CmResolveEffectiveVariant *effective, uint32_t variant_index,
+    const CmAst *ast, const CmAstVariant *ast_variant)
+{
+    CmResolveEffectiveAttribute attribute;
+    const CmAstAttribute *source_attribute;
+    const CmInternedString *source_metadata;
+    unsigned char *graph_metadata = NULL;
+    size_t graph_metadata_length = 0u;
+    CmInternedString metadata_view;
+    int valid;
+    if (effective->attribute_count != 1u
+        || cm_module_graph_get_effective_variant_attribute(
+            state->input->graph, state->input->revision, module->graph.id,
+            enumeration->id, variant_index, 0u, &attribute)
+            != CM_RESOLVE_VIEW_OK
+        || attribute.source == 0u
+        || attribute.source_attribute == 0u
+        || attribute.style != CM_AST_ATTR_OUTER
+        || attribute.expansion_depth != 0u
+        || attribute.span.source != attribute.source
+        || attribute.span.source != effective->span.source
+        || attribute.span.start > attribute.span.end
+        || attribute.span.start < effective->span.start
+        || attribute.span.end > effective->span.end
+        || !cm_decl_item_ref_equal(attribute.owner,
+            enumeration->declaration)
+        || !cm_decl_item_ref_equal(attribute.owner_variant.enumeration,
+            effective->declaration.enumeration)
+        || attribute.owner_variant.index != effective->declaration.index
+        || ast == NULL
+        || ast_variant == NULL || ast_variant->attribute_count != 1u
+        || ast_variant->attributes == NULL
+        || ast_variant->attributes[0] != attribute.source_attribute
+        || (source_attribute = cm_ast_get_attribute(ast,
+            attribute.source_attribute)) == NULL
+        || source_attribute->style != CM_AST_ATTR_OUTER
+        || source_attribute->span.start > attribute.span.start
+        || source_attribute->span.end < attribute.span.end
+        || (source_metadata = cm_ast_get_string(ast,
+            source_attribute->text)) == NULL
+        || source_metadata->len == 0u
+        || !cm_decl_copy_graph_string(state->input->graph,
+            attribute.metadata, &graph_metadata,
+            &graph_metadata_length)) return 0;
+    metadata_view.bytes = graph_metadata;
+    metadata_view.len = graph_metadata_length;
+    valid = graph_metadata_length <= SIZE_MAX - 3u
+        && source_metadata->len == graph_metadata_length + 3u
+        && source_metadata->bytes[0] == (unsigned char)'#'
+        && source_metadata->bytes[1] == (unsigned char)'['
+        && source_metadata->bytes[source_metadata->len - 1u]
+            == (unsigned char)']'
+        && memcmp(source_metadata->bytes + 2u, graph_metadata,
+            graph_metadata_length) == 0
+        && cm_decl_attribute_kind(&metadata_view) == CM_DECL_ATTR_UNSTABLE;
+    cm_free(graph_metadata);
+    return valid;
+}
+
+static int cm_decl_parse_u8_decimal(const CmInternedString *text,
+    uint64_t *out_value)
+{
+    size_t index;
+    uint64_t value = 0u;
+    if (text == NULL || text->len == 0u) return 0;
+    for (index = 0u; index < text->len; ++index) {
+        unsigned int digit;
+        if (text->bytes[index] < (unsigned char)'0'
+            || text->bytes[index] > (unsigned char)'9') return 0;
+        digit = (unsigned int)(text->bytes[index] - (unsigned char)'0');
+        if (value > (UINT64_C(255) - digit) / UINT64_C(10)) return 0;
+        value = value * UINT64_C(10) + digit;
+    }
+    *out_value = value;
+    return 1;
+}
+
+static int cm_decl_enum_shape_and_variants(const CmDeclCaptureState *state,
+    const CmHirItem *item, CmHirItemId item_id, uint32_t owner_module,
+    uint32_t source_ordinal, size_t *out_projected_count)
+{
+    CmDeclCaptureModule *module;
+    CmResolveEffectiveItem enumeration;
+    const CmAst *ast = NULL;
+    const CmAstItem *ast_item;
+    uint32_t index;
+    uint32_t prior_source_ordinal = 0u;
+    if (item->kind != CM_HIR_ITEM_ENUM || !cm_decl_plain_visibility(item)
+        || cm_hir_def_id_is_none(item->definition)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->is_specializable
+        || item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count != 0u
+        || item->predicate_scopes != NULL
+        || item->predicate_scope_count != 0u
+        || item->predicates != NULL || item->predicate_count != 0u
+        || item->outlives_predicates != NULL
+        || item->outlives_predicate_count != 0u
+        || item->data.enum_item.variant_count == 0u
+        || (size_t)item->data.enum_item.variant_count
+            > CM_HIR_DECL_METADATA_MAX_VARIANTS
+        || item->data.enum_item.variants == NULL) return 0;
+    module = cm_decl_module_by_local((CmDeclCaptureState *)state,
+        owner_module);
+    if (module == NULL
+        || cm_module_graph_get_effective_item(state->input->graph,
+            state->input->revision, module->graph.id, source_ordinal,
+            &enumeration) != CM_RESOLVE_VIEW_OK
+        || enumeration.is_generated
+        || enumeration.item_kind != CM_AST_ITEM_ENUM
+        || enumeration.variant_count != item->data.enum_item.variant_count
+        || !cm_module_graph_borrow_item_ast(state->input->graph,
+            module->graph.id, enumeration.declaration, &ast)
+        || ast == NULL
+        || (ast_item = cm_ast_get_item(ast,
+            enumeration.declaration.item)) == NULL
+        || ast_item->kind != CM_AST_ITEM_ENUM
+        || ast_item->data.enum_item.variant_count == 0u
+        || ast_item->data.enum_item.variants == NULL)
+        return 0;
+    for (index = 0u; index < item->data.enum_item.variant_count; ++index) {
+        const CmHirVariant *variant = &item->data.enum_item.variants[index];
+        const CmAstVariant *ast_variant;
+        const CmInternedString *ast_discriminant;
+        const CmInternedString *name = cm_interner_get(&state->hir->strings,
+            variant->name);
+        const CmHirDefinition *definition = cm_hir_lookup_definition(
+            state->hir, variant->definition);
+        const CmHirType *discriminant_type;
+        CmResolveEffectiveVariant effective;
+        uint64_t source_discriminant;
+        uint32_t prior;
+        if (cm_module_graph_get_effective_variant(state->input->graph,
+                state->input->revision, module->graph.id, enumeration.id,
+                index, &effective) != CM_RESOLVE_VIEW_OK
+            || effective.declaration.index
+                >= ast_item->data.enum_item.variant_count
+            || (index != 0u && effective.declaration.index
+                <= prior_source_ordinal)) return 0;
+        ast_variant = &ast_item->data.enum_item.variants[
+            effective.declaration.index];
+        ast_discriminant = cm_ast_get_string(ast,
+            ast_variant->discriminant);
+        if (name == NULL || name->len == 0u
+            || ast_variant->discriminant == CM_INTERN_ID_NONE
+            || !cm_decl_parse_u8_decimal(ast_discriminant,
+                &source_discriminant)
+            || variant->form != CM_HIR_AGGREGATE_UNIT
+            || variant->fields != NULL || variant->field_count != 0u
+            || !variant->has_discriminant
+            || variant->discriminant.kind != CM_HIR_CONST_VALUE
+            || (discriminant_type = cm_hir_get_type(state->hir,
+                variant->discriminant.type)) == NULL
+            || discriminant_type->kind != CM_HIR_TYPE_INTEGER_KIND
+            || discriminant_type->data.integer_type.kind != CM_HIR_INT_ISIZE
+            || variant->discriminant.data.value.high_bits != 0u
+            || variant->discriminant.data.value.low_bits > UINT64_C(255)
+            || variant->discriminant.data.value.low_bits
+                != source_discriminant
+            || definition == NULL
+            || definition->kind != CM_HIR_DEFINITION_ENUM_VARIANT
+            || definition->state != CM_HIR_DEFINITION_BOUND
+            || definition->entity.enum_variant.enum_item_id != item_id
+            || definition->entity.enum_variant.variant_index != index
+            || definition->span.source != variant->span.source
+            || definition->span.start != variant->span.start
+            || definition->span.end != variant->span.end
+            || variant->span.source != item->span.source
+            || variant->span.start > variant->span.end
+            || variant->span.start < item->span.start
+            || variant->span.end > item->span.end
+            || effective.is_generated
+            || !cm_decl_item_ref_equal(effective.declaration.enumeration,
+                enumeration.declaration)
+            || effective.form != CM_AST_FIELDS_UNIT
+            || effective.field_count != 0u
+            || effective.span.source != variant->span.source
+            || effective.span.start != variant->span.start
+            || effective.span.end != variant->span.end
+            || !cm_decl_graph_string_matches_intern(state, effective.name,
+                variant->name)
+            || !cm_decl_enum_variant_attribute(state, module, &enumeration,
+                &effective, index, ast, ast_variant)) return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            const CmHirVariant *prior_variant =
+                &item->data.enum_item.variants[prior];
+            if (prior_variant->name == variant->name
+                || prior_variant->discriminant.data.value.low_bits
+                    == variant->discriminant.data.value.low_bits) return 0;
+        }
+        prior_source_ordinal = effective.declaration.index;
+    }
+    if ((size_t)item->data.enum_item.variant_count > SIZE_MAX
+            - *out_projected_count) return 0;
+    *out_projected_count += item->data.enum_item.variant_count;
+    return 1;
+}
+
 static int cm_decl_item_already(const CmDeclCaptureItem *items,
     size_t count, CmHirDefId definition)
 {
@@ -984,16 +1292,6 @@ static int cm_decl_attribute_bare_is(const CmInternedString *metadata,
     return metadata != NULL && metadata->len == length
         && memcmp(metadata->bytes, name, length) == 0;
 }
-
-enum {
-    CM_DECL_ATTR_STABLE = 1u << 0,
-    CM_DECL_ATTR_UNSTABLE = 1u << 1,
-    CM_DECL_ATTR_DEPRECATED = 1u << 2,
-    CM_DECL_ATTR_DERIVE = 1u << 3,
-    CM_DECL_ATTR_NON_EXHAUSTIVE = 1u << 4,
-    CM_DECL_ATTR_ALLOW = 1u << 5,
-    CM_DECL_ATTR_DOC_ALIAS = 1u << 6
-};
 
 static int cm_decl_ascii_identifier(const unsigned char *bytes, size_t length)
 {
@@ -1049,6 +1347,8 @@ static unsigned int cm_decl_attribute_kind(const CmInternedString *metadata)
         return CM_DECL_ATTR_ALLOW;
     if (cm_decl_attribute_doc_alias_is(metadata))
         return CM_DECL_ATTR_DOC_ALIAS;
+    if (cm_decl_attribute_bare_is(metadata, "repr(u8)"))
+        return CM_DECL_ATTR_REPR_U8;
     return 0u;
 }
 
@@ -1469,6 +1769,30 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
                         entry, value.item, value.id);
                     return 0;
                 }
+            } else if (value.item->kind == CM_HIR_ITEM_ENUM
+                && entry->target.kind == CM_HIR_LIBRARY_BINDING_TYPE) {
+                if (!cm_decl_enum_source(state, value.item,
+                        &value.owner_module, &value.source_ordinal)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_enum_item_attributes(state, value.item,
+                        &projected_count)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
+                if (!cm_decl_enum_shape_and_variants(state, value.item,
+                        value.id, value.owner_module, value.source_ordinal,
+                        &projected_count)) {
+                    cm_decl_capture_item_failure(result,
+                        CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
+                        entry, value.item, value.id);
+                    return 0;
+                }
             } else {
                 cm_decl_capture_item_failure(result,
                     CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
@@ -1739,6 +2063,26 @@ static int cm_decl_fill_modules(const CmDeclCaptureState *state,
     return metadata->root_module != 0u;
 }
 
+static int cm_decl_enum_variant_source_ordinal(
+    const CmDeclCaptureState *state, const CmDeclCaptureItem *capture,
+    uint32_t variant_index, uint32_t *out_ordinal)
+{
+    CmDeclCaptureModule *module = cm_decl_module_by_local(
+        (CmDeclCaptureState *)state, capture->owner_module);
+    CmResolveEffectiveItem enumeration;
+    CmResolveEffectiveVariant variant;
+    if (module == NULL
+        || cm_module_graph_get_effective_item(state->input->graph,
+            state->input->revision, module->graph.id,
+            capture->source_ordinal, &enumeration) != CM_RESOLVE_VIEW_OK
+        || enumeration.item_kind != CM_AST_ITEM_ENUM
+        || cm_module_graph_get_effective_variant(state->input->graph,
+            state->input->revision, module->graph.id, enumeration.id,
+            variant_index, &variant) != CM_RESOLVE_VIEW_OK) return 0;
+    *out_ordinal = variant.declaration.index;
+    return 1;
+}
+
 static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
     CmHirDeclarationMetadata *metadata)
 {
@@ -1768,14 +2112,44 @@ static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
     for (index = 0u; index < state->item_count; ++index) {
         const CmDeclCaptureItem *capture = &state->items[index];
         CmHirDeclarationItem *wire = &metadata->items[index];
-        wire->kind = capture->item->kind == CM_HIR_ITEM_STRUCT
-            ? CM_HIR_DECL_ITEM_STRUCT : CM_HIR_DECL_ITEM_TYPE_ALIAS;
+        uint32_t variant_index;
+        if (capture->item->kind == CM_HIR_ITEM_STRUCT)
+            wire->kind = CM_HIR_DECL_ITEM_STRUCT;
+        else if (capture->item->kind == CM_HIR_ITEM_ENUM)
+            wire->kind = CM_HIR_DECL_ITEM_ENUM;
+        else wire->kind = CM_HIR_DECL_ITEM_TYPE_ALIAS;
         wire->owner_module = capture->owner_module;
         wire->source_ordinal = capture->source_ordinal;
         wire->visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
         wire->visibility.restriction_module = 0u;
         if (!cm_decl_copy_intern(&wire->name,
                 cm_decl_item_name(state, capture->item))) return 0;
+        if (capture->item->kind == CM_HIR_ITEM_ENUM) {
+            wire->enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+            wire->variant_count =
+                capture->item->data.enum_item.variant_count;
+            wire->variants = (CmHirDeclarationVariant *)cm_alloc_zeroed(
+                wire->variant_count, sizeof(*wire->variants));
+            for (variant_index = 0u; variant_index < wire->variant_count;
+                    ++variant_index) {
+                const CmHirVariant *source =
+                    &capture->item->data.enum_item.variants[variant_index];
+                CmHirDeclarationVariant *variant =
+                    &wire->variants[variant_index];
+                variant->kind = CM_HIR_DECL_VARIANT_UNIT;
+                if (!cm_decl_enum_variant_source_ordinal(state, capture,
+                        variant_index, &variant->source_ordinal)) return 0;
+                variant->discriminant_primitive =
+                    CM_HIR_DECL_PRIMITIVE_ISIZE;
+                variant->discriminant_low =
+                    source->discriminant.data.value.low_bits;
+                variant->discriminant_high =
+                    source->discriminant.data.value.high_bits;
+                if (!cm_decl_copy_intern(&variant->name,
+                        cm_interner_get(&state->hir->strings,
+                            source->name))) return 0;
+            }
+        }
     }
 #define CM_DECL_FILL_OWNER(items_, count_, wire_, owner_tag_) do { \
     for (index = 0u; index < (count_); ++index) { \

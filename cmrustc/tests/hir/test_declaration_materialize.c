@@ -44,6 +44,14 @@ typedef struct CompositeFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[4];
 } CompositeFixture;
 
+typedef struct EnumFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationVariant variants[2];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} EnumFixture;
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -395,6 +403,65 @@ static void composite_fixture_init(CompositeFixture *fixture)
     fixture->namespace_entries[3].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 4u;
+}
+
+static void enum_fixture_init(EnumFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("depcrate");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("char-enum-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->variants[0].kind = CM_HIR_DECL_VARIANT_UNIT;
+    fixture->variants[0].name = (CmHirDeclarationString)S("Null");
+    fixture->variants[0].source_ordinal = 2u;
+    fixture->variants[0].discriminant_primitive =
+        CM_HIR_DECL_PRIMITIVE_ISIZE;
+    fixture->variants[0].discriminant_low = 0u;
+    fixture->variants[1].kind = CM_HIR_DECL_VARIANT_UNIT;
+    fixture->variants[1].name = (CmHirDeclarationString)S("Scalar");
+    fixture->variants[1].source_ordinal = 3u;
+    fixture->variants[1].discriminant_primitive =
+        CM_HIR_DECL_PRIMITIVE_ISIZE;
+    fixture->variants[1].discriminant_low = 255u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Char");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    /* Canonical item and defining export ordinals may begin at zero. */
+    fixture->items[0].source_ordinal = 0u;
+    fixture->items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture->items[0].variant_count = 2u;
+    fixture->items[0].variants = fixture->variants;
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 0u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("CharReexport");
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static CmHirDeclarationMaterializeExpectation expectation_for(
@@ -1450,11 +1517,233 @@ static void test_composite_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void assert_enum_variant_path(const CmHirLibraryArtifact *artifact,
+    const char *enum_name, CmHirDefId enum_definition,
+    CmHirDefId variant_definition)
+{
+    CmHirLibraryPathSegment path[3];
+    CmHirLibraryType type;
+    CmHirLibraryBinding binding;
+    CmHirLibraryValue value;
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = sizeof("dep") - 1u;
+    path[1].bytes = (const unsigned char *)enum_name;
+    path[1].length = strlen(enum_name);
+    path[2].bytes = (const unsigned char *)"Null";
+    path[2].length = sizeof("Null") - 1u;
+    memset(&type, 0, sizeof(type));
+    assert(cm_hir_library_artifact_lookup_type(artifact, path, 3u, &type)
+        == CM_HIR_LIBRARY_OK);
+    assert(type.binding_kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && type.kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type.definition, variant_definition)
+        && cm_hir_def_id_equal(type.enum_definition, enum_definition)
+        && type.enum_variant_index == 0u
+        && type.enum_variant_form == CM_HIR_AGGREGATE_UNIT);
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_value_binding(artifact, path, 3u,
+        &binding) == CM_HIR_LIBRARY_OK);
+    assert(binding.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+        && cm_hir_def_id_equal(binding.definition, variant_definition)
+        && cm_hir_def_id_equal(binding.enum_definition, enum_definition)
+        && binding.enum_variant_index == 0u
+        && binding.enum_variant_form == CM_HIR_AGGREGATE_UNIT);
+    memset(&value, 0, sizeof(value));
+    assert(cm_hir_library_artifact_lookup_value(artifact, path, 3u, &value)
+        == CM_HIR_LIBRARY_WRONG_NAMESPACE);
+}
+
+static void test_enum_materialize_and_restore_scope(void)
+{
+    EnumFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding reexport;
+    const CmHirItem *enumeration;
+    const CmHirDefinition *enum_definition;
+    const CmInternedString *attribute_text;
+    ContextLengths lengths;
+    uint64_t saved_low;
+    uint64_t saved_high;
+    uint32_t saved_count;
+    uint32_t saved_ordinal;
+    uint8_t saved_kind;
+    uint8_t saved_primitive;
+    uint8_t saved_namespace;
+    uint32_t index;
+
+    enum_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 131u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.module_count == 1u && result.item_count == 1u
+        && result.public_type_entry_count == 2u
+        && result.public_value_entry_count == 0u);
+    direct = lookup_binding(&artifact, "Char");
+    reexport = lookup_binding(&artifact, "CharReexport");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && direct.type_kind == CM_HIR_TYPE_ADT_KIND
+        && reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && reexport.type_kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(direct.definition, reexport.definition)
+        && lookup_value_binding_status(&artifact, "Char")
+            == CM_HIR_LIBRARY_NOT_FOUND
+        && lookup_value_binding_status(&artifact, "CharReexport")
+            == CM_HIR_LIBRARY_NOT_FOUND);
+
+    enumeration = find_item(&context, CM_HIR_ITEM_ENUM, "Char");
+    enum_definition = enumeration == NULL ? NULL
+        : cm_hir_lookup_definition(&context, enumeration->definition);
+    attribute_text = enumeration == NULL || enumeration->attribute_count != 1u
+        ? NULL : cm_interner_get(&context.strings,
+            enumeration->attributes[0].metadata);
+    assert(enumeration != NULL && enum_definition != NULL
+        && enum_definition->state == CM_HIR_DEFINITION_BOUND
+        && enum_definition->kind == CM_HIR_DEFINITION_ITEM
+        && enum_definition->has_reserved_item_kind
+        && enum_definition->reserved_item_kind == CM_HIR_ITEM_ENUM
+        && cm_hir_def_id_equal(enumeration->definition, direct.definition)
+        && enumeration->generic_parameter_count == 0u
+        && enumeration->predicate_count == 0u
+        && enumeration->attribute_count == 1u
+        && enumeration->attributes != NULL && attribute_text != NULL
+        && attribute_text->len == sizeof("repr(u8)") - 1u
+        && memcmp(attribute_text->bytes, "repr(u8)",
+            sizeof("repr(u8)") - 1u) == 0
+        && enumeration->attributes[0].span.source == 131u
+        && enumeration->attributes[0].span.start == 0u
+        && enumeration->attributes[0].span.end == 1u
+        && enumeration->attributes[0].source_attribute == 1u
+        && enumeration->attributes[0].expansion_depth == 0u
+        && enumeration->data.enum_item.variant_count == 2u
+        && enumeration->data.enum_item.variants != NULL);
+    for (index = 0u; index < 2u; ++index) {
+        const CmHirVariant *variant =
+            &enumeration->data.enum_item.variants[index];
+        const CmHirDefinition *variant_definition =
+            cm_hir_lookup_definition(&context, variant->definition);
+        const CmHirType *discriminant = cm_hir_get_type(&context,
+            variant->discriminant.type);
+        const CmInternedString *name = cm_interner_get(&context.strings,
+            variant->name);
+        assert(variant_definition != NULL
+            && variant_definition->kind == CM_HIR_DEFINITION_ENUM_VARIANT
+            && variant_definition->state == CM_HIR_DEFINITION_BOUND
+            && variant_definition->entity.enum_variant.enum_item_id
+                == enum_definition->entity.item_id
+            && variant_definition->entity.enum_variant.variant_index == index
+            && variant->form == CM_HIR_AGGREGATE_UNIT
+            && variant->field_count == 0u && variant->fields == NULL
+            && variant->has_discriminant
+            && variant->discriminant.kind == CM_HIR_CONST_VALUE
+            && variant->discriminant.data.value.low_bits
+                == (index == 0u ? 0u : 255u)
+            && variant->discriminant.data.value.high_bits == 0u
+            && discriminant != NULL
+            && discriminant->kind == CM_HIR_TYPE_INTEGER_KIND
+            && discriminant->data.integer_type.kind == CM_HIR_INT_ISIZE
+            && discriminant->span.source == 131u
+            && discriminant->span.start == index + 2u
+            && name != NULL);
+    }
+    assert_enum_variant_path(&artifact, "Char", enumeration->definition,
+        enumeration->data.enum_item.variants[0].definition);
+    assert_enum_variant_path(&artifact, "CharReexport",
+        enumeration->definition,
+        enumeration->data.enum_item.variants[0].definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_primitive = decoded.items[0].enum_repr_primitive;
+    decoded.items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_ISIZE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 132u);
+    decoded.items[0].enum_repr_primitive = saved_primitive;
+
+    saved_kind = decoded.items[0].variants[0].kind;
+    decoded.items[0].variants[0].kind = UINT8_C(2);
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 133u);
+    decoded.items[0].variants[0].kind = saved_kind;
+
+    saved_primitive = decoded.items[0].variants[0].discriminant_primitive;
+    decoded.items[0].variants[0].discriminant_primitive =
+        CM_HIR_DECL_PRIMITIVE_U8;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 134u);
+    decoded.items[0].variants[0].discriminant_primitive = saved_primitive;
+
+    saved_high = decoded.items[0].variants[0].discriminant_high;
+    decoded.items[0].variants[0].discriminant_high = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 135u);
+    decoded.items[0].variants[0].discriminant_high = saved_high;
+
+    saved_low = decoded.items[0].variants[1].discriminant_low;
+    decoded.items[0].variants[1].discriminant_low = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 136u);
+    decoded.items[0].variants[1].discriminant_low = saved_low;
+
+    saved_ordinal = decoded.items[0].variants[1].source_ordinal;
+    decoded.items[0].variants[1].source_ordinal =
+        decoded.items[0].variants[0].source_ordinal;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 137u);
+    decoded.items[0].variants[1].source_ordinal = saved_ordinal;
+
+    saved_count = decoded.items[0].variant_count;
+    decoded.items[0].variant_count = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 138u);
+    decoded.items[0].variant_count = saved_count;
+
+    saved_namespace = decoded.namespace_entries[0].namespace_kind;
+    decoded.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 139u);
+    decoded.namespace_entries[0].namespace_kind = saved_namespace;
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
     test_item_materialize_and_consume();
     test_alias_materialize_and_consume();
     test_composite_materialize_and_consume();
+    test_enum_materialize_and_restore_scope();
     return 0;
 }

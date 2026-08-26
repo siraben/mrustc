@@ -46,6 +46,16 @@ typedef struct StructuralFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[5];
 } StructuralFixture;
 
+typedef struct EnumFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationItem items[2];
+    CmHirDeclarationVariant variants[128];
+    unsigned char variant_names[128][4];
+    CmHirDeclarationType types[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[3];
+} EnumFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -210,10 +220,48 @@ static size_t item_record_offset(const CmByteBuf *bytes,
         assert(cursor <= bytes->len && bytes->len - cursor >= 44u);
         cursor += 44u;
         if (kind == CM_HIR_DECL_ITEM_STRUCT) cursor += 8u;
-        else if (kind == CM_HIR_DECL_ITEM_TYPE_ALIAS) cursor += 4u;
+        else if (kind == CM_HIR_DECL_ITEM_ENUM) {
+            uint32_t child;
+            uint32_t variant_count;
+            assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+            variant_count = get_u32(bytes->data + cursor + 4u);
+            cursor += 8u;
+            for (child = 0u; child < variant_count; ++child) {
+                assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+                cursor = skip_string(bytes, cursor + 4u);
+                assert(cursor <= bytes->len && bytes->len - cursor >= 20u);
+                cursor += 20u;
+            }
+        } else if (kind == CM_HIR_DECL_ITEM_TYPE_ALIAS) cursor += 4u;
         else assert(0);
         assert(cursor <= bytes->len);
         if (index == wanted_index) return record;
+    }
+    assert(0);
+    return 0u;
+}
+
+static size_t enum_variant_record_offset(const CmByteBuf *bytes,
+    uint32_t item_index, uint32_t wanted_variant)
+{
+    size_t cursor;
+    size_t item_record;
+    uint32_t count;
+    uint32_t index;
+    item_record = item_record_offset(bytes, item_index);
+    assert(bytes->data[item_record] == CM_HIR_DECL_ITEM_ENUM);
+    cursor = skip_string(bytes, item_record + 8u) + 44u;
+    assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+    count = get_u32(bytes->data + cursor + 4u);
+    cursor += 8u;
+    assert(wanted_variant < count);
+    for (index = 0u; index < count; ++index) {
+        size_t record = cursor;
+        assert(cursor <= bytes->len && bytes->len - cursor >= 4u);
+        cursor = skip_string(bytes, cursor + 4u);
+        assert(cursor <= bytes->len && bytes->len - cursor >= 20u);
+        cursor += 20u;
+        if (index == wanted_variant) return record;
     }
     assert(0);
     return 0u;
@@ -648,6 +696,71 @@ static void structural_fixture_init(StructuralFixture *fixture)
     fixture->namespace_entries[4].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 5u;
+}
+
+static void enum_fixture_init(EnumFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    uint32_t index;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("ascii");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-ascii-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("AsciiChar");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 1u;
+    fixture->items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture->items[0].variant_count = 128u;
+    fixture->items[0].variants = fixture->variants;
+    for (index = 0u; index < 128u; ++index) {
+        fixture->variant_names[index][0] = (unsigned char)'V';
+        fixture->variant_names[index][1] =
+            (unsigned char)('0' + (index / 100u));
+        fixture->variant_names[index][2] =
+            (unsigned char)('0' + ((index / 10u) % 10u));
+        fixture->variant_names[index][3] =
+            (unsigned char)('0' + (index % 10u));
+        fixture->variants[index].kind = CM_HIR_DECL_VARIANT_UNIT;
+        fixture->variants[index].name.data = fixture->variant_names[index];
+        fixture->variants[index].name.length = 4u;
+        fixture->variants[index].source_ordinal = index + 1u;
+        fixture->variants[index].discriminant_primitive =
+            CM_HIR_DECL_PRIMITIVE_ISIZE;
+        fixture->variants[index].discriminant_low = index;
+    }
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1].owner_module = 1u;
+    fixture->namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("AsciiCharReexport");
+    fixture->namespace_entries[1].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[1].target_local = 1u;
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static void assert_failed_transaction(const CmByteBuf *bytes)
@@ -1311,6 +1424,261 @@ static void test_structural_type_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_enum_family(void)
+{
+    EnumFixture first;
+    EnumFixture second;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf rebuilt;
+    CmByteBuf bad;
+    size_t item_record;
+    size_t payload;
+    size_t variant_record;
+    size_t variant_payload;
+
+    enum_fixture_init(&first);
+    enum_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&rebuilt);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.item_count == 1u
+        && decoded.items[0].kind == CM_HIR_DECL_ITEM_ENUM
+        && decoded.items[0].enum_repr_primitive
+            == CM_HIR_DECL_PRIMITIVE_U8
+        && decoded.items[0].variant_count == 128u
+        && decoded.items[0].variants != NULL
+        && decoded.items[0].variants[0].kind
+            == CM_HIR_DECL_VARIANT_UNIT
+        && decoded.items[0].variants[0].source_ordinal == 1u
+        && decoded.items[0].variants[0].discriminant_primitive
+            == CM_HIR_DECL_PRIMITIVE_ISIZE
+        && decoded.items[0].variants[127].source_ordinal == 128u
+        && decoded.items[0].variants[127].discriminant_low
+            == UINT64_C(127)
+        && decoded.items[0].variants[127].discriminant_high
+            == UINT64_C(0)
+        && decoded.type_count == 0u
+        && decoded.namespace_count == 2u
+        && decoded.namespace_entries[0].namespace_kind
+            == CM_HIR_DECL_NAMESPACE_TYPE
+        && decoded.namespace_entries[1].target_local == 1u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &rebuilt)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == rebuilt.len
+        && memcmp(encoded.data, rebuilt.data, encoded.len) == 0);
+
+    enum_fixture_init(&first);
+    first.items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U16;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[0].alias_target_type = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[0].variant_count = 0u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[0].variants = NULL;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[0].variant_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_VARIANTS + 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].kind = UINT8_C(2);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].source_ordinal = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].name = first.variants[0].name;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].discriminant_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].discriminant_low = UINT64_C(0);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].discriminant_low = UINT64_C(256);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.variants[1].discriminant_high = UINT64_C(1);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[0].generic_start = 1u;
+    first.items[0].generic_count = 1u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.items[1].kind = CM_HIR_DECL_ITEM_TYPE_ALIAS;
+    first.items[1].owner_module = 1u;
+    first.items[1].name = (CmHirDeclarationString)S("AsciiCharAlias");
+    first.items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    first.items[1].source_ordinal = 2u;
+    first.items[1].alias_target_type = 1u;
+    first.types[0].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    first.types[0].item_local = 1u;
+    first.namespace_entries[1].name = first.items[1].name;
+    first.namespace_entries[1].target_local = 2u;
+    first.metadata.item_count = 2u;
+    first.metadata.type_count = 1u;
+    first.metadata.types = first.types;
+    /* Enum nominal types are valid signature nodes, but TYPE_ALIAS scope
+     * normalization is not yet represented by the bounded artifact. */
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    enum_fixture_init(&first);
+    first.namespace_entries[2] = first.namespace_entries[0];
+    first.namespace_entries[2].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    first.metadata.namespace_count = 3u;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    item_record = item_record_offset(&encoded, UINT32_C(0));
+    payload = skip_string(&encoded, item_record + 8u) + 44u;
+    assert(encoded.data[payload] == CM_HIR_DECL_PRIMITIVE_U8
+        && get_u32(encoded.data + payload + 4u) == UINT32_C(128));
+
+    bad = copy_bytes(&encoded);
+    bad.data[payload] = CM_HIR_DECL_PRIMITIVE_U16;
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + payload + 4u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_VARIANTS + 1u);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    variant_record = enum_variant_record_offset(&bad, UINT32_C(0),
+        UINT32_C(1));
+    bad.data[variant_record] = UINT8_C(2);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    variant_record = enum_variant_record_offset(&bad, UINT32_C(0),
+        UINT32_C(1));
+    bad.data[variant_record + 1u] = CM_HIR_DECL_PRIMITIVE_U8;
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    variant_record = enum_variant_record_offset(&bad, UINT32_C(0),
+        UINT32_C(1));
+    variant_payload = skip_string(&bad, variant_record + 4u);
+    put_u32(bad.data + variant_payload, UINT32_C(1));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    variant_record = enum_variant_record_offset(&bad, UINT32_C(0),
+        UINT32_C(1));
+    variant_payload = skip_string(&bad, variant_record + 4u);
+    put_u32(bad.data + variant_payload + 4u, UINT32_C(0));
+    put_u32(bad.data + variant_payload + 8u, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    variant_record = enum_variant_record_offset(&bad, UINT32_C(0),
+        UINT32_C(1));
+    memset(bad.data + variant_record + 8u, (int)'0', 4u);
+    bad.data[variant_record + 8u] = (unsigned char)'V';
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&rebuilt);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
+static void test_enum_named_adt_signature(void)
+{
+    TestFixture fixture;
+    CmHirDeclarationVariant variant;
+
+    fixture_init(&fixture);
+    memset(&variant, 0, sizeof(variant));
+    variant.kind = CM_HIR_DECL_VARIANT_UNIT;
+    variant.name = (CmHirDeclarationString)S("Null");
+    variant.discriminant_primitive = CM_HIR_DECL_PRIMITIVE_ISIZE;
+
+    fixture.items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture.items[0].owner_module = 2u;
+    fixture.items[0].name = (CmHirDeclarationString)S("AsciiChar");
+    fixture.items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture.items[0].source_ordinal = 3u;
+    fixture.items[0].enum_repr_primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture.items[0].variant_count = 1u;
+    fixture.items[0].variants = &variant;
+    fixture.metadata.items = fixture.items;
+    fixture.metadata.item_count = 1u;
+
+    memset(fixture.types, 0, sizeof(fixture.types));
+    fixture.types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture.types[0].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    fixture.types[1].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture.types[1].generic_local = 2u;
+    fixture.types[2].kind = CM_HIR_DECL_TYPE_NAMED_ADT;
+    fixture.types[2].item_local = 1u;
+    fixture.metadata.type_count = 3u;
+    fixture.parameters[0] = 2u;
+    fixture.values[0].return_type = 3u;
+    fixture.predicates[0].subject_type = 2u;
+    fixture.predicate_arguments[0] = 1u;
+
+    fixture.namespace_entries[4] = fixture.namespace_entries[3];
+    fixture.namespace_entries[3] = fixture.namespace_entries[2];
+    fixture.namespace_entries[2].owner_module = 2u;
+    fixture.namespace_entries[2].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture.namespace_entries[2].name = fixture.items[0].name;
+    fixture.namespace_entries[2].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture.namespace_entries[2].target_local = 1u;
+    fixture.namespace_entries[2].export_ordinal = 3u;
+    fixture.metadata.namespace_count = 5u;
+
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -1329,6 +1697,8 @@ int main(void)
     test_item_family();
     test_type_alias_family();
     test_structural_type_family();
+    test_enum_family();
+    test_enum_named_adt_signature();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

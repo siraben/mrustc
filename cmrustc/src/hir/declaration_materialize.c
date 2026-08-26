@@ -6,9 +6,11 @@
 #include <string.h>
 
 typedef struct CmDeclRuntime {
+    size_t item_count;
     CmHirModuleId *modules;
     CmHirDefId *traits;
     CmHirDefId *items;
+    CmHirDefId **variants;
     CmHirDefId *values;
     CmHirGenericParamId *generics;
     CmHirTypeId *types;
@@ -96,28 +98,55 @@ static int cm_decl_runtime_init(CmDeclRuntime *runtime,
     const CmHirDeclarationMetadata *metadata)
 {
     memset(runtime, 0, sizeof(*runtime));
+    runtime->item_count = metadata->item_count;
     runtime->modules = (CmHirModuleId *)cm_decl_array(metadata->module_count,
         sizeof(*runtime->modules));
     runtime->traits = (CmHirDefId *)cm_decl_array(metadata->trait_count,
         sizeof(*runtime->traits));
     runtime->items = (CmHirDefId *)cm_decl_array(metadata->item_count,
         sizeof(*runtime->items));
+    runtime->variants = (CmHirDefId **)cm_decl_array(metadata->item_count,
+        sizeof(*runtime->variants));
     runtime->values = (CmHirDefId *)cm_decl_array(metadata->value_count,
         sizeof(*runtime->values));
     runtime->generics = (CmHirGenericParamId *)cm_decl_array(
         metadata->generic_count, sizeof(*runtime->generics));
     runtime->types = (CmHirTypeId *)cm_decl_array(metadata->type_count,
         sizeof(*runtime->types));
-    return (metadata->module_count == 0u || runtime->modules != NULL)
+    if (!((metadata->module_count == 0u || runtime->modules != NULL)
         && (metadata->trait_count == 0u || runtime->traits != NULL)
-        && (metadata->item_count == 0u || runtime->items != NULL)
+        && (metadata->item_count == 0u
+            || (runtime->items != NULL && runtime->variants != NULL))
         && (metadata->value_count == 0u || runtime->values != NULL)
         && (metadata->generic_count == 0u || runtime->generics != NULL)
-        && (metadata->type_count == 0u || runtime->types != NULL);
+        && (metadata->type_count == 0u || runtime->types != NULL))) return 0;
+    {
+        size_t index;
+
+        for (index = 0u; index < metadata->item_count; ++index) {
+            if (metadata->items[index].kind != CM_HIR_DECL_ITEM_ENUM)
+                continue;
+            runtime->variants[index] = (CmHirDefId *)cm_decl_array(
+                metadata->items[index].variant_count,
+                sizeof(*runtime->variants[index]));
+            if (metadata->items[index].variant_count != 0u
+                && runtime->variants[index] == NULL) return 0;
+        }
+    }
+    return 1;
 }
 
 static void cm_decl_runtime_destroy(CmDeclRuntime *runtime)
 {
+    size_t index;
+
+    if (runtime->variants != NULL) {
+        for (index = 0u; runtime->items != NULL
+                && index < runtime->item_count; ++index) {
+            cm_free(runtime->variants[index]);
+        }
+    }
+    cm_free(runtime->variants);
     cm_free(runtime->types);
     cm_free(runtime->generics);
     cm_free(runtime->values);
@@ -201,6 +230,9 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         if (metadata->items[index].kind == CM_HIR_DECL_ITEM_STRUCT) {
             kind = CM_HIR_ITEM_STRUCT;
         } else if (metadata->items[index].kind
+                == CM_HIR_DECL_ITEM_ENUM) {
+            kind = CM_HIR_ITEM_ENUM;
+        } else if (metadata->items[index].kind
                 == CM_HIR_DECL_ITEM_TYPE_ALIAS) {
             kind = CM_HIR_ITEM_TYPE_ALIAS;
         } else {
@@ -209,6 +241,20 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         status = cm_hir_reserve_item_definition_as(context, crate_id,
             kind, span, &runtime->items[index]);
         if (status != CM_HIR_OK) return status;
+        if (kind == CM_HIR_ITEM_ENUM) {
+            uint32_t variant_index;
+
+            for (variant_index = 0u;
+                    variant_index < metadata->items[index].variant_count;
+                    ++variant_index) {
+                status = cm_hir_reserve_enum_variant_definition(context,
+                    crate_id, cm_decl_span(span.source,
+                        metadata->items[index].variants[variant_index]
+                            .source_ordinal),
+                    &runtime->variants[index][variant_index]);
+                if (status != CM_HIR_OK) return status;
+            }
+        }
     }
     for (index = 0u; index < metadata->value_count; ++index) {
         status = cm_hir_reserve_item_definition_as(context, crate_id,
@@ -320,8 +366,10 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
         } else if (wire->kind == CM_HIR_DECL_TYPE_NAMED_ADT) {
             if (wire->item_local == 0u
                 || (size_t)wire->item_local > metadata->item_count
-                || metadata->items[wire->item_local - 1u].kind
-                    != CM_HIR_DECL_ITEM_STRUCT
+                || (metadata->items[wire->item_local - 1u].kind
+                        != CM_HIR_DECL_ITEM_STRUCT
+                    && metadata->items[wire->item_local - 1u].kind
+                        != CM_HIR_DECL_ITEM_ENUM)
                 || metadata->items[wire->item_local - 1u].generic_count
                     != 0u) {
                 return CM_HIR_INVARIANT_VIOLATION;
@@ -449,19 +497,29 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
     size_t index;
     for (index = 0u; index < metadata->item_count; ++index) {
         const CmHirDeclarationItem *wire;
+        CmHirAttribute repr_attribute;
+        CmHirVariant *variants;
         CmHirItem item;
         CmHirItemId item_id;
         CmHirStatus status;
         wire = &metadata->items[index];
         if ((wire->kind != CM_HIR_DECL_ITEM_STRUCT
+                && wire->kind != CM_HIR_DECL_ITEM_ENUM
                 && wire->kind != CM_HIR_DECL_ITEM_TYPE_ALIAS)
             || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
             || wire->visibility.restriction_module != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
+        variants = NULL;
+        memset(&repr_attribute, 0, sizeof(repr_attribute));
         memset(&item, 0, sizeof(item));
-        item.kind = wire->kind == CM_HIR_DECL_ITEM_STRUCT
-            ? CM_HIR_ITEM_STRUCT : CM_HIR_ITEM_TYPE_ALIAS;
+        if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
+            item.kind = CM_HIR_ITEM_STRUCT;
+        } else if (wire->kind == CM_HIR_DECL_ITEM_ENUM) {
+            item.kind = CM_HIR_ITEM_ENUM;
+        } else {
+            item.kind = CM_HIR_ITEM_TYPE_ALIAS;
+        }
         item.definition = runtime->items[index];
         item.owner_module = runtime->modules[wire->owner_module - 1u];
         item.parent_definition = cm_hir_def_id_none();
@@ -475,6 +533,70 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         item.generic_parameter_count = wire->generic_count;
         if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
             item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+        } else if (wire->kind == CM_HIR_DECL_ITEM_ENUM) {
+            uint32_t variant_index;
+
+            if (wire->alias_target_type != 0u || wire->generic_start != 0u
+                || wire->generic_count != 0u
+                || wire->enum_repr_primitive != CM_HIR_DECL_PRIMITIVE_U8
+                || wire->variant_count == 0u || wire->variants == NULL
+                || runtime->variants[index] == NULL) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            variants = (CmHirVariant *)cm_decl_array(wire->variant_count,
+                sizeof(*variants));
+            if (variants == NULL) return CM_HIR_INVALID_ARGUMENT;
+            for (variant_index = 0u; variant_index < wire->variant_count;
+                    ++variant_index) {
+                const CmHirDeclarationVariant *wire_variant;
+                CmHirType discriminant_type;
+                CmHirTypeId discriminant_type_id;
+
+                wire_variant = &wire->variants[variant_index];
+                if (wire_variant->kind != CM_HIR_DECL_VARIANT_UNIT
+                    || wire_variant->discriminant_primitive
+                        != CM_HIR_DECL_PRIMITIVE_ISIZE
+                    || wire_variant->discriminant_high != 0u
+                    || wire_variant->discriminant_low > UINT64_C(255)) {
+                    cm_free(variants);
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
+                memset(&discriminant_type, 0, sizeof(discriminant_type));
+                discriminant_type.kind = CM_HIR_TYPE_INTEGER_KIND;
+                discriminant_type.data.integer_type.kind = CM_HIR_INT_ISIZE;
+                discriminant_type.span = cm_decl_span(source,
+                    wire_variant->source_ordinal);
+                status = cm_hir_add_type(context, &discriminant_type,
+                    &discriminant_type_id);
+                if (status != CM_HIR_OK) {
+                    cm_free(variants);
+                    return status;
+                }
+                variants[variant_index].definition =
+                    runtime->variants[index][variant_index];
+                variants[variant_index].name = cm_decl_intern(context,
+                    wire_variant->name);
+                variants[variant_index].form = CM_HIR_AGGREGATE_UNIT;
+                variants[variant_index].has_discriminant = 1;
+                variants[variant_index].discriminant.kind =
+                    CM_HIR_CONST_VALUE;
+                variants[variant_index].discriminant.type =
+                    discriminant_type_id;
+                variants[variant_index].discriminant.data.value.low_bits =
+                    wire_variant->discriminant_low;
+                variants[variant_index].discriminant.data.value.high_bits =
+                    wire_variant->discriminant_high;
+                variants[variant_index].span = cm_decl_span(source,
+                    wire_variant->source_ordinal);
+            }
+            repr_attribute.metadata = cm_hir_intern(context, "repr(u8)");
+            repr_attribute.span = item.span;
+            /* Synthetic metadata-origin attribute ordinal, always nonzero. */
+            repr_attribute.source_attribute = 1u;
+            item.attributes = &repr_attribute;
+            item.attribute_count = 1u;
+            item.data.enum_item.variants = variants;
+            item.data.enum_item.variant_count = wire->variant_count;
         } else {
             if (wire->alias_target_type == 0u
                 || (size_t)wire->alias_target_type > metadata->type_count) {
@@ -486,6 +608,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 cm_hir_def_id_none();
         }
         status = cm_hir_add_item(context, &item, &item_id);
+        cm_free(variants);
         if (status != CM_HIR_OK) return status;
     }
     return CM_HIR_OK;
@@ -753,6 +876,11 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
                         == CM_HIR_DECL_NAMESPACE_VALUE
                     ? CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
                     : CM_HIR_LIBRARY_BINDING_TYPE;
+            } else if (item->kind == CM_HIR_DECL_ITEM_ENUM
+                    && entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_TYPE) {
+                binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
+                binding.type_kind = CM_HIR_TYPE_ADT_KIND;
             } else if (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
                     && entry->namespace_kind
                         == CM_HIR_DECL_NAMESPACE_TYPE) {

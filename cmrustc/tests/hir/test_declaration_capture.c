@@ -941,6 +941,346 @@ static void test_char_shaped_reexport_projection(void)
     fixture_destroy(&attributed);
 }
 
+static void test_ascii_char_enum_projection_and_determinism(void)
+{
+    static const unsigned char source[] =
+        "mod ascii_char {\n"
+        "  #[derive(Copy, Clone, Eq, PartialEq)]\n"
+        "  #[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "  #[repr(u8)]\n"
+        "  pub enum AsciiChar {\n"
+        "    #[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+        "    Null = 0,\n"
+        "    #[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+        "    StartOfHeading = 1,\n"
+        "  }\n"
+        "}\n"
+        "#[doc(alias(\"AsciiChar\"))]\n"
+        "#[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "pub use ascii_char::AsciiChar as Char;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    const CmHirDeclarationNamespaceEntry *definition;
+    const CmHirDeclarationNamespaceEntry *reexport;
+    fixture_init_source(&first, 0, "ascii-char-enum.rs", source,
+        sizeof(source) - 1u);
+    fixture_init_source(&noisy, 1, "ascii-char-enum.rs", source,
+        sizeof(source) - 1u);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_OK) {
+        fprintf(stderr, "enum capture failed: %s stage=%s reason=%s "
+            "metadata=%s library=%s item=%u span=%u:%u-%u\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            cm_hir_declaration_metadata_status_name(result.metadata_status),
+            cm_hir_library_status_name(result.library_status),
+            (unsigned int)result.rejected_item,
+            (unsigned int)result.rejected_span.source,
+            (unsigned int)result.rejected_span.start,
+            (unsigned int)result.rejected_span.end);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 1u && result.namespace_count == 4u
+        && result.projected_semantic_attribute_count == 6u
+        && first_metadata.item_count == 1u
+        && first_metadata.items[0].kind == CM_HIR_DECL_ITEM_ENUM
+        && first_metadata.items[0].enum_repr_primitive
+            == CM_HIR_DECL_PRIMITIVE_U8
+        && first_metadata.items[0].variant_count == 2u
+        && first_metadata.items[0].variants != NULL
+        && first_metadata.items[0].variants[0].kind
+            == CM_HIR_DECL_VARIANT_UNIT
+        && first_metadata.items[0].variants[0].source_ordinal == 0u
+        && first_metadata.items[0].variants[0].discriminant_primitive
+            == CM_HIR_DECL_PRIMITIVE_ISIZE
+        && first_metadata.items[0].variants[0].discriminant_low == 0u
+        && first_metadata.items[0].variants[0].discriminant_high == 0u
+        && declaration_string_is(first_metadata.items[0].variants[0].name,
+            "Null")
+        && first_metadata.items[0].variants[1].source_ordinal == 1u
+        && first_metadata.items[0].variants[1].discriminant_low == 1u
+        && declaration_string_is(first_metadata.items[0].variants[1].name,
+            "StartOfHeading"));
+    definition = find_namespace_entry(&first_metadata, 2u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "AsciiChar");
+    reexport = find_namespace_entry(&first_metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Char");
+    assert(definition != NULL && reexport != NULL
+        && definition->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && reexport->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && definition->target_local == 1u
+        && reexport->target_local == definition->target_local
+        && find_namespace_entry(&first_metadata, 2u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "AsciiChar") == NULL
+        && find_namespace_entry(&first_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "Char") == NULL);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 6u);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_ascii_char_128_variant_projection(void)
+{
+    char source[32768];
+    size_t cursor = 0u;
+    uint32_t index;
+    int written;
+    CaptureFixture fixture;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    written = snprintf(source + cursor, sizeof(source) - cursor,
+        "mod ascii_char {\n"
+        "#[derive(Copy, Clone, Eq, PartialEq)]\n"
+        "#[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "#[repr(u8)]\n"
+        "pub enum AsciiChar {\n");
+    assert(written > 0 && (size_t)written < sizeof(source) - cursor);
+    cursor += (size_t)written;
+    for (index = 0u; index < 128u; ++index) {
+        written = snprintf(source + cursor, sizeof(source) - cursor,
+            "#[unstable(feature = \"ascii_char_variants\", "
+            "issue = \"110998\")] Variant%u = %u,\n",
+            (unsigned int)index, (unsigned int)index);
+        assert(written > 0 && (size_t)written < sizeof(source) - cursor);
+        cursor += (size_t)written;
+    }
+    written = snprintf(source + cursor, sizeof(source) - cursor,
+        "}\n}\n"
+        "#[doc(alias(\"AsciiChar\"))]\n"
+        "#[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "pub use ascii_char::AsciiChar as Char;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n");
+    assert(written > 0 && (size_t)written < sizeof(source) - cursor);
+    cursor += (size_t)written;
+    fixture_init_source(&fixture, 0, "ascii-char-128.rs",
+        (const unsigned char *)source, cursor);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 132u
+        && metadata.item_count == 1u
+        && metadata.items[0].kind == CM_HIR_DECL_ITEM_ENUM
+        && metadata.items[0].variant_count == 128u
+        && metadata.items[0].variants[127].source_ordinal == 127u
+        && metadata.items[0].variants[127].discriminant_low == 127u
+        && declaration_string_is(metadata.items[0].variants[127].name,
+            "Variant127")
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void fixture_init_enum_case(CaptureFixture *fixture,
+    const char *path, const char *repr_attribute,
+    const char *item_stability_attribute, const char *variant_source,
+    const char *extra_module_item)
+{
+    char source[8192];
+    int written = snprintf(source, sizeof(source),
+        "mod ascii_char {\n"
+        "#[derive(Copy, Clone, Eq, PartialEq)]\n"
+        "#[%s]\n"
+        "#[%s]\n"
+        "pub enum AsciiChar {\n%s}\n%s}\n"
+        "#[doc(alias(\"AsciiChar\"))]\n"
+        "#[unstable(feature = \"ascii_char\", issue = \"110998\")]\n"
+        "pub use ascii_char::AsciiChar as Char;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n",
+        item_stability_attribute, repr_attribute, variant_source,
+        extra_module_item);
+    assert(written > 0 && (size_t)written < sizeof(source));
+    fixture_init_source(fixture, 0, path, (const unsigned char *)source,
+        (size_t)written);
+}
+
+static void assert_enum_failure_is_atomic(CaptureFixture *fixture,
+    CmHirDeclarationMetadata *metadata, CmHirDeclarationItem *saved_items,
+    CmHirDeclarationNamespaceEntry *saved_namespace)
+{
+    CmHirDeclarationCaptureInput input = capture_input(fixture);
+    CmHirDeclarationCaptureResult result =
+        cm_hir_declaration_metadata_capture(&input, metadata);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && metadata->items == saved_items
+        && metadata->namespace_entries == saved_namespace);
+}
+
+static void test_enum_cfg_source_ordinal_and_atomic_negatives(void)
+{
+    static const char good_variants[] =
+        "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+        "Null = 0,\n"
+        "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+        "StartOfHeading = 1,\n";
+    static const char cfg_variants[] =
+        "#[cfg(any())]\n"
+        "Hidden = 99,\n"
+        "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+        "Null = 0,\n";
+    static const struct {
+        const char *path;
+        const char *repr_attribute;
+        const char *item_attribute;
+        const char *variants;
+        const char *extra;
+    } rejected[] = {
+        { "enum-tuple.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+          "Tuple(u8) = 0,\n", "" },
+        { "enum-named.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+          "Named { value: u8 } = 0,\n", "" },
+        { "enum-implicit.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+          "Implicit,\n", "" },
+        { "enum-range.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[unstable(feature = \"ascii_char_variants\", issue = \"110998\")]\n"
+          "TooLarge = 256,\n", "" },
+        { "enum-repr.rs", "repr(u16)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          good_variants, "" },
+        { "enum-item-attr.rs", "repr(u8)",
+          "stable(feature = \"ascii_char\", since = \"1.0.0\")",
+          good_variants, "" },
+        { "enum-variant-attr.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[stable(feature = \"ascii_char_variants\", since = \"1.0.0\")]\n"
+          "Null = 0,\n", "" },
+        { "enum-generated-variant-attr.rs", "repr(u8)",
+          "unstable(feature = \"ascii_char\", issue = \"110998\")",
+          "#[cfg_attr(all(), unstable(feature = \"ascii_char_variants\", "
+          "issue = \"110998\"))]\nNull = 0,\n", "" }
+    };
+    CaptureFixture good;
+    CaptureFixture cfg;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId item_id;
+    CmHirItemId needs_id;
+    const CmHirItem *item_const;
+    const CmHirItem *needs_const;
+    CmHirItem *item;
+    CmHirItem *needs;
+    CmHirDefId saved_definition;
+    uint64_t saved_discriminant;
+    CmSpan saved_span;
+    CmInternId saved_metadata;
+    size_t index;
+    fixture_init_enum_case(&good, "enum-atomic.rs", "repr(u8)",
+        "unstable(feature = \"ascii_char\", issue = \"110998\")",
+        good_variants, "");
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    item_const = find_item(&good, "AsciiChar", &item_id);
+    needs_const = find_item(&good, "needs", &needs_id);
+    assert(item_const != NULL && item_const->kind == CM_HIR_ITEM_ENUM
+        && item_const->data.enum_item.variant_count == 2u
+        && needs_const != NULL);
+    item = (CmHirItem *)item_const;
+    needs = (CmHirItem *)needs_const;
+
+    saved_discriminant =
+        item->data.enum_item.variants[0].discriminant.data.value.low_bits;
+    item->data.enum_item.variants[0].discriminant.data.value.low_bits = 2u;
+    assert_enum_failure_is_atomic(&good, &metadata, saved_items,
+        saved_namespace);
+    item->data.enum_item.variants[0].discriminant.data.value.low_bits =
+        saved_discriminant;
+
+    saved_span = item->data.enum_item.variants[0].span;
+    item->data.enum_item.variants[0].span.start += 1u;
+    assert_enum_failure_is_atomic(&good, &metadata, saved_items,
+        saved_namespace);
+    item->data.enum_item.variants[0].span = saved_span;
+
+    saved_metadata = item->attributes[2].metadata;
+    item->attributes[2].metadata = cm_hir_intern(&good.hir, "repr(u16)");
+    assert_enum_failure_is_atomic(&good, &metadata, saved_items,
+        saved_namespace);
+    item->attributes[2].metadata = saved_metadata;
+
+    item->attributes[1].expansion_depth = 1u;
+    assert_enum_failure_is_atomic(&good, &metadata, saved_items,
+        saved_namespace);
+    item->attributes[1].expansion_depth = 0u;
+
+    /* A forged VALUE may not borrow the enum ITEM identity. */
+    saved_definition = needs->definition;
+    needs->definition = item->definition;
+    assert_enum_failure_is_atomic(&good, &metadata, saved_items,
+        saved_namespace);
+    needs->definition = saved_definition;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+            ++index) {
+        CaptureFixture bad;
+        fixture_init_enum_case(&bad, rejected[index].path,
+            rejected[index].repr_attribute, rejected[index].item_attribute,
+            rejected[index].variants, rejected[index].extra);
+        assert_enum_failure_is_atomic(&bad, &metadata, saved_items,
+            saved_namespace);
+        fixture_destroy(&bad);
+    }
+
+    fixture_init_enum_case(&cfg, "enum-cfg-ordinal.rs", "repr(u8)",
+        "unstable(feature = \"ascii_char\", issue = \"110998\")",
+        cfg_variants, "");
+    item_const = find_item(&cfg, "AsciiChar", &item_id);
+    /* The graph has one effective variant at raw source ordinal 1, while
+     * current graph-backed lowering retains both raw variants. Capture must
+     * reject that live-HIR/effective-graph census mismatch atomically. */
+    assert(item_const != NULL
+        && item_const->data.enum_item.variant_count == 2u);
+    assert_enum_failure_is_atomic(&cfg, &metadata, saved_items,
+        saved_namespace);
+    fixture_destroy(&cfg);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
 static void assert_reexport_projection_failure(CaptureFixture *fixture,
     CmHirDeclarationMetadata *metadata,
     CmHirDeclarationItem *saved_items,
@@ -1312,6 +1652,9 @@ int main(void)
     test_item_shape_diagnostic();
     test_non_exhaustive_authorizes_missing_constructor_mate();
     test_char_shaped_reexport_projection();
+    test_ascii_char_enum_projection_and_determinism();
+    test_ascii_char_128_variant_projection();
+    test_enum_cfg_source_ordinal_and_atomic_negatives();
     test_reexport_alias_spelling_and_duplicate_negatives();
     test_reexport_provenance_and_generated_negatives();
     test_alias_and_reexport_attributes_fail_closed_atomically();
