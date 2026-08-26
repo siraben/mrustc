@@ -316,6 +316,13 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `core/src/array/mod.rs:173`'s `from_mut` (`def=1:18904`, source item
   `100:23`, rejected item `10807`) at
   `stage=items`/`item-source-invalid`.
+- Commit `292adaf1` adds the exact source-authenticated paired lifetime
+  normalization and declaration-only `from_mut` profile. The clean pinned-core
+  probe at `292adaf1` retains the zero-error graph/HIR and exact
+  451-module/1,658-type/20,747-value library census, then measures its shared
+  twin `core/src/array/mod.rs:165`'s `from_ref` (`def=1:18903`, source item
+  `100:22`, rejected item `10806`) at
+  `stage=items`/`item-source-invalid`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

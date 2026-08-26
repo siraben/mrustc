@@ -218,6 +218,13 @@ to be restated across a crate boundary. The clean pinned-core probe at
 `core/src/array/mod.rs:173`: `from_mut` (`def=1:18904`, source item `100:23`,
 rejected item `10807`) at `stage=items` with
 `reason=item-source-invalid`.
+Commit `292adaf1` source-authenticates its sole omitted input/output lifetime
+relation, transports the exact mutable paired declaration, and leaves its body
+unavailable. The clean pinned-core probe at `292adaf1` preserves the same
+zero-error census and exact library totals, then advances to the shared twin
+at `core/src/array/mod.rs:165`: `from_ref` (`def=1:18903`, source item
+`100:22`, rejected item `10806`) at `stage=items` with
+`reason=item-source-invalid`.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
