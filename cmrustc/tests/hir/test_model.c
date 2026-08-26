@@ -3331,7 +3331,7 @@ static CmHirBodyId add_unlowered_value_body(CmHirContext *context,
     return body_id;
 }
 
-static void test_imported_const_declaration_model(void)
+static void test_imported_value_declaration_model(void)
 {
     CmHirContext context;
     CmHirContextMark mark;
@@ -3439,10 +3439,27 @@ static void test_imported_const_declaration_model(void)
         test_span(50u, 60u));
     item.data.value_item.type = char_type;
     item.data.value_item.mutability = CM_HIR_IMMUTABLE;
-    item.data.value_item.definition_kind =
-        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
     assert(cm_hir_add_item(&context, &item, &item_id)
         == CM_HIR_INVALID_ID);
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    invalid_body = add_unlowered_value_body(&context, invalid_definition,
+        char_type, 55u);
+    item.data.value_item.body = invalid_body;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    item.data.value_item.body = CM_HIR_BODY_NONE;
+    item.data.value_item.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    stored = cm_hir_get_item(&context, item_id);
+    assert(stored != NULL && stored->kind == CM_HIR_ITEM_STATIC
+        && stored->data.value_item.mutability == CM_HIR_MUTABLE
+        && stored->data.value_item.definition_kind
+            == CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION
+        && stored->data.value_item.body == CM_HIR_BODY_NONE
+        && cm_hir_get_body(&context, stored->data.value_item.body) == NULL
+        && cm_hir_body_value_owner_kind(&context, stored)
+            == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED);
     assert(cm_hir_context_rewind(&context, &mark) == CM_HIR_OK);
 
     assert(cm_hir_context_mark(&context, &mark) == CM_HIR_OK);
@@ -9534,7 +9551,7 @@ int main(void)
     test_deref_shared_parameter_model();
     test_supertrait_model_invariants();
     test_default_body_value_model_invariants();
-    test_imported_const_declaration_model();
+    test_imported_value_declaration_model();
     test_trait_alias_model_invariants();
     test_static_supertrait_model_invariants();
     test_supertrait_equality_model_invariants();

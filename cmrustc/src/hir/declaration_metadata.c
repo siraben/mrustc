@@ -142,8 +142,10 @@ void cm_hir_declaration_metadata_destroy(CmHirDeclarationMetadata *metadata)
         cm_decl_free_string(&metadata->traits[index].name);
     for (index = 0u; index < metadata->generic_count; ++index)
         cm_decl_free_string(&metadata->generics[index].name);
-    for (index = 0u; index < metadata->type_count; ++index)
+    for (index = 0u; index < metadata->type_count; ++index) {
         cm_free(metadata->types[index].argument_types);
+        cm_free(metadata->types[index].element_types);
+    }
     for (index = 0u; index < metadata->item_count; ++index) {
         uint32_t child;
         cm_decl_free_string(&metadata->items[index].name);
@@ -663,6 +665,29 @@ static int cm_decl_type_compare(const CmHirDeclarationType *left,
         }
         return 0;
     }
+    if (left->kind == CM_HIR_DECL_TYPE_TUPLE) {
+        if (left->element_count != right->element_count)
+            return left->element_count < right->element_count ? -1 : 1;
+        for (index = 0u; index < left->element_count; ++index) {
+            if (left->element_types[index] != right->element_types[index])
+                return left->element_types[index]
+                        < right->element_types[index] ? -1 : 1;
+        }
+        return 0;
+    }
+    if (left->kind == CM_HIR_DECL_TYPE_ARRAY) {
+        if (left->child_type != right->child_type)
+            return left->child_type < right->child_type ? -1 : 1;
+        if (left->array_length_type != right->array_length_type)
+            return left->array_length_type < right->array_length_type
+                ? -1 : 1;
+        if (left->array_length_low_bits != right->array_length_low_bits)
+            return left->array_length_low_bits < right->array_length_low_bits
+                ? -1 : 1;
+        return left->array_length_high_bits
+                < right->array_length_high_bits ? -1
+            : left->array_length_high_bits > right->array_length_high_bits;
+    }
     return 0;
 }
 
@@ -673,7 +698,11 @@ static int cm_decl_type_common_zero(const CmHirDeclarationType *type)
         && type->self_trait_local == 0u && type->mutability == 0u
         && type->region.kind == 0u && type->region.generic_local == 0u
         && type->region.binder_index == 0u
-        && type->argument_count == 0u && type->argument_types == NULL;
+        && type->argument_count == 0u && type->argument_types == NULL
+        && type->element_count == 0u && type->element_types == NULL
+        && type->array_length_type == 0u
+        && type->array_length_low_bits == UINT64_C(0)
+        && type->array_length_high_bits == UINT64_C(0);
 }
 
 static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
@@ -783,6 +812,61 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
                     maximum_depth = depths[argument - 1u];
             }
             depth = maximum_depth + UINT32_C(1);
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            CmHirDeclarationType copy = *type;
+            uint32_t child;
+            uint32_t maximum_depth;
+            copy.element_count = 0u;
+            copy.element_types = NULL;
+            if (type->element_count == 0u || type->element_types == NULL
+                || type->element_count
+                    > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_size_add(total_arguments, type->element_count,
+                    &total_arguments)
+                || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_decl_type_common_zero(&copy)) {
+                valid = 0;
+                continue;
+            }
+            maximum_depth = 0u;
+            for (child = 0u; child < type->element_count; ++child) {
+                uint32_t element = type->element_types[child];
+                if (element == 0u || (size_t)element > index) {
+                    valid = 0;
+                    break;
+                }
+                if (depths[element - 1u] > maximum_depth)
+                    maximum_depth = depths[element - 1u];
+            }
+            depth = maximum_depth + UINT32_C(1);
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            CmHirDeclarationType copy = *type;
+            const CmHirDeclarationType *length_type;
+            uint32_t maximum_depth;
+            copy.child_type = 0u;
+            copy.array_length_type = 0u;
+            copy.array_length_low_bits = UINT64_C(0);
+            copy.array_length_high_bits = UINT64_C(0);
+            if (type->child_type == 0u || (size_t)type->child_type > index
+                || type->array_length_type == 0u
+                || (size_t)type->array_length_type > index
+                || type->array_length_high_bits != UINT64_C(0)
+                || !cm_size_add(total_arguments, 2u, &total_arguments)
+                || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_decl_type_common_zero(&copy)) {
+                valid = 0;
+                continue;
+            }
+            length_type = &metadata->types[type->array_length_type - 1u];
+            if (length_type->kind != CM_HIR_DECL_TYPE_PRIMITIVE
+                || length_type->primitive != CM_HIR_DECL_PRIMITIVE_USIZE) {
+                valid = 0;
+                continue;
+            }
+            maximum_depth = depths[type->child_type - 1u];
+            if (depths[type->array_length_type - 1u] > maximum_depth)
+                maximum_depth = depths[type->array_length_type - 1u];
+            depth = maximum_depth + UINT32_C(1);
         } else {
             valid = 0;
         }
@@ -872,6 +956,45 @@ static int cm_decl_validate_aggregate_types(
                     kind = argument_kind;
                     local = argument_local;
                 }
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            uint32_t child;
+            for (child = 0u; child < type->element_count; ++child) {
+                uint32_t element = type->element_types[child];
+                uint8_t element_kind = scope_kinds[element - 1u];
+                uint32_t element_local = scope_locals[element - 1u];
+                if (element_kind == UINT8_MAX
+                    || (kind != 0u && element_kind != 0u
+                        && (kind != element_kind
+                            || local != element_local))) {
+                    kind = UINT8_MAX;
+                    local = 0u;
+                    break;
+                }
+                if (kind == 0u && element_kind != 0u) {
+                    kind = element_kind;
+                    local = element_local;
+                }
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            uint8_t child_kind = scope_kinds[type->child_type - 1u];
+            uint32_t child_local = scope_locals[type->child_type - 1u];
+            uint8_t length_kind =
+                scope_kinds[type->array_length_type - 1u];
+            uint32_t length_local =
+                scope_locals[type->array_length_type - 1u];
+            if (child_kind == UINT8_MAX || length_kind == UINT8_MAX
+                || (child_kind != 0u && length_kind != 0u
+                    && (child_kind != length_kind
+                        || child_local != length_local))) {
+                kind = UINT8_MAX;
+                local = 0u;
+            } else if (child_kind != 0u) {
+                kind = child_kind;
+                local = child_local;
+            } else {
+                kind = length_kind;
+                local = length_local;
             }
         }
         scope_kinds[index] = kind;
@@ -965,6 +1088,12 @@ static int cm_decl_validate_aggregate_types(
                 == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
             for (child = 0u; child < type->argument_count; ++child)
                 reachable[type->argument_types[child] - 1u] = 1u;
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            for (child = 0u; child < type->element_count; ++child)
+                reachable[type->element_types[child] - 1u] = 1u;
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            reachable[type->child_type - 1u] = 1u;
+            reachable[type->array_length_type - 1u] = 1u;
         }
     }
     for (index = 0u; index < metadata->item_count && valid; ++index) {
@@ -1023,7 +1152,8 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
                 if (!cm_decl_type_local(metadata,
                         value->parameter_types[child])) return 0;
             }
-        } else if (value->kind == CM_HIR_DECL_VALUE_CONST) {
+        } else if (value->kind == CM_HIR_DECL_VALUE_CONST
+                || value->kind == CM_HIR_DECL_VALUE_STATIC) {
             if (value->generic_start != 0u || value->generic_count != 0u
                 || value->predicate_start != 0u
                 || value->predicate_count != 0u
@@ -1031,8 +1161,12 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
                 || value->parameter_types != NULL
                 || value->return_type != 0u
                 || !cm_decl_type_local(metadata, value->declared_type)
-                || value->mutability != CM_HIR_DECL_IMMUTABLE
                 || value->has_body != 1u) return 0;
+            if (value->kind == CM_HIR_DECL_VALUE_CONST
+                && value->mutability != CM_HIR_DECL_IMMUTABLE) return 0;
+            if (value->kind == CM_HIR_DECL_VALUE_STATIC
+                && value->mutability != CM_HIR_DECL_IMMUTABLE
+                && value->mutability != CM_HIR_DECL_MUTABLE) return 0;
         } else {
             return 0;
         }
@@ -1176,6 +1310,12 @@ static int cm_decl_validate_type_reachability(
                 == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
             for (child = 0u; child < type->argument_count; ++child)
                 seen[type->argument_types[child] - 1u] = 1u;
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            for (child = 0u; child < type->element_count; ++child)
+                seen[type->element_types[child] - 1u] = 1u;
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            seen[type->child_type - 1u] = 1u;
+            seen[type->array_length_type - 1u] = 1u;
         }
     }
     for (index = 0u; index < metadata->type_count; ++index) {
@@ -1230,6 +1370,30 @@ static int cm_decl_validate_value_type_scopes(
                 }
                 if (scope == 0u) scope = argument_scope;
             }
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            uint32_t child;
+            for (child = 0u; child < type->element_count; ++child) {
+                uint32_t element_scope =
+                    scopes[type->element_types[child] - 1u];
+                if (element_scope == UINT32_MAX
+                    || (scope != 0u && element_scope != 0u
+                        && scope != element_scope)) {
+                    scope = UINT32_MAX;
+                    break;
+                }
+                if (scope == 0u) scope = element_scope;
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            uint32_t child_scope = scopes[type->child_type - 1u];
+            uint32_t length_scope =
+                scopes[type->array_length_type - 1u];
+            if (child_scope == UINT32_MAX || length_scope == UINT32_MAX
+                || (child_scope != 0u && length_scope != 0u
+                    && child_scope != length_scope)) {
+                scope = UINT32_MAX;
+            } else {
+                scope = child_scope != 0u ? child_scope : length_scope;
+            }
         }
         scopes[index] = scope;
     }
@@ -1238,7 +1402,8 @@ static int cm_decl_validate_value_type_scopes(
         uint32_t owner = (uint32_t)(index + 1u);
         uint32_t child;
         uint32_t scope;
-        if (value->kind == CM_HIR_DECL_VALUE_CONST) {
+        if (value->kind == CM_HIR_DECL_VALUE_CONST
+                || value->kind == CM_HIR_DECL_VALUE_STATIC) {
             if (scopes[value->declared_type - 1u] != 0u) valid = 0;
         } else {
             scope = scopes[value->return_type - 1u];
@@ -1763,13 +1928,28 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
             cm_hir_metadata_write_u8(&writer, UINT8_C(0));
             cm_hir_metadata_write_u16(&writer, UINT16_C(0));
             cm_hir_metadata_write_u32(&writer, type->child_type);
-        } else {
+        } else if (type->kind
+                == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
             uint32_t child;
             cm_hir_metadata_write_u32(&writer, type->item_local);
             cm_hir_metadata_write_u32(&writer, type->argument_count);
             for (child = 0u; child < type->argument_count; ++child)
                 cm_hir_metadata_write_u32(&writer,
                     type->argument_types[child]);
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            uint32_t child;
+            cm_hir_metadata_write_u32(&writer, type->element_count);
+            for (child = 0u; child < type->element_count; ++child)
+                cm_hir_metadata_write_u32(&writer,
+                    type->element_types[child]);
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            cm_hir_metadata_write_u32(&writer, type->child_type);
+            cm_hir_metadata_write_u32(&writer,
+                type->array_length_type);
+            cm_hir_metadata_write_u64(&writer,
+                type->array_length_low_bits);
+            cm_hir_metadata_write_u64(&writer,
+                type->array_length_high_bits);
         }
     }
 
@@ -2420,6 +2600,36 @@ static int cm_decl_parse_types(const CmHirMetadataSection *section,
                         &type->argument_types[child])
                         != CM_HIR_METADATA_OK) return 0;
             }
+        } else if (type->kind == CM_HIR_DECL_TYPE_TUPLE) {
+            uint32_t child;
+            if (cm_hir_metadata_read_u32(&reader, &type->element_count)
+                    != CM_HIR_METADATA_OK
+                || type->element_count == 0u
+                || type->element_count
+                    > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_size_add(total_arguments, type->element_count,
+                    &total_arguments)
+                || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES)
+                return 0;
+            type->element_types = (uint32_t *)cm_alloc(
+                (size_t)type->element_count * sizeof(uint32_t));
+            for (child = 0u; child < type->element_count; ++child) {
+                if (cm_hir_metadata_read_u32(&reader,
+                        &type->element_types[child])
+                        != CM_HIR_METADATA_OK) return 0;
+            }
+        } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
+            if (!cm_size_add(total_arguments, 2u, &total_arguments)
+                || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || cm_hir_metadata_read_u32(&reader, &type->child_type)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u32(&reader,
+                    &type->array_length_type) != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u64(&reader,
+                    &type->array_length_low_bits) != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u64(&reader,
+                    &type->array_length_high_bits) != CM_HIR_METADATA_OK)
+                return 0;
         } else {
             return 0;
         }
@@ -2567,7 +2777,8 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
         value = &metadata->values[index];
         if (cm_hir_metadata_read_u8(&reader, &kind) != CM_HIR_METADATA_OK
             || (kind != CM_HIR_DECL_VALUE_FUNCTION
-                && kind != CM_HIR_DECL_VALUE_CONST)
+                && kind != CM_HIR_DECL_VALUE_CONST
+                && kind != CM_HIR_DECL_VALUE_STATIC)
             || !cm_decl_read_u8(&reader, UINT8_C(0))
             || !cm_decl_read_u16(&reader, UINT16_C(0))
             || cm_hir_metadata_read_u32(&reader, &value->owner_module)

@@ -83,6 +83,17 @@ typedef struct AggregateFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[6];
 } AggregateFixture;
 
+typedef struct StaticFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationType types[6];
+    uint32_t tuple_elements[3];
+    CmHirDeclarationGeneric generics[1];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationValue values[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[3];
+} StaticFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -216,6 +227,15 @@ static size_t type_record_offset(const CmByteBuf *bytes,
             argument_count = get_u32(bytes->data + cursor + 8u);
             assert((size_t)argument_count <= (bytes->len - cursor - 12u) / 4u);
             cursor += 12u + (size_t)argument_count * 4u;
+        } else if (kind == CM_HIR_DECL_TYPE_TUPLE) {
+            uint32_t element_count;
+            assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+            element_count = get_u32(bytes->data + cursor + 4u);
+            assert((size_t)element_count
+                <= (bytes->len - cursor - 8u) / 4u);
+            cursor += 8u + (size_t)element_count * 4u;
+        } else if (kind == CM_HIR_DECL_TYPE_ARRAY) {
+            cursor += 28u;
         } else {
             assert(0);
         }
@@ -252,7 +272,8 @@ static size_t value_record_offset(const CmByteBuf *bytes,
             assert((size_t)parameter_count
                 <= (bytes->len - cursor - 16u) / 4u);
             cursor += 16u + (size_t)parameter_count * 4u;
-        } else if (kind == CM_HIR_DECL_VALUE_CONST) {
+        } else if (kind == CM_HIR_DECL_VALUE_CONST
+                || kind == CM_HIR_DECL_VALUE_STATIC) {
             cursor += 8u;
         } else {
             assert(0);
@@ -915,6 +936,70 @@ static void const_fixture_init(ConstFixture *fixture)
     fixture->namespace_entries[2].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 3u;
+}
+
+static void static_fixture_init(StaticFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("core");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-static-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_I16;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_U64;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[2].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    fixture->tuple_elements[0] = 2u;
+    fixture->tuple_elements[1] = 1u;
+    fixture->tuple_elements[2] = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_TUPLE;
+    fixture->types[3].element_count = 3u;
+    fixture->types[3].element_types = fixture->tuple_elements;
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_ARRAY;
+    fixture->types[4].child_type = 4u;
+    fixture->types[4].array_length_type = 3u;
+    fixture->types[4].array_length_low_bits = UINT64_C(81);
+    metadata->types = fixture->types;
+    metadata->type_count = 5u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_STATIC;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("CACHED_POW10");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].declared_type = 5u;
+    fixture->values[0].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("POW10_REEXPORT");
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static void aggregate_fixture_init(AggregateFixture *fixture)
@@ -2374,7 +2459,7 @@ static void test_const_value_family(void)
         assert_failed_transaction(&bad); \
         cm_byte_buf_destroy(&bad); \
     } while (0)
-    ASSERT_BAD_VALUE_BYTE(record, UINT8_C(3));
+    ASSERT_BAD_VALUE_BYTE(record, UINT8_C(4));
     ASSERT_BAD_VALUE_BYTE(record + 1u, UINT8_C(1));
     ASSERT_BAD_VALUE_BYTE(payload + 4u, CM_HIR_DECL_MUTABLE);
     ASSERT_BAD_VALUE_BYTE(payload + 5u, UINT8_C(0));
@@ -2392,6 +2477,217 @@ static void test_const_value_family(void)
     cm_byte_buf_destroy(&bad);
     bad = copy_bytes(&encoded);
     bad.data[payload] ^= UINT8_C(1);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
+static void test_static_tuple_array_family(void)
+{
+    StaticFixture fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t tuple_record;
+    size_t array_record;
+    size_t value_record;
+    size_t value_common;
+    size_t value_payload;
+
+    static_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    tuple_record = type_record_offset(&encoded, UINT32_C(3));
+    array_record = type_record_offset(&encoded, UINT32_C(4));
+    value_record = value_record_offset(&encoded, UINT32_C(0));
+    value_common = skip_string(&encoded, value_record + 8u);
+    value_payload = value_common + 44u;
+    assert(encoded.data[tuple_record] == CM_HIR_DECL_TYPE_TUPLE
+        && get_u32(encoded.data + tuple_record + 4u) == UINT32_C(3)
+        && get_u32(encoded.data + tuple_record + 8u) == UINT32_C(2)
+        && get_u32(encoded.data + tuple_record + 12u) == UINT32_C(1)
+        && get_u32(encoded.data + tuple_record + 16u) == UINT32_C(1));
+    assert(encoded.data[array_record] == CM_HIR_DECL_TYPE_ARRAY
+        && get_u32(encoded.data + array_record + 4u) == UINT32_C(4)
+        && get_u32(encoded.data + array_record + 8u) == UINT32_C(3)
+        && get_u64(encoded.data + array_record + 12u) == UINT64_C(81)
+        && get_u64(encoded.data + array_record + 20u) == UINT64_C(0));
+    assert(encoded.data[value_record] == CM_HIR_DECL_VALUE_STATIC
+        && get_u32(encoded.data + value_payload) == UINT32_C(5)
+        && encoded.data[value_payload + 4u] == CM_HIR_DECL_IMMUTABLE
+        && encoded.data[value_payload + 5u] == UINT8_C(1));
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.type_count == 5u
+        && decoded.types[3].kind == CM_HIR_DECL_TYPE_TUPLE
+        && decoded.types[3].element_count == 3u
+        && decoded.types[3].element_types != NULL
+        && decoded.types[3].element_types[0] == 2u
+        && decoded.types[3].element_types[1] == 1u
+        && decoded.types[3].element_types[2] == 1u
+        && decoded.types[4].kind == CM_HIR_DECL_TYPE_ARRAY
+        && decoded.types[4].child_type == 4u
+        && decoded.types[4].array_length_type == 3u
+        && decoded.types[4].array_length_low_bits == UINT64_C(81)
+        && decoded.types[4].array_length_high_bits == UINT64_C(0)
+        && decoded.value_count == 1u
+        && decoded.values[0].kind == CM_HIR_DECL_VALUE_STATIC
+        && decoded.values[0].declared_type == 5u
+        && decoded.values[0].mutability == CM_HIR_DECL_IMMUTABLE
+        && decoded.values[0].has_body == 1u
+        && decoded.namespace_count == 2u
+        && decoded.namespace_entries[0].target_local == 1u
+        && decoded.namespace_entries[1].target_local == 1u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    static_fixture_init(&fixture);
+    fixture.values[0].mutability = CM_HIR_DECL_MUTABLE;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.types[4].array_length_low_bits = UINT64_MAX;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+
+    static_fixture_init(&fixture);
+    fixture.types[3].element_count = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.types[3].element_types = NULL;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.types[3].element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + UINT32_C(1);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.tuple_elements[1] = 5u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.types[4].child_type = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.types[4].array_length_type = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.types[4].array_length_high_bits = UINT64_C(1);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.values[0].kind = CM_HIR_DECL_VALUE_CONST;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.values[0].mutability = CM_HIR_DECL_MUTABLE;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.values[0].mutability = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.values[0].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture.values[0].has_body = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    static_fixture_init(&fixture);
+    fixture.namespace_entries[1].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* A generic hidden beneath TUPLE->ARRAY cannot escape into STATIC. */
+    static_fixture_init(&fixture);
+    fixture.generics[0].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture.generics[0].owner_local = 1u;
+    fixture.generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture.generics[0].name = (CmHirDeclarationString)S("T");
+    fixture.metadata.generics = fixture.generics;
+    fixture.metadata.generic_count = 1u;
+    fixture.items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture.items[0].owner_module = 1u;
+    fixture.items[0].name = (CmHirDeclarationString)S("Wrap");
+    fixture.items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture.items[0].source_ordinal = 2u;
+    fixture.items[0].generic_start = 1u;
+    fixture.items[0].generic_count = 1u;
+    fixture.items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_UNIT;
+    fixture.metadata.items = fixture.items;
+    fixture.metadata.item_count = 1u;
+    memset(fixture.types + 3u, 0,
+        3u * sizeof(fixture.types[0]));
+    fixture.types[3].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture.types[3].generic_local = 1u;
+    fixture.tuple_elements[0] = 2u;
+    fixture.tuple_elements[1] = 4u;
+    fixture.tuple_elements[2] = 1u;
+    fixture.types[4].kind = CM_HIR_DECL_TYPE_TUPLE;
+    fixture.types[4].element_count = 3u;
+    fixture.types[4].element_types = fixture.tuple_elements;
+    fixture.types[5].kind = CM_HIR_DECL_TYPE_ARRAY;
+    fixture.types[5].child_type = 5u;
+    fixture.types[5].array_length_type = 3u;
+    fixture.types[5].array_length_low_bits = UINT64_C(81);
+    fixture.metadata.type_count = 6u;
+    fixture.values[0].declared_type = 6u;
+    fixture.namespace_entries[2] = fixture.namespace_entries[1];
+    fixture.namespace_entries[1] = fixture.namespace_entries[0];
+    fixture.namespace_entries[0].owner_module = 1u;
+    fixture.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture.namespace_entries[0].name = fixture.items[0].name;
+    fixture.namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture.namespace_entries[0].target_local = 1u;
+    fixture.namespace_entries[0].export_ordinal = 2u;
+    fixture.metadata.namespace_count = 3u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    bad = copy_bytes(&encoded);
+    tuple_record = type_record_offset(&bad, UINT32_C(3));
+    put_u32(bad.data + tuple_record + 4u, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    array_record = type_record_offset(&bad, UINT32_C(4));
+    put_u32(bad.data + array_record + 8u, UINT32_C(2));
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    array_record = type_record_offset(&bad, UINT32_C(4));
+    bad.data[array_record + 20u] = UINT8_C(1);
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    value_record = value_record_offset(&bad, UINT32_C(0));
+    bad.data[value_record] = UINT8_C(4);
+    recompute_family_crc(&bad, UINT8_C(3), "VALU");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    bad.data[array_record + 12u] ^= UINT8_C(1);
     assert_failed_transaction(&bad);
     cm_byte_buf_destroy(&bad);
     bad = copy_bytes(&encoded);
@@ -2590,6 +2886,7 @@ int main(void)
     test_default_enum_variant_namespace();
     test_enum_named_adt_signature();
     test_const_value_family();
+    test_static_tuple_array_family();
     test_named_aggregate_family();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);

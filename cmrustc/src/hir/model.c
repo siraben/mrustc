@@ -3685,8 +3685,10 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
             || item->data.value_item.has_default_body != 0) return 0;
         if (item->data.value_item.definition_kind
                 == CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION) {
-            return item->kind == CM_HIR_ITEM_CONST
-                && item->data.value_item.mutability == CM_HIR_IMMUTABLE
+            return (item->kind == CM_HIR_ITEM_STATIC
+                    || (item->kind == CM_HIR_ITEM_CONST
+                        && item->data.value_item.mutability
+                            == CM_HIR_IMMUTABLE))
                 && item->data.value_item.body == CM_HIR_BODY_NONE;
         }
         if (item->data.value_item.body == CM_HIR_BODY_NONE) return 0;

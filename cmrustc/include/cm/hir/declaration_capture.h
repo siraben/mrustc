@@ -186,6 +186,14 @@ typedef struct CmHirDeclarationCaptureResult {
  * bit are captured. The initializer, an evaluated value, and CTFE IR are not
  * transported by v3.0, whose BODIES_CONST_IR family remains absent.
  *
+ * A supported free static is public, top-level, zero-generic/predicate, has
+ * an explicit source type made only from representable primitives, nonempty
+ * tuples, and fixed-size arrays, and has one authenticated source-owned body.
+ * Array lengths are retained as exact scalar `usize` VALUE constants. Its
+ * sole direct attribute is exact bare `doc(hidden)`; renamed public reexports
+ * retain the same VALU identity. Mutability and body presence are retained,
+ * but the initializer and CTFE/body IR are deliberately not transported.
+ *
  * On success output owns all descriptor storage.  Failure leaves an already
  * initialized output unchanged.
  */

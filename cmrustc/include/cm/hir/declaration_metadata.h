@@ -100,7 +100,9 @@ typedef enum CmHirDeclarationTypeKind {
     CM_HIR_DECL_TYPE_RAW_POINTER = 6,
     CM_HIR_DECL_TYPE_REFERENCE = 7,
     /* Nonempty ordered type arguments; zero arguments use NAMED_ADT. */
-    CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION = 8
+    CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION = 8,
+    CM_HIR_DECL_TYPE_TUPLE = 9,
+    CM_HIR_DECL_TYPE_ARRAY = 10
 } CmHirDeclarationTypeKind;
 
 typedef enum CmHirDeclarationMutability {
@@ -252,11 +254,19 @@ typedef struct CmHirDeclarationType {
     /* Required and nonempty for NAMED_ADT_APPLICATION. */
     uint32_t argument_count;
     uint32_t *argument_types;
+    /* Required and nonempty for TUPLE, in semantic element order. */
+    uint32_t element_count;
+    uint32_t *element_types;
+    /* ARRAY uses child_type as its element and an exact scalar usize length. */
+    uint32_t array_length_type;
+    uint64_t array_length_low_bits;
+    uint64_t array_length_high_bits;
 } CmHirDeclarationType;
 
 typedef enum CmHirDeclarationValueKind {
     CM_HIR_DECL_VALUE_FUNCTION = 1,
-    CM_HIR_DECL_VALUE_CONST = 2
+    CM_HIR_DECL_VALUE_CONST = 2,
+    CM_HIR_DECL_VALUE_STATIC = 3
 } CmHirDeclarationValueKind;
 
 typedef struct CmHirDeclarationValue {

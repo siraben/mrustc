@@ -53,6 +53,24 @@ static const unsigned char const_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char static_fixture_source[] =
+    "#[doc(hidden)]\n"
+    "pub static TABLE: [(u64, i16, i16); 2] = "
+        "[(1, -2, -3), (4, 5, 6)];\n"
+    "pub use TABLE as RENAMED_TABLE;\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
+static const unsigned char duplicate_static_fixture_source[] =
+    "#[doc(hidden)]\n"
+    "pub static FIRST: [(u64, i16, i16); 2] = "
+        "[(1, -2, -3), (4, 5, 6)];\n"
+    "#[doc(hidden)]\n"
+    "pub static SECOND: [(u64, i16, i16); 2] = "
+        "[(7, -8, -9), (10, 11, 12)];\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static const unsigned char default_enum_fixture_source[] =
     "#[rustc_diagnostic_item = \"mir_basic_block\"]\n"
     "pub enum BasicBlock { Normal, Cleanup }\n"
@@ -178,6 +196,12 @@ static void const_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-const-provider.rs",
         const_fixture_source, sizeof(const_fixture_source) - 1u);
+}
+
+static void static_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "v30-static-provider.rs",
+        static_fixture_source, sizeof(static_fixture_source) - 1u);
 }
 
 static void default_enum_fixture_init(CaptureFixture *fixture,
@@ -2592,8 +2616,285 @@ static void test_named_aggregate_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static void assert_static_descriptor(
+    const CmHirDeclarationMetadata *metadata)
+{
+    const CmHirDeclarationNamespaceEntry *direct;
+    const CmHirDeclarationNamespaceEntry *renamed;
+    const CmHirDeclarationType *tuple;
+    const CmHirDeclarationType *array;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(metadata->module_count == 1u && metadata->root_module == 1u
+        && metadata->trait_count == 1u && metadata->item_count == 0u
+        && metadata->value_count == 2u && metadata->generic_count == 2u
+        && metadata->predicate_count == 1u && metadata->type_count == 8u
+        && metadata->namespace_count == 4u);
+    assert(metadata->types[0].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[0].primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && metadata->types[1].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[1].primitive == CM_HIR_DECL_PRIMITIVE_I16
+        && metadata->types[2].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[2].primitive == CM_HIR_DECL_PRIMITIVE_U8
+        && metadata->types[3].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[3].primitive == CM_HIR_DECL_PRIMITIVE_U64
+        && metadata->types[4].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[4].primitive == CM_HIR_DECL_PRIMITIVE_USIZE
+        && metadata->types[5].kind == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->types[5].generic_local == 2u);
+    tuple = &metadata->types[6];
+    array = &metadata->types[7];
+    assert(tuple->kind == CM_HIR_DECL_TYPE_TUPLE
+        && tuple->element_count == 3u && tuple->element_types != NULL
+        && tuple->element_types[0] == 4u
+        && tuple->element_types[1] == 2u
+        && tuple->element_types[2] == 2u);
+    assert(array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && array->child_type == 7u && array->array_length_type == 5u
+        && array->array_length_low_bits == UINT64_C(2)
+        && array->array_length_high_bits == 0u);
+    assert(metadata->values[0].kind == CM_HIR_DECL_VALUE_STATIC
+        && declaration_string_is(metadata->values[0].name, "TABLE")
+        && metadata->values[0].source_ordinal == 0u
+        && metadata->values[0].generic_start == 0u
+        && metadata->values[0].generic_count == 0u
+        && metadata->values[0].predicate_start == 0u
+        && metadata->values[0].predicate_count == 0u
+        && metadata->values[0].parameter_count == 0u
+        && metadata->values[0].parameter_types == NULL
+        && metadata->values[0].return_type == 0u
+        && metadata->values[0].declared_type == 8u
+        && metadata->values[0].mutability == CM_HIR_DECL_IMMUTABLE
+        && metadata->values[0].has_body == 1u);
+    assert(metadata->values[1].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && declaration_string_is(metadata->values[1].name, "needs")
+        && metadata->values[1].source_ordinal == 3u
+        && metadata->values[1].generic_count == 1u
+        && metadata->values[1].predicate_count == 1u
+        && metadata->values[1].return_type == 1u);
+    assert(metadata->generics[1].owner_kind == CM_HIR_DECL_GENERIC_VALUE
+        && metadata->generics[1].owner_local == 2u
+        && metadata->predicates[0].owner_value == 2u
+        && metadata->predicates[0].subject_type == 6u
+        && metadata->predicates[0].argument_types[0] == 3u);
+    direct = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "TABLE");
+    renamed = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "RENAMED_TABLE");
+    assert(direct != NULL && renamed != NULL
+        && direct->target_kind == CM_HIR_DECL_TARGET_VALUE
+        && renamed->target_kind == CM_HIR_DECL_TARGET_VALUE
+        && direct->target_local == 1u && renamed->target_local == 1u
+        && direct->export_ordinal == 0u && renamed->export_ordinal == 1u);
+}
+
+static void test_static_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    static_fixture_init(&first, 0);
+    static_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.value_count == 2u && result.namespace_count == 4u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION
+        && result.projected_semantic_attribute_count == 1u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 1u);
+    assert_static_descriptor(&first_metadata);
+    assert_static_descriptor(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_static_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmHirBody *body;
+    CmHirType *array;
+    CmHirType *tuple;
+    CmHirTypeId saved_element;
+    CmHirTypeId saved_length_type;
+    uint64_t saved_length;
+    CmSpan saved_span;
+    CmInternId saved_metadata;
+    uint32_t saved_source_expression;
+    CmHirBodyId saved_body;
+    CmHirDefId saved_definition;
+    CmModuleId root_module;
+    const CmAst *borrowed_ast;
+    CmAstItem *ast_item;
+    CmResolveEffectiveItem effective;
+    static_fixture_init(&fixture, 1);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)find_item(&fixture, "TABLE", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_STATIC
+        && item->attribute_count == 1u
+        && item->data.value_item.body != CM_HIR_BODY_NONE);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        item->data.value_item.body);
+    array = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        item->data.value_item.type);
+    assert(body != NULL && array != NULL
+        && array->kind == CM_HIR_TYPE_ARRAY_KIND);
+    tuple = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        array->data.array_type.element);
+    assert(tuple != NULL && tuple->kind == CM_HIR_TYPE_TUPLE_KIND
+        && tuple->data.tuple_type.element_count == 3u);
+
+#define ASSERT_STATIC_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_length = array->data.array_type.length.data.value.low_bits;
+    array->data.array_type.length.data.value.low_bits = UINT64_C(3);
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    array->data.array_type.length.data.value.low_bits = saved_length;
+
+    array->data.array_type.length.data.value.high_bits = UINT64_C(1);
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    array->data.array_type.length.data.value.high_bits = 0u;
+
+    saved_length_type = array->data.array_type.length.type;
+    array->data.array_type.length.type = tuple->data.tuple_type.elements[0];
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    array->data.array_type.length.type = saved_length_type;
+
+    saved_element = tuple->data.tuple_type.elements[1];
+    tuple->data.tuple_type.elements[1] = tuple->data.tuple_type.elements[0];
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    tuple->data.tuple_type.elements[1] = saved_element;
+
+    tuple->data.tuple_type.element_count = 2u;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    tuple->data.tuple_type.element_count = 3u;
+
+    saved_span = tuple->span;
+    tuple->span.start += 1u;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    tuple->span = saved_span;
+
+    item->data.value_item.mutability = CM_HIR_MUTABLE;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    item->data.value_item.mutability = CM_HIR_IMMUTABLE;
+
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = cm_hir_intern(&fixture.hir, "doc(alias)");
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    item->attributes[0].metadata = saved_metadata;
+
+    item->attributes[0].expansion_depth = 1u;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    item->attributes[0].expansion_depth = 0u;
+
+    saved_source_expression = body->source_expression_id;
+    body->source_expression_id = UINT32_MAX;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    body->source_expression_id = saved_source_expression;
+
+    saved_body = item->data.value_item.body;
+    item->data.value_item.body = CM_HIR_BODY_NONE;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    item->data.value_item.body = saved_body;
+
+    body->expected_type = array->data.array_type.element;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    body->expected_type = item->data.value_item.type;
+
+    assert(cm_module_graph_get_root(&fixture.graph, &root_module)
+        && cm_module_graph_get_effective_item(&fixture.graph,
+            fixture.graph_result.revision, root_module, 0u, &effective)
+            == CM_RESOLVE_VIEW_OK
+        && cm_module_graph_borrow_ast(&fixture.graph, root_module,
+            &borrowed_ast));
+    ast_item = (CmAstItem *)(void *)cm_ast_get_item(borrowed_ast,
+        effective.declaration.item);
+    assert(ast_item != NULL && ast_item->kind == CM_AST_ITEM_STATIC
+        && ast_item->data.value_item.has_value);
+    ast_item->data.value_item.has_value = 0;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    ast_item->data.value_item.has_value = 1;
+
+    saved_definition = item->definition;
+    item->definition.index += 1u;
+    ASSERT_STATIC_ATOMIC_FAILURE();
+    item->definition = saved_definition;
+
+    assert_static_descriptor(&metadata);
+#undef ASSERT_STATIC_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_static_type_dag_is_structurally_deduplicated(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    fixture_init_source(&fixture, 1, "v30-duplicate-static.rs",
+        duplicate_static_fixture_source,
+        sizeof(duplicate_static_fixture_source) - 1u);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u
+        && metadata.type_count == 8u && metadata.value_count == 3u
+        && metadata.values[0].kind == CM_HIR_DECL_VALUE_STATIC
+        && metadata.values[1].kind == CM_HIR_DECL_VALUE_STATIC
+        && metadata.values[0].declared_type == 8u
+        && metadata.values[1].declared_type == 8u
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
+    test_static_capture_and_determinism();
+    test_static_hostile_mutations_are_atomic();
+    test_static_type_dag_is_structurally_deduplicated();
     test_named_aggregate_capture_and_determinism();
     test_named_aggregate_hostile_mutations_are_atomic();
     test_default_enum_variant_capture_and_determinism();

@@ -387,8 +387,9 @@ typedef enum CmHirItemKind {
 /*
  * Provenance for the presence or deliberate absence of an executable value
  * definition.  SOURCE is the zero/default state used by ordinary lowering.
- * METADATA_DECLARATION records an authenticated dependency declaration whose
- * initializer exists in the producer but is not carried by this HIR context.
+ * METADATA_DECLARATION records an authenticated free const/static declaration
+ * whose initializer exists in the producer but is not carried by this HIR
+ * context.
  */
 typedef enum CmHirValueDefinitionKind {
     CM_HIR_VALUE_DEFINITION_SOURCE = 0,
