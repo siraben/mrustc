@@ -53,6 +53,8 @@ typedef enum CmHirDeclarationCaptureReason {
     CM_HIR_DECL_CAPTURE_REASON_ITEM_DEFINITION_UNBOUND,
     CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID,
     CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED,
+    CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_VALUE_SHAPE_UNSUPPORTED,
     CM_HIR_DECL_CAPTURE_REASON_REQUIRED_ITEMS_MISSING,
     CM_HIR_DECL_CAPTURE_REASON_IDENTITY_UNSUPPORTED,
@@ -65,6 +67,18 @@ typedef enum CmHirDeclarationCaptureReason {
     CM_HIR_DECL_CAPTURE_REASON_METADATA_INVALID,
     CM_HIR_DECL_CAPTURE_REASON_AUTHORITY_CHANGED
 } CmHirDeclarationCaptureReason;
+
+typedef enum CmHirDeclarationCaptureSemanticAttributes {
+    /* No semantic attribute was omitted from the v3.0 descriptor. */
+    CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_EXACT_NONE = 0,
+    /*
+     * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture accepted and
+     * deliberately omitted only the LOWER_SAFE allowlist of authenticated,
+     * direct `unstable(...)` and/or unexpanded `derive(...)` attributes on
+     * supported UNIT structs.  This does not call either attribute inert.
+     */
+    CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_ALLOWLISTED_UNIT_STRUCT = 1
+} CmHirDeclarationCaptureSemanticAttributes;
 
 typedef struct CmHirDeclarationCaptureInput {
     const CmHirContext *hir;
@@ -87,9 +101,12 @@ typedef struct CmHirDeclarationCaptureResult {
     CmHirTypeId rejected_type;
     size_t module_count;
     size_t trait_count;
+    size_t item_count;
     size_t value_count;
     size_t predicate_count;
     size_t namespace_count;
+    CmHirDeclarationCaptureSemanticAttributes semantic_attributes;
+    size_t projected_semantic_attribute_count;
     /* Append-only first-failure diagnostic; all fields are borrowed/scalar. */
     CmHirDeclarationCaptureStage failure_stage;
     CmHirDeclarationCaptureReason failure_reason;
@@ -109,6 +126,18 @@ typedef struct CmHirDeclarationCaptureResult {
  * successfully lowered graph revision.  Graph/import/module-map provenance
  * is the completeness authority; unsupported active public facts reject the
  * complete transaction.  No declaration name has special meaning.
+ *
+ * v3.0's SEMANTIC_ATTRIBUTES family is absent.  For the supported public
+ * top-level UNIT-struct projection, capture may omit at most one direct
+ * `unstable(...)` and at most one direct, unexpanded `derive(...)` attribute.
+ * Every other attribute spelling, duplicate, generated attribute, repr/lang/
+ * layout/ABI attribute, or inconsistent pointer/count shape rejects.  A
+ * crate/module/import attribute and an attribute on any other supported item
+ * also reject; the allowlist applies only to the UNIT struct declaration.  A
+ * successful omission is reported explicitly through `semantic_attributes`
+ * and `projected_semantic_attribute_count`; it is not an unchanged-HIR
+ * round-trip claim and is not usable as attribute-complete dependency
+ * metadata.
  *
  * On success output owns all descriptor storage.  Failure leaves an already
  * initialized output unchanged.
