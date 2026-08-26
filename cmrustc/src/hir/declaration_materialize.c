@@ -316,13 +316,52 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         if (status != CM_HIR_OK) return status;
     }
     for (index = 0u; index < metadata->associated_count; ++index) {
-        if (metadata->associated_items[index].kind
-                != CM_HIR_DECL_ASSOCIATED_METHOD) {
+        CmHirItemKind kind;
+        const CmHirDeclarationAssociatedItem *wire =
+            &metadata->associated_items[index];
+        if (wire->kind == CM_HIR_DECL_ASSOCIATED_TYPE) {
+            kind = CM_HIR_ITEM_TYPE_ALIAS;
+        } else if (wire->kind == CM_HIR_DECL_ASSOCIATED_METHOD) {
+            kind = CM_HIR_ITEM_FUNCTION;
+        } else {
             return CM_HIR_INVARIANT_VIOLATION;
         }
         status = cm_hir_reserve_item_definition_as(context, crate_id,
-            CM_HIR_ITEM_FUNCTION, span, &runtime->associated[index]);
+            kind, cm_decl_span(span.source, wire->source_ordinal),
+            &runtime->associated[index]);
         if (status != CM_HIR_OK) return status;
+    }
+    /* Projection types may precede the final associated declaration bind.
+     * Prebind only the exact targetless trait-associated TYPE identities. */
+    for (index = 0u; index < metadata->associated_count; ++index) {
+        const CmHirDeclarationAssociatedItem *wire =
+            &metadata->associated_items[index];
+        const CmHirDeclarationTrait *parent;
+        CmHirItem skeleton;
+        CmHirItemId item_id;
+        if (wire->kind != CM_HIR_DECL_ASSOCIATED_TYPE) continue;
+        if (wire->parent_local == 0u
+            || (size_t)wire->parent_local > metadata->trait_count) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        parent = &metadata->traits[wire->parent_local - 1u];
+        memset(&skeleton, 0, sizeof(skeleton));
+        skeleton.kind = CM_HIR_ITEM_TYPE_ALIAS;
+        skeleton.definition = runtime->associated[index];
+        skeleton.owner_module = runtime->modules[parent->owner_module - 1u];
+        skeleton.parent_definition = runtime->traits[wire->parent_local - 1u];
+        skeleton.name = cm_decl_intern(context, wire->name);
+        skeleton.visibility.kind = CM_HIR_VIS_PRIVATE;
+        skeleton.visibility.restriction = cm_hir_def_id_none();
+        skeleton.span = cm_decl_span(span.source, wire->source_ordinal);
+        skeleton.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+        skeleton.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+        skeleton.data.type_alias_item.trait_item_definition =
+            cm_hir_def_id_none();
+        status = cm_hir_prebind_trait_associated_type_declaration(context,
+            &skeleton, &item_id);
+        if (status != CM_HIR_OK || item_id != CM_HIR_ITEM_NONE)
+            return status == CM_HIR_OK ? CM_HIR_INVARIANT_VIOLATION : status;
     }
     for (index = 0u; index < metadata->item_count; ++index) {
         CmHirItemKind kind;
@@ -505,6 +544,94 @@ static CmInternId cm_decl_lang_attribute(CmHirContext *context,
     result = cm_interner_intern(&context->strings, metadata, length);
     cm_free(metadata);
     return result;
+}
+
+static CmHirStatus cm_decl_trait_attributes(CmHirContext *context,
+    const CmHirDeclarationTrait *wire, CmSpan span,
+    CmHirAttribute attributes[7], uint32_t *out_count)
+{
+    uint8_t known_flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_HAS_LANG_ITEM | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    uint32_t count = 0u;
+#define CM_DECL_ADD_TRAIT_ATTRIBUTE(text_value) do { \
+        attributes[count].metadata = cm_hir_intern(context, (text_value)); \
+        if (attributes[count].metadata == CM_INTERN_ID_NONE) \
+            return CM_HIR_INVALID_ARGUMENT; \
+        count += 1u; \
+    } while (0)
+    if (context == NULL || wire == NULL || attributes == NULL
+        || out_count == NULL || (wire->flags & (uint8_t)~known_flags) != 0u
+        || ((wire->flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) != 0u
+            ? (wire->lang_item.data == NULL || wire->lang_item.length == 0u)
+            : (wire->lang_item.data != NULL
+                || wire->lang_item.length != 0u))) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    memset(attributes, 0, 7u * sizeof(*attributes));
+    if ((wire->flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) != 0u) {
+        attributes[count].metadata = cm_decl_lang_attribute(context,
+            wire->lang_item);
+        if (attributes[count].metadata == CM_INTERN_ID_NONE)
+            return CM_HIR_INVALID_ARGUMENT;
+        count += 1u;
+    }
+    if ((wire->flags & CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("rustc_paren_sugar");
+    if ((wire->flags & CM_HIR_DECL_TRAIT_FUNDAMENTAL) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("fundamental");
+    if ((wire->flags & CM_HIR_DECL_TRAIT_IS_CONST) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("const_trait");
+    if ((wire->flags & CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("rustc_deny_explicit_impl");
+    if ((wire->flags
+            & CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("rustc_do_not_implement_via_object");
+    if ((wire->flags & CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u) {
+        static const unsigned char prefix[] =
+            "rustc_diagnostic_item = \"";
+        static const unsigned char suffix[] = "\"";
+        size_t prefix_length = sizeof(prefix) - 1u;
+        size_t suffix_length = sizeof(suffix) - 1u;
+        size_t total;
+        unsigned char *text;
+        if (wire->diagnostic_item.data == NULL
+            || wire->diagnostic_item.length == 0u
+            || wire->diagnostic_item.length
+                > SIZE_MAX - prefix_length - suffix_length) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        total = prefix_length + wire->diagnostic_item.length + suffix_length;
+        text = (unsigned char *)cm_alloc(total);
+        memcpy(text, prefix, prefix_length);
+        memcpy(text + prefix_length, wire->diagnostic_item.data,
+            wire->diagnostic_item.length);
+        memcpy(text + prefix_length + wire->diagnostic_item.length,
+            suffix, suffix_length);
+        attributes[count].metadata = cm_interner_intern(&context->strings,
+            text, total);
+        cm_free(text);
+        if (attributes[count].metadata == CM_INTERN_ID_NONE)
+            return CM_HIR_INVALID_ARGUMENT;
+        count += 1u;
+    } else if (wire->diagnostic_item.data != NULL
+            || wire->diagnostic_item.length != 0u) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    {
+        uint32_t index;
+        for (index = 0u; index < count; ++index) {
+            attributes[index].span = span;
+            attributes[index].source_attribute = index + 1u;
+            attributes[index].expansion_depth = 0u;
+        }
+    }
+    *out_count = count;
+#undef CM_DECL_ADD_TRAIT_ATTRIBUTE
+    return CM_HIR_OK;
 }
 
 static CmHirStatus cm_decl_aggregate_attributes(CmHirContext *context,
@@ -874,6 +1001,64 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
             } else {
                 return CM_HIR_INVARIANT_VIOLATION;
             }
+        } else if (wire->kind == CM_HIR_DECL_TYPE_PROJECTION) {
+            CmHirGenericArg *projection_arguments;
+            uint32_t child;
+            if (wire->projection_self_type == 0u
+                || (size_t)wire->projection_self_type > index
+                || runtime->types[wire->projection_self_type - 1u]
+                    == CM_HIR_TYPE_NONE
+                || wire->projection_trait_local == 0u
+                || (size_t)wire->projection_trait_local
+                    > metadata->trait_count
+                || wire->projection_associated_local == 0u
+                || (size_t)wire->projection_associated_local
+                    > metadata->associated_count
+                || metadata->associated_items[
+                    wire->projection_associated_local - 1u].kind
+                    != CM_HIR_DECL_ASSOCIATED_TYPE
+                || metadata->associated_items[
+                    wire->projection_associated_local - 1u].parent_local
+                    != wire->projection_trait_local
+                || (wire->projection_argument_count != 0u
+                    && wire->projection_argument_types == NULL)) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            projection_arguments = (CmHirGenericArg *)cm_decl_array(
+                wire->projection_argument_count,
+                sizeof(*projection_arguments));
+            if (wire->projection_argument_count != 0u
+                && projection_arguments == NULL) {
+                return CM_HIR_INVALID_ARGUMENT;
+            }
+            for (child = 0u; child < wire->projection_argument_count;
+                    ++child) {
+                uint32_t local = wire->projection_argument_types[child];
+                if (local == 0u || (size_t)local > index
+                    || runtime->types[local - 1u] == CM_HIR_TYPE_NONE) {
+                    cm_free(projection_arguments);
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
+                projection_arguments[child].kind = CM_HIR_GENERIC_ARG_TYPE;
+                projection_arguments[child].data.type =
+                    runtime->types[local - 1u];
+            }
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_PROJECTION_KIND;
+            type.data.projection_type.self_type =
+                runtime->types[wire->projection_self_type - 1u];
+            type.data.projection_type.trait_type.definition =
+                runtime->traits[wire->projection_trait_local - 1u];
+            type.data.projection_type.trait_type.arguments =
+                projection_arguments;
+            type.data.projection_type.trait_type.argument_count =
+                wire->projection_argument_count;
+            type.data.projection_type.associated_type.definition =
+                runtime->associated[
+                    wire->projection_associated_local - 1u];
+            type.data.projection_type.associated_type.arguments = NULL;
+            type.data.projection_type.associated_type.argument_count = 0u;
+            arguments = projection_arguments;
         } else {
             /* Non-structural future tags fail closed here. */
             return CM_HIR_INVARIANT_VIOLATION;
@@ -922,14 +1107,18 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
     size_t index;
     for (index = 0u; index < metadata->trait_count; ++index) {
         const CmHirDeclarationTrait *wire = &metadata->traits[index];
-        CmHirAttribute diagnostic_attribute;
+        CmHirAttribute attributes[7];
+        CmHirSupertrait *supertraits = NULL;
+        CmHirGenericArg **supertrait_arguments = NULL;
+        CmHirTraitPredicate *predicates = NULL;
+        CmHirGenericArg **predicate_arguments = NULL;
         CmHirOutlivesPredicate *outlives = NULL;
         CmHirItem item;
         CmHirItemId item_id;
-        CmHirStatus status;
+        CmHirStatus status = CM_HIR_OK;
+        uint32_t attribute_count = 0u;
         uint32_t predicate_index;
         memset(&item, 0, sizeof(item));
-        memset(&diagnostic_attribute, 0, sizeof(diagnostic_attribute));
         item.kind = CM_HIR_ITEM_TRAIT;
         item.definition = runtime->traits[index];
         item.owner_module = runtime->modules[wire->owner_module - 1u];
@@ -945,52 +1134,139 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
             : runtime->generics[wire->generic_start - 1u];
         item.generic_parameter_count = wire->generic_count;
         if (wire->predicate_scope_start != 0u
-            || wire->predicate_scope_count != 0u
-            || wire->predicate_start != 0u || wire->predicate_count != 0u
-            || (wire->flags
-                & (uint8_t)~CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u) {
+            || wire->predicate_scope_count != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
-        if ((wire->flags & CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u) {
-            static const unsigned char prefix[] =
-                "rustc_diagnostic_item = \"";
-            static const unsigned char suffix[] = "\"";
-            size_t prefix_length = sizeof(prefix) - 1u;
-            size_t suffix_length = sizeof(suffix) - 1u;
-            size_t total;
-            unsigned char *text;
-            if (wire->diagnostic_item.data == NULL
-                || wire->diagnostic_item.length == 0u
-                || wire->diagnostic_item.length
-                    > SIZE_MAX - prefix_length - suffix_length) {
-                return CM_HIR_INVARIANT_VIOLATION;
-            }
-            total = prefix_length + wire->diagnostic_item.length
-                + suffix_length;
-            text = (unsigned char *)cm_alloc(total);
-            memcpy(text, prefix, prefix_length);
-            memcpy(text + prefix_length, wire->diagnostic_item.data,
-                wire->diagnostic_item.length);
-            memcpy(text + prefix_length + wire->diagnostic_item.length,
-                suffix, suffix_length);
-            diagnostic_attribute.metadata = cm_interner_intern(
-                &context->strings, text, total);
-            cm_free(text);
-            if (diagnostic_attribute.metadata == CM_INTERN_ID_NONE)
-                return CM_HIR_INVALID_ARGUMENT;
-            diagnostic_attribute.span = item.span;
-            diagnostic_attribute.source_attribute = 1u;
-            diagnostic_attribute.expansion_depth = 0u;
-            item.attributes = &diagnostic_attribute;
-            item.attribute_count = 1u;
-        } else if (wire->diagnostic_item.data != NULL
-                || wire->diagnostic_item.length != 0u) {
-            return CM_HIR_INVARIANT_VIOLATION;
-        }
+        status = cm_decl_trait_attributes(context, wire, item.span,
+            attributes, &attribute_count);
+        if (status != CM_HIR_OK) return status;
+        item.attributes = attributes;
+        item.attribute_count = attribute_count;
+        supertraits = (CmHirSupertrait *)cm_decl_array(
+            wire->supertrait_count, sizeof(*supertraits));
+        supertrait_arguments = (CmHirGenericArg **)cm_decl_array(
+            wire->supertrait_count, sizeof(*supertrait_arguments));
+        predicates = (CmHirTraitPredicate *)cm_decl_array(
+            wire->predicate_count, sizeof(*predicates));
+        predicate_arguments = (CmHirGenericArg **)cm_decl_array(
+            wire->predicate_count, sizeof(*predicate_arguments));
         outlives = (CmHirOutlivesPredicate *)cm_decl_array(
             wire->outlives_count, sizeof(*outlives));
-        if (wire->outlives_count != 0u && outlives == NULL)
-            return CM_HIR_INVALID_ARGUMENT;
+        if ((wire->supertrait_count != 0u
+                && (supertraits == NULL || supertrait_arguments == NULL))
+            || (wire->predicate_count != 0u
+                && (predicates == NULL || predicate_arguments == NULL))
+            || (wire->outlives_count != 0u && outlives == NULL)) {
+            status = CM_HIR_INVALID_ARGUMENT;
+            goto done;
+        }
+        for (predicate_index = 0u;
+                predicate_index < wire->supertrait_count;
+                ++predicate_index) {
+            const CmHirDeclarationSupertrait *supertrait =
+                &wire->supertraits[predicate_index];
+            uint32_t child;
+            if (supertrait->modifier != CM_HIR_DECL_SUPERTRAIT_REQUIRED
+                || supertrait->trait_local == 0u
+                || (size_t)supertrait->trait_local > metadata->trait_count
+                || (supertrait->argument_count != 0u
+                    && supertrait->argument_types == NULL)) {
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
+            }
+            supertrait_arguments[predicate_index] =
+                (CmHirGenericArg *)cm_decl_array(
+                    supertrait->argument_count,
+                    sizeof(*supertrait_arguments[predicate_index]));
+            if (supertrait->argument_count != 0u
+                && supertrait_arguments[predicate_index] == NULL) {
+                status = CM_HIR_INVALID_ARGUMENT;
+                goto done;
+            }
+            for (child = 0u; child < supertrait->argument_count; ++child) {
+                uint32_t local = supertrait->argument_types[child];
+                if (local == 0u || (size_t)local > metadata->type_count
+                    || runtime->types[local - 1u] == CM_HIR_TYPE_NONE) {
+                    status = CM_HIR_INVARIANT_VIOLATION;
+                    goto done;
+                }
+                supertrait_arguments[predicate_index][child].kind =
+                    CM_HIR_GENERIC_ARG_TYPE;
+                supertrait_arguments[predicate_index][child].data.type =
+                    runtime->types[local - 1u];
+            }
+            supertraits[predicate_index].trait_type.definition =
+                runtime->traits[supertrait->trait_local - 1u];
+            supertraits[predicate_index].trait_type.arguments =
+                supertrait_arguments[predicate_index];
+            supertraits[predicate_index].trait_type.argument_count =
+                supertrait->argument_count;
+            supertraits[predicate_index].span = item.span;
+            supertraits[predicate_index].modifier =
+                CM_HIR_SUPERTRAIT_REQUIRED;
+        }
+        for (predicate_index = 0u;
+                predicate_index < wire->predicate_count;
+                ++predicate_index) {
+            const CmHirDeclarationPredicate *predicate;
+            uint32_t child;
+            if (wire->predicate_start == 0u
+                || (size_t)wire->predicate_start > metadata->predicate_count
+                || (size_t)predicate_index
+                    >= metadata->predicate_count
+                        - (size_t)wire->predicate_start + 1u) {
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
+            }
+            predicate = &metadata->predicates[
+                wire->predicate_start - 1u + predicate_index];
+            if (predicate->owner_kind
+                    != CM_HIR_DECL_PREDICATE_OWNER_NOMINAL
+                || predicate->owner_nominal != index + 1u
+                || predicate->owner_value != 0u
+                || predicate->owner_associated != 0u
+                || predicate->owner_item != 0u
+                || predicate->ordinal != predicate_index
+                || predicate->subject_type == 0u
+                || (size_t)predicate->subject_type > metadata->type_count
+                || predicate->trait_local == 0u
+                || (size_t)predicate->trait_local > metadata->trait_count
+                || predicate->equality_count != 0u) {
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
+            }
+            predicate_arguments[predicate_index] =
+                (CmHirGenericArg *)cm_decl_array(predicate->argument_count,
+                    sizeof(*predicate_arguments[predicate_index]));
+            if (predicate->argument_count != 0u
+                && predicate_arguments[predicate_index] == NULL) {
+                status = CM_HIR_INVALID_ARGUMENT;
+                goto done;
+            }
+            for (child = 0u; child < predicate->argument_count; ++child) {
+                uint32_t local = predicate->argument_types[child];
+                if (local == 0u || (size_t)local > metadata->type_count
+                    || runtime->types[local - 1u] == CM_HIR_TYPE_NONE) {
+                    status = CM_HIR_INVARIANT_VIOLATION;
+                    goto done;
+                }
+                predicate_arguments[predicate_index][child].kind =
+                    CM_HIR_GENERIC_ARG_TYPE;
+                predicate_arguments[predicate_index][child].data.type =
+                    runtime->types[local - 1u];
+            }
+            predicates[predicate_index].subject =
+                runtime->types[predicate->subject_type - 1u];
+            predicates[predicate_index].trait_type.definition =
+                runtime->traits[predicate->trait_local - 1u];
+            predicates[predicate_index].trait_type.arguments =
+                predicate_arguments[predicate_index];
+            predicates[predicate_index].trait_type.argument_count =
+                predicate->argument_count;
+            predicates[predicate_index].scope = CM_HIR_PREDICATE_SCOPE_NONE;
+            predicates[predicate_index].span = item.span;
+            predicates[predicate_index].modifier = CM_HIR_PREDICATE_REQUIRED;
+        }
         for (predicate_index = 0u;
                 predicate_index < wire->outlives_count;
                 ++predicate_index) {
@@ -1002,8 +1278,8 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
                 || (size_t)predicate_index
                     >= metadata->outlives_predicate_count
                         - (size_t)wire->outlives_start + 1u) {
-                cm_free(outlives);
-                return CM_HIR_INVARIANT_VIOLATION;
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
             }
             predicate = &metadata->outlives_predicates[
                 wire->outlives_start - 1u + predicate_index];
@@ -1018,8 +1294,8 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
                 || predicate->bound.kind != CM_HIR_DECL_REGION_STATIC
                 || predicate->bound.generic_local != 0u
                 || predicate->bound.binder_index != 0u) {
-                cm_free(outlives);
-                return CM_HIR_INVARIANT_VIOLATION;
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
             }
             outlives[predicate_index].subject_kind = CM_HIR_OUTLIVES_TYPE;
             outlives[predicate_index].subject.type =
@@ -1030,15 +1306,28 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
         }
         item.outlives_predicates = outlives;
         item.outlives_predicate_count = wire->outlives_count;
+        item.predicates = predicates;
+        item.predicate_count = wire->predicate_count;
+        item.data.trait_item.supertraits = supertraits;
+        item.data.trait_item.supertrait_count = wire->supertrait_count;
+        item.data.trait_item.is_const =
+            (wire->flags & CM_HIR_DECL_TRAIT_IS_CONST) != 0u;
         if (wire->safety == CM_HIR_DECL_SAFETY_SAFE) {
             item.data.trait_item.safety = CM_HIR_SAFE;
         } else if (wire->safety == CM_HIR_DECL_SAFETY_UNSAFE) {
             item.data.trait_item.safety = CM_HIR_UNSAFE;
         } else {
-            cm_free(outlives);
-            return CM_HIR_INVARIANT_VIOLATION;
+            status = CM_HIR_INVARIANT_VIOLATION;
+            goto done;
         }
         status = cm_hir_add_item(context, &item, &item_id);
+done:
+        cm_decl_free_predicate_arguments(predicate_arguments,
+            wire->predicate_count);
+        cm_decl_free_predicate_arguments(supertrait_arguments,
+            wire->supertrait_count);
+        cm_free(predicates);
+        cm_free(supertraits);
         cm_free(outlives);
         if (status != CM_HIR_OK) return status;
     }
@@ -1100,10 +1389,71 @@ static CmHirStatus cm_decl_bind_associated(CmHirContext *context,
         CmHirSafety safety;
         size_t index;
 
-        if (wire->kind != CM_HIR_DECL_ASSOCIATED_METHOD
-            || wire->parent_kind != CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL
+        if (wire->parent_kind != CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL
             || wire->parent_local == 0u
-            || (size_t)wire->parent_local > metadata->trait_count
+            || (size_t)wire->parent_local > metadata->trait_count) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        parent_wire = &metadata->traits[wire->parent_local - 1u];
+        if (wire->kind == CM_HIR_DECL_ASSOCIATED_TYPE) {
+            CmHirAttribute lang_attribute;
+            memset(&item, 0, sizeof(item));
+            memset(&lang_attribute, 0, sizeof(lang_attribute));
+            if (wire->implemented_associated_local != 0u
+                || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PRIVATE
+                || wire->visibility.restriction_module != 0u
+                || wire->is_specializable != 0u
+                || wire->generic_start != 0u || wire->generic_count != 0u
+                || wire->predicate_start != 0u
+                || wire->predicate_count != 0u
+                || wire->receiver != CM_HIR_DECL_RECEIVER_NONE
+                || wire->parameter_count != 0u
+                || wire->parameter_types != NULL || wire->return_type != 0u
+                || wire->abi.data != NULL || wire->abi.length != 0u
+                || wire->safety != CM_HIR_DECL_SAFETY_SAFE
+                || wire->is_const != 0u || wire->is_async != 0u
+                || wire->is_variadic != 0u || wire->has_default_body != 0u
+                || (wire->flags
+                    & (uint8_t)~CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM) != 0u
+                || ((wire->flags
+                        & CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM) != 0u
+                    ? (wire->lang_item.data == NULL
+                        || wire->lang_item.length == 0u)
+                    : (wire->lang_item.data != NULL
+                        || wire->lang_item.length != 0u))) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            item.kind = CM_HIR_ITEM_TYPE_ALIAS;
+            item.definition = runtime->associated[associated_index];
+            item.owner_module =
+                runtime->modules[parent_wire->owner_module - 1u];
+            item.parent_definition =
+                runtime->traits[wire->parent_local - 1u];
+            item.name = cm_decl_intern(context, wire->name);
+            item.visibility.kind = CM_HIR_VIS_PRIVATE;
+            item.visibility.restriction = cm_hir_def_id_none();
+            item.span = cm_decl_span(source, wire->source_ordinal);
+            item.generic_parameter_start = CM_HIR_GENERIC_PARAM_NONE;
+            item.data.type_alias_item.target = CM_HIR_TYPE_NONE;
+            item.data.type_alias_item.trait_item_definition =
+                cm_hir_def_id_none();
+            if ((wire->flags
+                    & CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM) != 0u) {
+                lang_attribute.metadata = cm_decl_lang_attribute(context,
+                    wire->lang_item);
+                if (lang_attribute.metadata == CM_INTERN_ID_NONE)
+                    return CM_HIR_INVALID_ARGUMENT;
+                lang_attribute.span = item.span;
+                lang_attribute.source_attribute = 1u;
+                lang_attribute.expansion_depth = 0u;
+                item.attributes = &lang_attribute;
+                item.attribute_count = 1u;
+            }
+            status = cm_hir_add_item(context, &item, &item_id);
+            if (status != CM_HIR_OK) return status;
+            continue;
+        }
+        if (wire->kind != CM_HIR_DECL_ASSOCIATED_METHOD
             || wire->implemented_associated_local != 0u
             || wire->parameter_count == 0u
             || wire->parameter_types == NULL
@@ -1114,11 +1464,12 @@ static CmHirStatus cm_decl_bind_associated(CmHirContext *context,
             || wire->is_variadic != 0u
             || (wire->has_default_body != 0u
                 && wire->has_default_body != 1u)
+            || wire->flags != 0u || wire->lang_item.data != NULL
+            || wire->lang_item.length != 0u
             || !cm_decl_receiver(wire->receiver, &receiver)
             || !cm_decl_safety(wire->safety, &safety)) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
-        parent_wire = &metadata->traits[wire->parent_local - 1u];
         parameters = (CmHirFunctionParameter *)cm_decl_array(
             wire->parameter_count, sizeof(*parameters));
         predicates = (CmHirTraitPredicate *)cm_decl_array(
@@ -1728,6 +2079,7 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
     CmHirFunctionParameter *parameters;
     CmHirTraitPredicate *predicates;
     CmHirGenericArg **arguments;
+    CmHirAssociatedTypeEquality **equalities;
     CmHirItem item;
     CmHirItemId item_id;
     CmHirStatus status;
@@ -1779,9 +2131,12 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
         sizeof(*predicates));
     arguments = (CmHirGenericArg **)cm_decl_array(wire->predicate_count,
         sizeof(*arguments));
+    equalities = (CmHirAssociatedTypeEquality **)cm_decl_array(
+        wire->predicate_count, sizeof(*equalities));
     if ((wire->parameter_count != 0u && parameters == NULL)
         || (wire->predicate_count != 0u
-            && (predicates == NULL || arguments == NULL))) {
+            && (predicates == NULL || arguments == NULL
+                || equalities == NULL))) {
         status = CM_HIR_INVALID_ARGUMENT;
         goto done;
     }
@@ -1797,6 +2152,15 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
         const CmHirDeclarationPredicate *predicate = &metadata->predicates[
             wire->predicate_start - 1u + index];
         uint32_t child;
+        if (predicate->owner_kind != CM_HIR_DECL_PREDICATE_OWNER_VALUE
+            || predicate->owner_value != value_index + 1u
+            || predicate->owner_associated != 0u
+            || predicate->owner_item != 0u
+            || predicate->owner_nominal != 0u
+            || predicate->ordinal != index) {
+            status = CM_HIR_INVARIANT_VIOLATION;
+            goto done;
+        }
         arguments[index] = (CmHirGenericArg *)cm_decl_array(
             predicate->argument_count, sizeof(*arguments[index]));
         if (predicate->argument_count != 0u && arguments[index] == NULL) {
@@ -1808,12 +2172,43 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
             arguments[index][child].data.type = runtime->types[
                 predicate->argument_types[child] - 1u];
         }
+        equalities[index] = (CmHirAssociatedTypeEquality *)cm_decl_array(
+            predicate->equality_count, sizeof(*equalities[index]));
+        if (predicate->equality_count != 0u && equalities[index] == NULL) {
+            status = CM_HIR_INVALID_ARGUMENT;
+            goto done;
+        }
+        for (child = 0u; child < predicate->equality_count; ++child) {
+            const CmHirDeclarationPredicateEquality *equality =
+                &predicate->equalities[child];
+            if (equality->associated_local == 0u
+                || (size_t)equality->associated_local
+                    > metadata->associated_count
+                || metadata->associated_items[
+                    equality->associated_local - 1u].kind
+                    != CM_HIR_DECL_ASSOCIATED_TYPE
+                || equality->value_type == 0u
+                || (size_t)equality->value_type > metadata->type_count
+                || runtime->types[equality->value_type - 1u]
+                    == CM_HIR_TYPE_NONE) {
+                status = CM_HIR_INVARIANT_VIOLATION;
+                goto done;
+            }
+            equalities[index][child].associated_type =
+                runtime->associated[equality->associated_local - 1u];
+            equalities[index][child].value =
+                runtime->types[equality->value_type - 1u];
+            equalities[index][child].span =
+                cm_decl_span(source, wire->source_ordinal);
+        }
         predicates[index].subject = runtime->types[
             predicate->subject_type - 1u];
         predicates[index].trait_type.definition = runtime->traits[
             predicate->trait_local - 1u];
         predicates[index].trait_type.arguments = arguments[index];
         predicates[index].trait_type.argument_count = predicate->argument_count;
+        predicates[index].equalities = equalities[index];
+        predicates[index].equality_count = predicate->equality_count;
         predicates[index].scope = CM_HIR_PREDICATE_SCOPE_NONE;
         predicates[index].span = cm_decl_span(source, wire->source_ordinal);
         predicates[index].modifier = CM_HIR_PREDICATE_REQUIRED;
@@ -1844,6 +2239,11 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
     item.data.function_item.body = CM_HIR_BODY_NONE;
     status = cm_hir_add_item(context, &item, &item_id);
 done:
+    if (equalities != NULL) {
+        for (index = 0u; index < wire->predicate_count; ++index)
+            cm_free(equalities[index]);
+        cm_free(equalities);
+    }
     cm_decl_free_predicate_arguments(arguments, wire->predicate_count);
     cm_free(predicates);
     cm_free(parameters);
@@ -1858,9 +2258,14 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
     const CmHirDefinition *definition;
     const CmHirItem *item;
     CmHirLibraryNominalReference *references;
+    CmHirLibraryAssociatedAvailability *availability;
     CmHirGenericParamKind **schemas;
+    unsigned char *referenced_traits;
+    uint32_t *trait_queue;
     CmHirLibraryValue value;
     uint32_t reference_count;
+    uint32_t availability_count;
+    size_t equality_total;
     size_t trait_index;
     CmHirLibraryStatus status;
     definition = cm_hir_lookup_definition(context, runtime->values[value_index]);
@@ -1893,30 +2298,80 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
     if (wire->kind != CM_HIR_DECL_VALUE_FUNCTION
         || item->kind != CM_HIR_ITEM_FUNCTION)
         return CM_HIR_LIBRARY_INVALID_HIR;
+    equality_total = 0u;
+    for (trait_index = 0u; trait_index < wire->predicate_count;
+            ++trait_index) {
+        const CmHirDeclarationPredicate *predicate = &metadata->predicates[
+            wire->predicate_start - 1u + trait_index];
+        if (predicate->equality_count > SIZE_MAX - equality_total) {
+            return CM_HIR_LIBRARY_INVALID_HIR;
+        }
+        equality_total += predicate->equality_count;
+    }
     references = (CmHirLibraryNominalReference *)cm_decl_array(
-        metadata->trait_count, sizeof(*references));
+        metadata->trait_count + equality_total, sizeof(*references));
+    availability = (CmHirLibraryAssociatedAvailability *)cm_decl_array(
+        equality_total, sizeof(*availability));
     schemas = (CmHirGenericParamKind **)cm_decl_array(metadata->trait_count,
         sizeof(*schemas));
-    if ((metadata->trait_count != 0u
-            && (references == NULL || schemas == NULL))) {
+    referenced_traits = (unsigned char *)cm_decl_array(
+        metadata->trait_count, sizeof(*referenced_traits));
+    trait_queue = (uint32_t *)cm_decl_array(metadata->trait_count,
+        sizeof(*trait_queue));
+    if ((metadata->trait_count != 0u && schemas == NULL)
+        || (metadata->trait_count != 0u
+            && (referenced_traits == NULL || trait_queue == NULL))
+        || (metadata->trait_count + equality_total != 0u
+            && references == NULL)
+        || (equality_total != 0u && availability == NULL)) {
         status = CM_HIR_LIBRARY_INVALID_ARGUMENT;
         goto done;
+    }
+    /* Retain the complete required-supertrait closure, not merely the
+     * predicate's direct trait.  Associated availability is authenticated
+     * against this same closure by the generic library validator. */
+    {
+        size_t queue_count = 0u;
+        size_t queue_cursor = 0u;
+        for (trait_index = 0u; trait_index < wire->predicate_count;
+                ++trait_index) {
+            const CmHirDeclarationPredicate *predicate =
+                &metadata->predicates[
+                    wire->predicate_start - 1u + trait_index];
+            uint32_t local = predicate->trait_local;
+            if (local == 0u || (size_t)local > metadata->trait_count) {
+                status = CM_HIR_LIBRARY_INVALID_HIR;
+                goto done;
+            }
+            if (referenced_traits[local - 1u] == 0u) {
+                referenced_traits[local - 1u] = UINT8_C(1);
+                trait_queue[queue_count++] = local;
+            }
+        }
+        while (queue_cursor < queue_count) {
+            uint32_t local = trait_queue[queue_cursor++];
+            const CmHirDeclarationTrait *trait_wire =
+                &metadata->traits[local - 1u];
+            uint32_t child;
+            for (child = 0u; child < trait_wire->supertrait_count; ++child) {
+                uint32_t next = trait_wire->supertraits[child].trait_local;
+                if (next == 0u || (size_t)next > metadata->trait_count) {
+                    status = CM_HIR_LIBRARY_INVALID_HIR;
+                    goto done;
+                }
+                if (referenced_traits[next - 1u] == 0u) {
+                    referenced_traits[next - 1u] = UINT8_C(1);
+                    trait_queue[queue_count++] = next;
+                }
+            }
+        }
     }
     reference_count = 0u;
     for (trait_index = 0u; trait_index < metadata->trait_count; ++trait_index) {
         const CmHirDeclarationTrait *trait_wire;
         const CmHirModule *owner;
         uint32_t predicate_index;
-        int referenced;
-        referenced = 0;
-        for (predicate_index = 0u; predicate_index < wire->predicate_count;
-                ++predicate_index) {
-            const CmHirDeclarationPredicate *predicate;
-            predicate = &metadata->predicates[
-                wire->predicate_start - 1u + predicate_index];
-            if (predicate->trait_local == trait_index + 1u) referenced = 1;
-        }
-        if (!referenced) continue;
+        if (referenced_traits[trait_index] == 0u) continue;
         trait_wire = &metadata->traits[trait_index];
         owner = cm_hir_get_module(context,
             runtime->modules[trait_wire->owner_module - 1u]);
@@ -1949,6 +2404,63 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
             trait_wire->generic_count;
         reference_count += 1u;
     }
+    availability_count = 0u;
+    for (trait_index = 0u; trait_index < wire->predicate_count;
+            ++trait_index) {
+        const CmHirDeclarationPredicate *predicate = &metadata->predicates[
+            wire->predicate_start - 1u + trait_index];
+        uint32_t equality_index;
+        for (equality_index = 0u;
+                equality_index < predicate->equality_count;
+                ++equality_index) {
+            const CmHirDeclarationPredicateEquality *equality =
+                &predicate->equalities[equality_index];
+            const CmHirDeclarationAssociatedItem *associated;
+            const CmHirDeclarationTrait *parent;
+            const CmHirModule *owner;
+            if (equality->associated_local == 0u
+                || (size_t)equality->associated_local
+                    > metadata->associated_count) {
+                status = CM_HIR_LIBRARY_INVALID_HIR;
+                goto done;
+            }
+            associated = &metadata->associated_items[
+                equality->associated_local - 1u];
+            if (associated->kind != CM_HIR_DECL_ASSOCIATED_TYPE
+                || associated->parent_local == 0u
+                || (size_t)associated->parent_local
+                    > metadata->trait_count) {
+                status = CM_HIR_LIBRARY_INVALID_HIR;
+                goto done;
+            }
+            parent = &metadata->traits[associated->parent_local - 1u];
+            owner = cm_hir_get_module(context,
+                runtime->modules[parent->owner_module - 1u]);
+            if (owner == NULL) {
+                status = CM_HIR_LIBRARY_INVALID_HIR;
+                goto done;
+            }
+            references[reference_count].definition = runtime->associated[
+                equality->associated_local - 1u];
+            references[reference_count].owner_module = owner->definition;
+            references[reference_count].name.bytes = associated->name.data;
+            references[reference_count].name.length =
+                associated->name.length;
+            references[reference_count].use = CM_HIR_LIBRARY_REFERENCE_ONLY;
+            references[reference_count].kind =
+                CM_HIR_LIBRARY_NOMINAL_ASSOCIATED_TYPE;
+            references[reference_count].declaring_trait = runtime->traits[
+                associated->parent_local - 1u];
+            references[reference_count].generic_parameter_kinds = NULL;
+            references[reference_count].generic_parameter_count = 0u;
+            availability[availability_count].direct_trait = runtime->traits[
+                predicate->trait_local - 1u];
+            availability[availability_count].associated_type =
+                references[reference_count].definition;
+            reference_count += 1u;
+            availability_count += 1u;
+        }
+    }
     memset(&value, 0, sizeof(value));
     value.definition = item->definition;
     value.kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
@@ -1977,6 +2489,9 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
         value.data.function.predicate_count = item->predicate_count;
         value.data.function.nominal_references = references;
         value.data.function.nominal_reference_count = reference_count;
+        value.data.function.associated_availability = availability;
+        value.data.function.associated_availability_count =
+            availability_count;
         value.data.function.abi = item->data.function_item.signature.abi;
         value.data.function.safety = item->data.function_item.signature.safety;
         value.data.function.is_const =
@@ -1990,6 +2505,9 @@ done:
                 ++trait_index) cm_free(schemas[trait_index]);
     }
     cm_free(schemas);
+    cm_free(trait_queue);
+    cm_free(referenced_traits);
+    cm_free(availability);
     cm_free(references);
     return status;
 }
@@ -2158,6 +2676,7 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
         if (associated->parent_local == 0u
             || (size_t)associated->parent_local > metadata->trait_count)
             return CM_HIR_LIBRARY_INVALID_HIR;
+        if (associated->kind == CM_HIR_DECL_ASSOCIATED_TYPE) continue;
         if (metadata->traits[associated->parent_local - 1u]
                 .visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC)
             continue;

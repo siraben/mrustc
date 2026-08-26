@@ -185,6 +185,49 @@ static const unsigned char into_iter_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char from_fn_fixture_source[] =
+    "#[unstable(feature = \"tuple_trait\", issue = \"none\")]\n"
+    "#[lang = \"tuple_trait\"]\n"
+    "#[diagnostic::on_unimplemented(message = \"not a tuple\")]\n"
+    "#[rustc_deny_explicit_impl]\n"
+    "#[rustc_do_not_implement_via_object]\n"
+    "pub trait Tuple {}\n"
+    "#[lang = \"fn_once\"]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "#[rustc_paren_sugar]\n"
+    "#[rustc_on_unimplemented(message = \"not callable\")]\n"
+    "#[fundamental]\n"
+    "#[must_use = \"closures are lazy\"]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_trait_impl\", "
+        "issue = \"none\")]\n"
+    "pub trait FnOnce<Args: Tuple> {\n"
+    "  #[lang = \"fn_once_output\"]\n"
+    "  #[stable(feature = \"fn_once_output\", since = \"1.0.0\")]\n"
+    "  type Output;\n"
+    "  #[unstable(feature = \"fn_traits\", issue = \"none\")]\n"
+    "  extern \"rust-call\" fn call_once(self, args: Args) "
+        "-> Self::Output;\n"
+    "}\n"
+    "#[lang = \"fn_mut\"]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "#[rustc_paren_sugar]\n"
+    "#[rustc_on_unimplemented(message = \"not callable\")]\n"
+    "#[fundamental]\n"
+    "#[must_use = \"closures are lazy\"]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_trait_impl\", "
+        "issue = \"none\")]\n"
+    "pub trait FnMut<Args: Tuple>: FnOnce<Args> {\n"
+    "  #[unstable(feature = \"fn_traits\", issue = \"none\")]\n"
+    "  extern \"rust-call\" fn call_mut(&mut self, args: Args) "
+        "-> Self::Output;\n"
+    "}\n"
+    "#[inline]\n"
+    "#[stable(feature = \"array_from_fn\", since = \"1.63.0\")]\n"
+    "pub fn build<T, const N: usize, F>(f: F) -> [T; N]\n"
+    "where F: FnMut(usize) -> T { f }\n";
+
 static const char generic_enum_fixture_template[] =
     "mod option_like {\n"
     "  #[doc(search_unbox)]\n"
@@ -558,6 +601,12 @@ static void into_iter_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "into-iter.rs",
         into_iter_fixture_source, sizeof(into_iter_fixture_source) - 1u);
+}
+
+static void from_fn_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "from-fn-like.rs",
+        from_fn_fixture_source, sizeof(from_fn_fixture_source) - 1u);
 }
 
 static void layout_dependency_fixture_init(CaptureFixture *fixture,
@@ -4534,6 +4583,235 @@ static void test_into_iter_hostile_shapes_are_atomic(void)
     fixture_destroy(&fixture);
 }
 
+static void test_from_fn_callable_closure_and_determinism(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureInput noisy_input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    const CmHirDeclarationTrait *fn_once = NULL;
+    const CmHirDeclarationTrait *fn_mut = NULL;
+    const CmHirDeclarationAssociatedItem *output = NULL;
+    const CmHirDeclarationValue *build;
+    const CmHirDeclarationPredicate *predicate;
+    const CmHirDeclarationType *tuple;
+    const CmHirDeclarationType *array;
+    uint32_t fn_once_local = 0u;
+    uint32_t fn_mut_local = 0u;
+    uint32_t output_local = 0u;
+    size_t index;
+    from_fn_fixture_init(&fixture, 0);
+    from_fn_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&fixture);
+    noisy_input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == 3u && result.associated_count == 3u
+        && result.value_count == 1u && result.predicate_count == 3u
+        && result.projected_semantic_attribute_count == 15u
+        && metadata.type_count == 12u);
+    result = cm_hir_declaration_metadata_capture(&noisy_input,
+        &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    for (index = 0u; index < metadata.trait_count; ++index) {
+        if (declaration_string_is(metadata.traits[index].lang_item,
+                "fn_once")) {
+            fn_once = &metadata.traits[index];
+            fn_once_local = (uint32_t)(index + 1u);
+        } else if (declaration_string_is(metadata.traits[index].lang_item,
+                "fn_mut")) {
+            fn_mut = &metadata.traits[index];
+            fn_mut_local = (uint32_t)(index + 1u);
+        }
+    }
+    for (index = 0u; index < metadata.associated_count; ++index)
+        if (declaration_string_is(metadata.associated_items[index].lang_item,
+                "fn_once_output")) {
+            output = &metadata.associated_items[index];
+            output_local = (uint32_t)(index + 1u);
+        }
+    build = find_declaration_value(&metadata, "build", NULL);
+    assert(fn_once != NULL && fn_mut != NULL && output != NULL
+        && build != NULL && fn_once_local != 0u && fn_mut_local != 0u
+        && output_local != 0u
+        && fn_once->generic_count == 1u && fn_once->predicate_count == 1u
+        && fn_once->associated_count == 2u
+        && fn_mut->generic_count == 1u && fn_mut->predicate_count == 1u
+        && fn_mut->supertrait_count == 1u
+        && fn_mut->supertraits[0].trait_local == fn_once_local
+        && fn_mut->supertraits[0].argument_count == 1u
+        && output->kind == CM_HIR_DECL_ASSOCIATED_TYPE
+        && output->parent_local == fn_once_local
+        && build->generic_count == 3u && build->parameter_count == 1u
+        && build->predicate_count == 1u && build->has_body == 1u);
+    predicate = &metadata.predicates[build->predicate_start - 1u];
+    tuple = &metadata.types[predicate->argument_types[0] - 1u];
+    array = &metadata.types[build->return_type - 1u];
+    assert(predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_VALUE
+        && predicate->trait_local == fn_mut_local
+        && predicate->argument_count == 1u
+        && predicate->equality_count == 1u
+        && predicate->equalities[0].associated_local == output_local
+        && tuple->kind == CM_HIR_DECL_TYPE_TUPLE
+        && tuple->element_count == 1u
+        && array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && array->array_length_kind
+            == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER
+        && array->array_length_generic_local == build->generic_start + 1u);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+}
+
+static void test_from_fn_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirItem *build;
+    CmHirItem *tuple_trait;
+    CmHirItem *fn_mut;
+    CmHirItem *output;
+    CmHirItem *call_mut;
+    CmHirItemId ignored_id;
+    CmHirGenericParam *const_generic;
+    CmHirType *return_type;
+    CmHirBody *body;
+    CmHirGenericParamKind saved_generic_kind;
+    CmHirTypeId saved_declared_type;
+    CmHirGenericParamId saved_length_parameter;
+    CmHirDefId saved_definition;
+    CmHirReceiverKind saved_receiver;
+    CmHirTypeId saved_expected_type;
+    CmInternId saved_attribute_metadata;
+
+    from_fn_fixture_init(&fixture, 0);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_traits = metadata.traits;
+    saved_associated = metadata.associated_items;
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    build = (CmHirItem *)find_item(&fixture, "build", &ignored_id);
+    tuple_trait = (CmHirItem *)find_item(&fixture, "Tuple", &ignored_id);
+    fn_mut = (CmHirItem *)find_item(&fixture, "FnMut", &ignored_id);
+    output = (CmHirItem *)find_item(&fixture, "Output", &ignored_id);
+    call_mut = (CmHirItem *)find_item(&fixture, "call_mut", &ignored_id);
+    assert(build != NULL && tuple_trait != NULL && fn_mut != NULL
+        && output != NULL && call_mut != NULL
+        && build->generic_parameter_count == 3u
+        && build->predicate_count == 1u
+        && build->data.function_item.signature.return_type
+            != CM_HIR_TYPE_NONE);
+    const_generic = (CmHirGenericParam *)cm_hir_get_generic_param(
+        &fixture.hir, build->generic_parameter_start + 1u);
+    return_type = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        build->data.function_item.signature.return_type);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        build->data.function_item.body);
+    assert(const_generic != NULL && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_ARRAY_KIND && body != NULL);
+
+#define ASSERT_FROM_FN_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.traits == saved_traits \
+        && metadata.associated_items == saved_associated \
+        && metadata.values == saved_values \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_generic_kind = const_generic->kind;
+    const_generic->kind = CM_HIR_GENERIC_TYPE;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    const_generic->kind = saved_generic_kind;
+
+    saved_declared_type = const_generic->declared_type;
+    const_generic->declared_type = CM_HIR_TYPE_NONE;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    const_generic->declared_type = saved_declared_type;
+
+    saved_length_parameter =
+        return_type->data.array_type.length.data.parameter;
+    return_type->data.array_type.length.data.parameter =
+        build->generic_parameter_start;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    return_type->data.array_type.length.data.parameter =
+        saved_length_parameter;
+
+    saved_definition = build->predicates[0].trait_type.definition;
+    build->predicates[0].trait_type.definition = tuple_trait->definition;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    build->predicates[0].trait_type.definition = saved_definition;
+
+    saved_definition = build->predicates[0].equalities[0].associated_type;
+    build->predicates[0].equalities[0].associated_type =
+        fn_mut->definition;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    build->predicates[0].equalities[0].associated_type = saved_definition;
+
+    saved_definition = fn_mut->data.trait_item.supertraits[0]
+        .trait_type.definition;
+    fn_mut->data.trait_item.supertraits[0].trait_type.definition =
+        tuple_trait->definition;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    fn_mut->data.trait_item.supertraits[0].trait_type.definition =
+        saved_definition;
+
+    saved_receiver = call_mut->data.function_item.signature.receiver;
+    call_mut->data.function_item.signature.receiver = CM_HIR_RECEIVER_NONE;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    call_mut->data.function_item.signature.receiver = saved_receiver;
+
+    saved_definition = output->parent_definition;
+    output->parent_definition = fn_mut->definition;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    output->parent_definition = saved_definition;
+
+    saved_expected_type = body->expected_type;
+    body->expected_type = build->data.function_item.signature
+        .parameters[0].type;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    body->expected_type = saved_expected_type;
+
+    assert(build->attribute_count == 2u);
+    saved_attribute_metadata = build->attributes[1].metadata;
+    build->attributes[1].metadata = build->attributes[0].metadata;
+    ASSERT_FROM_FN_ATOMIC_FAILURE();
+    build->attributes[1].metadata = saved_attribute_metadata;
+
+#undef ASSERT_FROM_FN_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static const CmHirDeclarationType *type_id_like_array(
     const CmHirDeclarationMetadata *metadata, uint64_t expected_length)
 {
@@ -7708,6 +7986,8 @@ int main(void)
     test_rust_tuple_struct_capture_and_atomic_boundaries();
     test_into_iter_private_closure_and_determinism();
     test_into_iter_hostile_shapes_are_atomic();
+    test_from_fn_callable_closure_and_determinism();
+    test_from_fn_hostile_mutations_are_atomic();
     test_type_id_like_target_capture_and_determinism();
     test_type_id_like_hostile_mutations_are_atomic();
     test_layout_private_dependency_closure_and_determinism();

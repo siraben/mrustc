@@ -650,6 +650,22 @@ V3.0 must not silently skip any active public value merely because it has a
 body. It transports the declaration and records body presence. A consumer
 requiring execution checks the `BODIES_CONST_IR` family and rejects.
 
+The current `from_fn` declaration profile retains the ordered value-owned
+generics `T`, `const N: usize`, and `F`, the parameter `F`, the return type
+`[T; N]`, and the exact predicate
+`F: FnMut<(usize,), Output = T>`. Its reachable nominal closure contains the
+complete `Tuple`, `FnOnce`, and `FnMut` declarations, the ordered
+`FnMut: FnOnce` supertrait edge, targetless `FnOnce::Output`, the `call_once`
+and `call_mut` rust-call method declarations, the inherited associated-type
+availability relation, and the projection types used by those method
+signatures. Associated equalities retain the declaring associated DefId across
+crate boundaries; they are never reconstructed by name or forced to the
+consumer crate. Capture authenticates the stable/inline source attributes and
+the source-owned body but projects them from declaration bytes. Materialization
+binds the function with `BODY_NONE`: importing and inspecting the declaration
+is supported, while MIR, monomorphization, execution, and code generation fail
+closed until an executable family transports that authority.
+
 V3.2 appends this execution binding to every `VALU` function record after the
 unchanged declaration payload:
 

@@ -78,7 +78,8 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
      * and named aggregates/bounded unit/tuple-variant enums/type aliases/free
-     * consts/reexports, only the stricter LOWER_SAFE allowlist documented on
+     * consts/reexports/callable-trait declarations and their from-fn-style
+     * free functions, only the stricter LOWER_SAFE allowlist documented on
      * the capture entry point.
      * This does not call any projected attribute inert.
      */

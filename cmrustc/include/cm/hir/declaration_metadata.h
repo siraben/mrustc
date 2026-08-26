@@ -102,7 +102,9 @@ typedef enum CmHirDeclarationTypeKind {
     /* Nonempty ordered type arguments; zero arguments use NAMED_ADT. */
     CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION = 8,
     CM_HIR_DECL_TYPE_TUPLE = 9,
-    CM_HIR_DECL_TYPE_ARRAY = 10
+    CM_HIR_DECL_TYPE_ARRAY = 10,
+    /* Exact associated-type projection with an authenticated trait path. */
+    CM_HIR_DECL_TYPE_PROJECTION = 11
 } CmHirDeclarationTypeKind;
 
 typedef enum CmHirDeclarationMutability {
@@ -147,6 +149,8 @@ typedef struct CmHirDeclarationVisibility {
     uint32_t restriction_module;
 } CmHirDeclarationVisibility;
 
+typedef struct CmHirDeclarationSupertrait CmHirDeclarationSupertrait;
+
 typedef struct CmHirDeclarationTrait {
     uint32_t owner_module;
     CmHirDeclarationString name;
@@ -154,7 +158,7 @@ typedef struct CmHirDeclarationTrait {
     uint32_t source_ordinal;
     uint32_t generic_start;
     uint32_t generic_count;
-    /* This bounded slice reserves trait predicates but carries outlives. */
+    /* Exact nominal-owned predicate, outlives, and associated partitions. */
     uint32_t predicate_scope_start;
     uint32_t predicate_scope_count;
     uint32_t predicate_start;
@@ -168,11 +172,34 @@ typedef struct CmHirDeclarationTrait {
     uint8_t flags;
     /* Present exactly when CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM is set. */
     CmHirDeclarationString diagnostic_item;
+    /* Ordered direct supertraits; the first bounded slice is binder-free. */
+    uint32_t supertrait_count;
+    CmHirDeclarationSupertrait *supertraits;
+    /* Present exactly when CM_HIR_DECL_TRAIT_HAS_LANG_ITEM is set. */
+    CmHirDeclarationString lang_item;
 } CmHirDeclarationTrait;
 
 #define CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM UINT8_C(1)
+#define CM_HIR_DECL_TRAIT_HAS_LANG_ITEM UINT8_C(2)
+#define CM_HIR_DECL_TRAIT_IS_CONST UINT8_C(4)
+#define CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR UINT8_C(8)
+#define CM_HIR_DECL_TRAIT_FUNDAMENTAL UINT8_C(16)
+#define CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL UINT8_C(32)
+#define CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT UINT8_C(64)
+
+typedef enum CmHirDeclarationSupertraitModifier {
+    CM_HIR_DECL_SUPERTRAIT_REQUIRED = 1
+} CmHirDeclarationSupertraitModifier;
+
+struct CmHirDeclarationSupertrait {
+    uint8_t modifier;
+    uint32_t trait_local;
+    uint32_t argument_count;
+    uint32_t *argument_types;
+};
 
 typedef enum CmHirDeclarationAssociatedKind {
+    CM_HIR_DECL_ASSOCIATED_TYPE = 1,
     CM_HIR_DECL_ASSOCIATED_METHOD = 3
 } CmHirDeclarationAssociatedKind;
 
@@ -190,10 +217,10 @@ typedef enum CmHirDeclarationReceiverKind {
 
 /*
  * First bounded nominal-owned METHOD record. Parameter types include the
- * receiver in source slot zero. The current profile accepts authenticated
- * shared- or mutable-ref receivers, exact Rust ABI, zero method generics, and
- * non-const/non-async/non-variadic declarations; explicit fields keep those
- * facts authenticated.
+ * receiver in source slot zero. The current profiles accept authenticated
+ * value/shared/mutable receivers and exact Rust or rust-call ABI, with zero
+ * method generics and non-const/non-async/non-variadic declarations; explicit
+ * fields keep those facts authenticated.
  */
 typedef struct CmHirDeclarationAssociatedItem {
     uint8_t kind;
@@ -218,7 +245,12 @@ typedef struct CmHirDeclarationAssociatedItem {
     uint8_t is_async;
     uint8_t is_variadic;
     uint8_t has_default_body;
+    /* Common retained semantic identity; zero for existing METHOD records. */
+    uint8_t flags;
+    CmHirDeclarationString lang_item;
 } CmHirDeclarationAssociatedItem;
+
+#define CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM UINT8_C(1)
 
 typedef enum CmHirDeclarationItemKind {
     CM_HIR_DECL_ITEM_STRUCT = 2,
@@ -383,6 +415,12 @@ typedef struct CmHirDeclarationType {
     uint64_t array_length_high_bits;
     /* CONST_PARAMETER names an owner-local CONST generic declared as usize. */
     uint32_t array_length_generic_local;
+    /* PROJECTION names its self type, direct trait, declaring TYPE, and args. */
+    uint32_t projection_self_type;
+    uint32_t projection_trait_local;
+    uint32_t projection_associated_local;
+    uint32_t projection_argument_count;
+    uint32_t *projection_argument_types;
 } CmHirDeclarationType;
 
 typedef enum CmHirDeclarationValueKind {
@@ -420,13 +458,22 @@ typedef struct CmHirDeclarationPredicate {
     uint32_t trait_local;
     uint32_t argument_count;
     uint32_t *argument_types;
+    uint32_t equality_count;
+    struct CmHirDeclarationPredicateEquality *equalities;
     /* VALUE=0 preserves the original v3.0 predicate bytes. */
     uint8_t owner_kind;
     /* Required only for ASSOCIATED; owner_value is then zero. */
     uint32_t owner_associated;
     /* Required only for ITEM; other owner locals are then zero. */
     uint32_t owner_item;
+    /* Required only for NOMINAL; every other owner local is then zero. */
+    uint32_t owner_nominal;
 } CmHirDeclarationPredicate;
+
+typedef struct CmHirDeclarationPredicateEquality {
+    uint32_t associated_local;
+    uint32_t value_type;
+} CmHirDeclarationPredicateEquality;
 
 typedef enum CmHirDeclarationPredicateOwnerKind {
     CM_HIR_DECL_PREDICATE_OWNER_VALUE = 0,
