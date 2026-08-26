@@ -1580,7 +1580,9 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
     item.visibility.kind = CM_HIR_VIS_PUBLIC;
     item.visibility.restriction = cm_hir_def_id_none();
     item.span = cm_decl_span(source, wire->source_ordinal);
-    item.generic_parameter_start = runtime->generics[wire->generic_start - 1u];
+    item.generic_parameter_start = wire->generic_count == 0u
+        ? CM_HIR_GENERIC_PARAM_NONE
+        : runtime->generics[wire->generic_start - 1u];
     item.generic_parameter_count = wire->generic_count;
     item.predicates = predicates;
     item.predicate_count = wire->predicate_count;

@@ -132,6 +132,14 @@ typedef struct TypeNameFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[2];
 } TypeNameFixture;
 
+typedef struct UnitFunctionFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationType types[1];
+    CmHirDeclarationValue values[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} UnitFunctionFixture;
+
 #define PRIMITIVE_BINDING_COUNT 34u
 
 typedef struct PrimitiveFixture {
@@ -1597,6 +1605,56 @@ static void type_name_fixture_init(TypeNameFixture *fixture)
     metadata->namespace_count = 2u;
 }
 
+static void unit_function_fixture_init(UnitFunctionFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("arch_dep");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("unit-function-declaration-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    metadata->types = fixture->types;
+    metadata->type_count = 1u;
+
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name =
+        (CmHirDeclarationString)S("breakpoint_like");
+    fixture->values[0].source_ordinal = 1u;
+    fixture->values[0].return_type = 1u;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[0].name =
+        (CmHirDeclarationString)S("breakpoint_alias");
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 2u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->values[0].name;
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
+}
+
 static CmHirDeclarationMaterializeExpectation expectation_for(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -2649,6 +2707,92 @@ static void test_type_name_fresh_consumer(CmHirContext *context,
         assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED
             && body->root_expression == CM_HIR_EXPR_NONE);
     }
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_unit_function_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact)
+{
+    static const unsigned char source_text[] =
+        "use dep::breakpoint_like as direct_breakpoint;\n"
+        "use dep::breakpoint_alias as alias_breakpoint;\n"
+        "pub fn direct() { direct_breakpoint() }\n"
+        "pub fn via_alias() { alias_breakpoint() }\n";
+    static const char *const names[] = { "direct", "via_alias" };
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "unit-function-consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "unit_function_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        const CmHirItem *function = find_item(context,
+            CM_HIR_ITEM_FUNCTION, names[index]);
+        CmHirBodyLowerResult body_result;
+        const CmHirBody *body;
+        const CmHirType *return_type;
+        size_t expression_count = context->expressions.len;
+
+        assert(function != NULL
+            && function->generic_parameter_start
+                == CM_HIR_GENERIC_PARAM_NONE
+            && function->generic_parameter_count == 0u
+            && function->predicate_count == 0u
+            && function->data.function_item.signature.parameter_count == 0u
+            && function->data.function_item.signature.parameters == NULL
+            && function->data.function_item.body != CM_HIR_BODY_NONE);
+        return_type = cm_hir_get_type(context,
+            function->data.function_item.signature.return_type);
+        assert(return_type != NULL && return_type->kind
+            == CM_HIR_TYPE_UNIT_KIND);
+        body_result = cm_hir_lower_body(context,
+            function->data.function_item.body, &graph,
+            graph_result.revision, &imports, &map);
+        assert(body_result.status == CM_HIR_BODY_LOWER_UNSUPPORTED_BODY
+            && context->expressions.len == expression_count);
+        body = cm_hir_get_body(context,
+            function->data.function_item.body);
+        assert(body != NULL && body->state == CM_HIR_BODY_UNLOWERED
+            && body->root_expression == CM_HIR_EXPR_NONE);
+    }
+    assert(cm_hir_lower_body(context, CM_HIR_BODY_NONE, &graph,
+        graph_result.revision, &imports, &map).status
+        == CM_HIR_BODY_LOWER_INVALID_ARGUMENT);
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
@@ -5806,6 +5950,192 @@ static void test_associated_method_materialize_and_restore(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_unit_function_materialize_and_consume(void)
+{
+    UnitFunctionFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding alias;
+    CmHirLibraryPathSegment direct_path[2];
+    CmHirLibraryPathSegment alias_path[2];
+    CmHirLibraryValue direct_value;
+    CmHirLibraryValue alias_value;
+    const CmHirItem *item;
+    const CmHirType *return_type;
+    const CmInternedString *abi;
+    ContextLengths lengths;
+    uint32_t saved_local;
+    uint8_t saved_byte;
+
+    unit_function_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 221u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 0u
+        && result.public_type_entry_count == 0u
+        && result.public_value_entry_count == 2u);
+    item = find_item(&context, CM_HIR_ITEM_FUNCTION, "breakpoint_like");
+    return_type = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.function_item.signature.return_type);
+    abi = item == NULL ? NULL : cm_interner_get(&context.strings,
+        item->data.function_item.signature.abi);
+    assert(item != NULL && item->visibility.kind == CM_HIR_VIS_PUBLIC
+        && item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+        && item->generic_parameter_count == 0u
+        && item->predicate_scope_count == 0u
+        && item->predicate_scopes == NULL
+        && item->predicate_count == 0u && item->predicates == NULL
+        && item->outlives_predicate_count == 0u
+        && item->outlives_predicates == NULL
+        && item->attribute_count == 0u && item->attributes == NULL
+        && item->data.function_item.signature.parameter_count == 0u
+        && item->data.function_item.signature.parameters == NULL
+        && item->data.function_item.signature.receiver == CM_HIR_RECEIVER_NONE
+        && item->data.function_item.signature.safety == CM_HIR_SAFE
+        && item->data.function_item.signature.is_const == 0
+        && item->data.function_item.signature.is_async == 0
+        && item->data.function_item.signature.is_variadic == 0
+        && item->data.function_item.body == CM_HIR_BODY_NONE
+        && item->data.function_item.has_default_body == 0
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_UNIT_KIND
+        && abi != NULL && abi->len == sizeof("Rust") - 1u
+        && memcmp(abi->bytes, "Rust", sizeof("Rust") - 1u) == 0
+        && cm_hir_get_body(&context,
+            item->data.function_item.body) == NULL);
+
+    direct = lookup_value_binding(&artifact, "breakpoint_like");
+    alias = lookup_value_binding(&artifact, "breakpoint_alias");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && alias.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && cm_hir_def_id_equal(direct.definition, item->definition)
+        && cm_hir_def_id_equal(alias.definition, item->definition));
+    direct_path[0].bytes = (const unsigned char *)"dep";
+    direct_path[0].length = sizeof("dep") - 1u;
+    direct_path[1].bytes = (const unsigned char *)"breakpoint_like";
+    direct_path[1].length = sizeof("breakpoint_like") - 1u;
+    alias_path[0] = direct_path[0];
+    alias_path[1].bytes = (const unsigned char *)"breakpoint_alias";
+    alias_path[1].length = sizeof("breakpoint_alias") - 1u;
+    memset(&direct_value, 0, sizeof(direct_value));
+    memset(&alias_value, 0, sizeof(alias_value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, direct_path, 2u,
+            &direct_value) == CM_HIR_LIBRARY_OK
+        && cm_hir_library_artifact_lookup_value(&artifact, alias_path, 2u,
+            &alias_value) == CM_HIR_LIBRARY_OK
+        && direct_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && alias_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && direct_value.data.function.generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE
+        && alias_value.data.function.generic_parameter_start
+            == CM_HIR_GENERIC_PARAM_NONE
+        && direct_value.data.function.generic_parameter_count == 0u
+        && alias_value.data.function.generic_parameter_count == 0u
+        && direct_value.data.function.predicate_count == 0u
+        && alias_value.data.function.predicate_count == 0u
+        && direct_value.data.function.parameter_count == 0u
+        && alias_value.data.function.parameter_count == 0u
+        && direct_value.data.function.parameter_types == NULL
+        && alias_value.data.function.parameter_types == NULL
+        && direct_value.data.function.return_type
+            == item->data.function_item.signature.return_type
+        && alias_value.data.function.return_type
+            == item->data.function_item.signature.return_type
+        && direct_value.data.function.is_const == 0
+        && alias_value.data.function.is_const == 0
+        && cm_hir_def_id_equal(direct_value.definition, item->definition)
+        && cm_hir_def_id_equal(alias_value.definition, item->definition));
+    test_unit_function_fresh_consumer(&context, &artifact);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+    saved_local = decoded.values[0].generic_start;
+    decoded.values[0].generic_start = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 222u);
+    decoded.values[0].generic_start = saved_local;
+
+    saved_local = decoded.values[0].generic_count;
+    decoded.values[0].generic_count = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 223u);
+    decoded.values[0].generic_count = saved_local;
+
+    saved_local = decoded.values[0].parameter_count;
+    decoded.values[0].parameter_count = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 224u);
+    decoded.values[0].parameter_count = saved_local;
+
+    saved_byte = decoded.values[0].has_body;
+    decoded.values[0].has_body = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 225u);
+    decoded.values[0].has_body = saved_byte;
+
+    saved_byte = decoded.values[0].is_const;
+    decoded.values[0].is_const = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 226u);
+    decoded.values[0].is_const = saved_byte;
+
+    saved_byte = decoded.types[0].primitive;
+    decoded.types[0].primitive = CM_HIR_DECL_PRIMITIVE_BOOL;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 227u);
+    decoded.types[0].primitive = saved_byte;
+
+    saved_local = decoded.namespace_entries[1].target_local;
+    decoded.namespace_entries[1].target_local = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 228u);
+    decoded.namespace_entries[1].target_local = saved_local;
+
+    saved_byte = decoded.namespace_entries[1].namespace_kind;
+    decoded.namespace_entries[1].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 229u);
+    decoded.namespace_entries[1].namespace_kind = saved_byte;
+
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 230u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
@@ -5820,6 +6150,7 @@ int main(void)
     test_layout_materialize_and_consume();
     test_type_id_materialize_and_consume();
     test_type_name_materialize_and_consume();
+    test_unit_function_materialize_and_consume();
     test_enum_materialize_and_restore_scope();
     test_default_enum_materialize_and_variant_reexports();
     test_option_tuple_materialize_and_consume();
