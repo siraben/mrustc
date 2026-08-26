@@ -725,7 +725,11 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
                     || (field->visibility.kind
                             != CM_HIR_DECL_VISIBILITY_PRIVATE
                         && field->visibility.kind
-                            != CM_HIR_DECL_VISIBILITY_PUBLIC)
+                            != CM_HIR_DECL_VISIBILITY_PUBLIC
+                        && (item->aggregate_form
+                                != CM_HIR_DECL_AGGREGATE_NAMED
+                            || field->visibility.kind
+                                != CM_HIR_DECL_VISIBILITY_CRATE))
                     || field->visibility.restriction_module != 0u
                     || !cm_decl_type_local(metadata, field->type_local)
                     || (child != 0u && item->fields[child - 1u]

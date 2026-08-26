@@ -167,7 +167,7 @@ typedef enum CmHirDeclarationVisibilityKind {
 
 typedef struct CmHirDeclarationVisibility {
     uint8_t kind;
-    /* Nonzero only for RESTRICTED; this first ITEM slice accepts PUBLIC. */
+    /* Nonzero only for future RESTRICTED support; current forms require zero. */
     uint32_t restriction_module;
 } CmHirDeclarationVisibility;
 
