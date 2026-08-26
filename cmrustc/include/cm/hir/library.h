@@ -42,12 +42,23 @@ typedef enum CmHirLibraryBindingKind {
      */
     CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR,
     /*
-     * Associated constructor/type identity of one enum variant.  The parent
-     * enum, exact variant index, and aggregate form authenticate this DefId;
-     * it is never represented as a free function or free value declaration.
+     * Associated or module-reexported identity of one enum variant.  The
+     * parent enum, exact variant index, aggregate form, and explicit
+     * namespace authenticate this DefId; it is never represented as a free
+     * function or free value declaration.
      */
     CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
 } CmHirLibraryBindingKind;
+
+/*
+ * An enum variant can be imported in both Rust namespaces.  Keep this
+ * authority explicit: its binding kind and DefId alone cannot distinguish
+ * `use E::V`'s TYPE and VALUE entries.
+ */
+typedef enum CmHirLibraryEnumVariantNamespace {
+    CM_HIR_LIBRARY_ENUM_VARIANT_TYPE = 0,
+    CM_HIR_LIBRARY_ENUM_VARIANT_VALUE = 1
+} CmHirLibraryEnumVariantNamespace;
 
 typedef struct CmHirLibraryType {
     CmHirLibraryBindingKind binding_kind;
@@ -151,6 +162,7 @@ typedef struct CmHirLibraryBinding {
     CmHirDefId enum_definition;
     uint32_t enum_variant_index;
     CmHirAggregateForm enum_variant_form;
+    CmHirLibraryEnumVariantNamespace enum_variant_namespace;
 } CmHirLibraryBinding;
 
 typedef struct CmHirLibraryImport {
@@ -193,9 +205,10 @@ CmHirLibraryArtifactResult cm_hir_library_artifact_build(
  * Builds the declaration-v2 library view. In addition to the legacy type
  * namespace, it authenticates predicate-free public free functions, consts,
  * and statics, unit/tuple struct constructors, plus same-crate value
- * reexports. Constructors retain the struct DefId and are never represented
- * as free functions. Bodies, evaluated consts, external reexports, globs,
- * macros, predicates, and link objects are not represented.
+ * reexports, including authenticated enum-variant reexports in their exact
+ * TYPE/VALUE namespaces. Constructors retain their nominal DefIds and are
+ * never represented as free functions. Bodies, evaluated consts, external
+ * reexports, macros, predicates, and link objects are not represented.
  */
 CmHirLibraryArtifactResult cm_hir_library_declaration_artifact_build(
     CmHirLibraryArtifact *artifact, const CmHirContext *context,
@@ -227,7 +240,7 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
 
 /*
  * Resolves any exact public value-namespace binding, including struct
- * constructors and associated unit enum variants.
+ * constructors and authenticated enum-variant identities.
  */
 CmHirLibraryStatus cm_hir_library_artifact_lookup_value_binding(
     const CmHirLibraryArtifact *artifact,
@@ -257,7 +270,7 @@ CmHirLibraryStatus cm_hir_library_artifact_resolve_value_import(
 
 /*
  * Resolves a type below one exactly authenticated imported module alias,
- * including an associated unit enum variant below a retained enum type.
+ * including an associated enum variant below a retained enum type.
  */
 CmHirLibraryStatus cm_hir_library_artifact_resolve_imported_type(
     const CmHirLibraryArtifact *artifact, const CmImportResolver *imports,

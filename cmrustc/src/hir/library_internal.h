@@ -18,6 +18,11 @@ typedef struct CmHirLibraryOwnedEntry {
     CmHirPrimitiveKind primitive_kind;
     CmHirLibraryValueKind value_kind;
     CmHirLibraryBindingKind kind;
+    /* Canonical zero values unless kind is ENUM_VARIANT. */
+    CmHirDefId enum_definition;
+    uint32_t enum_variant_index;
+    CmHirAggregateForm enum_variant_form;
+    CmHirLibraryEnumVariantNamespace enum_variant_namespace;
 } CmHirLibraryOwnedEntry;
 
 typedef struct CmHirLibraryOwnedModule {

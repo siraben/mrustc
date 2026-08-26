@@ -56,6 +56,118 @@ static CmHirLibraryOwnedEntry *mutable_library_entry(
     return found;
 }
 
+static CmHirLibraryOwnedEntry *mutable_library_variant_entry(
+    CmHirLibraryArtifact *artifact, const char *expected_name,
+    CmHirLibraryEnumVariantNamespace expected_namespace)
+{
+    CmHirLibraryOwnedData *owned;
+    CmHirLibraryOwnedEntry *found;
+    size_t module_index;
+    size_t name_length;
+
+    owned = (CmHirLibraryOwnedData *)
+        cm_hir_library_artifact_owned_data_const(artifact);
+    found = NULL;
+    name_length = strlen(expected_name);
+    if (owned == NULL) return NULL;
+    for (module_index = 0u; module_index < owned->modules.len;
+            ++module_index) {
+        CmHirLibraryOwnedModule *module;
+        size_t entry_index;
+
+        module = (CmHirLibraryOwnedModule *)cm_vec_at(&owned->modules,
+            module_index);
+        if (module == NULL) return NULL;
+        for (entry_index = 0u; entry_index < module->entries.len;
+                ++entry_index) {
+            CmHirLibraryOwnedEntry *entry;
+            const CmInternedString *name;
+
+            entry = (CmHirLibraryOwnedEntry *)cm_vec_at(&module->entries,
+                entry_index);
+            name = entry == NULL ? NULL
+                : cm_interner_get(&owned->names, entry->name);
+            if (entry == NULL || name == NULL
+                || entry->kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+                || entry->enum_variant_namespace != expected_namespace
+                || name->len != name_length
+                || memcmp(name->bytes, expected_name, name_length) != 0) {
+                continue;
+            }
+            if (found != NULL) return NULL;
+            found = entry;
+        }
+    }
+    return found;
+}
+
+static CmHirDefinition *mutable_hir_definition(CmHirContext *hir,
+    CmHirDefId definition)
+{
+    size_t index;
+
+    if (hir == NULL || cm_hir_def_id_is_none(definition)) return NULL;
+    for (index = 0u; index < hir->definitions.len; ++index) {
+        CmHirDefinition *candidate;
+
+        candidate = (CmHirDefinition *)cm_vec_at(&hir->definitions, index);
+        if (candidate != NULL
+            && cm_hir_def_id_equal(candidate->id, definition)) {
+            return candidate;
+        }
+    }
+    return NULL;
+}
+
+typedef struct TestHirSnapshot {
+    size_t crates;
+    size_t modules;
+    size_t items;
+    size_t bodies;
+    size_t closures;
+    size_t expressions;
+    size_t types;
+    size_t generic_parameters;
+    size_t definitions;
+    size_t prebound_associated_types;
+    size_t strings;
+} TestHirSnapshot;
+
+static TestHirSnapshot test_hir_snapshot(const CmHirContext *hir)
+{
+    TestHirSnapshot snapshot;
+
+    snapshot.crates = hir->crates.len;
+    snapshot.modules = hir->modules.len;
+    snapshot.items = hir->items.len;
+    snapshot.bodies = hir->bodies.len;
+    snapshot.closures = hir->closures.len;
+    snapshot.expressions = hir->expressions.len;
+    snapshot.types = hir->types.len;
+    snapshot.generic_parameters = hir->generic_parameters.len;
+    snapshot.definitions = hir->definitions.len;
+    snapshot.prebound_associated_types = hir->prebound_associated_types.len;
+    snapshot.strings = cm_interner_length(&hir->strings);
+    return snapshot;
+}
+
+static int test_hir_matches_snapshot(const CmHirContext *hir,
+    TestHirSnapshot snapshot)
+{
+    return hir->crates.len == snapshot.crates
+        && hir->modules.len == snapshot.modules
+        && hir->items.len == snapshot.items
+        && hir->bodies.len == snapshot.bodies
+        && hir->closures.len == snapshot.closures
+        && hir->expressions.len == snapshot.expressions
+        && hir->types.len == snapshot.types
+        && hir->generic_parameters.len == snapshot.generic_parameters
+        && hir->definitions.len == snapshot.definitions
+        && hir->prebound_associated_types.len
+            == snapshot.prebound_associated_types
+        && cm_interner_length(&hir->strings) == snapshot.strings;
+}
+
 static void check(int condition, const char *message)
 {
     if (!condition) {
@@ -631,6 +743,33 @@ static CmHirLowerResult lower_module_graph(CmHirContext *hir,
         options);
     cm_import_resolver_destroy(&imports);
     return result;
+}
+
+static void check_dependency_variant_rejection(CmHirContext *hir,
+    const CmModuleGraph *graph, CmModuleGraphRevision revision,
+    const CmHirLibraryArtifact *artifact, TestHirSnapshot snapshot,
+    const char *message)
+{
+    const CmHirLibraryArtifact *libraries[1];
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+
+    libraries[0] = artifact;
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "rejected_variant_consumer";
+    options.dependency_libraries = libraries;
+    options.dependency_library_count = 1u;
+    result = lower_module_graph(hir, graph, revision, &map, &options);
+    check(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_RESOLVER_FAILURE
+        && result.crate_id == CM_HIR_CRATE_NONE
+        && result.root_module == CM_HIR_MODULE_NONE
+        && result.lowered_item_count == 0u
+        && cm_hir_module_map_count(&map) == 0u
+        && test_hir_matches_snapshot(hir, snapshot), message);
+    cm_hir_module_map_destroy(&map);
 }
 
 static int hir_is_empty(const CmHirContext *hir)
@@ -11296,6 +11435,230 @@ static void test_hir_library_artifact_types(void)
     cm_source_set_destroy(&consumer_sources);
 }
 
+static void test_dependency_enum_variant_imports(void)
+{
+    static const unsigned char producer_source[] =
+        "pub enum Choice { Unit, Tuple(u8), Named { value: u8 } }\n"
+        "pub use Choice::{Unit as ExportedUnit, "
+            "Tuple as ExportedTuple, Named as ExportedNamed};\n";
+    static const unsigned char consumer_source[] =
+        "use dep::Choice::{Unit as ImportedUnit, "
+            "Tuple as ImportedTuple, Named as ImportedNamed};\n"
+        "use dep::{ExportedUnit as ReexportedUnit, "
+            "ExportedTuple as ReexportedTuple, "
+            "ExportedNamed as ReexportedNamed};\n";
+    CmSourceSet producer_sources;
+    CmSourceSet consumer_sources;
+    CmSourceId producer_root = 0u;
+    CmSourceId consumer_root = 0u;
+    CmModuleGraph producer_graph;
+    CmModuleGraph consumer_graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult producer_graph_result;
+    CmModuleGraphResult consumer_graph_result;
+    CmCfgSet cfg;
+    CmHirContext hir;
+    CmHirModuleMap producer_map;
+    CmHirModuleMap consumer_map;
+    CmHirLowerOptions options;
+    CmHirLowerResult producer_lower;
+    CmHirLowerResult consumer_lower;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactResult artifact_result;
+    const CmHirLibraryArtifact *libraries[1];
+    CmHirModuleId consumer_root_hir;
+    const CmHirModule *consumer_module;
+    const CmHirImport *direct_import;
+    const CmHirImport *reexport_import;
+    const CmHirItem *choice;
+    const CmHirDefinition *choice_definition;
+    CmHirDefId unit;
+    CmHirDefId tuple;
+    CmHirDefId named;
+    CmHirLibraryOwnedEntry *tuple_type_entry;
+    CmHirLibraryOwnedEntry *named_type_entry;
+    CmHirLibraryOwnedEntry saved_entry;
+    CmHirDefinition *tuple_definition;
+    CmHirDefinition saved_definition;
+    TestHirSnapshot snapshot;
+
+    cm_source_set_init(&producer_sources);
+    cm_source_set_init(&consumer_sources);
+    cm_module_graph_init(&producer_graph);
+    cm_module_graph_init(&consumer_graph);
+    cm_cfg_set_init(&cfg);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&producer_map);
+    cm_hir_module_map_init(&consumer_map);
+    cm_hir_library_artifact_init(&artifact);
+    check(cm_source_add_memory(&producer_sources,
+            "variant-dependency/producer.rs", producer_source,
+            sizeof(producer_source) - 1u, &producer_root) == CM_SOURCE_OK
+        && cm_source_add_memory(&consumer_sources,
+            "variant-dependency/consumer.rs", consumer_source,
+            sizeof(consumer_source) - 1u, &consumer_root) == CM_SOURCE_OK,
+        "could not add dependency enum variant fixtures");
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    producer_graph_result = cm_module_graph_build(&producer_graph,
+        &producer_sources, producer_root, &graph_options);
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "variant_producer";
+    producer_lower = lower_module_graph(&hir, &producer_graph,
+        producer_graph_result.revision, &producer_map, &options);
+    choice = find_hir_item_anywhere(&hir, "Choice");
+    choice_definition = choice == NULL ? NULL
+        : cm_hir_lookup_definition(&hir, choice->definition);
+    unit = choice == NULL || choice->kind != CM_HIR_ITEM_ENUM
+            || choice->data.enum_item.variant_count != 3u
+        ? cm_hir_def_id_none()
+        : choice->data.enum_item.variants[0].definition;
+    tuple = choice == NULL || choice->kind != CM_HIR_ITEM_ENUM
+            || choice->data.enum_item.variant_count != 3u
+        ? cm_hir_def_id_none()
+        : choice->data.enum_item.variants[1].definition;
+    named = choice == NULL || choice->kind != CM_HIR_ITEM_ENUM
+            || choice->data.enum_item.variant_count != 3u
+        ? cm_hir_def_id_none()
+        : choice->data.enum_item.variants[2].definition;
+    check(producer_graph_result.error_count == 0u
+        && producer_lower.error_count == 0u
+        && choice != NULL && choice->kind == CM_HIR_ITEM_ENUM
+        && choice->data.enum_item.variant_count == 3u
+        && choice_definition != NULL
+        && choice_definition->kind == CM_HIR_DEFINITION_ITEM,
+        "dependency enum variant producer did not lower canonically");
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &hir, producer_lower.crate_id, &producer_graph,
+        producer_graph_result.revision, &producer_map, "dep");
+    check(artifact_result.status == CM_HIR_LIBRARY_OK,
+        "dependency enum variant artifact did not authenticate");
+
+    consumer_graph_result = cm_module_graph_build(&consumer_graph,
+        &consumer_sources, consumer_root, &graph_options);
+    libraries[0] = &artifact;
+    cm_hir_lower_options_init(&options);
+    options.crate_name = "variant_consumer";
+    options.dependency_libraries = libraries;
+    options.dependency_library_count = 1u;
+    consumer_lower = lower_module_graph(&hir, &consumer_graph,
+        consumer_graph_result.revision, &consumer_map, &options);
+    if (consumer_lower.error_count != 0u) {
+        fprintf(stderr, "hir-dependency-variant-lower: %s: %s\n",
+            cm_hir_lower_error_kind_name(consumer_lower.first_error.kind),
+            consumer_lower.first_error.message);
+    }
+    consumer_root_hir = CM_HIR_MODULE_NONE;
+    (void)cm_hir_module_map_lookup_hir(&consumer_map, &consumer_graph,
+        consumer_graph_result.revision, consumer_graph_result.root,
+        &hir, &consumer_root_hir);
+    consumer_module = cm_hir_get_module(&hir, consumer_root_hir);
+    direct_import = consumer_module != NULL
+            && consumer_module->import_count == 2u
+        ? &consumer_module->imports[0] : NULL;
+    reexport_import = consumer_module != NULL
+            && consumer_module->import_count == 2u
+        ? &consumer_module->imports[1] : NULL;
+    check(consumer_graph_result.error_count == 0u
+        && consumer_lower.error_count == 0u
+        && consumer_module != NULL && direct_import != NULL
+        && reexport_import != NULL
+        && direct_import->binding_count == 5u
+        && reexport_import->binding_count == 5u,
+        "explicit dependency enum variant imports did not lower");
+    check(direct_import != NULL
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_TYPE, "ImportedUnit", unit) == 1u
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_VALUE, "ImportedUnit", unit) == 1u
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_TYPE, "ImportedTuple", tuple) == 1u
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_VALUE, "ImportedTuple", tuple) == 1u
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_TYPE, "ImportedNamed", named) == 1u
+        && hir_import_binding_match_count(&hir, direct_import,
+            CM_HIR_NAMESPACE_VALUE, "ImportedNamed", named) == 0u,
+        "direct dependency variants lost TYPE/VALUE namespace identity");
+    check(reexport_import != NULL
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_TYPE, "ReexportedUnit", unit) == 1u
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_VALUE, "ReexportedUnit", unit) == 1u
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_TYPE, "ReexportedTuple", tuple) == 1u
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_VALUE, "ReexportedTuple", tuple) == 1u
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_TYPE, "ReexportedNamed", named) == 1u
+        && hir_import_binding_match_count(&hir, reexport_import,
+            CM_HIR_NAMESPACE_VALUE, "ReexportedNamed", named) == 0u,
+        "reexported dependency variants lost authenticated namespace twins");
+
+    snapshot = test_hir_snapshot(&hir);
+    tuple_type_entry = mutable_library_variant_entry(&artifact,
+        "ExportedTuple", CM_HIR_LIBRARY_ENUM_VARIANT_TYPE);
+    named_type_entry = mutable_library_variant_entry(&artifact,
+        "ExportedNamed", CM_HIR_LIBRARY_ENUM_VARIANT_TYPE);
+    tuple_definition = mutable_hir_definition(&hir, tuple);
+    check(tuple_type_entry != NULL && named_type_entry != NULL
+        && tuple_definition != NULL,
+        "dependency variant hostile fixtures are missing");
+    if (tuple_definition != NULL) {
+        saved_definition = *tuple_definition;
+        tuple_definition->entity.enum_variant.variant_index = 0u;
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "stale dependency variant index did not reject atomically");
+        tuple_definition = mutable_hir_definition(&hir, tuple);
+        if (tuple_definition != NULL) *tuple_definition = saved_definition;
+    }
+    if (tuple_type_entry != NULL) {
+        saved_entry = *tuple_type_entry;
+        tuple_type_entry->enum_definition = cm_hir_def_id_none();
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "forged dependency variant parent did not reject atomically");
+        *tuple_type_entry = saved_entry;
+
+        tuple_type_entry->enum_variant_index = 0u;
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "forged dependency variant index did not reject atomically");
+        *tuple_type_entry = saved_entry;
+
+        tuple_type_entry->enum_variant_form = CM_HIR_AGGREGATE_NAMED;
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "forged dependency variant form did not reject atomically");
+        *tuple_type_entry = saved_entry;
+
+        tuple_type_entry->target = unit;
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "forged dependency variant DefId did not reject atomically");
+        *tuple_type_entry = saved_entry;
+    }
+    if (named_type_entry != NULL) {
+        saved_entry = *named_type_entry;
+        named_type_entry->enum_variant_namespace
+            = CM_HIR_LIBRARY_ENUM_VARIANT_VALUE;
+        check_dependency_variant_rejection(&hir, &consumer_graph,
+            consumer_graph_result.revision, &artifact, snapshot,
+            "named dependency variant acquired a fictitious VALUE binding");
+        *named_type_entry = saved_entry;
+    }
+
+    cm_hir_module_map_destroy(&consumer_map);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_module_map_destroy(&producer_map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&consumer_graph);
+    cm_module_graph_destroy(&producer_graph);
+    cm_source_set_destroy(&consumer_sources);
+    cm_source_set_destroy(&producer_sources);
+}
+
 static void test_generated_preflight_rejections(void)
 {
     static const char *const rejected_sources[] = {
@@ -12422,6 +12785,7 @@ int main(void)
     test_inherent_associated_const();
     test_dependency_generated_declarations();
     test_hir_library_artifact_types();
+    test_dependency_enum_variant_imports();
     test_generated_preflight_rejections();
     test_import_failures_are_transactional();
     test_import_graph_identity();

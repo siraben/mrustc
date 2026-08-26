@@ -17799,13 +17799,15 @@ static size_t cm_lower_library_import_binding_count(CmLowerState *state,
     count = 0u;
     for (leaf_index = 0u; leaf_index < leaf_count; ++leaf_index) {
         CmImportLeafView leaf;
+        CmHirLibraryBinding type_binding;
         int resolution;
 
         if (leaf_index > (size_t)UINT32_MAX
             || !cm_import_get_leaf(state->imports, (uint32_t)leaf_index,
                 &leaf)) return SIZE_MAX;
+        memset(&type_binding, 0, sizeof(type_binding));
         resolution = cm_lower_library_import_leaf(state, graph_module,
-            declaration, &leaf, CM_RESOLVE_NAMESPACE_TYPE, NULL);
+            declaration, &leaf, CM_RESOLVE_NAMESPACE_TYPE, &type_binding);
         if (resolution < 0) {
             cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
                 declaration.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
@@ -17814,6 +17816,14 @@ static size_t cm_lower_library_import_binding_count(CmLowerState *state,
             return SIZE_MAX;
         }
         if (resolution > 0) count += 1u;
+        /* A named enum variant has a TYPE identity but no constructor in
+         * VALUE namespace.  Avoid turning the library's fail-closed VALUE
+         * query into rejection of the valid TYPE-only explicit import. */
+        if (resolution > 0
+            && type_binding.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+            && type_binding.enum_variant_form == CM_HIR_AGGREGATE_NAMED) {
+            continue;
+        }
         resolution = cm_lower_library_import_leaf(state, graph_module,
             declaration, &leaf, CM_RESOLVE_NAMESPACE_VALUE, NULL);
         if (resolution < 0) {
@@ -17854,7 +17864,8 @@ static int cm_lower_store_resolved_import_binding(CmLowerState *state,
 
 static int cm_lower_store_library_import_binding(CmLowerState *state,
     const CmImportLeafView *leaf, CmHirLibraryBinding imported_binding,
-    CmSpan span, CmResolveItemRef declaration,
+    CmResolveNamespace namespace_kind, CmSpan span,
+    CmResolveItemRef declaration,
     CmHirImportBinding *hir_binding)
 {
     int valid_target;
@@ -17915,6 +17926,63 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
             && (item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT
                 || item->data.aggregate_item.form
                     == CM_HIR_AGGREGATE_TUPLE);
+    } else if (imported_binding.kind
+            == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
+        const CmHirDefinition *enumeration_definition;
+        const CmHirDefinition *variant_definition;
+        const CmHirItem *enumeration;
+        const CmHirVariant *variant;
+
+        enumeration_definition = cm_hir_lookup_definition(state->hir,
+            imported_binding.enum_definition);
+        variant_definition = cm_hir_lookup_definition(state->hir,
+            imported_binding.definition);
+        enumeration = enumeration_definition == NULL
+            || enumeration_definition->kind != CM_HIR_DEFINITION_ITEM
+            || enumeration_definition->state != CM_HIR_DEFINITION_BOUND
+            ? NULL : cm_hir_get_item(state->hir,
+                enumeration_definition->entity.item_id);
+        variant = enumeration == NULL
+            || enumeration->kind != CM_HIR_ITEM_ENUM
+            || !cm_hir_def_id_equal(enumeration->definition,
+                imported_binding.enum_definition)
+            || imported_binding.enum_variant_index
+                >= enumeration->data.enum_item.variant_count
+            || enumeration->data.enum_item.variants == NULL
+            ? NULL : &enumeration->data.enum_item.variants[
+                imported_binding.enum_variant_index];
+        valid_target = imported_binding.type_kind == CM_HIR_TYPE_ADT_KIND
+            && imported_binding.primitive_kind == CM_HIR_PRIMITIVE_NONE
+            && imported_binding.value_kind == CM_HIR_LIBRARY_VALUE_NONE
+            && variant != NULL && variant_definition != NULL
+            && variant_definition->kind
+                == CM_HIR_DEFINITION_ENUM_VARIANT
+            && variant_definition->state == CM_HIR_DEFINITION_BOUND
+            && cm_hir_def_id_equal(variant->definition,
+                imported_binding.definition)
+            && variant_definition->entity.enum_variant.enum_item_id
+                == enumeration_definition->entity.item_id
+            && variant_definition->entity.enum_variant.variant_index
+                == imported_binding.enum_variant_index
+            && variant->form == imported_binding.enum_variant_form
+            && imported_binding.enum_variant_namespace
+                == (namespace_kind == CM_RESOLVE_NAMESPACE_VALUE
+                    ? CM_HIR_LIBRARY_ENUM_VARIANT_VALUE
+                    : CM_HIR_LIBRARY_ENUM_VARIANT_TYPE)
+            && (namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+                || (namespace_kind == CM_RESOLVE_NAMESPACE_VALUE
+                    && variant->form != CM_HIR_AGGREGATE_NAMED));
+    }
+    if (valid_target
+        && imported_binding.kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
+        int value_namespace;
+
+        value_namespace = imported_binding.kind
+                == CM_HIR_LIBRARY_BINDING_VALUE
+            || imported_binding.kind
+                == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR;
+        valid_target = namespace_kind == (value_namespace
+            ? CM_RESOLVE_NAMESPACE_VALUE : CM_RESOLVE_NAMESPACE_TYPE);
     }
     if (!valid_target) {
         cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
@@ -17924,11 +17992,9 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
     }
     hir_binding->name = cm_lower_copy_import_string(state,
         leaf->import_name, span, declaration.item);
-    hir_binding->namespace_kind = imported_binding.kind
-                == CM_HIR_LIBRARY_BINDING_VALUE
-            || imported_binding.kind
-                == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
-        ? CM_HIR_NAMESPACE_VALUE : CM_HIR_NAMESPACE_TYPE;
+    if (state->failed
+        || !cm_lower_import_namespace(state, namespace_kind, span,
+            declaration.item, &hir_binding->namespace_kind)) return 0;
     hir_binding->target = imported_binding.definition;
     hir_binding->primitive_kind = imported_binding.primitive_kind;
     hir_binding->is_anonymous = 0;
@@ -18224,10 +18290,17 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                         if (resolution == 0) continue;
                         if (binding_index >= binding_count
                             || !cm_lower_store_library_import_binding(state,
-                                &leaf, imported_binding, effective.span,
+                                &leaf, imported_binding,
+                                namespaces[namespace_index], effective.span,
                                 effective.declaration,
                                 &hir_import->bindings[binding_index])) break;
                         binding_index += 1u;
+                        if (namespaces[namespace_index]
+                                == CM_RESOLVE_NAMESPACE_TYPE
+                            && imported_binding.kind
+                                == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT
+                            && imported_binding.enum_variant_form
+                                == CM_HIR_AGGREGATE_NAMED) break;
                     }
                 }
             }
