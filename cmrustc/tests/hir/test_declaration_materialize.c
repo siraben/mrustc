@@ -103,6 +103,60 @@ typedef struct AggregateFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[6];
 } AggregateFixture;
 
+#define PRIMITIVE_BINDING_COUNT 34u
+
+typedef struct PrimitiveFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationNamespaceEntry
+        namespace_entries[PRIMITIVE_BINDING_COUNT];
+} PrimitiveFixture;
+
+typedef struct PrimitiveBindingSpec {
+    const char *name;
+    uint8_t declaration_kind;
+    CmHirPrimitiveKind hir_kind;
+} PrimitiveBindingSpec;
+
+/* TYPE namespace canonical order: aliases first, then primitive spellings. */
+static const PrimitiveBindingSpec primitive_binding_specs[
+        PRIMITIVE_BINDING_COUNT] = {
+    { "BoolAlias", CM_HIR_DECL_PRIMITIVE_BOOL, CM_HIR_PRIMITIVE_BOOL },
+    { "CharAlias", CM_HIR_DECL_PRIMITIVE_CHAR, CM_HIR_PRIMITIVE_CHAR },
+    { "F32Alias", CM_HIR_DECL_PRIMITIVE_F32, CM_HIR_PRIMITIVE_F32 },
+    { "F64Alias", CM_HIR_DECL_PRIMITIVE_F64, CM_HIR_PRIMITIVE_F64 },
+    { "I128Alias", CM_HIR_DECL_PRIMITIVE_I128, CM_HIR_PRIMITIVE_I128 },
+    { "I16Alias", CM_HIR_DECL_PRIMITIVE_I16, CM_HIR_PRIMITIVE_I16 },
+    { "I32Alias", CM_HIR_DECL_PRIMITIVE_I32, CM_HIR_PRIMITIVE_I32 },
+    { "I64Alias", CM_HIR_DECL_PRIMITIVE_I64, CM_HIR_PRIMITIVE_I64 },
+    { "I8Alias", CM_HIR_DECL_PRIMITIVE_I8, CM_HIR_PRIMITIVE_I8 },
+    { "IsizeAlias", CM_HIR_DECL_PRIMITIVE_ISIZE, CM_HIR_PRIMITIVE_ISIZE },
+    { "StrAlias", CM_HIR_DECL_PRIMITIVE_STR, CM_HIR_PRIMITIVE_STR },
+    { "U128Alias", CM_HIR_DECL_PRIMITIVE_U128, CM_HIR_PRIMITIVE_U128 },
+    { "U16Alias", CM_HIR_DECL_PRIMITIVE_U16, CM_HIR_PRIMITIVE_U16 },
+    { "U32Alias", CM_HIR_DECL_PRIMITIVE_U32, CM_HIR_PRIMITIVE_U32 },
+    { "U64Alias", CM_HIR_DECL_PRIMITIVE_U64, CM_HIR_PRIMITIVE_U64 },
+    { "U8Alias", CM_HIR_DECL_PRIMITIVE_U8, CM_HIR_PRIMITIVE_U8 },
+    { "UsizeAlias", CM_HIR_DECL_PRIMITIVE_USIZE, CM_HIR_PRIMITIVE_USIZE },
+    { "bool", CM_HIR_DECL_PRIMITIVE_BOOL, CM_HIR_PRIMITIVE_BOOL },
+    { "char", CM_HIR_DECL_PRIMITIVE_CHAR, CM_HIR_PRIMITIVE_CHAR },
+    { "f32", CM_HIR_DECL_PRIMITIVE_F32, CM_HIR_PRIMITIVE_F32 },
+    { "f64", CM_HIR_DECL_PRIMITIVE_F64, CM_HIR_PRIMITIVE_F64 },
+    { "i128", CM_HIR_DECL_PRIMITIVE_I128, CM_HIR_PRIMITIVE_I128 },
+    { "i16", CM_HIR_DECL_PRIMITIVE_I16, CM_HIR_PRIMITIVE_I16 },
+    { "i32", CM_HIR_DECL_PRIMITIVE_I32, CM_HIR_PRIMITIVE_I32 },
+    { "i64", CM_HIR_DECL_PRIMITIVE_I64, CM_HIR_PRIMITIVE_I64 },
+    { "i8", CM_HIR_DECL_PRIMITIVE_I8, CM_HIR_PRIMITIVE_I8 },
+    { "isize", CM_HIR_DECL_PRIMITIVE_ISIZE, CM_HIR_PRIMITIVE_ISIZE },
+    { "str", CM_HIR_DECL_PRIMITIVE_STR, CM_HIR_PRIMITIVE_STR },
+    { "u128", CM_HIR_DECL_PRIMITIVE_U128, CM_HIR_PRIMITIVE_U128 },
+    { "u16", CM_HIR_DECL_PRIMITIVE_U16, CM_HIR_PRIMITIVE_U16 },
+    { "u32", CM_HIR_DECL_PRIMITIVE_U32, CM_HIR_PRIMITIVE_U32 },
+    { "u64", CM_HIR_DECL_PRIMITIVE_U64, CM_HIR_PRIMITIVE_U64 },
+    { "u8", CM_HIR_DECL_PRIMITIVE_U8, CM_HIR_PRIMITIVE_U8 },
+    { "usize", CM_HIR_DECL_PRIMITIVE_USIZE, CM_HIR_PRIMITIVE_USIZE }
+};
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -851,6 +905,41 @@ static void static_fixture_init(StaticFixture *fixture)
     metadata->namespace_count = 2u;
 }
 
+static void primitive_fixture_init(PrimitiveFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    size_t index;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("depcrate");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("primitive-bindings-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    for (index = 0u; index < PRIMITIVE_BINDING_COUNT; ++index) {
+        CmHirDeclarationNamespaceEntry *entry =
+            &fixture->namespace_entries[index];
+        entry->owner_module = 1u;
+        entry->namespace_kind = CM_HIR_DECL_NAMESPACE_TYPE;
+        entry->name.data = (unsigned char *)primitive_binding_specs[index].name;
+        entry->name.length = strlen(primitive_binding_specs[index].name);
+        entry->target_kind = CM_HIR_DECL_TARGET_PRIMITIVE;
+        entry->target_local = primitive_binding_specs[index].declaration_kind;
+        entry->export_ordinal = (uint32_t)index + 1u;
+    }
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = PRIMITIVE_BINDING_COUNT;
+}
+
 static void aggregate_fixture_init(AggregateFixture *fixture)
 {
     CmHirDeclarationMetadata *metadata;
@@ -1369,6 +1458,161 @@ static void assert_item_parameter(const CmHirContext *context,
         && cm_hir_def_id_equal(parameter->data.named_type.definition,
             item_definition)
         && parameter->data.named_type.argument_count == 0u);
+}
+
+static void assert_primitive_type(const CmHirContext *context,
+    CmHirTypeId type_id, CmHirPrimitiveKind primitive)
+{
+    const CmHirType *type = cm_hir_get_type(context, type_id);
+    assert(type != NULL);
+    switch (primitive) {
+    case CM_HIR_PRIMITIVE_BOOL:
+        assert(type->kind == CM_HIR_TYPE_BOOL_KIND); break;
+    case CM_HIR_PRIMITIVE_CHAR:
+        assert(type->kind == CM_HIR_TYPE_CHAR_KIND); break;
+    case CM_HIR_PRIMITIVE_STR:
+        assert(type->kind == CM_HIR_TYPE_STR_KIND); break;
+    case CM_HIR_PRIMITIVE_I8:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_I8); break;
+    case CM_HIR_PRIMITIVE_I16:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_I16); break;
+    case CM_HIR_PRIMITIVE_I32:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_I32); break;
+    case CM_HIR_PRIMITIVE_I64:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_I64); break;
+    case CM_HIR_PRIMITIVE_I128:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_I128); break;
+    case CM_HIR_PRIMITIVE_ISIZE:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_ISIZE); break;
+    case CM_HIR_PRIMITIVE_U8:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U8); break;
+    case CM_HIR_PRIMITIVE_U16:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U16); break;
+    case CM_HIR_PRIMITIVE_U32:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U32); break;
+    case CM_HIR_PRIMITIVE_U64:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U64); break;
+    case CM_HIR_PRIMITIVE_U128:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_U128); break;
+    case CM_HIR_PRIMITIVE_USIZE:
+        assert(type->kind == CM_HIR_TYPE_INTEGER_KIND
+            && type->data.integer_type.kind == CM_HIR_INT_USIZE); break;
+    case CM_HIR_PRIMITIVE_F32:
+        assert(type->kind == CM_HIR_TYPE_FLOAT_KIND
+            && type->data.float_type.kind == CM_HIR_FLOAT_F32); break;
+    case CM_HIR_PRIMITIVE_F64:
+        assert(type->kind == CM_HIR_TYPE_FLOAT_KIND
+            && type->data.float_type.kind == CM_HIR_FLOAT_F64); break;
+    default:
+        assert(0);
+    }
+}
+
+static void test_primitive_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact)
+{
+    static const unsigned char source_text[] =
+        "pub fn p00(_: dep::BoolAlias) {}\n"
+        "pub fn p01(_: dep::CharAlias) {}\n"
+        "pub fn p02(_: dep::F32Alias) {}\n"
+        "pub fn p03(_: dep::F64Alias) {}\n"
+        "pub fn p04(_: dep::I128Alias) {}\n"
+        "pub fn p05(_: dep::I16Alias) {}\n"
+        "pub fn p06(_: dep::I32Alias) {}\n"
+        "pub fn p07(_: dep::I64Alias) {}\n"
+        "pub fn p08(_: dep::I8Alias) {}\n"
+        "pub fn p09(_: dep::IsizeAlias) {}\n"
+        "pub fn p10(_: dep::StrAlias) {}\n"
+        "pub fn p11(_: dep::U128Alias) {}\n"
+        "pub fn p12(_: dep::U16Alias) {}\n"
+        "pub fn p13(_: dep::U32Alias) {}\n"
+        "pub fn p14(_: dep::U64Alias) {}\n"
+        "pub fn p15(_: dep::U8Alias) {}\n"
+        "pub fn p16(_: dep::UsizeAlias) {}\n"
+        "pub fn p17(_: dep::bool) {}\n"
+        "pub fn p18(_: dep::char) {}\n"
+        "pub fn p19(_: dep::f32) {}\n"
+        "pub fn p20(_: dep::f64) {}\n"
+        "pub fn p21(_: dep::i128) {}\n"
+        "pub fn p22(_: dep::i16) {}\n"
+        "pub fn p23(_: dep::i32) {}\n"
+        "pub fn p24(_: dep::i64) {}\n"
+        "pub fn p25(_: dep::i8) {}\n"
+        "pub fn p26(_: dep::isize) {}\n"
+        "pub fn p27(_: dep::str) {}\n"
+        "pub fn p28(_: dep::u128) {}\n"
+        "pub fn p29(_: dep::u16) {}\n"
+        "pub fn p30(_: dep::u32) {}\n"
+        "pub fn p31(_: dep::u64) {}\n"
+        "pub fn p32(_: dep::u8) {}\n"
+        "pub fn p33(_: dep::usize) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "primitive_consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "primitive_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    for (index = 0u; index < PRIMITIVE_BINDING_COUNT; ++index) {
+        char name[4];
+        const CmHirItem *function;
+        name[0] = 'p';
+        name[1] = (char)('0' + (index / 10u));
+        name[2] = (char)('0' + (index % 10u));
+        name[3] = '\0';
+        function = find_item(context, CM_HIR_ITEM_FUNCTION, name);
+        assert(function != NULL
+            && function->data.function_item.signature.parameter_count == 1u);
+        assert_primitive_type(context,
+            function->data.function_item.signature.parameters[0].type,
+            primitive_binding_specs[index].hir_kind);
+    }
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
 }
 
 static void test_item_fresh_consumer(CmHirContext *context,
@@ -2690,6 +2934,120 @@ static void test_static_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_primitive_materialize_and_consume(void)
+{
+    PrimitiveFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    ContextLengths lengths;
+    size_t index;
+    uint8_t saved_byte;
+    uint32_t saved_local;
+
+    primitive_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 181u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.module_count == 1u && result.item_count == 0u
+        && result.public_type_entry_count == PRIMITIVE_BINDING_COUNT
+        && result.public_value_entry_count == 0u
+        && context.items.len == 0u && context.types.len == 0u
+        && context.generic_parameters.len == 0u
+        && context.bodies.len == 0u);
+    for (index = 0u; index < PRIMITIVE_BINDING_COUNT; ++index) {
+        const PrimitiveBindingSpec *spec = &primitive_binding_specs[index];
+        CmHirLibraryPathSegment path[2];
+        CmHirLibraryBinding binding = lookup_binding(&artifact, spec->name);
+        CmHirLibraryType type;
+        CmHirLibraryValue value;
+        assert(binding.kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE
+            && cm_hir_def_id_is_none(binding.definition)
+            && binding.type_kind == CM_HIR_TYPE_ERROR_KIND
+            && binding.primitive_kind == spec->hir_kind
+            && binding.value_kind == CM_HIR_LIBRARY_VALUE_NONE
+            && cm_hir_def_id_is_none(binding.enum_definition)
+            && binding.enum_variant_index == 0u
+            && binding.enum_variant_form == 0u
+            && binding.enum_variant_namespace == 0u);
+        path[0].bytes = (const unsigned char *)"dep";
+        path[0].length = sizeof("dep") - 1u;
+        path[1].bytes = (const unsigned char *)spec->name;
+        path[1].length = strlen(spec->name);
+        memset(&type, 0, sizeof(type));
+        assert(cm_hir_library_artifact_lookup_type(&artifact, path, 2u,
+            &type) == CM_HIR_LIBRARY_OK
+            && type.binding_kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE
+            && cm_hir_def_id_is_none(type.definition)
+            && type.kind == CM_HIR_TYPE_ERROR_KIND
+            && type.primitive_kind == spec->hir_kind);
+        assert(lookup_value_binding_status(&artifact, spec->name)
+            == CM_HIR_LIBRARY_NOT_FOUND);
+        memset(&value, 0, sizeof(value));
+        assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u,
+            &value) == CM_HIR_LIBRARY_NOT_FOUND);
+    }
+
+    test_primitive_fresh_consumer(&context, &artifact);
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    saved_byte = decoded.namespace_entries[0].namespace_kind;
+    decoded.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 182u);
+    decoded.namespace_entries[0].namespace_kind = saved_byte;
+
+    saved_byte = decoded.namespace_entries[0].target_kind;
+    decoded.namespace_entries[0].target_kind = UINT8_C(255);
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 183u);
+    decoded.namespace_entries[0].target_kind = saved_byte;
+
+    saved_local = decoded.namespace_entries[0].target_local;
+    decoded.namespace_entries[0].target_local = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 184u);
+    decoded.namespace_entries[0].target_local =
+        CM_HIR_DECL_PRIMITIVE_UNIT;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 185u);
+    decoded.namespace_entries[0].target_local =
+        (uint32_t)CM_HIR_DECL_PRIMITIVE_F64 + 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 186u);
+    decoded.namespace_entries[0].target_local = saved_local;
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_aggregate_materialize_and_consume(void)
 {
     AggregateFixture fixture;
@@ -3681,6 +4039,7 @@ int main(void)
     test_composite_materialize_and_consume();
     test_const_materialize_and_consume();
     test_static_materialize_and_consume();
+    test_primitive_materialize_and_consume();
     test_aggregate_materialize_and_consume();
     test_enum_materialize_and_restore_scope();
     test_default_enum_materialize_and_variant_reexports();

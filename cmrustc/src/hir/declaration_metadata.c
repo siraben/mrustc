@@ -89,6 +89,14 @@ static int cm_decl_primitive(uint8_t value)
         && value <= (uint8_t)CM_HIR_DECL_PRIMITIVE_F64;
 }
 
+static int cm_decl_namespace_primitive(uint32_t value)
+{
+    /* `()` has no identifier namespace binding.  All remaining declaration
+     * primitive tags map exactly to resolver primitive kinds. */
+    return value >= (uint32_t)CM_HIR_DECL_PRIMITIVE_BOOL
+        && value <= (uint32_t)CM_HIR_DECL_PRIMITIVE_F64;
+}
+
 static int cm_decl_range(uint32_t start, uint32_t count, size_t total)
 {
     size_t first;
@@ -1692,7 +1700,8 @@ static int cm_decl_validate_namespace(
                     && entry->target_kind != CM_HIR_DECL_TARGET_ITEM
                     && entry->target_kind != CM_HIR_DECL_TARGET_NOMINAL
                     && entry->target_kind
-                        != CM_HIR_DECL_TARGET_ENUM_VARIANT)
+                        != CM_HIR_DECL_TARGET_ENUM_VARIANT
+                    && entry->target_kind != CM_HIR_DECL_TARGET_PRIMITIVE)
                 || entry->target_local == 0u
                 || (entry->target_kind == CM_HIR_DECL_TARGET_MODULE
                     && (size_t)entry->target_local > metadata->module_count)
@@ -1703,7 +1712,9 @@ static int cm_decl_validate_namespace(
                 || (entry->target_kind
                         == CM_HIR_DECL_TARGET_ENUM_VARIANT
                     && cm_decl_variant_local(metadata,
-                        entry->target_local, NULL) == NULL))
+                        entry->target_local, NULL) == NULL)
+                || (entry->target_kind == CM_HIR_DECL_TARGET_PRIMITIVE
+                    && !cm_decl_namespace_primitive(entry->target_local)))
                 return 0;
             if (entry->target_kind == CM_HIR_DECL_TARGET_MODULE) {
                 const CmHirDeclarationModule *target = &metadata->modules[

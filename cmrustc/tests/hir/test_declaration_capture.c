@@ -168,6 +168,23 @@ static const char generic_enum_fixture_template[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char primitive_reexport_fixture_source[] =
+    "pub mod primitive {\n"
+    "  #[stable(feature = \"primitive\", since = \"1.0.0\")]\n"
+    "  pub use {\n"
+    "    bool, char, str, i8, i16, i32, i64, i128, isize,\n"
+    "    u8, u16, u32, u64, u128, usize, f32, f64\n"
+    "  };\n"
+    "  pub mod base {\n"
+    "    #[stable(feature = \"primitive_alias\", since = \"1.0.0\")]\n"
+    "    pub use u8 as byte;\n"
+    "  }\n"
+    "  #[stable(feature = \"primitive_transitive_alias\", since = \"1.0.0\")]\n"
+    "  pub use base::byte as octet;\n"
+    "}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -278,6 +295,14 @@ static void generic_enum_fixture_init(CaptureFixture *fixture,
     assert(written > 0 && (size_t)written < sizeof(source));
     fixture_init_source(fixture, with_noise, "v30-generic-enum-provider.rs",
         (const unsigned char *)source, (size_t)written);
+}
+
+static void primitive_reexport_fixture_init(CaptureFixture *fixture,
+    int with_noise)
+{
+    fixture_init_source(fixture, with_noise,
+        "v30-primitive-reexports.rs", primitive_reexport_fixture_source,
+        sizeof(primitive_reexport_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -3323,8 +3348,274 @@ static void test_generic_enum_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static void assert_primitive_reexport_descriptor(
+    const CmHirDeclarationMetadata *metadata)
+{
+    static const struct {
+        uint32_t owner_module;
+        const char *name;
+        uint32_t primitive;
+    } expected[] = {
+        { 2u, "bool", CM_HIR_DECL_PRIMITIVE_BOOL },
+        { 2u, "char", CM_HIR_DECL_PRIMITIVE_CHAR },
+        { 2u, "str", CM_HIR_DECL_PRIMITIVE_STR },
+        { 2u, "i8", CM_HIR_DECL_PRIMITIVE_I8 },
+        { 2u, "i16", CM_HIR_DECL_PRIMITIVE_I16 },
+        { 2u, "i32", CM_HIR_DECL_PRIMITIVE_I32 },
+        { 2u, "i64", CM_HIR_DECL_PRIMITIVE_I64 },
+        { 2u, "i128", CM_HIR_DECL_PRIMITIVE_I128 },
+        { 2u, "isize", CM_HIR_DECL_PRIMITIVE_ISIZE },
+        { 2u, "u8", CM_HIR_DECL_PRIMITIVE_U8 },
+        { 2u, "u16", CM_HIR_DECL_PRIMITIVE_U16 },
+        { 2u, "u32", CM_HIR_DECL_PRIMITIVE_U32 },
+        { 2u, "u64", CM_HIR_DECL_PRIMITIVE_U64 },
+        { 2u, "u128", CM_HIR_DECL_PRIMITIVE_U128 },
+        { 2u, "usize", CM_HIR_DECL_PRIMITIVE_USIZE },
+        { 2u, "f32", CM_HIR_DECL_PRIMITIVE_F32 },
+        { 2u, "f64", CM_HIR_DECL_PRIMITIVE_F64 },
+        { 3u, "byte", CM_HIR_DECL_PRIMITIVE_U8 },
+        { 2u, "octet", CM_HIR_DECL_PRIMITIVE_U8 }
+    };
+    size_t primitive_count = 0u;
+    size_t index;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    for (index = 0u; index < sizeof(expected) / sizeof(expected[0]); ++index) {
+        const CmHirDeclarationNamespaceEntry *entry = find_namespace_entry(
+            metadata, expected[index].owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE,
+            expected[index].name);
+        assert(entry != NULL
+            && entry->target_kind == CM_HIR_DECL_TARGET_PRIMITIVE
+            && entry->target_local == expected[index].primitive);
+    }
+    for (index = 0u; index < metadata->namespace_count; ++index) {
+        const CmHirDeclarationNamespaceEntry *entry =
+            &metadata->namespace_entries[index];
+        if (entry->target_kind == CM_HIR_DECL_TARGET_PRIMITIVE) {
+            assert(entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
+                && entry->target_local >= CM_HIR_DECL_PRIMITIVE_BOOL
+                && entry->target_local <= CM_HIR_DECL_PRIMITIVE_F64);
+            primitive_count += 1u;
+        }
+    }
+    assert(primitive_count == sizeof(expected) / sizeof(expected[0])
+        && find_namespace_entry(metadata, 2u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "octet") == NULL
+        && find_namespace_entry(metadata, 3u,
+            CM_HIR_DECL_NAMESPACE_VALUE, "byte") == NULL);
+}
+
+static void test_primitive_reexports_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    primitive_reexport_fixture_init(&first, 0);
+    primitive_reexport_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 3u
+        && result.module_count == 3u);
+    assert_primitive_reexport_descriptor(&first_metadata);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 3u);
+    assert_primitive_reexport_descriptor(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_primitive_reexport_hostile_mutations_are_atomic(void)
+{
+    static const struct {
+        const char *path;
+        const unsigned char *source;
+        size_t source_length;
+    } rejected[] = {
+        { "primitive-f16.rs",
+            (const unsigned char *)
+                "#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use f16;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use f16;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u },
+        { "primitive-mixed.rs",
+            (const unsigned char *)
+                "pub trait Gate<T: ?Sized> {}\n"
+                "#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use {bool, Gate as OtherGate};\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("pub trait Gate<T: ?Sized> {}\n"
+                "#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use {bool, Gate as OtherGate};\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u },
+        { "primitive-glob.rs",
+            (const unsigned char *)
+                "mod p { pub use bool; }\n"
+                "#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use p::*;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod p { pub use bool; }\n"
+                "#[stable(feature = \"p\", since = \"1.0.0\")]\n"
+                "pub use p::*;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u },
+        { "primitive-attr.rs",
+            (const unsigned char *)
+                "#[doc(hidden)]\n"
+                "pub use bool;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("#[doc(hidden)]\n"
+                "pub use bool;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u }
+    };
+    CaptureFixture good;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirDeclarationType *saved_types;
+    CmHirImport *grouped = NULL;
+    CmHirImport *alias = NULL;
+    CmHirImportBinding *bool_binding = NULL;
+    CmHirPrimitiveKind saved_primitive;
+    CmHirNamespace saved_namespace_kind;
+    CmHirDefId saved_target;
+    CmInternId saved_tree;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint32_t saved_source_item;
+    size_t index;
+    primitive_reexport_fixture_init(&good, 0);
+    input = capture_input(&good);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_namespace = metadata.namespace_entries;
+    saved_types = metadata.types;
+    for (index = 0u; index < good.hir.modules.len; ++index) {
+        CmHirModule *module = (CmHirModule *)cm_vec_at(&good.hir.modules,
+            index);
+        uint32_t import_index;
+        if (module == NULL
+            || module->crate_id != good.lower_result.crate_id) continue;
+        for (import_index = 0u; import_index < module->import_count;
+                ++import_index) {
+            CmHirImport *candidate = &module->imports[import_index];
+            if (candidate->binding_count == 17u) grouped = candidate;
+            if (candidate->binding_count == 1u
+                && candidate->bindings != NULL
+                && candidate->bindings[0].primitive_kind
+                    == CM_HIR_PRIMITIVE_U8) alias = candidate;
+        }
+    }
+    assert(grouped != NULL && alias != NULL && grouped != alias
+        && grouped->bindings != NULL && grouped->attribute_count == 1u
+        && grouped->attributes != NULL);
+    for (index = 0u; index < grouped->binding_count; ++index)
+        if (grouped->bindings[index].primitive_kind
+                == CM_HIR_PRIMITIVE_BOOL)
+            bool_binding = &grouped->bindings[index];
+    assert(bool_binding != NULL);
+
+#define ASSERT_PRIMITIVE_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.namespace_entries == saved_namespace \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_primitive = alias->bindings[0].primitive_kind;
+    alias->bindings[0].primitive_kind = CM_HIR_PRIMITIVE_CHAR;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    alias->bindings[0].primitive_kind = saved_primitive;
+
+    saved_namespace_kind = bool_binding->namespace_kind;
+    bool_binding->namespace_kind = CM_HIR_NAMESPACE_VALUE;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    bool_binding->namespace_kind = saved_namespace_kind;
+
+    saved_target = bool_binding->target;
+    bool_binding->target.crate_id = good.lower_result.crate_id;
+    bool_binding->target.index = 1u;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    bool_binding->target = saved_target;
+
+    saved_tree = grouped->tree;
+    grouped->tree = alias->tree;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    grouped->tree = saved_tree;
+
+    saved_source_item = grouped->source_item;
+    grouped->source_item = alias->source_item;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    grouped->source_item = saved_source_item;
+
+    saved_span = grouped->span;
+    grouped->span.start += 1u;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    grouped->span = saved_span;
+
+    saved_metadata = grouped->attributes[0].metadata;
+    grouped->attributes[0].metadata = cm_hir_intern(&good.hir,
+        "doc(hidden)");
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    grouped->attributes[0].metadata = saved_metadata;
+
+    grouped->attributes[0].expansion_depth = 1u;
+    ASSERT_PRIMITIVE_ATOMIC_FAILURE();
+    grouped->attributes[0].expansion_depth = 0u;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]); ++index) {
+        CaptureFixture bad;
+        CmHirDeclarationCaptureInput bad_input;
+        fixture_init_source(&bad, 0, rejected[index].path,
+            rejected[index].source, rejected[index].source_length);
+        bad_input = capture_input(&bad);
+        result = cm_hir_declaration_metadata_capture(&bad_input, &metadata);
+        assert(result.status != CM_HIR_DECL_CAPTURE_OK
+            && metadata.namespace_entries == saved_namespace
+            && metadata.types == saved_types);
+        fixture_destroy(&bad);
+    }
+    assert_primitive_reexport_descriptor(&metadata);
+#undef ASSERT_PRIMITIVE_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
 int main(void)
 {
+    test_primitive_reexports_and_determinism();
+    test_primitive_reexport_hostile_mutations_are_atomic();
     test_generic_enum_projection_glob_and_field_boundary();
     test_generic_enum_hostile_mutations_are_atomic();
     test_static_capture_and_determinism();

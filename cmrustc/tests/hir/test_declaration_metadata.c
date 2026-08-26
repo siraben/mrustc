@@ -108,6 +108,12 @@ typedef struct GenericEnumFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[16];
 } GenericEnumFixture;
 
+typedef struct PrimitiveNamespaceFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} PrimitiveNamespaceFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -601,6 +607,45 @@ static void fixture_init(TestFixture *fixture)
     fixture->namespace_entries[3].export_ordinal = 2u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 4u;
+}
+
+static void primitive_namespace_fixture_init(
+    PrimitiveNamespaceFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("primitive_scope");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-primitive-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name =
+        (CmHirDeclarationString)S("bool");
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_PRIMITIVE;
+    fixture->namespace_entries[0].target_local =
+        CM_HIR_DECL_PRIMITIVE_BOOL;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("boolean");
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 static void item_fixture_init(TestFixture *fixture)
@@ -3326,6 +3371,123 @@ static void test_named_aggregate_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_primitive_namespace_target(void)
+{
+    PrimitiveNamespaceFixture first;
+    PrimitiveNamespaceFixture second;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    CmHirDeclarationNamespaceEntry swapped;
+    uint32_t primitive;
+    size_t record;
+    size_t target_payload;
+
+    primitive_namespace_fixture_init(&first);
+    primitive_namespace_fixture_init(&second);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&first.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&second.metadata, &repeated)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+
+    record = namespace_record_offset(&encoded, UINT32_C(0));
+    target_payload = skip_string(&encoded, record + 8u);
+    assert(encoded.data[record + 4u] == CM_HIR_DECL_NAMESPACE_TYPE
+        && encoded.data[record + 5u] == CM_HIR_DECL_TARGET_PRIMITIVE
+        && get_u32(encoded.data + target_payload)
+            == (uint32_t)CM_HIR_DECL_PRIMITIVE_BOOL);
+
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(decoded.type_count == 0u && decoded.item_count == 0u
+        && decoded.value_count == 0u && decoded.namespace_count == 2u
+        && decoded.namespace_entries[0].target_kind
+            == CM_HIR_DECL_TARGET_PRIMITIVE
+        && decoded.namespace_entries[0].target_local
+            == (uint32_t)CM_HIR_DECL_PRIMITIVE_BOOL
+        && decoded.namespace_entries[1].target_kind
+            == CM_HIR_DECL_TARGET_PRIMITIVE
+        && decoded.namespace_entries[1].target_local
+            == decoded.namespace_entries[0].target_local);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    for (primitive = (uint32_t)CM_HIR_DECL_PRIMITIVE_BOOL;
+         primitive <= (uint32_t)CM_HIR_DECL_PRIMITIVE_F64; ++primitive) {
+        primitive_namespace_fixture_init(&first);
+        first.namespace_entries[0].target_local = primitive;
+        first.namespace_entries[1].target_local = primitive;
+        assert(cm_hir_declaration_metadata_validate(&first.metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    }
+
+    primitive_namespace_fixture_init(&first);
+    first.namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    primitive_namespace_fixture_init(&first);
+    first.namespace_entries[0].target_local =
+        CM_HIR_DECL_PRIMITIVE_UNIT;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    primitive_namespace_fixture_init(&first);
+    first.namespace_entries[0].target_local =
+        (uint32_t)CM_HIR_DECL_PRIMITIVE_F64 + UINT32_C(1);
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    primitive_namespace_fixture_init(&first);
+    first.namespace_entries[1].name = first.namespace_entries[0].name;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    primitive_namespace_fixture_init(&first);
+    swapped = first.namespace_entries[0];
+    first.namespace_entries[0] = first.namespace_entries[1];
+    first.namespace_entries[1] = swapped;
+    assert(cm_hir_declaration_metadata_validate(&first.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    bad = copy_bytes(&encoded);
+    record = namespace_record_offset(&bad, UINT32_C(0));
+    bad.data[record + 5u] = UINT8_C(7);
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = namespace_record_offset(&bad, UINT32_C(0));
+    target_payload = skip_string(&bad, record + 8u);
+    put_u32(bad.data + target_payload,
+        (uint32_t)CM_HIR_DECL_PRIMITIVE_UNIT);
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    record = namespace_record_offset(&bad, UINT32_C(0));
+    bad.data[record + 4u] = CM_HIR_DECL_NAMESPACE_VALUE;
+    recompute_module_family_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -3351,6 +3513,7 @@ int main(void)
     test_const_value_family();
     test_static_tuple_array_family();
     test_named_aggregate_family();
+    test_primitive_namespace_target();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

@@ -328,7 +328,8 @@ typedef enum CmHirDeclarationNamespaceTarget {
     CM_HIR_DECL_TARGET_ITEM = 2,
     CM_HIR_DECL_TARGET_VALUE = 3,
     CM_HIR_DECL_TARGET_NOMINAL = 4,
-    CM_HIR_DECL_TARGET_ENUM_VARIANT = 5
+    CM_HIR_DECL_TARGET_ENUM_VARIANT = 5,
+    CM_HIR_DECL_TARGET_PRIMITIVE = 6
 } CmHirDeclarationNamespaceTarget;
 
 typedef struct CmHirDeclarationNamespaceEntry {
@@ -338,8 +339,10 @@ typedef struct CmHirDeclarationNamespaceEntry {
     uint8_t target_kind;
     /*
      * For ENUM_VARIANT this is a one-based flattened variant local: ENUM
-     * ITEMs in canonical ITEM order, then variants in source order. Other
-     * target kinds retain their family-specific one-based local.
+     * ITEMs in canonical ITEM order, then variants in source order. For
+     * PRIMITIVE this is the exact CmHirDeclarationPrimitive tag; UNIT is not
+     * namespace-bindable. Other target kinds retain their family-specific
+     * one-based local.
      */
     uint32_t target_local;
     uint32_t export_ordinal;

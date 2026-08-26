@@ -187,6 +187,15 @@ typedef struct CmHirDeclarationCaptureResult {
  * exact `doc(no_inline)`. The latter additionally requires a complete public,
  * resolved resolver-leaf census that is either named/grouped leaves or one
  * glob leaf; mixed glob trees reject.
+ * Public primitive reexports are a separate namespace-only profile. Every
+ * non-glob named/grouped leaf, including aliases and transitive primitive
+ * paths, must resolve to an exact BOOL..F64 builtin primitive and agree with
+ * the HIR import snapshot and owned library entry. The primitive tag is stored
+ * directly as the NSPC target local; no fake ITEM, TYPE-table node, DefId, or
+ * VALUE mate is created. Resolver `item_kind` is deliberately not consulted
+ * for this synthetic no-declaration identity because its zero value aliases
+ * the FUNCTION enum tag. Source use/tree/leaf/span and attribute provenance
+ * remain mandatory and mixed primitive/nonprimitive groups fail closed.
  * Every other item/reexport spelling, duplicate, generated attribute,
  * repr/lang/layout/ABI attribute, or inconsistent provenance rejects.
  * Attributes on other supported items also reject. Every successful omission

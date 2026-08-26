@@ -254,6 +254,50 @@ static int cm_decl_primitive(uint8_t primitive, CmHirType *type)
     return 0;
 }
 
+static int cm_decl_library_primitive(uint32_t primitive,
+    CmHirPrimitiveKind *out)
+{
+    if (out == NULL) return 0;
+    switch (primitive) {
+    case CM_HIR_DECL_PRIMITIVE_BOOL:
+        *out = CM_HIR_PRIMITIVE_BOOL; return 1;
+    case CM_HIR_DECL_PRIMITIVE_CHAR:
+        *out = CM_HIR_PRIMITIVE_CHAR; return 1;
+    case CM_HIR_DECL_PRIMITIVE_STR:
+        *out = CM_HIR_PRIMITIVE_STR; return 1;
+    case CM_HIR_DECL_PRIMITIVE_I8:
+        *out = CM_HIR_PRIMITIVE_I8; return 1;
+    case CM_HIR_DECL_PRIMITIVE_I16:
+        *out = CM_HIR_PRIMITIVE_I16; return 1;
+    case CM_HIR_DECL_PRIMITIVE_I32:
+        *out = CM_HIR_PRIMITIVE_I32; return 1;
+    case CM_HIR_DECL_PRIMITIVE_I64:
+        *out = CM_HIR_PRIMITIVE_I64; return 1;
+    case CM_HIR_DECL_PRIMITIVE_I128:
+        *out = CM_HIR_PRIMITIVE_I128; return 1;
+    case CM_HIR_DECL_PRIMITIVE_ISIZE:
+        *out = CM_HIR_PRIMITIVE_ISIZE; return 1;
+    case CM_HIR_DECL_PRIMITIVE_U8:
+        *out = CM_HIR_PRIMITIVE_U8; return 1;
+    case CM_HIR_DECL_PRIMITIVE_U16:
+        *out = CM_HIR_PRIMITIVE_U16; return 1;
+    case CM_HIR_DECL_PRIMITIVE_U32:
+        *out = CM_HIR_PRIMITIVE_U32; return 1;
+    case CM_HIR_DECL_PRIMITIVE_U64:
+        *out = CM_HIR_PRIMITIVE_U64; return 1;
+    case CM_HIR_DECL_PRIMITIVE_U128:
+        *out = CM_HIR_PRIMITIVE_U128; return 1;
+    case CM_HIR_DECL_PRIMITIVE_USIZE:
+        *out = CM_HIR_PRIMITIVE_USIZE; return 1;
+    case CM_HIR_DECL_PRIMITIVE_F32:
+        *out = CM_HIR_PRIMITIVE_F32; return 1;
+    case CM_HIR_DECL_PRIMITIVE_F64:
+        *out = CM_HIR_PRIMITIVE_F64; return 1;
+    default:
+        return 0;
+    }
+}
+
 static CmHirStatus cm_decl_reserve(CmHirContext *context,
     CmHirCrateId crate_id, const CmHirDeclarationMetadata *metadata,
     CmDeclRuntime *runtime, CmSpan span)
@@ -1452,6 +1496,13 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
                     == CM_HIR_DECL_NAMESPACE_VALUE
                 ? CM_HIR_LIBRARY_ENUM_VARIANT_VALUE
                 : CM_HIR_LIBRARY_ENUM_VARIANT_TYPE;
+        } else if (entry->target_kind == CM_HIR_DECL_TARGET_PRIMITIVE) {
+            if (entry->namespace_kind != CM_HIR_DECL_NAMESPACE_TYPE
+                || !cm_decl_library_primitive(entry->target_local,
+                    &binding.primitive_kind)) {
+                return CM_HIR_LIBRARY_INVALID_HIR;
+            }
+            binding.kind = CM_HIR_LIBRARY_BINDING_PRIMITIVE;
         } else {
             return CM_HIR_LIBRARY_INVALID_HIR;
         }

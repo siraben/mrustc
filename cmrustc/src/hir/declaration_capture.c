@@ -535,9 +535,79 @@ static int cm_decl_effective_ordinal(const CmDeclCaptureState *state,
     return matches == 1u;
 }
 
+static uint8_t cm_decl_resolver_primitive(
+    CmResolvePrimitiveKind primitive)
+{
+    switch (primitive) {
+    case CM_RESOLVE_PRIMITIVE_BOOL: return CM_HIR_DECL_PRIMITIVE_BOOL;
+    case CM_RESOLVE_PRIMITIVE_CHAR: return CM_HIR_DECL_PRIMITIVE_CHAR;
+    case CM_RESOLVE_PRIMITIVE_STR: return CM_HIR_DECL_PRIMITIVE_STR;
+    case CM_RESOLVE_PRIMITIVE_I8: return CM_HIR_DECL_PRIMITIVE_I8;
+    case CM_RESOLVE_PRIMITIVE_I16: return CM_HIR_DECL_PRIMITIVE_I16;
+    case CM_RESOLVE_PRIMITIVE_I32: return CM_HIR_DECL_PRIMITIVE_I32;
+    case CM_RESOLVE_PRIMITIVE_I64: return CM_HIR_DECL_PRIMITIVE_I64;
+    case CM_RESOLVE_PRIMITIVE_I128: return CM_HIR_DECL_PRIMITIVE_I128;
+    case CM_RESOLVE_PRIMITIVE_ISIZE: return CM_HIR_DECL_PRIMITIVE_ISIZE;
+    case CM_RESOLVE_PRIMITIVE_U8: return CM_HIR_DECL_PRIMITIVE_U8;
+    case CM_RESOLVE_PRIMITIVE_U16: return CM_HIR_DECL_PRIMITIVE_U16;
+    case CM_RESOLVE_PRIMITIVE_U32: return CM_HIR_DECL_PRIMITIVE_U32;
+    case CM_RESOLVE_PRIMITIVE_U64: return CM_HIR_DECL_PRIMITIVE_U64;
+    case CM_RESOLVE_PRIMITIVE_U128: return CM_HIR_DECL_PRIMITIVE_U128;
+    case CM_RESOLVE_PRIMITIVE_USIZE: return CM_HIR_DECL_PRIMITIVE_USIZE;
+    case CM_RESOLVE_PRIMITIVE_F32: return CM_HIR_DECL_PRIMITIVE_F32;
+    case CM_RESOLVE_PRIMITIVE_F64: return CM_HIR_DECL_PRIMITIVE_F64;
+    default: return 0u;
+    }
+}
+
+static uint8_t cm_decl_library_primitive(CmHirPrimitiveKind primitive)
+{
+    switch (primitive) {
+    case CM_HIR_PRIMITIVE_BOOL: return CM_HIR_DECL_PRIMITIVE_BOOL;
+    case CM_HIR_PRIMITIVE_CHAR: return CM_HIR_DECL_PRIMITIVE_CHAR;
+    case CM_HIR_PRIMITIVE_STR: return CM_HIR_DECL_PRIMITIVE_STR;
+    case CM_HIR_PRIMITIVE_I8: return CM_HIR_DECL_PRIMITIVE_I8;
+    case CM_HIR_PRIMITIVE_I16: return CM_HIR_DECL_PRIMITIVE_I16;
+    case CM_HIR_PRIMITIVE_I32: return CM_HIR_DECL_PRIMITIVE_I32;
+    case CM_HIR_PRIMITIVE_I64: return CM_HIR_DECL_PRIMITIVE_I64;
+    case CM_HIR_PRIMITIVE_I128: return CM_HIR_DECL_PRIMITIVE_I128;
+    case CM_HIR_PRIMITIVE_ISIZE: return CM_HIR_DECL_PRIMITIVE_ISIZE;
+    case CM_HIR_PRIMITIVE_U8: return CM_HIR_DECL_PRIMITIVE_U8;
+    case CM_HIR_PRIMITIVE_U16: return CM_HIR_DECL_PRIMITIVE_U16;
+    case CM_HIR_PRIMITIVE_U32: return CM_HIR_DECL_PRIMITIVE_U32;
+    case CM_HIR_PRIMITIVE_U64: return CM_HIR_DECL_PRIMITIVE_U64;
+    case CM_HIR_PRIMITIVE_U128: return CM_HIR_DECL_PRIMITIVE_U128;
+    case CM_HIR_PRIMITIVE_USIZE: return CM_HIR_DECL_PRIMITIVE_USIZE;
+    case CM_HIR_PRIMITIVE_F32: return CM_HIR_DECL_PRIMITIVE_F32;
+    case CM_HIR_PRIMITIVE_F64: return CM_HIR_DECL_PRIMITIVE_F64;
+    default: return 0u;
+    }
+}
+
 static int cm_decl_namespace_target_shape(const CmResolvedBinding *binding,
     const CmHirLibraryBinding *target)
 {
+    if (target->kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
+        uint8_t resolver_primitive = cm_decl_resolver_primitive(
+            binding->primitive_kind);
+        uint8_t library_primitive = cm_decl_library_primitive(
+            target->primitive_kind);
+        /* A builtin primitive has no AST declaration.  CmAstItemKind's zero
+         * value happens to print as FUNCTION, so it is deliberately not an
+         * authority for this already-authenticated synthetic binding. */
+        return resolver_primitive != 0u
+            && resolver_primitive == library_primitive
+            && binding->namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+            && binding->target_module == CM_MODULE_NONE
+            && binding->declaration.source == 0u
+            && binding->declaration.item == CM_AST_ITEM_NONE
+            && binding->variant.enumeration.source == 0u
+            && binding->variant.enumeration.item == CM_AST_ITEM_NONE
+            && binding->variant.index == 0u
+            && cm_hir_def_id_is_none(target->definition)
+            && target->type_kind == CM_HIR_TYPE_ERROR_KIND
+            && target->value_kind == CM_HIR_LIBRARY_VALUE_NONE;
+    }
     if (target->kind == CM_HIR_LIBRARY_BINDING_MODULE)
         return binding->namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
             && binding->item_kind == CM_AST_ITEM_MODULE;
@@ -585,6 +655,9 @@ static int cm_decl_namespace_target_shape(const CmResolvedBinding *binding,
                         == CM_HIR_LIBRARY_ENUM_VARIANT_VALUE));
     return 0;
 }
+
+static int cm_decl_primitive_reexport_provenance(
+    const CmDeclCaptureState *state, const CmDeclCaptureNamespace *entry);
 
 static const CmHirItem *cm_decl_enum_variant_parent(
     const CmDeclCaptureState *state, const CmHirLibraryBinding *target,
@@ -845,6 +918,15 @@ static int cm_decl_collect_namespace(CmDeclCaptureState *state,
         const CmDeclCaptureNamespace *entry =
             &state->namespace_values[module_index];
         CmHirItemId ignored_item;
+        if (entry->target.kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
+            if (!cm_decl_primitive_reexport_provenance(state, entry)) {
+                cm_decl_capture_reexport_failure(result,
+                    CM_HIR_DECL_CAPTURE_REASON_BINDING_SHAPE_UNSUPPORTED,
+                    entry, entry->introduction_span);
+                return 0;
+            }
+            continue;
+        }
         if (entry->target.kind != CM_HIR_LIBRARY_BINDING_ENUM_VARIANT)
             continue;
         if (!entry->is_import || entry->source_is_generated
@@ -2093,6 +2175,168 @@ static const CmHirImport *cm_decl_reexport_import(
     return match;
 }
 
+static int cm_decl_primitive_reexport_provenance(
+    const CmDeclCaptureState *state, const CmDeclCaptureNamespace *entry)
+{
+    CmDeclCaptureModule *module;
+    CmResolveEffectiveItem effective;
+    const CmHirImport *import;
+    const CmAst *ast = NULL;
+    const CmAstItem *ast_item;
+    const CmInternedString *ast_tree;
+    const CmInternedString *hir_tree;
+    uint8_t primitive;
+    size_t leaf_count;
+    size_t declaration_count;
+    size_t matched_leaf_count = 0u;
+    size_t matched_binding_count = 0u;
+    size_t index;
+    int matched_entry = 0;
+    if (entry == NULL
+        || entry->target.kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE
+        || entry->namespace_kind != CM_HIR_DECL_NAMESPACE_TYPE
+        || !entry->is_import || entry->source_is_generated
+        || entry->declaration.source != 0u
+        || entry->declaration.item != CM_AST_ITEM_NONE
+        || !cm_hir_def_id_is_none(entry->target.definition)
+        || entry->target.type_kind != CM_HIR_TYPE_ERROR_KIND
+        || entry->target.value_kind != CM_HIR_LIBRARY_VALUE_NONE
+        || (primitive = cm_decl_library_primitive(
+            entry->target.primitive_kind)) == 0u)
+        return 0;
+    module = cm_decl_module_by_local((CmDeclCaptureState *)state,
+        entry->owner_module);
+    import = cm_decl_reexport_import(module, entry->introduced_by);
+    if (module == NULL || import == NULL
+        || cm_module_graph_get_effective_item(state->input->graph,
+            state->input->revision, module->graph.id, entry->export_ordinal,
+            &effective) != CM_RESOLVE_VIEW_OK
+        || effective.is_generated || effective.item_kind != CM_AST_ITEM_USE
+        || !cm_decl_item_ref_equal(effective.declaration,
+            entry->introduced_by)
+        || effective.span.source != entry->introduction_span.source
+        || effective.span.start != entry->introduction_span.start
+        || effective.span.end != entry->introduction_span.end
+        || !cm_module_graph_borrow_item_ast(state->input->graph,
+            module->graph.id, entry->introduced_by, &ast)
+        || ast == NULL
+        || (ast_item = cm_ast_get_item(ast,
+            entry->introduced_by.item)) == NULL
+        || ast_item->kind != CM_AST_ITEM_USE
+        || ast_item->visibility.kind != CM_AST_VIS_PUBLIC
+        || ast_item->visibility.restriction != CM_AST_PATH_NONE
+        || ast_item->span.start != effective.span.start
+        || ast_item->span.end != effective.span.end
+        || ast_item->generic_parameters != NULL
+        || ast_item->generic_parameter_count != 0u
+        || ast_item->where_clause != CM_INTERN_ID_NONE
+        || ast_item->where_predicates != NULL
+        || ast_item->where_predicate_count != 0u
+        || (ast_tree = cm_ast_get_string(ast,
+            ast_item->data.use_item.tree)) == NULL
+        || ast_tree->len == 0u
+        || import->kind != CM_HIR_IMPORT_USE
+        || import->visibility.kind != CM_HIR_VIS_PUBLIC
+        || !cm_hir_def_id_is_none(import->visibility.restriction)
+        || import->span.source != effective.span.source
+        || import->span.start != effective.span.start
+        || import->span.end != effective.span.end
+        || import->source_item != entry->introduced_by.item
+        || (hir_tree = cm_interner_get(&state->hir->strings,
+            import->tree)) == NULL
+        || !cm_decl_bytes_equal(hir_tree->bytes, hir_tree->len,
+            ast_tree->bytes, ast_tree->len))
+        return 0;
+    declaration_count = cm_import_declaration_binding_count(
+        state->input->imports, module->graph.id, entry->introduced_by);
+    if (declaration_count == 0u || declaration_count > (size_t)UINT32_MAX
+        || declaration_count != import->binding_count
+        || import->bindings == NULL) return 0;
+    leaf_count = cm_import_leaf_count(state->input->imports);
+    if (leaf_count > (size_t)UINT32_MAX) return 0;
+    for (index = 0u; index < leaf_count; ++index) {
+        CmImportLeafView leaf;
+        CmResolvedBinding resolver_binding;
+        const CmHirImportBinding *hir_binding;
+        const CmInternedString *hir_name;
+        unsigned char *resolver_name = NULL;
+        size_t resolver_name_length = 0u;
+        unsigned char *leaf_name = NULL;
+        size_t leaf_name_length = 0u;
+        uint8_t resolver_primitive = 0u;
+        uint32_t segment_index;
+        int valid;
+        if (!cm_import_get_leaf(state->input->imports, (uint32_t)index,
+                &leaf)) return 0;
+        if (leaf.module != module->graph.id
+            || !cm_decl_item_ref_equal(leaf.declaration,
+                entry->introduced_by)) continue;
+        valid = matched_binding_count < declaration_count
+            && leaf.revision == state->input->revision
+            && leaf.segment_count != 0u && leaf.binding_count == 1u
+            && !leaf.is_glob && !leaf.is_anonymous && leaf.is_public
+            && leaf.is_crate_visible && leaf.is_resolved
+            && !leaf.saw_ambiguous
+            && cm_import_get_declaration_binding(state->input->imports,
+                module->graph.id, entry->introduced_by,
+                (uint32_t)matched_binding_count, &resolver_binding)
+            && resolver_binding.revision == state->input->revision
+            && resolver_binding.module == module->graph.id
+            && resolver_binding.namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+            && (resolver_primitive = cm_decl_resolver_primitive(
+                resolver_binding.primitive_kind)) != 0u
+            && resolver_binding.declaration.source == 0u
+            && resolver_binding.declaration.item == CM_AST_ITEM_NONE
+            && resolver_binding.variant.enumeration.source == 0u
+            && resolver_binding.variant.enumeration.item == CM_AST_ITEM_NONE
+            && resolver_binding.variant.index == 0u
+            && resolver_binding.target_module == CM_MODULE_NONE
+            && cm_decl_item_ref_equal(resolver_binding.import_declaration,
+                entry->introduced_by)
+            && resolver_binding.is_public
+            && resolver_binding.is_crate_visible
+            && resolver_binding.is_import && resolver_binding.is_reexport
+            && !resolver_binding.is_ambiguous
+            && !resolver_binding.is_anonymous
+            && cm_decl_copy_import_string(state->input->imports,
+                resolver_binding.name, &resolver_name,
+                &resolver_name_length)
+            && cm_decl_copy_import_string(state->input->imports,
+                leaf.import_name, &leaf_name, &leaf_name_length)
+            && cm_decl_bytes_equal(resolver_name, resolver_name_length,
+                leaf_name, leaf_name_length);
+        hir_binding = valid ? &import->bindings[matched_binding_count] : NULL;
+        hir_name = hir_binding == NULL ? NULL : cm_interner_get(
+            &state->hir->strings, hir_binding->name);
+        valid = valid && hir_binding->namespace_kind == CM_HIR_NAMESPACE_TYPE
+            && cm_decl_library_primitive(hir_binding->primitive_kind)
+                == resolver_primitive
+            && cm_hir_def_id_is_none(hir_binding->target)
+            && !hir_binding->is_anonymous && hir_binding->is_public
+            && hir_binding->is_crate_visible && hir_name != NULL
+            && cm_decl_bytes_equal(hir_name->bytes, hir_name->len,
+                resolver_name, resolver_name_length);
+        for (segment_index = 0u; valid
+                && segment_index < leaf.segment_count; ++segment_index) {
+            CmResolvePathSegmentView segment;
+            valid = cm_import_get_leaf_segment(state->input->imports,
+                    (uint32_t)index, segment_index, &segment)
+                && segment.bytes != NULL && segment.length != 0u;
+        }
+        if (valid && resolver_primitive == primitive
+            && cm_decl_bytes_equal(resolver_name, resolver_name_length,
+                entry->name, entry->name_length)) matched_entry = 1;
+        if (valid) matched_binding_count += 1u;
+        cm_free(leaf_name);
+        cm_free(resolver_name);
+        if (!valid) return 0;
+        matched_leaf_count += 1u;
+    }
+    return matched_leaf_count != 0u
+        && matched_leaf_count == declaration_count
+        && matched_binding_count == declaration_count && matched_entry;
+}
+
 /*
  * `doc(no_inline)` is admitted only for a source-authenticated public use
  * tree.  A declaration may be a group of named leaves or one glob leaf; a
@@ -3044,6 +3288,8 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
             }
             continue;
         }
+        if (entry->target.kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE)
+            continue;
         if (entry->target.kind == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
             CmHirItemId enum_item_id = CM_HIR_ITEM_NONE;
             if (cm_decl_enum_variant_parent(state, &entry->target,
@@ -4444,6 +4690,11 @@ static int cm_decl_fill_namespace(const CmDeclCaptureState *state,
             entry->target_kind = CM_HIR_DECL_TARGET_VALUE;
             entry->target_local = cm_decl_value_local(state,
                 source->target.definition);
+        } else if (source->target.kind
+                == CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
+            entry->target_kind = CM_HIR_DECL_TARGET_PRIMITIVE;
+            entry->target_local = cm_decl_library_primitive(
+                source->target.primitive_kind);
         } else if (source->target.kind
                 == CM_HIR_LIBRARY_BINDING_ENUM_VARIANT) {
             entry->target_kind = CM_HIR_DECL_TARGET_ENUM_VARIANT;
