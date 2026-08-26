@@ -8,6 +8,7 @@
 typedef struct CmDeclRuntime {
     CmHirModuleId *modules;
     CmHirDefId *traits;
+    CmHirDefId *items;
     CmHirDefId *values;
     CmHirGenericParamId *generics;
     CmHirTypeId *types;
@@ -99,6 +100,8 @@ static int cm_decl_runtime_init(CmDeclRuntime *runtime,
         sizeof(*runtime->modules));
     runtime->traits = (CmHirDefId *)cm_decl_array(metadata->trait_count,
         sizeof(*runtime->traits));
+    runtime->items = (CmHirDefId *)cm_decl_array(metadata->item_count,
+        sizeof(*runtime->items));
     runtime->values = (CmHirDefId *)cm_decl_array(metadata->value_count,
         sizeof(*runtime->values));
     runtime->generics = (CmHirGenericParamId *)cm_decl_array(
@@ -107,6 +110,7 @@ static int cm_decl_runtime_init(CmDeclRuntime *runtime,
         sizeof(*runtime->types));
     return (metadata->module_count == 0u || runtime->modules != NULL)
         && (metadata->trait_count == 0u || runtime->traits != NULL)
+        && (metadata->item_count == 0u || runtime->items != NULL)
         && (metadata->value_count == 0u || runtime->values != NULL)
         && (metadata->generic_count == 0u || runtime->generics != NULL)
         && (metadata->type_count == 0u || runtime->types != NULL);
@@ -117,6 +121,7 @@ static void cm_decl_runtime_destroy(CmDeclRuntime *runtime)
     cm_free(runtime->types);
     cm_free(runtime->generics);
     cm_free(runtime->values);
+    cm_free(runtime->items);
     cm_free(runtime->traits);
     cm_free(runtime->modules);
     memset(runtime, 0, sizeof(*runtime));
@@ -189,6 +194,11 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
     for (index = 0u; index < metadata->trait_count; ++index) {
         status = cm_hir_reserve_item_definition_as(context, crate_id,
             CM_HIR_ITEM_TRAIT, span, &runtime->traits[index]);
+        if (status != CM_HIR_OK) return status;
+    }
+    for (index = 0u; index < metadata->item_count; ++index) {
+        status = cm_hir_reserve_item_definition_as(context, crate_id,
+            CM_HIR_ITEM_STRUCT, span, &runtime->items[index]);
         if (status != CM_HIR_OK) return status;
     }
     for (index = 0u; index < metadata->value_count; ++index) {
@@ -273,6 +283,38 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
             : runtime->generics[wire->generic_start - 1u];
         item.generic_parameter_count = wire->generic_count;
         item.data.trait_item.safety = CM_HIR_SAFE;
+        status = cm_hir_add_item(context, &item, &item_id);
+        if (status != CM_HIR_OK) return status;
+    }
+    return CM_HIR_OK;
+}
+
+static CmHirStatus cm_decl_bind_items(CmHirContext *context,
+    const CmHirDeclarationMetadata *metadata, const CmDeclRuntime *runtime,
+    CmSourceId source)
+{
+    size_t index;
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *wire;
+        CmHirItem item;
+        CmHirItemId item_id;
+        CmHirStatus status;
+        wire = &metadata->items[index];
+        if (wire->kind != CM_HIR_DECL_ITEM_STRUCT
+            || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
+            || wire->visibility.restriction_module != 0u) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        memset(&item, 0, sizeof(item));
+        item.kind = CM_HIR_ITEM_STRUCT;
+        item.definition = runtime->items[index];
+        item.owner_module = runtime->modules[wire->owner_module - 1u];
+        item.parent_definition = cm_hir_def_id_none();
+        item.name = cm_decl_intern(context, wire->name);
+        item.visibility.kind = CM_HIR_VIS_PUBLIC;
+        item.visibility.restriction = cm_hir_def_id_none();
+        item.span = cm_decl_span(source, wire->source_ordinal);
+        item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
         status = cm_hir_add_item(context, &item, &item_id);
         if (status != CM_HIR_OK) return status;
     }
@@ -531,10 +573,19 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
         } else if (entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL) {
             binding.kind = CM_HIR_LIBRARY_BINDING_TRAIT;
             binding.definition = runtime->traits[entry->target_local - 1u];
-        } else {
+        } else if (entry->target_kind == CM_HIR_DECL_TARGET_ITEM) {
+            binding.definition = runtime->items[entry->target_local - 1u];
+            binding.type_kind = CM_HIR_TYPE_ADT_KIND;
+            binding.kind = entry->namespace_kind
+                    == CM_HIR_DECL_NAMESPACE_VALUE
+                ? CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+                : CM_HIR_LIBRARY_BINDING_TYPE;
+        } else if (entry->target_kind == CM_HIR_DECL_TARGET_VALUE) {
             binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
             binding.definition = runtime->values[entry->target_local - 1u];
             binding.value_kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+        } else {
+            return CM_HIR_LIBRARY_INVALID_HIR;
         }
         status = cm_hir_library_owned_data_add_entry(owned,
             entry->owner_module - 1u, entry->name.data, entry->name.length,
@@ -632,6 +683,9 @@ CmHirDeclarationMaterializeResult cm_hir_declaration_metadata_materialize(
     result.hir_status = cm_decl_bind_traits(context, metadata, &runtime,
         metadata_source);
     if (result.hir_status != CM_HIR_OK) goto hir_failure;
+    result.hir_status = cm_decl_bind_items(context, metadata, &runtime,
+        metadata_source);
+    if (result.hir_status != CM_HIR_OK) goto hir_failure;
     for (index = 0u; index < metadata->value_count; ++index) {
         result.hir_status = cm_decl_bind_value(context, metadata, &runtime,
             index, metadata_source);
@@ -656,6 +710,7 @@ CmHirDeclarationMaterializeResult cm_hir_declaration_metadata_materialize(
         result.library_status = restored.status;
         if (restored.status != CM_HIR_LIBRARY_OK) goto artifact_failure;
         result.module_count = restored.module_count;
+        result.item_count = metadata->item_count;
         result.public_type_entry_count = restored.public_type_entry_count;
         result.public_value_entry_count = restored.public_value_entry_count;
     }

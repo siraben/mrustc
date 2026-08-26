@@ -20,6 +20,7 @@ typedef struct CmHirDeclarationMaterializeResult {
     CmHirCrateId crate_id;
     CmHirModuleId root_module;
     size_t module_count;
+    size_t item_count;
     size_t public_type_entry_count;
     size_t public_value_entry_count;
 } CmHirDeclarationMaterializeResult;

@@ -13,11 +13,12 @@ typedef struct TestFixture {
     CmHirDeclarationTrait traits[1];
     CmHirDeclarationGeneric generics[2];
     CmHirDeclarationType types[3];
+    CmHirDeclarationItem items[1];
     CmHirDeclarationValue values[1];
     uint32_t parameters[1];
     CmHirDeclarationPredicate predicates[1];
     uint32_t predicate_arguments[1];
-    CmHirDeclarationNamespaceEntry namespace_entries[3];
+    CmHirDeclarationNamespaceEntry namespace_entries[8];
 } TestFixture;
 
 typedef struct ContextLengths {
@@ -135,6 +136,47 @@ static void fixture_init(TestFixture *fixture)
     metadata->namespace_count = 3u;
 }
 
+static void item_fixture_init(TestFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    fixture_init(fixture);
+    metadata = &fixture->metadata;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("Packet");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 3u;
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->namespace_entries[2].owner_module = 1u;
+    fixture->namespace_entries[2].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[2].name = fixture->items[0].name;
+    fixture->namespace_entries[2].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[2].target_local = 1u;
+    fixture->namespace_entries[2].export_ordinal = 3u;
+    fixture->namespace_entries[3] = fixture->namespace_entries[2];
+    fixture->namespace_entries[3].name =
+        (CmHirDeclarationString)S("PacketReexport");
+    fixture->namespace_entries[3].export_ordinal = 4u;
+    fixture->namespace_entries[4] = fixture->namespace_entries[2];
+    fixture->namespace_entries[4].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[5] = fixture->namespace_entries[3];
+    fixture->namespace_entries[5].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[6].owner_module = 1u;
+    fixture->namespace_entries[6].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[6].name = fixture->values[0].name;
+    fixture->namespace_entries[6].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[6].target_local = 1u;
+    fixture->namespace_entries[6].export_ordinal = 5u;
+    metadata->namespace_count = 7u;
+}
+
 static CmHirDeclarationMaterializeExpectation expectation_for(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -192,6 +234,21 @@ static CmHirLibraryBinding lookup_binding(const CmHirLibraryArtifact *artifact,
     path[1].length = strlen(name);
     memset(&binding, 0, sizeof(binding));
     assert(cm_hir_library_artifact_lookup_binding(artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_OK);
+    return binding;
+}
+
+static CmHirLibraryBinding lookup_value_binding(
+    const CmHirLibraryArtifact *artifact, const char *name)
+{
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryBinding binding;
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = sizeof("dep") - 1u;
+    path[1].bytes = (const unsigned char *)name;
+    path[1].length = strlen(name);
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_value_binding(artifact, path, 2u,
         &binding) == CM_HIR_LIBRARY_OK);
     return binding;
 }
@@ -295,6 +352,74 @@ static void test_fresh_consumer(CmHirContext *context,
     cm_source_set_destroy(&sources);
 }
 
+static void assert_item_parameter(const CmHirContext *context,
+    const CmHirItem *function, CmHirDefId item_definition)
+{
+    const CmHirType *parameter;
+    assert(function != NULL && function->kind == CM_HIR_ITEM_FUNCTION
+        && function->data.function_item.signature.parameter_count == 1u);
+    parameter = cm_hir_get_type(context,
+        function->data.function_item.signature.parameters[0].type);
+    assert(parameter != NULL && parameter->kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(parameter->data.named_type.definition,
+            item_definition)
+        && parameter->data.named_type.argument_count == 0u);
+}
+
+static void test_item_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId item_definition)
+{
+    static const unsigned char source_text[] =
+        "pub fn direct_item(_x: dep::Packet) {}\n"
+        "pub fn reexported_item(_x: dep::PacketReexport) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    const CmHirItem *direct;
+    const CmHirItem *reexported;
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "item_consumer.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "item_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    direct = find_item(context, CM_HIR_ITEM_FUNCTION, "direct_item");
+    reexported = find_item(context, CM_HIR_ITEM_FUNCTION,
+        "reexported_item");
+    assert_item_parameter(context, direct, item_definition);
+    assert_item_parameter(context, reexported, item_definition);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
 static void assert_artifact_identity_same(const CmHirLibraryArtifact *artifact,
     const CmHirLibraryArtifactIdentity *expected)
 {
@@ -315,6 +440,22 @@ static void assert_expectation_rejected(CmHirContext *context,
     CmHirDeclarationMaterializeResult result;
     result = cm_hir_declaration_metadata_materialize(context, artifact,
         metadata, expectation, "replacement", 91u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_INVALID_METADATA
+        && result.metadata_status
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    assert_context_lengths(context, lengths);
+    assert_artifact_identity_same(artifact, identity);
+}
+
+static void assert_item_metadata_rejected(CmHirContext *context,
+    CmHirLibraryArtifact *artifact, const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationMaterializeExpectation *expectation,
+    ContextLengths lengths, const CmHirLibraryArtifactIdentity *identity,
+    CmSourceId source)
+{
+    CmHirDeclarationMaterializeResult result;
+    result = cm_hir_declaration_metadata_materialize(context, artifact,
+        metadata, expectation, "replacement", source);
     assert(result.status == CM_HIR_DECL_MATERIALIZE_INVALID_METADATA
         && result.metadata_status
             == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
@@ -369,6 +510,7 @@ static void test_materialize_decode_and_consume(void)
         &decoded, &expectation, "dep", 77u);
     assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
         && result.module_count == 1u
+        && result.item_count == 0u
         && result.public_type_entry_count == 2u
         && result.public_value_entry_count == 1u);
     canonical = lookup_binding(&artifact, "Gate");
@@ -491,8 +633,153 @@ static void test_materialize_decode_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_item_materialize_and_consume(void)
+{
+    TestFixture fixture;
+    CmByteBuf encoded;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeExpectation wrong;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    CmHirLibraryBinding type_binding;
+    CmHirLibraryBinding type_reexport;
+    CmHirLibraryBinding constructor;
+    CmHirLibraryBinding constructor_reexport;
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryType type;
+    CmHirLibraryValue value;
+    const CmHirItem *item;
+    const CmHirDefinition *definition;
+    ContextLengths lengths;
+    uint8_t saved_kind;
+    uint32_t saved_local;
+
+    item_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 101u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.module_count == 1u
+        && result.item_count == 1u
+        && result.public_type_entry_count == 4u
+        && result.public_value_entry_count == 3u);
+
+    type_binding = lookup_binding(&artifact, "Packet");
+    type_reexport = lookup_binding(&artifact, "PacketReexport");
+    constructor = lookup_value_binding(&artifact, "Packet");
+    constructor_reexport = lookup_value_binding(&artifact,
+        "PacketReexport");
+    assert(type_binding.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && type_binding.type_kind == CM_HIR_TYPE_ADT_KIND
+        && type_reexport.kind == CM_HIR_LIBRARY_BINDING_TYPE
+        && constructor.kind
+            == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+        && constructor.value_kind == CM_HIR_LIBRARY_VALUE_NONE
+        && constructor_reexport.kind
+            == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+        && cm_hir_def_id_equal(type_binding.definition,
+            type_reexport.definition)
+        && cm_hir_def_id_equal(type_binding.definition,
+            constructor.definition)
+        && cm_hir_def_id_equal(type_binding.definition,
+            constructor_reexport.definition));
+    item = find_item(&context, CM_HIR_ITEM_STRUCT, "Packet");
+    definition = item == NULL ? NULL
+        : cm_hir_lookup_definition(&context, item->definition);
+    assert(item != NULL
+        && definition != NULL
+        && definition->state == CM_HIR_DEFINITION_BOUND
+        && definition->kind == CM_HIR_DEFINITION_ITEM
+        && definition->has_reserved_item_kind
+        && definition->reserved_item_kind == CM_HIR_ITEM_STRUCT
+        && cm_hir_def_id_equal(item->definition, type_binding.definition)
+        && item->owner_module == result.root_module
+        && item->visibility.kind == CM_HIR_VIS_PUBLIC
+        && item->generic_parameter_count == 0u
+        && item->predicate_scope_count == 0u
+        && item->predicate_count == 0u
+        && item->outlives_predicate_count == 0u
+        && item->attribute_count == 0u
+        && item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT
+        && item->data.aggregate_item.field_count == 0u
+        && item->data.aggregate_item.fields == NULL);
+
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)"Packet";
+    path[1].length = 6u;
+    memset(&type, 0, sizeof(type));
+    assert(cm_hir_library_artifact_lookup_type(&artifact, path, 2u, &type)
+        == CM_HIR_LIBRARY_OK
+        && type.kind == CM_HIR_TYPE_ADT_KIND
+        && cm_hir_def_id_equal(type.definition, item->definition));
+    memset(&value, 0, sizeof(value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u, &value)
+        == CM_HIR_LIBRARY_WRONG_NAMESPACE);
+
+    test_item_fresh_consumer(&context, &artifact, item->definition);
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+
+    wrong = expectation;
+    wrong.crate_disambiguator =
+        (CmHirDeclarationString)S("wrong-item-disambiguator");
+    assert_expectation_rejected(&context, &artifact, &decoded, &wrong,
+        lengths, &identity);
+
+    saved_kind = decoded.namespace_entries[2].target_kind;
+    decoded.namespace_entries[2].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 102u);
+    decoded.namespace_entries[2].target_kind = saved_kind;
+
+    saved_kind = decoded.namespace_entries[4].target_kind;
+    decoded.namespace_entries[4].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 103u);
+    decoded.namespace_entries[4].target_kind = saved_kind;
+
+    saved_local = decoded.namespace_entries[4].target_local;
+    decoded.namespace_entries[4].target_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 104u);
+    decoded.namespace_entries[4].target_local = saved_local;
+
+    saved_kind = decoded.items[0].kind;
+    decoded.items[0].kind = UINT8_C(1);
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 105u);
+    decoded.items[0].kind = saved_kind;
+
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 106u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     test_materialize_decode_and_consume();
+    test_item_materialize_and_consume();
     return 0;
 }
