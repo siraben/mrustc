@@ -96,6 +96,20 @@ projections/function pointers, full ordinary aggregates, cfg-complete impl
 headers, macros, and complete semantic attributes remain later boundaries.
 These are bounded fixture profiles, not whole-core v3.
 
+Commit `5d055423` closes the generic Option/Result-like UNIT/TUPLE enum slice,
+including retained variant lang identities and recursive field-generic scope.
+Commit `eb8281c1` then transports exact definition-free primitive TYPE
+reexports and aliases.  On that committed code, the whole-core probe remains
+green through graph, HIR, and the 451-module/1,658-type/20,747-value library
+census before measuring `#[rustfmt::skip]` at
+`core/src/char/mod.rs:28`.  Commit `2bbd80f8` adds only that authenticated
+reexport projection and retains byte-neutral projection semantics.  Its next
+whole-core probe measures the current frontier at `core/src/ffi/mod.rs:12`:
+`doc(inline)` on the public `CStr` reexport (`def=1:20058`, source item `121:1`)
+is still rejected during namespace projection.  No declaration metadata bytes,
+object-bearing `core.rlib`, or bootstrap-completion claim follows from these
+attribute gates.
+
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
 `--extern-cmrlib` path is deliberately the exact v3.2 executable-slice

@@ -193,6 +193,26 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   next bounded declaration step is therefore generic Rust-default mixed
   UNIT/TUPLE enums, retained item/variant lang identities, tuple-field generic
   ownership, enum ADT applications, and exact TYPE/VALUE constructor twins.
+- Commit `5d055423` transports generic Rust-default UNIT/TUPLE enums, retained
+  item/variant lang identities, enum applications, exact flattened constructor
+  twins, and recursive aggregate-field generic-owner validation.  The next
+  pinned-core probe measures the definition-free primitive TYPE reexport at
+  `core/src/primitive.rs:41`.  Commit `eb8281c1` transports the closed BOOL
+  through F64 primitive namespace set and aliases without synthesizing a DefId,
+  ITEM, VALUE mate, or TYPE record; strict GCC, TinyCC, and sanitizer gates plus
+  fresh consumer lowering cover every admitted primitive.
+- The post-`eb8281c1` pinned-core probe measures `#[rustfmt::skip]` on
+  `core/src/char/mod.rs:28`'s `CharTryFromError` reexport (`def=1:19977`, source
+  item `117:4`).  Commit `2bbd80f8` projects only the exact bare, depth-zero,
+  source-authenticated public-reexport form and proves projection erasure,
+  coexistence with `stable`, private-import exclusion, determinism, and atomic
+  malformed/provenance rejection.  The following whole-core probe again
+  reaches the complete 451/1,658/20,747 library census and measures the current
+  frontier at `core/src/ffi/mod.rs:12`: `doc(inline)` on the `CStr` reexport
+  (`def=1:20058`, source item `121:1`) fails with
+  `stage=namespace`/`reexport-attribute-projection-unsupported`.  Namespace
+  collection therefore remains the active gate; the later `Allocator` trait
+  family is not yet a measured item frontier.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

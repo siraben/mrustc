@@ -2002,6 +2002,26 @@ therefore a generic Rust-default mixed UNIT/TUPLE enum profile with retained
 item/variant lang identity, tuple-field generic ownership, generic enum ADT
 applications, and exact TYPE/VALUE variant twins.  Constructor expressions
 and executable bodies remain separate later gates.
+Commit `5d055423` completes that generic enum slice and closes recursive
+aggregate-field generic ownership in both the live HIR model and the generic
+metadata formats.  Its pinned-core probe then measures the next v3.0 namespace
+frontier at `core/src/primitive.rs:41`, the definition-free TYPE binding from
+`pub use bool;`.  Commit `eb8281c1` transports all declaration-supported
+primitive namespace bindings and aliases without fabricating DefIds, ITEMs,
+VALUE mates, or TYPE-DAG records.  The following whole-core probe reaches the
+same zero-error 363-source/451-module HIR and 451/1,658/20,747 library census,
+then measures `#[rustfmt::skip]` on the `CharTryFromError` reexport at
+`core/src/char/mod.rs:28` (`def=1:19977`, source item `117:4`) as the next
+reexport-projection boundary.  Commit `2bbd80f8` admits only the exact bare,
+depth-zero, source-authenticated reexport form and keeps malformed, duplicate,
+generated, private-count, and provenance mutations fail-closed.  The next
+pinned-core probe measures the current v3.0 frontier at
+`core/src/ffi/mod.rs:12`: exact `doc(inline)` on the `CStr` reexport
+(`def=1:20058`, source item `121:1`) is rejected at `stage=namespace` with
+`reason=reexport-attribute-projection-unsupported`.  The active bounded task is
+the corresponding authenticated reexport-only projection; item census has not
+yet been proven to start, so `Allocator` remains a prediction rather than the
+measured frontier.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

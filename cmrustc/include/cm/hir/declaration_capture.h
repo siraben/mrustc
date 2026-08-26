@@ -184,10 +184,11 @@ typedef struct CmHirDeclarationCaptureResult {
  * A public reexport permits only direct `stable(...)` or `unstable(...)`,
  * `deprecated(...)`, `allow(...)`, and exact
  * `doc(alias("IDENT"))`, where IDENT is a nonempty ASCII Rust identifier, or
- * exact `doc(no_inline)`, or exact bare depth-zero `rustfmt::skip`. The latter
- * tool attribute is admitted only on source-authenticated public reexports;
- * call, malformed, duplicate, generated, and provenance-inconsistent forms
- * reject. `doc(no_inline)` additionally requires a complete public,
+ * exact `doc(no_inline)`, exact `doc(inline)`, or exact bare depth-zero
+ * `rustfmt::skip`. The inline directive and tool attribute are admitted only
+ * on source-authenticated public reexports; call, malformed, duplicate,
+ * generated, and provenance-inconsistent forms reject. `doc(no_inline)`
+ * additionally requires a complete public,
  * resolved resolver-leaf census that is either named/grouped leaves or one
  * glob leaf; mixed glob trees reject.
  * Public primitive reexports are a separate namespace-only profile. Every

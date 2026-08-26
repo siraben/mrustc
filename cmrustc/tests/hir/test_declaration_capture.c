@@ -2003,15 +2003,15 @@ static void test_rustfmt_skip_reexport_projection_and_negatives(void)
         "mod convert { pub struct CharTryFromError; }\n"
         "#[rustfmt::skip]\n"
         "#[stable(feature = \"try_from\", since = \"1.34.0\")]\n"
-        "pub use convert::CharTryFromError;\n"
-        "use convert::CharTryFromError as PrivateError;\n"
+        "pub use self::convert::CharTryFromError;\n"
+        "use self::convert::CharTryFromError as PrivateError;\n"
         "pub trait Gate<T: ?Sized> {}\n"
         "pub fn needs<X: Gate<u8>>() {}\n";
     static const unsigned char projected_source[] =
         "mod convert { pub struct CharTryFromError; }\n"
-        "pub use convert::CharTryFromError;\n"
+        "pub use self::convert::CharTryFromError;\n"
         "#[rustfmt::skip]\n"
-        "use convert::CharTryFromError as PrivateError;\n"
+        "use self::convert::CharTryFromError as PrivateError;\n"
         "pub trait Gate<T: ?Sized> {}\n"
         "pub fn needs<X: Gate<u8>>() {}\n";
     static const struct {
@@ -2197,6 +2197,220 @@ static void test_rustfmt_skip_reexport_projection_and_negatives(void)
     fixture_destroy(&noisy);
     fixture_destroy(&projected);
     fixture_destroy(&first);
+}
+
+static void test_doc_inline_reexport_projection_and_negatives(void)
+{
+    static const unsigned char attributed_source[] =
+        "mod ffi { pub struct CStr; pub struct CString; }\n"
+        "#[doc(inline)]\n"
+        "#[stable(feature = \"cstr\", since = \"1.64.0\")]\n"
+        "pub use self::ffi::CStr;\n"
+        "#[doc(inline)]\n"
+        "#[stable(feature = \"cstring\", since = \"1.64.0\")]\n"
+        "pub use self::ffi::{CString as OwnedCStr, CStr as BorrowedCStr};\n"
+        "#[doc(inline)]\n"
+        "use self::ffi::CString as PrivateCString;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char plain_source[] =
+        "mod ffi { pub struct CStr; pub struct CString; }\n"
+        "pub use self::ffi::CStr;\n"
+        "pub use self::ffi::{CString as OwnedCStr, CStr as BorrowedCStr};\n"
+        "use self::ffi::CString as PrivateCString;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char mutation_source[] =
+        "mod ffi { pub struct CStr; }\n"
+        "#[doc(inline)]\n"
+        "#[stable(feature = \"cstr\", since = \"1.64.0\")]\n"
+        "pub use self::ffi::CStr;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const struct {
+        const char *path;
+        const unsigned char *source;
+        size_t source_length;
+        uint32_t rejected_attribute;
+    } rejected[] = {
+        { "doc-inline-call.rs",
+            (const unsigned char *)
+                "mod ffi { pub struct CStr; }\n"
+                "#[doc(inline())]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod ffi { pub struct CStr; }\n"
+                "#[doc(inline())]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "doc-inline-malformed.rs",
+            (const unsigned char *)
+                "mod ffi { pub struct CStr; }\n"
+                "#[doc(inline = \"yes\")]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod ffi { pub struct CStr; }\n"
+                "#[doc(inline = \"yes\")]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u },
+        { "doc-inline-duplicate.rs",
+            (const unsigned char *)
+                "mod ffi { pub struct CStr; }\n"
+                "#[doc(inline)]\n"
+                "#[doc(inline)]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod ffi { pub struct CStr; }\n"
+                "#[doc(inline)]\n"
+                "#[doc(inline)]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 1u },
+        { "doc-inline-generated.rs",
+            (const unsigned char *)
+                "mod ffi { pub struct CStr; }\n"
+                "#[cfg_attr(all(), doc(inline))]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n",
+            sizeof("mod ffi { pub struct CStr; }\n"
+                "#[cfg_attr(all(), doc(inline))]\n"
+                "pub use self::ffi::CStr;\n"
+                "pub trait Gate<T: ?Sized> {}\n"
+                "pub fn needs<X: Gate<u8>>() {}\n") - 1u, 0u }
+    };
+    static const unsigned char item_attribute_source[] =
+        "#[doc(inline)]\n"
+        "pub struct CStr;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture attributed;
+    CaptureFixture plain;
+    CaptureFixture mutation;
+    CmHirDeclarationMetadata attributed_metadata;
+    CmHirDeclarationMetadata plain_metadata;
+    CmHirDeclarationMetadata mutation_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirImport *import;
+    CmInternId saved_metadata;
+    CmSpan saved_span;
+    uint32_t saved_source_attribute;
+    CmByteBuf attributed_bytes;
+    CmByteBuf plain_bytes;
+    size_t index;
+    fixture_init_source(&attributed, 0, "doc-inline.rs",
+        attributed_source, sizeof(attributed_source) - 1u);
+    fixture_init_source(&plain, 0, "doc-inline.rs", plain_source,
+        sizeof(plain_source) - 1u);
+    fixture_init_source(&mutation, 0, "doc-inline-mutation.rs",
+        mutation_source, sizeof(mutation_source) - 1u);
+    cm_hir_declaration_metadata_init(&attributed_metadata);
+    cm_hir_declaration_metadata_init(&plain_metadata);
+    cm_hir_declaration_metadata_init(&mutation_metadata);
+    input = capture_input(&attributed);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &attributed_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 4u
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "CStr") != NULL
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "OwnedCStr") != NULL
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "BorrowedCStr") != NULL
+        && find_namespace_entry(&attributed_metadata, 1u,
+            CM_HIR_DECL_NAMESPACE_TYPE, "PrivateCString") == NULL);
+    input = capture_input(&plain);
+    result = cm_hir_declaration_metadata_capture(&input, &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 0u);
+    cm_byte_buf_init(&attributed_bytes);
+    cm_byte_buf_init(&plain_bytes);
+    assert(cm_hir_declaration_metadata_encode(&attributed_metadata,
+            &attributed_bytes) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&plain_metadata, &plain_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && attributed_bytes.len == plain_bytes.len
+        && memcmp(attributed_bytes.data, plain_bytes.data,
+            attributed_bytes.len) == 0);
+    cm_byte_buf_destroy(&plain_bytes);
+    cm_byte_buf_destroy(&attributed_bytes);
+
+    input = capture_input(&mutation);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &mutation_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    saved_items = mutation_metadata.items;
+    saved_namespace = mutation_metadata.namespace_entries;
+    import = find_unique_attributed_import(&mutation);
+    assert(import != NULL && import->attribute_count == 2u
+        && import->attributes != NULL);
+
+    saved_metadata = import->attributes[0].metadata;
+    import->attributes[0].metadata = cm_hir_intern(&mutation.hir,
+        "doc(inline())");
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 0u);
+    import->attributes[0].metadata = saved_metadata;
+
+    saved_span = import->attributes[0].span;
+    import->attributes[0].span.end -= 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 0u);
+    import->attributes[0].span = saved_span;
+
+    saved_source_attribute = import->attributes[0].source_attribute;
+    import->attributes[0].source_attribute += 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 0u);
+    import->attributes[0].source_attribute = saved_source_attribute;
+
+    import->attributes[0].expansion_depth = 1u;
+    assert_reexport_projection_failure(&mutation, &mutation_metadata,
+        saved_items, saved_namespace, 0u);
+    import->attributes[0].expansion_depth = 0u;
+
+    for (index = 0u; index < sizeof(rejected) / sizeof(rejected[0]);
+            ++index) {
+        CaptureFixture bad;
+        fixture_init_source(&bad, 0, rejected[index].path,
+            rejected[index].source, rejected[index].source_length);
+        assert_reexport_projection_failure(&bad, &mutation_metadata,
+            saved_items, saved_namespace, rejected[index].rejected_attribute);
+        fixture_destroy(&bad);
+    }
+    {
+        CaptureFixture item_attribute;
+        fixture_init_source(&item_attribute, 0, "doc-inline-item.rs",
+            item_attribute_source, sizeof(item_attribute_source) - 1u);
+        input = capture_input(&item_attribute);
+        result = cm_hir_declaration_metadata_capture(&input,
+            &mutation_metadata);
+        assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+            && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+            && result.failure_reason
+                == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+            && mutation_metadata.items == saved_items
+            && mutation_metadata.namespace_entries == saved_namespace);
+        fixture_destroy(&item_attribute);
+    }
+    assert(cm_hir_declaration_metadata_validate(&mutation_metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&mutation_metadata);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
+    cm_hir_declaration_metadata_destroy(&attributed_metadata);
+    fixture_destroy(&mutation);
+    fixture_destroy(&plain);
+    fixture_destroy(&attributed);
 }
 
 static void test_alias_and_reexport_attributes_fail_closed_atomically(void)
@@ -3867,6 +4081,7 @@ int main(void)
     test_reexport_alias_spelling_and_duplicate_negatives();
     test_reexport_provenance_and_generated_negatives();
     test_rustfmt_skip_reexport_projection_and_negatives();
+    test_doc_inline_reexport_projection_and_negatives();
     test_alias_and_reexport_attributes_fail_closed_atomically();
     test_constructor_omission_authority_is_not_forgeable();
     test_many_private_bindings_do_not_consume_public_cap();
