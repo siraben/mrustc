@@ -2098,9 +2098,14 @@ rejected item `10801`) fails at `stage=items` with
 leaving its implementation unavailable.  Their clean pinned-core probe then
 measures `core/src/any.rs:896`: `type_name_of_val` (`def=1:18899`, source item
 `99:43`, rejected item `10802`) at `stage=items`/
-`item-source-invalid`.  Its elided `&T` input is still represented by an HIR
-inference region, which cannot be published as cross-crate declaration
-identity.
+`item-source-invalid`.  Commits `bef6bc8a`, `c03b3378`, and `b0a41eef`
+constrain erased declaration roots, normalize only the exact input-only
+lifetime boundary, and capture the declaration.  The clean pinned-core probe
+at `b0a41eef` keeps the zero-error graph/HIR and exact
+451-module/1,658-type/20,747-value library census, then measures
+`core/src/arch.rs:76`'s public `breakpoint` function (`def=1:36071`, source
+item `332:5`, rejected item `19448`) at `stage=items`/
+`item-source-invalid`.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

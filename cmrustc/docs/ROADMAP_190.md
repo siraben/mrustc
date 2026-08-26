@@ -278,9 +278,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   body is executable.  The next clean run measures
   `core/src/any.rs:896`'s `type_name_of_val` (`def=1:18899`, source item
   `99:43`, rejected item `10802`) at the same stage/reason.  Its omitted input
-  lifetime currently lowers to an unresolved HIR inference region; the next
-  slice must provide authenticated function-bound lifetime semantics rather
-  than serialize inference.
+  lifetime is now normalized only at its exact source-authenticated input
+  boundary and transported under contextual erased-root validation by commits
+  `bef6bc8a`, `c03b3378`, and `b0a41eef`.  The clean pinned-core probe at
+  `b0a41eef` preserves the zero-error graph/HIR and exact
+  451-module/1,658-type/20,747-value library census, then measures
+  `core/src/arch.rs:76`'s public `breakpoint` function (`def=1:36071`, source
+  item `332:5`, rejected item `19448`) at
+  `stage=items`/`item-source-invalid`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

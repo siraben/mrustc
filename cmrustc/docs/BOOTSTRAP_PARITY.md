@@ -178,9 +178,15 @@ clean pinned-core probe preserves the same zero-error graph/HIR and exact
 451-module/1,658-type/20,747-value library census, then advances to
 `core/src/any.rs:896`: `type_name_of_val` (`def=1:18899`, source item `99:43`,
 rejected item `10802`) at `stage=items` with
-`reason=item-source-invalid`.  Its elided `&T` input lifetime remains an
-unresolved HIR inference region and must not cross the declaration boundary
-as inference.
+`reason=item-source-invalid`.  Commits `bef6bc8a`, `c03b3378`, and `b0a41eef`
+constrain erased declaration roots, perform the exact source-authenticated
+input-only lifetime normalization, and capture that declaration without
+claiming executable body authority.  The clean pinned-core probe at
+`b0a41eef` again reports zero graph/import/HIR errors, 38,176 HIR items, and
+the exact 451-module/1,658-type/20,747-value library census.  It advances the
+measured v3.0 frontier to `core/src/arch.rs:76`: public function `breakpoint`
+(`def=1:36071`, source item `332:5`, rejected item `19448`) fails at
+`stage=items` with `reason=item-source-invalid`.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
