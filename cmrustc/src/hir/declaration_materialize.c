@@ -781,10 +781,14 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
     size_t index;
     for (index = 0u; index < metadata->trait_count; ++index) {
         const CmHirDeclarationTrait *wire = &metadata->traits[index];
+        CmHirAttribute diagnostic_attribute;
+        CmHirOutlivesPredicate *outlives = NULL;
         CmHirItem item;
         CmHirItemId item_id;
         CmHirStatus status;
+        uint32_t predicate_index;
         memset(&item, 0, sizeof(item));
+        memset(&diagnostic_attribute, 0, sizeof(diagnostic_attribute));
         item.kind = CM_HIR_ITEM_TRAIT;
         item.definition = runtime->traits[index];
         item.owner_module = runtime->modules[wire->owner_module - 1u];
@@ -797,14 +801,102 @@ static CmHirStatus cm_decl_bind_traits(CmHirContext *context,
             ? CM_HIR_GENERIC_PARAM_NONE
             : runtime->generics[wire->generic_start - 1u];
         item.generic_parameter_count = wire->generic_count;
+        if (wire->predicate_scope_start != 0u
+            || wire->predicate_scope_count != 0u
+            || wire->predicate_start != 0u || wire->predicate_count != 0u
+            || (wire->flags
+                & (uint8_t)~CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        if ((wire->flags & CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u) {
+            static const unsigned char prefix[] =
+                "rustc_diagnostic_item = \"";
+            static const unsigned char suffix[] = "\"";
+            size_t prefix_length = sizeof(prefix) - 1u;
+            size_t suffix_length = sizeof(suffix) - 1u;
+            size_t total;
+            unsigned char *text;
+            if (wire->diagnostic_item.data == NULL
+                || wire->diagnostic_item.length == 0u
+                || wire->diagnostic_item.length
+                    > SIZE_MAX - prefix_length - suffix_length) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            total = prefix_length + wire->diagnostic_item.length
+                + suffix_length;
+            text = (unsigned char *)cm_alloc(total);
+            memcpy(text, prefix, prefix_length);
+            memcpy(text + prefix_length, wire->diagnostic_item.data,
+                wire->diagnostic_item.length);
+            memcpy(text + prefix_length + wire->diagnostic_item.length,
+                suffix, suffix_length);
+            diagnostic_attribute.metadata = cm_interner_intern(
+                &context->strings, text, total);
+            cm_free(text);
+            if (diagnostic_attribute.metadata == CM_INTERN_ID_NONE)
+                return CM_HIR_INVALID_ARGUMENT;
+            diagnostic_attribute.span = item.span;
+            diagnostic_attribute.source_attribute = 1u;
+            diagnostic_attribute.expansion_depth = 0u;
+            item.attributes = &diagnostic_attribute;
+            item.attribute_count = 1u;
+        } else if (wire->diagnostic_item.data != NULL
+                || wire->diagnostic_item.length != 0u) {
+            return CM_HIR_INVARIANT_VIOLATION;
+        }
+        outlives = (CmHirOutlivesPredicate *)cm_decl_array(
+            wire->outlives_count, sizeof(*outlives));
+        if (wire->outlives_count != 0u && outlives == NULL)
+            return CM_HIR_INVALID_ARGUMENT;
+        for (predicate_index = 0u;
+                predicate_index < wire->outlives_count;
+                ++predicate_index) {
+            const CmHirDeclarationOutlivesPredicate *predicate;
+            uint32_t local;
+            if (wire->outlives_start == 0u
+                || (size_t)wire->outlives_start
+                    > metadata->outlives_predicate_count
+                || (size_t)predicate_index
+                    >= metadata->outlives_predicate_count
+                        - (size_t)wire->outlives_start + 1u) {
+                cm_free(outlives);
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            predicate = &metadata->outlives_predicates[
+                wire->outlives_start - 1u + predicate_index];
+            local = predicate->subject_type;
+            if (predicate->owner_kind
+                    != CM_HIR_DECL_PREDICATE_OWNER_NOMINAL
+                || predicate->owner_local != (uint32_t)(index + 1u)
+                || predicate->ordinal != predicate_index
+                || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+                || local == 0u || (size_t)local > metadata->type_count
+                || runtime->types[local - 1u] == CM_HIR_TYPE_NONE
+                || predicate->bound.kind != CM_HIR_DECL_REGION_STATIC
+                || predicate->bound.generic_local != 0u
+                || predicate->bound.binder_index != 0u) {
+                cm_free(outlives);
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            outlives[predicate_index].subject_kind = CM_HIR_OUTLIVES_TYPE;
+            outlives[predicate_index].subject.type =
+                runtime->types[local - 1u];
+            outlives[predicate_index].bound.kind = CM_HIR_REGION_STATIC;
+            outlives[predicate_index].scope = CM_HIR_PREDICATE_SCOPE_NONE;
+            outlives[predicate_index].span = item.span;
+        }
+        item.outlives_predicates = outlives;
+        item.outlives_predicate_count = wire->outlives_count;
         if (wire->safety == CM_HIR_DECL_SAFETY_SAFE) {
             item.data.trait_item.safety = CM_HIR_SAFE;
         } else if (wire->safety == CM_HIR_DECL_SAFETY_UNSAFE) {
             item.data.trait_item.safety = CM_HIR_UNSAFE;
         } else {
+            cm_free(outlives);
             return CM_HIR_INVARIANT_VIOLATION;
         }
         status = cm_hir_add_item(context, &item, &item_id);
+        cm_free(outlives);
         if (status != CM_HIR_OK) return status;
     }
     return CM_HIR_OK;

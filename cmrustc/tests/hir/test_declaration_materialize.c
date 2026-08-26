@@ -140,6 +140,17 @@ typedef struct AssociatedMethodFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[3];
 } AssociatedMethodFixture;
 
+typedef struct AnyMethodFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[1];
+    CmHirDeclarationAssociatedItem associated_items[1];
+    uint32_t method_parameters[1];
+    CmHirDeclarationType types[3];
+    CmHirDeclarationOutlivesPredicate outlives[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[2];
+} AnyMethodFixture;
+
 /* TYPE namespace canonical order: aliases first, then primitive spellings. */
 static const PrimitiveBindingSpec primitive_binding_specs[
         PRIMITIVE_BINDING_COUNT] = {
@@ -289,6 +300,93 @@ static void associated_method_fixture_init(AssociatedMethodFixture *fixture)
     fixture->namespace_entries[2].export_ordinal = 5u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 3u;
+}
+
+static void any_method_fixture_init(AnyMethodFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    CmHirDeclarationAssociatedItem *method;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("any_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-any-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].name = (CmHirDeclarationString)S("AnyLike");
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].outlives_start = 1u;
+    fixture->traits[0].outlives_count = 1u;
+    fixture->traits[0].associated_start = 1u;
+    fixture->traits[0].associated_count = 1u;
+    fixture->traits[0].safety = CM_HIR_DECL_SAFETY_SAFE;
+    fixture->traits[0].flags =
+        CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM;
+    fixture->traits[0].diagnostic_item =
+        (CmHirDeclarationString)S("AnyLike");
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 1u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_SELF;
+    fixture->types[1].self_trait_local = 1u;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[2].child_type = 2u;
+    fixture->types[2].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[2].region.kind = CM_HIR_DECL_REGION_ERASED;
+    metadata->types = fixture->types;
+    metadata->type_count = 3u;
+
+    fixture->outlives[0].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
+    fixture->outlives[0].owner_local = 1u;
+    fixture->outlives[0].subject_type = 2u;
+    fixture->outlives[0].bound.kind = CM_HIR_DECL_REGION_STATIC;
+    metadata->outlives_predicates = fixture->outlives;
+    metadata->outlives_predicate_count = 1u;
+
+    fixture->method_parameters[0] = 3u;
+    method = &fixture->associated_items[0];
+    method->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    method->parent_kind = CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+    method->parent_local = 1u;
+    method->name = (CmHirDeclarationString)S("type_id");
+    method->visibility.kind = CM_HIR_DECL_VISIBILITY_PRIVATE;
+    method->source_ordinal = 2u;
+    method->receiver = CM_HIR_DECL_RECEIVER_REF_SHARED;
+    method->parameter_count = 1u;
+    method->parameter_types = fixture->method_parameters;
+    method->return_type = 1u;
+    method->abi = (CmHirDeclarationString)S("Rust");
+    method->safety = CM_HIR_DECL_SAFETY_SAFE;
+    metadata->associated_items = fixture->associated_items;
+    metadata->associated_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name =
+        (CmHirDeclarationString)S("AnyAlias");
+    fixture->namespace_entries[0].target_kind =
+        CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 3u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->traits[0].name;
+    fixture->namespace_entries[1].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 2u;
 }
 
 typedef struct ContextLengths {
@@ -4679,6 +4777,210 @@ static void test_associated_method_fresh_consumer(CmHirContext *context,
     cm_source_set_destroy(&sources);
 }
 
+static void test_any_method_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId any_trait)
+{
+    static const unsigned char source_text[] =
+        "pub fn direct<A: dep::AnyLike>(_value: &A) {}\n"
+        "pub fn via_alias<A: dep::AnyAlias>(_value: &A) {}\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    const CmHirItem *direct;
+    const CmHirItem *via_alias;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "any-consumer.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "any_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    direct = find_item(context, CM_HIR_ITEM_FUNCTION, "direct");
+    via_alias = find_item(context, CM_HIR_ITEM_FUNCTION, "via_alias");
+    assert(direct != NULL && via_alias != NULL
+        && direct->predicate_count == 1u
+        && via_alias->predicate_count == 1u
+        && cm_hir_def_id_equal(
+            direct->predicates[0].trait_type.definition, any_trait)
+        && cm_hir_def_id_equal(
+            via_alias->predicates[0].trait_type.definition, any_trait));
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_any_method_materialize_and_restore(void)
+{
+    AnyMethodFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    const CmHirItem *trait_item;
+    const CmHirItem *method_item;
+    const CmHirType *subject;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding alias;
+    CmHirLibraryPathSegment method_name;
+    CmHirLibraryValue method;
+    ContextLengths lengths;
+    CmHirLibraryArtifactIdentity identity;
+    uint32_t saved_local;
+    uint32_t saved_count;
+    uint8_t saved_byte;
+    CmHirDeclarationString saved_string;
+
+    any_method_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 191u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 0u
+        && result.public_type_entry_count == 2u
+        && result.public_value_entry_count == 0u);
+    trait_item = find_item(&context, CM_HIR_ITEM_TRAIT, "AnyLike");
+    method_item = find_item(&context, CM_HIR_ITEM_FUNCTION, "type_id");
+    assert(trait_item != NULL && method_item != NULL
+        && trait_item->data.trait_item.safety == CM_HIR_SAFE
+        && trait_item->data.trait_item.supertrait_count == 0u
+        && trait_item->outlives_predicate_count == 1u
+        && trait_item->outlives_predicates != NULL
+        && trait_item->outlives_predicates[0].subject_kind
+            == CM_HIR_OUTLIVES_TYPE
+        && trait_item->outlives_predicates[0].bound.kind
+            == CM_HIR_REGION_STATIC
+        && trait_item->outlives_predicates[0].scope
+            == CM_HIR_PREDICATE_SCOPE_NONE
+        && method_item->data.function_item.body == CM_HIR_BODY_NONE
+        && method_item->data.function_item.has_default_body == 0
+        && method_item->data.function_item.signature.safety == CM_HIR_SAFE
+        && method_item->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        && cm_hir_def_id_equal(method_item->parent_definition,
+            trait_item->definition));
+    assert_item_attribute(&context, trait_item, 0u,
+        "rustc_diagnostic_item = \"AnyLike\"", 191u);
+    subject = cm_hir_get_type(&context,
+        trait_item->outlives_predicates[0].subject.type);
+    assert(subject != NULL && subject->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(subject->data.self_type.owner,
+            trait_item->definition));
+
+    direct = lookup_binding(&artifact, "AnyLike");
+    alias = lookup_binding(&artifact, "AnyAlias");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && alias.kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && cm_hir_def_id_equal(direct.definition, alias.definition));
+    method_name.bytes = (const unsigned char *)"type_id";
+    method_name.length = sizeof("type_id") - 1u;
+    memset(&method, 0, sizeof(method));
+    assert(cm_hir_library_artifact_lookup_associated_method(&artifact,
+        direct.definition, &method_name, &method) == CM_HIR_LIBRARY_OK
+        && cm_hir_def_id_equal(method.definition, method_item->definition)
+        && method.data.function.safety == CM_HIR_SAFE
+        && method.data.function.has_default_body == 0);
+    assert(lookup_value_binding_status(&artifact, "type_id")
+        == CM_HIR_LIBRARY_NOT_FOUND);
+    test_any_method_fresh_consumer(&context, &artifact,
+        trait_item->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+    saved_byte = decoded.traits[0].flags;
+    decoded.traits[0].flags = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 192u);
+    decoded.traits[0].flags = saved_byte;
+    saved_string = decoded.traits[0].diagnostic_item;
+    decoded.traits[0].diagnostic_item = (CmHirDeclarationString)S("");
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 193u);
+    decoded.traits[0].diagnostic_item = saved_string;
+    saved_local = decoded.outlives_predicates[0].owner_local;
+    decoded.outlives_predicates[0].owner_local = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 194u);
+    decoded.outlives_predicates[0].owner_local = saved_local;
+    saved_local = decoded.outlives_predicates[0].subject_type;
+    decoded.outlives_predicates[0].subject_type = 1u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 195u);
+    decoded.outlives_predicates[0].subject_type = saved_local;
+    saved_byte = decoded.outlives_predicates[0].bound.kind;
+    decoded.outlives_predicates[0].bound.kind = CM_HIR_DECL_REGION_ERASED;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 196u);
+    decoded.outlives_predicates[0].bound.kind = saved_byte;
+    saved_count = decoded.traits[0].outlives_count;
+    decoded.traits[0].outlives_count = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 197u);
+    decoded.traits[0].outlives_count = saved_count;
+    saved_local = decoded.associated_items[0].parent_local;
+    decoded.associated_items[0].parent_local = 2u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 198u);
+    decoded.associated_items[0].parent_local = saved_local;
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 199u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_associated_method_materialize_and_restore(void)
 {
     AssociatedMethodFixture fixture;
@@ -4855,6 +5157,7 @@ int main(void)
     test_enum_materialize_and_restore_scope();
     test_default_enum_materialize_and_variant_reexports();
     test_option_tuple_materialize_and_consume();
+    test_any_method_materialize_and_restore();
     test_associated_method_materialize_and_restore();
     return 0;
 }
