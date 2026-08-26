@@ -134,9 +134,23 @@ typedef struct CmHirDeclarationModule {
     CmHirDeclarationString name;
 } CmHirDeclarationModule;
 
+typedef enum CmHirDeclarationVisibilityKind {
+    CM_HIR_DECL_VISIBILITY_PRIVATE = 1,
+    CM_HIR_DECL_VISIBILITY_PUBLIC = 2,
+    CM_HIR_DECL_VISIBILITY_CRATE = 3,
+    CM_HIR_DECL_VISIBILITY_RESTRICTED = 4
+} CmHirDeclarationVisibilityKind;
+
+typedef struct CmHirDeclarationVisibility {
+    uint8_t kind;
+    /* Required only for RESTRICTED and names an exact ancestor module. */
+    uint32_t restriction_module;
+} CmHirDeclarationVisibility;
+
 typedef struct CmHirDeclarationTrait {
     uint32_t owner_module;
     CmHirDeclarationString name;
+    CmHirDeclarationVisibility visibility;
     uint32_t source_ordinal;
     uint32_t generic_start;
     uint32_t generic_count;
@@ -158,19 +172,6 @@ typedef struct CmHirDeclarationTrait {
 
 #define CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM UINT8_C(1)
 
-typedef enum CmHirDeclarationVisibilityKind {
-    CM_HIR_DECL_VISIBILITY_PRIVATE = 1,
-    CM_HIR_DECL_VISIBILITY_PUBLIC = 2,
-    CM_HIR_DECL_VISIBILITY_CRATE = 3,
-    CM_HIR_DECL_VISIBILITY_RESTRICTED = 4
-} CmHirDeclarationVisibilityKind;
-
-typedef struct CmHirDeclarationVisibility {
-    uint8_t kind;
-    /* Nonzero only for future RESTRICTED support; current forms require zero. */
-    uint32_t restriction_module;
-} CmHirDeclarationVisibility;
-
 typedef enum CmHirDeclarationAssociatedKind {
     CM_HIR_DECL_ASSOCIATED_METHOD = 3
 } CmHirDeclarationAssociatedKind;
@@ -189,9 +190,10 @@ typedef enum CmHirDeclarationReceiverKind {
 
 /*
  * First bounded nominal-owned METHOD record. Parameter types include the
- * receiver in source slot zero. The current profile accepts only shared-ref
- * receivers, exact Rust ABI, zero method generics, and non-const/non-async/
- * non-variadic declarations; explicit fields keep those facts authenticated.
+ * receiver in source slot zero. The current profile accepts authenticated
+ * shared- or mutable-ref receivers, exact Rust ABI, zero method generics, and
+ * non-const/non-async/non-variadic declarations; explicit fields keep those
+ * facts authenticated.
  */
 typedef struct CmHirDeclarationAssociatedItem {
     uint8_t kind;
@@ -236,6 +238,8 @@ typedef enum CmHirDeclarationAggregateForm {
 
 #define CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM UINT16_C(1)
 #define CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT UINT16_C(2)
+#define CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM UINT16_C(4)
+#define CM_HIR_DECL_AGGREGATE_RUSTC_INSIGNIFICANT_DTOR UINT16_C(8)
 
 typedef struct CmHirDeclarationField {
     CmHirDeclarationString name;
@@ -306,6 +310,13 @@ typedef struct CmHirDeclarationItem {
     /* A contiguous ITEM-owned GPAR range; aliases require zero. */
     uint32_t generic_start;
     uint32_t generic_count;
+    /* Exact ITEM-owned predicate partitions; zero count requires zero start. */
+    uint32_t predicate_scope_start;
+    uint32_t predicate_scope_count;
+    uint32_t predicate_start;
+    uint32_t predicate_count;
+    uint32_t outlives_start;
+    uint32_t outlives_count;
     /* STRUCT/UNION aggregate shape; zero for ENUM/TYPE_ALIAS. */
     uint8_t aggregate_form;
     uint8_t aggregate_repr;
@@ -318,7 +329,7 @@ typedef struct CmHirDeclarationItem {
     uint8_t enum_repr_primitive;
     uint32_t variant_count;
     CmHirDeclarationVariant *variants;
-    /* Required only by the Rust-default implicit diagnostic-enum profile. */
+    /* Required by diagnostic aggregates and supported diagnostic enums. */
     CmHirDeclarationString diagnostic_item;
     uint8_t enum_flags;
     /* Required exactly when enum_flags has HAS_LANG_ITEM. */
@@ -332,7 +343,17 @@ typedef struct CmHirDeclarationGeneric {
     uint8_t kind;
     uint8_t is_relaxed_sized;
     CmHirDeclarationString name;
+    /* Defaults remain unavailable in this bounded declaration slice. */
+    uint8_t has_default;
+    /* CONST-only declared type; TYPE parameters require zero. */
+    uint32_t declared_type;
 } CmHirDeclarationGeneric;
+
+typedef enum CmHirDeclarationArrayLengthKind {
+    /* Zero preserves the original scalar ARRAY wire representation. */
+    CM_HIR_DECL_ARRAY_LENGTH_SCALAR = 0,
+    CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER = 1
+} CmHirDeclarationArrayLengthKind;
 
 typedef struct CmHirDeclarationType {
     uint8_t kind;
@@ -354,10 +375,14 @@ typedef struct CmHirDeclarationType {
     /* Required and nonempty for TUPLE, in semantic element order. */
     uint32_t element_count;
     uint32_t *element_types;
-    /* ARRAY uses child_type as its element and an exact scalar usize length. */
+    /* ARRAY uses child_type as its element. */
+    uint8_t array_length_kind;
+    /* SCALAR carries the original exact usize scalar representation. */
     uint32_t array_length_type;
     uint64_t array_length_low_bits;
     uint64_t array_length_high_bits;
+    /* CONST_PARAMETER names an owner-local CONST generic declared as usize. */
+    uint32_t array_length_generic_local;
 } CmHirDeclarationType;
 
 typedef enum CmHirDeclarationValueKind {
@@ -399,12 +424,15 @@ typedef struct CmHirDeclarationPredicate {
     uint8_t owner_kind;
     /* Required only for ASSOCIATED; owner_value is then zero. */
     uint32_t owner_associated;
+    /* Required only for ITEM; other owner locals are then zero. */
+    uint32_t owner_item;
 } CmHirDeclarationPredicate;
 
 typedef enum CmHirDeclarationPredicateOwnerKind {
     CM_HIR_DECL_PREDICATE_OWNER_VALUE = 0,
     CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED = 1,
-    CM_HIR_DECL_PREDICATE_OWNER_NOMINAL = 2
+    CM_HIR_DECL_PREDICATE_OWNER_NOMINAL = 2,
+    CM_HIR_DECL_PREDICATE_OWNER_ITEM = 3
 } CmHirDeclarationPredicateOwnerKind;
 
 typedef struct CmHirDeclarationOutlivesPredicate {

@@ -472,7 +472,8 @@ CmHirMetadataStatus cm_hir_metadata_decode_envelope_version(
     uint32_t header_length;
     uint32_t reserved_before_payload;
     uint32_t payload_crc;
-    uint32_t reserved_after_crc;
+    /* Initialized for GCC's split read-chain analysis at -O2. */
+    uint32_t reserved_after_crc = 0u;
     uint64_t wire_payload_length;
     size_t payload_length;
     size_t total_length;

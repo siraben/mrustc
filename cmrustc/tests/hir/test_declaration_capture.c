@@ -129,6 +129,54 @@ static const unsigned char aggregate_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char into_iter_fixture_source[] =
+    "mod manually_drop {\n"
+    "  #[stable(feature = \"manual\", since = \"1.0.0\")]\n"
+    "  #[lang = \"manually_drop\"]\n"
+    "  #[derive(Copy, Clone)]\n"
+    "  #[repr(transparent)]\n"
+    "  #[rustc_pub_transparent]\n"
+    "  pub struct Manual<T: ?Sized> { value: T }\n"
+    "}\n"
+    "#[stable(feature = \"manual\", since = \"1.0.0\")]\n"
+    "pub use manually_drop::Manual;\n"
+    "mod maybe_uninit {\n"
+    "  use super::Manual;\n"
+    "  #[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "  #[lang = \"maybe_uninit\"]\n"
+    "  #[derive(Copy)]\n"
+    "  #[repr(transparent)]\n"
+    "  #[rustc_pub_transparent]\n"
+    "  pub union Maybe<T> { uninit: (), value: Manual<T> }\n"
+    "}\n"
+    "#[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "pub use maybe_uninit::Maybe;\n"
+    "mod array_iter {\n"
+    "  use super::Maybe;\n"
+    "  #[allow(private_bounds)]\n"
+    "  trait PartialDrop {\n"
+    "    unsafe fn partial_drop(&mut self, alive: IndexRange);\n"
+    "  }\n"
+    "  pub(crate) struct IndexRange { start: usize, end: usize }\n"
+    "  mod iter_inner {\n"
+    "    use super::{IndexRange, PartialDrop};\n"
+    "    #[allow(private_bounds)]\n"
+    "    pub(super) struct PolymorphicIter<DATA: ?Sized>\n"
+    "    where DATA: PartialDrop { alive: IndexRange, data: DATA }\n"
+    "  }\n"
+    "  type InnerSized<T, const N: usize> =\n"
+    "    iter_inner::PolymorphicIter<[Maybe<T>; N]>;\n"
+    "  #[stable(feature = \"array_into_iter\", since = \"1.53.0\")]\n"
+    "  #[rustc_insignificant_dtor]\n"
+    "  #[rustc_diagnostic_item = \"ArrayIntoIter\"]\n"
+    "  #[derive(Clone)]\n"
+    "  pub struct IntoIter<T, const N: usize> { inner: InnerSized<T, N> }\n"
+    "}\n"
+    "#[stable(feature = \"array_into_iter\", since = \"1.53.0\")]\n"
+    "pub use array_iter::IntoIter;\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static const char generic_enum_fixture_template[] =
     "mod option_like {\n"
     "  #[doc(search_unbox)]\n"
@@ -490,6 +538,12 @@ static void aggregate_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-aggregate-provider.rs",
         aggregate_fixture_source, sizeof(aggregate_fixture_source) - 1u);
+}
+
+static void into_iter_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "into-iter.rs",
+        into_iter_fixture_source, sizeof(into_iter_fixture_source) - 1u);
 }
 
 static void layout_dependency_fixture_init(CaptureFixture *fixture,
@@ -4069,6 +4123,288 @@ static void test_named_aggregate_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static void test_into_iter_private_closure_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    const CmHirDeclarationItem *into_iter;
+    const CmHirDeclarationItem *poly;
+    const CmHirDeclarationItem *range;
+    const CmHirDeclarationType *poly_application;
+    const CmHirDeclarationType *array;
+    const CmHirDeclarationTrait *partial = NULL;
+    uint32_t into_local = 0u;
+    uint32_t poly_local = 0u;
+    uint32_t partial_local = 0u;
+    size_t index;
+    into_iter_fixture_init(&first, 0);
+    into_iter_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 11u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 11u);
+    assert(cm_hir_declaration_metadata_validate(&first_metadata)
+        == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_validate(&noisy_metadata)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    into_iter = find_declaration_item(&first_metadata, "IntoIter",
+        &into_local);
+    poly = find_declaration_item(&first_metadata, "PolymorphicIter",
+        &poly_local);
+    range = find_declaration_item(&first_metadata, "IndexRange", NULL);
+    assert(into_iter != NULL && poly != NULL && range != NULL
+        && into_iter->kind == CM_HIR_DECL_ITEM_STRUCT
+        && into_iter->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && into_iter->generic_count == 2u
+        && (into_iter->aggregate_flags
+            & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM) != 0u
+        && (into_iter->aggregate_flags
+            & CM_HIR_DECL_AGGREGATE_RUSTC_INSIGNIFICANT_DTOR) != 0u
+        && declaration_string_is(into_iter->diagnostic_item,
+            "ArrayIntoIter")
+        && into_iter->field_count == 1u
+        && poly->visibility.kind == CM_HIR_DECL_VISIBILITY_RESTRICTED
+        && poly->visibility.restriction_module != 0u
+        && poly->generic_count == 1u && poly->predicate_count == 1u
+        && range->visibility.kind == CM_HIR_DECL_VISIBILITY_CRATE
+        && find_namespace_entry(&first_metadata, poly->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "PolymorphicIter") == NULL
+        && find_namespace_entry(&first_metadata, range->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "IndexRange") == NULL);
+    assert(first_metadata.generics[into_iter->generic_start].kind
+            == CM_HIR_DECL_GENERIC_CONST
+        && first_metadata.generics[into_iter->generic_start].declared_type
+            != 0u);
+    poly_application = &first_metadata.types[
+        into_iter->fields[0].type_local - 1u];
+    assert(poly_application->kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && poly_application->item_local == poly_local
+        && poly_application->argument_count == 1u);
+    array = &first_metadata.types[
+        poly_application->argument_types[0] - 1u];
+    assert(array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && array->array_length_kind
+            == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER
+        && array->array_length_generic_local
+            == into_iter->generic_start + 1u);
+    for (index = 0u; index < first_metadata.trait_count; ++index)
+        if (declaration_string_is(first_metadata.traits[index].name,
+                "PartialDrop")) {
+            partial = &first_metadata.traits[index];
+            partial_local = (uint32_t)(index + 1u);
+        }
+    assert(partial != NULL && partial_local != 0u
+        && partial->visibility.kind == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && partial->associated_count == 1u
+        && first_metadata.associated_items[partial->associated_start - 1u]
+            .receiver == CM_HIR_DECL_RECEIVER_REF_MUTABLE
+        && first_metadata.associated_items[partial->associated_start - 1u]
+            .safety == CM_HIR_DECL_SAFETY_UNSAFE
+        && first_metadata.predicates[poly->predicate_start - 1u].owner_kind
+            == CM_HIR_DECL_PREDICATE_OWNER_ITEM
+        && first_metadata.predicates[poly->predicate_start - 1u].owner_item
+            == poly_local
+        && first_metadata.predicates[poly->predicate_start - 1u].trait_local
+            == partial_local);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_into_iter_hostile_shapes_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationType *saved_types;
+    CmHirItemId ignored_id;
+    CmHirItem *into_iter;
+    CmHirItem *polymorphic;
+    CmHirItem *partial_drop;
+    CmHirItem *partial_method;
+    CmHirItem *alias;
+    CmHirItem *gate;
+    CmHirGenericParam *const_generic;
+    CmHirType *field_application;
+    CmHirType *field_array;
+    CmHirGenericParamKind saved_generic_kind;
+    CmHirTypeId saved_declared_type;
+    CmHirGenericParamId saved_length_parameter;
+    CmHirVisibilityKind saved_visibility;
+    CmHirDefId saved_definition;
+    CmInternId saved_metadata;
+    CmHirReceiverKind saved_receiver;
+    CmHirSafety saved_safety;
+    CmHirTypeId saved_parameter_type;
+    CmHirTypeId saved_alias_target;
+    uint32_t saved_predicate_span_start;
+
+    into_iter_fixture_init(&fixture, 0);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_traits = metadata.traits;
+    saved_associated = metadata.associated_items;
+    saved_types = metadata.types;
+    into_iter = (CmHirItem *)(void *)find_item(&fixture, "IntoIter",
+        &ignored_id);
+    polymorphic = (CmHirItem *)(void *)find_item(&fixture,
+        "PolymorphicIter", &ignored_id);
+    partial_drop = (CmHirItem *)(void *)find_item(&fixture, "PartialDrop",
+        &ignored_id);
+    partial_method = (CmHirItem *)(void *)find_item(&fixture,
+        "partial_drop", &ignored_id);
+    alias = (CmHirItem *)(void *)find_item(&fixture, "InnerSized",
+        &ignored_id);
+    gate = (CmHirItem *)(void *)find_item(&fixture, "Gate", &ignored_id);
+    assert(into_iter != NULL && polymorphic != NULL && partial_drop != NULL
+        && partial_method != NULL && alias != NULL && gate != NULL
+        && into_iter->generic_parameter_count == 2u
+        && into_iter->data.aggregate_item.field_count == 1u
+        && polymorphic->predicate_count == 1u
+        && partial_drop->attribute_count == 1u
+        && partial_method->data.function_item.signature.parameter_count == 2u);
+    const_generic = (CmHirGenericParam *)(void *)cm_hir_get_generic_param(
+        &fixture.hir, into_iter->generic_parameter_start + 1u);
+    field_application = (CmHirType *)(void *)cm_hir_get_type(&fixture.hir,
+        into_iter->data.aggregate_item.fields[0].type);
+    field_array = field_application == NULL
+            || field_application->kind != CM_HIR_TYPE_ADT_KIND
+            || field_application->data.named_type.argument_count != 1u
+        ? NULL : (CmHirType *)(void *)cm_hir_get_type(&fixture.hir,
+            field_application->data.named_type.arguments[0].data.type);
+    assert(const_generic != NULL && field_array != NULL
+        && const_generic->kind == CM_HIR_GENERIC_CONST
+        && field_array->kind == CM_HIR_TYPE_ARRAY_KIND);
+
+#define ASSERT_INTO_ITER_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.traits == saved_traits \
+        && metadata.associated_items == saved_associated \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_generic_kind = const_generic->kind;
+    const_generic->kind = CM_HIR_GENERIC_TYPE;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    const_generic->kind = saved_generic_kind;
+
+    const_generic->has_default = 1;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    const_generic->has_default = 0;
+
+    saved_declared_type = const_generic->declared_type;
+    const_generic->declared_type =
+        partial_method->data.function_item.signature.return_type;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    const_generic->declared_type = saved_declared_type;
+
+    saved_length_parameter =
+        field_array->data.array_type.length.data.parameter;
+    field_array->data.array_type.length.data.parameter =
+        into_iter->generic_parameter_start;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    field_array->data.array_type.length.data.parameter =
+        saved_length_parameter;
+
+    saved_alias_target = alias->data.type_alias_item.target;
+    alias->data.type_alias_item.target = const_generic->declared_type;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    alias->data.type_alias_item.target = saved_alias_target;
+
+    saved_visibility = polymorphic->visibility.kind;
+    polymorphic->visibility.kind = CM_HIR_VIS_PRIVATE;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    polymorphic->visibility.kind = saved_visibility;
+
+    saved_definition = polymorphic->predicates[0].trait_type.definition;
+    polymorphic->predicates[0].trait_type.definition = gate->definition;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    polymorphic->predicates[0].trait_type.definition = saved_definition;
+
+    saved_predicate_span_start = polymorphic->predicates[0].span.start;
+    polymorphic->predicates[0].span.start += 1u;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    polymorphic->predicates[0].span.start = saved_predicate_span_start;
+
+    saved_metadata = partial_drop->attributes[0].metadata;
+    partial_drop->attributes[0].metadata = cm_hir_intern(&fixture.hir,
+        "stable(feature = \"partial\", since = \"1.0.0\")");
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    partial_drop->attributes[0].metadata = saved_metadata;
+
+    assert(into_iter->attribute_count == 4u
+        && into_iter->attributes != NULL);
+    saved_metadata = into_iter->attributes[1].metadata;
+    into_iter->attributes[1].metadata = cm_hir_intern(&fixture.hir,
+        "rustc_layout_scalar_valid_range_start(0)");
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    into_iter->attributes[1].metadata = saved_metadata;
+
+    saved_receiver = partial_method->data.function_item.signature.receiver;
+    partial_method->data.function_item.signature.receiver =
+        CM_HIR_RECEIVER_REF_SHARED;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    partial_method->data.function_item.signature.receiver = saved_receiver;
+
+    saved_safety = partial_method->data.function_item.signature.safety;
+    partial_method->data.function_item.signature.safety = CM_HIR_SAFE;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    partial_method->data.function_item.signature.safety = saved_safety;
+
+    saved_parameter_type = partial_method->data.function_item.signature
+        .parameters[1].type;
+    partial_method->data.function_item.signature.parameters[1].type =
+        partial_method->data.function_item.signature.return_type;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    partial_method->data.function_item.signature.parameters[1].type =
+        saved_parameter_type;
+
+    saved_parameter_type = into_iter->data.aggregate_item.fields[0].type;
+    into_iter->data.aggregate_item.fields[0].type =
+        const_generic->declared_type;
+    ASSERT_INTO_ITER_ATOMIC_FAILURE();
+    into_iter->data.aggregate_item.fields[0].type = saved_parameter_type;
+
+#undef ASSERT_INTO_ITER_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static const CmHirDeclarationType *type_id_like_array(
     const CmHirDeclarationMetadata *metadata, uint64_t expected_length)
 {
@@ -7240,6 +7576,8 @@ int main(void)
     test_static_type_dag_is_structurally_deduplicated();
     test_named_aggregate_capture_and_determinism();
     test_named_aggregate_hostile_mutations_are_atomic();
+    test_into_iter_private_closure_and_determinism();
+    test_into_iter_hostile_shapes_are_atomic();
     test_type_id_like_target_capture_and_determinism();
     test_type_id_like_hostile_mutations_are_atomic();
     test_layout_private_dependency_closure_and_determinism();

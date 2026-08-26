@@ -275,13 +275,39 @@ static int cm_decl_validate_modules(const CmHirDeclarationMetadata *metadata)
     return root_count == 1u;
 }
 
+static int cm_decl_visibility_valid(
+    const CmHirDeclarationMetadata *metadata,
+    const CmHirDeclarationVisibility *visibility, uint32_t owner_module)
+{
+    uint32_t module;
+    if (visibility->kind == CM_HIR_DECL_VISIBILITY_PRIVATE
+        || visibility->kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        || visibility->kind == CM_HIR_DECL_VISIBILITY_CRATE)
+        return visibility->restriction_module == 0u;
+    if (visibility->kind != CM_HIR_DECL_VISIBILITY_RESTRICTED
+        || visibility->restriction_module == 0u
+        || visibility->restriction_module == metadata->root_module
+        || (size_t)visibility->restriction_module > metadata->module_count
+        || owner_module == 0u
+        || (size_t)owner_module > metadata->module_count)
+        return 0;
+    /* A restricted visibility names a proper ancestor; self is PRIVATE. */
+    module = metadata->modules[owner_module - 1u].parent_module;
+    while (module != 0u) {
+        if (module == visibility->restriction_module) return 1;
+        module = metadata->modules[module - 1u].parent_module;
+    }
+    return 0;
+}
+
 static int cm_decl_validate_generics(
     const CmHirDeclarationMetadata *metadata)
 {
     size_t index;
     size_t owner_index;
     unsigned char *seen;
-    if (metadata->generic_count != 0u && metadata->generics == NULL) return 0;
+    if ((metadata->generic_count != 0u && metadata->generics == NULL)
+        || (metadata->type_count != 0u && metadata->types == NULL)) return 0;
     seen = metadata->generic_count == 0u ? NULL
         : (unsigned char *)cm_alloc_zeroed(metadata->generic_count,
             sizeof(unsigned char));
@@ -292,9 +318,29 @@ static int cm_decl_validate_generics(
                 && generic->owner_kind != CM_HIR_DECL_GENERIC_ITEM
                 && generic->owner_kind != CM_HIR_DECL_GENERIC_VALUE)
             || generic->owner_local == 0u
-            || generic->kind != CM_HIR_DECL_GENERIC_TYPE
+            || (generic->kind != CM_HIR_DECL_GENERIC_TYPE
+                && generic->kind != CM_HIR_DECL_GENERIC_CONST)
             || generic->is_relaxed_sized > 1u
+            || generic->has_default != 0u
             || !cm_decl_identifier(generic->name)) {
+            cm_free(seen);
+            return 0;
+        }
+        if (generic->kind == CM_HIR_DECL_GENERIC_CONST) {
+            const CmHirDeclarationType *declared;
+            if (generic->owner_kind != CM_HIR_DECL_GENERIC_ITEM
+                || generic->is_relaxed_sized != 0u
+                || !cm_decl_type_local(metadata, generic->declared_type)) {
+                cm_free(seen);
+                return 0;
+            }
+            declared = &metadata->types[generic->declared_type - 1u];
+            if (declared->kind != CM_HIR_DECL_TYPE_PRIMITIVE
+                || declared->primitive != CM_HIR_DECL_PRIMITIVE_USIZE) {
+                cm_free(seen);
+                return 0;
+            }
+        } else if (generic->declared_type != 0u) {
             cm_free(seen);
             return 0;
         }
@@ -406,6 +452,8 @@ static int cm_decl_validate_traits(const CmHirDeclarationMetadata *metadata)
         if (trait_value->owner_module == 0u
             || (size_t)trait_value->owner_module > metadata->module_count
             || !cm_decl_identifier(trait_value->name)
+            || !cm_decl_visibility_valid(metadata,
+                &trait_value->visibility, trait_value->owner_module)
             || !cm_decl_range(trait_value->associated_start,
                 trait_value->associated_count, metadata->associated_count)
             || trait_value->predicate_scope_start != 0u
@@ -473,7 +521,9 @@ static int cm_decl_validate_associated_items(
             || associated->generic_count != 0u
             || !cm_decl_range(associated->predicate_start,
                 associated->predicate_count, metadata->predicate_count)
-            || associated->receiver != CM_HIR_DECL_RECEIVER_REF_SHARED
+            || (associated->receiver != CM_HIR_DECL_RECEIVER_REF_SHARED
+                && associated->receiver
+                    != CM_HIR_DECL_RECEIVER_REF_MUTABLE)
             || associated->parameter_count == 0u
             || associated->parameter_count
                 > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
@@ -501,7 +551,10 @@ static int cm_decl_validate_associated_items(
             associated->parameter_types[0] - 1u];
         if (receiver_type->kind != CM_HIR_DECL_TYPE_REFERENCE
             || receiver_type->region.kind != CM_HIR_DECL_REGION_ERASED
-            || receiver_type->mutability != CM_HIR_DECL_IMMUTABLE
+            || receiver_type->mutability
+                != (associated->receiver
+                        == CM_HIR_DECL_RECEIVER_REF_MUTABLE
+                    ? CM_HIR_DECL_MUTABLE : CM_HIR_DECL_IMMUTABLE)
             || !cm_decl_type_local(metadata, receiver_type->child_type)) {
             cm_free(seen);
             return 0;
@@ -634,9 +687,19 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
             || item->owner_module == 0u
             || (size_t)item->owner_module > metadata->module_count
             || !cm_decl_identifier(item->name)
-            || (item->visibility.kind != CM_HIR_DECL_VISIBILITY_PRIVATE
-                && item->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC)
-            || item->visibility.restriction_module != 0u
+            || !cm_decl_visibility_valid(metadata, &item->visibility,
+                item->owner_module)
+            || !cm_decl_range(item->generic_start, item->generic_count,
+                metadata->generic_count)
+            || (item->generic_count != 0u && metadata->generics == NULL)
+            || item->predicate_scope_start != 0u
+            || item->predicate_scope_count != 0u
+            || !cm_decl_range(item->predicate_start,
+                item->predicate_count, metadata->predicate_count)
+            || (item->predicate_count != 0u
+                && item->kind != CM_HIR_DECL_ITEM_STRUCT)
+            || item->outlives_start != 0u
+            || item->outlives_count != 0u
             || (item->kind != CM_HIR_DECL_ITEM_TYPE_ALIAS
                 && item->alias_target_type != 0u)
             || (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS
@@ -649,18 +712,29 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
                 && (item->enum_repr_primitive != 0u
                     || item->variant_count != 0u
                     || item->variants != NULL
-                    || item->diagnostic_item.data != NULL
-                    || item->diagnostic_item.length != 0u
                     || item->enum_flags != 0u
                     || item->enum_lang_item.data != NULL
                     || item->enum_lang_item.length != 0u))) return 0;
+        {
+            uint32_t generic_index;
+            for (generic_index = 0u; generic_index < item->generic_count;
+                    ++generic_index) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[(size_t)item->generic_start
+                        + generic_index - 1u];
+                if (generic->kind == CM_HIR_DECL_GENERIC_CONST
+                    && item->kind != CM_HIR_DECL_ITEM_STRUCT) return 0;
+            }
+        }
         if (item->kind == CM_HIR_DECL_ITEM_STRUCT
                 || item->kind == CM_HIR_DECL_ITEM_UNION) {
             CmHirDeclarationString *names;
             uint32_t child;
             uint16_t known_flags =
                 CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
-                | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+                | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT
+                | CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM
+                | CM_HIR_DECL_AGGREGATE_RUSTC_INSIGNIFICANT_DTOR;
             if ((item->aggregate_form != CM_HIR_DECL_AGGREGATE_UNIT
                     && item->aggregate_form
                         != CM_HIR_DECL_AGGREGATE_TUPLE
@@ -677,9 +751,25 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
                     : (item->lang_item.data != NULL
                         || item->lang_item.length != 0u))
                 || ((item->aggregate_flags
+                        & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM) != 0u
+                    ? !cm_decl_identifier(item->diagnostic_item)
+                    : (item->diagnostic_item.data != NULL
+                        || item->diagnostic_item.length != 0u))
+                || ((item->aggregate_flags
                         & CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT) != 0u
                     && item->aggregate_repr
                         != CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT)
+                || ((item->aggregate_flags
+                        & CM_HIR_DECL_AGGREGATE_RUSTC_INSIGNIFICANT_DTOR)
+                        != 0u
+                    && (item->kind != CM_HIR_DECL_ITEM_STRUCT
+                        || item->aggregate_form
+                            != CM_HIR_DECL_AGGREGATE_NAMED
+                        || item->aggregate_repr
+                            != CM_HIR_DECL_AGGREGATE_REPR_RUST
+                        || (item->aggregate_flags
+                                & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM)
+                            == 0u))
                 || (item->kind == CM_HIR_DECL_ITEM_UNION
                     && (item->aggregate_form
                             != CM_HIR_DECL_AGGREGATE_NAMED
@@ -756,7 +846,10 @@ static int cm_decl_validate_items(const CmHirDeclarationMetadata *metadata)
                 || item->aggregate_flags != 0u
                 || item->field_count != 0u || item->fields != NULL
                 || item->lang_item.data != NULL
-                || item->lang_item.length != 0u) {
+                || item->lang_item.length != 0u
+                || (item->kind != CM_HIR_DECL_ITEM_ENUM
+                    && (item->diagnostic_item.data != NULL
+                        || item->diagnostic_item.length != 0u))) {
             return 0;
         } else if (item->kind == CM_HIR_DECL_ITEM_ENUM) {
             CmHirDeclarationString *names;
@@ -1123,6 +1216,15 @@ static int cm_decl_type_compare(const CmHirDeclarationType *left,
     if (left->kind == CM_HIR_DECL_TYPE_ARRAY) {
         if (left->child_type != right->child_type)
             return left->child_type < right->child_type ? -1 : 1;
+        if (left->array_length_kind != right->array_length_kind)
+            return left->array_length_kind < right->array_length_kind
+                ? -1 : 1;
+        if (left->array_length_kind
+                == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER)
+            return left->array_length_generic_local
+                    < right->array_length_generic_local ? -1
+                : left->array_length_generic_local
+                    > right->array_length_generic_local;
         if (left->array_length_type != right->array_length_type)
             return left->array_length_type < right->array_length_type
                 ? -1 : 1;
@@ -1145,9 +1247,11 @@ static int cm_decl_type_common_zero(const CmHirDeclarationType *type)
         && type->region.binder_index == 0u
         && type->argument_count == 0u && type->argument_types == NULL
         && type->element_count == 0u && type->element_types == NULL
+        && type->array_length_kind == 0u
         && type->array_length_type == 0u
         && type->array_length_low_bits == UINT64_C(0)
-        && type->array_length_high_bits == UINT64_C(0);
+        && type->array_length_high_bits == UINT64_C(0)
+        && type->array_length_generic_local == 0u;
 }
 
 static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
@@ -1161,6 +1265,14 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
         : (uint32_t *)cm_alloc_zeroed(metadata->type_count,
             sizeof(uint32_t));
     total_arguments = 0u;
+    for (index = 0u; index < metadata->generic_count; ++index) {
+        if (metadata->generics[index].kind == CM_HIR_DECL_GENERIC_CONST
+            && (!cm_size_add(total_arguments, 1u, &total_arguments)
+                || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES)) {
+            cm_free(depths);
+            return 0;
+        }
+    }
     valid = 1;
     for (index = 0u; index < metadata->type_count && valid; ++index) {
         const CmHirDeclarationType *type;
@@ -1176,6 +1288,8 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
             CmHirDeclarationType copy = *type;
             copy.generic_local = 0u;
             if (!cm_decl_generic_local(metadata, type->generic_local)
+                || metadata->generics[type->generic_local - 1u].kind
+                    != CM_HIR_DECL_GENERIC_TYPE
                 || !cm_decl_type_common_zero(&copy)) valid = 0;
         } else if (type->kind == CM_HIR_DECL_TYPE_NAMED_ADT) {
             CmHirDeclarationType copy = *type;
@@ -1255,7 +1369,11 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
             maximum_depth = 0u;
             for (child = 0u; child < type->argument_count; ++child) {
                 uint32_t argument = type->argument_types[child];
-                if (argument == 0u || (size_t)argument > index) {
+                size_t generic_index = (size_t)item->generic_start
+                    + (size_t)child - 1u;
+                if (argument == 0u || (size_t)argument > index
+                    || metadata->generics[generic_index].kind
+                        != CM_HIR_DECL_GENERIC_TYPE) {
                     valid = 0;
                     break;
                 }
@@ -1292,31 +1410,67 @@ static int cm_decl_validate_types(const CmHirDeclarationMetadata *metadata)
             depth = maximum_depth + UINT32_C(1);
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             CmHirDeclarationType copy = *type;
-            const CmHirDeclarationType *length_type;
+            const CmHirDeclarationType *length_type = NULL;
             uint32_t maximum_depth;
             copy.child_type = 0u;
+            copy.array_length_kind = 0u;
             copy.array_length_type = 0u;
             copy.array_length_low_bits = UINT64_C(0);
             copy.array_length_high_bits = UINT64_C(0);
+            copy.array_length_generic_local = 0u;
             if (type->child_type == 0u || (size_t)type->child_type > index
-                || type->array_length_type == 0u
-                || (size_t)type->array_length_type > index
-                || type->array_length_high_bits != UINT64_C(0)
                 || !cm_size_add(total_arguments, 2u, &total_arguments)
                 || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
                 || !cm_decl_type_common_zero(&copy)) {
                 valid = 0;
                 continue;
             }
-            length_type = &metadata->types[type->array_length_type - 1u];
-            if (length_type->kind != CM_HIR_DECL_TYPE_PRIMITIVE
-                || length_type->primitive != CM_HIR_DECL_PRIMITIVE_USIZE) {
+            maximum_depth = depths[type->child_type - 1u];
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_SCALAR) {
+                if (type->array_length_type == 0u
+                    || (size_t)type->array_length_type > index
+                    || type->array_length_generic_local != 0u
+                    || type->array_length_high_bits != UINT64_C(0)) {
+                    valid = 0;
+                    continue;
+                }
+                length_type = &metadata->types[
+                    type->array_length_type - 1u];
+                if (length_type->kind != CM_HIR_DECL_TYPE_PRIMITIVE
+                    || length_type->primitive
+                        != CM_HIR_DECL_PRIMITIVE_USIZE) {
+                    valid = 0;
+                    continue;
+                }
+                if (depths[type->array_length_type - 1u] > maximum_depth)
+                    maximum_depth = depths[type->array_length_type - 1u];
+            } else if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                const CmHirDeclarationGeneric *generic;
+                if (type->array_length_type != 0u
+                    || type->array_length_low_bits != UINT64_C(0)
+                    || type->array_length_high_bits != UINT64_C(0)
+                    || !cm_decl_generic_local(metadata,
+                        type->array_length_generic_local)) {
+                    valid = 0;
+                    continue;
+                }
+                generic = &metadata->generics[
+                    type->array_length_generic_local - 1u];
+                if (generic->kind != CM_HIR_DECL_GENERIC_CONST
+                    || !cm_decl_type_local(metadata,
+                        generic->declared_type)
+                    || (size_t)generic->declared_type > index) {
+                    valid = 0;
+                    continue;
+                }
+                if (depths[generic->declared_type - 1u] > maximum_depth)
+                    maximum_depth = depths[generic->declared_type - 1u];
+            } else {
                 valid = 0;
                 continue;
             }
-            maximum_depth = depths[type->child_type - 1u];
-            if (depths[type->array_length_type - 1u] > maximum_depth)
-                maximum_depth = depths[type->array_length_type - 1u];
             depth = maximum_depth + UINT32_C(1);
         } else {
             valid = 0;
@@ -1430,10 +1584,16 @@ static int cm_decl_validate_aggregate_types(
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             uint8_t child_kind = scope_kinds[type->child_type - 1u];
             uint32_t child_local = scope_locals[type->child_type - 1u];
-            uint8_t length_kind =
-                scope_kinds[type->array_length_type - 1u];
-            uint32_t length_local =
-                scope_locals[type->array_length_type - 1u];
+            uint8_t length_kind = 0u;
+            uint32_t length_local = 0u;
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[
+                        type->array_length_generic_local - 1u];
+                length_kind = generic->owner_kind;
+                length_local = generic->owner_local;
+            }
             if (child_kind == UINT8_MAX || length_kind == UINT8_MAX
                 || (child_kind != 0u && length_kind != 0u
                     && (child_kind != length_kind
@@ -1566,7 +1726,16 @@ static int cm_decl_validate_aggregate_types(
                 reachable[type->element_types[child] - 1u] = 1u;
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             reachable[type->child_type - 1u] = 1u;
-            reachable[type->array_length_type - 1u] = 1u;
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[
+                        type->array_length_generic_local - 1u];
+                generic_used[type->array_length_generic_local - 1u] = 1u;
+                reachable[generic->declared_type - 1u] = 1u;
+            } else {
+                reachable[type->array_length_type - 1u] = 1u;
+            }
         }
     }
     for (index = 0u; index < metadata->item_count && valid; ++index) {
@@ -1712,7 +1881,8 @@ static int cm_decl_validate_predicates(
         if (predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_VALUE) {
             if (predicate->owner_value == 0u
                 || (size_t)predicate->owner_value > metadata->value_count
-                || predicate->owner_associated != 0u) {
+                || predicate->owner_associated != 0u
+                || predicate->owner_item != 0u) {
                 cm_free(seen);
                 return 0;
             }
@@ -1720,6 +1890,7 @@ static int cm_decl_validate_predicates(
         } else if (predicate->owner_kind
                 == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED) {
             if (predicate->owner_value != 0u
+                || predicate->owner_item != 0u
                 || predicate->owner_associated == 0u
                 || (size_t)predicate->owner_associated
                     > metadata->associated_count
@@ -1730,6 +1901,20 @@ static int cm_decl_validate_predicates(
                 return 0;
             }
             owner_local = predicate->owner_associated;
+        } else if (predicate->owner_kind
+                == CM_HIR_DECL_PREDICATE_OWNER_ITEM) {
+            if (predicate->owner_value != 0u
+                || predicate->owner_associated != 0u
+                || predicate->owner_item == 0u
+                || (size_t)predicate->owner_item > metadata->item_count
+                || (metadata->items[predicate->owner_item - 1u].kind
+                        != CM_HIR_DECL_ITEM_STRUCT
+                    && metadata->items[predicate->owner_item - 1u].kind
+                        != CM_HIR_DECL_ITEM_UNION)) {
+                cm_free(seen);
+                return 0;
+            }
+            owner_local = predicate->owner_item;
         } else {
             cm_free(seen);
             return 0;
@@ -1752,6 +1937,13 @@ static int cm_decl_validate_predicates(
                     || subject->self_trait_local
                         != metadata->associated_items[owner_local - 1u]
                             .parent_local))
+            || (predicate->owner_kind
+                    == CM_HIR_DECL_PREDICATE_OWNER_ITEM
+                && (subject->kind != CM_HIR_DECL_TYPE_GENERIC
+                    || metadata->generics[subject->generic_local - 1u]
+                        .owner_kind != CM_HIR_DECL_GENERIC_ITEM
+                    || metadata->generics[subject->generic_local - 1u]
+                        .owner_local != predicate->owner_item))
             || predicate->argument_count != trait_value->generic_count
             || predicate->argument_count
                 > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
@@ -1763,8 +1955,10 @@ static int cm_decl_validate_predicates(
             cm_free(seen);
             return 0;
         }
-        if (predicate->owner_kind
+        if ((predicate->owner_kind
                 == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+                || predicate->owner_kind
+                    == CM_HIR_DECL_PREDICATE_OWNER_ITEM)
             && predicate->argument_count != 0u) {
             cm_free(seen);
             return 0;
@@ -1789,7 +1983,10 @@ static int cm_decl_validate_predicates(
             prior = &metadata->predicates[index - 1u];
             prior_owner = prior->owner_kind
                     == CM_HIR_DECL_PREDICATE_OWNER_VALUE
-                ? prior->owner_value : prior->owner_associated;
+                ? prior->owner_value
+                : prior->owner_kind
+                    == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+                    ? prior->owner_associated : prior->owner_item;
             if (prior->owner_kind > predicate->owner_kind
                 || (prior->owner_kind == predicate->owner_kind
                     && (prior_owner > owner_local
@@ -1832,6 +2029,24 @@ static int cm_decl_validate_predicates(
                 || predicate->owner_kind
                     != CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
                 || predicate->owner_associated != (uint32_t)(index + 1u)
+                || predicate->ordinal != child) {
+                cm_free(seen);
+                return 0;
+            }
+            seen[local] = 1u;
+        }
+    }
+    for (index = 0u; index < metadata->item_count; ++index) {
+        const CmHirDeclarationItem *item = &metadata->items[index];
+        uint32_t child;
+        for (child = 0u; child < item->predicate_count; ++child) {
+            const CmHirDeclarationPredicate *predicate;
+            size_t local = (size_t)item->predicate_start + child - 1u;
+            predicate = &metadata->predicates[local];
+            if (seen[local]
+                || predicate->owner_kind
+                    != CM_HIR_DECL_PREDICATE_OWNER_ITEM
+                || predicate->owner_item != (uint32_t)(index + 1u)
                 || predicate->ordinal != child) {
                 cm_free(seen);
                 return 0;
@@ -1995,7 +2210,15 @@ static int cm_decl_validate_type_reachability(
                 seen[type->element_types[child] - 1u] = 1u;
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             seen[type->child_type - 1u] = 1u;
-            seen[type->array_length_type - 1u] = 1u;
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[
+                        type->array_length_generic_local - 1u];
+                seen[generic->declared_type - 1u] = 1u;
+            } else {
+                seen[type->array_length_type - 1u] = 1u;
+            }
         }
     }
     for (index = 0u; index < metadata->type_count; ++index) {
@@ -2065,8 +2288,16 @@ static int cm_decl_validate_value_type_scopes(
             }
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             uint32_t child_scope = scopes[type->child_type - 1u];
-            uint32_t length_scope =
-                scopes[type->array_length_type - 1u];
+            uint32_t length_scope = 0u;
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[
+                        type->array_length_generic_local - 1u];
+                length_scope = generic->owner_kind
+                        == CM_HIR_DECL_GENERIC_VALUE
+                    ? generic->owner_local : UINT32_MAX;
+            }
             if (child_scope == UINT32_MAX || length_scope == UINT32_MAX
                 || (child_scope != 0u && length_scope != 0u
                     && child_scope != length_scope)) {
@@ -2113,7 +2344,10 @@ static int cm_decl_validate_value_type_scopes(
                 == CM_HIR_DECL_PREDICATE_OWNER_VALUE
             ? predicate->owner_value : 0u;
         uint32_t child;
-        uint32_t scope = scopes[predicate->subject_type - 1u];
+        uint32_t scope;
+        if (predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_ITEM)
+            continue;
+        scope = scopes[predicate->subject_type - 1u];
         if (scope != 0u && scope != owner) valid = 0;
         for (child = 0u; child < predicate->argument_count && valid;
                 ++child) {
@@ -2184,7 +2418,9 @@ static int cm_decl_validate_self_type_scopes(
             }
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             uint32_t child_scope = scopes[type->child_type - 1u];
-            uint32_t length_scope = scopes[type->array_length_type - 1u];
+            uint32_t length_scope = type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+                ? scopes[type->array_length_type - 1u] : 0u;
             if (child_scope == UINT32_MAX || length_scope == UINT32_MAX
                 || (child_scope != 0u && length_scope != 0u
                     && child_scope != length_scope)) {
@@ -2355,8 +2591,7 @@ static int cm_decl_validate_erased_type_roots(
                     contains_erased[index] = 1u;
             }
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY
-            && (contains_erased[type->child_type - 1u]
-                || contains_erased[type->array_length_type - 1u])) {
+            && contains_erased[type->child_type - 1u]) {
             contains_erased[index] = 1u;
         }
     }
@@ -2515,21 +2750,35 @@ static void cm_decl_reach_item(const CmHirDeclarationMetadata *metadata,
     *queue_count += 1u;
 }
 
+static void cm_decl_reach_trait(const CmHirDeclarationMetadata *metadata,
+    unsigned char *seen, uint32_t *queue, size_t *queue_count,
+    uint32_t local)
+{
+    if (local == 0u || (size_t)local > metadata->trait_count
+        || seen[local - 1u]) return;
+    seen[local - 1u] = 1u;
+    queue[*queue_count] = local;
+    *queue_count += 1u;
+}
+
 /*
- * Private ITEMs are dependency closure, not independent artifact roots.
- * Traverse the mutually recursive ITEM/TYPE graph only from declarations
- * exposed by this artifact and reject every orphan private record.
+ * Nonpublic ITEMs and traits are dependency closure, not independent artifact
+ * roots. Traverse only from public declarations and reject every orphan.
  */
 static int cm_decl_validate_private_item_reachability(
     const CmHirDeclarationMetadata *metadata)
 {
     unsigned char *item_seen;
+    unsigned char *trait_seen;
     unsigned char *type_seen;
     uint32_t *item_queue;
+    uint32_t *trait_queue;
     uint32_t *type_queue;
     size_t item_count;
+    size_t trait_count;
     size_t type_count;
     size_t item_cursor;
+    size_t trait_cursor;
     size_t type_cursor;
     size_t index;
     item_seen = metadata->item_count == 0u ? NULL
@@ -2538,19 +2787,32 @@ static int cm_decl_validate_private_item_reachability(
     type_seen = metadata->type_count == 0u ? NULL
         : (unsigned char *)cm_alloc_zeroed(metadata->type_count,
             sizeof(*type_seen));
+    trait_seen = metadata->trait_count == 0u ? NULL
+        : (unsigned char *)cm_alloc_zeroed(metadata->trait_count,
+            sizeof(*trait_seen));
     item_queue = metadata->item_count == 0u ? NULL
         : (uint32_t *)cm_alloc_zeroed(metadata->item_count,
             sizeof(*item_queue));
     type_queue = metadata->type_count == 0u ? NULL
         : (uint32_t *)cm_alloc_zeroed(metadata->type_count,
             sizeof(*type_queue));
+    trait_queue = metadata->trait_count == 0u ? NULL
+        : (uint32_t *)cm_alloc_zeroed(metadata->trait_count,
+            sizeof(*trait_queue));
     item_count = 0u;
+    trait_count = 0u;
     type_count = 0u;
     for (index = 0u; index < metadata->item_count; ++index) {
         if (metadata->items[index].visibility.kind
                 == CM_HIR_DECL_VISIBILITY_PUBLIC)
             cm_decl_reach_item(metadata, item_seen, item_queue, &item_count,
                 (uint32_t)(index + 1u));
+    }
+    for (index = 0u; index < metadata->trait_count; ++index) {
+        if (metadata->traits[index].visibility.kind
+                == CM_HIR_DECL_VISIBILITY_PUBLIC)
+            cm_decl_reach_trait(metadata, trait_seen, trait_queue,
+                &trait_count, (uint32_t)(index + 1u));
     }
     for (index = 0u; index < metadata->value_count; ++index) {
         const CmHirDeclarationValue *value = &metadata->values[index];
@@ -2565,35 +2827,39 @@ static int cm_decl_validate_private_item_reachability(
             cm_decl_reach_type(metadata, type_seen, type_queue, &type_count,
                 value->declared_type);
         }
-    }
-    for (index = 0u; index < metadata->associated_count; ++index) {
-        const CmHirDeclarationAssociatedItem *associated =
-            &metadata->associated_items[index];
-        uint32_t child;
-        cm_decl_reach_type(metadata, type_seen, type_queue, &type_count,
-            associated->return_type);
-        for (child = 0u; child < associated->parameter_count; ++child)
+        for (child = 0u; child < value->predicate_count; ++child) {
+            const CmHirDeclarationPredicate *predicate =
+                &metadata->predicates[
+                    (size_t)value->predicate_start + child - 1u];
+            uint32_t argument;
+            cm_decl_reach_trait(metadata, trait_seen, trait_queue,
+                &trait_count, predicate->trait_local);
             cm_decl_reach_type(metadata, type_seen, type_queue, &type_count,
-                associated->parameter_types[child]);
-    }
-    for (index = 0u; index < metadata->predicate_count; ++index) {
-        const CmHirDeclarationPredicate *predicate =
-            &metadata->predicates[index];
-        uint32_t child;
-        cm_decl_reach_type(metadata, type_seen, type_queue, &type_count,
-            predicate->subject_type);
-        for (child = 0u; child < predicate->argument_count; ++child)
-            cm_decl_reach_type(metadata, type_seen, type_queue, &type_count,
-                predicate->argument_types[child]);
+                predicate->subject_type);
+            for (argument = 0u; argument < predicate->argument_count;
+                    ++argument)
+                cm_decl_reach_type(metadata, type_seen, type_queue,
+                    &type_count, predicate->argument_types[argument]);
+        }
     }
     item_cursor = 0u;
+    trait_cursor = 0u;
     type_cursor = 0u;
-    while (item_cursor < item_count || type_cursor < type_count) {
+    while (item_cursor < item_count || trait_cursor < trait_count
+            || type_cursor < type_count) {
         while (item_cursor < item_count) {
             const CmHirDeclarationItem *item = &metadata->items[
                 item_queue[item_cursor] - 1u];
             uint32_t child;
             item_cursor += 1u;
+            for (child = 0u; child < item->generic_count; ++child) {
+                const CmHirDeclarationGeneric *generic =
+                    &metadata->generics[
+                        (size_t)item->generic_start + child - 1u];
+                if (generic->kind == CM_HIR_DECL_GENERIC_CONST)
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, generic->declared_type);
+            }
             if (item->kind == CM_HIR_DECL_ITEM_TYPE_ALIAS)
                 cm_decl_reach_type(metadata, type_seen, type_queue,
                     &type_count, item->alias_target_type);
@@ -2612,6 +2878,61 @@ static int cm_decl_validate_private_item_reachability(
                                 .fields[field].type_local);
                 }
             }
+            for (child = 0u; child < item->predicate_count; ++child) {
+                const CmHirDeclarationPredicate *predicate =
+                    &metadata->predicates[
+                        (size_t)item->predicate_start + child - 1u];
+                uint32_t argument;
+                cm_decl_reach_trait(metadata, trait_seen, trait_queue,
+                    &trait_count, predicate->trait_local);
+                cm_decl_reach_type(metadata, type_seen, type_queue,
+                    &type_count, predicate->subject_type);
+                for (argument = 0u; argument < predicate->argument_count;
+                        ++argument)
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, predicate->argument_types[argument]);
+            }
+        }
+        while (trait_cursor < trait_count) {
+            const CmHirDeclarationTrait *trait_value = &metadata->traits[
+                trait_queue[trait_cursor] - 1u];
+            uint32_t child;
+            trait_cursor += 1u;
+            for (child = 0u; child < trait_value->associated_count; ++child) {
+                const CmHirDeclarationAssociatedItem *associated =
+                    &metadata->associated_items[
+                        (size_t)trait_value->associated_start + child - 1u];
+                uint32_t parameter;
+                uint32_t predicate_index;
+                cm_decl_reach_type(metadata, type_seen, type_queue,
+                    &type_count, associated->return_type);
+                for (parameter = 0u;
+                        parameter < associated->parameter_count; ++parameter)
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, associated->parameter_types[parameter]);
+                for (predicate_index = 0u;
+                        predicate_index < associated->predicate_count;
+                        ++predicate_index) {
+                    const CmHirDeclarationPredicate *predicate =
+                        &metadata->predicates[
+                            (size_t)associated->predicate_start
+                            + predicate_index - 1u];
+                    uint32_t argument;
+                    cm_decl_reach_trait(metadata, trait_seen, trait_queue,
+                        &trait_count, predicate->trait_local);
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, predicate->subject_type);
+                    for (argument = 0u;
+                            argument < predicate->argument_count; ++argument)
+                        cm_decl_reach_type(metadata, type_seen, type_queue,
+                            &type_count, predicate->argument_types[argument]);
+                }
+            }
+            for (child = 0u; child < trait_value->outlives_count; ++child)
+                cm_decl_reach_type(metadata, type_seen, type_queue,
+                    &type_count, metadata->outlives_predicates[
+                        (size_t)trait_value->outlives_start + child - 1u]
+                        .subject_type);
         }
         while (type_cursor < type_count) {
             const CmHirDeclarationType *type = &metadata->types[
@@ -2639,23 +2960,47 @@ static int cm_decl_validate_private_item_reachability(
             } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
                 cm_decl_reach_type(metadata, type_seen, type_queue,
                     &type_count, type->child_type);
-                cm_decl_reach_type(metadata, type_seen, type_queue,
-                    &type_count, type->array_length_type);
+                if (type->array_length_kind
+                        == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                    const CmHirDeclarationGeneric *generic =
+                        &metadata->generics[
+                            type->array_length_generic_local - 1u];
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, generic->declared_type);
+                } else {
+                    cm_decl_reach_type(metadata, type_seen, type_queue,
+                        &type_count, type->array_length_type);
+                }
             }
         }
     }
     for (index = 0u; index < metadata->item_count; ++index) {
         if (!item_seen[index]) {
             cm_free(type_queue);
+            cm_free(trait_queue);
             cm_free(item_queue);
             cm_free(type_seen);
+            cm_free(trait_seen);
+            cm_free(item_seen);
+            return 0;
+        }
+    }
+    for (index = 0u; index < metadata->trait_count; ++index) {
+        if (!trait_seen[index]) {
+            cm_free(type_queue);
+            cm_free(trait_queue);
+            cm_free(item_queue);
+            cm_free(type_seen);
+            cm_free(trait_seen);
             cm_free(item_seen);
             return 0;
         }
     }
     cm_free(type_queue);
+    cm_free(trait_queue);
     cm_free(item_queue);
     cm_free(type_seen);
+    cm_free(trait_seen);
     cm_free(item_seen);
     return 1;
 }
@@ -2695,6 +3040,10 @@ static int cm_decl_validate_namespace(
                 return 0;
             if (entry->target_kind == CM_HIR_DECL_TARGET_ITEM
                 && metadata->items[entry->target_local - 1u]
+                    .visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC)
+                return 0;
+            if (entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL
+                && metadata->traits[entry->target_local - 1u]
                     .visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC)
                 return 0;
             if (entry->target_kind == CM_HIR_DECL_TARGET_ENUM_VARIANT) {
@@ -2804,7 +3153,7 @@ static int cm_decl_validate_namespace(
                     constructor_defining_count += 1u;
             }
         }
-        if ((item->visibility.kind == CM_HIR_DECL_VISIBILITY_PRIVATE
+        if ((item->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
                 && target_count != 0u)
             || (item->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
                 && type_defining_count != 1u)
@@ -2817,7 +3166,7 @@ static int cm_decl_validate_namespace(
                 && constructor_defining_count != 0u)
             || (item->kind == CM_HIR_DECL_ITEM_STRUCT
                 && constructor_defining_count > 1u)) return 0;
-        if (item->visibility.kind == CM_HIR_DECL_VISIBILITY_PRIVATE) continue;
+        if (item->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC) continue;
         for (entry_index = 0u; entry_index < metadata->namespace_count;
                 ++entry_index) {
             const CmHirDeclarationNamespaceEntry *entry =
@@ -2864,22 +3213,31 @@ static int cm_decl_validate_namespace(
     for (index = 0u; index < metadata->trait_count; ++index) {
         const CmHirDeclarationTrait *trait_value;
         size_t entry_index;
-        int found;
+        size_t defining_count;
+        size_t target_count;
         trait_value = &metadata->traits[index];
-        found = 0;
+        defining_count = 0u;
+        target_count = 0u;
         for (entry_index = 0u; entry_index < metadata->namespace_count;
                 ++entry_index) {
             const CmHirDeclarationNamespaceEntry *entry;
             entry = &metadata->namespace_entries[entry_index];
+            if (entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL
+                && entry->target_local == (uint32_t)(index + 1u))
+                target_count += 1u;
             if (entry->owner_module == trait_value->owner_module
                 && entry->namespace_kind == CM_HIR_DECL_NAMESPACE_TYPE
                 && entry->target_kind == CM_HIR_DECL_TARGET_NOMINAL
                 && entry->target_local == (uint32_t)(index + 1u)
-                && cm_decl_string_equal(entry->name, trait_value->name)) {
-                found = 1;
-            }
+                && entry->export_ordinal == trait_value->source_ordinal
+                && cm_decl_string_equal(entry->name, trait_value->name))
+                defining_count += 1u;
         }
-        if (!found) return 0;
+        if ((trait_value->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+                && defining_count != 1u)
+            || (trait_value->visibility.kind
+                    != CM_HIR_DECL_VISIBILITY_PUBLIC
+                && target_count != 0u)) return 0;
     }
     for (index = 0u; index < metadata->value_count; ++index) {
         const CmHirDeclarationValue *value;
@@ -3063,7 +3421,7 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         cm_hir_metadata_write_u32(&writer, trait_value->owner_module);
         cm_decl_write_string(&writer, trait_value->name);
-        cm_decl_write_visibility(&writer);
+        cm_decl_write_item_visibility(&writer, &trait_value->visibility);
         cm_hir_metadata_write_u32(&writer, trait_value->source_ordinal);
         cm_hir_metadata_write_u32(&writer, trait_value->generic_start);
         cm_hir_metadata_write_u32(&writer, trait_value->generic_count);
@@ -3152,10 +3510,10 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u8(&writer, generic->is_relaxed_sized);
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         cm_decl_write_string(&writer, generic->name);
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+        cm_hir_metadata_write_u8(&writer, generic->has_default);
         cm_hir_metadata_write_u8(&writer, UINT8_C(0));
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, generic->declared_type);
         cm_hir_metadata_write_u32(&writer, UINT32_C(0));
     }
 
@@ -3166,7 +3524,9 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         const CmHirDeclarationType *type;
         type = &metadata->types[index];
         cm_hir_metadata_write_u8(&writer, type->kind);
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+        cm_hir_metadata_write_u8(&writer,
+            type->kind == CM_HIR_DECL_TYPE_ARRAY
+                ? type->array_length_kind : UINT8_C(0));
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         if (type->kind == CM_HIR_DECL_TYPE_PRIMITIVE) {
             cm_hir_metadata_write_u8(&writer, type->primitive);
@@ -3212,12 +3572,20 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
                     type->element_types[child]);
         } else if (type->kind == CM_HIR_DECL_TYPE_ARRAY) {
             cm_hir_metadata_write_u32(&writer, type->child_type);
-            cm_hir_metadata_write_u32(&writer,
-                type->array_length_type);
-            cm_hir_metadata_write_u64(&writer,
-                type->array_length_low_bits);
-            cm_hir_metadata_write_u64(&writer,
-                type->array_length_high_bits);
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                cm_hir_metadata_write_u32(&writer,
+                    type->array_length_generic_local);
+                cm_hir_metadata_write_u64(&writer, UINT64_C(0));
+                cm_hir_metadata_write_u64(&writer, UINT64_C(0));
+            } else {
+                cm_hir_metadata_write_u32(&writer,
+                    type->array_length_type);
+                cm_hir_metadata_write_u64(&writer,
+                    type->array_length_low_bits);
+                cm_hir_metadata_write_u64(&writer,
+                    type->array_length_high_bits);
+            }
         }
     }
 
@@ -3236,13 +3604,12 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u32(&writer, item->source_ordinal);
         cm_hir_metadata_write_u32(&writer, item->generic_start);
         cm_hir_metadata_write_u32(&writer, item->generic_count);
-        /* The three predicate ranges are empty in this slice. */
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u32(&writer, UINT32_C(0));
+        cm_hir_metadata_write_u32(&writer, item->predicate_scope_start);
+        cm_hir_metadata_write_u32(&writer, item->predicate_scope_count);
+        cm_hir_metadata_write_u32(&writer, item->predicate_start);
+        cm_hir_metadata_write_u32(&writer, item->predicate_count);
+        cm_hir_metadata_write_u32(&writer, item->outlives_start);
+        cm_hir_metadata_write_u32(&writer, item->outlives_count);
         if (item->kind == CM_HIR_DECL_ITEM_STRUCT
                 || item->kind == CM_HIR_DECL_ITEM_UNION) {
             uint32_t child;
@@ -3261,6 +3628,9 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
             if ((item->aggregate_flags
                     & CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM) != 0u)
                 cm_decl_write_string(&writer, item->lang_item);
+            if ((item->aggregate_flags
+                    & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM) != 0u)
+                cm_decl_write_string(&writer, item->diagnostic_item);
         } else if (item->kind == CM_HIR_DECL_ITEM_ENUM) {
             uint32_t child;
             cm_hir_metadata_write_u8(&writer,
@@ -3367,7 +3737,10 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         cm_hir_metadata_write_u32(&writer,
             predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_VALUE
-                ? predicate->owner_value : predicate->owner_associated);
+                ? predicate->owner_value
+                : predicate->owner_kind
+                    == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+                    ? predicate->owner_associated : predicate->owner_item);
         cm_hir_metadata_write_u32(&writer, predicate->ordinal);
         cm_hir_metadata_write_u32(&writer, predicate->subject_type);
         cm_hir_metadata_write_u32(&writer, predicate->trait_local);
@@ -3579,6 +3952,13 @@ static int cm_decl_read_u32(CmHirMetadataReader *reader, uint32_t expected)
         && value == expected;
 }
 
+static int cm_decl_read_u64(CmHirMetadataReader *reader, uint64_t expected)
+{
+    uint64_t value;
+    return cm_hir_metadata_read_u64(reader, &value) == CM_HIR_METADATA_OK
+        && value == expected;
+}
+
 static int cm_decl_read_string(CmHirMetadataReader *reader,
     CmHirDeclarationString *out)
 {
@@ -3761,7 +4141,8 @@ static int cm_decl_parse_traits(const CmHirMetadataSection *section,
             || cm_hir_metadata_read_u32(&reader, &trait_value->owner_module)
                 != CM_HIR_METADATA_OK
             || !cm_decl_read_string(&reader, &trait_value->name)
-            || !cm_decl_read_visibility(&reader)
+            || !cm_decl_read_item_visibility(&reader,
+                &trait_value->visibility)
             || cm_hir_metadata_read_u32(&reader,
                 &trait_value->source_ordinal) != CM_HIR_METADATA_OK
             || cm_hir_metadata_read_u32(&reader,
@@ -3924,10 +4305,12 @@ static int cm_decl_parse_generics(const CmHirMetadataSection *section,
                 != CM_HIR_METADATA_OK
             || !cm_decl_read_u16(&reader, UINT16_C(0))
             || !cm_decl_read_string(&reader, &generic->name)
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
+            || cm_hir_metadata_read_u8(&reader, &generic->has_default)
+                != CM_HIR_METADATA_OK
             || !cm_decl_read_u8(&reader, UINT8_C(0))
             || !cm_decl_read_u16(&reader, UINT16_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
+            || cm_hir_metadata_read_u32(&reader, &generic->declared_type)
+                != CM_HIR_METADATA_OK
             || !cm_decl_read_u32(&reader, UINT32_C(0))) return 0;
     }
     return cm_decl_reader_done(&reader);
@@ -3951,8 +4334,11 @@ static int cm_decl_parse_types(const CmHirMetadataSection *section,
         type = &metadata->types[index];
         if (cm_hir_metadata_read_u8(&reader, &type->kind)
                 != CM_HIR_METADATA_OK
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
+            || cm_hir_metadata_read_u8(&reader, &type->array_length_kind)
+                != CM_HIR_METADATA_OK
             || !cm_decl_read_u16(&reader, UINT16_C(0))) return 0;
+        if (type->kind != CM_HIR_DECL_TYPE_ARRAY
+            && type->array_length_kind != 0u) return 0;
         if (type->kind == CM_HIR_DECL_TYPE_PRIMITIVE) {
             if (cm_hir_metadata_read_u8(&reader, &type->primitive)
                     != CM_HIR_METADATA_OK
@@ -4036,13 +4422,26 @@ static int cm_decl_parse_types(const CmHirMetadataSection *section,
                 || total_arguments > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
                 || cm_hir_metadata_read_u32(&reader, &type->child_type)
                     != CM_HIR_METADATA_OK
-                || cm_hir_metadata_read_u32(&reader,
+                || (type->array_length_kind
+                        != CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+                    && type->array_length_kind
+                        != CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER))
+                return 0;
+            if (type->array_length_kind
+                    == CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER) {
+                if (cm_hir_metadata_read_u32(&reader,
+                        &type->array_length_generic_local)
+                        != CM_HIR_METADATA_OK
+                    || !cm_decl_read_u64(&reader, UINT64_C(0))
+                    || !cm_decl_read_u64(&reader, UINT64_C(0))) return 0;
+            } else if (cm_hir_metadata_read_u32(&reader,
                     &type->array_length_type) != CM_HIR_METADATA_OK
                 || cm_hir_metadata_read_u64(&reader,
                     &type->array_length_low_bits) != CM_HIR_METADATA_OK
                 || cm_hir_metadata_read_u64(&reader,
-                    &type->array_length_high_bits) != CM_HIR_METADATA_OK)
+                    &type->array_length_high_bits) != CM_HIR_METADATA_OK) {
                 return 0;
+            }
         } else {
             return 0;
         }
@@ -4082,12 +4481,18 @@ static int cm_decl_parse_items(const CmHirMetadataSection *section,
                 != CM_HIR_METADATA_OK
             || cm_hir_metadata_read_u32(&reader, &item->generic_count)
                 != CM_HIR_METADATA_OK
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))) return 0;
+            || cm_hir_metadata_read_u32(&reader,
+                &item->predicate_scope_start) != CM_HIR_METADATA_OK
+            || cm_hir_metadata_read_u32(&reader,
+                &item->predicate_scope_count) != CM_HIR_METADATA_OK
+            || cm_hir_metadata_read_u32(&reader,
+                &item->predicate_start) != CM_HIR_METADATA_OK
+            || cm_hir_metadata_read_u32(&reader,
+                &item->predicate_count) != CM_HIR_METADATA_OK
+            || cm_hir_metadata_read_u32(&reader,
+                &item->outlives_start) != CM_HIR_METADATA_OK
+            || cm_hir_metadata_read_u32(&reader,
+                &item->outlives_count) != CM_HIR_METADATA_OK) return 0;
         if (item->kind == CM_HIR_DECL_ITEM_STRUCT
                 || item->kind == CM_HIR_DECL_ITEM_UNION) {
             uint32_t child;
@@ -4128,6 +4533,10 @@ static int cm_decl_parse_items(const CmHirMetadataSection *section,
                     & CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM) != 0u
                 && !cm_decl_read_string(&reader, &item->lang_item))
                 return 0;
+            if ((item->aggregate_flags
+                    & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM) != 0u
+                && !cm_decl_read_string(&reader,
+                    &item->diagnostic_item)) return 0;
         } else if (item->kind == CM_HIR_DECL_ITEM_ENUM) {
             uint32_t child;
             if (cm_hir_metadata_read_u8(&reader,
@@ -4330,7 +4739,9 @@ static int cm_decl_parse_predicates(const CmHirMetadataSection *section,
             || (predicate->owner_kind
                     != CM_HIR_DECL_PREDICATE_OWNER_VALUE
                 && predicate->owner_kind
-                    != CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED)
+                    != CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+                && predicate->owner_kind
+                    != CM_HIR_DECL_PREDICATE_OWNER_ITEM)
             || !cm_decl_read_u16(&reader, UINT16_C(0))
             || cm_hir_metadata_read_u32(&reader, &owner_local)
                 != CM_HIR_METADATA_OK
@@ -4350,8 +4761,11 @@ static int cm_decl_parse_predicates(const CmHirMetadataSection *section,
             return 0;
         if (predicate->owner_kind == CM_HIR_DECL_PREDICATE_OWNER_VALUE)
             predicate->owner_value = owner_local;
-        else
+        else if (predicate->owner_kind
+                == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED)
             predicate->owner_associated = owner_local;
+        else
+            predicate->owner_item = owner_local;
         predicate->argument_types = predicate->argument_count == 0u ? NULL
             : (uint32_t *)cm_alloc((size_t)predicate->argument_count
                 * sizeof(uint32_t));
