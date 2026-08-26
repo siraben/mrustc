@@ -41,6 +41,18 @@ static const unsigned char fixture_source[] =
     "pub use Gate as GateReexport;\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char const_fixture_source[] =
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "pub const MAX: char = char::MAX;\n"
+    "#[unstable(feature = \"next_char\", issue = \"none\")]\n"
+    "pub const NEXT: usize = usize::MAX;\n"
+    "#[deprecated(since = \"1.1.0\", note = \"old\")]\n"
+    "pub const OLD: char = char::MAX;\n"
+    "#[deprecated(since = \"1.1.0\", note = \"renamed\")]\n"
+    "pub use MAX as RENAMED;\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -111,6 +123,12 @@ static void fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-trait-provider.rs",
         fixture_source, sizeof(fixture_source) - 1u);
+}
+
+static void const_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "v30-const-provider.rs",
+        const_fixture_source, sizeof(const_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -281,7 +299,10 @@ static void assert_exact_descriptor(const CmHirDeclarationMetadata *metadata)
         && metadata->types[2].generic_local == 2u
         && metadata->types[3].kind == CM_HIR_DECL_TYPE_NAMED_ADT
         && metadata->types[3].item_local == 3u);
-    assert(metadata->values[0].parameter_count == 0u
+    assert(metadata->values[0].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && metadata->values[0].declared_type == 0u
+        && metadata->values[0].mutability == 0u
+        && metadata->values[0].parameter_count == 0u
         && metadata->values[0].parameter_types == NULL
         && metadata->values[0].return_type == 1u
         && metadata->values[0].has_body == 1u
@@ -1642,8 +1663,283 @@ static void test_many_private_bindings_do_not_consume_public_cap(void)
     fixture_destroy(&fixture);
 }
 
+static void assert_const_descriptor(const CmHirDeclarationMetadata *metadata)
+{
+    const CmHirDeclarationNamespaceEntry *direct;
+    const CmHirDeclarationNamespaceEntry *renamed;
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    assert(metadata->module_count == 1u && metadata->root_module == 1u
+        && metadata->trait_count == 1u && metadata->item_count == 0u
+        && metadata->value_count == 4u && metadata->generic_count == 2u
+        && metadata->predicate_count == 1u && metadata->type_count == 5u
+        && metadata->namespace_count == 6u);
+    assert(metadata->types[0].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[0].primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && metadata->types[1].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[1].primitive == CM_HIR_DECL_PRIMITIVE_CHAR
+        && metadata->types[2].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[2].primitive == CM_HIR_DECL_PRIMITIVE_U8
+        && metadata->types[3].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[3].primitive == CM_HIR_DECL_PRIMITIVE_USIZE
+        && metadata->types[4].kind == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->types[4].generic_local == 2u);
+    assert(metadata->values[0].kind == CM_HIR_DECL_VALUE_CONST
+        && declaration_string_is(metadata->values[0].name, "MAX")
+        && metadata->values[0].source_ordinal == 0u
+        && metadata->values[0].generic_start == 0u
+        && metadata->values[0].generic_count == 0u
+        && metadata->values[0].predicate_start == 0u
+        && metadata->values[0].predicate_count == 0u
+        && metadata->values[0].parameter_count == 0u
+        && metadata->values[0].parameter_types == NULL
+        && metadata->values[0].return_type == 0u
+        && metadata->values[0].declared_type == 2u
+        && metadata->values[0].mutability == CM_HIR_DECL_IMMUTABLE
+        && metadata->values[0].has_body == 1u);
+    assert(metadata->values[1].kind == CM_HIR_DECL_VALUE_CONST
+        && declaration_string_is(metadata->values[1].name, "NEXT")
+        && metadata->values[1].source_ordinal == 1u
+        && metadata->values[1].declared_type == 4u
+        && metadata->values[1].mutability == CM_HIR_DECL_IMMUTABLE
+        && metadata->values[1].has_body == 1u
+        && metadata->values[2].kind == CM_HIR_DECL_VALUE_CONST
+        && declaration_string_is(metadata->values[2].name, "OLD")
+        && metadata->values[2].source_ordinal == 2u
+        && metadata->values[2].declared_type == 2u
+        && metadata->values[2].mutability == CM_HIR_DECL_IMMUTABLE
+        && metadata->values[2].has_body == 1u);
+    assert(metadata->values[3].kind == CM_HIR_DECL_VALUE_FUNCTION
+        && declaration_string_is(metadata->values[3].name, "needs")
+        && metadata->values[3].source_ordinal == 5u
+        && metadata->values[3].generic_count == 1u
+        && metadata->values[3].predicate_count == 1u
+        && metadata->values[3].declared_type == 0u
+        && metadata->values[3].mutability == 0u
+        && metadata->values[3].return_type == 1u
+        && metadata->values[3].has_body == 1u);
+    assert(metadata->generics[1].owner_kind == CM_HIR_DECL_GENERIC_VALUE
+        && metadata->generics[1].owner_local == 4u
+        && metadata->predicates[0].owner_value == 4u
+        && metadata->predicates[0].subject_type == 5u
+        && metadata->predicates[0].argument_types[0] == 3u);
+    direct = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "MAX");
+    renamed = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_VALUE, "RENAMED");
+    assert(direct != NULL && renamed != NULL
+        && direct->target_kind == CM_HIR_DECL_TARGET_VALUE
+        && renamed->target_kind == CM_HIR_DECL_TARGET_VALUE
+        && direct->target_local == 1u && renamed->target_local == 1u
+        && direct->export_ordinal == 0u && renamed->export_ordinal == 3u);
+}
+
+static void test_char_const_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    const_fixture_init(&first, 0);
+    const_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.value_count == 4u && result.namespace_count == 6u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION
+        && result.projected_semantic_attribute_count == 4u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 4u);
+    assert_const_descriptor(&first_metadata);
+    assert_const_descriptor(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_char_const_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmHirBody *body;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmInternId saved_metadata;
+    CmHirAttribute *saved_attributes;
+    uint32_t saved_source_expression;
+    CmSourceId saved_source;
+    CmSpan saved_body_span;
+    CmHirType mismatched;
+    CmHirTypeId mismatched_id;
+    CmHirTypeId saved_type;
+    const CmHirType *saved_type_value;
+    CmHirBodyId saved_body_id;
+    const_fixture_init(&fixture, 1);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)find_item(&fixture, "MAX", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_CONST
+        && item->attribute_count == 1u
+        && item->data.value_item.body != CM_HIR_BODY_NONE);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        item->data.value_item.body);
+    assert(body != NULL);
+    saved_body_id = item->data.value_item.body;
+
+#define ASSERT_CONST_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_source_expression = body->source_expression_id;
+    body->source_expression_id = UINT32_MAX;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    body->source_expression_id = saved_source_expression;
+
+    saved_source = body->source;
+    saved_body_span = body->span;
+    body->source = 1u;
+    body->span.source = 1u;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    body->source = saved_source;
+    body->span = saved_body_span;
+
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = cm_hir_intern(&fixture.hir,
+        "stable(feature = \"forged\", since = \"1.0.0\")");
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->attributes[0].metadata = saved_metadata;
+
+    item->attributes[0].expansion_depth = 1u;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->attributes[0].expansion_depth = 0u;
+
+    saved_attributes = item->attributes;
+    item->attributes = NULL;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->attributes = saved_attributes;
+
+    item->predicate_count = 1u;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->predicate_count = 0u;
+
+    saved_type = item->data.value_item.type;
+    saved_type_value = cm_hir_get_type(&fixture.hir, saved_type);
+    assert(saved_type_value != NULL
+        && saved_type_value->kind == CM_HIR_TYPE_CHAR_KIND);
+    memset(&mismatched, 0, sizeof(mismatched));
+    mismatched.kind = CM_HIR_TYPE_INTEGER_KIND;
+    mismatched.data.integer_type.kind = CM_HIR_INT_USIZE;
+    mismatched.span = saved_type_value->span;
+    assert(cm_hir_add_type(&fixture.hir, &mismatched, &mismatched_id)
+        == CM_HIR_OK);
+    item->data.value_item.type = mismatched_id;
+    body->expected_type = mismatched_id;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->data.value_item.type = saved_type;
+    body->expected_type = saved_type;
+
+    item->data.value_item.mutability = CM_HIR_MUTABLE;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->data.value_item.mutability = CM_HIR_IMMUTABLE;
+
+    item->data.value_item.body = CM_HIR_BODY_NONE;
+    ASSERT_CONST_ATOMIC_FAILURE();
+    item->data.value_item.body = saved_body_id;
+
+    assert_const_descriptor(&metadata);
+#undef ASSERT_CONST_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_char_const_attributes_fail_closed_atomically(void)
+{
+    static const unsigned char stable_unstable[] =
+        "#[stable(feature = \"one\", since = \"1.0.0\")]\n"
+        "#[unstable(feature = \"two\", issue = \"none\")]\n"
+        "pub const C: char = char::MAX;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    static const unsigned char unknown[] =
+        "#[unknown_projection]\n"
+        "pub const C: char = char::MAX;\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    const unsigned char *sources[2];
+    size_t lengths[2];
+    CaptureFixture good;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    size_t index;
+    sources[0] = stable_unstable;
+    sources[1] = unknown;
+    lengths[0] = sizeof(stable_unstable) - 1u;
+    lengths[1] = sizeof(unknown) - 1u;
+    const_fixture_init(&good, 0);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_namespace = metadata.namespace_entries;
+    for (index = 0u; index < 2u; ++index) {
+        CaptureFixture bad;
+        fixture_init_source(&bad, 0, "bad-const-attributes.rs",
+            sources[index], lengths[index]);
+        input = capture_input(&bad);
+        result = cm_hir_declaration_metadata_capture(&input, &metadata);
+        assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+            && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+            && result.failure_reason
+                == CM_HIR_DECL_CAPTURE_REASON_ITEM_ATTRIBUTE_PROJECTION_UNSUPPORTED
+            && metadata.values == saved_values
+            && metadata.namespace_entries == saved_namespace);
+        fixture_destroy(&bad);
+    }
+    assert_const_descriptor(&metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
 int main(void)
 {
+    test_char_const_capture_and_determinism();
+    test_char_const_hostile_mutations_are_atomic();
+    test_char_const_attributes_fail_closed_atomically();
     test_fixture_and_determinism();
     test_failure_is_atomic();
     test_zero_item_gate_path();

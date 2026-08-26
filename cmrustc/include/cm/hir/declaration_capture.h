@@ -77,8 +77,9 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /*
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
-     * structs/repr(u8) unit-variant enums/type aliases/reexports, only the
-     * stricter LOWER_SAFE allowlist documented on the capture entry point.
+     * structs/repr(u8) unit-variant enums/type aliases/free consts/reexports,
+     * only the stricter LOWER_SAFE allowlist documented on the capture entry
+     * point.
      * This does not call any projected attribute inert.
      */
     CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION = 1
@@ -158,6 +159,16 @@ typedef struct CmHirDeclarationCaptureResult {
  * `semantic_attributes` and `projected_semantic_attribute_count`; it is not
  * an unchanged-HIR round-trip claim and is not usable as attribute-complete
  * dependency metadata.
+ *
+ * A supported free const is public, top-level, immutable, explicitly typed by
+ * a v3.0-representable primitive, zero-generic/predicate, and has one
+ * authenticated source-owned body. The source primitive spelling and HIR
+ * primitive kind must agree exactly.
+ * Its direct attributes use only `stable(...)`, `unstable(...)`, and
+ * `deprecated(...)`; renamed public reexports use the reexport allowlist above
+ * and retain the same VALU identity. Only the declaration and body-presence
+ * bit are captured. The initializer, an evaluated value, and CTFE IR are not
+ * transported by v3.0, whose BODIES_CONST_IR family remains absent.
  *
  * On success output owns all descriptor storage.  Failure leaves an already
  * initialized output unchanged.
