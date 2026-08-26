@@ -2022,6 +2022,24 @@ pinned-core probe measures the current v3.0 frontier at
 the corresponding authenticated reexport-only projection; item census has not
 yet been proven to start, so `Allocator` remains a prediction rather than the
 measured frontier.
+Commit `659d29e4` projects exact `doc(inline)` on authenticated public
+reexports, including stable coexistence, grouped aliases, projection erasure,
+private-import exclusion, and atomic malformed/provenance rejection.  Its
+pinned-core probe measures the remaining reexport kind at
+`core/src/hash/mod.rs:91`: `doc(hidden)` on `SipHasher13` (`def=1:24504`,
+source item `203:2`).  Commit `53ff35f2` adds that reexport-only projection
+without broadening ordinary item profiles.  The following whole-core probe
+proves namespace collection complete and measures the current v3.0 frontier
+at `core/src/alloc/mod.rs:105`: unsafe, unstable `Allocator` (`def=1:26860`,
+source item `252:21`, rejected item `229`) fails at `stage=items` with
+`reason=item-source-invalid`.  The immediate source gate sees the retained
+`unstable` attribute before the existing trait-shape gate encounters unsafe
+safety and seven associated methods.  The active declaration dependency is a
+byte-preserving trait-associated METHOD foundation with exact parent/source
+order, safety, receiver/default-body promises, `Self`, erased receiver
+references, method-owned predicates, and trait-owned library reachability;
+the full `Layout`/`NonNull`/`Result` closure follows before exact Allocator can
+be transported.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

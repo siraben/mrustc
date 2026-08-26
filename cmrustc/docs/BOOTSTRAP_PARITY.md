@@ -110,6 +110,19 @@ is still rejected during namespace projection.  No declaration metadata bytes,
 object-bearing `core.rlib`, or bootstrap-completion claim follows from these
 attribute gates.
 
+Commit `659d29e4` closes `doc(inline)` reexport projection.  Its whole-core
+probe measures `doc(hidden)` on `core::hash::SipHasher13`; commit `53ff35f2`
+then closes that last source-censused public-reexport attribute kind.  The next
+probe again reports zero graph/import/HIR errors and the exact
+451-module/1,658-type/20,747-value library census, proves namespace capture
+complete, and measures the current item frontier at
+`core/src/alloc/mod.rs:105`: `Allocator` (`def=1:26860`, source item `252:21`,
+rejected item `229`) fails with `stage=items` and `reason=item-source-invalid`.
+This is an unsafe, unstable trait with seven associated methods.  The next
+staged capability is authenticated associated-method declaration/library
+transport; it does not yet provide the full nominal/signature closure or an
+object-bearing `core.rlib`.
+
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
 `--extern-cmrlib` path is deliberately the exact v3.2 executable-slice

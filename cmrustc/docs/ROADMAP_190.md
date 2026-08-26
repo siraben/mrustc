@@ -213,6 +213,19 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   `stage=namespace`/`reexport-attribute-projection-unsupported`.  Namespace
   collection therefore remains the active gate; the later `Allocator` trait
   family is not yet a measured item frontier.
+- Commit `659d29e4` closes the exact `doc(inline)` public-reexport projection.
+  Its probe measures `doc(hidden)` on `core::hash::SipHasher13` at
+  `core/src/hash/mod.rs:91` (`def=1:24504`, source item `203:2`), and commit
+  `53ff35f2` closes that final source-censused reexport attribute without
+  changing item admission.  The next pinned-core run proves namespace
+  collection complete and enters item collection.  The current measured v3.0
+  frontier is `core::alloc::Allocator` at `core/src/alloc/mod.rs:105`
+  (`def=1:26860`, source item `252:21`, rejected item `229`), reported as
+  `stage=items`/`item-source-invalid` because its retained `unstable` attribute
+  reaches the source gate before unsafe safety and seven associated METHODs
+  reach trait-shape validation.  A bounded associated-method declaration and
+  library foundation is next; exact Allocator additionally requires complete
+  `Layout`, `NonNull`, `Result`, `Sized`, and method-signature closure.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.
