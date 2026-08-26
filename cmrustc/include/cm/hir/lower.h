@@ -66,6 +66,9 @@ typedef enum CmHirLowerErrorKind {
 typedef struct CmHirLowerError {
     CmHirLowerErrorKind kind;
     CmSpan span;
+    /* Optional second source location for pairwise validation failures. */
+    CmSpan related_span;
+    int has_related_span;
     CmAstItemId item;
     CmAstTypeId type;
     CmAstPathId path;

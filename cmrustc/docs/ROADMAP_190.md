@@ -19,10 +19,12 @@ ledger; this document orders its tasks by the deepest consumable artifact.
 - The C implementation is a substantial fork.  Its general rustc-shaped CLI
   is still incomplete, but `--emit-cmrlib` and dependency-aware `--emit-c`
   now expose the exact bounded v3.2 executable profile.
-- `make check-core-hir` is the strongest completed Rust-library gate. At
-  `6b63926f`, target-configured Rust 1.90 `core` loaded 363 sources and 451
-  modules with zero graph, import, or HIR errors, producing 38,176 items,
-  22,524 bodies, and 159,528 types.
+- `make check-core-hir` is the strongest completed Rust-library gate.  On
+  2026-08-25 the review-hardened current working tree reproduced the complete
+  target-configured Rust 1.90 result twice: 363 sources and 451 modules with
+  zero graph, import, or HIR errors, producing 38,176 items, 22,524 bodies,
+  and 159,528 types.  Value-aware library capture also succeeds with 451
+  modules, 1,632 public type entries, and 20,692 public value entries.
 - The next measured boundary contains 252 traits, 9,092 impls, and 9,854
   generic parameters, including 2,411 const and 1,443 lifetime parameters.
   Commits `fdfbe33c` through `a6e7c309` began extending library capture and
@@ -41,6 +43,13 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   provider/consumer profile.  No compiler-built `core.rlib`, `alloc`, `std`,
   `rustc`, or `cargo` artifact exists, so M6-06 remains the active vertical
   milestone.
+- The current full-core declaration-v2.6 encoder still rejects atomically at
+  the previously localized ITEM-family boundary and emits zero bytes.  This
+  is the expected format boundary: v2.6 cannot transport real trait/alias
+  declarations, associated children, impl headers, or their namespace
+  identities.  The next G4 slice is therefore a complete v3 ordinary-trait
+  declaration plus its canonical and reexported namespace bindings, not a
+  v2.7 omission or another HIR census.
 - The corrected value-aware `check-core-metadata` reaches the same clean HIR
   census after v2.3. Its first library-capture rejection was
   `core/src/contracts.rs:19`'s `build_check_ensures<Ret, C>`: its `C: Fn(&Ret)

@@ -21823,6 +21823,229 @@ static int cm_lower_impl_headers_unify(const CmHirContext *hir,
     return unified;
 }
 
+static int cm_lower_impl_headers_bind(const CmHirContext *hir,
+    const CmHirItem *left_impl, const CmHirItem *right_impl,
+    CmVec *bindings)
+{
+    const CmHirNamedType *left;
+    const CmHirNamedType *right;
+    uint32_t index;
+
+    if (hir == NULL || left_impl == NULL || right_impl == NULL
+        || bindings == NULL) return 0;
+    if (!cm_lower_unify_type(hir, bindings,
+            left_impl->data.impl_item.self_type,
+            right_impl->data.impl_item.self_type,
+            (size_t)hir->types.len + 1u)) return 0;
+    left = &left_impl->data.impl_item.trait_type;
+    right = &right_impl->data.impl_item.trait_type;
+    if (left->argument_count != right->argument_count
+        || (left->argument_count != 0u
+            && (left->arguments == NULL || right->arguments == NULL))) {
+        return 0;
+    }
+    for (index = 0u; index < left->argument_count; ++index) {
+        if (!cm_lower_unify_generic_arg(hir, bindings,
+                &left->arguments[index], &right->arguments[index],
+                (size_t)hir->types.len + 1u)) return 0;
+    }
+    return 1;
+}
+
+static int cm_lower_type_is_downstream_closed(const CmLowerState *state,
+    CmHirTypeId type_id, size_t budget);
+
+#define CM_LOWER_CLOSED_PREDICATE_DEPTH 32u
+
+static int cm_lower_predicate_is_impossible(const CmLowerState *state,
+    const CmHirTraitPredicate *predicate, const CmVec *header_bindings,
+    uint32_t depth);
+
+static int cm_lower_predicate_provider_may_match(
+    const CmLowerState *state, const CmHirTraitPredicate *predicate,
+    const CmVec *header_bindings, uint32_t depth)
+{
+    size_t item_index;
+
+    if (state == NULL || predicate == NULL || header_bindings == NULL
+        || depth == 0u) {
+        return 1;
+    }
+    for (item_index = 0u; item_index < state->hir->items.len;
+         ++item_index) {
+        const CmHirItem *provider;
+        const CmHirNamedType *provided_trait;
+        CmVec bindings;
+        uint32_t argument_index;
+        uint32_t predicate_index;
+        int matches;
+
+        provider = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            item_index);
+        if (provider == NULL || provider->kind != CM_HIR_ITEM_IMPL
+            || provider->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+            || !provider->data.impl_item.has_trait
+            || !cm_hir_def_id_equal(
+                provider->data.impl_item.trait_type.definition,
+                predicate->trait_type.definition)) continue;
+        provided_trait = &provider->data.impl_item.trait_type;
+        if (provided_trait->argument_count
+                != predicate->trait_type.argument_count
+            || (provided_trait->argument_count != 0u
+                && (provided_trait->arguments == NULL
+                    || predicate->trait_type.arguments == NULL))) {
+            continue;
+        }
+        cm_vec_init(&bindings, sizeof(CmLowerUnifyBinding));
+        cm_vec_append(&bindings, header_bindings->data,
+            header_bindings->len);
+        matches = cm_lower_unify_type(state->hir, &bindings,
+            predicate->subject, provider->data.impl_item.self_type,
+            (size_t)state->hir->types.len + 1u);
+        for (argument_index = 0u; matches
+             && argument_index < provided_trait->argument_count;
+             ++argument_index) {
+            matches = cm_lower_unify_generic_arg(state->hir, &bindings,
+                &predicate->trait_type.arguments[argument_index],
+                &provided_trait->arguments[argument_index],
+                (size_t)state->hir->types.len + 1u);
+        }
+        for (predicate_index = 0u; matches
+             && predicate_index < provider->predicate_count;
+             ++predicate_index) {
+            if (cm_lower_predicate_is_impossible(state,
+                    &provider->predicates[predicate_index], &bindings,
+                    depth - 1u)) matches = 0;
+        }
+        cm_vec_destroy(&bindings);
+        if (matches) return 1;
+    }
+    return 0;
+}
+
+static int cm_lower_predicate_is_impossible(const CmLowerState *state,
+    const CmHirTraitPredicate *predicate, const CmVec *header_bindings,
+    uint32_t depth)
+{
+    const CmHirItem *trait_item;
+    CmHirTypeId resolved_subject_id;
+    uint32_t argument_index;
+
+    if (state == NULL || predicate == NULL || header_bindings == NULL
+        || depth == 0u
+        || (predicate->modifier != CM_HIR_PREDICATE_REQUIRED
+            && predicate->modifier != CM_HIR_PREDICATE_CONST_IF_CONST)
+        || predicate->scope != CM_HIR_PREDICATE_SCOPE_NONE
+        || predicate->binder.lifetime_count != 0u
+        || predicate->binder.lifetimes != NULL
+        || predicate->trait_type.definition.crate_id
+            != state->result.crate_id) return 0;
+    trait_item = cm_lower_bound_item(state,
+        predicate->trait_type.definition);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || trait_item->data.trait_item.safety != CM_HIR_SAFE
+        || trait_item->data.trait_item.is_auto
+        || cm_lower_item_has_attribute_name(state, trait_item,
+            "rustc_deny_explicit_impl")
+        || cm_lower_item_has_exact_attribute(state, trait_item,
+            "lang = \"fn_ptr_trait\"")) return 0;
+    resolved_subject_id = cm_lower_unify_resolve(state->hir,
+        header_bindings, predicate->subject);
+    if (!cm_lower_type_is_downstream_closed(state, resolved_subject_id,
+            (size_t)state->hir->types.len + 1u)) return 0;
+    if (predicate->trait_type.argument_count != 0u
+        && predicate->trait_type.arguments == NULL) return 0;
+    for (argument_index = 0u;
+         argument_index < predicate->trait_type.argument_count;
+         ++argument_index) {
+        const CmHirGenericArg *argument;
+        CmHirTypeId resolved_argument;
+
+        argument = &predicate->trait_type.arguments[argument_index];
+        if (argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
+        resolved_argument = cm_lower_unify_resolve(state->hir,
+            header_bindings, argument->data.type);
+        if (!cm_lower_type_is_downstream_closed(state, resolved_argument,
+                (size_t)state->hir->types.len + 1u)) return 0;
+    }
+    return !cm_lower_predicate_provider_may_match(state, predicate,
+        header_bindings, depth);
+}
+
+/*
+ * A downstream crate cannot add an impl of this crate's ordinary trait for
+ * a type that the orphan rules can never make local there.  Once unifying two
+ * headers has fixed one of a blanket impl's owned parameters to such a closed
+ * type, the complete local impl set can therefore prove one of its atomic
+ * trait predicates impossible.  This is
+ * the closed-world coherence fact rustc uses for pairs such as
+ *
+ *   impl<T: Type<'a>> MaybeSizedType<'a> for T
+ *   impl<T: ?Sized> MaybeSizedType<'a> for MaybeSizedValue<T>
+ *
+ * Keep the proof deliberately narrow: only a direct owned parameter subject,
+ * a required or const-if-const predicate, a plain local non-auto trait, and
+ * an orphan-closed result after header unification qualify.  Associated
+ * equalities only restrict the provider set, so provider discovery
+ * deliberately ignores them and remains conservative.  Every
+ * matching positive provider keeps the overlap possible unless one of that
+ * provider's own atomic predicates is recursively proven impossible.  The
+ * bounded recursion fails open on cycles or exhaustion.
+ */
+static int cm_lower_impl_direction_has_closed_local_predicate(
+    const CmLowerState *state, const CmHirItem *blanket,
+    const CmHirItem *nominal)
+{
+    CmVec bindings;
+    uint32_t predicate_index;
+    int disjoint = 0;
+
+    if (state == NULL || blanket == NULL || nominal == NULL
+        || blanket->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE
+        || nominal->data.impl_item.polarity != CM_HIR_IMPL_POSITIVE) {
+        return 0;
+    }
+    cm_vec_init(&bindings, sizeof(CmLowerUnifyBinding));
+    if (!cm_lower_impl_headers_bind(state->hir, blanket, nominal,
+            &bindings)) {
+        cm_vec_destroy(&bindings);
+        return 0;
+    }
+    for (predicate_index = 0u;
+         predicate_index < blanket->predicate_count; ++predicate_index) {
+        const CmHirTraitPredicate *predicate;
+        const CmHirType *subject;
+
+        predicate = &blanket->predicates[predicate_index];
+        subject = cm_hir_get_type(state->hir, predicate->subject);
+        if (subject == NULL
+            || subject->kind != CM_HIR_TYPE_PARAMETER_KIND
+            || !cm_lower_impl_owned_parameter(state->hir, blanket,
+                subject->data.parameter_type.parameter,
+                CM_HIR_GENERIC_TYPE)) continue;
+        if (cm_lower_predicate_is_impossible(state, predicate, &bindings,
+                CM_LOWER_CLOSED_PREDICATE_DEPTH)) {
+            disjoint = 1;
+            break;
+        }
+    }
+    cm_vec_destroy(&bindings);
+    return disjoint;
+}
+
+static int cm_lower_impl_pair_is_closed_local_predicate_disjoint(
+    const CmLowerState *state, CmLowerImplSelfClass left_class,
+    const CmHirItem *left, CmLowerImplSelfClass right_class,
+    const CmHirItem *right)
+{
+    (void)left_class;
+    (void)right_class;
+    return cm_lower_impl_direction_has_closed_local_predicate(state,
+            left, right)
+        || cm_lower_impl_direction_has_closed_local_predicate(state,
+            right, left);
+}
+
 /*
  * `FnPtr` is a compiler-implemented lang trait whose explicit-impl ban makes
  * its domain exactly the function-pointer type family.  Authenticate the
@@ -22216,7 +22439,6 @@ static int cm_lower_type_is_downstream_closed(const CmLowerState *state,
     CmHirTypeId type_id, size_t budget)
 {
     const CmHirType *type;
-    uint32_t index;
 
     if (state == NULL || state->hir == NULL || budget == 0u) return 0;
     type = cm_hir_get_type(state->hir, type_id);
@@ -22230,8 +22452,24 @@ static int cm_lower_type_is_downstream_closed(const CmLowerState *state,
     case CM_HIR_TYPE_INTEGER_KIND:
     case CM_HIR_TYPE_FLOAT_KIND:
         return 1;
+    case CM_HIR_TYPE_ARRAY_KIND:
+    case CM_HIR_TYPE_SLICE_KIND:
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+    case CM_HIR_TYPE_TUPLE_KIND:
+        /*
+         * These structural types never become local to a downstream crate
+         * merely because a component does.  Their outer constructors
+         * therefore close the orphan-rule domain even when a component is a
+         * generic parameter owned by the concrete impl.
+         */
+        return 1;
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        /* References are fundamental: locality follows the pointee. */
+        return cm_lower_type_is_downstream_closed(state,
+            type->data.reference_type.pointee, budget - 1u);
     case CM_HIR_TYPE_ADT_KIND: {
         const CmHirItem *item;
+        uint32_t index;
 
         if (type->data.named_type.definition.crate_id
                 != state->result.crate_id
@@ -22243,22 +22481,23 @@ static int cm_lower_type_is_downstream_closed(const CmLowerState *state,
             || (item->kind != CM_HIR_ITEM_STRUCT
                 && item->kind != CM_HIR_ITEM_ENUM
                 && item->kind != CM_HIR_ITEM_UNION)) return 0;
+        if (!cm_lower_item_has_attribute_name(state, item,
+                "fundamental")) return 1;
+        /*
+         * A fundamental nominal constructor can inherit downstream locality
+         * from a type argument.  Requiring every type argument to be closed
+         * is conservative for constructors whose locality is determined by
+         * only a distinguished argument, and avoids treating Box<Local> (or
+         * an equivalent fundamental wrapper) as permanently foreign.
+         */
         for (index = 0u; index < type->data.named_type.argument_count;
              ++index) {
-            const CmHirGenericArg *argument =
-                &type->data.named_type.arguments[index];
+            const CmHirGenericArg *argument;
 
-            if (argument->kind == CM_HIR_GENERIC_ARG_TYPE) {
-                if (!cm_lower_type_is_downstream_closed(state,
-                        argument->data.type, budget - 1u)) return 0;
-            } else if (argument->kind == CM_HIR_GENERIC_ARG_CONST) {
-                if (argument->data.constant.kind != CM_HIR_CONST_VALUE
-                    || !cm_lower_type_is_downstream_closed(state,
-                        argument->data.constant.type,
-                        budget - 1u)) return 0;
-            } else if (argument->kind != CM_HIR_GENERIC_ARG_LIFETIME) {
-                return 0;
-            }
+            argument = &type->data.named_type.arguments[index];
+            if (argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                && !cm_lower_type_is_downstream_closed(state,
+                    argument->data.type, budget - 1u)) return 0;
         }
         return 1;
     }
@@ -22301,9 +22540,7 @@ static int cm_lower_impl_pair_is_conversion_predicate_disjoint(
     }
     (void)blanket;
     (void)blanket_class;
-    if (concrete->generic_parameter_count != 0u
-        || concrete->predicate_count != 0u
-        || concrete->data.impl_item.trait_type.argument_count != 1u
+    if (concrete->data.impl_item.trait_type.argument_count != 1u
         || concrete->data.impl_item.trait_type.arguments == NULL) return 0;
     source_argument = &concrete->data.impl_item.trait_type.arguments[0];
     if (source_argument->kind != CM_HIR_GENERIC_ARG_TYPE) return 0;
@@ -22448,6 +22685,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     prior_class, prior, item_class, item)) continue;
             if (!cm_lower_impl_headers_unify(state->hir, prior,
                     item)) continue;
+            if (cm_lower_impl_pair_is_closed_local_predicate_disjoint(state,
+                    prior_class, prior, item_class, item)) continue;
             if (cm_lower_impl_pair_is_conversion_predicate_disjoint(state,
                     prior_class, prior, item_class, item)) continue;
             if (cm_lower_impl_pair_is_admitted_specialization(state, prior,
@@ -22485,6 +22724,8 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                               "one trait and self type"
                         : "duplicate exact impl candidate for one trait "
                               "and self type");
+            state->result.first_error.related_span = prior->span;
+            state->result.first_error.has_related_span = 1;
             cm_free(adt_definitions);
             cm_free(classes);
             return 0;

@@ -878,7 +878,7 @@ static void test_function_pointer_impl_coherence(void)
         generic_dst_wrapper_unknown
     };
     static const char *const fn_ptr_rejected[] = {
-        fn_ptr_missing_lang, fn_ptr_missing_deny, ordinary_bound_overlap,
+        fn_ptr_missing_lang, fn_ptr_missing_deny,
         non_self_fn_ptr_bound, two_fn_ptr_blankets
     };
     static const char *const explicit_fn_ptr_rejected[] = {
@@ -915,6 +915,12 @@ static void test_function_pointer_impl_coherence(void)
         && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
         && strstr(result.first_error.message,
             "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* A plain local bound with no matching provider is now closed-world
+     * evidence; compiler/lang traits still use the authenticated path. */
+    result = lower_graph_source(ordinary_bound_overlap, &context);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     for (index = 0u;
@@ -1047,6 +1053,273 @@ static void test_function_pointer_impl_coherence(void)
                 "duplicate exact impl candidate") != NULL);
         cm_hir_context_destroy(&context);
     }
+}
+
+static void test_local_predicate_closed_world_coherence(void)
+{
+    static const char disjoint[] =
+        "trait Bound<'a> {} trait Marker<'a> {}"
+        "struct Wrap<T: ?Sized> { pointer: *const T }"
+        "impl<'a, T: Bound<'a>> Marker<'a> for T {}"
+        "impl<'a, U: ?Sized> Marker<'a> for Wrap<U> {}";
+    static const char matching_provider[] =
+        "trait Bound<'a> {} trait Marker<'a> {}"
+        "struct Wrap<T: ?Sized> { pointer: *const T }"
+        "impl<'a, U: ?Sized> Bound<'a> for Wrap<U> {}"
+        "impl<'a, T: Bound<'a>> Marker<'a> for T {}"
+        "impl<'a, U: ?Sized> Marker<'a> for Wrap<U> {}";
+    static const char unrelated_provider[] =
+        "trait Bound<'a> {} trait Marker<'a> {}"
+        "struct Wrap<T: ?Sized> { pointer: *const T } struct Other;"
+        "impl<'a> Bound<'a> for Other {}"
+        "impl<'a, T: Bound<'a>> Marker<'a> for T {}"
+        "impl<'a, U: ?Sized> Marker<'a> for Wrap<U> {}";
+    static const char reversed[] =
+        "trait Bound<'a> {} trait Marker<'a> {}"
+        "struct Wrap<T: ?Sized> { pointer: *const T }"
+        "impl<'a, U: ?Sized> Marker<'a> for Wrap<U> {}"
+        "impl<'a, T: Bound<'a>> Marker<'a> for T {}";
+    static const char nested_disjoint[] =
+        "trait Bound {} trait Marker {}"
+        "struct Outer<T> { value: T } struct Inner<T> { value: T }"
+        "impl<I: Bound> Marker for Outer<I> {}"
+        "impl<T> Marker for Outer<Inner<T>> {}";
+    static const char nested_provider[] =
+        "trait Bound {} trait Marker {}"
+        "struct Outer<T> { value: T } struct Inner<T> { value: T }"
+        "impl<T> Bound for Inner<T> {}"
+        "impl<I: Bound> Marker for Outer<I> {}"
+        "impl<T> Marker for Outer<Inner<T>> {}";
+    static const char provider_after_candidates[] =
+        "trait Bound {} trait Marker {} struct Wrap<T>(T);"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T> Marker for Wrap<T> {}"
+        "impl<T> Bound for Wrap<T> {}";
+    static const char fundamental_open[] =
+        "trait Bound {} trait Marker {}"
+        "#[fundamental] struct Wrap<T>(T);"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T> Marker for Wrap<T> {}";
+    static const char open_trait_argument[] =
+        "trait Bound<A> {} trait Marker<A> {} struct Wrap<T>(T);"
+        "impl<X, A> Marker<A> for X where X: Bound<A> {}"
+        "impl<T> Marker<T> for Wrap<T> {}";
+    static const char closed_trait_argument[] =
+        "trait Bound<A> {} trait Marker<A> {} struct Wrap<T>(T);"
+        "impl<X, A> Marker<A> for X where X: Bound<A> {}"
+        "impl<T> Marker<u8> for Wrap<T> {}";
+    static const char closed_trait_argument_provider[] =
+        "trait Bound<A> {} trait Marker<A> {} struct Wrap<T>(T);"
+        "impl<T> Bound<u8> for Wrap<T> {}"
+        "impl<X, A> Marker<A> for X where X: Bound<A> {}"
+        "impl<T> Marker<u8> for Wrap<T> {}";
+    static const char const_if_const_recursive_disjoint[] =
+        "#[const_trait] trait Callable {} trait Marker {}"
+        "impl<F: ?Sized> const Callable for &F "
+        "where F: ~const Callable {}"
+        "impl<I: Callable> Marker for I {}"
+        "impl<T, const N: usize> Marker for &[T; N] {}";
+    static const char const_if_const_recursive_provider[] =
+        "#[const_trait] trait Callable {} trait Marker {}"
+        "impl<F: ?Sized> const Callable for &F "
+        "where F: ~const Callable {}"
+        "impl<T, const N: usize> const Callable for [T; N] {}"
+        "impl<I: Callable> Marker for I {}"
+        "impl<T, const N: usize> Marker for &[T; N] {}";
+    static const char closed_reference[] =
+        "trait Bound {} trait Marker {}"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T, const N: usize> Marker for &[T; N] {}";
+    static const char closed_reference_provider[] =
+        "trait Bound {} trait Marker {}"
+        "impl<T, const N: usize> Bound for &[T; N] {}"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T, const N: usize> Marker for &[T; N] {}";
+    static const char open_reference[] =
+        "trait Bound {} trait Marker {}"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T> Marker for &T {}";
+    static const char ordinary_lang_trait[] =
+        "#[lang = \"iterator\"] trait Bound {} trait Marker {}"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T, const N: usize> Marker for &[T; N] {}";
+    static const char recursive_disjoint[] =
+        "trait Bound {} trait Bridge {} trait Marker {}"
+        "impl<I: Bound + ?Sized> Bridge for &mut I {}"
+        "impl<I: Bridge> Marker for I {}"
+        "impl<T, const N: usize> Marker for &mut [T; N] {}";
+    static const char recursive_provider[] =
+        "trait Bound {} trait Bridge {} trait Marker {}"
+        "impl<T, const N: usize> Bound for [T; N] {}"
+        "impl<I: Bound + ?Sized> Bridge for &mut I {}"
+        "impl<I: Bridge> Marker for I {}"
+        "impl<T, const N: usize> Marker for &mut [T; N] {}";
+    static const char associated_equality_disjoint[] =
+        "trait Bound { type Output; } trait Marker {}"
+        "impl<I: Bound<Output = bool>> Marker for I {}"
+        "impl<T, const N: usize> Marker for [T; N] {}";
+    static const char associated_equality_provider[] =
+        "trait Bound { type Output; } trait Marker {}"
+        "impl<T, const N: usize> Bound for [T; N] { type Output = bool; }"
+        "impl<I: Bound<Output = bool>> Marker for I {}"
+        "impl<T, const N: usize> Marker for [T; N] {}";
+    static const char associated_equality_mismatch[] =
+        "trait Bound { type Output; } trait Marker {}"
+        "impl<T, const N: usize> Bound for [T; N] { type Output = u8; }"
+        "impl<I: Bound<Output = bool>> Marker for I {}"
+        "impl<T, const N: usize> Marker for [T; N] {}";
+    static const char recursive_cycle[] =
+        "trait Bound {} trait Bridge {} trait Marker {}"
+        "impl<T: Bridge> Bound for T {}"
+        "impl<T: Bound> Bridge for T {}"
+        "impl<I: Bound> Marker for I {}"
+        "impl<T, const N: usize> Marker for [T; N] {}";
+    CmHirContext context;
+    CmHirLowerResult result;
+
+    result = lower_graph_source(disjoint, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "closed local predicate disjointness: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(unrelated_provider, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(reversed, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(nested_disjoint, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(closed_reference, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(ordinary_lang_trait, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(recursive_disjoint, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(associated_equality_disjoint, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(const_if_const_recursive_disjoint,
+        &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(closed_trait_argument, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(matching_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && result.first_error.has_related_span
+        && result.first_error.related_span.source
+            == result.first_error.span.source
+        && result.first_error.related_span.start
+            < result.first_error.span.start
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(nested_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping ordered generic impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(fundamental_open, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(open_trait_argument, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(closed_trait_argument_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(provider_after_candidates, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(closed_reference_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(open_reference, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(recursive_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(associated_equality_provider, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* Equalities are intentionally ignored, so mismatch remains fail-open. */
+    result = lower_graph_source(associated_equality_mismatch, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(recursive_cycle, &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(const_if_const_recursive_provider,
+        &context);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+        && strstr(result.first_error.message,
+            "overlapping blanket impl candidates") != NULL);
+    cm_hir_context_destroy(&context);
 }
 
 static void test_reservation_impl_lowering_and_coherence(void)
@@ -1255,12 +1528,47 @@ static void test_try_from_conversion_coherence(void)
         "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
         "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
         "impl<V> const TryFrom<V> for i8 {}";
+    static const char generic_array[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "trait Copy {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl<T, const N: usize> const TryFrom<&[T]> for [T; N] "
+        "where T: Copy {}";
+    static const char generic_array_with_provider[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "trait Copy {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl<T, const N: usize> const From<&[T]> for [T; N] {}"
+        "impl<T, const N: usize> const TryFrom<&[T]> for [T; N] "
+        "where T: Copy {}";
+    static const char open_reference_parameter[] =
+        "#[rustc_diagnostic_item = \"Into\"]"
+        "#[const_trait] trait Into<T> {}"
+        "#[rustc_diagnostic_item = \"From\"]"
+        "#[const_trait] trait From<T> {}"
+        "#[rustc_diagnostic_item = \"TryFrom\"]"
+        "#[const_trait] trait TryFrom<T> {}"
+        "impl<T, U> const Into<U> for T where U: ~const From<T> {}"
+        "impl<T, U> const TryFrom<U> for T where U: ~const Into<T> {}"
+        "impl<V> const TryFrom<&V> for i8 {}";
     char source[2048];
     CmHirContext context;
     CmHirLowerResult result;
     const char *const rejected[] = {
-        with_from_provider, missing_into_blanket,
-        required_instead_of_const, open_source_parameter
+        with_from_provider, open_source_parameter,
+        generic_array_with_provider, open_reference_parameter
     };
     size_t index;
 
@@ -1288,7 +1596,24 @@ static void test_try_from_conversion_coherence(void)
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
+    result = lower_graph_source(generic_array, &context);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "generic array TryFrom disjointness: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
     result = lower_graph_source(reservation_is_not_provider, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(required_instead_of_const, &context);
+    assert(result.error_count == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_graph_source(missing_into_blanket, &context);
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
@@ -12563,6 +12888,7 @@ int main(void)
     test_function_pointer_lifetime_binders();
     test_function_pointer_binder_ast_mutations();
     test_function_pointer_impl_coherence();
+    test_local_predicate_closed_world_coherence();
     test_reservation_impl_lowering_and_coherence();
     test_try_from_conversion_coherence();
     test_union_declarations();

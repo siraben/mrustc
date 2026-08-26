@@ -1,60 +1,104 @@
-# cmrustc overnight goal
+# cmrustc overnight goal: build rustc end to end
 
-Advance cmrustc to bootstrap gate G3 in
-`cmrustc/docs/BOOTSTRAP_PARITY.md` without stopping until the complete G3
-acceptance test passes.
+Make the maximum safe, verified progress toward a fully functioning Rust
+compiler written in C by making **cmrustc compile the same Rust release that
+the retained upstream C++ mrustc demonstrably supports**. The current pinned
+target is Rust 1.90.0. Do not redirect the effort toward parsing a newer Rust
+release; after producing a working 1.90.0 `rustc`, use the normal Rust
+bootstrap/release ladder to reach newer releases.
 
-First preserve and validate the current working-tree changes, including the
-`TryFrom` coherence fix and bootstrap-parity documentation. Work toward a
-fresh-process executable cross-crate artifact containing one public generic
-function, one trait, and one trait implementation.
+The terminal objective is not a declaration census, metadata file, `core`
+artifact, or isolated code-generation demo. It is a cmrustc-produced Rust
+1.90.0 `rustc` executable that runs, reports the expected version, compiles a
+small Rust program, and produces a working executable. Continue working until
+that objective is genuinely met or no safe in-scope path remains.
 
-## Completion criteria
+## Evidence lock
 
-Completion requires all of the following:
+Before relying on a result, record and preserve:
 
-- An isolated producer emits deterministic, nonempty metadata plus required
-  object/archive members.
-- A fresh consumer process loads only that artifact, resolves and instantiates
-  the generic function and trait impl, links an executable, and produces the
-  expected runtime result.
-- Both strict GCC and TinyCC builds pass and produce the same observable
-  behavior.
-- Relevant Clang ASan/UBSan tests pass.
-- Twin isolated producers emit identical artifacts.
-- Corrupt, incomplete, stale, wrong-source, and wrong-target artifacts reject
-  atomically without publishing output.
-- No fixture-name special cases, unconditional coherence exemptions, fake
-  declarations, or hidden use of upstream C++ mrustc appear in the produced
-  artifact path.
+- the exact upstream mrustc revision used as the behavioral oracle;
+- the exact Rust source archive, SHA-256, patches, overrides, target triple,
+  compiler flags, and native dependencies;
+- the deepest reproducible cmrustc gate and its exact command;
+- whether a result came from cmrustc, upstream C++ mrustc, or an official Rust
+  compiler.
 
-## Required context and evidence
+Never silently use upstream C++ mrustc in the cmrustc-produced artifact path.
+It may be run only as an oracle for behavior, formats, diagnostics, and known
+bootstrap inputs.
 
-Read `cmrustc/docs/BOOTSTRAP_PARITY.md`, `cmrustc/docs/METADATA_V3.md`,
-`cmrustc/docs/ROADMAP_190.md`, `cmrustc/TASKS.md`, and the retained upstream
-mrustc implementation before choosing the implementation slice. Use upstream
-mrustc as a behavioral oracle for formats, flags, MIR, symbols, and runtime
-results, but not as an input to the cmrustc-produced artifact.
+## Work order
 
-Do not claim completion from an HIR census, metadata bytes alone, or a process
-that emits no usable artifact. The authority is the deepest nonempty artifact
-successfully consumed by a fresh process and exercised at runtime.
+Follow the dependency frontier rather than accumulating disconnected tests:
 
-## Working method
+1. Preserve and validate the current working tree. Run the deepest current
+   Rust 1.90.0 `core` probe and reduce its first real failure to a focused
+   fixture.
+2. Implement the smallest general compiler capability that removes that
+   failure. Do not add source-location, item-name, crate-name, or fixture-name
+   special cases. Add positive, negative, determinism, and atomic-failure
+   coverage for each capability.
+3. Re-run the full current-source `core` gate after every frontier fix. Repeat
+   until `core` becomes a fresh-process, consumable object-bearing rlib—not
+   merely a declaration-HIR census or nonempty metadata blob.
+4. Build and execute representative consumers of `core`, then advance through
+   `alloc`, compiler builtins, panic/unwind support, proc-macro support, `std`,
+   and the remaining bootstrap libraries. Each crate must produce a loadable
+   artifact and pass a runtime canary before moving on.
+5. Implement or extend the C-side rustc-compatible driver/orchestrator as the
+   real build graph demands: crate types, `--extern`, search paths, cfg and
+   features, target/host separation, build scripts, proc macros, native links,
+   deterministic caching, archive/object handling, C compilation, and final
+   linking.
+6. Build the pinned Rust 1.90.0 compiler and Cargo graph with cmrustc. Verify
+   `rustc --version`, compile and run a hello-world program, and compile a
+   small crate exercising generics, traits, and a proc macro.
+7. Only after the cmrustc-produced Rust 1.90.0 compiler works, hand off to the
+   official bootstrap machinery and advance release by release. This ladder is
+   subsequent work and must not weaken the 1.90.0 completion gate.
 
-Work in small verified checkpoints. Add focused positive and negative tests
-for every semantic change. Make coherent local Git commits after green
-checkpoints, but do not push, rewrite history, delete existing build
-directories, or modify unrelated user changes. Keep
-`cmrustc/docs/BOOTSTRAP_PARITY.md` and `cmrustc/TASKS.md` honest about the
-deepest passing artifact.
+When several independent tasks are available, fan out bounded audits, oracle
+comparisons, focused test construction, and safety reviews to subagents. Keep
+one owner per edited area, integrate only reviewed work, and always keep the
+main dependency frontier moving.
 
-Use subagents in parallel for bounded read-only investigation, oracle
-comparison, test review, and independent safety review. Keep implementation
-ownership coordinated to avoid conflicting edits.
+## Verification requirements
 
-If a G3 dependency is temporarily blocked, switch to another G3 dependency,
-capture the upstream compiler invocation contract from G2, or advance the
-current whole-core G1 frontier starting at `core/src/error.rs:937`. Only
-declare the goal blocked when no safe in-scope progress remains after
-exhausting those paths.
+For every coherent checkpoint:
+
+- pass focused strict C99 GCC tests with warnings as errors;
+- pass the corresponding TinyCC tests;
+- run relevant Clang ASan/UBSan/LSan coverage;
+- check deterministic twin outputs where artifacts are involved;
+- test fresh-process consumption, corruption/truncation, wrong identity,
+  wrong target/configuration, and atomic preservation of existing output;
+- run the deepest applicable `core`/library/bootstrap probe;
+- inspect `git diff`, run `git diff --check`, preserve unrelated user changes,
+  and make a coherent local commit when green.
+
+Do not delete existing build directories, rewrite Git history, push changes,
+or use destructive cleanup. Do not weaken tests or acceptance criteria merely
+to cross a gate.
+
+## Honest status rules
+
+The strongest completed evidence is always the deepest nonempty artifact
+produced by cmrustc, consumed in a fresh process, and exercised through its
+next dependent stage. Keep `cmrustc/docs/BOOTSTRAP_PARITY.md`,
+`cmrustc/docs/ROADMAP_190.md`, and `cmrustc/TASKS.md` synchronized with that
+evidence.
+
+Do not declare this goal complete until all of the following are true:
+
+- cmrustc builds a Rust 1.90.0 `rustc` without an upstream mrustc binary in
+  the producing dependency closure;
+- the produced `rustc --version` succeeds and identifies the expected build;
+- that produced `rustc` compiles a Rust source file into an executable; and
+- the resulting executable runs with the expected output.
+
+If the terminal objective cannot be reached in one unattended run, leave the
+repository at the deepest green, committed checkpoint; record the exact next
+failure, reproducer, diagnosis, and next implementation step; and keep the
+goal active. Mark it blocked only after the same external blocker has been
+confirmed repeatedly and all other safe, relevant work is exhausted.

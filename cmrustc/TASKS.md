@@ -1944,6 +1944,17 @@ focused executable metadata/capture/materialization/recipe tests.  M6-06 stays
 `ACTIVE` because no `core.rlib` exists and this exact profile rejects general
 library declarations, bodies, MIR, layout, and ABI.
 
+The review-hardened 2026-08-25 current tree revalidates M6-05 rather than
+relying on the historical census.  Two optimized runs load 363 sources and
+451 modules, lower 38,176 items and 22,524 body records with zero graph,
+import, or HIR errors, and capture 451 modules, 1,632 public type entries, and
+20,692 public value entries.  Complete strict GCC and TinyCC suites plus the
+focused Clang ASan/UBSan/LSan run pass.  Declaration v2.6 then rejects the
+known ITEM-family format boundary with zero output.  M6-06 therefore proceeds
+through real v3 trait declarations and namespace identity, followed by
+associated declarations, aliases, and impl headers; another opaque v2
+reference or skipped family would not be a consumable `core` artifact.
+
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
 coverage are necessary diagnostics but do not substitute for metadata,

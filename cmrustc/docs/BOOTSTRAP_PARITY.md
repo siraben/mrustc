@@ -42,17 +42,31 @@ The current tree has four important, but different, kinds of evidence:
    admitted provider, then a fresh process loads its trait, positive primitive
    impl, and generic `RETURN_ARGUMENT` body recipe and emits a linked consumer
    that executes under both GCC and TinyCC.
-4. A historical target-configured Rust 1.90 `core` run loaded 363 sources and
-   451 modules and counted 38,176 HIR items, 22,524 body records, and 159,528
-   types.  Body records are not equivalent to typed, executable bodies.
+4. The review-hardened current tree passes the target-configured Rust 1.90
+   `core` front end: 363 sources, 451 modules, 38,176 HIR items, 22,524 body
+   records, and 159,528 types, with zero graph, import, or HIR errors.  Its
+   value-aware library capture contains 451 modules, 1,632 public type
+   entries, and 20,692 public value entries.  Body records are not equivalent
+   to typed, executable bodies.
 
-The 2026-08-25 working-tree probe re-established the 363-source/451-module
-graph and import result and moved the active coherence frontier from
-`convert/mod.rs:833` to `error.rs:937`.  The latter is the overlap between the
-`T: Type<'a>` blanket `MaybeSizedType<'a> for T` and the nominal
-`MaybeSizedType<'a> for MaybeSizedValue<T>` impl.  This remains a red G1 result:
-it calls for a bounded, authenticated proof that the blanket predicate has no
-matching provider, not an unconditional overlap exemption.
+The 2026-08-25 current-source repair implements bounded implicit-negative
+coherence reasoning rather than source-specific exemptions.  After header
+unification it may prove a local trait predicate impossible only when the
+subject and every trait type input are orphan-closed, the complete local
+positive-provider set has no viable candidate, and recursive provider
+requirements are likewise impossible.  It fails open for foreign/open,
+fundamental-wrapper, compiler-only, cyclic, or exhausted cases.  This crossed
+the `error.rs`, array/`TryFrom`, iterator, and callable `MultiCharEq` frontiers;
+the full strict GCC and TinyCC suites, Clang ASan/UBSan/LSan, and two complete
+current-source core probes pass.
+
+The active G4 boundary is now declaration metadata, not G1.  Full library
+capture succeeds, but v2.6 rejects at its previously localized ITEM family and
+emits zero bytes because that format cannot represent complete traits,
+aliases, associated children, impl headers, or trait namespace entries.  The
+next dependency-ordered capability is a real v3 ordinary-trait declaration
+whose canonical and reexported names and predicate references share one
+fresh-context identity.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

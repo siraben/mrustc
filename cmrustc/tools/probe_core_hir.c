@@ -35,7 +35,9 @@ int main(int argc, char **argv)
     CmHirLowerOptions lower_options;
     CmHirLowerResult lower_result;
     const CmSourceFile *error_source;
+    const CmSourceFile *related_source;
     size_t line;
+    size_t related_line;
     int require_metadata;
     int status;
 
@@ -184,6 +186,17 @@ int main(int argc, char **argv)
         (unsigned long)lower_result.first_error.span.start,
         (unsigned long)lower_result.first_error.span.end,
         lower_result.first_error.message);
+    if (lower_result.first_error.has_related_span) {
+        related_source = cm_source_get(&sources,
+            lower_result.first_error.related_span.source);
+        related_line = source_line(related_source,
+            (size_t)lower_result.first_error.related_span.start);
+        printf("hir related_source=%s related_line=%lu related_span=%lu..%lu\n",
+            related_source == NULL ? "<none>" : related_source->path,
+            (unsigned long)related_line,
+            (unsigned long)lower_result.first_error.related_span.start,
+            (unsigned long)lower_result.first_error.related_span.end);
+    }
     status = 1;
 
 cleanup:
