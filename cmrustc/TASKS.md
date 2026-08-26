@@ -2047,13 +2047,18 @@ method-owned marker predicates, complete library child authority and associated
 lookup, reserve-before-bind materialization, fresh consumer lowering, and
 atomic rollback.  It intentionally rejects ordinary elided `-> &Self`, whose
 live HIR region remains `INFER` rather than the receiver's `ERASED` region.
-The post-foundation pinned-core probe remains at the same exact Allocator item
-and `item-source-invalid` reason.  The first residual signature mismatch is
-`allocate`'s outer generic `Result` ENUM application; after that, `[u8]` needs
-SLICE capture and `by_ref` needs a narrowly authenticated receiver-driven
-output-elision relation.  Those types already exist in the wire/materializer,
-so the active step is capture DAG/source support plus the bounded lowering
-normalization, not a new opaque nominal shortcut.
+Commits `310a7e1c` and `159686dd` add exact generic ENUM applications,
+SLICE/raw-pointer capture, and scoped receiver-driven recursive output elision.
+The clean pinned-core probe at `159686dd` remains at the same exact Allocator
+parent and `item-source-invalid`, but the first residual fact is no longer a
+signature type: source-ordinal-6 `by_ref` carries `#[inline(always)]`, which is
+not yet classified by the associated-function projection and therefore fails
+before its now-representable signature is emitted.  The active step is an
+exact, byte-neutral inline-hint projection with provenance and malformed/
+duplicate negatives.  Commit `e79c819e` also replaces the capture TYPE
+canonicalizer's repeated scans with a memoized, stable `O(E log E)` pipeline
+and an authenticated multi-crate trait DefId index; this resource hardening
+does not itself change the whole-core semantic frontier.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

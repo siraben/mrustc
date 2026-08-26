@@ -231,13 +231,20 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   child methods, shared erased receivers, method safety/default promises,
   `Self: Marker`, associated library reachability/lookup, fresh restoration,
   and rollback are all green while old empty-AITM/free-function bytes remain
-  exact.  The following pinned-core probe remains at Allocator with the same
-  `item-source-invalid` report, now localized inside member signature
-  authentication.  `allocate` first fails on its generic `Result` ENUM
-  application, followed by the `[u8]` SLICE; later `by_ref -> &Self` retains an
-  `INFER` output region distinct from the erased receiver.  The next bounded
-  work reuses existing wire forms for enum applications/slices/raw pointers
-  and adds only an authenticated receiver-driven output-elision rule.
+  exact.  Commits `310a7e1c` and `159686dd` close the authenticated generic
+  ENUM-application/slice/raw-pointer capture and receiver-driven recursive
+  output-elision gaps.  The clean pinned-core probe at `159686dd` still
+  measures the same Allocator parent and `item-source-invalid`, but the exact
+  remaining source fact is now source-ordinal-6 `by_ref`'s
+  `#[inline(always)]`: the earlier six method signatures pass, while the
+  associated-member attribute classifier rejects the inline hint before
+  `by_ref`'s otherwise representable signature is emitted.  The immediate
+  work is therefore a closed, byte-neutral associated-function inline
+  projection; aggregate/layout dependencies remain later.  Commit `e79c819e`
+  separately replaces repeated TYPE-arena rescans with memoized depth
+  traversal, exact-key stable sorting, adjacent deduplication, and a
+  multi-crate DefId index, satisfying the hostile resource bound without a
+  wire change.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

@@ -127,12 +127,19 @@ Commit `c74680bf` adds a real but bounded unsafe-trait METHOD declaration
 surface: exact trait-child identities, receivers, safety/default-body promises,
 `Self`, erased references, method predicates, associated library lookup, fresh
 materialization, and fail-closed unavailable bodies.  Legacy zero-AITM and
-free-function representations remain exact.  The next whole-core probe still
-measures Allocator at the same item/reason, now because its first method return
-contains a generic `Result` ENUM application outside capture's composite-type
-source/DAG support.  Slice/raw-pointer capture and the distinct elided
-`by_ref -> &Self` output-lifetime relation remain the immediate prerequisites;
-the full nominal/layout closure still follows.
+free-function representations remain exact.  Commits `310a7e1c` and
+`159686dd` then add authenticated generic ENUM applications, slices/raw
+pointers, and receiver-driven output-lifetime elision.  A clean pinned-core
+probe at `159686dd` again reports zero graph/import/HIR errors, 38,176 HIR
+items, and the exact 451-module/1,658-type/20,747-value library census before
+measuring Allocator at the same parent item/reason.  The residual source fact
+is now `Allocator::by_ref`'s `#[inline(always)]`: associated children are
+walked in source order, the prior six signatures pass, and the unclassified
+inline hint bubbles up as trait-level `item-source-invalid`.  This is a
+byte-neutral capture projection gate; the full nominal/layout closure still
+follows.  Commit `e79c819e` independently makes reachable declaration TYPE
+canonicalization bounded and deterministic in multi-crate hostile inputs; it
+does not broaden the semantic frontier.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
