@@ -264,6 +264,15 @@ typedef struct CmHirDeclarationCaptureResult {
  * bit are captured. The initializer, an evaluated value, and CTFE IR are not
  * transported by v3.0, whose BODIES_CONST_IR family remains absent.
  *
+ * The simple unit-function profile is public, top-level, safe Rust ABI,
+ * non-const/non-async/non-variadic, and has no generics, predicates,
+ * parameters, or body locals. Its source return is omitted and must lower to
+ * primitive UNIT. It requires exactly one direct stability attribute (stable
+ * XOR unstable) and one exact `inline`, `inline(always)`, or `inline(never)`
+ * hint; both are source-authenticated, projected, counted, and byte-neutral.
+ * The source-owned UNLOWERED body and declaration-library identity are
+ * authenticated, but executable body authority is not transported.
+ *
  * The attributed const-function profile is public, top-level, safe Rust ABI,
  * has one relaxed-Sized type generic and no predicates, and returns an exact
  * immutable `&'static str`. It admits either no parameters, or exactly one

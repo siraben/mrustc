@@ -324,6 +324,18 @@ static const unsigned char type_name_fixture_source[] =
         "issue = \"none\")]\n"
     "pub const fn type_name_like<T: ?Sized>() -> &'static str { \"\" }\n";
 
+static const unsigned char unit_function_fixture_source[] =
+    "pub trait Marker {}\n"
+    "#[unstable(feature = \"breakpoint_like\", issue = \"123\")]\n"
+    "#[inline(always)]\n"
+    "pub fn breakpoint_like() {}\n";
+
+static const unsigned char unit_function_stable_fixture_source[] =
+    "pub trait Marker {}\n"
+    "#[stable(feature = \"breakpoint_like\", since = \"1.0.0\")]\n"
+    "#[inline]\n"
+    "pub fn breakpoint_like() {}\n";
+
 static const unsigned char type_name_of_val_fixture_source[] =
     "pub trait Marker {}\n"
     "#[must_use]\n"
@@ -449,6 +461,13 @@ static void type_name_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "type-name-like.rs",
         type_name_fixture_source, sizeof(type_name_fixture_source) - 1u);
+}
+
+static void unit_function_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "unit-function-like.rs",
+        unit_function_fixture_source,
+        sizeof(unit_function_fixture_source) - 1u);
 }
 
 static void type_name_of_val_fixture_init(CaptureFixture *fixture,
@@ -6344,6 +6363,295 @@ static void test_many_self_traits_use_indexed_trait_locals(void)
     fixture_destroy(&dependency);
 }
 
+static void test_unit_function_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture stable;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata stable_metadata;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationValue *value;
+    const CmHirDeclarationType *return_type;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf stable_bytes;
+    CmByteBuf decoded_bytes;
+    unit_function_fixture_init(&first, 0);
+    unit_function_fixture_init(&noisy, 1);
+    fixture_init_source(&stable, 0, "unit-function-stable.rs",
+        unit_function_stable_fixture_source,
+        sizeof(unit_function_stable_fixture_source) - 1u);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&stable_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.value_count == 1u && result.trait_count == 1u
+        && result.projected_semantic_attribute_count == 2u
+        && first_metadata.generic_count == 0u
+        && first_metadata.predicate_count == 0u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    input = capture_input(&stable);
+    result = cm_hir_declaration_metadata_capture(&input, &stable_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    value = find_declaration_value(&first_metadata, "breakpoint_like", NULL);
+    assert(value != NULL && value->kind == CM_HIR_DECL_VALUE_FUNCTION
+        && value->generic_start == 0u && value->generic_count == 0u
+        && value->predicate_start == 0u && value->predicate_count == 0u
+        && value->parameter_count == 0u && value->parameter_types == NULL
+        && value->has_body == 1u && value->is_const == 0u);
+    return_type = &first_metadata.types[value->return_type - 1u];
+    assert(return_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && return_type->primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && cm_hir_declaration_metadata_validate(&first_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&stable_bytes);
+    cm_byte_buf_init(&decoded_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&stable_metadata, &stable_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && first_bytes.len == stable_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0
+        && memcmp(first_bytes.data, stable_bytes.data, first_bytes.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(first_bytes.data,
+                first_bytes.len, &decoded) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&decoded, &decoded_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == decoded_bytes.len
+        && memcmp(first_bytes.data, decoded_bytes.data,
+            first_bytes.len) == 0);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&decoded_bytes);
+    cm_byte_buf_destroy(&stable_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&stable_metadata);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&stable);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void assert_unit_function_source_fails(
+    const unsigned char *source, size_t source_length)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata sentinel;
+    CmHirDeclarationCaptureResult result;
+    fixture_init_source(&fixture, 0, "unit-function-negative.rs", source,
+        source_length);
+    memset(&sentinel, 0, sizeof(sentinel));
+    sentinel.root_module = UINT32_C(91);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &sentinel);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && sentinel.root_module == UINT32_C(91));
+    fixture_destroy(&fixture);
+}
+
+static void test_unit_function_unsupported_sources_fail_closed(void)
+{
+    static const unsigned char no_inline[] =
+        "pub trait Marker {}\n"
+        "#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "pub fn breakpoint_like() {}\n";
+    static const unsigned char extra_attribute[] =
+        "pub trait Marker {}\n"
+        "#[stable(feature=\"x\",since=\"1.0.0\")]\n"
+        "#[inline(always)]\n#[deprecated(since=\"1.0.0\")]\n"
+        "pub fn breakpoint_like() {}\n";
+    static const unsigned char parameter[] =
+        "pub trait Marker {}\n"
+        "#[stable(feature=\"x\",since=\"1.0.0\")]\n#[inline]\n"
+        "pub fn breakpoint_like(_value: u8) {}\n";
+    static const unsigned char explicit_unit[] =
+        "pub trait Marker {}\n"
+        "#[stable(feature=\"x\",since=\"1.0.0\")]\n#[inline]\n"
+        "pub fn breakpoint_like() -> () {}\n";
+    assert_unit_function_source_fails(no_inline, sizeof(no_inline) - 1u);
+    assert_unit_function_source_fails(extra_attribute,
+        sizeof(extra_attribute) - 1u);
+    assert_unit_function_source_fails(parameter, sizeof(parameter) - 1u);
+    assert_unit_function_source_fails(explicit_unit,
+        sizeof(explicit_unit) - 1u);
+}
+
+static void test_unit_function_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItem *item;
+    CmHirItemId item_id;
+    CmHirBody *body;
+    CmHirType *return_type;
+    CmInternId saved_metadata;
+    uint32_t saved_source_attribute;
+    CmSpan saved_span;
+    CmHirDefId saved_definition;
+    uint32_t saved_source_expression;
+    CmModuleId root_module;
+    const CmAst *borrowed_ast;
+    CmAstItem *ast_item = NULL;
+    CmResolveEffectiveItem effective;
+    uint32_t ordinal;
+    unit_function_fixture_init(&fixture, 1);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)(void *)find_item(&fixture, "breakpoint_like",
+        &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+        && item->attribute_count == 2u
+        && item->data.function_item.signature.parameter_count == 0u);
+    body = (CmHirBody *)(void *)cm_hir_get_body(&fixture.hir,
+        item->data.function_item.body);
+    return_type = (CmHirType *)(void *)cm_hir_get_type(&fixture.hir,
+        item->data.function_item.signature.return_type);
+    assert(body != NULL && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_UNIT_KIND);
+
+#define ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values && metadata.types == saved_types \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_metadata = item->attributes[1].metadata;
+    item->attributes[1].metadata = cm_hir_intern(&fixture.hir,
+        "inline(sometimes)");
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[1].metadata = saved_metadata;
+    saved_metadata = item->attributes[0].metadata;
+    item->attributes[0].metadata = item->attributes[1].metadata;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[0].metadata = saved_metadata;
+    item->attributes[1].metadata = cm_hir_intern(&fixture.hir,
+        "stable(feature = \"x\", since = \"1.0.0\")");
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[1].metadata = cm_hir_intern(&fixture.hir,
+        "inline(always)");
+    item->attribute_count = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attribute_count = 2u;
+    saved_source_attribute = item->attributes[0].source_attribute;
+    item->attributes[0].source_attribute += 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[0].source_attribute = saved_source_attribute;
+    saved_span = item->attributes[1].span;
+    item->attributes[1].span.start += 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[1].span = saved_span;
+    item->attributes[1].expansion_depth = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->attributes[1].expansion_depth = 0u;
+
+    item->data.function_item.signature.safety = CM_HIR_UNSAFE;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->data.function_item.signature.safety = CM_HIR_SAFE;
+    item->data.function_item.signature.is_const = 1;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->data.function_item.signature.is_const = 0;
+    saved_metadata = item->data.function_item.signature.abi;
+    item->data.function_item.signature.abi = cm_hir_intern(&fixture.hir,
+        "C");
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->data.function_item.signature.abi = saved_metadata;
+    item->data.function_item.signature.parameter_count = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->data.function_item.signature.parameter_count = 0u;
+    return_type->kind = CM_HIR_TYPE_BOOL_KIND;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    return_type->kind = CM_HIR_TYPE_UNIT_KIND;
+    item->generic_parameter_count = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->generic_parameter_count = 0u;
+
+    saved_source_expression = body->source_expression_id;
+    body->source_expression_id = UINT32_MAX;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    body->source_expression_id = saved_source_expression;
+    body->local_count = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    body->local_count = 0u;
+    body->state = CM_HIR_BODY_ERROR;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    body->state = CM_HIR_BODY_UNLOWERED;
+    body->root_expression = 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    body->root_expression = CM_HIR_EXPR_NONE;
+    saved_span = body->span;
+    body->span.start += 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    body->span = saved_span;
+
+    saved_definition = item->definition;
+    item->definition.index += 1u;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->definition = saved_definition;
+    item->visibility.kind = CM_HIR_VIS_PRIVATE;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    item->visibility.kind = CM_HIR_VIS_PUBLIC;
+
+    assert(cm_module_graph_get_root(&fixture.graph, &root_module)
+        && cm_module_graph_borrow_ast(&fixture.graph, root_module,
+            &borrowed_ast));
+    for (ordinal = 0u; ordinal < 2u; ++ordinal) {
+        const CmAstItem *candidate;
+        const CmInternedString *name;
+        assert(cm_module_graph_get_effective_item(&fixture.graph,
+            fixture.graph_result.revision, root_module, ordinal,
+            &effective) == CM_RESOLVE_VIEW_OK);
+        candidate = cm_ast_get_item(borrowed_ast, effective.declaration.item);
+        name = candidate == NULL ? NULL
+            : cm_ast_get_string(borrowed_ast, candidate->name);
+        if (name != NULL && name->len == strlen("breakpoint_like")
+            && memcmp(name->bytes, "breakpoint_like", name->len) == 0) {
+            ast_item = (CmAstItem *)(void *)candidate;
+            break;
+        }
+    }
+    assert(ast_item != NULL && ast_item->kind == CM_AST_ITEM_FUNCTION);
+    ast_item->data.function_item.is_unsafe = 1;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+    ast_item->data.function_item.is_unsafe = 0;
+    ast_item->data.function_item.body = CM_AST_EXPR_NONE;
+    ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE();
+
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+#undef ASSERT_UNIT_FUNCTION_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static void test_type_name_const_functions_and_determinism(void)
 {
     CaptureFixture first;
@@ -6909,6 +7217,9 @@ static void test_type_name_of_val_hostile_mutations_are_atomic(void)
 
 int main(void)
 {
+    test_unit_function_capture_and_determinism();
+    test_unit_function_unsupported_sources_fail_closed();
+    test_unit_function_hostile_mutations_are_atomic();
     test_type_name_const_functions_and_determinism();
     test_type_name_const_function_hostiles_are_atomic();
     test_type_name_of_val_const_function_and_determinism();

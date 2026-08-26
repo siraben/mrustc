@@ -3280,6 +3280,167 @@ static int cm_decl_const_function_attributes(
     return 1;
 }
 
+static int cm_decl_simple_unit_function_attributes(
+    const CmDeclCaptureState *state, const CmHirItem *item,
+    size_t *out_projected_count)
+{
+    const unsigned int allowed = CM_DECL_ATTR_STABLE
+        | CM_DECL_ATTR_UNSTABLE | CM_DECL_ATTR_INLINE_HINT;
+    int non_exhaustive = 0;
+    if (item->attribute_count != 2u || item->attributes == NULL
+        || !cm_decl_project_item_attributes(state, item, allowed,
+            out_projected_count, &non_exhaustive)
+        || non_exhaustive || *out_projected_count != 2u
+        || !cm_decl_item_attribute_provenance(state, item,
+            CM_AST_ITEM_FUNCTION,
+            CM_HIR_LIBRARY_BINDING_VALUE)) return 0;
+    return 1;
+}
+
+static int cm_decl_simple_unit_function_shape(CmDeclCaptureState *state,
+    const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal,
+    size_t *out_projected_count)
+{
+    const CmHirFunctionSignature *signature =
+        &item->data.function_item.signature;
+    const CmHirLibraryOwnedValue *owned;
+    const CmHirType *return_type;
+    const CmHirBody *body;
+    const CmAst *ast = NULL;
+    const CmAstItem *ast_item = NULL;
+    const CmAstExpr *ast_body;
+    CmDeclCaptureModule *module = NULL;
+    CmResolveEffectiveItem effective;
+    uint32_t namespace_module = 0u;
+    uint32_t namespace_ordinal = 0u;
+    *out_projected_count = 0u;
+    if (!cm_decl_plain_visibility(item)
+        || !cm_hir_def_id_is_none(item->parent_definition)
+        || item->is_specializable
+        || item->generic_parameter_start != CM_HIR_GENERIC_PARAM_NONE
+        || item->generic_parameter_count != 0u
+        || item->predicate_scopes != NULL || item->predicate_scope_count != 0u
+        || item->predicates != NULL || item->predicate_count != 0u
+        || item->outlives_predicates != NULL
+        || item->outlives_predicate_count != 0u
+        || item->data.function_item.has_default_body
+        || item->data.function_item.body == CM_HIR_BODY_NONE
+        || !cm_hir_def_id_is_none(
+            item->data.function_item.trait_item_definition)
+        || !cm_decl_free_value_source(state, item, CM_AST_ITEM_FUNCTION,
+            CM_HIR_LIBRARY_VALUE_FUNCTION, &namespace_module,
+            &namespace_ordinal)
+        || !cm_decl_item_source_view(state, item, CM_AST_ITEM_FUNCTION,
+            &module, out_ordinal, &effective, &ast, &ast_item)
+        || module == NULL || namespace_module != module->local
+        || namespace_ordinal != *out_ordinal
+        || !cm_decl_simple_unit_function_attributes(state, item,
+            out_projected_count)) return 0;
+    *out_module = module->local;
+    return_type = cm_hir_get_type(state->hir, signature->return_type);
+    if (signature->receiver != CM_HIR_RECEIVER_NONE
+        || signature->parameters != NULL || signature->parameter_count != 0u
+        || signature->safety != CM_HIR_SAFE || signature->is_const
+        || signature->is_async || signature->is_variadic
+        || !cm_decl_string_is(state->hir, signature->abi, "Rust")
+        || return_type == NULL
+        || cm_decl_primitive(return_type) != CM_HIR_DECL_PRIMITIVE_UNIT
+        || return_type->span.source != item->span.source
+        || return_type->span.start > return_type->span.end
+        || return_type->span.start < item->span.start
+        || return_type->span.end > item->span.end
+        || ast_item->is_default
+        || ast_item->visibility.kind != CM_AST_VIS_PUBLIC
+        || ast_item->visibility.restriction != CM_AST_PATH_NONE
+        || ast_item->generic_parameters != NULL
+        || ast_item->generic_parameter_count != 0u
+        || ast_item->where_clause != CM_INTERN_ID_NONE
+        || ast_item->where_predicates != NULL
+        || ast_item->where_predicate_count != 0u
+        || ast_item->data.function_item.parameters != NULL
+        || ast_item->data.function_item.parameter_count != 0u
+        || ast_item->data.function_item.return_type != CM_AST_TYPE_NONE
+        || ast_item->data.function_item.abi != CM_INTERN_ID_NONE
+        || ast_item->data.function_item.body == CM_AST_EXPR_NONE
+        || ast_item->data.function_item.is_const
+        || ast_item->data.function_item.is_async
+        || ast_item->data.function_item.is_safe
+        || ast_item->data.function_item.is_unsafe) return 0;
+    owned = cm_decl_owned_value(state->owned, item->definition);
+    if (owned == NULL
+        || owned->storage_kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || owned->declaration.kind != CM_HIR_LIBRARY_VALUE_FUNCTION
+        || !cm_hir_def_id_equal(owned->declaration.definition,
+            item->definition)
+        || !cm_hir_def_id_is_none(
+            owned->declaration.data.function.parent_trait)
+        || owned->declaration.data.function.receiver != CM_HIR_RECEIVER_NONE
+        || owned->declaration.data.function.has_default_body
+        || owned->declaration.data.function.parameter_types != NULL
+        || owned->declaration.data.function.parameter_count != 0u
+        || owned->parameter_types != NULL || owned->parameter_count != 0u
+        || owned->declaration.data.function.return_type
+            != signature->return_type
+        || owned->declaration.data.function.generic_parameter_start
+            != CM_HIR_GENERIC_PARAM_NONE
+        || owned->declaration.data.function.generic_parameter_count != 0u
+        || owned->declaration.data.function.predicate_scopes != NULL
+        || owned->declaration.data.function.predicate_scope_count != 0u
+        || owned->predicate_scopes != NULL
+        || owned->predicate_scope_lifetimes != NULL
+        || owned->predicate_scope_count != 0u
+        || owned->declaration.data.function.predicates != NULL
+        || owned->declaration.data.function.predicate_count != 0u
+        || owned->predicates != NULL || owned->predicate_arguments != NULL
+        || owned->predicate_equalities != NULL
+        || owned->predicate_lifetimes != NULL || owned->predicate_count != 0u
+        || owned->declaration.data.function.outlives_predicates != NULL
+        || owned->declaration.data.function.outlives_predicate_count != 0u
+        || owned->outlives_predicates != NULL
+        || owned->outlives_predicate_count != 0u
+        || owned->nominal_references != NULL
+        || owned->nominal_reference_names != NULL
+        || owned->nominal_reference_generic_kinds != NULL
+        || owned->nominal_reference_count != 0u
+        || owned->associated_availability != NULL
+        || owned->associated_availability_count != 0u
+        || owned->declaration.data.function.abi != signature->abi
+        || owned->declaration.data.function.safety != signature->safety
+        || owned->declaration.data.function.is_const != signature->is_const
+        || owned->declaration.data.function.is_async != signature->is_async
+        || owned->declaration.data.function.is_variadic
+            != signature->is_variadic) return 0;
+    body = cm_hir_get_body(state->hir, item->data.function_item.body);
+    ast_body = cm_ast_get_expr(ast, ast_item->data.function_item.body);
+    if (body == NULL || ast_body == NULL
+        || ((ast_body->attribute_count == 0u)
+            != (ast_body->attributes == NULL))
+        || ast_body->attribute_count != 0u
+        || ast_body->span.start > ast_body->span.end
+        || ast_body->span.start < ast_item->span.start
+        || ast_body->span.end > ast_item->span.end
+        || !cm_hir_def_id_equal(body->owner, item->definition)
+        || body->origin.kind != CM_HIR_BODY_ORIGIN_ITEM_SOURCE
+        || !cm_hir_def_id_equal(body->origin.definition, item->definition)
+        || !cm_hir_def_id_equal(body->origin.enclosing_definition,
+            item->definition)
+        || !cm_hir_def_id_equal(
+            body->origin.data.item_source.item_definition, item->definition)
+        || body->state != CM_HIR_BODY_UNLOWERED
+        || body->expected_type != signature->return_type
+        || body->parameter_count != 0u
+        || body->locals != NULL || body->local_count != 0u
+        || body->source != effective.declaration.source
+        || body->source != item->span.source
+        || body->source_expression_id != ast_item->data.function_item.body
+        || body->root_expression != CM_HIR_EXPR_NONE
+        || body->error_reason != CM_INTERN_ID_NONE
+        || body->span.source != item->span.source
+        || body->span.start != item->span.start
+        || body->span.end != item->span.end) return 0;
+    return 1;
+}
+
 static int cm_decl_legacy_function_shape(CmDeclCaptureState *state,
     const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal,
     size_t *out_projected_count)
@@ -3352,6 +3513,10 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
     uint32_t namespace_ordinal = 0u;
     if (item->kind != CM_HIR_ITEM_FUNCTION) return 0;
     signature = &item->data.function_item.signature;
+    if (!signature->is_const && item->generic_parameter_count == 0u
+        && item->predicate_count == 0u)
+        return cm_decl_simple_unit_function_shape(state, item, out_module,
+            out_ordinal, out_projected_count);
     if (!signature->is_const)
         return cm_decl_legacy_function_shape(state, item, out_module,
             out_ordinal, out_projected_count);
