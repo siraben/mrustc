@@ -13468,7 +13468,20 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
         "pub const fn paired_named<'a, T>(s: &'a mut T) "
             "-> &'a mut [T; 1] { s }\n"
         "pub const fn paired_static<T>(s: &'static mut T) "
-            "-> &'static mut [T; 1] { s }\n";
+            "-> &'static mut [T; 1] { s }\n"
+        "pub const fn paired_shared<T>(s: &T) -> &[T; 1] { s }\n"
+        "pub const fn paired_shared_input_placeholder<T>(s: &'_ T) "
+            "-> &[T; 1] { s }\n"
+        "pub const fn paired_shared_output_placeholder<T>(s: &T) "
+            "-> &'_ [T; 1] { s }\n"
+        "pub const fn paired_shared_two<T>(s: &T, _other: &T) "
+            "-> &[T; 1] { s }\n"
+        "pub const fn paired_shared_two_length<T>(s: &T) "
+            "-> &[T; 2] { s }\n"
+        "pub const fn paired_mixed_input_mut<T>(s: &mut T) "
+            "-> &[T; 1] { s }\n"
+        "pub const fn paired_mixed_output_mut<T>(s: &T) "
+            "-> &mut [T; 1] { s }\n";
     static const char *const names[] = {
         "admitted", "placeholder", "named", "static_input", "mutable",
         "sized", "nonconst", "constrained"
@@ -13524,7 +13537,7 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
             result.first_error.message);
     }
     check(graph_result.error_count == 0u && result.error_count == 0u
-        && result.lowered_item_count == 18u,
+        && result.lowered_item_count == 25u,
         "bounded free input lifetime fixture did not lower exactly");
     for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
         const CmHirItem *item = find_hir_item_anywhere(&hir, names[index]);
@@ -13666,6 +13679,47 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
                     == expected_regions[explicit_index],
                 "bounded paired free elision rewrote an explicit named or "
                 "static lifetime");
+        }
+    }
+    {
+        static const char *const shared_names[] = {
+            "paired_shared", "paired_shared_input_placeholder",
+            "paired_shared_output_placeholder", "paired_shared_two",
+            "paired_shared_two_length", "paired_mixed_input_mut",
+            "paired_mixed_output_mut"
+        };
+        size_t shared_index;
+
+        for (shared_index = 0u;
+             shared_index < sizeof(shared_names) / sizeof(shared_names[0]);
+             ++shared_index) {
+            const CmHirItem *item = find_hir_item_anywhere(&hir,
+                shared_names[shared_index]);
+            const CmHirType *input = item == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.parameters[0].type);
+            const CmHirType *output = item == NULL ? NULL
+                : cm_hir_get_type(&hir,
+                    item->data.function_item.signature.return_type);
+
+            check(input != NULL && output != NULL
+                && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && input->data.reference_type.region.kind
+                    == (shared_index == 0u
+                        ? CM_HIR_REGION_ERASED : CM_HIR_REGION_INFER)
+                && output->data.reference_type.region.kind
+                    == (shared_index == 0u
+                        ? CM_HIR_REGION_ERASED : CM_HIR_REGION_INFER),
+                "bounded shared free elision admitted a mutated source "
+                "shape or lost the unary input/output relation");
+            if (shared_index == 0u) {
+                check(input->data.reference_type.mutability
+                        == CM_HIR_IMMUTABLE
+                    && output->data.reference_type.mutability
+                        == CM_HIR_IMMUTABLE,
+                    "bounded shared free elision changed mutability");
+            }
         }
     }
     cm_hir_module_map_destroy(&map);

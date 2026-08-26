@@ -10455,7 +10455,7 @@ static int cm_lower_bounded_free_input_erasure(
  * additional input, nested reference, or different result shape enters this
  * normalization.
  */
-static int cm_lower_bounded_free_mut_elision(
+static int cm_lower_bounded_free_array_ref_elision(
     const CmLowerState *state, const CmAstItem *ast_item,
     const CmLowerItemRecord *record)
 {
@@ -10513,12 +10513,12 @@ static int cm_lower_bounded_free_mut_elision(
         && !pattern->data.binding.is_ref
         && !pattern->data.binding.is_mutable
         && parameter != NULL && parameter->kind == CM_AST_TYPE_REFERENCE
-        && parameter->is_mutable
         && parameter->lifetime == CM_INTERN_ID_NONE
         && cm_lower_plain_path_type_named(state, parameter->child,
             ast_generic->name)
         && result != NULL && result->kind == CM_AST_TYPE_REFERENCE
-        && result->is_mutable && result->lifetime == CM_INTERN_ID_NONE
+        && result->is_mutable == parameter->is_mutable
+        && result->lifetime == CM_INTERN_ID_NONE
         && array != NULL && array->kind == CM_AST_TYPE_ARRAY
         && cm_lower_plain_path_type_named(state, array->child,
             ast_generic->name)
@@ -10586,7 +10586,7 @@ static int cm_lower_function_item(CmLowerState *state,
             (size_t)function->parameter_count * 2u, sizeof(CmHirLocal));
     }
     erase_bounded_free_output_lifetime =
-        cm_lower_bounded_free_mut_elision(state, ast_item, record);
+        cm_lower_bounded_free_array_ref_elision(state, ast_item, record);
     erase_bounded_free_input_lifetime =
         erase_bounded_free_output_lifetime
         || cm_lower_bounded_free_input_erasure(state, ast_item, record);

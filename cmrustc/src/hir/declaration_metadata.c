@@ -2996,7 +2996,7 @@ static int cm_decl_bounded_type_name_of_val_erased_input(
  * single, bounded relation here; it is not admitted as a general free-
  * function lifetime.
  */
-static int cm_decl_bounded_from_mut_erased_pair(
+static int cm_decl_bounded_array_from_ref_erased_pair(
     const CmHirDeclarationMetadata *metadata,
     const CmHirDeclarationValue *value, uint32_t value_local)
 {
@@ -3024,10 +3024,11 @@ static int cm_decl_bounded_from_mut_erased_pair(
         || generic->is_relaxed_sized != 0u
         || generic->has_default != 0u || generic->declared_type != 0u
         || parameter->kind != CM_HIR_DECL_TYPE_REFERENCE
-        || parameter->mutability != CM_HIR_DECL_MUTABLE
+        || (parameter->mutability != CM_HIR_DECL_IMMUTABLE
+            && parameter->mutability != CM_HIR_DECL_MUTABLE)
         || parameter->region.kind != CM_HIR_DECL_REGION_ERASED
         || result->kind != CM_HIR_DECL_TYPE_REFERENCE
-        || result->mutability != CM_HIR_DECL_MUTABLE
+        || result->mutability != parameter->mutability
         || result->region.kind != CM_HIR_DECL_REGION_ERASED) return 0;
     parameter_child = &metadata->types[parameter->child_type - 1u];
     array = &metadata->types[result->child_type - 1u];
@@ -3051,7 +3052,7 @@ static int cm_decl_bounded_free_erased_value(
 {
     return cm_decl_bounded_type_name_of_val_erased_input(metadata, value,
             value_local)
-        || cm_decl_bounded_from_mut_erased_pair(metadata, value,
+        || cm_decl_bounded_array_from_ref_erased_pair(metadata, value,
             value_local);
 }
 

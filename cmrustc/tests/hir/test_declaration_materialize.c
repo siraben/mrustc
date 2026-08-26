@@ -1082,6 +1082,22 @@ static void from_mut_fixture_init(FromMutFixture *fixture)
     metadata->namespace_count = 2u;
 }
 
+static void from_ref_fixture_init(FromMutFixture *fixture)
+{
+    from_mut_fixture_init(fixture);
+    fixture->metadata.crate_name =
+        (CmHirDeclarationString)S("from_ref_like");
+    fixture->metadata.crate_disambiguator =
+        (CmHirDeclarationString)S("decl-from-ref-v1");
+    fixture->modules[0].name = fixture->metadata.crate_name;
+    fixture->types[2].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[4].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->values[0].name = (CmHirDeclarationString)S("from_ref");
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("from_ref_alias");
+}
+
 typedef struct ContextLengths {
     size_t crates;
     size_t modules;
@@ -3664,6 +3680,113 @@ static void test_from_mut_fresh_consumer(CmHirContext *context,
     assert(cm_hir_lower_body(context, CM_HIR_BODY_NONE, &graph,
         graph_result.revision, &imports, &map).status
         == CM_HIR_BODY_LOWER_INVALID_ARGUMENT);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_from_ref_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId imported_definition)
+{
+    static const unsigned char source_text[] =
+        "use dep::from_ref as direct_from_ref;\n"
+        "use dep::from_ref_alias as alias_from_ref;\n"
+        "pub const fn direct<T>(s: &T) -> &[T; 1] "
+            "{ direct_from_ref(s) }\n"
+        "pub const fn via_alias<T>(s: &T) -> &[T; 1] "
+            "{ alias_from_ref(s) }\n";
+    static const char *const names[] = { "direct", "via_alias" };
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "from-ref-consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "from_ref_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    if (lower_result.error_count != 0u) {
+        fprintf(stderr, "from-ref consumer: %s: %s\n",
+            cm_hir_lower_error_kind_name(lower_result.first_error.kind),
+            lower_result.first_error.message);
+    }
+    assert(lower_result.error_count == 0u);
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        const CmHirItem *function = find_item(context,
+            CM_HIR_ITEM_FUNCTION, names[index]);
+        const CmHirType *input = function == NULL
+            ? NULL : cm_hir_get_type(context,
+                function->data.function_item.signature.parameters[0].type);
+        const CmHirType *output = function == NULL
+            ? NULL : cm_hir_get_type(context,
+                function->data.function_item.signature.return_type);
+        const CmHirType *array = output == NULL
+                || output->kind != CM_HIR_TYPE_REFERENCE_KIND
+            ? NULL : cm_hir_get_type(context,
+                output->data.reference_type.pointee);
+        CmHirBodyLowerResult body_result;
+        size_t expression_count = context->expressions.len;
+
+        assert(function != NULL && function->generic_parameter_count == 1u
+            && function->predicate_count == 0u
+            && function->data.function_item.signature.is_const == 1
+            && function->data.function_item.signature.parameter_count == 1u
+            && function->data.function_item.body != CM_HIR_BODY_NONE
+            && input != NULL && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && input->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && input->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+            && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+            && output->data.reference_type.mutability == CM_HIR_IMMUTABLE
+            && output->data.reference_type.region.kind
+                == CM_HIR_REGION_ERASED
+            && array != NULL && array->kind == CM_HIR_TYPE_ARRAY_KIND
+            && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && array->data.array_type.length.data.value.low_bits
+                == UINT64_C(1));
+        body_result = cm_hir_lower_body(context,
+            function->data.function_item.body, &graph,
+            graph_result.revision, &imports, &map);
+        assert(body_result.status == CM_HIR_BODY_LOWER_UNSUPPORTED_BODY
+            && context->expressions.len == expression_count);
+    }
+    {
+        const CmHirItem *imported = find_item(context,
+            CM_HIR_ITEM_FUNCTION, "from_ref");
+        assert(imported != NULL && cm_hir_def_id_equal(imported->definition,
+            imported_definition)
+            && imported->data.function_item.body == CM_HIR_BODY_NONE
+            && cm_hir_get_body(context,
+                imported->data.function_item.body) == NULL);
+    }
     cm_hir_module_map_destroy(&map);
     cm_import_resolver_destroy(&imports);
     cm_module_graph_destroy(&graph);
@@ -7711,6 +7834,147 @@ static void test_from_mut_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_from_ref_materialize_and_consume(void)
+{
+    FromMutFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    const CmHirItem *item;
+    const CmHirType *input;
+    const CmHirType *output;
+    const CmHirType *array;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding alias;
+    CmHirLibraryPathSegment direct_path[2];
+    CmHirLibraryPathSegment alias_path[2];
+    CmHirLibraryValue direct_value;
+    CmHirLibraryValue alias_value;
+    ContextLengths lengths;
+    uint8_t saved_byte;
+
+    from_ref_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 267u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 0u
+        && result.public_type_entry_count == 0u
+        && result.public_value_entry_count == 2u);
+    item = find_item(&context, CM_HIR_ITEM_FUNCTION, "from_ref");
+    input = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.function_item.signature.parameters[0].type);
+    output = item == NULL ? NULL : cm_hir_get_type(&context,
+        item->data.function_item.signature.return_type);
+    array = output == NULL || output->kind != CM_HIR_TYPE_REFERENCE_KIND
+        ? NULL : cm_hir_get_type(&context,
+            output->data.reference_type.pointee);
+    assert(item != NULL && item->visibility.kind == CM_HIR_VIS_PUBLIC
+        && item->generic_parameter_count == 1u
+        && item->predicate_count == 0u
+        && item->data.function_item.signature.is_const == 1
+        && item->data.function_item.signature.parameter_count == 1u
+        && item->data.function_item.body == CM_HIR_BODY_NONE
+        && input != NULL && input->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && input->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && input->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && output != NULL && output->kind == CM_HIR_TYPE_REFERENCE_KIND
+        && output->data.reference_type.mutability == CM_HIR_IMMUTABLE
+        && output->data.reference_type.region.kind == CM_HIR_REGION_ERASED
+        && array != NULL && array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && array->data.array_type.length.data.value.low_bits == UINT64_C(1)
+        && array->data.array_type.length.data.value.high_bits == UINT64_C(0)
+        && cm_hir_get_body(&context,
+            item->data.function_item.body) == NULL);
+
+    direct = lookup_value_binding(&artifact, "from_ref");
+    alias = lookup_value_binding(&artifact, "from_ref_alias");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && alias.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && cm_hir_def_id_equal(direct.definition, item->definition)
+        && cm_hir_def_id_equal(alias.definition, item->definition));
+    direct_path[0].bytes = (const unsigned char *)"dep";
+    direct_path[0].length = sizeof("dep") - 1u;
+    direct_path[1].bytes = (const unsigned char *)"from_ref";
+    direct_path[1].length = sizeof("from_ref") - 1u;
+    alias_path[0] = direct_path[0];
+    alias_path[1].bytes = (const unsigned char *)"from_ref_alias";
+    alias_path[1].length = sizeof("from_ref_alias") - 1u;
+    memset(&direct_value, 0, sizeof(direct_value));
+    memset(&alias_value, 0, sizeof(alias_value));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, direct_path, 2u,
+            &direct_value) == CM_HIR_LIBRARY_OK
+        && cm_hir_library_artifact_lookup_value(&artifact, alias_path, 2u,
+            &alias_value) == CM_HIR_LIBRARY_OK
+        && direct_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && alias_value.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && direct_value.data.function.is_const == 1
+        && alias_value.data.function.is_const == 1
+        && direct_value.data.function.parameter_count == 1u
+        && alias_value.data.function.parameter_count == 1u
+        && direct_value.data.function.parameter_types[0]
+            == item->data.function_item.signature.parameters[0].type
+        && alias_value.data.function.parameter_types[0]
+            == item->data.function_item.signature.parameters[0].type
+        && direct_value.data.function.return_type
+            == item->data.function_item.signature.return_type
+        && alias_value.data.function.return_type
+            == item->data.function_item.signature.return_type);
+    test_from_ref_fresh_consumer(&context, &artifact, item->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+    saved_byte = decoded.types[2].mutability;
+    decoded.types[2].mutability = CM_HIR_DECL_MUTABLE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 268u);
+    decoded.types[2].mutability = saved_byte;
+    saved_byte = decoded.types[4].mutability;
+    decoded.types[4].mutability = CM_HIR_DECL_MUTABLE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 269u);
+    decoded.types[4].mutability = saved_byte;
+    saved_byte = decoded.types[2].region.kind;
+    decoded.types[2].region.kind = CM_HIR_DECL_REGION_STATIC;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 270u);
+    decoded.types[2].region.kind = saved_byte;
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 271u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_unit_function_materialize_and_consume(void)
 {
     UnitFunctionFixture fixture;
@@ -7918,6 +8182,7 @@ int main(void)
     test_into_iter_materialize_and_consume();
     test_from_fn_materialize_and_consume();
     test_from_mut_materialize_and_consume();
+    test_from_ref_materialize_and_consume();
     test_any_method_materialize_and_restore();
     test_associated_method_materialize_and_restore();
     return 0;

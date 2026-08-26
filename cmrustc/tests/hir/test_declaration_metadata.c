@@ -1654,6 +1654,22 @@ static void from_mut_fixture_init(FromMutFixture *fixture)
     metadata->namespace_count = 2u;
 }
 
+static void from_ref_fixture_init(FromMutFixture *fixture)
+{
+    from_mut_fixture_init(fixture);
+    fixture->metadata.crate_name =
+        (CmHirDeclarationString)S("from_ref_like");
+    fixture->metadata.crate_disambiguator =
+        (CmHirDeclarationString)S("decl-from-ref-v1");
+    fixture->modules[0].name = fixture->metadata.crate_name;
+    fixture->types[2].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->types[4].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture->values[0].name = (CmHirDeclarationString)S("from_ref");
+    fixture->namespace_entries[0].name = fixture->values[0].name;
+    fixture->namespace_entries[1].name =
+        (CmHirDeclarationString)S("from_ref_alias");
+}
+
 static void unit_function_fixture_init(UnitFunctionFixture *fixture)
 {
     CmHirDeclarationMetadata *metadata;
@@ -4934,6 +4950,113 @@ static void test_from_mut_erased_pair(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_from_ref_erased_pair(void)
+{
+    FromMutFixture fixture;
+    FromMutFixture repeated;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated_bytes;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+
+    from_ref_fixture_init(&fixture);
+    from_ref_fixture_init(&repeated);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated_bytes);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated.metadata,
+            &repeated_bytes) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated_bytes.len
+        && memcmp(encoded.data, repeated_bytes.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.generic_count == 1u && decoded.type_count == 5u
+        && decoded.value_count == 1u && decoded.namespace_count == 2u
+        && decoded.values[0].is_const == 1u
+        && decoded.values[0].has_body == 1u
+        && decoded.values[0].parameter_count == 1u
+        && decoded.values[0].parameter_types[0] == 3u
+        && decoded.values[0].return_type == 5u
+        && decoded.types[2].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[2].mutability == CM_HIR_DECL_IMMUTABLE
+        && decoded.types[2].region.kind == CM_HIR_DECL_REGION_ERASED
+        && decoded.types[4].kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decoded.types[4].mutability == CM_HIR_DECL_IMMUTABLE
+        && decoded.types[4].region.kind == CM_HIR_DECL_REGION_ERASED
+        && cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+#define ASSERT_INVALID_FROM_REF(change_) do { \
+        from_ref_fixture_init(&fixture); \
+        change_; \
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+    } while (0)
+    ASSERT_INVALID_FROM_REF(
+        fixture.types[2].mutability = CM_HIR_DECL_MUTABLE);
+    ASSERT_INVALID_FROM_REF(
+        fixture.types[4].mutability = CM_HIR_DECL_MUTABLE);
+    ASSERT_INVALID_FROM_REF(
+        fixture.types[2].region.kind = CM_HIR_DECL_REGION_STATIC);
+    ASSERT_INVALID_FROM_REF(
+        fixture.types[4].region.kind = CM_HIR_DECL_REGION_STATIC);
+    ASSERT_INVALID_FROM_REF(fixture.values[0].is_const = 0u);
+    ASSERT_INVALID_FROM_REF(fixture.values[0].has_body = 0u);
+    ASSERT_INVALID_FROM_REF(
+        fixture.parameters[1] = 3u;
+        fixture.values[0].parameter_count = 2u);
+    ASSERT_INVALID_FROM_REF(
+        fixture.types[3].array_length_low_bits = UINT64_C(2));
+    ASSERT_INVALID_FROM_REF(fixture.values[0].return_type = 4u);
+#undef ASSERT_INVALID_FROM_REF
+
+    /* The shared relation cannot be repurposed as another declaration root. */
+    from_ref_fixture_init(&fixture);
+    fixture.values[1].kind = CM_HIR_DECL_VALUE_CONST;
+    fixture.values[1].owner_module = 1u;
+    fixture.values[1].name = (CmHirDeclarationString)S("z_value");
+    fixture.values[1].source_ordinal = 2u;
+    fixture.values[1].declared_type = 1u;
+    fixture.values[1].mutability = CM_HIR_DECL_IMMUTABLE;
+    fixture.values[1].has_body = 1u;
+    fixture.metadata.value_count = 2u;
+    fixture.namespace_entries[1].name = fixture.values[1].name;
+    fixture.namespace_entries[1].target_local = 2u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.values[1].declared_type = 3u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+
+    /* A CRC-correct mixed-mutability output is rejected transactionally. */
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(4));
+    bad.data[record + 16u] = CM_HIR_DECL_MUTABLE;
+    recompute_family_crc(&bad, UINT8_C(2), "TYPE");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    bad = copy_bytes(&encoded);
+    assert(bad.len != 0u);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated_bytes);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_static_tuple_array_family(void)
 {
     StaticFixture fixture;
@@ -6448,6 +6571,7 @@ int main(void)
     test_zero_generic_unit_function_family();
     test_contextual_erased_reference_roots();
     test_from_mut_erased_pair();
+    test_from_ref_erased_pair();
     test_static_tuple_array_family();
     test_named_aggregate_family();
     test_type_id_crate_field_family();

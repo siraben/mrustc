@@ -4254,7 +4254,7 @@ static int cm_decl_from_fn_function_shape(CmDeclCaptureState *state,
     return 1;
 }
 
-static int cm_decl_from_mut_attributes(const CmDeclCaptureState *state,
+static int cm_decl_array_ref_attributes(const CmDeclCaptureState *state,
     const CmHirItem *item, size_t *out_projected_count)
 {
     uint32_t index;
@@ -4278,7 +4278,7 @@ static int cm_decl_from_mut_attributes(const CmDeclCaptureState *state,
     return 1;
 }
 
-static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
+static int cm_decl_array_ref_function_shape(CmDeclCaptureState *state,
     const CmHirItem *item, uint32_t *out_module, uint32_t *out_ordinal,
     size_t *out_projected_count)
 {
@@ -4306,6 +4306,7 @@ static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
     uint32_t namespace_module = 0u;
     uint32_t namespace_ordinal = 0u;
     uint32_t attribute_index;
+    CmHirMutability reference_mutability;
     if (!cm_decl_plain_visibility(item)
         || !cm_hir_def_id_is_none(item->parent_definition)
         || item->is_specializable
@@ -4333,7 +4334,7 @@ static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
         || module == NULL || ast == NULL || ast_item == NULL
         || namespace_module != module->local
         || namespace_ordinal != *out_ordinal
-        || !cm_decl_from_mut_attributes(state, item,
+        || !cm_decl_array_ref_attributes(state, item,
             out_projected_count)) return 0;
     *out_module = module->local;
     for (attribute_index = 0u; attribute_index < effective.attribute_count;
@@ -4378,6 +4379,8 @@ static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
         : cm_ast_get_type(ast, ast_parameter->type);
     ast_output = cm_ast_get_type(ast,
         ast_item->data.function_item.return_type);
+    reference_mutability = ast_input != NULL && ast_input->is_mutable
+        ? CM_HIR_MUTABLE : CM_HIR_IMMUTABLE;
     if (generic == NULL || generic->kind != CM_HIR_GENERIC_TYPE
         || generic->index != 0u
         || !cm_hir_def_id_equal(generic->owner, item->definition)
@@ -4417,10 +4420,9 @@ static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
         || ast_parameter->receiver_lifetime != CM_INTERN_ID_NONE
         || ast_input == NULL || ast_input->kind != CM_AST_TYPE_REFERENCE
         || ast_input->lifetime != CM_INTERN_ID_NONE
-        || !ast_input->is_mutable
         || ast_output == NULL || ast_output->kind != CM_AST_TYPE_REFERENCE
         || ast_output->lifetime != CM_INTERN_ID_NONE
-        || !ast_output->is_mutable
+        || ast_output->is_mutable != ast_input->is_mutable
         || ast_pattern == NULL || ast_pattern->kind != CM_AST_PATTERN_BINDING
         || ast_pattern->data.binding.subpattern != CM_AST_PATTERN_NONE
         || ast_pattern->data.binding.is_ref
@@ -4433,14 +4435,16 @@ static int cm_decl_from_mut_function_shape(CmDeclCaptureState *state,
         || parameter->span.start != ast_pattern->span.start
         || parameter->span.end != ast_pattern->span.end
         || input_type == NULL || input_child == NULL
-        || input_type->data.reference_type.mutability != CM_HIR_MUTABLE
+        || input_type->data.reference_type.mutability
+            != reference_mutability
         || input_type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
         || input_child->kind != CM_HIR_TYPE_PARAMETER_KIND
         || input_child->data.parameter_type.parameter
             != item->generic_parameter_start
         || output_type == NULL || output_array == NULL
         || output_element == NULL || length_type == NULL
-        || output_type->data.reference_type.mutability != CM_HIR_MUTABLE
+        || output_type->data.reference_type.mutability
+            != reference_mutability
         || output_type->data.reference_type.region.kind
             != CM_HIR_REGION_ERASED
         || output_element->kind != CM_HIR_TYPE_PARAMETER_KIND
@@ -4616,7 +4620,7 @@ static int cm_decl_function_shape(CmDeclCaptureState *state,
             out_ordinal, out_projected_count);
     if (item->generic_parameter_count == 1u
         && item->predicate_count == 0u && signature->parameter_count == 1u
-        && cm_decl_from_mut_function_shape(state, item, out_module,
+        && cm_decl_array_ref_function_shape(state, item, out_module,
             out_ordinal, out_projected_count)) return 1;
     if (!cm_decl_plain_visibility(item)
         || !cm_hir_def_id_is_none(item->parent_definition)

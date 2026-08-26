@@ -597,11 +597,12 @@ input; or
 (2) the sole immutable direct `&T` parameter of a body-bearing const free
 `FUNCTION` with exactly one owner-local relaxed-Sized type generic, zero
 predicates, and exact immutable `&'static str` return; or (3) both roots of the
-exact body-bearing const free `fn<T>(&mut T) -> &mut [T; 1]` profile, after
-lowering has authenticated that both source lifetimes are omitted and the
-unary input therefore governs the output. The third profile's paired root
-shape is the relation authority; structural reuse of either `ERASED` type is
-not. Aggregate, variant, and alias fields, `CONST`/`STATIC` types, predicate
+exact body-bearing const free `fn<T>(&M T) -> &M [T; 1]` profile, where `M` is
+either shared at both roots or mutable at both roots, after lowering has
+authenticated that both source lifetimes are omitted and the unary input
+therefore governs the output. The third profile's paired root shape is the
+relation authority; structural reuse of either `ERASED` type is not.
+Aggregate, variant, and alias fields, `CONST`/`STATIC` types, predicate
 and outlives roots, arbitrary free parameters or returns, mixed-sharing roots,
 explicit `'_`, named, or static input lifetimes, and remaining inference
 regions reject. `ERASED` does not by itself encode equality, outlives evidence,
@@ -671,13 +672,14 @@ binds the function with `BODY_NONE`: importing and inspecting the declaration
 is supported, while MIR, monomorphization, execution, and code generation fail
 closed until an executable family transports that authority.
 
-The current `from_mut` profile similarly transports only its declaration. It
-retains ordinary `T`, one mutable erased reference parameter to `T`, and one
-mutable erased reference return to the scalar-length array `[T; 1]`. Capture
-requires the exact source-owned stable const function and its
-`rustc_const_stable` provenance, while lowering admits the paired erased roots
-only after authenticating the sole omitted input/output lifetime relation.
-The body remains `BODY_NONE` after materialization.
+The current `from_ref`/`from_mut` profile similarly transports only the
+declaration. It retains ordinary `T`, one erased reference parameter to `T`,
+and one erased reference return to the scalar-length array `[T; 1]`, requiring
+the same shared or mutable mode at both roots. Capture requires the exact
+source-owned stable const function and its `rustc_const_stable` provenance,
+while lowering admits the paired erased roots only after authenticating the
+sole omitted input/output lifetime relation. The body remains `BODY_NONE`
+after materialization.
 
 V3.2 appends this execution binding to every `VALU` function record after the
 unchanged declaration payload:

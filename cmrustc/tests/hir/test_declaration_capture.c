@@ -244,6 +244,38 @@ static const unsigned char from_mut_explicit_infer_source[] =
         "since = \"1.83.0\")]\n"
     "pub const fn borrow<T>(s: &'_ mut T) -> &'_ mut [T; 1] { s }\n";
 
+static const unsigned char from_ref_fixture_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_ref\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_ref\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow_shared<T>(s: &T) -> &[T; 1] { s }\n";
+
+static const unsigned char from_ref_explicit_infer_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_ref\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_ref\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow_shared<T>(s: &'_ T) -> &'_ [T; 1] { s }\n";
+
+static const unsigned char from_ref_mixed_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_ref\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_ref\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow_shared<T>(s: &T) -> &mut [T; 1] { s }\n";
+
+static const unsigned char from_ref_extra_input_source[] =
+    "pub trait Gate {}\n"
+    "pub fn needs<X: Gate>() {}\n"
+    "#[stable(feature = \"array_from_ref\", since = \"1.53.0\")]\n"
+    "#[rustc_const_stable(feature = \"const_array_from_ref\", "
+        "since = \"1.83.0\")]\n"
+    "pub const fn borrow_shared<T>(s: &T, extra: &T) -> &[T; 1] { s }\n";
+
 static const char generic_enum_fixture_template[] =
     "mod option_like {\n"
     "  #[doc(search_unbox)]\n"
@@ -629,6 +661,12 @@ static void from_mut_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "from-mut-like.rs",
         from_mut_fixture_source, sizeof(from_mut_fixture_source) - 1u);
+}
+
+static void from_ref_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "from-ref-like.rs",
+        from_ref_fixture_source, sizeof(from_ref_fixture_source) - 1u);
 }
 
 static void layout_dependency_fixture_init(CaptureFixture *fixture,
@@ -5048,6 +5086,171 @@ static void test_from_mut_hostile_mutations_are_atomic(void)
     fixture_destroy(&fixture);
 }
 
+static void test_from_ref_elision_profile_and_negatives(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CaptureFixture rejected;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureInput noisy_input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    const CmHirDeclarationValue *value;
+    const CmHirDeclarationType *decl_input;
+    const CmHirDeclarationType *decl_output;
+    const CmHirDeclarationType *decl_array;
+    CmHirItem *item;
+    CmHirItemId item_id;
+    CmHirGenericParam *generic;
+    CmHirFunctionSignature *signature;
+    CmHirType *input_reference;
+    CmHirType *output_reference;
+    CmHirType *array;
+    CmHirBody *body;
+    CmHirMutability saved_mutability;
+    CmHirRegionKind saved_region;
+    CmHirDefId saved_definition;
+    CmHirTypeId saved_type;
+    uint64_t saved_length;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+
+    from_ref_fixture_init(&fixture, 0);
+    from_ref_fixture_init(&noisy, 1);
+    input = capture_input(&fixture);
+    noisy_input = capture_input(&noisy);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    result = cm_hir_declaration_metadata_capture(&noisy_input,
+        &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    value = find_declaration_value(&metadata, "borrow_shared", NULL);
+    assert(value != NULL && value->kind == CM_HIR_DECL_VALUE_FUNCTION
+        && value->generic_count == 1u && value->predicate_count == 0u
+        && value->parameter_count == 1u && value->parameter_types != NULL
+        && value->is_const == 1u && value->has_body == 1u);
+    decl_input = &metadata.types[value->parameter_types[0] - 1u];
+    decl_output = &metadata.types[value->return_type - 1u];
+    assert(decl_input->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decl_input->mutability == CM_HIR_DECL_IMMUTABLE
+        && decl_input->region.kind == CM_HIR_DECL_REGION_ERASED
+        && decl_output->kind == CM_HIR_DECL_TYPE_REFERENCE
+        && decl_output->mutability == CM_HIR_DECL_IMMUTABLE
+        && decl_output->region.kind == CM_HIR_DECL_REGION_ERASED);
+    decl_array = &metadata.types[decl_output->child_type - 1u];
+    assert(decl_array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && decl_array->array_length_kind == CM_HIR_DECL_ARRAY_LENGTH_SCALAR
+        && decl_array->array_length_low_bits == 1u
+        && decl_array->array_length_high_bits == 0u
+        && decl_input->child_type == decl_array->child_type);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    item = (CmHirItem *)find_item(&fixture, "borrow_shared", &item_id);
+    assert(item != NULL && item->generic_parameter_count == 1u);
+    generic = (CmHirGenericParam *)cm_hir_get_generic_param(&fixture.hir,
+        item->generic_parameter_start);
+    signature = &item->data.function_item.signature;
+    input_reference = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        signature->parameters[0].type);
+    output_reference = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        signature->return_type);
+    array = output_reference == NULL ? NULL
+        : (CmHirType *)cm_hir_get_type(&fixture.hir,
+            output_reference->data.reference_type.pointee);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        item->data.function_item.body);
+    assert(generic != NULL && input_reference != NULL
+        && output_reference != NULL && array != NULL && body != NULL);
+
+#define ASSERT_FROM_REF_ATOMIC_FAILURE(input_) do { \
+    result = cm_hir_declaration_metadata_capture(&(input_), &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.values == saved_values \
+        && metadata.types == saved_types); \
+} while (0)
+
+    saved_mutability = input_reference->data.reference_type.mutability;
+    input_reference->data.reference_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    input_reference->data.reference_type.mutability = saved_mutability;
+
+    saved_mutability = output_reference->data.reference_type.mutability;
+    output_reference->data.reference_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    output_reference->data.reference_type.mutability = saved_mutability;
+
+    saved_region = input_reference->data.reference_type.region.kind;
+    input_reference->data.reference_type.region.kind = CM_HIR_REGION_INFER;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    input_reference->data.reference_type.region.kind = saved_region;
+
+    saved_region = output_reference->data.reference_type.region.kind;
+    output_reference->data.reference_type.region.kind = CM_HIR_REGION_STATIC;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    output_reference->data.reference_type.region.kind = saved_region;
+
+    saved_length = array->data.array_type.length.data.value.low_bits;
+    array->data.array_type.length.data.value.low_bits = 2u;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    array->data.array_type.length.data.value.low_bits = saved_length;
+
+    saved_definition = generic->owner;
+    generic->owner.index += 1000u;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    generic->owner = saved_definition;
+
+    saved_type = body->locals[0].type;
+    body->locals[0].type = signature->return_type;
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    body->locals[0].type = saved_type;
+
+    fixture_init_source(&rejected, 0, "from-ref-explicit.rs",
+        from_ref_explicit_infer_source,
+        sizeof(from_ref_explicit_infer_source) - 1u);
+    input = capture_input(&rejected);
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    fixture_destroy(&rejected);
+
+    fixture_init_source(&rejected, 0, "from-ref-mixed.rs",
+        from_ref_mixed_source, sizeof(from_ref_mixed_source) - 1u);
+    input = capture_input(&rejected);
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    fixture_destroy(&rejected);
+
+    fixture_init_source(&rejected, 0, "from-ref-extra.rs",
+        from_ref_extra_input_source,
+        sizeof(from_ref_extra_input_source) - 1u);
+    input = capture_input(&rejected);
+    ASSERT_FROM_REF_ATOMIC_FAILURE(input);
+    fixture_destroy(&rejected);
+
+#undef ASSERT_FROM_REF_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+}
+
 static const CmHirDeclarationType *type_id_like_array(
     const CmHirDeclarationMetadata *metadata, uint64_t expected_length)
 {
@@ -8226,6 +8429,7 @@ int main(void)
     test_from_fn_hostile_mutations_are_atomic();
     test_from_mut_elision_profile_and_determinism();
     test_from_mut_hostile_mutations_are_atomic();
+    test_from_ref_elision_profile_and_negatives();
     test_type_id_like_target_capture_and_determinism();
     test_type_id_like_hostile_mutations_are_atomic();
     test_layout_private_dependency_closure_and_determinism();
