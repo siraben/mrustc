@@ -2796,6 +2796,8 @@ static int cm_decl_ast_type_matches_hir_static(
         if (ast_type->kind != CM_AST_TYPE_TUPLE
             || ast_type->tuple_provenance != CM_AST_TUPLE_SOURCE
             || hir_type->data.tuple_type.element_count == 0u
+            || hir_type->data.tuple_type.element_count
+                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
             || ast_type->element_count
                 != hir_type->data.tuple_type.element_count
             || ast_type->elements == NULL
@@ -3449,6 +3451,86 @@ static int cm_decl_field_visibility_matches(CmAstVisibility ast_visibility,
     return 0;
 }
 
+static int cm_decl_ast_path_resolves_item(
+    const CmDeclCaptureState *state, const CmAst *ast,
+    const CmAstPath *path, const CmHirItem *owner,
+    const CmHirItem *target)
+{
+    const CmDeclCaptureModule *owner_module = NULL;
+    CmResolvePathSegmentView *segments;
+    CmResolvedBinding binding;
+    CmResolveItemRef declaration;
+    uint32_t declaration_module = 0u;
+    size_t declaration_count = 0u;
+    size_t index;
+    int valid;
+    if (state == NULL || ast == NULL || path == NULL || owner == NULL
+        || target == NULL || path->segment_count == 0u
+        || path->segment_count > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+        || path->segments == NULL) return 0;
+    memset(&declaration, 0, sizeof(declaration));
+    for (index = 0u; index < state->module_count; ++index) {
+        if (state->modules[index].hir_id == owner->owner_module) {
+            if (owner_module != NULL) return 0;
+            owner_module = &state->modules[index];
+        }
+    }
+    for (index = 0u; index < state->namespace_count; ++index) {
+        const CmDeclCaptureNamespace *entry =
+            &state->namespace_values[index];
+        if (!cm_hir_def_id_equal(entry->target.definition,
+                target->definition) || entry->is_import) continue;
+        if (entry->source_is_generated
+            || (entry->target.kind != CM_HIR_LIBRARY_BINDING_TYPE
+                && entry->target.kind
+                    != CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR)) return 0;
+        if (declaration_count == 0u) {
+            declaration = entry->declaration;
+            declaration_module = entry->owner_module;
+        } else if (!cm_decl_item_ref_equal(declaration,
+                entry->declaration)
+            || declaration_module != entry->owner_module) return 0;
+        declaration_count += 1u;
+    }
+    if (owner_module == NULL || declaration_count == 0u
+        || declaration_module == 0u) return 0;
+    {
+        const CmDeclCaptureModule *target_module = cm_decl_module_by_local(
+            (CmDeclCaptureState *)state, declaration_module);
+        if (target_module == NULL
+            || target_module->hir_id != target->owner_module) return 0;
+    }
+    segments = (CmResolvePathSegmentView *)cm_alloc_zeroed(
+        path->segment_count, sizeof(*segments));
+    for (index = 0u; index < path->segment_count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(ast,
+            path->segments[index].name);
+        if (name == NULL || name->len == 0u) {
+            cm_free(segments);
+            return 0;
+        }
+        segments[index].bytes = name->bytes;
+        segments[index].length = name->len;
+    }
+    valid = cm_import_resolve_path_checked(state->input->imports,
+            state->input->graph, state->input->revision,
+            owner_module->graph.id, path->absolute, segments,
+            path->segment_count, CM_RESOLVE_NAMESPACE_TYPE, &binding)
+            == CM_IMPORT_LOOKUP_OK
+        && binding.revision == state->input->revision
+        && binding.namespace_kind == CM_RESOLVE_NAMESPACE_TYPE
+        && binding.primitive_kind == CM_RESOLVE_PRIMITIVE_NONE
+        && binding.variant.enumeration.source == 0u
+        && binding.variant.enumeration.item == 0u
+        && binding.target_module == CM_MODULE_NONE
+        && binding.item_kind == (target->kind == CM_HIR_ITEM_STRUCT
+                ? CM_AST_ITEM_STRUCT : target->kind == CM_HIR_ITEM_UNION
+                ? CM_AST_ITEM_UNION : CM_AST_ITEM_ENUM)
+        && cm_decl_item_ref_equal(binding.declaration, declaration);
+    cm_free(segments);
+    return valid;
+}
+
 static int cm_decl_ast_type_matches_hir_field(
     const CmDeclCaptureState *state, const CmAst *ast,
     const CmAstType *ast_type, const CmHirType *hir_type,
@@ -3491,6 +3573,35 @@ static int cm_decl_ast_type_matches_hir_field(
         return cm_decl_ast_type_matches_hir_field(state, ast, ast_child,
             hir_child, owner, depth + 1u);
     }
+    if (hir_type->kind == CM_HIR_TYPE_SLICE_KIND) {
+        const CmAstType *ast_child;
+        const CmHirType *hir_child;
+        if (ast_type->kind != CM_AST_TYPE_SLICE
+            || ast_type->child == CM_AST_TYPE_NONE
+            || (ast_child = cm_ast_get_type(ast, ast_type->child)) == NULL
+            || (hir_child = cm_hir_get_type(state->hir,
+                hir_type->data.slice_type.element)) == NULL) return 0;
+        return cm_decl_ast_type_matches_hir_field(state, ast, ast_child,
+            hir_child, owner, depth + 1u);
+    }
+    if (hir_type->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {
+        const CmAstType *ast_child;
+        const CmHirType *hir_child;
+        if (ast_type->kind != CM_AST_TYPE_POINTER
+            || ast_type->child == CM_AST_TYPE_NONE
+            || (hir_type->data.raw_pointer_type.mutability
+                    != CM_HIR_IMMUTABLE
+                && hir_type->data.raw_pointer_type.mutability
+                    != CM_HIR_MUTABLE)
+            || ast_type->is_mutable
+                != (hir_type->data.raw_pointer_type.mutability
+                    == CM_HIR_MUTABLE)
+            || (ast_child = cm_ast_get_type(ast, ast_type->child)) == NULL
+            || (hir_child = cm_hir_get_type(state->hir,
+                hir_type->data.raw_pointer_type.pointee)) == NULL) return 0;
+        return cm_decl_ast_type_matches_hir_field(state, ast, ast_child,
+            hir_child, owner, depth + 1u);
+    }
     if (hir_type->kind == CM_HIR_TYPE_PARAMETER_KIND) {
         const CmHirGenericParam *generic = cm_hir_get_generic_param(
             state->hir, hir_type->data.parameter_type.parameter);
@@ -3513,9 +3624,14 @@ static int cm_decl_ast_type_matches_hir_field(
             hir_type->data.named_type.definition, &target_id)) == NULL
         || target->definition.crate_id != state->input->crate_id
         || (target->kind != CM_HIR_ITEM_STRUCT
-            && target->kind != CM_HIR_ITEM_UNION)
+            && target->kind != CM_HIR_ITEM_UNION
+            && target->kind != CM_HIR_ITEM_ENUM)
+        || (target->kind == CM_HIR_ITEM_ENUM
+            && hir_type->data.named_type.argument_count == 0u)
         || target->generic_parameter_count
-            != hir_type->data.named_type.argument_count) return 0;
+            != hir_type->data.named_type.argument_count
+        || hir_type->data.named_type.argument_count
+            > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES) return 0;
     path = cm_ast_get_path(ast, ast_type->path);
     if (path == NULL || path->segment_count == 0u || path->segments == NULL)
         return 0;
@@ -3528,7 +3644,9 @@ static int cm_decl_ast_type_matches_hir_field(
             target->name)
         || segment->argument_count != hir_type->data.named_type.argument_count
         || ((segment->argument_count == 0u)
-            != (segment->arguments == NULL))) return 0;
+            != (segment->arguments == NULL))
+        || !cm_decl_ast_path_resolves_item(state, ast, path, owner, target))
+        return 0;
     for (index = 0u; index < segment->argument_count; ++index) {
         const CmAstGenericArg *ast_argument = &segment->arguments[index];
         const CmHirGenericArg *hir_argument =
@@ -4367,8 +4485,30 @@ static int cm_decl_mark_type_depth(CmDeclCaptureState *state,
     }
     if (type != NULL && type_id != CM_HIR_TYPE_NONE
         && (size_t)type_id <= state->hir->types.len
+        && type->kind == CM_HIR_TYPE_SLICE_KIND
+        && type->data.slice_type.element != CM_HIR_TYPE_NONE
+        && cm_decl_mark_type_depth(state, type->data.slice_type.element,
+            result, depth + 1u)) {
+        state->compound_types[type_id - 1u] = 1u;
+        return 1;
+    }
+    if (type != NULL && type_id != CM_HIR_TYPE_NONE
+        && (size_t)type_id <= state->hir->types.len
+        && type->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+        && type->data.raw_pointer_type.pointee != CM_HIR_TYPE_NONE
+        && (type->data.raw_pointer_type.mutability == CM_HIR_IMMUTABLE
+            || type->data.raw_pointer_type.mutability == CM_HIR_MUTABLE)
+        && cm_decl_mark_type_depth(state,
+            type->data.raw_pointer_type.pointee, result, depth + 1u)) {
+        state->compound_types[type_id - 1u] = 1u;
+        return 1;
+    }
+    if (type != NULL && type_id != CM_HIR_TYPE_NONE
+        && (size_t)type_id <= state->hir->types.len
         && type->kind == CM_HIR_TYPE_TUPLE_KIND
         && type->data.tuple_type.element_count != 0u
+        && type->data.tuple_type.element_count
+            <= (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
         && type->data.tuple_type.elements != NULL) {
         for (child = 0u; child < type->data.tuple_type.element_count; ++child)
             if (!cm_decl_mark_type_depth(state,
@@ -4395,6 +4535,8 @@ static int cm_decl_mark_type_depth(CmDeclCaptureState *state,
     }
     if (type != NULL && type->kind == CM_HIR_TYPE_ADT_KIND
         && type->data.named_type.argument_count != 0u
+        && type->data.named_type.argument_count
+            <= (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
         && type->data.named_type.arguments != NULL
         && type_id != CM_HIR_TYPE_NONE
         && (size_t)type_id <= state->hir->types.len
@@ -4525,6 +4667,30 @@ static uint32_t cm_decl_type_local(const CmDeclCaptureState *state,
                 && wire->region.kind == CM_HIR_DECL_REGION_ERASED
                 && wire->region.generic_local == 0u
                 && wire->region.binder_index == 0u)
+                return (uint32_t)(index + 1u);
+        }
+    }
+    if (type != NULL && type->kind == CM_HIR_TYPE_SLICE_KIND) {
+        uint32_t child_local = cm_decl_type_local(state, metadata,
+            type->data.slice_type.element);
+        for (index = 0u; index < metadata->type_count; ++index) {
+            const CmHirDeclarationType *wire = &metadata->types[index];
+            if (wire->kind == CM_HIR_DECL_TYPE_SLICE
+                && wire->child_type == child_local)
+                return (uint32_t)(index + 1u);
+        }
+    }
+    if (type != NULL && type->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {
+        uint32_t child_local = cm_decl_type_local(state, metadata,
+            type->data.raw_pointer_type.pointee);
+        uint8_t mutability = type->data.raw_pointer_type.mutability
+                == CM_HIR_MUTABLE
+            ? CM_HIR_DECL_MUTABLE : CM_HIR_DECL_IMMUTABLE;
+        for (index = 0u; index < metadata->type_count; ++index) {
+            const CmHirDeclarationType *wire = &metadata->types[index];
+            if (wire->kind == CM_HIR_DECL_TYPE_RAW_POINTER
+                && wire->child_type == child_local
+                && wire->mutability == mutability)
                 return (uint32_t)(index + 1u);
         }
     }
@@ -4970,7 +5136,23 @@ static int cm_decl_compound_candidate(const CmDeclCaptureState *state,
     uint32_t depth = 1u;
     uint32_t child;
     if (type == NULL) return 0;
-    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
+    if (type->kind == CM_HIR_TYPE_SLICE_KIND) {
+        uint32_t local = cm_decl_type_local(state, metadata,
+            type->data.slice_type.element);
+        if (local == 0u) return 0;
+        *out_kind = CM_HIR_DECL_TYPE_SLICE;
+        if (depths[local - 1u] >= depth)
+            depth = depths[local - 1u] + 1u;
+    } else if (type->kind == CM_HIR_TYPE_RAW_POINTER_KIND) {
+        uint32_t local = cm_decl_type_local(state, metadata,
+            type->data.raw_pointer_type.pointee);
+        if ((type->data.raw_pointer_type.mutability != CM_HIR_IMMUTABLE
+                && type->data.raw_pointer_type.mutability != CM_HIR_MUTABLE)
+            || local == 0u) return 0;
+        *out_kind = CM_HIR_DECL_TYPE_RAW_POINTER;
+        if (depths[local - 1u] >= depth)
+            depth = depths[local - 1u] + 1u;
+    } else if (type->kind == CM_HIR_TYPE_REFERENCE_KIND) {
         uint32_t local;
         if (type->data.reference_type.mutability != CM_HIR_IMMUTABLE
             || type->data.reference_type.region.kind != CM_HIR_REGION_ERASED
@@ -5036,7 +5218,29 @@ static int cm_decl_compound_before(const CmDeclCaptureState *state,
     uint32_t index;
     if (left_depth != right_depth) return left_depth < right_depth;
     if (left_kind != right_kind) return left_kind < right_kind;
-    if (left_kind == CM_HIR_DECL_TYPE_REFERENCE) {
+    if (left_kind == CM_HIR_DECL_TYPE_SLICE) {
+        uint32_t left_child = cm_decl_type_local(state, metadata,
+            left->data.slice_type.element);
+        uint32_t right_child = cm_decl_type_local(state, metadata,
+            right->data.slice_type.element);
+        if (left_child != right_child) return left_child < right_child;
+    } else if (left_kind == CM_HIR_DECL_TYPE_RAW_POINTER) {
+        uint8_t left_mutability = left->data.raw_pointer_type.mutability
+                == CM_HIR_MUTABLE
+            ? CM_HIR_DECL_MUTABLE : CM_HIR_DECL_IMMUTABLE;
+        uint8_t right_mutability = right->data.raw_pointer_type.mutability
+                == CM_HIR_MUTABLE
+            ? CM_HIR_DECL_MUTABLE : CM_HIR_DECL_IMMUTABLE;
+        uint32_t left_child;
+        uint32_t right_child;
+        if (left_mutability != right_mutability)
+            return left_mutability < right_mutability;
+        left_child = cm_decl_type_local(state, metadata,
+            left->data.raw_pointer_type.pointee);
+        right_child = cm_decl_type_local(state, metadata,
+            right->data.raw_pointer_type.pointee);
+        if (left_child != right_child) return left_child < right_child;
+    } else if (left_kind == CM_HIR_DECL_TYPE_REFERENCE) {
         uint32_t left_child = cm_decl_type_local(state, metadata,
             left->data.reference_type.pointee);
         uint32_t right_child = cm_decl_type_local(state, metadata,
@@ -5101,6 +5305,7 @@ static int cm_decl_fill_compound_types(CmDeclCaptureState *state,
 {
     uint32_t *depths = (uint32_t *)cm_alloc_zeroed(metadata->type_count,
         sizeof(*depths));
+    size_t emitted_edges = 0u;
     while (pending != 0u) {
         CmHirTypeId selected = CM_HIR_TYPE_NONE;
         uint8_t selected_kind = 0u;
@@ -5141,8 +5346,31 @@ static int cm_decl_fill_compound_types(CmDeclCaptureState *state,
             const CmHirType *source = cm_hir_get_type(state->hir, selected);
             CmHirDeclarationType *wire = &metadata->types[*cursor];
             uint32_t child;
+            size_t edge_count;
+            if (selected_kind == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION)
+                edge_count = source->data.named_type.argument_count;
+            else if (selected_kind == CM_HIR_DECL_TYPE_TUPLE)
+                edge_count = source->data.tuple_type.element_count;
+            else if (selected_kind == CM_HIR_DECL_TYPE_ARRAY)
+                edge_count = 2u;
+            else edge_count = 0u;
+            if (edge_count > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                    - emitted_edges) {
+                cm_free(depths);
+                return 0;
+            }
+            emitted_edges += edge_count;
             wire->kind = selected_kind;
-            if (selected_kind == CM_HIR_DECL_TYPE_REFERENCE) {
+            if (selected_kind == CM_HIR_DECL_TYPE_SLICE) {
+                wire->child_type = cm_decl_type_local(state, metadata,
+                    source->data.slice_type.element);
+            } else if (selected_kind == CM_HIR_DECL_TYPE_RAW_POINTER) {
+                wire->child_type = cm_decl_type_local(state, metadata,
+                    source->data.raw_pointer_type.pointee);
+                wire->mutability = source->data.raw_pointer_type.mutability
+                        == CM_HIR_MUTABLE
+                    ? CM_HIR_DECL_MUTABLE : CM_HIR_DECL_IMMUTABLE;
+            } else if (selected_kind == CM_HIR_DECL_TYPE_REFERENCE) {
                 wire->child_type = cm_decl_type_local(state, metadata,
                     source->data.reference_type.pointee);
                 wire->mutability = CM_HIR_DECL_IMMUTABLE;
@@ -5197,6 +5425,8 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
     size_t type_count = 0u;
     size_t application_count = 0u;
     size_t compound_count = 0u;
+    size_t composite_occurrence_count;
+    size_t type_capacity;
     size_t cursor;
     state->generic_types = (unsigned char *)cm_alloc_zeroed(
         metadata->generic_count, sizeof(*state->generic_types));
@@ -5309,16 +5539,20 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
     for (index = 0u; index < state->hir->types.len; ++index)
         if (state->application_types[index]) {
             application_count += 1u;
-            type_count += 1u;
         }
     for (index = 0u; index < state->hir->types.len; ++index)
         if (state->compound_types[index]) {
             compound_count += 1u;
-            type_count += 1u;
         }
     if (type_count > CM_HIR_DECL_METADATA_MAX_TYPES) return 0;
-    metadata->type_count = type_count;
-    metadata->types = (CmHirDeclarationType *)cm_alloc_zeroed(type_count,
+    if (application_count > SIZE_MAX - compound_count) return 0;
+    composite_occurrence_count = application_count + compound_count;
+    type_capacity = CM_HIR_DECL_METADATA_MAX_TYPES - type_count;
+    if (composite_occurrence_count < type_capacity)
+        type_capacity = composite_occurrence_count;
+    type_capacity += type_count;
+    metadata->type_count = type_capacity;
+    metadata->types = (CmHirDeclarationType *)cm_alloc_zeroed(type_capacity,
         sizeof(*metadata->types));
     cursor = 0u;
     for (index = CM_HIR_DECL_PRIMITIVE_UNIT;
@@ -5355,7 +5589,7 @@ static int cm_decl_fill_types_values_predicates(CmDeclCaptureState *state,
             application_count + compound_count)) return 0;
     /* The provisional count is by live HIR ID. Structural duplicates consume
      * pending IDs but intentionally share the already emitted canonical local. */
-    if (cursor > type_count) return 0;
+    if (cursor > type_capacity) return 0;
     metadata->type_count = cursor;
     for (index = 0u; index < state->item_count; ++index) {
         const CmHirItem *item = state->items[index].item;

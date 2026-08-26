@@ -1,5 +1,6 @@
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/lower.h"
+#include "cm/alloc.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -222,6 +223,62 @@ static const unsigned char safe_associated_trait_fixture_source[] =
     "pub trait SafeLike { fn ping(&self); }\n"
     "pub fn needs<X: Marker>() {}\n";
 
+static const unsigned char composite_associated_fixture_source[] =
+    "#[stable(feature = \"wrap\", since = \"1.0.0\")]\n"
+    "#[lang = \"manually_drop\"]\n"
+    "#[derive(Copy)]\n"
+    "#[repr(transparent)]\n"
+    "#[rustc_pub_transparent]\n"
+    "pub struct Wrap<T: ?Sized> { value: T }\n"
+    "pub struct Error;\n"
+    "#[doc(search_unbox)]\n"
+    "#[derive(Copy)]\n"
+    "#[rustc_diagnostic_item = \"Outcome\"]\n"
+    "#[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "pub enum Outcome<T, E> {\n"
+    "  #[lang = \"Good\"]\n"
+    "  #[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "  Good(T),\n"
+    "  #[lang = \"Bad\"]\n"
+    "  #[stable(feature = \"outcome\", since = \"1.0.0\")]\n"
+    "  Bad(E),\n"
+    "}\n"
+    "mod shadow {\n"
+    "  #[doc(search_unbox)]\n"
+    "  #[derive(Copy)]\n"
+    "  #[rustc_diagnostic_item = \"ShadowOutcome\"]\n"
+    "  #[stable(feature = \"shadow\", since = \"1.0.0\")]\n"
+    "  pub enum Outcome<T, E> {\n"
+    "    #[lang = \"ShadowGood\"]\n"
+    "    #[stable(feature = \"shadow\", since = \"1.0.0\")]\n"
+    "    Good(T),\n"
+    "    #[lang = \"ShadowBad\"]\n"
+    "    #[stable(feature = \"shadow\", since = \"1.0.0\")]\n"
+    "    Bad(E),\n"
+    "  }\n"
+    "}\n"
+    "pub unsafe trait Composite {\n"
+    "  fn outcome(&self, bytes: *const u8)\n"
+    "    -> Outcome<Wrap<[u8]>, Error>;\n"
+    "  fn raw_mut(&self) -> *mut u8;\n"
+    "}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
+static const unsigned char unreachable_private_type_fixture_source[] =
+    "fn hidden(value: (u8, u8)) {}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
+static const unsigned char repeated_composite_fixture_source[] =
+    "#[doc(hidden)]\n"
+    "pub static MANY: [((u8,), (u8,)); 1] = [((1,), (2,))];\n"
+    "pub unsafe trait Unary {\n"
+    "  fn raw(&self, bytes: *const [u8]) -> *mut u8;\n"
+    "}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -348,6 +405,14 @@ static void allocator_like_fixture_init(CaptureFixture *fixture,
     fixture_init_source(fixture, with_noise, "allocator-like.rs",
         allocator_like_fixture_source,
         sizeof(allocator_like_fixture_source) - 1u);
+}
+
+static void composite_associated_fixture_init(CaptureFixture *fixture,
+    int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "associated-composite.rs",
+        composite_associated_fixture_source,
+        sizeof(composite_associated_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -4332,6 +4397,7 @@ static void test_allocator_like_associated_method_capture(void)
     int saved_default;
     CmHirBodyId saved_body;
     CmHirReceiverKind saved_receiver;
+    CmHirType *inferred_return;
     size_t saved_hir_item_count;
     CmByteBuf bytes;
     CmByteBuf noisy_bytes;
@@ -4477,6 +4543,13 @@ static void test_allocator_like_associated_method_capture(void)
     fixture_init_source(&rejected, 0, "associated-inferred-return.rs",
         inferred_associated_return_fixture_source,
         sizeof(inferred_associated_return_fixture_source) - 1u);
+    method = (CmHirItem *)find_item(&rejected, "by_ref", &method_id);
+    assert(method != NULL);
+    inferred_return = (CmHirType *)cm_hir_get_type(&rejected.hir,
+        method->data.function_item.signature.return_type);
+    assert(inferred_return != NULL
+        && inferred_return->kind == CM_HIR_TYPE_REFERENCE_KIND);
+    inferred_return->data.reference_type.region.kind = CM_HIR_REGION_INFER;
     input = capture_input(&rejected);
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
     assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
@@ -4510,11 +4583,466 @@ static void test_allocator_like_associated_method_capture(void)
     fixture_destroy(&first);
 }
 
+static void test_associated_composite_type_capture(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationAssociatedItem *outcome_wire = NULL;
+    CmHirDeclarationAssociatedItem *raw_mut_wire = NULL;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId outcome_method_id;
+    CmHirItemId raw_mut_method_id;
+    CmHirItemId outcome_item_id;
+    CmHirItem *outcome_method;
+    CmHirItem *raw_mut_method;
+    CmHirItem *outcome_item;
+    CmHirItem *shadow_outcome = NULL;
+    const CmHirModule *shadow_module;
+    CmHirType *outer_application;
+    CmHirType *wrap_application;
+    CmHirType *slice;
+    CmHirType *const_pointer;
+    CmHirType *mut_pointer;
+    CmHirDefId saved_definition;
+    uint32_t saved_argument_count;
+    CmHirTypeId saved_type_id;
+    CmHirMutability saved_mutability;
+    uint32_t saved_span_start;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    size_t index;
+    size_t slice_count = 0u;
+    size_t pointer_count = 0u;
+    size_t application_count = 0u;
+    int saw_const_pointer = 0;
+    int saw_mut_pointer = 0;
+    composite_associated_fixture_init(&first, 0);
+    composite_associated_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.associated_count == 2u
+        && metadata.associated_count == 2u);
+    for (index = 0u; index < metadata.type_count; ++index) {
+        const CmHirDeclarationType *type = &metadata.types[index];
+        if (type->kind == CM_HIR_DECL_TYPE_SLICE) slice_count += 1u;
+        else if (type->kind == CM_HIR_DECL_TYPE_RAW_POINTER) {
+            pointer_count += 1u;
+            if (type->mutability == CM_HIR_DECL_IMMUTABLE)
+                saw_const_pointer = 1;
+            if (type->mutability == CM_HIR_DECL_MUTABLE)
+                saw_mut_pointer = 1;
+        } else if (type->kind
+                == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION) {
+            application_count += 1u;
+        }
+    }
+    assert(slice_count == 1u && pointer_count == 2u
+        && application_count == 2u && saw_const_pointer && saw_mut_pointer
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    for (index = 0u; index < metadata.associated_count; ++index) {
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "outcome")) outcome_wire = &metadata.associated_items[index];
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "raw_mut")) raw_mut_wire = &metadata.associated_items[index];
+    }
+    assert(outcome_wire != NULL && raw_mut_wire != NULL
+        && outcome_wire->parameter_count == 2u
+        && metadata.types[outcome_wire->parameter_types[1] - 1u].kind
+            == CM_HIR_DECL_TYPE_RAW_POINTER
+        && metadata.types[outcome_wire->parameter_types[1] - 1u].mutability
+            == CM_HIR_DECL_IMMUTABLE
+        && metadata.types[raw_mut_wire->return_type - 1u].kind
+            == CM_HIR_DECL_TYPE_RAW_POINTER
+        && metadata.types[raw_mut_wire->return_type - 1u].mutability
+            == CM_HIR_DECL_MUTABLE
+        && metadata.types[outcome_wire->return_type - 1u].kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && metadata.types[outcome_wire->return_type - 1u].argument_count
+            == 2u);
+    {
+        const CmHirDeclarationType *outer =
+            &metadata.types[outcome_wire->return_type - 1u];
+        const CmHirDeclarationType *wrap =
+            &metadata.types[outer->argument_types[0] - 1u];
+        const CmHirDeclarationType *error =
+            &metadata.types[outer->argument_types[1] - 1u];
+        const CmHirDeclarationType *slice_type;
+        const CmHirDeclarationType *const_type =
+            &metadata.types[outcome_wire->parameter_types[1] - 1u];
+        const CmHirDeclarationType *mut_type =
+            &metadata.types[raw_mut_wire->return_type - 1u];
+        assert(wrap->kind == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+            && wrap->argument_count == 1u
+            && error->kind == CM_HIR_DECL_TYPE_NAMED_ADT
+            && wrap->argument_types[0] < outer->argument_types[0]
+            && outer->argument_types[0] < outcome_wire->return_type
+            && outer->argument_types[1] < outcome_wire->return_type);
+        slice_type = &metadata.types[wrap->argument_types[0] - 1u];
+        assert(slice_type->kind == CM_HIR_DECL_TYPE_SLICE
+            && slice_type->child_type < wrap->argument_types[0]
+            && const_type->child_type == slice_type->child_type
+            && mut_type->child_type == slice_type->child_type
+            && metadata.types[slice_type->child_type - 1u].kind
+                == CM_HIR_DECL_TYPE_PRIMITIVE
+            && metadata.types[slice_type->child_type - 1u].primitive
+                == CM_HIR_DECL_PRIMITIVE_U8
+            && declaration_string_is(metadata.items[outer->item_local - 1u]
+                    .name, "Outcome")
+            && declaration_string_is(metadata.items[wrap->item_local - 1u]
+                    .name, "Wrap")
+            && declaration_string_is(metadata.items[error->item_local - 1u]
+                    .name, "Error"));
+    }
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.associated_count == 2u);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+
+    saved_associated = metadata.associated_items;
+    saved_types = metadata.types;
+    saved_namespace = metadata.namespace_entries;
+    outcome_method = (CmHirItem *)find_item(&first, "outcome",
+        &outcome_method_id);
+    raw_mut_method = (CmHirItem *)find_item(&first, "raw_mut",
+        &raw_mut_method_id);
+    outcome_item = (CmHirItem *)find_item(&first, "Outcome",
+        &outcome_item_id);
+    shadow_module = find_module(&first, "shadow");
+    for (index = 0u; index < first.hir.items.len; ++index) {
+        CmHirItem *candidate = (CmHirItem *)cm_vec_at(&first.hir.items,
+            index);
+        const CmInternedString *name = candidate == NULL ? NULL
+            : cm_interner_get(&first.hir.strings, candidate->name);
+        if (candidate != NULL && shadow_module != NULL
+            && cm_hir_get_module(&first.hir, candidate->owner_module)
+                == shadow_module
+            && name != NULL && name->len == 7u
+            && memcmp(name->bytes, "Outcome", 7u) == 0)
+            shadow_outcome = candidate;
+    }
+    assert(outcome_method != NULL && raw_mut_method != NULL
+        && outcome_item != NULL && shadow_outcome != NULL
+        && outcome_method->data.function_item.signature.parameter_count == 2u
+        && outcome_item->data.enum_item.variant_count == 2u);
+    outer_application = (CmHirType *)cm_hir_get_type(&first.hir,
+        outcome_method->data.function_item.signature.return_type);
+    const_pointer = (CmHirType *)cm_hir_get_type(&first.hir,
+        outcome_method->data.function_item.signature.parameters[1].type);
+    mut_pointer = (CmHirType *)cm_hir_get_type(&first.hir,
+        raw_mut_method->data.function_item.signature.return_type);
+    assert(outer_application != NULL
+        && outer_application->kind == CM_HIR_TYPE_ADT_KIND
+        && outer_application->data.named_type.argument_count == 2u
+        && const_pointer != NULL
+        && const_pointer->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+        && mut_pointer != NULL
+        && mut_pointer->kind == CM_HIR_TYPE_RAW_POINTER_KIND);
+    wrap_application = (CmHirType *)cm_hir_get_type(&first.hir,
+        outer_application->data.named_type.arguments[0].data.type);
+    assert(wrap_application != NULL
+        && wrap_application->kind == CM_HIR_TYPE_ADT_KIND
+        && wrap_application->data.named_type.argument_count == 1u);
+    slice = (CmHirType *)cm_hir_get_type(&first.hir,
+        wrap_application->data.named_type.arguments[0].data.type);
+    assert(slice != NULL && slice->kind == CM_HIR_TYPE_SLICE_KIND);
+    input = capture_input(&first);
+#define ASSERT_COMPOSITE_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.associated_items == saved_associated \
+        && metadata.types == saved_types \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_definition = outer_application->data.named_type.definition;
+    outer_application->data.named_type.definition =
+        wrap_application->data.named_type.definition;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    outer_application->data.named_type.definition = saved_definition;
+
+    outer_application->data.named_type.definition =
+        shadow_outcome->definition;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    outer_application->data.named_type.definition = saved_definition;
+
+    saved_argument_count = outer_application->data.named_type.argument_count;
+    outer_application->data.named_type.argument_count = 1u;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    outer_application->data.named_type.argument_count = saved_argument_count;
+
+    saved_type_id = slice->data.slice_type.element;
+    slice->data.slice_type.element =
+        outer_application->data.named_type.arguments[1].data.type;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    slice->data.slice_type.element = saved_type_id;
+
+    saved_mutability = const_pointer->data.raw_pointer_type.mutability;
+    const_pointer->data.raw_pointer_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    const_pointer->data.raw_pointer_type.mutability = saved_mutability;
+
+    saved_mutability = mut_pointer->data.raw_pointer_type.mutability;
+    mut_pointer->data.raw_pointer_type.mutability = CM_HIR_IMMUTABLE;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    mut_pointer->data.raw_pointer_type.mutability = saved_mutability;
+
+    saved_type_id = wrap_application->data.named_type.arguments[0].data.type;
+    wrap_application->data.named_type.arguments[0].data.type =
+        outcome_item->data.enum_item.variants[0].fields[0].type;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    wrap_application->data.named_type.arguments[0].data.type = saved_type_id;
+
+    saved_span_start = outer_application->span.start;
+    outer_application->span.start += 1u;
+    ASSERT_COMPOSITE_ATOMIC_FAILURE();
+    outer_application->span.start = saved_span_start;
+
+    saved_argument_count = outer_application->data.named_type.argument_count;
+    outer_application->data.named_type.argument_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + UINT32_C(1);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && metadata.associated_items == saved_associated
+        && metadata.types == saved_types
+        && metadata.namespace_entries == saved_namespace);
+    outer_application->data.named_type.argument_count = saved_argument_count;
+#undef ASSERT_COMPOSITE_ATOMIC_FAILURE
+
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_reachable_canonical_type_caps(void)
+{
+    CaptureFixture private_fixture;
+    CaptureFixture repeated_fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmHirType *type;
+    uint32_t saved_count;
+    CmModuleId root_module;
+    CmResolveEffectiveItem effective;
+    const CmAst *borrowed_ast;
+    CmAstItem *ast_item;
+    CmAstType *ast_array;
+    CmAstType *ast_outer;
+    const CmAstType *ast_inner;
+    CmAstTypeId ast_inner_id;
+    CmAstTypeId ast_primitive_id;
+    CmAstTypeId *saved_ast_elements;
+    CmAstTypeId *ast_elements;
+    CmHirType *hir_array;
+    CmHirType *hir_outer;
+    const CmHirType *hir_inner;
+    CmHirTypeId hir_outer_id;
+    CmHirTypeId hir_inner_id;
+    CmHirTypeId hir_primitive_id;
+    CmHirType duplicate_template;
+    CmHirTypeId *saved_hir_elements;
+    CmHirTypeId *hir_elements;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    size_t duplicate_count =
+        CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES / 2u + 1u;
+    size_t index;
+    size_t tuple_count;
+    size_t slice_count;
+    size_t raw_pointer_count;
+    size_t reference_count;
+
+    fixture_init_source(&private_fixture, 0, "unreachable-private.rs",
+        unreachable_private_type_fixture_source,
+        sizeof(unreachable_private_type_fixture_source) - 1u);
+    item = (CmHirItem *)find_item(&private_fixture, "hidden", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+        && item->data.function_item.signature.parameter_count == 1u);
+    type = (CmHirType *)cm_hir_get_type(&private_fixture.hir,
+        item->data.function_item.signature.parameters[0].type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_TUPLE_KIND
+        && type->data.tuple_type.element_count == 2u);
+    saved_count = type->data.tuple_type.element_count;
+    type->data.tuple_type.element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES + UINT32_C(1);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&private_fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    type->data.tuple_type.element_count = saved_count;
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&private_fixture);
+
+    fixture_init_source(&repeated_fixture, 0, "repeated-composites.rs",
+        repeated_composite_fixture_source,
+        sizeof(repeated_composite_fixture_source) - 1u);
+    item = (CmHirItem *)find_item(&repeated_fixture, "MANY", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_STATIC);
+    hir_array = (CmHirType *)cm_hir_get_type(&repeated_fixture.hir,
+        item->data.value_item.type);
+    assert(hir_array != NULL && hir_array->kind == CM_HIR_TYPE_ARRAY_KIND);
+    hir_outer_id = hir_array->data.array_type.element;
+    hir_outer = (CmHirType *)cm_hir_get_type(&repeated_fixture.hir,
+        hir_outer_id);
+    assert(hir_outer != NULL && hir_outer->kind == CM_HIR_TYPE_TUPLE_KIND
+        && hir_outer->data.tuple_type.element_count == 2u);
+    hir_inner_id = hir_outer->data.tuple_type.elements[0];
+    hir_inner = cm_hir_get_type(&repeated_fixture.hir, hir_inner_id);
+    assert(hir_inner != NULL && hir_inner->kind == CM_HIR_TYPE_TUPLE_KIND
+        && hir_inner->data.tuple_type.element_count == 1u);
+    hir_primitive_id = hir_inner->data.tuple_type.elements[0];
+    duplicate_template = *hir_inner;
+    assert(cm_module_graph_get_root(&repeated_fixture.graph, &root_module)
+        && cm_module_graph_get_effective_item(&repeated_fixture.graph,
+            repeated_fixture.graph_result.revision, root_module, 0u,
+            &effective) == CM_RESOLVE_VIEW_OK
+        && cm_module_graph_borrow_ast(&repeated_fixture.graph, root_module,
+            &borrowed_ast));
+    ast_item = (CmAstItem *)(void *)cm_ast_get_item(borrowed_ast,
+        effective.declaration.item);
+    assert(ast_item != NULL && ast_item->kind == CM_AST_ITEM_STATIC);
+    ast_array = (CmAstType *)(void *)cm_ast_get_type(borrowed_ast,
+        ast_item->data.value_item.type);
+    assert(ast_array != NULL && ast_array->kind == CM_AST_TYPE_ARRAY);
+    ast_outer = (CmAstType *)(void *)cm_ast_get_type(borrowed_ast,
+        ast_array->child);
+    assert(ast_outer != NULL && ast_outer->kind == CM_AST_TYPE_TUPLE
+        && ast_outer->element_count == 2u);
+    ast_inner_id = ast_outer->elements[0];
+    ast_inner = cm_ast_get_type(borrowed_ast, ast_inner_id);
+    assert(ast_inner != NULL && ast_inner->kind == CM_AST_TYPE_TUPLE
+        && ast_inner->element_count == 1u);
+    ast_primitive_id = ast_inner->elements[0];
+
+    hir_elements = (CmHirTypeId *)cm_alloc_zeroed(duplicate_count,
+        sizeof(*hir_elements));
+    ast_elements = (CmAstTypeId *)cm_alloc_zeroed(duplicate_count,
+        sizeof(*ast_elements));
+    for (index = 0u; index < duplicate_count; ++index) {
+        assert(cm_hir_add_type(&repeated_fixture.hir, &duplicate_template,
+                &hir_elements[index]) == CM_HIR_OK);
+        ast_elements[index] = ast_inner_id;
+    }
+    hir_outer = (CmHirType *)cm_hir_get_type(&repeated_fixture.hir,
+        hir_outer_id);
+    saved_hir_elements = hir_outer->data.tuple_type.elements;
+    saved_ast_elements = ast_outer->elements;
+    saved_count = hir_outer->data.tuple_type.element_count;
+    hir_outer->data.tuple_type.elements = hir_elements;
+    hir_outer->data.tuple_type.element_count = (uint32_t)duplicate_count;
+    ast_outer->elements = ast_elements;
+    ast_outer->element_count = (uint32_t)duplicate_count;
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&repeated_fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    tuple_count = 0u;
+    for (index = 0u; index < metadata.type_count; ++index)
+        if (metadata.types[index].kind == CM_HIR_DECL_TYPE_TUPLE)
+            tuple_count += 1u;
+    assert(tuple_count == 2u
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    saved_types = metadata.types;
+    saved_values = metadata.values;
+
+    hir_outer->data.tuple_type.elements = saved_hir_elements;
+    hir_outer->data.tuple_type.element_count = saved_count;
+    ast_outer->elements = saved_ast_elements;
+    ast_outer->element_count = saved_count;
+    cm_free(hir_elements);
+    cm_free(ast_elements);
+
+    hir_elements = (CmHirTypeId *)cm_alloc_zeroed(
+        CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES, sizeof(*hir_elements));
+    ast_elements = (CmAstTypeId *)cm_alloc_zeroed(
+        CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES, sizeof(*ast_elements));
+    for (index = 0u; index < CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES; ++index) {
+        hir_elements[index] = hir_primitive_id;
+        ast_elements[index] = ast_primitive_id;
+    }
+    hir_outer->data.tuple_type.elements = hir_elements;
+    hir_outer->data.tuple_type.element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES - UINT32_C(2);
+    ast_outer->elements = ast_elements;
+    ast_outer->element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES - UINT32_C(2);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    slice_count = 0u;
+    raw_pointer_count = 0u;
+    reference_count = 0u;
+    for (index = 0u; index < metadata.type_count; ++index) {
+        if (metadata.types[index].kind == CM_HIR_DECL_TYPE_SLICE)
+            slice_count += 1u;
+        else if (metadata.types[index].kind == CM_HIR_DECL_TYPE_RAW_POINTER)
+            raw_pointer_count += 1u;
+        else if (metadata.types[index].kind == CM_HIR_DECL_TYPE_REFERENCE)
+            reference_count += 1u;
+    }
+    assert(slice_count == 1u && raw_pointer_count == 2u
+        && reference_count == 1u
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    saved_types = metadata.types;
+    saved_values = metadata.values;
+    saved_associated = metadata.associated_items;
+    hir_outer->data.tuple_type.element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES - UINT32_C(1);
+    ast_outer->element_count =
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES - UINT32_C(1);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_TYPE_METADATA
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_TYPE_METADATA_INVALID
+        && metadata.types == saved_types && metadata.values == saved_values
+        && metadata.associated_items == saved_associated);
+    hir_outer->data.tuple_type.elements = saved_hir_elements;
+    hir_outer->data.tuple_type.element_count = saved_count;
+    ast_outer->elements = saved_ast_elements;
+    ast_outer->element_count = saved_count;
+    cm_free(hir_elements);
+    cm_free(ast_elements);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&repeated_fixture);
+}
+
 int main(void)
 {
     test_primitive_reexports_and_determinism();
     test_primitive_reexport_hostile_mutations_are_atomic();
     test_allocator_like_associated_method_capture();
+    test_associated_composite_type_capture();
+    test_reachable_canonical_type_caps();
     test_generic_enum_projection_glob_and_field_boundary();
     test_generic_enum_hostile_mutations_are_atomic();
     test_static_capture_and_determinism();

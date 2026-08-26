@@ -216,11 +216,16 @@ typedef struct CmHirDeclarationCaptureResult {
  * with exact graph/HIR provenance. Marker traits retain their existing safe
  * zero-member profile. The first member-bearing profile retains UNSAFE trait
  * safety and source-ordered private methods with shared `&self`
- * receivers, exact Rust ABI, zero method generics, primitive/`Self`/erased
- * shared-reference signature types, optional default bodies, and optional
- * required `Self: Marker` predicates. Auto/const traits, supertraits, other
- * associated-item kinds, receiver/type forms, and incomplete child/library
- * identities fail closed.
+ * receivers, exact Rust ABI, zero method generics, and source-authenticated
+ * signature types. The bounded composite signature profile includes captured
+ * generic STRUCT/UNION/ENUM applications with exact arity, slices, and raw
+ * pointers of either mutability; their children share the canonical type DAG.
+ * Erased shared references remain supported, while inferred reference regions
+ * are not normalized and fail closed. Methods may have optional default bodies
+ * and optional required `Self: Marker` predicates. Auto/const traits,
+ * supertraits, other associated-item kinds, unsupported receiver/type forms,
+ * cross-owner generic leaves, and incomplete child/library identities fail
+ * closed.
  *
  * A supported free const is public, top-level, immutable, explicitly typed by
  * a v3.0-representable primitive, zero-generic/predicate, and has one
