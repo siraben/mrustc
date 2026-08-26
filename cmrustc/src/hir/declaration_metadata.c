@@ -692,22 +692,38 @@ static int cm_decl_validate_values(const CmHirDeclarationMetadata *metadata)
         if (value->owner_module == 0u
             || (size_t)value->owner_module > metadata->module_count
             || !cm_decl_identifier(value->name)
-            || value->generic_count == 0u
-            || value->predicate_count == 0u
             || !cm_decl_range(value->predicate_start,
                 value->predicate_count, metadata->predicate_count)
-            || value->parameter_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
-            || !cm_size_add(total_parameters, value->parameter_count,
-                &total_parameters)
-            || total_parameters > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
-            || ((value->parameter_count == 0u)
-                != (value->parameter_types == NULL))
-            || !cm_decl_type_local(metadata, value->return_type)
             || value->has_body > 1u) return 0;
-        for (child = 0u; child < value->parameter_count; ++child) {
-            if (!cm_decl_type_local(metadata,
-                    value->parameter_types[child])) return 0;
+        if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            if (value->generic_count == 0u
+                || value->predicate_count == 0u
+                || value->parameter_count
+                    > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_size_add(total_parameters, value->parameter_count,
+                    &total_parameters)
+                || total_parameters > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || ((value->parameter_count == 0u)
+                    != (value->parameter_types == NULL))
+                || !cm_decl_type_local(metadata, value->return_type)
+                || value->declared_type != 0u
+                || value->mutability != 0u) return 0;
+            for (child = 0u; child < value->parameter_count; ++child) {
+                if (!cm_decl_type_local(metadata,
+                        value->parameter_types[child])) return 0;
+            }
+        } else if (value->kind == CM_HIR_DECL_VALUE_CONST) {
+            if (value->generic_start != 0u || value->generic_count != 0u
+                || value->predicate_start != 0u
+                || value->predicate_count != 0u
+                || value->parameter_count != 0u
+                || value->parameter_types != NULL
+                || value->return_type != 0u
+                || !cm_decl_type_local(metadata, value->declared_type)
+                || value->mutability != CM_HIR_DECL_IMMUTABLE
+                || value->has_body != 1u) return 0;
+        } else {
+            return 0;
         }
         if (index != 0u) {
             const CmHirDeclarationValue *prior;
@@ -811,9 +827,13 @@ static int cm_decl_validate_type_reachability(
         const CmHirDeclarationValue *value;
         uint32_t child;
         value = &metadata->values[index];
-        seen[value->return_type - 1u] = 1u;
-        for (child = 0u; child < value->parameter_count; ++child)
-            seen[value->parameter_types[child] - 1u] = 1u;
+        if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            seen[value->return_type - 1u] = 1u;
+            for (child = 0u; child < value->parameter_count; ++child)
+                seen[value->parameter_types[child] - 1u] = 1u;
+        } else {
+            seen[value->declared_type - 1u] = 1u;
+        }
     }
     for (index = 0u; index < metadata->predicate_count; ++index) {
         const CmHirDeclarationPredicate *predicate;
@@ -903,11 +923,17 @@ static int cm_decl_validate_value_type_scopes(
         const CmHirDeclarationValue *value = &metadata->values[index];
         uint32_t owner = (uint32_t)(index + 1u);
         uint32_t child;
-        uint32_t scope = scopes[value->return_type - 1u];
-        if (scope != 0u && scope != owner) valid = 0;
-        for (child = 0u; child < value->parameter_count && valid; ++child) {
-            scope = scopes[value->parameter_types[child] - 1u];
+        uint32_t scope;
+        if (value->kind == CM_HIR_DECL_VALUE_CONST) {
+            if (scopes[value->declared_type - 1u] != 0u) valid = 0;
+        } else {
+            scope = scopes[value->return_type - 1u];
             if (scope != 0u && scope != owner) valid = 0;
+            for (child = 0u; child < value->parameter_count && valid;
+                    ++child) {
+                scope = scopes[value->parameter_types[child] - 1u];
+                if (scope != 0u && scope != owner) valid = 0;
+            }
         }
     }
     for (index = 0u; index < metadata->predicate_count && valid; ++index) {
@@ -1091,9 +1117,9 @@ static int cm_decl_validate_namespace(
     for (index = 0u; index < metadata->value_count; ++index) {
         const CmHirDeclarationValue *value;
         size_t entry_index;
-        int found;
+        size_t defining_count;
         value = &metadata->values[index];
-        found = 0;
+        defining_count = 0u;
         for (entry_index = 0u; entry_index < metadata->namespace_count;
                 ++entry_index) {
             const CmHirDeclarationNamespaceEntry *entry;
@@ -1102,11 +1128,12 @@ static int cm_decl_validate_namespace(
                 && entry->namespace_kind == CM_HIR_DECL_NAMESPACE_VALUE
                 && entry->target_kind == CM_HIR_DECL_TARGET_VALUE
                 && entry->target_local == (uint32_t)(index + 1u)
+                && entry->export_ordinal == value->source_ordinal
                 && cm_decl_string_equal(entry->name, value->name)) {
-                found = 1;
+                defining_count += 1u;
             }
         }
-        if (!found) return 0;
+        if (defining_count != 1u) return 0;
     }
     return 1;
 }
@@ -1409,7 +1436,7 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         const CmHirDeclarationValue *value;
         uint32_t child;
         value = &metadata->values[index];
-        cm_hir_metadata_write_u8(&writer, UINT8_C(1));
+        cm_hir_metadata_write_u8(&writer, value->kind);
         cm_hir_metadata_write_u8(&writer, UINT8_C(0));
         cm_hir_metadata_write_u16(&writer, UINT16_C(0));
         cm_hir_metadata_write_u32(&writer, value->owner_module);
@@ -1424,18 +1451,25 @@ static CmHirDeclarationMetadataStatus cm_decl_build_sections(
         cm_hir_metadata_write_u32(&writer, value->predicate_count);
         cm_hir_metadata_write_u32(&writer, UINT32_C(0));
         cm_hir_metadata_write_u32(&writer, UINT32_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u32(&writer, value->parameter_count);
-        for (child = 0u; child < value->parameter_count; ++child)
-            cm_hir_metadata_write_u32(&writer,
-                value->parameter_types[child]);
-        cm_hir_metadata_write_u32(&writer, value->return_type);
-        cm_hir_metadata_write_u8(&writer, value->has_body);
-        cm_hir_metadata_write_u8(&writer, UINT8_C(0));
-        cm_hir_metadata_write_u16(&writer, UINT16_C(0));
+        if (value->kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u32(&writer, value->parameter_count);
+            for (child = 0u; child < value->parameter_count; ++child)
+                cm_hir_metadata_write_u32(&writer,
+                    value->parameter_types[child]);
+            cm_hir_metadata_write_u32(&writer, value->return_type);
+            cm_hir_metadata_write_u8(&writer, value->has_body);
+            cm_hir_metadata_write_u8(&writer, UINT8_C(0));
+            cm_hir_metadata_write_u16(&writer, UINT16_C(0));
+        } else {
+            cm_hir_metadata_write_u32(&writer, value->declared_type);
+            cm_hir_metadata_write_u8(&writer, value->mutability);
+            cm_hir_metadata_write_u8(&writer, value->has_body);
+            cm_hir_metadata_write_u16(&writer, UINT16_C(0));
+        }
     }
 
     cm_hir_metadata_writer_init(&writer, &sections[9],
@@ -2081,8 +2115,11 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
     for (index = 0u; index < metadata->value_count; ++index) {
         CmHirDeclarationValue *value;
         uint32_t child;
+        uint8_t kind;
         value = &metadata->values[index];
-        if (!cm_decl_read_u8(&reader, UINT8_C(1))
+        if (cm_hir_metadata_read_u8(&reader, &kind) != CM_HIR_METADATA_OK
+            || (kind != CM_HIR_DECL_VALUE_FUNCTION
+                && kind != CM_HIR_DECL_VALUE_CONST)
             || !cm_decl_read_u8(&reader, UINT8_C(0))
             || !cm_decl_read_u16(&reader, UINT16_C(0))
             || cm_hir_metadata_read_u32(&reader, &value->owner_module)
@@ -2102,33 +2139,46 @@ static int cm_decl_parse_values(const CmHirMetadataSection *section,
             || cm_hir_metadata_read_u32(&reader, &value->predicate_count)
                 != CM_HIR_METADATA_OK
             || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u32(&reader, UINT32_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || cm_hir_metadata_read_u32(&reader, &value->parameter_count)
-                != CM_HIR_METADATA_OK
-            || value->parameter_count
-                > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
-            || !cm_size_add(total_parameters, value->parameter_count,
-                &total_parameters)
-            || total_parameters > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES)
-            return 0;
-        value->parameter_types = value->parameter_count == 0u ? NULL
-            : (uint32_t *)cm_alloc((size_t)value->parameter_count
-                * sizeof(uint32_t));
-        for (child = 0u; child < value->parameter_count; ++child) {
-            if (cm_hir_metadata_read_u32(&reader,
-                    &value->parameter_types[child]) != CM_HIR_METADATA_OK)
+            || !cm_decl_read_u32(&reader, UINT32_C(0))) return 0;
+        value->kind = kind;
+        if (kind == CM_HIR_DECL_VALUE_FUNCTION) {
+            if (!cm_decl_read_u8(&reader, UINT8_C(0))
+                || !cm_decl_read_u8(&reader, UINT8_C(0))
+                || !cm_decl_read_u8(&reader, UINT8_C(0))
+                || !cm_decl_read_u8(&reader, UINT8_C(0))
+                || cm_hir_metadata_read_u32(&reader,
+                    &value->parameter_count) != CM_HIR_METADATA_OK
+                || value->parameter_count
+                    > (uint32_t)CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+                || !cm_size_add(total_parameters, value->parameter_count,
+                    &total_parameters)
+                || total_parameters
+                    > CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES) return 0;
+            value->parameter_types = value->parameter_count == 0u ? NULL
+                : (uint32_t *)cm_alloc((size_t)value->parameter_count
+                    * sizeof(uint32_t));
+            for (child = 0u; child < value->parameter_count; ++child) {
+                if (cm_hir_metadata_read_u32(&reader,
+                        &value->parameter_types[child])
+                        != CM_HIR_METADATA_OK) return 0;
+            }
+            if (cm_hir_metadata_read_u32(&reader, &value->return_type)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u8(&reader, &value->has_body)
+                    != CM_HIR_METADATA_OK
+                || !cm_decl_read_u8(&reader, UINT8_C(0))
+                || !cm_decl_read_u16(&reader, UINT16_C(0))) return 0;
+        } else {
+            if (cm_hir_metadata_read_u32(&reader, &value->declared_type)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u8(&reader, &value->mutability)
+                    != CM_HIR_METADATA_OK
+                || cm_hir_metadata_read_u8(&reader, &value->has_body)
+                    != CM_HIR_METADATA_OK
+                || !cm_decl_read_u16(&reader, UINT16_C(0))) {
                 return 0;
+            }
         }
-        if (cm_hir_metadata_read_u32(&reader, &value->return_type)
-                != CM_HIR_METADATA_OK
-            || cm_hir_metadata_read_u8(&reader, &value->has_body)
-                != CM_HIR_METADATA_OK
-            || !cm_decl_read_u8(&reader, UINT8_C(0))
-            || !cm_decl_read_u16(&reader, UINT16_C(0))) return 0;
     }
     return cm_decl_reader_done(&reader);
 }

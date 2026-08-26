@@ -216,7 +216,13 @@ typedef struct CmHirDeclarationType {
     uint32_t *argument_types;
 } CmHirDeclarationType;
 
+typedef enum CmHirDeclarationValueKind {
+    CM_HIR_DECL_VALUE_FUNCTION = 1,
+    CM_HIR_DECL_VALUE_CONST = 2
+} CmHirDeclarationValueKind;
+
 typedef struct CmHirDeclarationValue {
+    uint8_t kind;
     uint32_t owner_module;
     CmHirDeclarationString name;
     uint32_t source_ordinal;
@@ -228,6 +234,10 @@ typedef struct CmHirDeclarationValue {
     uint32_t *parameter_types;
     /* UNIT is a real nonzero TYPE local; local zero is never a return type. */
     uint32_t return_type;
+    /* Required only for CONST; functions require this to remain zero. */
+    uint32_t declared_type;
+    /* Required only for CONST, which must be immutable in this slice. */
+    uint8_t mutability;
     uint8_t has_body;
 } CmHirDeclarationValue;
 
