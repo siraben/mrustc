@@ -164,7 +164,14 @@ item `10800`) fails at `stage=items` with `reason=item-shape-unsupported`.
 Its exact declaration requires a retained crate-visible field containing
 `[*const (); 16 / size_of::<*const ()>()]`; the active work must preserve
 crate visibility and bind the evaluated array length to the configured target
-pointer width rather than the bootstrap host width.
+pointer width rather than the bootstrap host width.  Commits `2b19ef47` and
+`592d17a1` encode that visibility and implement target-aware lowering,
+capture, and materialization.  The clean pinned-core probe at `592d17a1`
+again reports zero graph/import/HIR errors, 38,176 HIR items, and the exact
+451-module/1,658-type/20,747-value library census.  It advances the measured
+v3.0 frontier to `core/src/any.rs:856`: `type_name` (`def=1:18898`, source
+item `99:42`, rejected item `10801`) fails at `stage=items` with
+`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

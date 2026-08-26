@@ -268,6 +268,12 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   array of immutable unit raw pointers whose length is the target-dependent
   result of `16 / size_of::<*const ()>()`; the next slice must carry exact
   crate visibility and configured-target evaluation, not host `sizeof`.
+  Commits `2b19ef47` and `592d17a1` complete that descriptor and the
+  target-aware producer/consumer path.  The clean probe at `592d17a1`
+  preserves the exact zero-error graph/HIR and 451/1,658/20,747 library
+  census, then measures `core/src/any.rs:856`'s public `type_name` function
+  (`def=1:18898`, source item `99:42`, rejected item `10801`) at
+  `stage=items`/`item-source-invalid`.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

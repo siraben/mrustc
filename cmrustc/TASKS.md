@@ -2088,6 +2088,12 @@ crate-visible `data` field of type
 `[*const (); 16 / size_of::<*const ()>()]`: field visibility must not collapse
 to private, and the evaluated array length must derive from the configured
 target pointer width rather than `sizeof(void *)` on the bootstrap host.
+Commits `2b19ef47` and `592d17a1` preserve that exact declaration with
+explicit 32/64-bit target authority.  Their clean pinned-core probe keeps the
+zero-error graph/HIR and exact 451/1,658/20,747 library census, then advances
+to `core/src/any.rs:856`: `type_name` (`def=1:18898`, source item `99:42`,
+rejected item `10801`) fails at `stage=items` with
+`reason=item-source-invalid` as a public VALUE/FUNCTION declaration.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
