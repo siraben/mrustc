@@ -2055,7 +2055,15 @@ signature type: source-ordinal-6 `by_ref` carries `#[inline(always)]`, which is
 not yet classified by the associated-function projection and therefore fails
 before its now-representable signature is emitted.  The active step is an
 exact, byte-neutral inline-hint projection with provenance and malformed/
-duplicate negatives.  Commit `e79c819e` also replaces the capture TYPE
+duplicate negatives.  Commit `5b5509f6` closes that associated-only projection.
+Its clean whole-core probe advances to `core::alloc::Layout` at
+`alloc/layout.rs:40` (`def=1:26881`, source item `252:4`, rejected item
+`11511`) with `stage=items`/`item-shape-unsupported`.  The active closure is
+`Layout -> Alignment -> private AlignmentEnum -> usize`: a private-field named
+struct, transparent tuple struct, and transitively reachable private repr(u64)
+unit enum with explicit ISIZE-carried discriminants.  It must not publish the
+private enum as a namespace binding or replace it with an opaque nominal.
+Commit `e79c819e` also replaces the capture TYPE
 canonicalizer's repeated scans with a memoized, stable `O(E log E)` pipeline
 and an authenticated multi-crate trait DefId index; this resource hardening
 does not itself change the whole-core semantic frontier.

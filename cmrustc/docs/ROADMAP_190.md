@@ -240,7 +240,14 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   associated-member attribute classifier rejects the inline hint before
   `by_ref`'s otherwise representable signature is emitted.  The immediate
   work is therefore a closed, byte-neutral associated-function inline
-  projection; aggregate/layout dependencies remain later.  Commit `e79c819e`
+  projection.  Commit `5b5509f6` implements that exact associated-only
+  projection; the following clean probe advances to `core::alloc::Layout` at
+  `alloc/layout.rs:40` (`def=1:26881`, source item `252:4`, rejected item
+  `11511`) with `stage=items`/`item-shape-unsupported`.  The active measured
+  dependency is now `Layout -> Alignment -> private AlignmentEnum -> usize`,
+  requiring tuple aggregates, wider explicit integer enum reprs, and
+  authenticated transitively reachable private ITEMs without public namespace
+  entries.  Commit `e79c819e`
   separately replaces repeated TYPE-arena rescans with memoized depth
   traversal, exact-key stable sorting, adjacent deduplication, and a
   multi-crate DefId index, satisfying the hostile resource bound without a

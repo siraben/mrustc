@@ -136,10 +136,17 @@ measuring Allocator at the same parent item/reason.  The residual source fact
 is now `Allocator::by_ref`'s `#[inline(always)]`: associated children are
 walked in source order, the prior six signatures pass, and the unclassified
 inline hint bubbles up as trait-level `item-source-invalid`.  This is a
-byte-neutral capture projection gate; the full nominal/layout closure still
-follows.  Commit `e79c819e` independently makes reachable declaration TYPE
-canonicalization bounded and deterministic in multi-crate hostile inputs; it
-does not broaden the semantic frontier.
+byte-neutral capture projection gate.  Commit `5b5509f6` closes it for the
+exact `inline`, `inline(always)`, and `inline(never)` forms on associated
+functions only.  Its clean pinned-core probe advances to
+`core/src/alloc/layout.rs:40`: `Layout` (`def=1:26881`, source item `252:4`,
+rejected item `11511`) fails with `stage=items` and
+`reason=item-shape-unsupported`.  The measured structural closure is the
+public private-field `Layout` struct, transparent tuple `Alignment`, and its
+private cfg-selected repr(u64) `AlignmentEnum`; no declaration metadata or
+object artifact succeeds yet.  Commit `e79c819e` independently makes reachable
+declaration TYPE canonicalization bounded and deterministic in multi-crate
+hostile inputs; it does not broaden the semantic frontier.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
