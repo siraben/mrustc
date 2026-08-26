@@ -122,7 +122,13 @@ typedef enum CmHirLibraryBindingKind {
     CM_HIR_LIBRARY_BINDING_MODULE,
     CM_HIR_LIBRARY_BINDING_TRAIT,
     CM_HIR_LIBRARY_BINDING_PRIMITIVE,
-    CM_HIR_LIBRARY_BINDING_VALUE
+    CM_HIR_LIBRARY_BINDING_VALUE,
+    /*
+     * Value-namespace constructor of a unit or tuple struct.  This is not a
+     * free function declaration: `definition` is the struct's DefId and the
+     * same public name must also bind that DefId as an ADT in TYPE namespace.
+     */
+    CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
 } CmHirLibraryBindingKind;
 
 typedef struct CmHirLibraryBinding {
@@ -172,9 +178,10 @@ CmHirLibraryArtifactResult cm_hir_library_artifact_build(
 /*
  * Builds the declaration-v2 library view. In addition to the legacy type
  * namespace, it authenticates predicate-free public free functions, consts,
- * and statics plus same-crate value reexports. Bodies, evaluated consts,
- * external reexports, globs, macros, predicates, and link objects are not
- * represented.
+ * and statics, unit/tuple struct constructors, plus same-crate value
+ * reexports. Constructors retain the struct DefId and are never represented
+ * as free functions. Bodies, evaluated consts, external reexports, globs,
+ * macros, predicates, and link objects are not represented.
  */
 CmHirLibraryArtifactResult cm_hir_library_declaration_artifact_build(
     CmHirLibraryArtifact *artifact, const CmHirContext *context,
@@ -203,6 +210,12 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
     const CmHirLibraryArtifact *artifact,
     const CmHirLibraryPathSegment *segments, size_t segment_count,
     CmHirLibraryValue *out_value);
+
+/* Resolves any exact public value-namespace binding, including constructors. */
+CmHirLibraryStatus cm_hir_library_artifact_lookup_value_binding(
+    const CmHirLibraryArtifact *artifact,
+    const CmHirLibraryPathSegment *segments, size_t segment_count,
+    CmHirLibraryBinding *out_binding);
 
 /*
  * Authenticates one unresolved, non-glob consumer type-namespace use-tree

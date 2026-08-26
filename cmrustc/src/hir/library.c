@@ -216,7 +216,9 @@ static int cm_hir_library_binding_shape_valid(
 {
     if (binding == NULL
         || (unsigned int)binding->kind
-            > (unsigned int)CM_HIR_LIBRARY_BINDING_VALUE) return 0;
+            > (unsigned int)CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+        return 0;
+    }
     if (binding->kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE) {
         return cm_hir_def_id_is_none(binding->definition)
             && binding->primitive_kind != CM_HIR_PRIMITIVE_NONE
@@ -230,6 +232,10 @@ static int cm_hir_library_binding_shape_valid(
         return binding->type_kind == CM_HIR_TYPE_ERROR_KIND
             && binding->value_kind >= CM_HIR_LIBRARY_VALUE_FUNCTION
             && binding->value_kind <= CM_HIR_LIBRARY_VALUE_STATIC;
+    }
+    if (binding->kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+        return binding->type_kind == CM_HIR_TYPE_ADT_KIND
+            && binding->value_kind == CM_HIR_LIBRARY_VALUE_NONE;
     }
     if (binding->value_kind != CM_HIR_LIBRARY_VALUE_NONE) return 0;
     if (binding->kind == CM_HIR_LIBRARY_BINDING_TYPE) {
@@ -914,6 +920,49 @@ static int cm_hir_library_item_binding_kind(CmHirItemKind item_kind,
     }
 }
 
+static int cm_hir_library_item_namespace_binding_kind(
+    const CmHirItem *item, int value_namespace,
+    CmHirLibraryBindingKind *out_binding_kind,
+    CmHirTypeKind *out_type_kind,
+    CmHirLibraryValueKind *out_value_kind)
+{
+    if (item == NULL || out_binding_kind == NULL || out_type_kind == NULL
+        || out_value_kind == NULL
+        || !cm_hir_library_item_binding_kind(item->kind, out_binding_kind,
+            out_type_kind, out_value_kind)) return 0;
+    if (!value_namespace)
+        return *out_binding_kind != CM_HIR_LIBRARY_BINDING_VALUE;
+    if (item->kind == CM_HIR_ITEM_STRUCT) {
+        if (item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED)
+            return 0;
+        *out_binding_kind = CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR;
+        *out_type_kind = CM_HIR_TYPE_ADT_KIND;
+        *out_value_kind = CM_HIR_LIBRARY_VALUE_NONE;
+        return 1;
+    }
+    return *out_binding_kind == CM_HIR_LIBRARY_BINDING_VALUE;
+}
+
+static int cm_hir_library_item_has_public_constructor(
+    const CmHirItem *item)
+{
+    uint32_t field_index;
+
+    if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT
+        || item->visibility.kind != CM_HIR_VIS_PUBLIC
+        || item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED) {
+        return 0;
+    }
+    for (field_index = 0u;
+            field_index < item->data.aggregate_item.field_count;
+            ++field_index) {
+        if (item->data.aggregate_item.fields == NULL
+            || item->data.aggregate_item.fields[field_index].visibility.kind
+                != CM_HIR_VIS_PUBLIC) return 0;
+    }
+    return 1;
+}
+
 static int cm_hir_library_ast_item_binding_kind(CmAstItemKind item_kind,
     CmHirItemKind *out_item_kind,
     CmHirLibraryBindingKind *out_binding_kind,
@@ -1023,6 +1072,8 @@ static int cm_hir_library_add_entry(CmHirLibraryArtifactState *state,
     CmHirLibraryOwnedEntry entry;
 
     if (module == NULL || name == CM_INTERN_ID_NONE
+        || (unsigned int)kind
+            > (unsigned int)CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
         || (kind == CM_HIR_LIBRARY_BINDING_PRIMITIVE
             ? (!cm_hir_def_id_is_none(target)
                 || primitive_kind == CM_HIR_PRIMITIVE_NONE
@@ -1034,7 +1085,9 @@ static int cm_hir_library_add_entry(CmHirLibraryArtifactState *state,
         || (kind == CM_HIR_LIBRARY_BINDING_VALUE
             ? (value_kind < CM_HIR_LIBRARY_VALUE_FUNCTION
                 || value_kind > CM_HIR_LIBRARY_VALUE_STATIC)
-            : value_kind != CM_HIR_LIBRARY_VALUE_NONE)) return 0;
+            : value_kind != CM_HIR_LIBRARY_VALUE_NONE)
+        || (kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
+            && type_kind != CM_HIR_TYPE_ADT_KIND)) return 0;
     for (index = 0u; index < module->entries.len; ++index) {
         const CmHirLibraryOwnedEntry *existing;
 
@@ -1058,7 +1111,8 @@ static int cm_hir_library_add_entry(CmHirLibraryArtifactState *state,
     entry.primitive_kind = primitive_kind;
     entry.value_kind = value_kind;
     (void)cm_vec_push(&module->entries, &entry);
-    if (kind == CM_HIR_LIBRARY_BINDING_VALUE)
+    if (kind == CM_HIR_LIBRARY_BINDING_VALUE
+        || kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR)
         state->public_value_entry_count += 1u;
     else if (kind != CM_HIR_LIBRARY_BINDING_MODULE)
         state->public_type_entry_count += 1u;
@@ -2518,6 +2572,10 @@ static int cm_hir_library_definition_valid(
         CmHirLibraryValueKind actual_value_kind;
 
         item = cm_hir_get_item(state->context, resolved->entity.item_id);
+        if (kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+            return type_kind == CM_HIR_TYPE_ADT_KIND && item != NULL
+                && cm_hir_library_item_has_public_constructor(item);
+        }
         return item != NULL
             && cm_hir_library_item_binding_kind(item->kind,
                 &actual_binding_kind, &actual_kind, &actual_value_kind)
@@ -2538,7 +2596,32 @@ static int cm_hir_library_entry_is_value_namespace(
     const CmHirLibraryOwnedEntry *entry)
 {
     return entry != NULL
-        && entry->kind == CM_HIR_LIBRARY_BINDING_VALUE;
+        && (entry->kind == CM_HIR_LIBRARY_BINDING_VALUE
+            || entry->kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR);
+}
+
+static int cm_hir_library_constructor_has_type_mate(
+    const CmHirLibraryOwnedModule *module,
+    const CmHirLibraryOwnedEntry *constructor)
+{
+    size_t index;
+
+    if (module == NULL || constructor == NULL
+        || constructor->kind
+            != CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) return 0;
+    for (index = 0u; index < module->entries.len; ++index) {
+        const CmHirLibraryOwnedEntry *entry;
+
+        entry = (const CmHirLibraryOwnedEntry *)cm_vec_at_const(
+            &module->entries, index);
+        if (entry != NULL && entry->name == constructor->name
+            && entry->kind == CM_HIR_LIBRARY_BINDING_TYPE
+            && entry->type_kind == CM_HIR_TYPE_ADT_KIND
+            && cm_hir_def_id_equal(entry->target, constructor->target)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int cm_hir_library_owned_data_validate(
@@ -2628,6 +2711,12 @@ static int cm_hir_library_owned_data_validate(
                     || value->declaration.kind != entry->value_kind) {
                     return 0;
                 }
+            } else if (entry->kind
+                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+                if (!cm_hir_library_definition_valid(candidate,
+                        entry->target, entry->kind, entry->type_kind)
+                    || !cm_hir_library_constructor_has_type_mate(module,
+                        entry)) return 0;
             } else if (entry->kind != CM_HIR_LIBRARY_BINDING_PRIMITIVE
                 && !cm_hir_library_definition_valid(candidate, entry->target,
                     entry->kind, entry->type_kind)) {
@@ -2649,7 +2738,7 @@ static int cm_hir_library_owned_data_validate(
                         || prior->value_kind
                             != entry->value_kind)) return 0;
             }
-            if (entry->kind == CM_HIR_LIBRARY_BINDING_VALUE)
+            if (cm_hir_library_entry_is_value_namespace(entry))
                 public_value_entry_count += 1u;
             else if (entry->kind != CM_HIR_LIBRARY_BINDING_MODULE)
                 public_type_entry_count += 1u;
@@ -2761,7 +2850,7 @@ static int cm_hir_library_add_direct_entry(
     CmHirLibraryArtifactState *state, const CmModuleGraph *graph,
     const CmHirModuleMap *modules, CmHirLibraryOwnedModule *artifact_module,
     const CmResolveModuleInfo *graph_information,
-    const CmResolveNamespaceEntry *entry)
+    const CmResolveNamespaceEntry *entry, int value_namespace)
 {
     CmInternId name;
 
@@ -2865,6 +2954,8 @@ static int cm_hir_library_add_direct_entry(
             }
         }
         if (matches != 1u || matched_item == NULL
+            || !cm_hir_library_item_namespace_binding_kind(matched_item,
+                value_namespace, &binding_kind, &type_kind, &value_kind)
             || !cm_hir_library_definition_valid(state,
                 matched_item->definition, binding_kind, type_kind)) return 0;
         if (binding_kind == CM_HIR_LIBRARY_BINDING_VALUE
@@ -2926,6 +3017,8 @@ static int cm_hir_library_add_public_imports(
                 || definition->state != CM_HIR_DEFINITION_BOUND
                 || name == CM_INTERN_ID_NONE) return 0;
             if (definition->kind == CM_HIR_DEFINITION_MODULE) {
+                if (binding->namespace_kind == CM_HIR_NAMESPACE_VALUE)
+                    return 0;
                 if (cm_hir_library_find_definition_module(state,
                         binding->target) == NULL
                     || !cm_hir_library_definition_valid(state,
@@ -2946,9 +3039,10 @@ static int cm_hir_library_add_public_imports(
                 item = cm_hir_get_item(state->context,
                     definition->entity.item_id);
                 if (item == NULL) return 0;
-                if (cm_hir_library_item_binding_kind(item->kind,
+                if (cm_hir_library_item_namespace_binding_kind(item,
+                        binding->namespace_kind == CM_HIR_NAMESPACE_VALUE,
                         &binding_kind, &type_kind, &value_kind)
-                    && (binding_kind != CM_HIR_LIBRARY_BINDING_VALUE
+                    && (binding->namespace_kind != CM_HIR_NAMESPACE_VALUE
                         || include_values)
                     && (!cm_hir_library_definition_valid(state,
                             binding->target, binding_kind, type_kind)
@@ -3075,7 +3169,7 @@ static CmHirLibraryArtifactResult cm_hir_library_artifact_build_internal(
             }
             if (entry.visibility != CM_AST_VIS_PUBLIC) continue;
             if (!cm_hir_library_add_direct_entry(&candidate, graph,
-                    modules, artifact_module, &information, &entry)) {
+                    modules, artifact_module, &information, &entry, 0)) {
                 result.status = CM_HIR_LIBRARY_INVALID_HIR;
                 goto fail_candidate;
             }
@@ -3094,9 +3188,10 @@ static CmHirLibraryArtifactResult cm_hir_library_artifact_build_internal(
                 if (entry.visibility != CM_AST_VIS_PUBLIC) continue;
                 if (entry.item_kind != CM_AST_ITEM_FUNCTION
                     && entry.item_kind != CM_AST_ITEM_CONST
-                    && entry.item_kind != CM_AST_ITEM_STATIC) continue;
+                    && entry.item_kind != CM_AST_ITEM_STATIC
+                    && entry.item_kind != CM_AST_ITEM_STRUCT) continue;
                 if (!cm_hir_library_add_direct_entry(&candidate, graph,
-                        modules, artifact_module, &information, &entry)) {
+                        modules, artifact_module, &information, &entry, 1)) {
                     result.status = CM_HIR_LIBRARY_INVALID_HIR;
                     goto fail_candidate;
                 }
@@ -3272,6 +3367,13 @@ static CmHirLibraryStatus cm_hir_library_lookup_from_module(
                     || !cm_hir_library_owned_value_valid(state, value)) {
                     return CM_HIR_LIBRARY_INVALID_HIR;
                 }
+            } else if (selected->kind
+                    == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
+                if (!cm_hir_library_definition_valid(state,
+                        selected->target, selected->kind,
+                        selected->type_kind)
+                    || !cm_hir_library_constructor_has_type_mate(module,
+                        selected)) return CM_HIR_LIBRARY_INVALID_HIR;
             } else if (!cm_hir_library_definition_valid(state,
                     selected->target, selected->kind,
                     selected->type_kind)) {
@@ -3358,6 +3460,25 @@ CmHirLibraryStatus cm_hir_library_artifact_lookup_value(
         return CM_HIR_LIBRARY_INVALID_HIR;
     *out_value = value->declaration;
     return CM_HIR_LIBRARY_OK;
+}
+
+CmHirLibraryStatus cm_hir_library_artifact_lookup_value_binding(
+    const CmHirLibraryArtifact *artifact,
+    const CmHirLibraryPathSegment *segments, size_t segment_count,
+    CmHirLibraryBinding *out_binding)
+{
+    const CmHirLibraryArtifactState *state;
+
+    if (out_binding != NULL) memset(out_binding, 0, sizeof(*out_binding));
+    state = cm_hir_library_state_const(artifact);
+    if (state == NULL || out_binding == NULL || segments == NULL
+        || segment_count < 2u || state->context == NULL
+        || state->extern_name == NULL) return CM_HIR_LIBRARY_INVALID_ARGUMENT;
+    if (!cm_hir_library_segment_is_c_str(&segments[0],
+            state->extern_name)) return CM_HIR_LIBRARY_NOT_FOUND;
+    return cm_hir_library_lookup_from_module(state,
+        state->root_definition, &segments[1], segment_count - 1u, 1,
+        out_binding);
 }
 
 static int cm_hir_library_segment_identifier_valid(

@@ -1,4 +1,5 @@
 #include "../../src/hir/library_internal.h"
+#include "cm/hir/lower.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -59,6 +60,56 @@ static CmHirDefId add_public_extern_type(TestFixture *fixture,
     return definition;
 }
 
+static CmHirTypeId add_bool_type(CmHirContext *context, uint32_t start)
+{
+    CmHirType type;
+    CmHirTypeId type_id;
+
+    memset(&type, 0, sizeof(type));
+    type.kind = CM_HIR_TYPE_BOOL_KIND;
+    type.span = test_span(start, start + 1u);
+    assert(cm_hir_add_type(context, &type, &type_id) == CM_HIR_OK);
+    return type_id;
+}
+
+static CmHirDefId add_public_struct(TestFixture *fixture, const char *name,
+    CmHirAggregateForm form, uint32_t start)
+{
+    CmHirDefId definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirField field;
+
+    assert(cm_hir_reserve_item_definition_as(&fixture->context,
+        fixture->crate_id, CM_HIR_ITEM_STRUCT, test_span(start, start + 5u),
+        &definition) == CM_HIR_OK);
+    memset(&item, 0, sizeof(item));
+    item.kind = CM_HIR_ITEM_STRUCT;
+    item.definition = definition;
+    item.owner_module = fixture->root_module;
+    item.parent_definition = cm_hir_def_id_none();
+    item.name = cm_hir_intern(&fixture->context, name);
+    item.visibility.kind = CM_HIR_VIS_PUBLIC;
+    item.visibility.restriction = cm_hir_def_id_none();
+    item.span = test_span(start, start + 5u);
+    item.data.aggregate_item.form = form;
+    if (form != CM_HIR_AGGREGATE_UNIT) {
+        memset(&field, 0, sizeof(field));
+        field.name = form == CM_HIR_AGGREGATE_NAMED
+            ? cm_hir_intern(&fixture->context, "field")
+            : CM_INTERN_ID_NONE;
+        field.type = add_bool_type(&fixture->context, start + 1u);
+        field.visibility.kind = CM_HIR_VIS_PUBLIC;
+        field.visibility.restriction = cm_hir_def_id_none();
+        field.span = test_span(start + 1u, start + 2u);
+        item.data.aggregate_item.fields = &field;
+        item.data.aggregate_item.field_count = 1u;
+    }
+    assert(cm_hir_add_item(&fixture->context, &item, &item_id) == CM_HIR_OK);
+    assert(item_id != CM_HIR_ITEM_NONE);
+    return definition;
+}
+
 static void fixture_init(TestFixture *fixture)
 {
     const CmHirModule *module;
@@ -92,6 +143,31 @@ static CmHirLibraryBinding type_binding(CmHirDefId definition)
     binding.definition = definition;
     binding.type_kind = CM_HIR_TYPE_FOREIGN_KIND;
     binding.primitive_kind = CM_HIR_PRIMITIVE_NONE;
+    return binding;
+}
+
+static CmHirLibraryBinding adt_binding(CmHirDefId definition)
+{
+    CmHirLibraryBinding binding;
+
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
+    binding.definition = definition;
+    binding.type_kind = CM_HIR_TYPE_ADT_KIND;
+    binding.primitive_kind = CM_HIR_PRIMITIVE_NONE;
+    return binding;
+}
+
+static CmHirLibraryBinding constructor_binding(CmHirDefId definition)
+{
+    CmHirLibraryBinding binding;
+
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR;
+    binding.definition = definition;
+    binding.type_kind = CM_HIR_TYPE_ADT_KIND;
+    binding.primitive_kind = CM_HIR_PRIMITIVE_NONE;
+    binding.value_kind = CM_HIR_LIBRARY_VALUE_NONE;
     return binding;
 }
 
@@ -198,6 +274,7 @@ static void assert_failed_restore(CmHirLibraryArtifact *artifact,
     assert(result.status == expected_status);
     assert(result.module_count == 0u);
     assert(result.public_type_entry_count == 0u);
+    assert(result.public_value_entry_count == 0u);
     assert_owned_data_unchanged(candidate, before_candidate);
     assert(cm_hir_library_artifact_identity(artifact, &after_identity));
     assert(after_identity.context == before_identity.context);
@@ -207,6 +284,311 @@ static void assert_failed_restore(CmHirLibraryArtifact *artifact,
     assert(after_identity.extern_name == before_identity.extern_name);
     assert_artifact_entry(artifact, stable_extern_name, "Api",
         stable_definition);
+}
+
+static void add_binding_entry(CmHirLibraryOwnedData *data,
+    size_t module_index, const char *name,
+    const CmHirLibraryBinding *binding)
+{
+    assert(cm_hir_library_owned_data_add_entry(data, module_index,
+        (const unsigned char *)name, strlen(name), binding)
+        == CM_HIR_LIBRARY_OK);
+}
+
+static void assert_value_binding(const CmHirLibraryArtifact *artifact,
+    const char *extern_name, const char *name, CmHirLibraryBindingKind kind,
+    CmHirDefId definition)
+{
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryBinding binding;
+
+    path[0].bytes = (const unsigned char *)extern_name;
+    path[0].length = strlen(extern_name);
+    path[1].bytes = (const unsigned char *)name;
+    path[1].length = strlen(name);
+    memset(&binding, 0, sizeof(binding));
+    assert(cm_hir_library_artifact_lookup_value_binding(artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_OK);
+    assert(binding.kind == kind);
+    assert(binding.type_kind == CM_HIR_TYPE_ADT_KIND);
+    assert(binding.value_kind == CM_HIR_LIBRARY_VALUE_NONE);
+    assert(cm_hir_def_id_equal(binding.definition, definition));
+}
+
+static void test_struct_constructor_restore(void)
+{
+    TestFixture fixture;
+    TestFixture fresh;
+    CmHirDefId unit_definition;
+    CmHirDefId tuple_definition;
+    CmHirDefId named_definition;
+    CmHirDefId fresh_unit_definition;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryOwnedData owned;
+    CmHirLibraryArtifactResult result;
+    CmHirLibraryBinding binding;
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryValue value;
+    CmHirLibraryValue fake_value;
+    CmHirTypeId fake_return_type;
+    size_t root_index;
+
+    fixture_init(&fixture);
+    unit_definition = add_public_struct(&fixture, "AllocError",
+        CM_HIR_AGGREGATE_UNIT, 50u);
+    tuple_definition = add_public_struct(&fixture, "Tuple",
+        CM_HIR_AGGREGATE_TUPLE, 60u);
+    named_definition = add_public_struct(&fixture, "Named",
+        CM_HIR_AGGREGATE_NAMED, 70u);
+    cm_hir_library_artifact_init(&artifact);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = adt_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    binding = constructor_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    binding = adt_binding(tuple_definition);
+    add_binding_entry(&owned, root_index, "Tuple", &binding);
+    binding = constructor_binding(tuple_definition);
+    add_binding_entry(&owned, root_index, "Tuple", &binding);
+    binding = adt_binding(named_definition);
+    add_binding_entry(&owned, root_index, "Named", &binding);
+    binding = type_binding(fixture.api_definition);
+    add_binding_entry(&owned, root_index, "Api", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact,
+        &fixture.context, fixture.crate_id, fixture.root_definition,
+        "dep", &owned);
+    assert(result.status == CM_HIR_LIBRARY_OK);
+    assert(result.public_type_entry_count == 4u);
+    assert(result.public_value_entry_count == 2u);
+    assert_value_binding(&artifact, "dep", "AllocError",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, unit_definition);
+    assert_value_binding(&artifact, "dep", "Tuple",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, tuple_definition);
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)"Named";
+    path[1].length = 5u;
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    path[1].bytes = (const unsigned char *)"AllocError";
+    path[1].length = 10u;
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u, &value)
+        == CM_HIR_LIBRARY_WRONG_NAMESPACE);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* A constructor cannot be laundered into a fabricated free function. */
+    fake_return_type = add_bool_type(&fixture.context, 80u);
+    memset(&fake_value, 0, sizeof(fake_value));
+    fake_value.definition = unit_definition;
+    fake_value.kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+    fake_value.data.function.return_type = fake_return_type;
+    fake_value.data.function.generic_parameter_start
+        = CM_HIR_GENERIC_PARAM_NONE;
+    fake_value.data.function.abi = cm_hir_intern(&fixture.context, "Rust");
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = adt_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    assert(cm_hir_library_owned_data_add_value(&owned, &fake_value)
+        == CM_HIR_LIBRARY_OK);
+    memset(&binding, 0, sizeof(binding));
+    binding.kind = CM_HIR_LIBRARY_BINDING_VALUE;
+    binding.definition = unit_definition;
+    binding.value_kind = CM_HIR_LIBRARY_VALUE_FUNCTION;
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    assert_failed_restore(&artifact, &fixture, &owned, fixture.crate_id,
+        fixture.root_definition, "fake_function",
+        CM_HIR_LIBRARY_INVALID_HIR, "dep", fixture.api_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* Missing the same-name TYPE mate is an unauthenticated constructor. */
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = constructor_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    assert_failed_restore(&artifact, &fixture, &owned, fixture.crate_id,
+        fixture.root_definition, "missing", CM_HIR_LIBRARY_INVALID_HIR,
+        "dep", fixture.api_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* A named-field struct cannot be authenticated as a constructor. */
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = adt_binding(named_definition);
+    add_binding_entry(&owned, root_index, "Named", &binding);
+    binding = constructor_binding(named_definition);
+    add_binding_entry(&owned, root_index, "Named", &binding);
+    assert_failed_restore(&artifact, &fixture, &owned, fixture.crate_id,
+        fixture.root_definition, "fake", CM_HIR_LIBRARY_INVALID_HIR,
+        "dep", fixture.api_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* The constructor DefId must equal its exact same-name TYPE target. */
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = adt_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    binding = constructor_binding(tuple_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    assert_failed_restore(&artifact, &fixture, &owned, fixture.crate_id,
+        fixture.root_definition, "wrong_def", CM_HIR_LIBRARY_INVALID_HIR,
+        "dep", fixture.api_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* Producer-local DefIds do not authenticate against a shifted context. */
+    fixture_init(&fresh);
+    (void)add_public_extern_type(&fresh, "Shift", 45u);
+    fresh_unit_definition = add_public_struct(&fresh, "AllocError",
+        CM_HIR_AGGREGATE_UNIT, 50u);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fresh.root_definition);
+    binding = adt_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    binding = constructor_binding(unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact, &fresh.context,
+        fresh.crate_id, fresh.root_definition, "fresh_bad", &owned);
+    assert(result.status == CM_HIR_LIBRARY_INVALID_HIR);
+    assert(owned.modules.len == 1u);
+    assert_artifact_entry(&artifact, "dep", "Api", fixture.api_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fresh.root_definition);
+    binding = adt_binding(fresh_unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    binding = constructor_binding(fresh_unit_definition);
+    add_binding_entry(&owned, root_index, "AllocError", &binding);
+    result = cm_hir_library_artifact_restore_owned(&artifact, &fresh.context,
+        fresh.crate_id, fresh.root_definition, "fresh", &owned);
+    assert(result.status == CM_HIR_LIBRARY_OK);
+    assert_value_binding(&artifact, "fresh", "AllocError",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, fresh_unit_definition);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&fresh.context);
+    cm_hir_context_destroy(&fixture.context);
+}
+
+static const CmHirItem *find_item_named(const CmHirContext *context,
+    const char *name)
+{
+    size_t index;
+    size_t name_length;
+
+    name_length = strlen(name);
+    for (index = 0u; index < context->items.len; ++index) {
+        const CmHirItem *item;
+        const CmInternedString *item_name;
+
+        item = (const CmHirItem *)cm_vec_at_const(&context->items, index);
+        item_name = item == NULL ? NULL
+            : cm_interner_get(&context->strings, item->name);
+        if (item_name != NULL && item_name->len == name_length
+            && memcmp(item_name->bytes, name, name_length) == 0) return item;
+    }
+    return NULL;
+}
+
+static CmHirLowerResult lower_test_graph(CmHirContext *context,
+    const CmModuleGraph *graph, CmModuleGraphRevision revision,
+    CmHirModuleMap *map, const CmHirLowerOptions *options)
+{
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirLowerResult result;
+
+    cm_import_resolver_init(&imports);
+    import_result = cm_import_resolve(&imports, graph, revision);
+    assert(import_result.error_count == 0u);
+    result = cm_hir_lower_module_graph(context, graph, revision, &imports,
+        map, options);
+    cm_import_resolver_destroy(&imports);
+    return result;
+}
+
+static void test_struct_constructor_direct_capture(void)
+{
+    static const unsigned char source_text[] =
+        "pub struct AllocError;\n"
+        "pub struct Tuple(pub u8);\n"
+        "pub struct Named { pub field: u8 }\n";
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmCfgSet cfg;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmHirContext context;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactResult artifact_result;
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryType type;
+    CmHirLibraryBinding binding;
+    const CmHirItem *unit_item;
+    const CmHirItem *tuple_item;
+    const CmHirItem *named_item;
+
+    cm_source_set_init(&sources);
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_init(&graph);
+    cm_hir_context_init(&context);
+    cm_hir_module_map_init(&map);
+    cm_hir_library_artifact_init(&artifact);
+    assert(cm_source_add_memory(&sources, "constructor.rs", source_text,
+        sizeof(source_text) - 1u, &root_source) == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "constructor";
+    lower_result = lower_test_graph(&context, &graph, graph_result.revision,
+        &map, &lower_options);
+    assert(lower_result.error_count == 0u);
+    unit_item = find_item_named(&context, "AllocError");
+    tuple_item = find_item_named(&context, "Tuple");
+    named_item = find_item_named(&context, "Named");
+    assert(unit_item != NULL && unit_item->kind == CM_HIR_ITEM_STRUCT
+        && unit_item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT);
+    assert(tuple_item != NULL && tuple_item->kind == CM_HIR_ITEM_STRUCT
+        && tuple_item->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE);
+    assert(named_item != NULL && named_item->kind == CM_HIR_ITEM_STRUCT
+        && named_item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED);
+    artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
+        &context, lower_result.crate_id, &graph, graph_result.revision, &map,
+        "dep");
+    assert(artifact_result.status == CM_HIR_LIBRARY_OK);
+    assert(artifact_result.public_type_entry_count == 3u);
+    assert(artifact_result.public_value_entry_count == 2u);
+    assert_value_binding(&artifact, "dep", "AllocError",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, unit_item->definition);
+    assert_value_binding(&artifact, "dep", "Tuple",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, tuple_item->definition);
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = 3u;
+    path[1].bytes = (const unsigned char *)"AllocError";
+    path[1].length = 10u;
+    memset(&type, 0, sizeof(type));
+    assert(cm_hir_library_artifact_lookup_type(&artifact, path, 2u, &type)
+        == CM_HIR_LIBRARY_OK);
+    assert(type.kind == CM_HIR_TYPE_ADT_KIND);
+    assert(cm_hir_def_id_equal(type.definition, unit_item->definition));
+    path[1].bytes = (const unsigned char *)"Named";
+    path[1].length = 5u;
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&context);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
 }
 
 static void test_owned_restore_is_transactional(void)
@@ -593,6 +975,8 @@ static void test_reserved_parameter_outlives_value_accepted(void)
 int main(void)
 {
     test_owned_restore_is_transactional();
+    test_struct_constructor_restore();
+    test_struct_constructor_direct_capture();
     test_owned_predicate_copy_and_equality();
     test_reserved_predicate_value_rejected();
     test_reserved_parameter_outlives_value_accepted();
