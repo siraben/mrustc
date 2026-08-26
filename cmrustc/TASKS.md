@@ -2124,6 +2124,16 @@ The clean pinned-core probe at `ba215beb` again preserves the zero-error
 graph/HIR and 451-module/1,658-type/20,747-value library census, then measures
 `core/src/array/mod.rs:108`'s `from_fn` (`def=1:18901`, source item `100:20`,
 rejected item `10804`) at `stage=items`/`item-source-invalid`.
+Commit `68e338e9` adds its exact const-generic declaration plus the complete
+reachable `Tuple`/`FnOnce`/`FnMut`, associated `Output`, rust-call method,
+projection, supertrait, and equality closure. The function remains
+declaration-only with `BODY_NONE`. Commit `62fd1289` admits foreign associated
+equalities only after the existing exact definition, parent-trait reachability,
+shape, and name-ambiguity authentication. The clean pinned-core probe at
+`62fd1289` preserves the zero-error graph/HIR and exact
+451-module/1,658-type/20,747-value library census, then measures
+`core/src/array/mod.rs:173`'s `from_mut` (`def=1:18904`, source item `100:23`,
+rejected item `10807`) at `stage=items`/`item-source-invalid`.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR

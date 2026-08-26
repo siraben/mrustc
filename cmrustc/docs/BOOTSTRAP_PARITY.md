@@ -208,6 +208,16 @@ zero-error graph/HIR and 451-module/1,658-type/20,747-value library census,
 then advances to `core/src/array/mod.rs:108`: `from_fn` (`def=1:18901`, source
 item `100:20`, rejected item `10804`) fails at `stage=items` with
 `reason=item-source-invalid`.
+Commit `68e338e9` captures and freshly materializes its exact const-generic
+signature plus the complete reachable `Tuple`/`FnOnce`/`FnMut` callable-trait
+declaration closure while keeping its generic body unavailable. Commit
+`62fd1289` permits the resulting authenticated inherited associated equality
+to be restated across a crate boundary. The clean pinned-core probe at
+`62fd1289` again reports zero graph/import/HIR errors and the exact
+451-module/1,658-type/20,747-value library census, then advances to
+`core/src/array/mod.rs:173`: `from_mut` (`def=1:18904`, source item `100:23`,
+rejected item `10807`) at `stage=items` with
+`reason=item-source-invalid`.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
