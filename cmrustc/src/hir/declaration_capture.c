@@ -5312,8 +5312,12 @@ static int cm_decl_aggregate_shape_and_source(CmDeclCaptureState *state,
                 & CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM) == 0u))
         return 0;
     if (capture->aggregate_repr == CM_HIR_DECL_AGGREGATE_REPR_RUST) {
-        if (item->data.aggregate_item.form != CM_HIR_AGGREGATE_NAMED)
-            return 0;
+        if (item->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE) {
+            if (item->kind != CM_HIR_ITEM_STRUCT
+                || item->generic_parameter_count != 0u
+                || capture->aggregate_flags != 0u) return 0;
+        } else if (item->data.aggregate_item.form
+                != CM_HIR_AGGREGATE_NAMED) return 0;
     } else if (item->generic_parameter_count == 0u) {
         if (item->kind != CM_HIR_ITEM_STRUCT) return 0;
     } else if (item->kind == CM_HIR_ITEM_STRUCT) {

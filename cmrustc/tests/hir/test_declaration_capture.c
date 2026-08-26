@@ -129,6 +129,14 @@ static const unsigned char aggregate_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char rust_tuple_fixture_source[] =
+    "#[stable(feature = \"try_from\", since = \"1.34.0\")]\n"
+    "#[derive(Debug, Copy, Clone)]\n"
+    "pub struct TupleError(());\n"
+    "pub use TupleError as TupleErrorAlias;\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static const unsigned char into_iter_fixture_source[] =
     "mod manually_drop {\n"
     "  #[stable(feature = \"manual\", since = \"1.0.0\")]\n"
@@ -538,6 +546,12 @@ static void aggregate_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-aggregate-provider.rs",
         aggregate_fixture_source, sizeof(aggregate_fixture_source) - 1u);
+}
+
+static void rust_tuple_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "rust-tuple.rs",
+        rust_tuple_fixture_source, sizeof(rust_tuple_fixture_source) - 1u);
 }
 
 static void into_iter_fixture_init(CaptureFixture *fixture, int with_noise)
@@ -4123,6 +4137,121 @@ static void test_named_aggregate_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static void test_rust_tuple_struct_capture_and_atomic_boundaries(void)
+{
+    static const unsigned char generic_tuple_source[] =
+        "#[stable(feature = \"generic_tuple\", since = \"1.0.0\")]\n"
+        "#[derive(Copy, Clone)]\n"
+        "pub struct GenericTuple<T>(T);\n"
+        "pub trait Gate<T: ?Sized> {}\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture generic;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationItem *wire;
+    const CmHirDeclarationType *field_type;
+    CmHirItem *item;
+    CmHirItemId item_id;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirAggregateForm saved_form;
+    CmHirVisibility saved_visibility;
+    CmInternId saved_name;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+
+    rust_tuple_fixture_init(&first, 0);
+    rust_tuple_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    wire = find_declaration_item(&metadata, "TupleError", NULL);
+    assert(wire != NULL && wire->kind == CM_HIR_DECL_ITEM_STRUCT
+        && wire->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && wire->aggregate_form == CM_HIR_DECL_AGGREGATE_TUPLE
+        && wire->aggregate_repr == CM_HIR_DECL_AGGREGATE_REPR_RUST
+        && wire->aggregate_flags == 0u && wire->generic_count == 0u
+        && wire->field_count == 1u && wire->fields != NULL
+        && wire->fields[0].name.data == NULL
+        && wire->fields[0].name.length == 0u
+        && wire->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && wire->fields[0].type_local != 0u
+        && (size_t)wire->fields[0].type_local <= metadata.type_count);
+    field_type = &metadata.types[wire->fields[0].type_local - 1u];
+    assert(field_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && field_type->primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && find_namespace_entry(&metadata, wire->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "TupleError") != NULL
+        && find_namespace_entry(&metadata, wire->owner_module,
+            CM_HIR_DECL_NAMESPACE_TYPE, "TupleErrorAlias") != NULL
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)(void *)find_item(&first, "TupleError", &item_id);
+    assert(item != NULL && item_id != CM_HIR_ITEM_NONE
+        && item->data.aggregate_item.field_count == 1u);
+#define ASSERT_RUST_TUPLE_ATOMIC_FAILURE() do { \
+    input = capture_input(&first); \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+    saved_visibility = item->data.aggregate_item.fields[0].visibility;
+    item->data.aggregate_item.fields[0].visibility.kind = CM_HIR_VIS_PUBLIC;
+    ASSERT_RUST_TUPLE_ATOMIC_FAILURE();
+    item->data.aggregate_item.fields[0].visibility = saved_visibility;
+    saved_name = item->data.aggregate_item.fields[0].name;
+    item->data.aggregate_item.fields[0].name = cm_hir_intern(&first.hir,
+        "forged");
+    ASSERT_RUST_TUPLE_ATOMIC_FAILURE();
+    item->data.aggregate_item.fields[0].name = saved_name;
+    saved_form = item->data.aggregate_item.form;
+    item->data.aggregate_item.form = CM_HIR_AGGREGATE_NAMED;
+    ASSERT_RUST_TUPLE_ATOMIC_FAILURE();
+    item->data.aggregate_item.form = saved_form;
+
+    fixture_init_source(&generic, 0, "generic-rust-tuple.rs",
+        generic_tuple_source, sizeof(generic_tuple_source) - 1u);
+    input = capture_input(&generic);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&generic);
+#undef ASSERT_RUST_TUPLE_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
 static void test_into_iter_private_closure_and_determinism(void)
 {
     CaptureFixture first;
@@ -7576,6 +7705,7 @@ int main(void)
     test_static_type_dag_is_structurally_deduplicated();
     test_named_aggregate_capture_and_determinism();
     test_named_aggregate_hostile_mutations_are_atomic();
+    test_rust_tuple_struct_capture_and_atomic_boundaries();
     test_into_iter_private_closure_and_determinism();
     test_into_iter_hostile_shapes_are_atomic();
     test_type_id_like_target_capture_and_determinism();
