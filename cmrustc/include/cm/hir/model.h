@@ -384,6 +384,17 @@ typedef enum CmHirItemKind {
     CM_HIR_ITEM_TRAIT_ALIAS
 } CmHirItemKind;
 
+/*
+ * Provenance for the presence or deliberate absence of an executable value
+ * definition.  SOURCE is the zero/default state used by ordinary lowering.
+ * METADATA_DECLARATION records an authenticated dependency declaration whose
+ * initializer exists in the producer but is not carried by this HIR context.
+ */
+typedef enum CmHirValueDefinitionKind {
+    CM_HIR_VALUE_DEFINITION_SOURCE = 0,
+    CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION
+} CmHirValueDefinitionKind;
+
 typedef enum CmHirMacroDefinitionForm {
     CM_HIR_MACRO_RULES_DEFINITION = 0,
     CM_HIR_MACRO_DECLARATIVE_DEFINITION
@@ -698,6 +709,7 @@ typedef struct CmHirItem {
         struct {
             CmHirTypeId type;
             CmHirBodyId body;
+            CmHirValueDefinitionKind definition_kind;
             /* Trait-associated-const default promise; zero otherwise. */
             int has_default_body;
             CmHirMutability mutability;

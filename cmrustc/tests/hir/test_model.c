@@ -1,4 +1,5 @@
 #include "cm/hir/model.h"
+#include "cm/hir/body.h"
 #include "cm/hir/semantic_mark.h"
 
 #include "cm/alloc.h"
@@ -1401,7 +1402,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1660,7 +1661,7 @@ static void test_function_pointer_lifetime_binder_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0
+    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
         && strstr(dump,
             "type#4 for<\"'a\"> fn[\"Rust\"](ty#2)->ty#2 ") != NULL
         && strstr(dump,
@@ -3146,7 +3147,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -3328,6 +3329,146 @@ static CmHirBodyId add_unlowered_value_body(CmHirContext *context,
     body.span = test_span(start, start + 1u);
     assert(cm_hir_add_body(context, &body, &body_id) == CM_HIR_OK);
     return body_id;
+}
+
+static void test_imported_const_declaration_model(void)
+{
+    CmHirContext context;
+    CmHirContextMark mark;
+    CmHirCrateId crate_id;
+    CmHirModuleId root_id;
+    CmHirTypeId char_type;
+    CmHirDefId definition;
+    CmHirDefId invalid_definition;
+    CmHirDefId trait_definition;
+    CmHirItem item;
+    CmHirItemId item_id;
+    CmHirBodyId invalid_body;
+    const CmHirDefinition *stored_definition;
+    const CmHirItem *stored;
+    size_t item_count;
+    size_t arena_bytes;
+    FILE *dump_file;
+    char *dump;
+
+    cm_hir_context_init(&context);
+    assert(cm_hir_create_crate(&context,
+        cm_hir_intern(&context, "imported_const_model"),
+        CM_HIR_EDITION_2024, test_span(0u, 100u), &crate_id, &root_id)
+        == CM_HIR_OK);
+    char_type = add_simple_type(&context, CM_HIR_TYPE_CHAR_KIND,
+        test_span(1u, 2u));
+
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_CONST, test_span(10u, 20u), &definition) == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_CONST, definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "MAX"),
+        test_span(10u, 20u));
+    item.data.value_item.type = char_type;
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item_count = context.items.len;
+    arena_bytes = cm_arena_bytes_used(&context.storage);
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count
+        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+    stored_definition = cm_hir_lookup_definition(&context, definition);
+    assert(stored_definition != NULL
+        && stored_definition->state == CM_HIR_DEFINITION_RESERVED);
+
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    stored = cm_hir_get_item(&context, item_id);
+    assert(stored != NULL && stored->kind == CM_HIR_ITEM_CONST
+        && stored->data.value_item.definition_kind
+            == CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION
+        && stored->data.value_item.body == CM_HIR_BODY_NONE
+        && cm_hir_get_body(&context, stored->data.value_item.body) == NULL
+        && cm_hir_body_value_owner_kind(&context, stored)
+            == CM_HIR_BODY_VALUE_OWNER_UNSUPPORTED);
+
+    dump_file = tmpfile();
+    assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
+    dump = read_dump(dump_file);
+    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
+        && strstr(dump,
+            "default-body=0 definition=metadata-declaration") != NULL);
+    free(dump);
+    assert(fclose(dump_file) == 0);
+
+    assert(cm_hir_context_mark(&context, &mark) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_CONST, test_span(30u, 40u), &invalid_definition)
+        == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_CONST, invalid_definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "BAD"),
+        test_span(30u, 40u));
+    item.data.value_item.type = char_type;
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    item.data.value_item.has_default_body = 1;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    item.data.value_item.has_default_body = 0;
+    item.data.value_item.mutability = CM_HIR_MUTABLE;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item.data.value_item.definition_kind = (CmHirValueDefinitionKind)2;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    invalid_body = add_unlowered_value_body(&context, invalid_definition,
+        char_type, 35u);
+    item.data.value_item.body = invalid_body;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    assert(cm_hir_context_rewind(&context, &mark) == CM_HIR_OK);
+    assert(context.items.len == item_count + 1u
+        && cm_hir_lookup_definition(&context, invalid_definition) == NULL);
+
+    assert(cm_hir_context_mark(&context, &mark) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_STATIC, test_span(50u, 60u), &invalid_definition)
+        == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_STATIC, invalid_definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "STATIC"),
+        test_span(50u, 60u));
+    item.data.value_item.type = char_type;
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    assert(cm_hir_context_rewind(&context, &mark) == CM_HIR_OK);
+
+    assert(cm_hir_context_mark(&context, &mark) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_TRAIT, test_span(70u, 90u), &trait_definition)
+        == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_TRAIT, trait_definition, root_id,
+        cm_hir_def_id_none(), cm_hir_intern(&context, "Trait"),
+        test_span(70u, 90u));
+    item.data.trait_item.safety = CM_HIR_SAFE;
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
+    assert(cm_hir_reserve_item_definition_as(&context, crate_id,
+        CM_HIR_ITEM_CONST, test_span(75u, 80u), &invalid_definition)
+        == CM_HIR_OK);
+    init_test_item(&item, CM_HIR_ITEM_CONST, invalid_definition, root_id,
+        trait_definition, cm_hir_intern(&context, "VALUE"),
+        test_span(75u, 80u));
+    item.data.value_item.type = char_type;
+    item.data.value_item.mutability = CM_HIR_IMMUTABLE;
+    item.data.value_item.definition_kind =
+        CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION;
+    assert(cm_hir_add_item(&context, &item, &item_id)
+        == CM_HIR_INVALID_ID);
+    assert(cm_hir_context_rewind(&context, &mark) == CM_HIR_OK);
+
+    cm_hir_context_destroy(&context);
 }
 
 static void test_default_body_value_model_invariants(void)
@@ -3530,7 +3671,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0
+    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -4217,7 +4358,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -4699,7 +4840,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -5216,7 +5357,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -6363,7 +6504,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -8403,7 +8544,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(strstr(dump,
         "trait-header item#2 safety=unsafe auto=1 const=1")
         != NULL);
@@ -8804,7 +8945,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -9353,7 +9494,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
+    assert(strncmp(first_dump, "hir-v36\n", strlen("hir-v36\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,
@@ -9393,6 +9534,7 @@ int main(void)
     test_deref_shared_parameter_model();
     test_supertrait_model_invariants();
     test_default_body_value_model_invariants();
+    test_imported_const_declaration_model();
     test_trait_alias_model_invariants();
     test_static_supertrait_model_invariants();
     test_supertrait_equality_model_invariants();

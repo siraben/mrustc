@@ -340,7 +340,7 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v35`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v36`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
@@ -350,6 +350,16 @@ to every canonical import binding. They are a conservative public/crate
 lattice: exact `pub(super)` and `pub(in path)` restriction identities remain
 future schema work. Public-artifact capture consumes only bindings marked
 public and continues to validate their target shape fail-closed.
+
+`hir-v36` gives const/static value items a closed definition provenance.
+Ordinary source, trait, and impl values use the zero/default `SOURCE` state.
+An authenticated declaration materializer may instead bind an immutable free
+const as `METADATA_DECLARATION` with no executable body. That state records a
+producer initializer promise without fabricating an expression: body-owner,
+semantic, CTFE, MIR, and code-generation entry points still receive no body
+authority and must reject an attempted evaluation. Static items, associated
+consts, mutable values, metadata declarations with bodies, and bodyless source
+free consts reject.
 
 The generation-bound whole-local-body barrier now reaches a read-only REGIONS
 checkpoint after TYPED and MARKED. MARKED atomically records builtin-Copy
@@ -1404,7 +1414,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v35`.
+wrong-kind targets hard-error. The canonical format is `hir-v36`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

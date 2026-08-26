@@ -71,6 +71,17 @@ static const char *cm_hir_dump_closure_class_name(CmHirClosureClass class_)
     return "invalid";
 }
 
+static const char *cm_hir_dump_value_definition_name(
+    CmHirValueDefinitionKind kind)
+{
+    switch (kind) {
+    case CM_HIR_VALUE_DEFINITION_SOURCE: return "source";
+    case CM_HIR_VALUE_DEFINITION_METADATA_DECLARATION:
+        return "metadata-declaration";
+    }
+    return "invalid";
+}
+
 static void cm_hir_dump_visibility(FILE *stream,
     const CmHirVisibility *visibility)
 {
@@ -516,7 +527,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v35\n", stream);
+    fputs("hir-v36\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -1175,6 +1186,9 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                 item->data.value_item.trait_item_definition);
             fprintf(stream, " default-body=%d",
                 item->data.value_item.has_default_body);
+            fprintf(stream, " definition=%s",
+                cm_hir_dump_value_definition_name(
+                    item->data.value_item.definition_kind));
         }
         fprintf(stream, " generics=%u..%u",
             (unsigned int)item->generic_parameter_start,
