@@ -64,6 +64,44 @@ static const unsigned char default_enum_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char aggregate_fixture_source[] =
+    "mod manually_drop {\n"
+    "  #[stable(feature = \"manual\", since = \"1.0.0\")]\n"
+    "  #[lang = \"manually_drop\"]\n"
+    "  #[derive(Copy, Clone)]\n"
+    "  #[repr(transparent)]\n"
+    "  #[rustc_pub_transparent]\n"
+    "  pub struct Manual<T: ?Sized> { value: T }\n"
+    "}\n"
+    "#[stable(feature = \"manual\", since = \"1.0.0\")]\n"
+    "pub use manually_drop::Manual;\n"
+    "mod maybe_uninit {\n"
+    "  use super::Manual;\n"
+    "  #[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "  #[lang = \"maybe_uninit\"]\n"
+    "  #[derive(Copy)]\n"
+    "  #[repr(transparent)]\n"
+    "  #[rustc_pub_transparent]\n"
+    "  pub union Maybe<T> { uninit: (), value: Manual<T> }\n"
+    "}\n"
+    "#[stable(feature = \"maybe\", since = \"1.0.0\")]\n"
+    "pub use maybe_uninit::Maybe;\n"
+    "mod transmutability {\n"
+    "  #[unstable(feature = \"transmute\", issue = \"none\")]\n"
+    "  #[lang = \"transmute_opts\"]\n"
+    "  #[derive(PartialEq, Eq, Clone, Copy, Debug)]\n"
+    "  pub struct Assumptions {\n"
+    "    pub alignment: bool,\n"
+    "    pub lifetimes: bool,\n"
+    "    pub safety: bool,\n"
+    "    pub validity: bool,\n"
+    "  }\n"
+    "}\n"
+    "#[unstable(feature = \"transmute\", issue = \"none\")]\n"
+    "pub use transmutability::Assumptions;\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -148,6 +186,12 @@ static void default_enum_fixture_init(CaptureFixture *fixture,
     fixture_init_source(fixture, with_noise, "v30-default-enum-provider.rs",
         default_enum_fixture_source,
         sizeof(default_enum_fixture_source) - 1u);
+}
+
+static void aggregate_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "v30-aggregate-provider.rs",
+        aggregate_fixture_source, sizeof(aggregate_fixture_source) - 1u);
 }
 
 static void fixture_destroy(CaptureFixture *fixture)
@@ -2257,8 +2301,301 @@ static void test_char_const_attributes_fail_closed_atomically(void)
     fixture_destroy(&good);
 }
 
+static void assert_aggregate_descriptor(
+    const CmHirDeclarationMetadata *metadata)
+{
+    const CmHirDeclarationItem *manual;
+    const CmHirDeclarationItem *maybe;
+    const CmHirDeclarationItem *assume;
+    const CmHirDeclarationNamespaceEntry *manual_direct;
+    const CmHirDeclarationNamespaceEntry *manual_export;
+    const CmHirDeclarationNamespaceEntry *maybe_direct;
+    const CmHirDeclarationNamespaceEntry *maybe_export;
+    const CmHirDeclarationNamespaceEntry *assume_direct;
+    const CmHirDeclarationNamespaceEntry *assume_export;
+    assert(metadata->module_count == 4u && metadata->item_count == 3u
+        && metadata->generic_count == 4u && metadata->type_count == 7u
+        && metadata->namespace_count == 8u);
+    manual = &metadata->items[0];
+    maybe = &metadata->items[1];
+    assume = &metadata->items[2];
+    assert(manual->kind == CM_HIR_DECL_ITEM_STRUCT
+        && manual->owner_module == 2u
+        && declaration_string_is(manual->name, "Manual")
+        && manual->generic_start == 2u && manual->generic_count == 1u
+        && manual->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+        && manual->aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT
+        && manual->aggregate_flags
+            == (CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+                | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT)
+        && declaration_string_is(manual->lang_item, "manually_drop")
+        && manual->field_count == 1u
+        && declaration_string_is(manual->fields[0].name, "value")
+        && manual->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && manual->fields[0].source_ordinal == 0u
+        && manual->fields[0].type_local == 4u);
+    assert(maybe->kind == CM_HIR_DECL_ITEM_UNION
+        && maybe->owner_module == 3u
+        && declaration_string_is(maybe->name, "Maybe")
+        && maybe->generic_start == 3u && maybe->generic_count == 1u
+        && maybe->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+        && maybe->aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT
+        && maybe->aggregate_flags
+            == (CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+                | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT)
+        && declaration_string_is(maybe->lang_item, "maybe_uninit")
+        && maybe->field_count == 2u
+        && declaration_string_is(maybe->fields[0].name, "uninit")
+        && declaration_string_is(maybe->fields[1].name, "value")
+        && maybe->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && maybe->fields[1].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && maybe->fields[0].source_ordinal == 0u
+        && maybe->fields[1].source_ordinal == 1u
+        && maybe->fields[0].type_local == 1u
+        && maybe->fields[1].type_local == 7u);
+    assert(assume->kind == CM_HIR_DECL_ITEM_STRUCT
+        && assume->owner_module == 4u
+        && declaration_string_is(assume->name, "Assumptions")
+        && assume->generic_start == 0u && assume->generic_count == 0u
+        && assume->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+        && assume->aggregate_repr == CM_HIR_DECL_AGGREGATE_REPR_RUST
+        && assume->aggregate_flags == CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        && declaration_string_is(assume->lang_item, "transmute_opts")
+        && assume->field_count == 4u);
+    assert(metadata->types[0].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[0].primitive == CM_HIR_DECL_PRIMITIVE_UNIT
+        && metadata->types[1].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[1].primitive == CM_HIR_DECL_PRIMITIVE_BOOL
+        && metadata->types[2].kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && metadata->types[2].primitive == CM_HIR_DECL_PRIMITIVE_U8
+        && metadata->types[3].kind == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->types[3].generic_local == 2u
+        && metadata->types[4].kind == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->types[4].generic_local == 3u
+        && metadata->types[5].kind == CM_HIR_DECL_TYPE_GENERIC
+        && metadata->types[5].generic_local == 4u
+        && metadata->types[6].kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && metadata->types[6].item_local == 1u
+        && metadata->types[6].argument_count == 1u
+        && metadata->types[6].argument_types[0] == 5u);
+    manual_direct = find_namespace_entry(metadata, 2u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Manual");
+    manual_export = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Manual");
+    maybe_direct = find_namespace_entry(metadata, 3u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Maybe");
+    maybe_export = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Maybe");
+    assume_direct = find_namespace_entry(metadata, 4u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Assumptions");
+    assume_export = find_namespace_entry(metadata, 1u,
+        CM_HIR_DECL_NAMESPACE_TYPE, "Assumptions");
+    assert(manual_direct != NULL && manual_export != NULL
+        && maybe_direct != NULL && maybe_export != NULL
+        && assume_direct != NULL && assume_export != NULL
+        && manual_direct->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && manual_direct->target_local == 1u
+        && manual_export->target_local == 1u
+        && maybe_direct->target_local == 2u
+        && maybe_export->target_local == 2u
+        && assume_direct->target_local == 3u
+        && assume_export->target_local == 3u);
+    assert(cm_hir_declaration_metadata_validate(metadata)
+        == CM_HIR_DECL_METADATA_OK);
+}
+
+static void test_named_aggregate_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    aggregate_fixture_init(&first, 0);
+    aggregate_fixture_init(&noisy, 1);
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    if (result.status != CM_HIR_DECL_CAPTURE_OK) {
+        fprintf(stderr, "aggregate capture failed: %s stage=%s reason=%s "
+            "item=%u type=%u\n",
+            cm_hir_declaration_capture_status_name(result.status),
+            cm_hir_declaration_capture_stage_name(result.failure_stage),
+            cm_hir_declaration_capture_reason_name(result.failure_reason),
+            (unsigned int)result.rejected_item,
+            (unsigned int)result.rejected_type);
+    }
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.item_count == 3u && result.trait_count == 1u
+        && result.value_count == 1u && result.namespace_count == 8u
+        && result.projected_semantic_attribute_count == 9u
+        && result.semantic_attributes
+            == CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 9u);
+    assert_aggregate_descriptor(&first_metadata);
+    assert_aggregate_descriptor(&noisy_metadata);
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_named_aggregate_hostile_mutations_are_atomic(void)
+{
+    static const unsigned char drop_guard_source[] =
+        "pub trait Gate<T: ?Sized> {}\n"
+        "#[stable(feature = \"guard\", since = \"1.0.0\")]\n"
+        "#[lang = \"guard\"]\n"
+        "#[derive(Copy)]\n"
+        "#[repr(transparent)]\n"
+        "#[rustc_pub_transparent]\n"
+        "pub struct Guard<T: ?Sized> where T: Gate<u8> { value: T }\n"
+        "pub fn needs<X: Gate<u8>>() {}\n";
+    CaptureFixture good;
+    CaptureFixture drop_guard;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItem *manual;
+    CmHirItem *maybe;
+    CmHirItem *assume;
+    CmHirItemId item_id;
+    CmHirGenericParam *generic;
+    CmHirVisibilityKind saved_visibility;
+    CmHirTypeId saved_type;
+    CmHirGenericArg *application_arguments;
+    CmHirTypeId saved_argument_type;
+    CmInternId saved_metadata;
+    CmInternId saved_field_name;
+    CmSpan saved_span;
+    uint32_t saved_attribute_count;
+    aggregate_fixture_init(&good, 0);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&good);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_namespace = metadata.namespace_entries;
+    manual = (CmHirItem *)find_item(&good, "Manual", &item_id);
+    assert(manual != NULL && manual->generic_parameter_count == 1u);
+    generic = (CmHirGenericParam *)cm_hir_get_generic_param(&good.hir,
+        manual->generic_parameter_start);
+    assert(generic != NULL && generic->is_relaxed_sized);
+
+#define ASSERT_AGGREGATE_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    generic->is_relaxed_sized = 0;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    generic->is_relaxed_sized = 1;
+
+    saved_visibility = manual->data.aggregate_item.fields[0].visibility.kind;
+    manual->data.aggregate_item.fields[0].visibility.kind = CM_HIR_VIS_PUBLIC;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    manual->data.aggregate_item.fields[0].visibility.kind = saved_visibility;
+
+    maybe = (CmHirItem *)find_item(&good, "Maybe", &item_id);
+    assert(maybe != NULL && maybe->kind == CM_HIR_ITEM_UNION
+        && maybe->data.aggregate_item.field_count == 2u);
+    saved_type = maybe->data.aggregate_item.fields[1].type;
+    maybe->data.aggregate_item.fields[1].type =
+        maybe->data.aggregate_item.fields[0].type;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->data.aggregate_item.fields[1].type = saved_type;
+
+    application_arguments = ((CmHirType *)cm_hir_get_type(&good.hir,
+        saved_type))->data.named_type.arguments;
+    assert(application_arguments != NULL
+        && application_arguments[0].kind == CM_HIR_GENERIC_ARG_TYPE);
+    saved_argument_type = application_arguments[0].data.type;
+    application_arguments[0].data.type =
+        manual->data.aggregate_item.fields[0].type;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    application_arguments[0].data.type = saved_argument_type;
+
+    saved_span = maybe->data.aggregate_item.fields[1].span;
+    maybe->data.aggregate_item.fields[1].span.start += 1u;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->data.aggregate_item.fields[1].span = saved_span;
+
+    saved_field_name = maybe->data.aggregate_item.fields[1].name;
+    maybe->data.aggregate_item.fields[1].name = cm_hir_intern(&good.hir,
+        "forged_field");
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->data.aggregate_item.fields[1].name = saved_field_name;
+
+    saved_metadata = maybe->attributes[1].metadata;
+    maybe->attributes[1].metadata = cm_hir_intern(&good.hir,
+        "lang = \"forged\"");
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->attributes[1].metadata = saved_metadata;
+
+    maybe->attributes[2].expansion_depth = 1u;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->attributes[2].expansion_depth = 0u;
+
+    saved_attribute_count = maybe->attribute_count;
+    maybe->attribute_count -= 1u;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    maybe->attribute_count = saved_attribute_count;
+
+    assume = (CmHirItem *)find_item(&good, "Assumptions", &item_id);
+    assert(assume != NULL && assume->data.aggregate_item.field_count == 4u);
+    saved_visibility = assume->data.aggregate_item.fields[0].visibility.kind;
+    assume->data.aggregate_item.fields[0].visibility.kind = CM_HIR_VIS_PRIVATE;
+    ASSERT_AGGREGATE_ATOMIC_FAILURE();
+    assume->data.aggregate_item.fields[0].visibility.kind = saved_visibility;
+
+    fixture_init_source(&drop_guard, 0, "drop-guard.rs", drop_guard_source,
+        sizeof(drop_guard_source) - 1u);
+    input = capture_input(&drop_guard);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SHAPE_UNSUPPORTED
+        && metadata.items == saved_items
+        && metadata.namespace_entries == saved_namespace);
+    fixture_destroy(&drop_guard);
+    assert_aggregate_descriptor(&metadata);
+#undef ASSERT_AGGREGATE_ATOMIC_FAILURE
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&good);
+}
+
 int main(void)
 {
+    test_named_aggregate_capture_and_determinism();
+    test_named_aggregate_hostile_mutations_are_atomic();
     test_default_enum_variant_capture_and_determinism();
     test_default_enum_hostile_mutations_are_atomic();
     test_char_const_capture_and_determinism();

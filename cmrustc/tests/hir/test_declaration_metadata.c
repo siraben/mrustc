@@ -69,6 +69,20 @@ typedef struct ConstFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[4];
 } ConstFixture;
 
+typedef struct AggregateFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[4];
+    CmHirDeclarationGeneric generics[2];
+    CmHirDeclarationType types[6];
+    uint32_t application_arguments[1];
+    uint32_t union_application_arguments[1];
+    CmHirDeclarationItem items[3];
+    CmHirDeclarationField manually_drop_fields[1];
+    CmHirDeclarationField maybe_uninit_fields[2];
+    CmHirDeclarationField assume_fields[4];
+    CmHirDeclarationNamespaceEntry namespace_entries[6];
+} AggregateFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -270,7 +284,24 @@ static size_t item_record_offset(const CmByteBuf *bytes,
         cursor = skip_string(bytes, cursor + 8u);
         assert(cursor <= bytes->len && bytes->len - cursor >= 44u);
         cursor += 44u;
-        if (kind == CM_HIR_DECL_ITEM_STRUCT) cursor += 8u;
+        if (kind == CM_HIR_DECL_ITEM_STRUCT
+                || kind == CM_HIR_DECL_ITEM_UNION) {
+            uint32_t child;
+            uint32_t field_count;
+            uint16_t flags;
+            assert(cursor <= bytes->len && bytes->len - cursor >= 8u);
+            flags = (uint16_t)bytes->data[cursor + 2u]
+                | (uint16_t)((uint16_t)bytes->data[cursor + 3u] << 8u);
+            field_count = get_u32(bytes->data + cursor + 4u);
+            cursor += 8u;
+            for (child = 0u; child < field_count; ++child) {
+                cursor = skip_string(bytes, cursor);
+                assert(cursor <= bytes->len && bytes->len - cursor >= 16u);
+                cursor += 16u;
+            }
+            if ((flags & CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM) != 0u)
+                cursor = skip_string(bytes, cursor);
+        }
         else if (kind == CM_HIR_DECL_ITEM_ENUM) {
             uint32_t child;
             uint32_t variant_count;
@@ -508,6 +539,7 @@ static void item_fixture_init(TestFixture *fixture)
     metadata = &fixture->metadata;
 
     fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_UNIT;
     fixture->items[0].owner_module = 2u;
     fixture->items[0].name = (CmHirDeclarationString)S("Packet");
     fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
@@ -574,6 +606,7 @@ static void alias_fixture_init(AliasFixture *fixture)
     fixture->items[0].source_ordinal = 1u;
     fixture->items[0].alias_target_type = 1u;
     fixture->items[1].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[1].aggregate_form = CM_HIR_DECL_AGGREGATE_UNIT;
     fixture->items[1].owner_module = 3u;
     fixture->items[1].name = (CmHirDeclarationString)S("LayoutError");
     fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
@@ -646,6 +679,7 @@ static void structural_fixture_init(StructuralFixture *fixture)
     metadata->trait_count = 1u;
 
     fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_UNIT;
     fixture->items[0].owner_module = 2u;
     fixture->items[0].name = (CmHirDeclarationString)S("Wrap");
     fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
@@ -881,6 +915,173 @@ static void const_fixture_init(ConstFixture *fixture)
     fixture->namespace_entries[2].export_ordinal = 3u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 3u;
+}
+
+static void aggregate_fixture_init(AggregateFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    uint32_t index;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("core");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-aggregate-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+
+    fixture->modules[0].name = metadata->crate_name;
+    fixture->modules[1].parent_module = 1u;
+    fixture->modules[1].name = (CmHirDeclarationString)S("manually_drop");
+    fixture->modules[2].parent_module = 1u;
+    fixture->modules[2].name = (CmHirDeclarationString)S("maybe_uninit");
+    fixture->modules[3].parent_module = 1u;
+    fixture->modules[3].name = (CmHirDeclarationString)S("transmutability");
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 4u;
+
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[0].owner_module = 2u;
+    fixture->items[0].name = (CmHirDeclarationString)S("ManuallyDrop");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 10u;
+    fixture->items[0].generic_start = 1u;
+    fixture->items[0].generic_count = 1u;
+    fixture->items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    fixture->items[0].aggregate_repr =
+        CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT;
+    fixture->items[0].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+    fixture->items[0].field_count = 1u;
+    fixture->items[0].fields = fixture->manually_drop_fields;
+    fixture->items[0].lang_item =
+        (CmHirDeclarationString)S("manually_drop");
+
+    fixture->items[1].kind = CM_HIR_DECL_ITEM_UNION;
+    fixture->items[1].owner_module = 3u;
+    fixture->items[1].name = (CmHirDeclarationString)S("MaybeUninit");
+    fixture->items[1].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[1].source_ordinal = 20u;
+    fixture->items[1].generic_start = 2u;
+    fixture->items[1].generic_count = 1u;
+    fixture->items[1].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    fixture->items[1].aggregate_repr =
+        CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT;
+    fixture->items[1].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+    fixture->items[1].field_count = 2u;
+    fixture->items[1].fields = fixture->maybe_uninit_fields;
+    fixture->items[1].lang_item =
+        (CmHirDeclarationString)S("maybe_uninit");
+
+    fixture->items[2].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture->items[2].owner_module = 4u;
+    fixture->items[2].name = (CmHirDeclarationString)S("Assume");
+    fixture->items[2].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[2].source_ordinal = 30u;
+    fixture->items[2].aggregate_form = CM_HIR_DECL_AGGREGATE_NAMED;
+    fixture->items[2].aggregate_repr = CM_HIR_DECL_AGGREGATE_REPR_RUST;
+    fixture->items[2].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+    fixture->items[2].field_count = 4u;
+    fixture->items[2].fields = fixture->assume_fields;
+    fixture->items[2].lang_item =
+        (CmHirDeclarationString)S("transmute_opts");
+    metadata->items = fixture->items;
+    metadata->item_count = 3u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].is_relaxed_sized = 1u;
+    fixture->generics[0].name = (CmHirDeclarationString)S("T");
+    fixture->generics[1].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[1].owner_local = 2u;
+    fixture->generics[1].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[1].name = (CmHirDeclarationString)S("T");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 2u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_BOOL;
+    fixture->types[2].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[2].generic_local = 1u;
+    fixture->types[3].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[3].generic_local = 2u;
+    fixture->application_arguments[0] = 4u;
+    fixture->types[4].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[4].item_local = 1u;
+    fixture->types[4].argument_count = 1u;
+    fixture->types[4].argument_types = fixture->application_arguments;
+    metadata->types = fixture->types;
+    metadata->type_count = 5u;
+
+    fixture->manually_drop_fields[0].name =
+        (CmHirDeclarationString)S("value");
+    fixture->manually_drop_fields[0].visibility.kind =
+        CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->manually_drop_fields[0].source_ordinal = 0u;
+    fixture->manually_drop_fields[0].type_local = 3u;
+    fixture->maybe_uninit_fields[0].name =
+        (CmHirDeclarationString)S("uninit");
+    fixture->maybe_uninit_fields[0].visibility.kind =
+        CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->maybe_uninit_fields[0].source_ordinal = 0u;
+    fixture->maybe_uninit_fields[0].type_local = 1u;
+    fixture->maybe_uninit_fields[1].name =
+        (CmHirDeclarationString)S("value");
+    fixture->maybe_uninit_fields[1].visibility.kind =
+        CM_HIR_DECL_VISIBILITY_PRIVATE;
+    fixture->maybe_uninit_fields[1].source_ordinal = 1u;
+    fixture->maybe_uninit_fields[1].type_local = 5u;
+    for (index = 0u; index < 4u; ++index) {
+        fixture->assume_fields[index].visibility.kind =
+            CM_HIR_DECL_VISIBILITY_PUBLIC;
+        fixture->assume_fields[index].source_ordinal = index;
+        fixture->assume_fields[index].type_local = 2u;
+    }
+    fixture->assume_fields[0].name =
+        (CmHirDeclarationString)S("alignment");
+    fixture->assume_fields[1].name =
+        (CmHirDeclarationString)S("lifetimes");
+    fixture->assume_fields[2].name =
+        (CmHirDeclarationString)S("safety");
+    fixture->assume_fields[3].name =
+        (CmHirDeclarationString)S("validity");
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->items[2].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 3u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    fixture->namespace_entries[1] = fixture->namespace_entries[0];
+    fixture->namespace_entries[1].name = fixture->items[0].name;
+    fixture->namespace_entries[1].target_local = 1u;
+    fixture->namespace_entries[1].export_ordinal = 2u;
+    fixture->namespace_entries[2] = fixture->namespace_entries[0];
+    fixture->namespace_entries[2].name = fixture->items[1].name;
+    fixture->namespace_entries[2].target_local = 2u;
+    fixture->namespace_entries[2].export_ordinal = 3u;
+    fixture->namespace_entries[3] = fixture->namespace_entries[1];
+    fixture->namespace_entries[3].owner_module = 2u;
+    fixture->namespace_entries[3].export_ordinal = 10u;
+    fixture->namespace_entries[4] = fixture->namespace_entries[2];
+    fixture->namespace_entries[4].owner_module = 3u;
+    fixture->namespace_entries[4].export_ordinal = 20u;
+    fixture->namespace_entries[5] = fixture->namespace_entries[0];
+    fixture->namespace_entries[5].owner_module = 4u;
+    fixture->namespace_entries[5].export_ordinal = 30u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 6u;
 }
 
 static void assert_failed_transaction(const CmByteBuf *bytes)
@@ -2131,6 +2332,7 @@ static void test_const_value_family(void)
     fixture.metadata.generics = fixture.generics;
     fixture.metadata.generic_count = 1u;
     fixture.items[0].kind = CM_HIR_DECL_ITEM_STRUCT;
+    fixture.items[0].aggregate_form = CM_HIR_DECL_AGGREGATE_UNIT;
     fixture.items[0].owner_module = 1u;
     fixture.items[0].name = (CmHirDeclarationString)S("Wrap");
     fixture.items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
@@ -2203,6 +2405,169 @@ static void test_const_value_family(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_named_aggregate_family(void)
+{
+    AggregateFixture fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+    size_t payload;
+    size_t field;
+    size_t field_tail;
+
+    aggregate_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.item_count == 3u
+        && decoded.items[0].kind == CM_HIR_DECL_ITEM_STRUCT
+        && decoded.items[0].aggregate_form
+            == CM_HIR_DECL_AGGREGATE_NAMED
+        && decoded.items[0].aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT
+        && decoded.items[0].field_count == 1u
+        && decoded.items[0].fields[0].source_ordinal == 0u
+        && decoded.items[0].fields[0].type_local == 3u
+        && decoded.items[1].kind == CM_HIR_DECL_ITEM_UNION
+        && decoded.items[1].field_count == 2u
+        && decoded.items[1].fields[1].source_ordinal == 1u
+        && decoded.items[1].fields[1].type_local == 5u
+        && decoded.items[2].aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_RUST
+        && decoded.items[2].field_count == 4u
+        && decoded.types[4].kind
+            == CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION
+        && decoded.types[4].item_local == 1u
+        && decoded.namespace_entries[0].target_local == 3u
+        && decoded.namespace_entries[2].target_local == 2u);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+        == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+
+    /* Generic applications may name either bounded aggregate family. */
+    fixture.types[5].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture.types[5].item_local = 2u;
+    fixture.types[5].argument_count = 1u;
+    fixture.union_application_arguments[0] = 2u;
+    fixture.types[5].argument_types = fixture.union_application_arguments;
+    fixture.assume_fields[0].type_local = 6u;
+    fixture.metadata.type_count = 6u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    fixture.metadata.type_count = 5u;
+    fixture.assume_fields[0].type_local = 2u;
+
+    fixture.manually_drop_fields[0].type_local = 4u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.manually_drop_fields[0].type_local = 5u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.manually_drop_fields[0].type_local = 3u;
+
+    fixture.manually_drop_fields[0].source_ordinal = 1u;
+    fixture.maybe_uninit_fields[1].source_ordinal = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.manually_drop_fields[0].source_ordinal = 0u;
+    fixture.maybe_uninit_fields[1].source_ordinal = 1u;
+    fixture.maybe_uninit_fields[1].name =
+        fixture.maybe_uninit_fields[0].name;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.maybe_uninit_fields[1].name =
+        (CmHirDeclarationString)S("value");
+
+    fixture.items[1].aggregate_repr = CM_HIR_DECL_AGGREGATE_REPR_RUST;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.items[1].aggregate_repr =
+        CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT;
+    fixture.items[2].aggregate_flags |=
+        CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.items[2].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+    fixture.items[1].lang_item = fixture.items[0].lang_item;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.items[1].lang_item =
+        (CmHirDeclarationString)S("maybe_uninit");
+    fixture.items[0].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.items[0].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+    fixture.items[2].aggregate_flags |= UINT16_C(4);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.items[2].aggregate_flags =
+        CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM;
+
+    /* `str` is unsized/non-Copy and cannot be a direct bounded union field. */
+    fixture.types[0].primitive = CM_HIR_DECL_PRIMITIVE_STR;
+    fixture.types[1].primitive = CM_HIR_DECL_PRIMITIVE_U8;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture.types[1].primitive = CM_HIR_DECL_PRIMITIVE_BOOL;
+
+    /* Named structs and unions are TYPE-only, including defining entries. */
+    fixture.namespace_entries[4].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR);
+    fixture.namespace_entries[4].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+
+    record = item_record_offset(&encoded, UINT32_C(1));
+    payload = skip_string(&encoded, record + 8u) + 44u;
+    field = payload + 8u;
+    field_tail = skip_string(&encoded, field);
+    bad = copy_bytes(&encoded);
+    bad.data[payload] = CM_HIR_DECL_AGGREGATE_UNIT;
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + payload + 4u,
+        (uint32_t)CM_HIR_DECL_METADATA_MAX_FIELDS + 1u);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    bad.data[field_tail] = CM_HIR_DECL_VISIBILITY_CRATE;
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + field_tail + 12u, UINT32_C(0));
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    put_u32(bad.data + field, UINT32_MAX);
+    recompute_family_crc(&bad, UINT8_C(2), "ITEM");
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 int main(void)
 {
     TestFixture first;
@@ -2225,6 +2590,7 @@ int main(void)
     test_default_enum_variant_namespace();
     test_enum_named_adt_signature();
     test_const_value_family();
+    test_named_aggregate_family();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);
     cm_byte_buf_init(&bytes3);

@@ -270,6 +270,9 @@ static CmHirStatus cm_decl_reserve(CmHirContext *context,
         if (metadata->items[index].kind == CM_HIR_DECL_ITEM_STRUCT) {
             kind = CM_HIR_ITEM_STRUCT;
         } else if (metadata->items[index].kind
+                == CM_HIR_DECL_ITEM_UNION) {
+            kind = CM_HIR_ITEM_UNION;
+        } else if (metadata->items[index].kind
                 == CM_HIR_DECL_ITEM_ENUM) {
             kind = CM_HIR_ITEM_ENUM;
         } else if (metadata->items[index].kind
@@ -363,6 +366,107 @@ static int cm_decl_mutability(uint8_t wire, CmHirMutability *out)
     return 0;
 }
 
+static int cm_decl_visibility(CmHirDeclarationVisibility wire,
+    CmHirVisibility *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->restriction = cm_hir_def_id_none();
+    if (wire.kind == CM_HIR_DECL_VISIBILITY_PRIVATE
+        && wire.restriction_module == 0u) {
+        out->kind = CM_HIR_VIS_PRIVATE;
+        return 1;
+    }
+    if (wire.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && wire.restriction_module == 0u) {
+        out->kind = CM_HIR_VIS_PUBLIC;
+        return 1;
+    }
+    return 0;
+}
+
+static CmInternId cm_decl_lang_attribute(CmHirContext *context,
+    CmHirDeclarationString lang_item)
+{
+    static const unsigned char prefix[] = "lang = \"";
+    static const unsigned char suffix[] = "\"";
+    size_t prefix_length = sizeof(prefix) - 1u;
+    size_t suffix_length = sizeof(suffix) - 1u;
+    size_t length;
+    unsigned char *metadata;
+    CmInternId result;
+    if (lang_item.data == NULL || lang_item.length == 0u
+        || lang_item.length > SIZE_MAX - prefix_length
+        || prefix_length + lang_item.length > SIZE_MAX - suffix_length) {
+        return CM_INTERN_ID_NONE;
+    }
+    length = prefix_length + lang_item.length + suffix_length;
+    metadata = (unsigned char *)cm_alloc(length);
+    if (metadata == NULL) return CM_INTERN_ID_NONE;
+    memcpy(metadata, prefix, prefix_length);
+    memcpy(metadata + prefix_length, lang_item.data, lang_item.length);
+    memcpy(metadata + prefix_length + lang_item.length, suffix,
+        suffix_length);
+    result = cm_interner_intern(&context->strings, metadata, length);
+    cm_free(metadata);
+    return result;
+}
+
+static CmHirStatus cm_decl_aggregate_attributes(CmHirContext *context,
+    const CmHirDeclarationItem *wire, CmSpan span,
+    CmHirAttribute attributes[3], uint32_t *out_count)
+{
+    uint16_t known_flags = CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM
+        | CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT;
+    uint32_t count = 0u;
+    if (context == NULL || wire == NULL || attributes == NULL
+        || out_count == NULL
+        || (wire->aggregate_flags & (uint16_t)~known_flags) != 0u
+        || (wire->aggregate_repr != CM_HIR_DECL_AGGREGATE_REPR_RUST
+            && wire->aggregate_repr
+                != CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT)
+        || ((wire->aggregate_flags
+                & CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT) != 0u
+            && wire->aggregate_repr
+                != CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT)) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
+    memset(attributes, 0, 3u * sizeof(*attributes));
+    if ((wire->aggregate_flags
+            & CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM) != 0u) {
+        attributes[count].metadata = cm_decl_lang_attribute(context,
+            wire->lang_item);
+        if (attributes[count].metadata == CM_INTERN_ID_NONE)
+            return CM_HIR_INVALID_ARGUMENT;
+        count += 1u;
+    }
+    if (wire->aggregate_repr
+            == CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT) {
+        attributes[count].metadata = cm_hir_intern(context,
+            "repr(transparent)");
+        if (attributes[count].metadata == CM_INTERN_ID_NONE)
+            return CM_HIR_INVALID_ARGUMENT;
+        count += 1u;
+    }
+    if ((wire->aggregate_flags
+            & CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT) != 0u) {
+        attributes[count].metadata = cm_hir_intern(context,
+            "rustc_pub_transparent");
+        if (attributes[count].metadata == CM_INTERN_ID_NONE)
+            return CM_HIR_INVALID_ARGUMENT;
+        count += 1u;
+    }
+    {
+        uint32_t index;
+        for (index = 0u; index < count; ++index) {
+            attributes[index].span = span;
+            /* Synthetic metadata-origin ordinals are always nonzero. */
+            attributes[index].source_attribute = index + 1u;
+        }
+    }
+    *out_count = count;
+    return CM_HIR_OK;
+}
+
 static int cm_decl_application_schema_valid(
     const CmHirDeclarationMetadata *metadata,
     const CmHirDeclarationType *wire)
@@ -375,7 +479,8 @@ static int cm_decl_application_schema_valid(
         return 0;
     }
     target = &metadata->items[wire->item_local - 1u];
-    if (target->kind != CM_HIR_DECL_ITEM_STRUCT
+    if ((target->kind != CM_HIR_DECL_ITEM_STRUCT
+            && target->kind != CM_HIR_DECL_ITEM_UNION)
         || target->generic_count != wire->argument_count
         || target->generic_start == 0u
         || (size_t)target->generic_start > metadata->generic_count
@@ -417,6 +522,8 @@ static CmHirStatus cm_decl_add_types(CmHirContext *context,
                 || (size_t)wire->item_local > metadata->item_count
                 || (metadata->items[wire->item_local - 1u].kind
                         != CM_HIR_DECL_ITEM_STRUCT
+                    && metadata->items[wire->item_local - 1u].kind
+                        != CM_HIR_DECL_ITEM_UNION
                     && metadata->items[wire->item_local - 1u].kind
                         != CM_HIR_DECL_ITEM_ENUM)
                 || metadata->items[wire->item_local - 1u].generic_count
@@ -547,6 +654,8 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
     for (index = 0u; index < metadata->item_count; ++index) {
         const CmHirDeclarationItem *wire;
         CmHirAttribute item_attribute;
+        CmHirAttribute aggregate_attributes[3];
+        CmHirField *fields;
         CmHirVariant *variants;
         unsigned char *diagnostic_metadata;
         CmHirItem item;
@@ -554,18 +663,23 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
         CmHirStatus status;
         wire = &metadata->items[index];
         if ((wire->kind != CM_HIR_DECL_ITEM_STRUCT
+                && wire->kind != CM_HIR_DECL_ITEM_UNION
                 && wire->kind != CM_HIR_DECL_ITEM_ENUM
                 && wire->kind != CM_HIR_DECL_ITEM_TYPE_ALIAS)
             || wire->visibility.kind != CM_HIR_DECL_VISIBILITY_PUBLIC
             || wire->visibility.restriction_module != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
+        fields = NULL;
         variants = NULL;
         diagnostic_metadata = NULL;
         memset(&item_attribute, 0, sizeof(item_attribute));
+        memset(aggregate_attributes, 0, sizeof(aggregate_attributes));
         memset(&item, 0, sizeof(item));
         if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
             item.kind = CM_HIR_ITEM_STRUCT;
+        } else if (wire->kind == CM_HIR_DECL_ITEM_UNION) {
+            item.kind = CM_HIR_ITEM_UNION;
         } else if (wire->kind == CM_HIR_DECL_ITEM_ENUM) {
             item.kind = CM_HIR_ITEM_ENUM;
         } else {
@@ -582,8 +696,59 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
             ? CM_HIR_GENERIC_PARAM_NONE
             : runtime->generics[wire->generic_start - 1u];
         item.generic_parameter_count = wire->generic_count;
-        if (wire->kind == CM_HIR_DECL_ITEM_STRUCT) {
-            item.data.aggregate_item.form = CM_HIR_AGGREGATE_UNIT;
+        if (wire->kind == CM_HIR_DECL_ITEM_STRUCT
+                || wire->kind == CM_HIR_DECL_ITEM_UNION) {
+            uint32_t field_index;
+            uint32_t attribute_count;
+            if ((wire->aggregate_form != CM_HIR_DECL_AGGREGATE_UNIT
+                    && wire->aggregate_form
+                        != CM_HIR_DECL_AGGREGATE_NAMED)
+                || (wire->kind == CM_HIR_DECL_ITEM_UNION
+                    && wire->aggregate_form
+                        != CM_HIR_DECL_AGGREGATE_NAMED)
+                || (wire->aggregate_form == CM_HIR_DECL_AGGREGATE_UNIT
+                    && (wire->field_count != 0u || wire->fields != NULL))
+                || (wire->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+                    && (wire->field_count == 0u || wire->fields == NULL))) {
+                return CM_HIR_INVARIANT_VIOLATION;
+            }
+            item.data.aggregate_item.form = wire->aggregate_form
+                    == CM_HIR_DECL_AGGREGATE_UNIT
+                ? CM_HIR_AGGREGATE_UNIT : CM_HIR_AGGREGATE_NAMED;
+            fields = (CmHirField *)cm_decl_array(wire->field_count,
+                sizeof(*fields));
+            if (wire->field_count != 0u && fields == NULL)
+                return CM_HIR_INVALID_ARGUMENT;
+            for (field_index = 0u; field_index < wire->field_count;
+                    ++field_index) {
+                const CmHirDeclarationField *field =
+                    &wire->fields[field_index];
+                if (field->type_local == 0u
+                    || (size_t)field->type_local > metadata->type_count
+                    || runtime->types[field->type_local - 1u]
+                        == CM_HIR_TYPE_NONE
+                    || !cm_decl_visibility(field->visibility,
+                        &fields[field_index].visibility)) {
+                    cm_free(fields);
+                    return CM_HIR_INVARIANT_VIOLATION;
+                }
+                fields[field_index].name = cm_decl_intern(context,
+                    field->name);
+                fields[field_index].type =
+                    runtime->types[field->type_local - 1u];
+                fields[field_index].span = cm_decl_span(source,
+                    field->source_ordinal);
+            }
+            status = cm_decl_aggregate_attributes(context, wire, item.span,
+                aggregate_attributes, &attribute_count);
+            if (status != CM_HIR_OK) {
+                cm_free(fields);
+                return status;
+            }
+            item.attributes = aggregate_attributes;
+            item.attribute_count = attribute_count;
+            item.data.aggregate_item.fields = fields;
+            item.data.aggregate_item.field_count = wire->field_count;
         } else if (wire->kind == CM_HIR_DECL_ITEM_ENUM) {
             uint32_t variant_index;
 
@@ -714,6 +879,7 @@ static CmHirStatus cm_decl_bind_items(CmHirContext *context,
                 cm_hir_def_id_none();
         }
         status = cm_hir_add_item(context, &item, &item_id);
+        cm_free(fields);
         cm_free(variants);
         if (status != CM_HIR_OK) return status;
     }
@@ -1020,10 +1186,22 @@ static CmHirLibraryStatus cm_decl_build_owned(CmHirContext *context,
             binding.definition = runtime->items[entry->target_local - 1u];
             if (item->kind == CM_HIR_DECL_ITEM_STRUCT) {
                 binding.type_kind = CM_HIR_TYPE_ADT_KIND;
-                binding.kind = entry->namespace_kind
-                        == CM_HIR_DECL_NAMESPACE_VALUE
-                    ? CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR
-                    : CM_HIR_LIBRARY_BINDING_TYPE;
+                if (entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_VALUE) {
+                    if (item->aggregate_form
+                            != CM_HIR_DECL_AGGREGATE_UNIT) {
+                        return CM_HIR_LIBRARY_INVALID_HIR;
+                    }
+                    binding.kind =
+                        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR;
+                } else {
+                    binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
+                }
+            } else if (item->kind == CM_HIR_DECL_ITEM_UNION
+                    && entry->namespace_kind
+                        == CM_HIR_DECL_NAMESPACE_TYPE) {
+                binding.kind = CM_HIR_LIBRARY_BINDING_TYPE;
+                binding.type_kind = CM_HIR_TYPE_ADT_KIND;
             } else if (item->kind == CM_HIR_DECL_ITEM_ENUM
                     && entry->namespace_kind
                         == CM_HIR_DECL_NAMESPACE_TYPE) {

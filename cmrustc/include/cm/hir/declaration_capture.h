@@ -77,9 +77,9 @@ typedef enum CmHirDeclarationCaptureSemanticAttributes {
     /*
      * v3.0 declares SEMANTIC_ATTRIBUTES absent.  The capture explicitly
      * projected authenticated crate/module attributes and, on supported UNIT
-     * structs/bounded unit-variant enums/type aliases/free consts/reexports,
-     * only the stricter LOWER_SAFE allowlist documented on the capture entry
-     * point.
+     * and named aggregates/bounded unit-variant enums/type aliases/free
+     * consts/reexports, only the stricter LOWER_SAFE allowlist documented on
+     * the capture entry point.
      * This does not call any projected attribute inert.
      */
     CM_HIR_DECL_CAPTURE_SEMANTIC_ATTRIBUTES_ABSENT_PROFILE_PROJECTION = 1
@@ -140,6 +140,18 @@ typedef struct CmHirDeclarationCaptureResult {
  * `derive(...)`, and bare `non_exhaustive`.  The latter is the sole authority
  * for an absent public VALUE constructor mate. A supported free alias permits
  * only the stability/deprecation subset and must target a captured UNIT struct.
+ * Three source-authenticated named aggregate profiles are also supported,
+ * without declaration-name checks: a Rust-repr, zero-generic struct with one
+ * retained lang identity and exactly four public BOOL fields; a transparent,
+ * pub-transparent one-generic struct whose relaxed-Sized type parameter is its
+ * sole private field; and a transparent, pub-transparent one-generic union
+ * whose ordinary-Sized parameter appears in one UNIT field and one application
+ * of the captured `manually_drop` lang wrapper. Named aggregates are TYPE-only
+ * and retain their lang, representation, pub-transparent flag, field order,
+ * visibility, types, and ITEM-owned generic shape. Their authenticated
+ * stability and derive attributes are projected; layout/lang attributes are
+ * normalized into retained ITEM facts. Predicated aggregates remain outside
+ * this bounded profile and fail closed.
  * A supported enum is public, top-level, zero-generic/predicate and uses one
  * of two exact profiles. The first is `repr(u8)` with source-ordered UNIT
  * variants and explicit decimal ISIZE scalar discriminants in the u8 range;

@@ -24,6 +24,8 @@
 #define CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES ((size_t)131072u)
 #define CM_HIR_DECL_METADATA_MAX_VARIANTS \
     CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
+#define CM_HIR_DECL_METADATA_MAX_FIELDS \
+    CM_HIR_DECL_METADATA_MAX_GRAPH_EDGES
 
 /* Kept for capture callers until they migrate to the family-specific names. */
 #define CM_HIR_DECL_METADATA_MAX_RECORDS \
@@ -146,9 +148,29 @@ typedef struct CmHirDeclarationVisibility {
 
 typedef enum CmHirDeclarationItemKind {
     CM_HIR_DECL_ITEM_STRUCT = 2,
+    CM_HIR_DECL_ITEM_UNION = 3,
     CM_HIR_DECL_ITEM_ENUM = 4,
     CM_HIR_DECL_ITEM_TYPE_ALIAS = 5
 } CmHirDeclarationItemKind;
+
+typedef enum CmHirDeclarationAggregateForm {
+    CM_HIR_DECL_AGGREGATE_UNIT = 1,
+    CM_HIR_DECL_AGGREGATE_NAMED = 3
+} CmHirDeclarationAggregateForm;
+
+#define CM_HIR_DECL_AGGREGATE_REPR_RUST UINT8_C(0)
+#define CM_HIR_DECL_AGGREGATE_REPR_TRANSPARENT UINT8_C(1)
+
+#define CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM UINT16_C(1)
+#define CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT UINT16_C(2)
+
+typedef struct CmHirDeclarationField {
+    CmHirDeclarationString name;
+    CmHirDeclarationVisibility visibility;
+    /* Source-order identity; fields are stored in strictly increasing order. */
+    uint32_t source_ordinal;
+    uint32_t type_local;
+} CmHirDeclarationField;
 
 typedef enum CmHirDeclarationVariantKind {
     CM_HIR_DECL_VARIANT_UNIT = 1
@@ -169,12 +191,13 @@ typedef struct CmHirDeclarationVariant {
 } CmHirDeclarationVariant;
 
 /*
- * The bounded ordinary ITEM slice includes public top-level unit structs,
- * repr(u8) unit-variant enums, Rust-default diagnostic unit enums, and free
- * type aliases to zero-argument STRUCT ITEMs. Unit structs may own type
- * parameters; enums and aliases require zero generic/predicate ranges.
- * A STRUCT's public constructor availability is represented by the complete
- * VALUE namespace. ENUM variants are item-owned and never module VALUE mates.
+ * The bounded ordinary ITEM slice includes public top-level unit and named
+ * structs, named unions, repr(u8) unit-variant enums, Rust-default diagnostic
+ * unit enums, and free type aliases to zero-argument STRUCT ITEMs. Structs and
+ * unions may own type parameters; enums and aliases require zero
+ * generic/predicate ranges. A unit STRUCT's public constructor availability is
+ * represented by the complete VALUE namespace. Named structs, unions, and
+ * enums are TYPE-only in module namespace metadata.
  */
 typedef struct CmHirDeclarationItem {
     uint8_t kind;
@@ -187,6 +210,14 @@ typedef struct CmHirDeclarationItem {
     /* A contiguous ITEM-owned GPAR range; aliases require zero. */
     uint32_t generic_start;
     uint32_t generic_count;
+    /* STRUCT/UNION aggregate shape; zero for ENUM/TYPE_ALIAS. */
+    uint8_t aggregate_form;
+    uint8_t aggregate_repr;
+    uint16_t aggregate_flags;
+    uint32_t field_count;
+    CmHirDeclarationField *fields;
+    /* Required exactly when aggregate_flags has HAS_LANG_ITEM. */
+    CmHirDeclarationString lang_item;
     /* ENUM requires a supported repr and an owned source-ordered variant array. */
     uint8_t enum_repr_primitive;
     uint32_t variant_count;
