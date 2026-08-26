@@ -215,8 +215,8 @@ static const CmHirType *expect_type_kind(const CmHirContext *context,
     return type;
 }
 
-static CmHirLowerResult lower_source(const char *source,
-    CmHirContext *context, TestResolver *resolver)
+static CmHirLowerResult lower_source_with_pointer_bits(const char *source,
+    CmHirContext *context, TestResolver *resolver, uint32_t pointer_bits)
 {
     CmAst ast;
     CmParseResult parse_result;
@@ -231,6 +231,7 @@ static CmHirLowerResult lower_source(const char *source,
     cm_hir_lower_options_init(&options);
     options.crate_name = "lower_test";
     options.source = 7u;
+    options.pointer_bits = pointer_bits;
     if (resolver != NULL) {
         resolver->hir = context;
         options.resolve_path = resolve_external;
@@ -239,6 +240,12 @@ static CmHirLowerResult lower_source(const char *source,
     result = cm_hir_lower_crate(context, &ast, &options);
     cm_ast_destroy(&ast);
     return result;
+}
+
+static CmHirLowerResult lower_source(const char *source,
+    CmHirContext *context, TestResolver *resolver)
+{
+    return lower_source_with_pointer_bits(source, context, resolver, 0u);
 }
 
 static CmHirLowerResult lower_graph_source(const char *source,
@@ -2708,7 +2715,8 @@ static void test_const_generic_trait_method_declaration(void)
 static void test_macro_expanded_array_length_expression(void)
 {
     static const char source[] =
-        "struct Holder<T> { values: [T; ((32 - 1) - 1)] }"
+        "struct Holder<T> { values: [T; ((32 - 1) - 1)] }";
+    static const char pointer_source[] =
         "struct PointerStorage {"
         " values: [*const (); 16 / size_of::<*const ()>()]"
         "}";
@@ -2745,7 +2753,6 @@ static void test_macro_expanded_array_length_expression(void)
 
     result = lower_source(source, &context, NULL);
     holder = find_item(&context, "Holder");
-    pointer_storage = find_item(&context, "PointerStorage");
     array = holder == NULL || holder->kind != CM_HIR_ITEM_STRUCT
             || holder->data.aggregate_item.field_count != 1u
         ? NULL : cm_hir_get_type(&context,
@@ -2753,24 +2760,58 @@ static void test_macro_expanded_array_length_expression(void)
     length_type = array == NULL || array->kind != CM_HIR_TYPE_ARRAY_KIND
         ? NULL : cm_hir_get_type(&context,
             array->data.array_type.length.type);
-    pointer_array = pointer_storage == NULL
-            || pointer_storage->kind != CM_HIR_ITEM_STRUCT
-            || pointer_storage->data.aggregate_item.field_count != 1u
-        ? NULL : cm_hir_get_type(&context,
-            pointer_storage->data.aggregate_item.fields[0].type);
     assert(result.error_count == 0u
         && holder != NULL && array != NULL
         && array->kind == CM_HIR_TYPE_ARRAY_KIND
         && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
         && array->data.array_type.length.data.value.low_bits == 30u
-        && pointer_array != NULL
-        && pointer_array->kind == CM_HIR_TYPE_ARRAY_KIND
-        && pointer_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
-        && pointer_array->data.array_type.length.data.value.low_bits
-            == 16u / (uint64_t)sizeof(void *)
         && length_type != NULL
         && length_type->kind == CM_HIR_TYPE_INTEGER_KIND
         && length_type->data.integer_type.kind == CM_HIR_INT_USIZE);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source_with_pointer_bits(pointer_source, &context, NULL,
+        32u);
+    pointer_storage = find_item(&context, "PointerStorage");
+    pointer_array = pointer_storage == NULL
+            || pointer_storage->kind != CM_HIR_ITEM_STRUCT
+            || pointer_storage->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            pointer_storage->data.aggregate_item.fields[0].type);
+    assert(result.error_count == 0u && pointer_array != NULL
+        && pointer_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && pointer_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && pointer_array->data.array_type.length.data.value.low_bits == 4u
+        && pointer_array->data.array_type.length.data.value.high_bits == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source_with_pointer_bits(pointer_source, &context, NULL,
+        64u);
+    pointer_storage = find_item(&context, "PointerStorage");
+    pointer_array = pointer_storage == NULL
+            || pointer_storage->kind != CM_HIR_ITEM_STRUCT
+            || pointer_storage->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            pointer_storage->data.aggregate_item.fields[0].type);
+    assert(result.error_count == 0u && pointer_array != NULL
+        && pointer_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && pointer_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && pointer_array->data.array_type.length.data.value.low_bits == 2u
+        && pointer_array->data.array_type.length.data.value.high_bits == 0u);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source_with_pointer_bits(pointer_source, &context, NULL,
+        0u);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && find_item(&context, "PointerStorage") == NULL);
+    cm_hir_context_destroy(&context);
+
+    result = lower_source_with_pointer_bits(pointer_source, &context, NULL,
+        16u);
+    assert(result.error_count == 1u
+        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
+        && find_item(&context, "PointerStorage") == NULL);
     cm_hir_context_destroy(&context);
 
     for (index = 0u; index < sizeof(evaluated) / sizeof(evaluated[0]);

@@ -96,6 +96,12 @@ typedef struct CmHirDeclarationCaptureInput {
     CmHirArtifactBytes crate_disambiguator;
     CmHirArtifactBytes target_triple;
     CmHirArtifactBytes data_layout;
+    /*
+     * Exact configured target width. The canonical descriptor, target
+     * triple, and cfg target facts must agree; only 32/64-bit targets enter
+     * this bounded capture profile.
+     */
+    uint32_t target_pointer_bits;
 } CmHirDeclarationCaptureInput;
 
 typedef struct CmHirDeclarationCaptureResult {
@@ -153,6 +159,13 @@ typedef struct CmHirDeclarationCaptureResult {
  * edges. Such private ITEMs must be transitively reachable and have no NSPC
  * identity; an orphan private item is never discovered or emitted. Predicated
  * aggregates remain outside this bounded profile and fail closed.
+ * Named aggregate fields preserve exact PUBLIC, PRIVATE, or CRATE visibility
+ * (the latter has no restriction identity); visibility is never collapsed.
+ * A field array length may use an ordinary decimal scalar or the exact
+ * whitespace-insensitive `N / size_of::<*const ()>()` source form. The latter
+ * is accepted only when its lowered VALUE/USIZE constant equals N divided by
+ * the authenticated 32/64-bit target pointer size. Raw-pointer/unit children
+ * and every target descriptor/triple/cfg fact are matched independently.
  * A supported enum is top-level, predicate-free and uses one of three exact
  * profiles. The first is zero-generic explicit `repr(u8|u16|u32|u64)` with
  * source-ordered UNIT variants and exact source-authenticated ISIZE scalar

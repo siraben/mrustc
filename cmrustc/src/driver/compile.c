@@ -1819,6 +1819,7 @@ CmCompileResult cm_compile_emit_c_with_dependencies(const char *input_path,
     cm_hir_lower_options_init(&hir_options);
     hir_options.crate_name = crate_name;
     hir_options.source = root_source;
+    hir_options.pointer_bits = target->pointer_bits;
     hir_options.dependency_libraries = dependency_views;
     hir_options.dependency_library_count = dependency_count;
     if (!cm_compile_hir_edition(edition, &hir_options.edition)) {
@@ -2341,6 +2342,7 @@ CmCompileResult cm_compile_emit_cmrlib(const char *input_path,
     cm_hir_lower_options_init(&hir_options);
     hir_options.crate_name = crate_name;
     hir_options.source = root_source;
+    hir_options.pointer_bits = target->pointer_bits;
     if (!cm_compile_hir_edition(edition, &hir_options.edition)) {
         result = cm_compile_result(CM_COMPILE_INVALID_ARGUMENT,
             "unsupported Rust edition");
@@ -2737,6 +2739,7 @@ CmCompileResult cm_compile_emit_cmhir_kind(const char *input_path,
     cm_hir_lower_options_init(&hir_options);
     hir_options.crate_name = crate_name;
     hir_options.source = root_source;
+    hir_options.pointer_bits = target->pointer_bits;
     hir_options.dependency_libraries = dependency_views;
     hir_options.dependency_library_count = dependency_count;
     if (!cm_compile_hir_edition(edition, &hir_options.edition)) {

@@ -179,6 +179,7 @@ static void report_declaration_v3(const CmSourceSet *sources,
     input.crate_disambiguator.length = 68u;
     input.target_triple.data = target->triple;
     input.target_triple.length = strlen(target->triple);
+    input.target_pointer_bits = target->pointer_bits;
     input.data_layout.data = layout;
     input.data_layout.length = (size_t)layout_length;
     result = cm_hir_declaration_metadata_capture(&input, &metadata);
@@ -269,6 +270,7 @@ int main(int argc, char **argv)
     lower_options.crate_name = "core";
     lower_options.source = root;
     lower_options.edition = CM_HIR_EDITION_2024;
+    lower_options.pointer_bits = target->pointer_bits;
     lower_result = cm_hir_lower_module_graph(&hir, &graph,
         graph_result.revision, &imports, &modules, &lower_options);
     if (lower_result.error_count == 0u) {

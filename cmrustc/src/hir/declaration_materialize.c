@@ -443,6 +443,11 @@ static int cm_decl_visibility(CmHirDeclarationVisibility wire,
         out->kind = CM_HIR_VIS_PUBLIC;
         return 1;
     }
+    if (wire.kind == CM_HIR_DECL_VISIBILITY_CRATE
+        && wire.restriction_module == 0u) {
+        out->kind = CM_HIR_VIS_CRATE;
+        return 1;
+    }
     return 0;
 }
 

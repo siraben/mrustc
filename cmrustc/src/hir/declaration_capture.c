@@ -216,6 +216,274 @@ static int cm_decl_bytes_compare(const unsigned char *left,
     return left_length < right_length ? -1 : left_length > right_length;
 }
 
+static int cm_decl_target_read_u32(const unsigned char *bytes, size_t length,
+    size_t *position, uint32_t *out)
+{
+    size_t offset;
+    if (bytes == NULL || position == NULL || out == NULL
+        || *position > length || length - *position < 4u) return 0;
+    offset = *position;
+    *out = ((uint32_t)bytes[offset] << 24)
+        | ((uint32_t)bytes[offset + 1u] << 16)
+        | ((uint32_t)bytes[offset + 2u] << 8)
+        | (uint32_t)bytes[offset + 3u];
+    *position += 4u;
+    return 1;
+}
+
+static int cm_decl_target_read_string(const unsigned char *bytes,
+    size_t length, size_t *position, const unsigned char **out_bytes,
+    size_t *out_length)
+{
+    uint32_t string_length;
+    if (!cm_decl_target_read_u32(bytes, length, position, &string_length)
+        || *position > length
+        || (size_t)string_length > length - *position) return 0;
+    *out_bytes = bytes + *position;
+    *out_length = (size_t)string_length;
+    *position += (size_t)string_length;
+    return 1;
+}
+
+static unsigned char cm_decl_target_rendered_byte(size_t position,
+    const unsigned char *name, size_t name_length,
+    const unsigned char *value, size_t value_length, int has_value)
+{
+    if (position < name_length) return name[position];
+    position -= name_length;
+    if (!has_value) return 0u;
+    if (position == 0u) return (unsigned char)'=';
+    if (position == 1u) return (unsigned char)'"';
+    position -= 2u;
+    if (position < value_length) return value[position];
+    return (unsigned char)'"';
+}
+
+static int cm_decl_target_rendered_compare(const unsigned char *bytes,
+    size_t length, const unsigned char *name, size_t name_length,
+    const unsigned char *value, size_t value_length, int has_value,
+    size_t expected_length)
+{
+    size_t common = length < expected_length ? length : expected_length;
+    size_t position;
+    for (position = 0u; position < common; ++position) {
+        unsigned char expected = cm_decl_target_rendered_byte(position,
+            name, name_length, value, value_length, has_value);
+        if (bytes[position] != expected)
+            return bytes[position] < expected ? -1 : 1;
+    }
+    return length < expected_length ? -1 : length > expected_length;
+}
+
+static int cm_decl_target_cfg_has_rendered(
+    const CmHirArtifactConfig *config, const unsigned char *name,
+    size_t name_length, const unsigned char *value, size_t value_length,
+    int has_value)
+{
+    size_t expected_length;
+    size_t lower;
+    size_t upper;
+    size_t index;
+    if (config == NULL || name == NULL || name_length == 0u
+        || config->cfg_count > CM_HIR_ARTIFACT_MAX_CFG_COUNT
+        || (config->cfg_count != 0u && config->cfgs == NULL)
+        || (has_value && value == NULL)
+        || !cm_size_add(name_length, has_value ? 3u : 0u,
+            &expected_length)
+        || !cm_size_add(expected_length, has_value ? value_length : 0u,
+            &expected_length)) return 0;
+    if (has_value) {
+        for (index = 0u; index < value_length; ++index) {
+            unsigned char byte = value[index];
+            if (byte < UINT8_C(0x20) || byte > UINT8_C(0x7e)
+                || byte == (unsigned char)'"'
+                || byte == (unsigned char)'\\') return 0;
+        }
+    }
+    lower = 0u;
+    upper = config->cfg_count;
+    while (lower < upper) {
+        size_t middle = lower + (upper - lower) / 2u;
+        const CmHirArtifactBytes *cfg = &config->cfgs[middle];
+        const unsigned char *cfg_bytes =
+            (const unsigned char *)cfg->data;
+        int comparison;
+        if (cfg_bytes == NULL) return 0;
+        comparison = cm_decl_target_rendered_compare(cfg_bytes, cfg->length,
+            name, name_length, value, value_length, has_value,
+            expected_length);
+        if (comparison < 0) lower = middle + 1u;
+        else upper = middle;
+    }
+    if (lower == config->cfg_count
+        || config->cfgs[lower].data == NULL) return 0;
+    return cm_decl_target_rendered_compare(
+        (const unsigned char *)config->cfgs[lower].data,
+        config->cfgs[lower].length, name, name_length, value, value_length,
+        has_value, expected_length) == 0;
+}
+
+static int cm_decl_target_descriptor_matches(
+    const CmHirDeclarationCaptureInput *input)
+{
+    static const unsigned char header[] = "cmrustc-target-v1";
+    static const char *const cfg_fields[7] = {
+        NULL, "target_arch", "target_os", "target_env", "target_abi",
+        "target_vendor", "target_family"
+    };
+    static const unsigned char target_feature[] = "target_feature";
+    static const unsigned char target_endian[] = "target_endian";
+    static const unsigned char little[] = "little";
+    static const unsigned char big[] = "big";
+    const CmHirArtifactConfig *config = input->configuration;
+    const unsigned char *bytes;
+    const unsigned char *field;
+    const unsigned char *prior = NULL;
+    const unsigned char *prior_value = NULL;
+    size_t length;
+    size_t field_length;
+    const unsigned char *family = NULL;
+    size_t family_length = 0u;
+    size_t prior_length = 0u;
+    size_t prior_value_length = 0u;
+    size_t position;
+    uint32_t count;
+    uint32_t pointer_bits;
+    uint32_t index;
+    unsigned char prior_has_value = 0u;
+    if (config->target_descriptor.data == NULL
+        || config->target_descriptor.data != config->descriptor_storage.data
+        || config->target_descriptor.length != config->descriptor_storage.len
+        || config->target_descriptor.length < sizeof(header)
+        || memcmp(config->target_descriptor.data, header,
+            sizeof(header)) != 0) return 0;
+    bytes = config->target_descriptor.data;
+    length = config->target_descriptor.length;
+    position = sizeof(header);
+    for (index = 0u; index < 7u; ++index) {
+        if (!cm_decl_target_read_string(bytes, length, &position, &field,
+                &field_length)
+            || (index == 0u
+                && !cm_decl_bytes_equal(field, field_length,
+                    input->target_triple.data,
+                    input->target_triple.length))
+            || (index != 0u && !cm_decl_target_cfg_has_rendered(config,
+                (const unsigned char *)cfg_fields[index],
+                strlen(cfg_fields[index]), field, field_length, 1))) return 0;
+        if (index == 6u) {
+            family = field;
+            family_length = field_length;
+        }
+    }
+    if (!cm_decl_target_read_u32(bytes, length, &position, &pointer_bits)
+        || pointer_bits != input->target_pointer_bits
+        || position >= length || bytes[position] > UINT8_C(1)) return 0;
+    if (!cm_decl_target_cfg_has_rendered(config, target_endian,
+            sizeof(target_endian) - 1u,
+            bytes[position] == 0u ? little : big,
+            bytes[position] == 0u ? sizeof(little) - 1u : sizeof(big) - 1u,
+            1)
+        || family == NULL || family_length == 0u
+        || !cm_decl_target_cfg_has_rendered(config, family, family_length,
+            NULL, 0u, 0)) return 0;
+    position += 1u;
+    if (!cm_decl_target_read_u32(bytes, length, &position, &count)
+        || count > CM_HIR_ARTIFACT_MAX_CFG_COUNT) return 0;
+    for (index = 0u; index < count; ++index) {
+        if (!cm_decl_target_read_string(bytes, length, &position, &field,
+                &field_length)
+            || field_length == 0u
+            || (prior != NULL && cm_decl_bytes_compare(prior, prior_length,
+                field, field_length) >= 0)
+            || !cm_decl_target_cfg_has_rendered(config, target_feature,
+                sizeof(target_feature) - 1u, field, field_length, 1)) return 0;
+        prior = field;
+        prior_length = field_length;
+    }
+    if (!cm_decl_target_read_u32(bytes, length, &position, &count)
+        || count > CM_HIR_ARTIFACT_MAX_CFG_COUNT) return 0;
+    prior = NULL;
+    prior_length = 0u;
+    for (index = 0u; index < count; ++index) {
+        const unsigned char *value = NULL;
+        size_t value_length = 0u;
+        unsigned char has_value;
+        int comparison;
+        if (!cm_decl_target_read_string(bytes, length, &position, &field,
+                &field_length)
+            || field_length == 0u || position >= length) return 0;
+        has_value = bytes[position++];
+        if (has_value > UINT8_C(1)) return 0;
+        if (has_value != 0u
+            && !cm_decl_target_read_string(bytes, length, &position, &value,
+                &value_length)) return 0;
+        if (!cm_decl_target_cfg_has_rendered(config, field, field_length,
+                value, value_length, has_value != 0u)) return 0;
+        comparison = prior == NULL ? -1 : cm_decl_bytes_compare(prior,
+            prior_length, field, field_length);
+        if (prior != NULL && comparison == 0) {
+            comparison = prior_has_value < has_value ? -1
+                : prior_has_value > has_value ? 1
+                : has_value == 0u ? 0
+                : cm_decl_bytes_compare(prior_value, prior_value_length,
+                    value, value_length);
+        }
+        if (prior != NULL && comparison >= 0) return 0;
+        prior = field;
+        prior_length = field_length;
+        prior_has_value = has_value;
+        prior_value = value;
+        prior_value_length = value_length;
+    }
+    return position == length;
+}
+
+static int cm_decl_target_cfg_matches(
+    const CmHirDeclarationCaptureInput *input)
+{
+    static const unsigned char width32[] =
+        "target_pointer_width=\"32\"";
+    static const unsigned char width64[] =
+        "target_pointer_width=\"64\"";
+    const CmHirArtifactConfig *config = input->configuration;
+    const unsigned char *expected = input->target_pointer_bits == 32u
+        ? width32 : width64;
+    size_t expected_length = input->target_pointer_bits == 32u
+        ? sizeof(width32) - 1u : sizeof(width64) - 1u;
+    size_t storage_offset = 0u;
+    size_t matches = 0u;
+    size_t index;
+    if ((config->cfg_count == 0u) != (config->cfgs == NULL)
+        || config->cfg_count > CM_HIR_ARTIFACT_MAX_CFG_COUNT
+        || config->cfg_storage.len == 0u
+        || config->cfg_storage.data == NULL) return 0;
+    for (index = 0u; index < config->cfg_count; ++index) {
+        const CmHirArtifactBytes *cfg = &config->cfgs[index];
+        if (cfg->data == NULL || cfg->length == 0u
+            || storage_offset > config->cfg_storage.len
+            || cfg->length > config->cfg_storage.len - storage_offset
+            || cfg->data != config->cfg_storage.data + storage_offset
+            || (index != 0u && cm_decl_bytes_compare(
+                config->cfgs[index - 1u].data,
+                config->cfgs[index - 1u].length,
+                cfg->data, cfg->length) >= 0)) return 0;
+        storage_offset += cfg->length;
+        if (cm_decl_bytes_equal(cfg->data, cfg->length, expected,
+                expected_length)) matches += 1u;
+    }
+    return storage_offset == config->cfg_storage.len && matches == 1u;
+}
+
+static int cm_decl_target_configuration_matches(
+    const CmHirDeclarationCaptureInput *input)
+{
+    return input != NULL && input->configuration != NULL
+        && (input->target_pointer_bits == 32u
+            || input->target_pointer_bits == 64u)
+        && cm_decl_target_descriptor_matches(input)
+        && cm_decl_target_cfg_matches(input);
+}
+
 static int cm_decl_copy_bytes(CmHirDeclarationString *out,
     const void *bytes, size_t length)
 {
@@ -3809,6 +4077,10 @@ static int cm_decl_field_visibility_matches(CmAstVisibility ast_visibility,
         return ast_visibility.restriction == CM_AST_PATH_NONE
             && hir_visibility.kind == CM_HIR_VIS_PUBLIC
             && cm_hir_def_id_is_none(hir_visibility.restriction);
+    if (ast_visibility.kind == CM_AST_VIS_CRATE)
+        return ast_visibility.restriction == CM_AST_PATH_NONE
+            && hir_visibility.kind == CM_HIR_VIS_CRATE
+            && cm_hir_def_id_is_none(hir_visibility.restriction);
     return 0;
 }
 
@@ -3879,6 +4151,61 @@ static int cm_decl_ast_path_resolves_item(
     return valid;
 }
 
+static int cm_decl_pointer_storage_length(const CmInternedString *text,
+    uint32_t pointer_bits, uint64_t *out_value)
+{
+    static const unsigned char suffix[] =
+        "/size_of::<*const()>()";
+    uint64_t numerator = 0u;
+    size_t suffix_position = 0u;
+    size_t position;
+    int saw_digit = 0;
+    if (text == NULL || out_value == NULL
+        || (pointer_bits != 32u && pointer_bits != 64u)) return 0;
+    for (position = 0u; position < text->len; ++position) {
+        unsigned char byte = text->bytes[position];
+        if (byte == (unsigned char)' ' || byte == (unsigned char)'\t'
+            || byte == (unsigned char)'\r'
+            || byte == (unsigned char)'\n') continue;
+        if (suffix_position == 0u && byte >= (unsigned char)'0'
+            && byte <= (unsigned char)'9') {
+            unsigned int digit = (unsigned int)(byte - (unsigned char)'0');
+            if (numerator > (UINT64_MAX - digit) / UINT64_C(10)) return 0;
+            numerator = numerator * UINT64_C(10) + digit;
+            saw_digit = 1;
+            continue;
+        }
+        if (!saw_digit || suffix_position + 1u >= sizeof(suffix)
+            || byte != suffix[suffix_position]) return 0;
+        suffix_position += 1u;
+    }
+    if (!saw_digit || suffix_position + 1u != sizeof(suffix)) return 0;
+    *out_value = numerator / ((uint64_t)pointer_bits / UINT64_C(8));
+    return 1;
+}
+
+static int cm_decl_aggregate_array_length_matches(
+    const CmDeclCaptureState *state, const CmAst *ast,
+    const CmAstType *ast_type, const CmHirType *hir_type)
+{
+    const CmHirType *length_type;
+    const CmInternedString *length_text;
+    uint64_t length;
+    if (state == NULL || ast == NULL || ast_type == NULL || hir_type == NULL
+        || ast_type->kind != CM_AST_TYPE_ARRAY
+        || hir_type->kind != CM_HIR_TYPE_ARRAY_KIND
+        || (length_type = cm_hir_get_type(state->hir,
+            hir_type->data.array_type.length.type)) == NULL
+        || cm_decl_primitive(length_type) != CM_HIR_DECL_PRIMITIVE_USIZE
+        || hir_type->data.array_type.length.kind != CM_HIR_CONST_VALUE
+        || hir_type->data.array_type.length.data.value.high_bits != 0u
+        || (length_text = cm_ast_get_string(ast, ast_type->text)) == NULL
+        || (!cm_decl_parse_u64_decimal(length_text, &length)
+            && !cm_decl_pointer_storage_length(length_text,
+                state->input->target_pointer_bits, &length))) return 0;
+    return length == hir_type->data.array_type.length.data.value.low_bits;
+}
+
 static int cm_decl_ast_type_matches_hir_field(
     const CmDeclCaptureState *state, const CmAst *ast,
     const CmAstType *ast_type, const CmHirType *hir_type,
@@ -3947,6 +4274,20 @@ static int cm_decl_ast_type_matches_hir_field(
             || (ast_child = cm_ast_get_type(ast, ast_type->child)) == NULL
             || (hir_child = cm_hir_get_type(state->hir,
                 hir_type->data.raw_pointer_type.pointee)) == NULL) return 0;
+        return cm_decl_ast_type_matches_hir_field(state, ast, ast_child,
+            hir_child, owner, depth + 1u);
+    }
+    if (hir_type->kind == CM_HIR_TYPE_ARRAY_KIND) {
+        const CmAstType *ast_child;
+        const CmHirType *hir_child;
+        if (ast_type->kind != CM_AST_TYPE_ARRAY
+            || ast_type->child == CM_AST_TYPE_NONE
+            || hir_type->data.array_type.element == CM_HIR_TYPE_NONE
+            || (ast_child = cm_ast_get_type(ast, ast_type->child)) == NULL
+            || (hir_child = cm_hir_get_type(state->hir,
+                hir_type->data.array_type.element)) == NULL
+            || !cm_decl_aggregate_array_length_matches(state, ast, ast_type,
+                hir_type)) return 0;
         return cm_decl_ast_type_matches_hir_field(state, ast, ast_child,
             hir_child, owner, depth + 1u);
     }
@@ -5425,10 +5766,16 @@ static int cm_decl_fill_items_and_generics(CmDeclCaptureState *state,
                     && !cm_decl_copy_intern(&wire_field->name,
                         cm_interner_get(&state->hir->strings, field->name)))
                     return 0;
-                wire_field->visibility.kind = field->visibility.kind
-                        == CM_HIR_VIS_PUBLIC
-                    ? CM_HIR_DECL_VISIBILITY_PUBLIC
-                    : CM_HIR_DECL_VISIBILITY_PRIVATE;
+                if (field->visibility.kind == CM_HIR_VIS_PUBLIC) {
+                    wire_field->visibility.kind =
+                        CM_HIR_DECL_VISIBILITY_PUBLIC;
+                } else if (field->visibility.kind == CM_HIR_VIS_CRATE) {
+                    wire_field->visibility.kind =
+                        CM_HIR_DECL_VISIBILITY_CRATE;
+                } else if (field->visibility.kind == CM_HIR_VIS_PRIVATE) {
+                    wire_field->visibility.kind =
+                        CM_HIR_DECL_VISIBILITY_PRIVATE;
+                } else return 0;
                 wire_field->visibility.restriction_module = 0u;
                 wire_field->source_ordinal = field_index;
             }
@@ -6419,7 +6766,8 @@ CmHirDeclarationCaptureResult cm_hir_declaration_metadata_capture(
         || input->target_triple.data == NULL
         || input->target_triple.length == 0u
         || input->data_layout.data == NULL
-        || input->data_layout.length == 0u) return result;
+        || input->data_layout.length == 0u
+        || !cm_decl_target_configuration_matches(input)) return result;
     if (cm_module_graph_revision(input->graph) != input->revision
         || cm_module_graph_error_count(input->graph) != 0u
         || cm_import_resolver_revision(input->imports) != input->revision

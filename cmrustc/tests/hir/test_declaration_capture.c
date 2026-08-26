@@ -2,6 +2,7 @@
 #include "cm/hir/declaration_materialize.h"
 #include "cm/hir/lower.h"
 #include "cm/alloc.h"
+#include "cm/driver/cfg.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -17,6 +18,9 @@ typedef struct CaptureFixture {
     CmModuleGraphResult graph_result;
     CmHirLowerResult lower_result;
     CmHirArtifactConfig config;
+    const CmTargetDesc *target;
+    char data_layout[64];
+    size_t data_layout_length;
 } CaptureFixture;
 
 static const CmHirItem *find_item(const CaptureFixture *fixture,
@@ -302,6 +306,16 @@ static const unsigned char repeated_composite_fixture_source[] =
     "pub trait Gate<T: ?Sized> {}\n"
     "pub fn needs<X: Gate<u8>>() {}\n";
 
+static const unsigned char type_id_like_fixture_source[] =
+    "#[derive(Clone, Copy, Eq, PartialOrd, Ord)]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "#[lang = \"type_id_like\"]\n"
+    "pub struct TypeIdLike {\n"
+    "  pub(crate) data: [*const (); 16 / size_of::<*const ()>()],\n"
+    "}\n"
+    "pub trait Gate<T: ?Sized> {}\n"
+    "pub fn needs<X: Gate<u8>>() {}\n";
+
 static CmHirArtifactBytes test_bytes(const char *text)
 {
     CmHirArtifactBytes bytes;
@@ -310,21 +324,25 @@ static CmHirArtifactBytes test_bytes(const char *text)
     return bytes;
 }
 
-static void fixture_init_source(CaptureFixture *fixture, int with_noise,
-    const char *path, const unsigned char *source, size_t source_length)
+static void fixture_init_source_target(CaptureFixture *fixture,
+    int with_noise, const char *path, const unsigned char *source,
+    size_t source_length, const char *target_triple)
 {
     CmSourceId root;
     CmModuleGraphOptions graph_options;
     CmImportResult import_result;
     CmHirLowerOptions lower_options;
+    int layout_length;
     memset(fixture, 0, sizeof(*fixture));
     cm_source_set_init(&fixture->sources);
-    cm_cfg_set_init(&fixture->cfg);
     cm_module_graph_init(&fixture->graph);
     cm_import_resolver_init(&fixture->imports);
     cm_hir_module_map_init(&fixture->modules);
     cm_hir_context_init(&fixture->hir);
     cm_hir_artifact_config_init(&fixture->config);
+    fixture->target = cm_target_find(target_triple);
+    assert(fixture->target != NULL
+        && cm_target_cfg_set(&fixture->cfg, fixture->target));
     if (with_noise) {
         CmSourceId ignored_source;
         CmHirCrateId ignored_crate;
@@ -360,12 +378,28 @@ static void fixture_init_source(CaptureFixture *fixture, int with_noise,
     lower_options.crate_name = "v30_provider";
     lower_options.edition = CM_HIR_EDITION_2024;
     lower_options.source = root;
+    lower_options.pointer_bits = fixture->target->pointer_bits;
     fixture->lower_result = cm_hir_lower_module_graph(&fixture->hir,
         &fixture->graph, fixture->graph_result.revision, &fixture->imports,
         &fixture->modules, &lower_options);
     assert(fixture->lower_result.error_count == 0u);
-    fixture->config.edition = UINT32_C(2024);
-    fixture->config.panic_strategy = test_bytes("abort");
+    assert(cm_hir_artifact_config_build(fixture->target, CM_EDITION_2024,
+        CM_HIR_ARTIFACT_PANIC_ABORT, &fixture->cfg, &fixture->config)
+        == CM_HIR_ARTIFACT_CONFIG_OK);
+    layout_length = snprintf(fixture->data_layout,
+        sizeof(fixture->data_layout), "capture-test-layout-v1:%c-p:%u:%u",
+        fixture->target->endian == CM_ENDIAN_LITTLE ? 'e' : 'E',
+        fixture->target->pointer_bits, fixture->target->pointer_bits);
+    assert(layout_length > 0
+        && (size_t)layout_length < sizeof(fixture->data_layout));
+    fixture->data_layout_length = (size_t)layout_length;
+}
+
+static void fixture_init_source(CaptureFixture *fixture, int with_noise,
+    const char *path, const unsigned char *source, size_t source_length)
+{
+    fixture_init_source_target(fixture, with_noise, path, source,
+        source_length, "x86_64-unknown-linux-gnu");
 }
 
 static void fixture_init(CaptureFixture *fixture, int with_noise)
@@ -384,6 +418,14 @@ static void static_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "v30-static-provider.rs",
         static_fixture_source, sizeof(static_fixture_source) - 1u);
+}
+
+static void type_id_like_fixture_init(CaptureFixture *fixture,
+    int with_noise, const char *target_triple)
+{
+    fixture_init_source_target(fixture, with_noise, "type-id-like.rs",
+        type_id_like_fixture_source,
+        sizeof(type_id_like_fixture_source) - 1u, target_triple);
 }
 
 static void default_enum_fixture_init(CaptureFixture *fixture,
@@ -667,8 +709,11 @@ static CmHirDeclarationCaptureInput capture_input(
     input.modules = &fixture->modules;
     input.configuration = &fixture->config;
     input.crate_disambiguator = test_bytes("capture-test-disambiguator");
-    input.target_triple = test_bytes("x86_64-unknown-linux-gnu");
-    input.data_layout = test_bytes("e-p:64:64-i64:64-n8:16:32:64-S128");
+    input.target_triple.data = fixture->target->triple;
+    input.target_triple.length = strlen(fixture->target->triple);
+    input.data_layout.data = fixture->data_layout;
+    input.data_layout.length = fixture->data_layout_length;
+    input.target_pointer_bits = fixture->target->pointer_bits;
     return input;
 }
 
@@ -3959,6 +4004,268 @@ static void test_named_aggregate_hostile_mutations_are_atomic(void)
     fixture_destroy(&good);
 }
 
+static const CmHirDeclarationType *type_id_like_array(
+    const CmHirDeclarationMetadata *metadata, uint64_t expected_length)
+{
+    const CmHirDeclarationItem *item;
+    const CmHirDeclarationNamespaceEntry *type_entry;
+    const CmHirDeclarationNamespaceEntry *value_entry;
+    const CmHirDeclarationType *array;
+    const CmHirDeclarationType *pointer;
+    const CmHirDeclarationType *pointee;
+    const CmHirDeclarationType *length_type;
+    uint32_t item_local = 0u;
+    item = find_declaration_item(metadata, "TypeIdLike", &item_local);
+    assert(item != NULL && item_local != 0u
+        && item->kind == CM_HIR_DECL_ITEM_STRUCT
+        && item->visibility.kind == CM_HIR_DECL_VISIBILITY_PUBLIC
+        && item->aggregate_form == CM_HIR_DECL_AGGREGATE_NAMED
+        && item->aggregate_repr == CM_HIR_DECL_AGGREGATE_REPR_RUST
+        && (item->aggregate_flags & CM_HIR_DECL_AGGREGATE_HAS_LANG_ITEM)
+            != 0u
+        && declaration_string_is(item->lang_item, "type_id_like")
+        && item->field_count == 1u
+        && declaration_string_is(item->fields[0].name, "data")
+        && item->fields[0].visibility.kind
+            == CM_HIR_DECL_VISIBILITY_CRATE
+        && item->fields[0].visibility.restriction_module == 0u
+        && item->fields[0].source_ordinal == 0u
+        && item->fields[0].type_local != 0u
+        && item->fields[0].type_local <= metadata->type_count);
+    type_entry = find_namespace_entry(metadata, item->owner_module,
+        CM_HIR_DECL_NAMESPACE_TYPE, "TypeIdLike");
+    value_entry = find_namespace_entry(metadata, item->owner_module,
+        CM_HIR_DECL_NAMESPACE_VALUE, "TypeIdLike");
+    assert(type_entry != NULL
+        && type_entry->target_kind == CM_HIR_DECL_TARGET_ITEM
+        && type_entry->target_local == item_local && value_entry == NULL);
+    array = &metadata->types[item->fields[0].type_local - 1u];
+    assert(array->kind == CM_HIR_DECL_TYPE_ARRAY
+        && array->child_type != 0u
+        && array->child_type <= metadata->type_count
+        && array->array_length_type != 0u
+        && array->array_length_type <= metadata->type_count
+        && array->array_length_low_bits == expected_length
+        && array->array_length_high_bits == 0u);
+    pointer = &metadata->types[array->child_type - 1u];
+    length_type = &metadata->types[array->array_length_type - 1u];
+    assert(pointer->kind == CM_HIR_DECL_TYPE_RAW_POINTER
+        && pointer->mutability == CM_HIR_DECL_IMMUTABLE
+        && pointer->child_type != 0u
+        && pointer->child_type <= metadata->type_count
+        && length_type->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && length_type->primitive == CM_HIR_DECL_PRIMITIVE_USIZE);
+    pointee = &metadata->types[pointer->child_type - 1u];
+    assert(pointee->kind == CM_HIR_DECL_TYPE_PRIMITIVE
+        && pointee->primitive == CM_HIR_DECL_PRIMITIVE_UNIT);
+    return array;
+}
+
+static void test_type_id_like_target_capture_and_determinism(void)
+{
+    CaptureFixture first;
+    CaptureFixture noisy;
+    CaptureFixture narrow;
+    CmHirDeclarationMetadata first_metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata narrow_metadata;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf first_bytes;
+    CmByteBuf noisy_bytes;
+    type_id_like_fixture_init(&first, 0, "x86_64-unknown-linux-gnu");
+    type_id_like_fixture_init(&noisy, 1, "x86_64-unknown-linux-gnu");
+    type_id_like_fixture_init(&narrow, 0, "i686-unknown-linux-musl");
+    cm_hir_declaration_metadata_init(&first_metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&narrow_metadata);
+    input = capture_input(&first);
+    result = cm_hir_declaration_metadata_capture(&input, &first_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u
+        && cm_hir_declaration_metadata_validate(&first_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    (void)type_id_like_array(&first_metadata, UINT64_C(2));
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u);
+    (void)type_id_like_array(&noisy_metadata, UINT64_C(2));
+    input = capture_input(&narrow);
+    result = cm_hir_declaration_metadata_capture(&input, &narrow_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 2u
+        && cm_hir_declaration_metadata_validate(&narrow_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    (void)type_id_like_array(&narrow_metadata, UINT64_C(4));
+    cm_byte_buf_init(&first_bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    assert(cm_hir_declaration_metadata_encode(&first_metadata, &first_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && first_bytes.len == noisy_bytes.len
+        && memcmp(first_bytes.data, noisy_bytes.data, first_bytes.len) == 0);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&first_bytes);
+    cm_hir_declaration_metadata_destroy(&narrow_metadata);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&first_metadata);
+    fixture_destroy(&narrow);
+    fixture_destroy(&noisy);
+    fixture_destroy(&first);
+}
+
+static void test_type_id_like_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationNamespaceEntry *saved_namespace;
+    CmHirItemId item_id;
+    CmHirItem *item;
+    CmHirField *field;
+    CmHirType *array;
+    CmHirType *pointer;
+    CmHirTypeId saved_type_id;
+    CmHirConstArg saved_length;
+    CmHirVisibility saved_visibility;
+    CmHirMutability saved_mutability;
+    CmSpan saved_span;
+    CmInternId saved_metadata;
+    CmModuleId root_module;
+    CmResolveEffectiveItem effective;
+    const CmAst *borrowed_ast;
+    CmAst *ast;
+    CmAstItem *ast_item;
+    CmAstType *ast_array;
+    CmInternId saved_text;
+    uint32_t saved_pointer_bits;
+    CmHirArtifactBytes saved_triple;
+    uint32_t attribute_index;
+    type_id_like_fixture_init(&fixture, 1, "x86_64-unknown-linux-gnu");
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_items = metadata.items;
+    saved_types = metadata.types;
+    saved_namespace = metadata.namespace_entries;
+    item = (CmHirItem *)find_item(&fixture, "TypeIdLike", &item_id);
+    assert(item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+        && item->data.aggregate_item.field_count == 1u);
+    field = &item->data.aggregate_item.fields[0];
+    array = (CmHirType *)cm_hir_get_type(&fixture.hir, field->type);
+    assert(array != NULL && array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && array->data.array_type.length.data.value.low_bits == 2u);
+    pointer = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        array->data.array_type.element);
+    assert(pointer != NULL && pointer->kind == CM_HIR_TYPE_RAW_POINTER_KIND
+        && pointer->data.raw_pointer_type.mutability == CM_HIR_IMMUTABLE);
+    assert(cm_module_graph_get_root(&fixture.graph, &root_module)
+        && cm_module_graph_get_effective_item(&fixture.graph,
+            fixture.graph_result.revision, root_module, 0u, &effective)
+            == CM_RESOLVE_VIEW_OK
+        && cm_module_graph_borrow_ast(&fixture.graph, root_module,
+            &borrowed_ast));
+    ast = (CmAst *)(void *)borrowed_ast;
+    ast_item = (CmAstItem *)(void *)cm_ast_get_item(ast,
+        effective.declaration.item);
+    assert(ast_item != NULL && ast_item->kind == CM_AST_ITEM_STRUCT
+        && ast_item->data.aggregate_item.field_count == 1u);
+    ast_array = (CmAstType *)(void *)cm_ast_get_type(ast,
+        ast_item->data.aggregate_item.fields[0].type);
+    assert(ast_array != NULL && ast_array->kind == CM_AST_TYPE_ARRAY);
+
+#define ASSERT_TYPE_ID_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.items == saved_items && metadata.types == saved_types \
+        && metadata.namespace_entries == saved_namespace); \
+} while (0)
+
+    saved_visibility = field->visibility;
+    field->visibility.kind = CM_HIR_VIS_PRIVATE;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    field->visibility = saved_visibility;
+    field->visibility.restriction = item->definition;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    field->visibility = saved_visibility;
+
+    saved_text = ast_array->text;
+    ast_array->text = cm_interner_intern_c_str(&ast->strings,
+        "16 * size_of::<*const ()>()");
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    ast_array->text = cm_interner_intern_c_str(&ast->strings,
+        "24 / size_of::<*const ()>()");
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    ast_array->text = saved_text;
+
+    saved_mutability = pointer->data.raw_pointer_type.mutability;
+    pointer->data.raw_pointer_type.mutability = CM_HIR_MUTABLE;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    pointer->data.raw_pointer_type.mutability = saved_mutability;
+    saved_type_id = pointer->data.raw_pointer_type.pointee;
+    pointer->data.raw_pointer_type.pointee =
+        array->data.array_type.length.type;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    pointer->data.raw_pointer_type.pointee = saved_type_id;
+
+    saved_length = array->data.array_type.length;
+    array->data.array_type.length.kind = CM_HIR_CONST_PARAMETER;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    array->data.array_type.length = saved_length;
+    array->data.array_type.length.type =
+        pointer->data.raw_pointer_type.pointee;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    array->data.array_type.length = saved_length;
+    array->data.array_type.length.data.value.low_bits = 3u;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    array->data.array_type.length = saved_length;
+    array->data.array_type.length.data.value.high_bits = 1u;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    array->data.array_type.length = saved_length;
+
+    saved_pointer_bits = input.target_pointer_bits;
+    input.target_pointer_bits = 32u;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    input.target_pointer_bits = saved_pointer_bits;
+    saved_triple = input.target_triple;
+    input.target_triple = test_bytes("i686-unknown-linux-musl");
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    input.target_triple = saved_triple;
+
+    saved_span = field->span;
+    field->span.start += 1u;
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    field->span = saved_span;
+    for (attribute_index = 0u; attribute_index < item->attribute_count;
+            ++attribute_index) {
+        const CmInternedString *attribute = cm_interner_get(
+            &fixture.hir.strings,
+            item->attributes[attribute_index].metadata);
+        if (attribute != NULL && attribute->len >= 4u
+            && memcmp(attribute->bytes, "lang", 4u) == 0) break;
+    }
+    assert(attribute_index < item->attribute_count);
+    saved_metadata = item->attributes[attribute_index].metadata;
+    item->attributes[attribute_index].metadata = cm_hir_intern(&fixture.hir,
+        "lang = \"forged_type_id\"");
+    ASSERT_TYPE_ID_ATOMIC_FAILURE();
+    item->attributes[attribute_index].metadata = saved_metadata;
+
+#undef ASSERT_TYPE_ID_ATOMIC_FAILURE
+    (void)type_id_like_array(&metadata, UINT64_C(2));
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static void assert_static_descriptor(
     const CmHirDeclarationMetadata *metadata)
 {
@@ -6008,6 +6315,8 @@ int main(void)
     test_static_type_dag_is_structurally_deduplicated();
     test_named_aggregate_capture_and_determinism();
     test_named_aggregate_hostile_mutations_are_atomic();
+    test_type_id_like_target_capture_and_determinism();
+    test_type_id_like_hostile_mutations_are_atomic();
     test_layout_private_dependency_closure_and_determinism();
     test_layout_private_dependency_hostiles_are_atomic();
     test_default_enum_variant_capture_and_determinism();

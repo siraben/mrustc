@@ -80,6 +80,11 @@ typedef struct CmHirLowerOptions {
     const char *crate_name;
     CmHirEdition edition;
     CmSourceId source;
+    /*
+     * Exact configured target pointer width. Zero means unavailable; only
+     * target-dependent source forms reject when this authority is absent.
+     */
+    uint32_t pointer_bits;
     /* Borrowed for the synchronous lowering call; DefIds share `context`. */
     const CmHirLibraryArtifact *const *dependency_libraries;
     size_t dependency_library_count;

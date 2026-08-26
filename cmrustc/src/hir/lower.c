@@ -2656,20 +2656,20 @@ static int cm_lower_literal_const_argument(CmLowerState *state,
     return 1;
 }
 
-/* Rust 1.90's TypeId storage is expressed in pointer-sized words.  HIR
- * lowering does not yet receive the configured target width, so admit only
- * this exact bootstrap expression and use the bootstrap compiler's pointer
- * width.  General size_of evaluation remains closed until target properties
- * are carried into this pass. */
+/* Rust 1.90's TypeId storage is expressed in pointer-sized words.  Admit only
+ * this exact bootstrap expression and evaluate it from explicit target
+ * authority. General size_of evaluation remains closed. */
 static int cm_lower_parse_pointer_storage_length(
-    const CmInternedString *text, uint64_t *out_value)
+    const CmInternedString *text, uint32_t pointer_bits,
+    uint64_t *out_value)
 {
     static const unsigned char expected[] =
         "16/size_of::<*const()>()";
     size_t expected_position;
     size_t position;
 
-    if (text == NULL || out_value == NULL) return 0;
+    if (text == NULL || out_value == NULL
+        || (pointer_bits != 32u && pointer_bits != 64u)) return 0;
     expected_position = 0u;
     for (position = 0u; position < text->len; ++position) {
         unsigned char byte;
@@ -2688,7 +2688,7 @@ static int cm_lower_parse_pointer_storage_length(
         expected_position += 1u;
     }
     if (expected_position + 1u != sizeof(expected)) return 0;
-    *out_value = 16u / (uint64_t)sizeof(void *);
+    *out_value = UINT64_C(128) / (uint64_t)pointer_bits;
     return 1;
 }
 
@@ -6434,7 +6434,7 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         }
         if (!has_literal_length) {
             has_literal_length = cm_lower_parse_pointer_storage_length(
-                length_text, &length_value);
+                length_text, state->options->pointer_bits, &length_value);
         }
         if (!has_literal_length) {
             has_literal_length = cm_lower_primitive_self_size_length(state,
