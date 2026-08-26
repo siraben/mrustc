@@ -438,6 +438,27 @@ static int cm_glob_binding_is_visible(const CmImportResolverState *state,
         || cm_module_is_ancestor(state, source_module, leaf->module);
 }
 
+static void cm_import_apply_leaf_visibility(CmResolvedBinding *binding,
+    const CmImportLeaf *leaf)
+{
+    int source_is_public;
+    int source_is_crate_visible;
+
+    if (binding == NULL || leaf == NULL) return;
+    if (binding->namespace_kind == CM_RESOLVE_NAMESPACE_MACRO) {
+        binding->is_public = leaf->is_public;
+        binding->is_crate_visible = leaf->is_crate_visible;
+        binding->is_reexport = leaf->is_public;
+        return;
+    }
+    source_is_public = binding->is_public;
+    source_is_crate_visible = binding->is_crate_visible;
+    binding->is_public = leaf->is_public && source_is_public;
+    binding->is_crate_visible = leaf->is_crate_visible
+        && source_is_crate_visible;
+    binding->is_reexport = binding->is_public;
+}
+
 static int cm_add_binding(CmImportModuleState *module,
     const CmResolvedBinding *value, int priority)
 {
@@ -1075,10 +1096,8 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                     imported = source_binding->value;
                     imported.module = leaf->module;
                     imported.import_declaration = leaf->declaration;
-                    imported.is_public = leaf->is_public;
-                    imported.is_crate_visible = leaf->is_crate_visible;
+                    cm_import_apply_leaf_visibility(&imported, leaf);
                     imported.is_import = 1;
-                    imported.is_reexport = leaf->is_public;
                     imported.is_ambiguous = 0;
                     imported.is_anonymous = leaf->is_anonymous;
                     cm_record_leaf_binding(leaf, &imported);
@@ -1149,6 +1168,8 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                 imported.namespace_kind = CM_RESOLVE_NAMESPACE_TYPE;
                 imported.item_kind = CM_AST_ITEM_MODULE;
                 imported.target_module = state->root;
+                imported.is_public = 1;
+                imported.is_crate_visible = 1;
                 found = 1;
             } else if (source_binding != NULL
                 && !source_binding->value.is_ambiguous) {
@@ -1162,10 +1183,8 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                 imported.module = leaf->module;
                 imported.name = leaf->import_name;
                 imported.import_declaration = leaf->declaration;
-                imported.is_public = leaf->is_public;
-                imported.is_crate_visible = leaf->is_crate_visible;
+                cm_import_apply_leaf_visibility(&imported, leaf);
                 imported.is_import = 1;
-                imported.is_reexport = leaf->is_public;
                 imported.is_ambiguous = 0;
                 imported.is_anonymous = leaf->is_anonymous;
                 cm_record_leaf_binding(leaf, &imported);
@@ -1211,15 +1230,21 @@ static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
                             ambiguous = 1;
                             continue;
                         }
+                        if (namespace_index
+                                == (int)CM_RESOLVE_NAMESPACE_VALUE
+                            && source_binding->value.item_kind
+                                == CM_AST_ITEM_STRUCT
+                            && !cm_glob_binding_is_visible(state, leaf,
+                                scope.module, &source_binding->value)) {
+                            continue;
+                        }
                         imported = source_binding->value;
                     }
                     imported.module = leaf->module;
                     imported.name = leaf->import_name;
                     imported.import_declaration = leaf->declaration;
-                    imported.is_public = leaf->is_public;
-                    imported.is_crate_visible = leaf->is_crate_visible;
+                    cm_import_apply_leaf_visibility(&imported, leaf);
                     imported.is_import = 1;
-                    imported.is_reexport = leaf->is_public;
                     imported.is_ambiguous = 0;
                     imported.is_anonymous = leaf->is_anonymous;
                     cm_record_leaf_binding(leaf, &imported);
@@ -1929,6 +1954,7 @@ int cm_import_get_leaf(const CmImportResolver *resolver, uint32_t index,
     out_leaf->is_glob = leaf->is_glob;
     out_leaf->is_anonymous = leaf->is_anonymous;
     out_leaf->is_public = leaf->is_public;
+    out_leaf->is_crate_visible = leaf->is_crate_visible;
     out_leaf->is_resolved = leaf->ever_resolved;
     out_leaf->saw_ambiguous = leaf->saw_ambiguous;
     return 1;

@@ -1626,9 +1626,14 @@ static CmResolveEffectiveAttribute *cm_record_effective_inner_attributes(
     }
 }
 
-static void cm_record_namespace_entry(CmModuleGraphState *state,
+static int cm_effective_attribute_is_bare(
+    const CmEffectiveAttribute *attribute, const char *name);
+
+static void cm_record_namespace_entry_with_visibility(
+    CmModuleGraphState *state,
     CmSourceId source, const CmAst *ast, CmAstItemId item_id,
-    CmResolveNamespace namespace_kind, CmVec *type_entries,
+    CmResolveNamespace namespace_kind, CmAstVisibilityKind visibility,
+    CmVec *type_entries,
     CmVec *value_entries, CmVec *macro_entries)
 {
     const CmAstItem *item;
@@ -1650,15 +1655,78 @@ static void cm_record_namespace_entry(CmModuleGraphState *state,
     entry.declaration.source = source;
     entry.declaration.item = item_id;
     entry.item_kind = item->kind;
-    entry.visibility = item->visibility.kind;
+    entry.visibility = visibility;
     destination = namespace_kind == CM_RESOLVE_NAMESPACE_TYPE ?
         type_entries : (namespace_kind == CM_RESOLVE_NAMESPACE_VALUE ?
         value_entries : macro_entries);
     (void)cm_vec_push(destination, &entry);
 }
 
+static void cm_record_namespace_entry(CmModuleGraphState *state,
+    CmSourceId source, const CmAst *ast, CmAstItemId item_id,
+    CmResolveNamespace namespace_kind, CmVec *type_entries,
+    CmVec *value_entries, CmVec *macro_entries)
+{
+    const CmAstItem *item;
+
+    item = cm_ast_get_item(ast, item_id);
+    if (item == NULL) return;
+    cm_record_namespace_entry_with_visibility(state, source, ast, item_id,
+        namespace_kind, item->visibility.kind, type_entries, value_entries,
+        macro_entries);
+}
+
+static CmAstVisibilityKind cm_struct_constructor_visibility(
+    const CmAstItem *item, const CmEffectiveAttribute *attributes,
+    size_t attribute_count)
+{
+    CmAstVisibilityKind visibility;
+    size_t index;
+
+    if (item == NULL) return CM_AST_VIS_INHERITED;
+    if (item->visibility.kind == CM_AST_VIS_PUBLIC) {
+        visibility = CM_AST_VIS_PUBLIC;
+    } else if (item->visibility.kind == CM_AST_VIS_CRATE) {
+        visibility = CM_AST_VIS_CRATE;
+    } else {
+        visibility = CM_AST_VIS_INHERITED;
+    }
+    for (index = 0u; index < item->data.aggregate_item.field_count;
+            ++index) {
+        CmAstVisibilityKind field_visibility;
+
+        if (item->data.aggregate_item.fields == NULL)
+            return CM_AST_VIS_INHERITED;
+        field_visibility =
+            item->data.aggregate_item.fields[index].visibility.kind;
+        if (field_visibility == CM_AST_VIS_PUBLIC) continue;
+        if (field_visibility == CM_AST_VIS_CRATE) {
+            if (visibility == CM_AST_VIS_PUBLIC)
+                visibility = CM_AST_VIS_CRATE;
+        } else {
+            /*
+             * `pub(super)` and `pub(in path)` meets need a path-aware schema.
+             * Until then, retain local identity but conservatively record
+             * those constructor restrictions as inherited.
+             * TODO: retain the exact restriction-module identity here.
+             */
+            return CM_AST_VIS_INHERITED;
+        }
+    }
+    for (index = 0u; index < attribute_count; ++index) {
+        if (attributes == NULL) return CM_AST_VIS_INHERITED;
+        if (cm_effective_attribute_is_bare(&attributes[index],
+                "non_exhaustive") != 0
+            && visibility == CM_AST_VIS_PUBLIC) {
+            visibility = CM_AST_VIS_CRATE;
+        }
+    }
+    return visibility;
+}
+
 static void cm_record_item_declarations(CmModuleGraphState *state,
     CmSourceId source, const CmAst *ast, CmAstItemId item_id,
+    const CmEffectiveAttribute *attributes, size_t attribute_count,
     CmVec *type_entries, CmVec *value_entries, CmVec *macro_entries)
 {
     const CmAstItem *item;
@@ -1678,9 +1746,11 @@ static void cm_record_item_declarations(CmModuleGraphState *state,
             CM_RESOLVE_NAMESPACE_TYPE, type_entries, value_entries,
             macro_entries);
         if (item->data.aggregate_item.form != CM_AST_FIELDS_NAMED) {
-            cm_record_namespace_entry(state, source, ast, item_id,
-                CM_RESOLVE_NAMESPACE_VALUE, type_entries, value_entries,
-                macro_entries);
+            cm_record_namespace_entry_with_visibility(state, source, ast,
+                item_id, CM_RESOLVE_NAMESPACE_VALUE,
+                cm_struct_constructor_visibility(item, attributes,
+                    attribute_count),
+                type_entries, value_entries, macro_entries);
         }
         break;
     case CM_AST_ITEM_UNION:
@@ -3093,8 +3163,10 @@ static void cm_record_extern_block(CmModuleGraphState *state,
 
     for (index = 0u; index < block->child_count; ++index) {
         cm_record_item_declarations(state, source, ast,
-            block->children[index].item_id, type_entries, value_entries,
-            macro_entries);
+            block->children[index].item_id,
+            block->children[index].attributes,
+            block->children[index].attribute_count,
+            type_entries, value_entries, macro_entries);
     }
 }
 
@@ -4174,6 +4246,7 @@ static CmModuleId cm_build_module(CmModuleGraphState *state,
         }
         cm_record_item_declarations(state,
             effective->item.declaration.source, &unit->ast, item_id,
+            plan_node->attributes, plan_node->attribute_count,
             &type_entries, &value_entries, &macro_entries);
         if (item->kind == CM_AST_ITEM_USE) {
             CmResolveImport import_directive;

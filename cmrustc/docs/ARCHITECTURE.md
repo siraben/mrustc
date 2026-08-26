@@ -340,10 +340,16 @@ All semantic phases and C formatting complete in memory. Output publication
 uses a unique temporary beside the requested path and an atomic rename, so
 rejection preserves any previous artifact. Device/inode comparison rejects
 hard-link and symlink aliases of the input. Typed local/call/let expressions
-use canonical HIR schema `hir-v34`. MIR began at `mir-v1`; user locals,
+use canonical HIR schema `hir-v35`. MIR began at `mir-v1`; user locals,
 statement-bearing blocks, flattened aggregate places, and the first exact
 conditional diamond, target-width `usize`, and explicit dispatch/body-owner
 identity advance the current canonical schema to `mir-v9`.
+
+`hir-v35` appends resolver-authenticated `public` and `crate-visible` flags
+to every canonical import binding. They are a conservative public/crate
+lattice: exact `pub(super)` and `pub(in path)` restriction identities remain
+future schema work. Public-artifact capture consumes only bindings marked
+public and continues to validate their target shape fail-closed.
 
 The generation-bound whole-local-body barrier now reaches a read-only REGIONS
 checkpoint after TYPED and MARKED. MARKED atomically records builtin-Copy
@@ -366,7 +372,7 @@ and type-position expression bodies are deliberately not REGIONS roots yet;
 manifest body owners and enclosing trait/impl items with any predicate or
 outlives constraint are therefore rejected fail-closed.
 
-Function-pointer types in `hir-v34` own an ordered lifetime binder. Explicit
+Function-pointer types in `hir-v35` own an ordered lifetime binder. Explicit
 and elided input lifetimes use indices local to the nearest function pointer;
 nested pointers close independently, with no binder-depth representation or
 outer late capture. A derived per-type late-bound requirement is recomputed on
@@ -377,7 +383,7 @@ names. Typeck and in-memory semantic-results storage, canonical instance v2,
 semantic metadata v1.1, and declaration metadata v2.x reject nonzero arity
 because they cannot preserve the complete region topology.
 
-Impl headers in `hir-v34` carry one closed polarity: positive, negative, or
+Impl headers in `hir-v35` carry one closed polarity: positive, negative, or
 reservation. Reservation is authenticated from the exact cfg-effective
 string-valued compiler attribute, is restricted to non-`Drop` trait impls,
 and is skipped as an overlap witness and as a positive implementation
@@ -1398,7 +1404,7 @@ definitions bind. Lowering accepts nongeneric local or authenticated producer
 trait bounds,
 nongeneric type equalities, and the exact relaxed `?Sized` form. Defaults,
 GATs, positional arguments, duplicate identities, other relaxed bounds, and
-wrong-kind targets hard-error. The canonical format is `hir-v34`.
+wrong-kind targets hard-error. The canonical format is `hir-v35`.
 
 The next source-backed fixture retains the exact Rust 1.90 attributes and
 signatures of 68 `Iterator` methods. Trait and trait-method type parameters are

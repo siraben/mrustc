@@ -1776,6 +1776,7 @@ static int test_dependency_macro_consumer_import(void)
         for (index = 0u; index < leaf_count; ++index) {
             if (cm_import_get_leaf(&imports, (uint32_t)index, &leaf)
                 && leaf.module == success && !leaf.is_resolved
+                && leaf.is_public && leaf.is_crate_visible
                 && import_string_equals(&imports, leaf.import_name, "local")
                 && leaf.segment_count == 3u
                 && cm_import_get_leaf_segment(&imports, (uint32_t)index,
@@ -1902,6 +1903,104 @@ static int test_resolver_lifetime_and_generation(void)
     return ok;
 }
 
+static int test_struct_constructor_visibility(void)
+{
+    static const char source[] =
+        "mod source {\n"
+        "  pub struct PublicUnit;\n"
+        "  pub struct PublicTuple(pub u8);\n"
+        "  pub struct CrateTuple(pub(crate) u8);\n"
+        "  pub struct PrivateTuple(u8);\n"
+        "  pub struct Named { pub field: u8 }\n"
+        "  #[non_exhaustive] pub struct NonExhaustive(pub u8);\n"
+        "}\n"
+        "pub use source::{PublicTuple as TupleAlias,\n"
+        "  CrateTuple as CrateAlias, PrivateTuple as PrivateAlias,\n"
+        "  Named as NamedAlias};\n"
+        "pub(crate) use source::PublicUnit as CrateUnitAlias;\n";
+    CmSourceSet sources;
+    CmModuleGraph graph;
+    CmImportResolver resolver;
+    CmModuleGraphResult graph_result;
+    CmImportResult import_result;
+    CmResolvedBinding binding;
+    CmImportLeafView leaf;
+    CmModuleId source_module;
+    size_t leaf_index;
+    int saw_crate_leaf;
+    int ok;
+
+    ok = check(load_memory_and_resolve("constructor-vis/lib.rs", source,
+        &sources, &graph, &resolver, &graph_result, &import_result),
+        "could not load constructor visibility fixture");
+    if (!ok) return 0;
+    source_module = find_module(&graph, "crate::source");
+    ok &= check(graph_result.error_count == 0u
+        && import_result.error_count == 0u
+        && source_module != CM_MODULE_NONE,
+        "constructor visibility fixture did not resolve");
+    ok &= check(find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "PublicUnit", &binding)
+        && binding.is_public && binding.is_crate_visible,
+        "public unit constructor was not public");
+    ok &= check(find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "PublicTuple", &binding)
+        && binding.is_public && binding.is_crate_visible,
+        "all-public tuple constructor was not public");
+    ok &= check(find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "CrateTuple", &binding)
+        && !binding.is_public && binding.is_crate_visible,
+        "pub(crate) tuple field did not cap constructor at crate visibility");
+    ok &= check(find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "PrivateTuple", &binding)
+        && !binding.is_public && !binding.is_crate_visible,
+        "private tuple field did not make constructor private");
+    ok &= check(!find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "Named", NULL),
+        "named struct incorrectly introduced a value constructor");
+    ok &= check(find_binding(&resolver, source_module,
+            CM_RESOLVE_NAMESPACE_VALUE, "NonExhaustive", &binding)
+        && !binding.is_public && binding.is_crate_visible,
+        "non_exhaustive did not cap constructor at crate visibility");
+    ok &= check(find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "TupleAlias", &binding)
+        && binding.is_public && binding.is_reexport,
+        "public tuple constructor reexport lost public visibility");
+    ok &= check(find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_TYPE, "CrateAlias", &binding)
+        && binding.is_public && binding.is_reexport
+        && !find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "CrateAlias", NULL),
+        "public type reexport leaked its crate-visible constructor");
+    ok &= check(find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_TYPE, "PrivateAlias", &binding)
+        && binding.is_public && binding.is_reexport
+        && !find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "PrivateAlias", NULL),
+        "public type reexport leaked its private constructor");
+    ok &= check(!find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "NamedAlias", NULL),
+        "named struct reexport introduced a value constructor");
+    ok &= check(find_binding(&resolver, graph_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "CrateUnitAlias", &binding)
+        && !binding.is_public && binding.is_crate_visible,
+        "pub(crate) constructor import lost crate visibility");
+    saw_crate_leaf = 0;
+    for (leaf_index = 0u; leaf_index < cm_import_leaf_count(&resolver);
+            ++leaf_index) {
+        if (leaf_index <= (size_t)UINT32_MAX
+            && cm_import_get_leaf(&resolver, (uint32_t)leaf_index, &leaf)
+            && import_string_equals(&resolver, leaf.import_name,
+                "CrateUnitAlias")) {
+            saw_crate_leaf = !leaf.is_public && leaf.is_crate_visible;
+        }
+    }
+    ok &= check(saw_crate_leaf,
+        "public import leaf view lost crate-visible provenance");
+    destroy_all(&sources, &graph, &resolver);
+    return ok;
+}
+
 int main(void)
 {
     int ok;
@@ -1937,6 +2036,7 @@ int main(void)
     ok &= test_dependency_macro_artifact();
     ok &= test_dependency_macro_consumer_import();
     ok &= test_resolver_lifetime_and_generation();
+    ok &= test_struct_constructor_visibility();
     if (ok) puts("import resolution tests: ok");
     return ok ? 0 : 1;
 }

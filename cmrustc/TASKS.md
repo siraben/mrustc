@@ -390,7 +390,7 @@ meet the corpus-wide acceptance gates.
   to the bound side of their owning predicate. Predicate-prefix HRTBs use one
   item-owned scope shared by the subject and every atomic trait or outlives
   constraint expanded from the source predicate; scope counts and references
-  are validated together. Canonical dumps are `hir-v34`. This clears both
+  are validated together. Canonical dumps are `hir-v35`. This clears both
   `VaListImpl::with_copy` in `core/src/ffi/va_list.rs:246` and
   `for<'a> F: FnMut(GenericShunt<'a, I, R>) -> U` in
   `core/src/iter/adapters/mod.rs:155`. Graph-authenticated inherent methods may
@@ -2046,14 +2046,19 @@ cmhir-meta v3 with explicit family capabilities and real declaration items,
 not another opaque v2 omission. V3.0 targets declaration-safe trait/alias/
 associated/impl headers plus projection and function-pointer types; impl
 absence remains deferred until a later cfg-active completeness certificate.
-The first v3 prerequisite is now canonical `hir-v34`: traits preserve exact
+The first v3 prerequisite is now canonical `hir-v35`: traits preserve exact
 effective `#[const_trait]` capability and trait impls preserve their const
 header bit, including safe itemless negative impls. Const inherent impls,
 non-word or misplaced `const_trait` attributes, and const impls of non-const
 traits reject. Semantic metadata v1.1 rejects either new bit rather than
 silently erasing it; v3 will transport both as authenticated declaration
 facts without claiming const-trait solving.
-Canonical `hir-v34` also separates the promise that a trait method or
+Canonical `hir-v35` additionally records resolver-authenticated conservative
+public/crate-visible reachability on each import binding. Public declaration
+artifacts can now retain a public struct type reexport while omitting its
+private, restricted, or `#[non_exhaustive]` constructor; exact restriction
+module identities remain future schema work.
+Canonical `hir-v35` also separates the promise that a trait method or
 associated const has a default from the availability of its executable body.
 Impl completeness permits omission or exact override from that promise,
 defaulted associated consts remain overrideable, and a metadata-only default
@@ -2066,7 +2071,7 @@ lifetimes become deterministic predicate-owned late-bound parameters. An
 elided callable output inherits the sole distinct input lifetime; ambiguous
 outputs and predicate-prefix binders combined with additional elided inputs
 remain fail-closed.
-Function-pointer lifetime binders are also canonical `hir-v34`: explicit
+Function-pointer lifetime binders are also canonical `hir-v35`: explicit
 `for<'a>` names and implicit input elision lower to declaration-order local
 indices under the nearest function-pointer binder. Each nested function
 pointer is independently closed; item early-bound lifetimes remain visible,
@@ -2080,7 +2085,7 @@ fail closed on nonzero function-pointer binders because those consumers cannot
 preserve the region topology;
 their binder-zero bytes remain unchanged. Binder depth and executable support
 remain deferred.
-Reservation impls are now canonical `hir-v34`: impl polarity is a closed
+Reservation impls are now canonical `hir-v35`: impl polarity is a closed
 positive/negative/reservation enum, exact cfg-effective reservation metadata
 is authenticated during lowering, invalid placement/forms and `Drop`
 reservations reject, and coherence permits overlap without treating a

@@ -871,6 +871,10 @@ CmHirStatus cm_hir_set_module_imports(CmHirContext *context,
                     (unsigned int)CM_HIR_PRIMITIVE_F128
                 || (binding->is_anonymous != 0
                     && binding->is_anonymous != 1)
+                || (binding->is_public != 0 && binding->is_public != 1)
+                || (binding->is_crate_visible != 0
+                    && binding->is_crate_visible != 1)
+                || (binding->is_public && !binding->is_crate_visible)
                 || (binding->is_anonymous
                     != cm_hir_intern_matches(context, binding->name, "_"))
                 || (binding->primitive_kind != CM_HIR_PRIMITIVE_NONE

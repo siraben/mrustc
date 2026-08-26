@@ -17836,6 +17836,8 @@ static int cm_lower_store_resolved_import_binding(CmLowerState *state,
     hir_binding->name = cm_lower_copy_import_string(state, binding->name,
         span, declaration.item);
     hir_binding->is_anonymous = binding->is_anonymous;
+    hir_binding->is_public = binding->is_public;
+    hir_binding->is_crate_visible = binding->is_crate_visible;
     if (binding->primitive_kind != CM_RESOLVE_PRIMITIVE_NONE
         && !cm_lower_resolved_primitive(binding->primitive_kind,
             &hir_binding->primitive_kind, NULL)) {
@@ -17930,6 +17932,8 @@ static int cm_lower_store_library_import_binding(CmLowerState *state,
     hir_binding->target = imported_binding.definition;
     hir_binding->primitive_kind = imported_binding.primitive_kind;
     hir_binding->is_anonymous = 0;
+    hir_binding->is_public = leaf->is_public;
+    hir_binding->is_crate_visible = leaf->is_crate_visible;
     return !state->failed;
 }
 
@@ -18106,6 +18110,10 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                     effective.span, effective.declaration.item);
                 binding->namespace_kind = CM_HIR_NAMESPACE_TYPE;
                 binding->target = root_module->definition;
+                binding->is_public =
+                    ast_item->visibility.kind == CM_AST_VIS_PUBLIC;
+                binding->is_crate_visible = binding->is_public
+                    || ast_item->visibility.kind == CM_AST_VIS_CRATE;
                 if (state->failed) break;
                 import_index += 1u;
                 continue;

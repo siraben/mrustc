@@ -73,12 +73,13 @@ static CmHirTypeId add_bool_type(CmHirContext *context, uint32_t start)
 }
 
 static CmHirDefId add_public_struct(TestFixture *fixture, const char *name,
-    CmHirAggregateForm form, uint32_t start)
+    CmHirAggregateForm form, uint32_t start, int non_exhaustive)
 {
     CmHirDefId definition;
     CmHirItem item;
     CmHirItemId item_id;
     CmHirField field;
+    CmHirAttribute attribute;
 
     assert(cm_hir_reserve_item_definition_as(&fixture->context,
         fixture->crate_id, CM_HIR_ITEM_STRUCT, test_span(start, start + 5u),
@@ -93,6 +94,15 @@ static CmHirDefId add_public_struct(TestFixture *fixture, const char *name,
     item.visibility.restriction = cm_hir_def_id_none();
     item.span = test_span(start, start + 5u);
     item.data.aggregate_item.form = form;
+    if (non_exhaustive) {
+        memset(&attribute, 0, sizeof(attribute));
+        attribute.metadata = cm_hir_intern(&fixture->context,
+            "non_exhaustive");
+        attribute.span = test_span(start, start + 1u);
+        attribute.source_attribute = 1u;
+        item.attributes = &attribute;
+        item.attribute_count = 1u;
+    }
     if (form != CM_HIR_AGGREGATE_UNIT) {
         memset(&field, 0, sizeof(field));
         field.name = form == CM_HIR_AGGREGATE_NAMED
@@ -322,6 +332,7 @@ static void test_struct_constructor_restore(void)
     CmHirDefId unit_definition;
     CmHirDefId tuple_definition;
     CmHirDefId named_definition;
+    CmHirDefId non_exhaustive_definition;
     CmHirDefId fresh_unit_definition;
     CmHirLibraryArtifact artifact;
     CmHirLibraryOwnedData owned;
@@ -335,11 +346,13 @@ static void test_struct_constructor_restore(void)
 
     fixture_init(&fixture);
     unit_definition = add_public_struct(&fixture, "AllocError",
-        CM_HIR_AGGREGATE_UNIT, 50u);
+        CM_HIR_AGGREGATE_UNIT, 50u, 0);
     tuple_definition = add_public_struct(&fixture, "Tuple",
-        CM_HIR_AGGREGATE_TUPLE, 60u);
+        CM_HIR_AGGREGATE_TUPLE, 60u, 0);
     named_definition = add_public_struct(&fixture, "Named",
-        CM_HIR_AGGREGATE_NAMED, 70u);
+        CM_HIR_AGGREGATE_NAMED, 70u, 0);
+    non_exhaustive_definition = add_public_struct(&fixture,
+        "NonExhaustive", CM_HIR_AGGREGATE_TUPLE, 75u, 1);
     cm_hir_library_artifact_init(&artifact);
     cm_hir_library_owned_data_init(&owned);
     root_index = add_snapshot_module(&owned, fixture.root_definition);
@@ -375,6 +388,18 @@ static void test_struct_constructor_restore(void)
     path[1].length = 10u;
     assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u, &value)
         == CM_HIR_LIBRARY_WRONG_NAMESPACE);
+    cm_hir_library_owned_data_destroy(&owned);
+
+    /* A non_exhaustive constructor is crate-visible, not exportable. */
+    cm_hir_library_owned_data_init(&owned);
+    root_index = add_snapshot_module(&owned, fixture.root_definition);
+    binding = adt_binding(non_exhaustive_definition);
+    add_binding_entry(&owned, root_index, "NonExhaustive", &binding);
+    binding = constructor_binding(non_exhaustive_definition);
+    add_binding_entry(&owned, root_index, "NonExhaustive", &binding);
+    assert_failed_restore(&artifact, &fixture, &owned, fixture.crate_id,
+        fixture.root_definition, "non_exhaustive",
+        CM_HIR_LIBRARY_INVALID_HIR, "dep", fixture.api_definition);
     cm_hir_library_owned_data_destroy(&owned);
 
     /* A constructor cannot be laundered into a fabricated free function. */
@@ -440,7 +465,7 @@ static void test_struct_constructor_restore(void)
     fixture_init(&fresh);
     (void)add_public_extern_type(&fresh, "Shift", 45u);
     fresh_unit_definition = add_public_struct(&fresh, "AllocError",
-        CM_HIR_AGGREGATE_UNIT, 50u);
+        CM_HIR_AGGREGATE_UNIT, 50u, 0);
     cm_hir_library_owned_data_init(&owned);
     root_index = add_snapshot_module(&owned, fresh.root_definition);
     binding = adt_binding(unit_definition);
@@ -513,7 +538,12 @@ static void test_struct_constructor_direct_capture(void)
     static const unsigned char source_text[] =
         "pub struct AllocError;\n"
         "pub struct Tuple(pub u8);\n"
-        "pub struct Named { pub field: u8 }\n";
+        "pub struct CrateTuple(pub(crate) u8);\n"
+        "pub struct PrivateTuple(u8);\n"
+        "#[non_exhaustive] pub struct NonExhaustive(pub u8);\n"
+        "pub struct Named { pub field: u8 }\n"
+        "pub use Tuple as TupleAlias;\n"
+        "pub use PrivateTuple as PrivateAlias;\n";
     CmSourceSet sources;
     CmSourceId root_source;
     CmCfgSet cfg;
@@ -531,6 +561,9 @@ static void test_struct_constructor_direct_capture(void)
     CmHirLibraryBinding binding;
     const CmHirItem *unit_item;
     const CmHirItem *tuple_item;
+    const CmHirItem *crate_tuple_item;
+    const CmHirItem *private_tuple_item;
+    const CmHirItem *non_exhaustive_item;
     const CmHirItem *named_item;
 
     cm_source_set_init(&sources);
@@ -553,22 +586,33 @@ static void test_struct_constructor_direct_capture(void)
     assert(lower_result.error_count == 0u);
     unit_item = find_item_named(&context, "AllocError");
     tuple_item = find_item_named(&context, "Tuple");
+    crate_tuple_item = find_item_named(&context, "CrateTuple");
+    private_tuple_item = find_item_named(&context, "PrivateTuple");
+    non_exhaustive_item = find_item_named(&context, "NonExhaustive");
     named_item = find_item_named(&context, "Named");
     assert(unit_item != NULL && unit_item->kind == CM_HIR_ITEM_STRUCT
         && unit_item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT);
     assert(tuple_item != NULL && tuple_item->kind == CM_HIR_ITEM_STRUCT
         && tuple_item->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE);
+    assert(crate_tuple_item != NULL
+        && crate_tuple_item->kind == CM_HIR_ITEM_STRUCT
+        && private_tuple_item != NULL
+        && private_tuple_item->kind == CM_HIR_ITEM_STRUCT
+        && non_exhaustive_item != NULL
+        && non_exhaustive_item->kind == CM_HIR_ITEM_STRUCT);
     assert(named_item != NULL && named_item->kind == CM_HIR_ITEM_STRUCT
         && named_item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED);
     artifact_result = cm_hir_library_declaration_artifact_build(&artifact,
         &context, lower_result.crate_id, &graph, graph_result.revision, &map,
         "dep");
     assert(artifact_result.status == CM_HIR_LIBRARY_OK);
-    assert(artifact_result.public_type_entry_count == 3u);
-    assert(artifact_result.public_value_entry_count == 2u);
+    assert(artifact_result.public_type_entry_count == 8u);
+    assert(artifact_result.public_value_entry_count == 3u);
     assert_value_binding(&artifact, "dep", "AllocError",
         CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, unit_item->definition);
     assert_value_binding(&artifact, "dep", "Tuple",
+        CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, tuple_item->definition);
+    assert_value_binding(&artifact, "dep", "TupleAlias",
         CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR, tuple_item->definition);
     path[0].bytes = (const unsigned char *)"dep";
     path[0].length = 3u;
@@ -581,6 +625,20 @@ static void test_struct_constructor_direct_capture(void)
     assert(cm_hir_def_id_equal(type.definition, unit_item->definition));
     path[1].bytes = (const unsigned char *)"Named";
     path[1].length = 5u;
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    path[1].bytes = (const unsigned char *)"PrivateAlias";
+    path[1].length = 12u;
+    assert(cm_hir_library_artifact_lookup_type(&artifact, path, 2u, &type)
+        == CM_HIR_LIBRARY_OK);
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    path[1].bytes = (const unsigned char *)"CrateTuple";
+    path[1].length = 10u;
+    assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
+        &binding) == CM_HIR_LIBRARY_NOT_FOUND);
+    path[1].bytes = (const unsigned char *)"NonExhaustive";
+    path[1].length = 13u;
     assert(cm_hir_library_artifact_lookup_value_binding(&artifact, path, 2u,
         &binding) == CM_HIR_LIBRARY_NOT_FOUND);
 

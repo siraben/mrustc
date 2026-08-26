@@ -516,7 +516,7 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
     if (stream == NULL || context == NULL) {
         return -1;
     }
-    fputs("hir-v34\n", stream);
+    fputs("hir-v35\n", stream);
     for (index = 0u; index < context->crates.len; ++index) {
         const CmHirCrate *crate_value;
 
@@ -674,8 +674,11 @@ int cm_hir_dump(FILE *stream, const CmHirContext *context)
                             cm_hir_primitive_name(
                                 binding->primitive_kind));
                     }
-                    fprintf(stream, " anonymous=%u\n",
-                        (unsigned int)binding->is_anonymous);
+                    fprintf(stream,
+                        " anonymous=%u public=%u crate-visible=%u\n",
+                        (unsigned int)binding->is_anonymous,
+                        (unsigned int)binding->is_public,
+                        (unsigned int)binding->is_crate_visible);
                 }
             }
         }

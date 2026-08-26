@@ -495,6 +495,9 @@ typedef struct CmHirImportBinding {
     /* Non-none only when target is empty and this binds a primitive type. */
     CmHirPrimitiveKind primitive_kind;
     int is_anonymous;
+    /* Conservative effective reachability in the public/crate lattice. */
+    int is_public;
+    int is_crate_visible;
 } CmHirImportBinding;
 
 typedef enum CmHirImportKind {

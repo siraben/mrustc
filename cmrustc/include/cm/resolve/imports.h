@@ -108,6 +108,7 @@ typedef struct CmImportLeafView {
     int is_glob;
     int is_anonymous;
     int is_public;
+    int is_crate_visible;
     int is_resolved;
     int saw_ambiguous;
 } CmImportLeafView;

@@ -943,14 +943,60 @@ static int cm_hir_library_item_namespace_binding_kind(
     return *out_binding_kind == CM_HIR_LIBRARY_BINDING_VALUE;
 }
 
+static int cm_hir_library_meta_identifier_continue(unsigned char byte)
+{
+    return (byte >= (unsigned char)'a' && byte <= (unsigned char)'z')
+        || (byte >= (unsigned char)'A' && byte <= (unsigned char)'Z')
+        || (byte >= (unsigned char)'0' && byte <= (unsigned char)'9')
+        || byte == (unsigned char)'_' || byte >= 0x80u;
+}
+
+static int cm_hir_library_item_has_attribute_name(
+    const CmHirContext *context, const CmHirItem *item,
+    const char *expected)
+{
+    size_t expected_length;
+    uint32_t index;
+
+    if (context == NULL || item == NULL || expected == NULL) return 0;
+    expected_length = strlen(expected);
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *metadata;
+        size_t position;
+
+        if (item->attributes == NULL) return 1;
+        metadata = cm_interner_get(&context->strings,
+            item->attributes[index].metadata);
+        if (metadata == NULL) return 1;
+        position = 0u;
+        while (position < metadata->len
+            && (metadata->bytes[position] == (unsigned char)' '
+                || metadata->bytes[position] == (unsigned char)'\t'
+                || metadata->bytes[position] == (unsigned char)'\r'
+                || metadata->bytes[position] == (unsigned char)'\n')) {
+            position += 1u;
+        }
+        if (metadata->len - position < expected_length
+            || memcmp(metadata->bytes + position, expected,
+                expected_length) != 0) continue;
+        position += expected_length;
+        if (position == metadata->len
+            || !cm_hir_library_meta_identifier_continue(
+                metadata->bytes[position])) return 1;
+    }
+    return 0;
+}
+
 static int cm_hir_library_item_has_public_constructor(
-    const CmHirItem *item)
+    const CmHirContext *context, const CmHirItem *item)
 {
     uint32_t field_index;
 
     if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT
         || item->visibility.kind != CM_HIR_VIS_PUBLIC
-        || item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED) {
+        || item->data.aggregate_item.form == CM_HIR_AGGREGATE_NAMED
+        || cm_hir_library_item_has_attribute_name(context, item,
+            "non_exhaustive")) {
         return 0;
     }
     for (field_index = 0u;
@@ -2574,7 +2620,8 @@ static int cm_hir_library_definition_valid(
         item = cm_hir_get_item(state->context, resolved->entity.item_id);
         if (kind == CM_HIR_LIBRARY_BINDING_STRUCT_CONSTRUCTOR) {
             return type_kind == CM_HIR_TYPE_ADT_KIND && item != NULL
-                && cm_hir_library_item_has_public_constructor(item);
+                && cm_hir_library_item_has_public_constructor(
+                    state->context, item);
         }
         return item != NULL
             && cm_hir_library_item_binding_kind(item->kind,
@@ -2953,8 +3000,11 @@ static int cm_hir_library_add_direct_entry(
                 }
             }
         }
-        if (matches != 1u || matched_item == NULL
-            || !cm_hir_library_item_namespace_binding_kind(matched_item,
+        if (matches != 1u || matched_item == NULL) return 0;
+        if (value_namespace && matched_item->kind == CM_HIR_ITEM_STRUCT
+            && !cm_hir_library_item_has_public_constructor(state->context,
+                matched_item)) return 0;
+        if (!cm_hir_library_item_namespace_binding_kind(matched_item,
                 value_namespace, &binding_kind, &type_kind, &value_kind)
             || !cm_hir_library_definition_valid(state,
                 matched_item->definition, binding_kind, type_kind)) return 0;
@@ -2993,6 +3043,7 @@ static int cm_hir_library_add_public_imports(
             CmInternId name;
 
             binding = &import->bindings[binding_index];
+            if (!binding->is_public) continue;
             if ((binding->namespace_kind != CM_HIR_NAMESPACE_TYPE
                     && (!include_values
                         || binding->namespace_kind

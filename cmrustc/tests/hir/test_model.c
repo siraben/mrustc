@@ -101,17 +101,24 @@ static void test_structural_import_model(void)
     bindings[0].name = cm_hir_intern(&context, "Child");
     bindings[0].namespace_kind = CM_HIR_NAMESPACE_TYPE;
     bindings[0].target = child->definition;
+    bindings[0].is_public = 1;
+    bindings[0].is_crate_visible = 1;
     bindings[1].name = cm_hir_intern(&context, "_");
     bindings[1].namespace_kind = CM_HIR_NAMESPACE_TYPE;
     bindings[1].target = child->definition;
     bindings[1].is_anonymous = 1;
+    bindings[1].is_public = 1;
+    bindings[1].is_crate_visible = 1;
     bindings[2].name = bindings[1].name;
     bindings[2].namespace_kind = CM_HIR_NAMESPACE_TYPE;
     bindings[2].target = item_definition;
     bindings[2].is_anonymous = 1;
+    bindings[2].is_public = 1;
+    bindings[2].is_crate_visible = 1;
     bindings[3].name = cm_hir_intern(&context, "value");
     bindings[3].namespace_kind = CM_HIR_NAMESPACE_VALUE;
     bindings[3].target = item_definition;
+    bindings[3].is_crate_visible = 1;
     memset(imports, 0, sizeof(imports));
     imports[0].tree = cm_hir_intern(&context, "self::child as Child");
     imports[0].visibility.kind = CM_HIR_VIS_PUBLIC;
@@ -223,6 +230,19 @@ static void test_structural_import_model(void)
     imports[0].bindings = bindings;
     imports[0].binding_count = 1u;
     bindings[0] = root->imports[0].bindings[0];
+    bindings[0].is_public = 2;
+    assert(cm_hir_set_module_imports(&context, invalid_module_id,
+        imports, 1u) == CM_HIR_INVALID_ARGUMENT);
+    bindings[0] = root->imports[0].bindings[0];
+    bindings[0].is_public = 1;
+    bindings[0].is_crate_visible = 0;
+    assert(cm_hir_set_module_imports(&context, invalid_module_id,
+        imports, 1u) == CM_HIR_INVALID_ARGUMENT);
+    bindings[0] = root->imports[0].bindings[0];
+    bindings[0].is_crate_visible = 2;
+    assert(cm_hir_set_module_imports(&context, invalid_module_id,
+        imports, 1u) == CM_HIR_INVALID_ARGUMENT);
+    bindings[0] = root->imports[0].bindings[0];
     bindings[0].is_anonymous = 1;
     assert(cm_hir_set_module_imports(&context, invalid_module_id,
         imports, 1u) == CM_HIR_INVALID_ARGUMENT);
@@ -280,6 +300,8 @@ static void test_structural_import_model(void)
     assert(strstr(dump,
         "import-binding module#1 index=1 binding=0 namespace=value")
         != NULL);
+    assert(strstr(dump,
+        "anonymous=0 public=0 crate-visible=1") != NULL);
     assert(strstr(dump, "kind=extern-crate tree=\"self\"") != NULL);
     free(dump);
     assert(fclose(dump_file) == 0);
@@ -1379,7 +1401,7 @@ static void test_method_and_item_attribute_model(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(strstr(dump, "Self(owner=") != NULL);
     assert(strstr(dump, "receiver=ref-shared") != NULL);
     assert(strstr(dump, "receiver=ref-mutable") != NULL);
@@ -1638,7 +1660,7 @@ static void test_function_pointer_lifetime_binder_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0
+    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0
         && strstr(dump,
             "type#4 for<\"'a\"> fn[\"Rust\"](ty#2)->ty#2 ") != NULL
         && strstr(dump,
@@ -3124,7 +3146,7 @@ static void test_supertrait_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     first_supertrait = strstr(first_dump,
         "supertrait item#4 index=0 modifier=required "
         "trait=1:2<ty#1> equalities=0 span=1:101..102\n");
@@ -3508,7 +3530,7 @@ static void test_static_supertrait_model_invariants(void)
     assert(dump_file != NULL);
     assert(cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0
+    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0
         && strstr(dump,
             "outlives-predicate item#1 index=0 subject=ty#1 "
             "bound='static span=1:25..32\n") != NULL);
@@ -4195,7 +4217,7 @@ static void test_associated_type_bound_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "associated-type-bound item#%u index=0 modifier=required",
         (unsigned int)into_iter_item_id) > 0);
@@ -4677,7 +4699,7 @@ static void test_item_trait_predicate_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)parent_self_type) > 0);
@@ -5194,7 +5216,7 @@ static void test_trait_predicate_equality_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "trait-predicate item#%u index=0 subject=ty#%u trait=",
         (unsigned int)method_item_id, (unsigned int)owner_type) > 0);
@@ -6341,7 +6363,7 @@ static void test_aggregate_expression_model(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(snprintf(expected, sizeof(expected),
         "expr#%u aggregate type=ty#%u aggregate=%u:%u "
         "fields=[field(index=1,value=expr#%u,span=1:118..124),"
@@ -8381,7 +8403,7 @@ static void test_auto_trait_and_negative_impl_model(void)
     dump_file = tmpfile();
     assert(dump_file != NULL && cm_hir_dump(dump_file, &context) == 0);
     dump = read_dump(dump_file);
-    assert(strncmp(dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(strstr(dump,
         "trait-header item#2 safety=unsafe auto=1 const=1")
         != NULL);
@@ -8782,7 +8804,7 @@ static void test_trait_alias_model_invariants(void)
     first_dump = read_dump(first_file);
     second_dump = read_dump(second_file);
     assert(strcmp(first_dump, second_dump) == 0);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(strstr(first_dump,
         "generic#2 owner=1:6 index=1 kind=1 name=\"T\" "
         "declared=ty#0 relaxed-sized=0 default=ty#2") != NULL);
@@ -9331,7 +9353,7 @@ int main(void)
     assert(strstr(first_dump, "state=unlowered") != NULL);
     assert(strstr(first_dump, "*mut ty#2") != NULL);
     assert(strstr(first_dump, "unsafe fn[\"C\"]") != NULL);
-    assert(strncmp(first_dump, "hir-v34\n", strlen("hir-v34\n")) == 0);
+    assert(strncmp(first_dump, "hir-v35\n", strlen("hir-v35\n")) == 0);
     assert(strstr(first_dump, "source-expr=1:77") != NULL);
     assert(strstr(first_dump, "infer[1]?42") != NULL);
     assert(strstr(first_dump,
