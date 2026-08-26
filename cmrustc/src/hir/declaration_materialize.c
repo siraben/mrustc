@@ -1499,7 +1499,7 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
             || wire->predicate_start != 0u || wire->predicate_count != 0u
             || wire->parameter_count != 0u
             || wire->parameter_types != NULL || wire->return_type != 0u
-            || wire->has_body != 1u) {
+            || wire->has_body != 1u || wire->is_const != 0u) {
             return CM_HIR_INVARIANT_VIOLATION;
         }
         memset(&item, 0, sizeof(item));
@@ -1523,6 +1523,9 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
     }
     if (wire->kind != CM_HIR_DECL_VALUE_FUNCTION)
         return CM_HIR_INVARIANT_VIOLATION;
+    if (wire->is_const > 1u) {
+        return CM_HIR_INVARIANT_VIOLATION;
+    }
     parameters = (CmHirFunctionParameter *)cm_decl_array(
         wire->parameter_count, sizeof(*parameters));
     predicates = (CmHirTraitPredicate *)cm_decl_array(wire->predicate_count,
@@ -1588,6 +1591,7 @@ static CmHirStatus cm_decl_bind_value(CmHirContext *context,
         runtime->types[wire->return_type - 1u];
     item.data.function_item.signature.abi = cm_hir_intern(context, "Rust");
     item.data.function_item.signature.safety = CM_HIR_SAFE;
+    item.data.function_item.signature.is_const = wire->is_const;
     item.data.function_item.body = CM_HIR_BODY_NONE;
     status = cm_hir_add_item(context, &item, &item_id);
 done:
@@ -1726,6 +1730,8 @@ static CmHirLibraryStatus cm_decl_add_library_value(CmHirContext *context,
         value.data.function.nominal_reference_count = reference_count;
         value.data.function.abi = item->data.function_item.signature.abi;
         value.data.function.safety = item->data.function_item.signature.safety;
+        value.data.function.is_const =
+            item->data.function_item.signature.is_const;
         status = cm_hir_library_owned_data_add_value(owned, &value);
         cm_free(parameter_types);
     }
