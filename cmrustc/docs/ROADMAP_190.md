@@ -180,6 +180,19 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   real STATIC plus ordered tuple and fixed-array types with an exact scalar
   `usize` length.  The table initializer and storage are not carried by v3.0
   and remain a later body/object/link gate.
+- Commit `12c92627` transports that declaration-only STATIC plus ordered tuple
+  and fixed-array types, exact scalar `usize` length, immutable/mutable static
+  identity, and body-presence-without-body provenance.  Strict GCC, TinyCC,
+  Clang ASan/UBSan/LSan, and a fresh integrated strict run pass.  Its pinned
+  whole-core probe again reaches the zero-error 363-source/451-module HIR and
+  451/1,658/20,747 library census, then measures the next v3.0 rejection at
+  `core/src/prelude/mod.rs:21`: `stage=namespace`,
+  `reason=binding-shape-unsupported`, `binding=enum-variant`,
+  `namespace=type`, `ast_item=enum`, `def=1:22477`.  This is the TYPE half of
+  tuple variant `Option::Some` introduced by the Rust 2015 prelude glob.  The
+  next bounded declaration step is therefore generic Rust-default mixed
+  UNIT/TUPLE enums, retained item/variant lang identities, tuple-field generic
+  ownership, enum ADT applications, and exact TYPE/VALUE constructor twins.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

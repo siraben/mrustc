@@ -75,19 +75,23 @@ aliases, zero-argument named ADTs, explicit and implicit unit enums, associated
 enum-variant namespace aliases, declaration-only free constants, structural
 slice/reference/pointer/application types, and the measured named-aggregate
 profiles for `Assume`, `ManuallyDrop<T: ?Sized>`, and `MaybeUninit<T>`.  These
-records survive decode/re-encode, transactional materialization, library
+profiles now also include declaration-only free statics with ordered tuple and
+fixed-array types plus an exact scalar `usize` array length.  These records
+survive decode/re-encode, transactional materialization, library
 restore, and focused fresh-consumer lowering without fabricating constructors,
-bodies, initializer values, or semantic completeness.
+bodies, initializer/storage values, or semantic completeness.
 
-At commit `b78a18a8`, the fresh Rust 1.90 whole-core probe again reports zero
+At commit `12c92627`, the fresh Rust 1.90 whole-core probe again reports zero
 graph/import/HIR errors and the exact 451-module/1,658-type/20,747-value library
-census.  V3.0 then reaches the next measured namespace frontier at
-`core/src/num/flt2dec/strategy/grisu.rs:29`: public immutable static
-`CACHED_POW10` (`def=1:2845`) is rejected with `stage=namespace`,
-`reason=binding-shape-unsupported`, `binding=value`, and `ast_item=static`.
-The next dependency is therefore declaration-only `STATIC` identity plus its
-array-of-tuple type and exact scalar `usize` length.  Initializer/storage/CTFE
-authority remains a separate executable family.  Associated declarations,
+census.  V3.0 now crosses `CACHED_POW10` and reaches the next measured
+namespace frontier at `core/src/prelude/mod.rs:21`: the Rust 2015 prelude glob
+introduces the TYPE half of tuple variant `Option::Some` (`def=1:22477`), which
+is rejected with `stage=namespace`, `reason=binding-shape-unsupported`,
+`binding=enum-variant`, and `ast_item=enum`.  The next bounded dependency is a
+generic Rust-default enum with mixed UNIT/TUPLE variants, retained item/variant
+lang identities, scoped tuple fields, generic enum applications, and exact
+TYPE/VALUE variant twins.  Initializer/storage/CTFE authority remains a
+separate executable family.  Associated declarations,
 projections/function pointers, full ordinary aggregates, cfg-complete impl
 headers, macros, and complete semantic attributes remain later boundaries.
 These are bounded fixture profiles, not whole-core v3.

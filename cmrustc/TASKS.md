@@ -1991,6 +1991,17 @@ declaration-only STATIC plus tuple/array type closure and exact scalar array
 length.  Initializer/storage/CTFE transport remains a separate executable
 gate; exact trait-associated ownership follows the later declaration
 prerequisites before projection and impl families.
+Commit `12c92627` completes that bounded STATIC/TUPLE/ARRAY slice without
+inventing storage or a body.  The fresh pinned-core probe remains green through
+graph, HIR, and the exact 451/1,658/20,747 library census, then measures the new
+v3.0 frontier at `core/src/prelude/mod.rs:21`: the TYPE namespace binding for
+tuple variant `Option::Some` (`def=1:22477`) is rejected with
+`stage=namespace`, `reason=binding-shape-unsupported`,
+`binding=enum-variant`, and `ast_item=enum`.  The active declaration task is
+therefore a generic Rust-default mixed UNIT/TUPLE enum profile with retained
+item/variant lang identity, tuple-field generic ownership, generic enum ADT
+applications, and exact TYPE/VALUE variant twins.  Constructor expressions
+and executable bodies remain separate later gates.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
