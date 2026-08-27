@@ -318,6 +318,13 @@ int cm_module_graph_get_error(const CmModuleGraph *graph, uint32_t index,
 int cm_module_graph_borrow_ast(const CmModuleGraph *graph, CmModuleId module,
     const CmAst **out_ast);
 /*
+ * Mutable access for post-build body expansion only.  Callers may append
+ * expression/statement/pattern/type nodes and overwrite existing expression
+ * nodes in place; item structure, namespaces, and effective views must not
+ * change.  Returns NULL when the graph is not live.
+ */
+CmAst *cm_module_graph_borrow_ast_mut(CmModuleGraph *graph, CmModuleId module);
+/*
  * Authenticate one source-qualified declaration in a module's syntax unit.
  * This includes declarations spliced from an item-position `include!`, whose
  * source differs from the module root while their AST storage is shared.

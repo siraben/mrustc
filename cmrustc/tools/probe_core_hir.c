@@ -2,6 +2,7 @@
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
 #include "cm/hir/lower.h"
+#include "cm/resolve/body_expand.h"
 #include "cm/hir/module_map.h"
 #include "cm/hir/metadata.h"
 #include "cm/sha256.h"
@@ -549,6 +550,44 @@ int main(int argc, char **argv)
     if (graph_result.error_count != 0u || import_result.error_count != 0u) {
         status = 1;
         goto cleanup;
+    }
+    if (body_census_requested) {
+        /* M9-01: expand expression-position macros in place before HIR
+         * lowering so the census below measures what remains. */
+        CmBodyExpandOptions expand_options;
+        CmBodyExpandResult expand_result;
+        cm_body_expand_options_init(&expand_options);
+        expand_options.edition = CM_EDITION_2024;
+        expand_options.crate_identifier = "crate";
+        expand_options.cfg = &cfg;
+        expand_options.imports = &imports;
+        expand_result = cm_body_expand_graph(&graph, graph_result.revision,
+            &expand_options);
+        printf("body-expand bodies=%lu invocations=%lu rules=%lu builtin=%lu "
+            "asm=%lu unsupported_builtin=%lu failed=%lu\n",
+            (unsigned long)expand_result.bodies,
+            (unsigned long)expand_result.invocations,
+            (unsigned long)expand_result.expanded_rules,
+            (unsigned long)expand_result.expanded_builtin,
+            (unsigned long)expand_result.remaining_asm,
+            (unsigned long)expand_result.remaining_builtin,
+            (unsigned long)expand_result.failed);
+        if (expand_result.failed != 0u) {
+            size_t class_index;
+            printf("body-expand first_failure macro=%s reason=%s "
+                "span=%lu..%lu\n", expand_result.first_failure_macro,
+                expand_result.first_failure_reason,
+                (unsigned long)expand_result.first_failure_span.start,
+                (unsigned long)expand_result.first_failure_span.end);
+            for (class_index = 0u;
+                    class_index < expand_result.failure_class_count;
+                    ++class_index)
+                printf("body-expand failure macro=%s count=%lu reason=%s\n",
+                    expand_result.failure_classes[class_index].macro_name,
+                    (unsigned long)
+                        expand_result.failure_classes[class_index].count,
+                    expand_result.failure_classes[class_index].reason);
+        }
     }
     cm_hir_lower_options_init(&lower_options);
     lower_options.crate_name = "core";

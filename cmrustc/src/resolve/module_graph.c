@@ -4780,6 +4780,21 @@ int cm_module_graph_get_error(const CmModuleGraph *graph, uint32_t index,
     return 1;
 }
 
+CmAst *cm_module_graph_borrow_ast_mut(CmModuleGraph *graph, CmModuleId module)
+{
+    CmModuleGraphState *state;
+    CmResolveModuleNode *node;
+    CmResolveUnit *unit;
+
+    state = cm_graph_state(graph);
+    if (state == NULL) return NULL;
+    node = cm_get_module_node(state, module);
+    if (node == NULL) return NULL;
+    unit = cm_get_unit(state, node->unit);
+    if (unit == NULL) return NULL;
+    return &unit->ast;
+}
+
 int cm_module_graph_borrow_ast(const CmModuleGraph *graph, CmModuleId module,
     const CmAst **out_ast)
 {
