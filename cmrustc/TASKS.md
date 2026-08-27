@@ -2604,6 +2604,23 @@ assignment family is now pinned by `assignment-normalized` output:
 `<Wrapping<u8> as BitOr>::Output` normalizes through the blanket
 `impl<T> BitOr<NonZero<T>> for T` because no specific impl matches in
 scan-0 — the blanket-fallback statistics run will show why.
+M9-04 thirteenth pass (same day, runs 31-35): a large correctness batch
+— argument-aware candidate selection extended to binary operators
+(blanket `impl<T> BitOr<NonZero<T>> for T` no longer shadows the
+Wrapping impls) and to qualified associated calls (`<u64>::from`);
+slice `rest @ ..` bindings lower as real REST patterns and type as the
+subslice (the AST REST kind silently lowered to WILD before); the
+lexer no longer eats `999.try_into()` as a float — this alone cleared
+the whole call-through-non-function class; speculative candidate
+probes roll back inference bindings via a new arena undo log
+(`cm_ty_undo_mark`/`cm_ty_undo_to`); candidate cap 32; lenient
+projection-receiver methods; field access through user `Deref`
+(`ManuallyDrop<Waker>`); debug spans carry the enclosing fn name.
+Whole core: 497 -> 444 -> 415 -> 361 -> 355 -> **327 error nodes**,
+21,082/22,524 bodies typed.  Remaining: call-arg 87; method not found
+69 (30 = Simd integer-op family); body vs signature 56; assignment 19;
+branch 17; assoc-value 16; unresolved value path 14; field 7.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
