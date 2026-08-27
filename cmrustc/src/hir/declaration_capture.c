@@ -3837,6 +3837,33 @@ static int cm_decl_trait_shape(const CmDeclCaptureState *state,
     uint32_t index;
     if (capture->trait_flags != 0u)
         return cm_decl_callable_trait_shape(state, capture);
+    if (capture->trait_compiler_flags != 0u) {
+        /* `#[rustc_unsafe_specialization_marker]` is admitted exactly on an
+         * empty, safe, public, generic-free, bound-free trait such as
+         * `core::array::iter::NonDrop`. */
+        return capture->trait_compiler_flags
+                == CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER
+            && item->kind == CM_HIR_ITEM_TRAIT
+            && item->visibility.kind == CM_HIR_VIS_PUBLIC
+            && cm_hir_def_id_is_none(item->visibility.restriction)
+            && cm_hir_def_id_is_none(item->parent_definition)
+            && !item->is_specializable
+            && item->generic_parameter_start == CM_HIR_GENERIC_PARAM_NONE
+            && item->generic_parameter_count == 0u
+            && item->predicate_scope_count == 0u
+            && item->predicate_count == 0u
+            && item->outlives_predicate_count == 0u
+            && !capture->has_static_outlives
+            && !item->data.trait_item.is_auto
+            && !item->data.trait_item.is_const
+            && item->data.trait_item.safety == CM_HIR_SAFE
+            && item->data.trait_item.supertrait_count == 0u
+            && capture->associated_count == 0u
+            && capture->diagnostic_item == NULL
+            && capture->diagnostic_item_length == 0u
+            && capture->lang_item == NULL
+            && capture->lang_item_length == 0u;
+    }
     if (item->kind != CM_HIR_ITEM_TRAIT
         || (item->visibility.kind != CM_HIR_VIS_PUBLIC
             && item->visibility.kind != CM_HIR_VIS_PRIVATE)
@@ -6202,45 +6229,66 @@ static int cm_decl_ast_name_matches_hir(const CmAst *ast, CmInternId ast_id,
             hir_name->bytes, hir_name->len);
 }
 
+/*
+ * Plain (non-lang-item) trait and associated-item attribute projection.
+ * `out_compiler_flags` is non-NULL only for a trait declaration itself; it
+ * retains the bare `rustc_unsafe_specialization_marker` structurally, while
+ * `doc(hidden)` is counted in the SEMANTIC_ATTRIBUTES-ABSENT projection.
+ */
 static int cm_decl_trait_attributes(const CmDeclCaptureState *state,
     const CmHirItem *item, int parent_trait,
     size_t *out_projected_count, int *out_const_trait,
     const unsigned char **out_diagnostic_item,
-    size_t *out_diagnostic_item_length)
+    size_t *out_diagnostic_item_length, uint16_t *out_compiler_flags)
 {
     unsigned int seen = 0u;
+    uint16_t compiler_seen = 0u;
     uint32_t index;
     *out_projected_count = 0u;
     *out_const_trait = 0;
     if (out_diagnostic_item != NULL) *out_diagnostic_item = NULL;
     if (out_diagnostic_item_length != NULL)
         *out_diagnostic_item_length = 0u;
+    if (out_compiler_flags != NULL) *out_compiler_flags = 0u;
     if ((item->attribute_count == 0u) != (item->attributes == NULL)) return 0;
     for (index = 0u; index < item->attribute_count; ++index) {
         const CmHirAttribute *attribute = &item->attributes[index];
         const CmInternedString *metadata = cm_interner_get(
             &state->hir->strings, attribute->metadata);
         unsigned int kind = cm_decl_attribute_kind(metadata);
+        uint16_t compiler_kind = 0u;
         uint32_t prior;
+        if (kind == 0u && parent_trait && out_compiler_flags != NULL
+            && cm_decl_attribute_bare_is(metadata,
+                "rustc_unsafe_specialization_marker"))
+            compiler_kind =
+                CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER;
         if (attribute->source_attribute == 0u
             || attribute->expansion_depth != 0u
             || attribute->span.source == 0u
             || attribute->span.source != item->span.source
             || attribute->span.start > attribute->span.end
-            || (kind != CM_DECL_ATTR_STABLE
+            || (compiler_kind == 0u
+                && kind != CM_DECL_ATTR_STABLE
                 && kind != CM_DECL_ATTR_UNSTABLE
                 && kind != CM_DECL_ATTR_DEPRECATED
                 && !(parent_trait && kind == CM_DECL_ATTR_CONST_TRAIT)
                 && !(parent_trait && kind == CM_DECL_ATTR_DIAGNOSTIC_ITEM)
+                && !(parent_trait && out_compiler_flags != NULL
+                    && kind == CM_DECL_ATTR_DOC_HIDDEN)
                 && !(!parent_trait && item->kind == CM_HIR_ITEM_FUNCTION
                     && kind == CM_DECL_ATTR_INLINE_HINT))
-            || (seen & kind) != 0u) return 0;
+            || (kind != 0u && (seen & kind) != 0u)
+            || (compiler_kind != 0u
+                && (compiler_seen & compiler_kind) != 0u)) return 0;
         for (prior = 0u; prior < index; ++prior) {
             if (item->attributes[prior].span.source == attribute->span.source
                 && item->attributes[prior].source_attribute
                     == attribute->source_attribute) return 0;
         }
         seen |= kind;
+        compiler_seen |= compiler_kind;
+        if (compiler_kind != 0u) continue;
         if (kind == CM_DECL_ATTR_DIAGNOSTIC_ITEM) {
             const unsigned char *name = NULL;
             size_t name_length = 0u;
@@ -6257,7 +6305,15 @@ static int cm_decl_trait_attributes(const CmDeclCaptureState *state,
     }
     if ((seen & CM_DECL_ATTR_STABLE) != 0u
         && (seen & CM_DECL_ATTR_UNSTABLE) != 0u) return 0;
+    /* The unsafe specialization marker is admitted only with the exact
+     * `doc(hidden)` + `unstable` projection that `core` declares on it. */
+    if (compiler_seen != 0u
+        && seen != (CM_DECL_ATTR_DOC_HIDDEN | CM_DECL_ATTR_UNSTABLE))
+        return 0;
+    if (compiler_seen == 0u && (seen & CM_DECL_ATTR_DOC_HIDDEN) != 0u)
+        return 0;
     *out_const_trait = (seen & CM_DECL_ATTR_CONST_TRAIT) != 0u;
+    if (out_compiler_flags != NULL) *out_compiler_flags = compiler_seen;
     return 1;
 }
 
@@ -6658,7 +6714,7 @@ static int cm_decl_trait_member_source_shape(
                             out_lang_length))
                     ? 0 : (!cm_decl_trait_attributes(state, item, 0,
                         out_projected_count, &ignored_const_trait, NULL,
-                        NULL) || ignored_const_trait))))) return 0;
+                        NULL, NULL) || ignored_const_trait))))) return 0;
     for (attribute_index = 0u; attribute_index < effective->attribute_count;
             ++attribute_index) {
         CmResolveEffectiveAttribute graph_attribute;
@@ -7531,7 +7587,8 @@ static int cm_decl_trait_source_and_members(CmDeclCaptureState *state,
         || source->owner_module > state->module_count) return 0;
     if (!cm_decl_trait_attributes(state, item, 1,
             &projected_count, &const_trait, &capture->diagnostic_item,
-            &capture->diagnostic_item_length)) {
+            &capture->diagnostic_item_length,
+            &capture->trait_compiler_flags)) {
         if (!cm_decl_callable_trait_attributes(state, item,
                 &projected_count, &capture->trait_flags,
                 &capture->trait_compiler_flags, &capture->lang_item,

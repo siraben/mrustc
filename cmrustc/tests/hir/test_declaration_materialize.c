@@ -1532,6 +1532,53 @@ static void try_from_fn_fixture_init(TryFromFnFixture *fixture)
     metadata->namespace_count = 9u;
 }
 
+typedef struct NonDropFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[1];
+} NonDropFixture;
+
+static void non_drop_fixture_init(NonDropFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("non_drop_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-non-drop-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].safety = CM_HIR_DECL_SAFETY_SAFE;
+    fixture->traits[0].name = (CmHirDeclarationString)S("NonDrop");
+    fixture->traits[0].compiler_flags =
+        CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->traits[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 1u;
+}
+
 static void repeat_fixture_init(RepeatFixture *fixture)
 {
     CmHirDeclarationMetadata *metadata;
@@ -8876,6 +8923,51 @@ static void test_try_from_fn_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_non_drop_marker_materialize(void)
+{
+    NonDropFixture fixture;
+    CmByteBuf encoded;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirDeclarationMaterializeResult result;
+    const CmHirItem *non_drop;
+
+    non_drop_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 272u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.public_type_entry_count == 1u);
+    non_drop = find_item(&context, CM_HIR_ITEM_TRAIT, "NonDrop");
+    assert(non_drop != NULL
+        && non_drop->visibility.kind == CM_HIR_VIS_PUBLIC
+        && non_drop->data.trait_item.safety == CM_HIR_SAFE
+        && non_drop->data.trait_item.is_const == 0
+        && non_drop->data.trait_item.is_auto == 0
+        && non_drop->data.trait_item.supertrait_count == 0u
+        && non_drop->generic_parameter_count == 0u
+        && non_drop->predicate_count == 0u
+        && non_drop->attribute_count == 1u);
+    assert_item_attribute(&context, non_drop, 0u,
+        "rustc_unsafe_specialization_marker", 272u);
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_repeat_materialize_and_consume(void)
 {
     RepeatFixture fixture;
@@ -9759,6 +9851,7 @@ int main(void)
     test_from_fn_materialize_and_consume();
     test_try_from_fn_materialize_and_consume();
     test_repeat_materialize_and_consume();
+    test_non_drop_marker_materialize();
     test_from_mut_materialize_and_consume();
     test_from_ref_materialize_and_consume();
     test_any_method_materialize_and_restore();

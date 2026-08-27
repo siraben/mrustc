@@ -610,7 +610,8 @@ static CmHirStatus cm_decl_trait_attributes(CmHirContext *context,
     uint16_t known_compiler_flags =
         CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
         | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE
-        | CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS;
+        | CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+        | CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER;
     uint32_t count = 0u;
 #define CM_DECL_ADD_TRAIT_ATTRIBUTE(text_value) do { \
         attributes[count].metadata = cm_hir_intern(context, (text_value)); \
@@ -685,6 +686,9 @@ static CmHirStatus cm_decl_trait_attributes(CmHirContext *context,
     if ((wire->compiler_flags
             & CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS) != 0u)
         CM_DECL_ADD_TRAIT_ATTRIBUTE("rustc_trivial_field_reads");
+    if ((wire->compiler_flags
+            & CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER) != 0u)
+        CM_DECL_ADD_TRAIT_ATTRIBUTE("rustc_unsafe_specialization_marker");
     if ((wire->flags & CM_HIR_DECL_TRAIT_IS_CONST) != 0u)
         CM_DECL_ADD_TRAIT_ATTRIBUTE("const_trait");
     {

@@ -446,6 +446,37 @@ static const unsigned char try_from_fn_split_fixture_source[] =
 static const unsigned char try_from_fn_split_plain_try_fixture_source[] =
     TRY_FROM_FN_SPLIT_SOURCE("", "FromResidual");
 
+/*
+ * `core::array::iter::NonDrop`: an unsafe specialization marker admitted only
+ * as an empty, generic-free, bound-free public trait with the exact
+ * `doc(hidden)` + `unstable` projection.
+ */
+#define NON_DROP_SOURCE(ATTRS, GENERICS, BODY) \
+    ATTRS \
+    "pub trait NonDrop" GENERICS BODY "\n" \
+    "#[unstable(feature = \"touch_like\", issue = \"none\")]\n" \
+    "#[inline]\n" \
+    "pub fn touch() {}\n"
+#define NON_DROP_ATTRS \
+    "#[doc(hidden)]\n" \
+    "#[unstable(issue = \"none\", feature = \"std_internals\")]\n" \
+    "#[rustc_unsafe_specialization_marker]\n"
+
+static const unsigned char non_drop_fixture_source[] =
+    NON_DROP_SOURCE(NON_DROP_ATTRS, "", " {}");
+static const unsigned char non_drop_generic_fixture_source[] =
+    NON_DROP_SOURCE(NON_DROP_ATTRS, "<T>", " {}");
+static const unsigned char non_drop_method_fixture_source[] =
+    NON_DROP_SOURCE(NON_DROP_ATTRS, "", " { fn f(&self); }");
+static const unsigned char non_drop_stable_fixture_source[] =
+    NON_DROP_SOURCE(
+        "#[doc(hidden)]\n#[rustc_unsafe_specialization_marker]\n", "", " {}");
+static const unsigned char non_drop_hidden_only_fixture_source[] =
+    NON_DROP_SOURCE(
+        "#[doc(hidden)]\n"
+        "#[unstable(issue = \"none\", feature = \"std_internals\")]\n",
+        "", " {}");
+
 static const unsigned char from_mut_fixture_source[] =
     "pub trait Gate {}\n"
     "pub fn needs<X: Gate>() {}\n"
@@ -957,6 +988,13 @@ static void try_from_fn_split_fixture_init(CaptureFixture *fixture,
         fixture_init_source(fixture, with_noise, "try-from-fn-split.rs",
             try_from_fn_split_fixture_source,
             sizeof(try_from_fn_split_fixture_source) - 1u);
+}
+
+static void non_drop_fixture_init(CaptureFixture *fixture, int with_noise,
+    const unsigned char *source, size_t source_length)
+{
+    fixture_init_source(fixture, with_noise, "non-drop-like.rs", source,
+        source_length);
 }
 
 static void from_mut_fixture_init(CaptureFixture *fixture, int with_noise)
@@ -5740,6 +5778,116 @@ static void test_try_from_fn_cross_module_trait_order(void)
     fixture_destroy(&fixture);
 }
 
+static void assert_non_drop_rejects(const unsigned char *source,
+    size_t source_length, CmHirDeclarationCaptureReason expected_reason)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    non_drop_fixture_init(&fixture, 0, source, source_length);
+    cm_hir_declaration_metadata_init(&metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason == expected_reason
+        && result.rejected_item != CM_HIR_ITEM_NONE
+        && (expected_reason
+                == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
+            ? (result.has_rejected_binding
+                && result.rejected_binding_kind
+                    == CM_HIR_LIBRARY_BINDING_TRAIT)
+            : !result.has_rejected_binding)
+        && metadata.trait_count == 0u && metadata.value_count == 0u
+        && metadata.module_count == 0u);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
+static void test_non_drop_unsafe_specialization_marker(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationCaptureResult result;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf decoded_bytes;
+    non_drop_fixture_init(&fixture, 0, non_drop_fixture_source,
+        sizeof(non_drop_fixture_source) - 1u);
+    non_drop_fixture_init(&noisy, 1, non_drop_fixture_source,
+        sizeof(non_drop_fixture_source) - 1u);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == 1u && result.associated_count == 0u
+        && result.item_count == 0u && result.value_count == 1u
+        && result.predicate_count == 0u
+        && result.projected_semantic_attribute_count == 4u
+        && metadata.trait_count == 1u
+        && metadata.traits[0].flags == 0u
+        && metadata.traits[0].compiler_flags
+            == CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER
+        && metadata.traits[0].safety == CM_HIR_DECL_SAFETY_SAFE
+        && metadata.traits[0].supertrait_count == 0u
+        && metadata.traits[0].generic_count == 0u
+        && metadata.traits[0].associated_count == 0u
+        && declaration_string_is(metadata.traits[0].name, "NonDrop")
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 4u);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&decoded_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(bytes.data, bytes.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.traits[0].compiler_flags
+            == CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER
+        && cm_hir_declaration_metadata_encode(&decoded, &decoded_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == decoded_bytes.len
+        && memcmp(bytes.data, decoded_bytes.data, bytes.len) == 0);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&decoded_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+    /* The marker is not a loose attribute: generics, members, a missing
+     * `unstable` projection, and `doc(hidden)` without the marker all reject
+     * atomically at the trait. */
+    assert_non_drop_rejects(non_drop_generic_fixture_source,
+        sizeof(non_drop_generic_fixture_source) - 1u,
+        CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED);
+    assert_non_drop_rejects(non_drop_method_fixture_source,
+        sizeof(non_drop_method_fixture_source) - 1u,
+        CM_HIR_DECL_CAPTURE_REASON_TRAIT_SHAPE_UNSUPPORTED);
+    assert_non_drop_rejects(non_drop_stable_fixture_source,
+        sizeof(non_drop_stable_fixture_source) - 1u,
+        CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+    assert_non_drop_rejects(non_drop_hidden_only_fixture_source,
+        sizeof(non_drop_hidden_only_fixture_source) - 1u,
+        CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID);
+}
+
 static void test_try_from_fn_hostile_mutations_are_atomic(void)
 {
     CaptureFixture fixture;
@@ -9480,6 +9628,7 @@ int main(void)
     test_from_fn_hostile_mutations_are_atomic();
     test_try_from_fn_closure_and_determinism();
     test_try_from_fn_cross_module_trait_order();
+    test_non_drop_unsafe_specialization_marker();
     test_try_from_fn_hostile_mutations_are_atomic();
     test_repeat_clone_closure_and_determinism();
     test_repeat_clone_hostile_mutations_are_atomic();

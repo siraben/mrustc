@@ -1617,6 +1617,53 @@ static void type_name_of_val_fixture_init(TypeNameFixture *fixture)
     metadata->namespace_count = 1u;
 }
 
+typedef struct NonDropFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[1];
+    CmHirDeclarationNamespaceEntry namespace_entries[1];
+} NonDropFixture;
+
+static void non_drop_fixture_init(NonDropFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("non_drop_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-non-drop-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    fixture->traits[0].owner_module = 1u;
+    fixture->traits[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->traits[0].source_ordinal = 1u;
+    fixture->traits[0].safety = CM_HIR_DECL_SAFETY_SAFE;
+    fixture->traits[0].name = (CmHirDeclarationString)S("NonDrop");
+    fixture->traits[0].compiler_flags =
+        CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER;
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 1u;
+
+    fixture->namespace_entries[0].owner_module = 1u;
+    fixture->namespace_entries[0].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_TYPE;
+    fixture->namespace_entries[0].name = fixture->traits[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_NOMINAL;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 1u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 1u;
+}
+
 static void from_mut_fixture_init(FromMutFixture *fixture)
 {
     CmHirDeclarationMetadata *metadata;
@@ -5529,6 +5576,68 @@ static void test_contextual_erased_reference_roots(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_non_drop_unsafe_specialization_marker(void)
+{
+    NonDropFixture fixture;
+    NonDropFixture repeated;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf again;
+    CmByteBuf replay;
+
+    non_drop_fixture_init(&fixture);
+    non_drop_fixture_init(&repeated);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&again);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated.metadata, &again)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == again.len
+        && memcmp(encoded.data, again.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.trait_count == 1u
+        && decoded.traits[0].flags == 0u
+        && decoded.traits[0].compiler_flags
+            == CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER
+        && cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && encoded.len == replay.len
+        && memcmp(encoded.data, replay.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&again);
+    cm_byte_buf_destroy(&encoded);
+
+    /* Dropping the marker leaves an ordinary empty trait; every other
+     * deviation from the exact marker profile rejects. */
+    non_drop_fixture_init(&fixture);
+    fixture.traits[0].compiler_flags = 0u;
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+#define ASSERT_INVALID_NON_DROP(change_) do { \
+        non_drop_fixture_init(&fixture); \
+        change_; \
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+    } while (0)
+    ASSERT_INVALID_NON_DROP(fixture.traits[0].compiler_flags |=
+        CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION);
+    ASSERT_INVALID_NON_DROP(fixture.traits[0].compiler_flags |=
+        CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE);
+    ASSERT_INVALID_NON_DROP(fixture.traits[0].compiler_flags |= UINT16_C(16));
+    ASSERT_INVALID_NON_DROP(fixture.traits[0].flags =
+        CM_HIR_DECL_TRAIT_IS_CONST);
+    ASSERT_INVALID_NON_DROP(fixture.traits[0].safety =
+        CM_HIR_DECL_SAFETY_UNSAFE);
+#undef ASSERT_INVALID_NON_DROP
+}
+
 static void test_from_mut_erased_pair(void)
 {
     FromMutFixture fixture;
@@ -7576,6 +7685,7 @@ int main(void)
     test_zero_generic_unit_function_family();
     test_contextual_erased_reference_roots();
     test_from_mut_erased_pair();
+    test_non_drop_unsafe_specialization_marker();
     test_from_ref_erased_pair();
     test_static_tuple_array_family();
     test_named_aggregate_family();

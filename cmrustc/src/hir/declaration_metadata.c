@@ -506,7 +506,8 @@ static int cm_decl_validate_traits(const CmHirDeclarationMetadata *metadata)
             || (trait_value->compiler_flags
                 & (uint16_t)~(CM_HIR_DECL_TRAIT_COMPILER_SPECIALIZATION
                     | CM_HIR_DECL_TRAIT_COMPILER_COINDUCTIVE
-                    | CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS))
+                    | CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS
+                    | CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER))
                 != 0u
             || ((trait_value->flags
                     & CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM) != 0u
@@ -3701,6 +3702,23 @@ static int cm_decl_validate_callable_profile(
         const CmHirDeclarationTrait *trait_value = &metadata->traits[index];
         uint32_t local = (uint32_t)(index + 1u);
         if ((trait_value->flags & CM_HIR_DECL_TRAIT_HAS_LANG_ITEM) == 0u) {
+            if (trait_value->compiler_flags
+                    == CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER) {
+                /* An unsafe specialization marker is an empty, safe,
+                 * bound-free, generic-free trait with no other flags. */
+                if (trait_value->flags != 0u
+                    || trait_value->safety != CM_HIR_DECL_SAFETY_SAFE
+                    || trait_value->generic_start != 0u
+                    || trait_value->generic_count != 0u
+                    || trait_value->predicate_start != 0u
+                    || trait_value->predicate_count != 0u
+                    || trait_value->outlives_start != 0u
+                    || trait_value->outlives_count != 0u
+                    || trait_value->supertrait_count != 0u
+                    || trait_value->associated_start != 0u
+                    || trait_value->associated_count != 0u) return 0;
+                continue;
+            }
             if (trait_value->supertrait_count != 0u
                 || trait_value->compiler_flags != 0u
                 || (trait_value->flags & (uint8_t)~
@@ -3936,7 +3954,10 @@ static int cm_decl_validate_clone_profile(
         || clone_method_local != 0u;
     if (!any) {
         for (index = 0u; index < metadata->trait_count; ++index)
-            if (metadata->traits[index].compiler_flags != 0u) return 0;
+            if (metadata->traits[index].compiler_flags != 0u
+                && metadata->traits[index].compiler_flags
+                    != CM_HIR_DECL_TRAIT_COMPILER_UNSAFE_SPECIALIZATION_MARKER)
+                return 0;
         for (index = 0u; index < metadata->associated_count; ++index) {
             const CmHirDeclarationAssociatedItem *associated =
                 &metadata->associated_items[index];

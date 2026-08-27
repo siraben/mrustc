@@ -485,7 +485,11 @@ profiles accept only `COMPLETE_DECLARATION`.
 `TRAIT` then contains safety, authenticated `is_auto`, authenticated
 `is_const_trait`, closed compiler-semantic flags, and the ordered supertrait
 array. The currently retained compiler flags are specialization-trait,
-coinductive, and trivial-field-reads; every unknown bit rejects. These flags
+coinductive, trivial-field-reads, and unsafe-specialization-marker; every
+unknown bit rejects. The unsafe specialization marker is admitted only on an
+empty, safe, generic-free, bound-free public trait without a lang item, such
+as `core::array::iter::NonDrop`, whose `doc(hidden)` and `unstable`
+attributes are counted in the semantic-attribute projection. These flags
 occupy a formerly reserved zero `NOMD` slot, so declarations without them keep
 their prior bytes. Each supertrait has a `REQUIRED` or `CONST_IF_CONST`
 modifier, a complete named trait reference, associated equalities, and its
