@@ -2676,6 +2676,15 @@ body-vs-signature 44 -> 25.  Remaining: method not found 25; body vs
 signature 25; assoc-value 16; unresolved value path 14 (cfg'd arch
 helpers); field 10; branch 9; path-pattern 8; assignment 8.
 
+M9-04 nineteenth pass (2026-08-27, run 57): unresolved projections act
+as wildcards on the receiver side of impl matching (`Option<&T>`
+patterns accept `Option<<I as Iterator>::Item>` receivers), so
+`Option::copied`/`cloned` beat Iterator's provided adapters.  Whole
+core: **153 error nodes** (was 156); method-not-found 25 -> 17, body
+vs signature 25 -> 23, operator resurfaced at 8 (shifted receivers).
+Remaining: body vs signature 23; method not found 17; assoc-value 16;
+unresolved value path 14; field 10; branch 10.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

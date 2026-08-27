@@ -579,6 +579,10 @@ static int cm_tyck_matches(CmTyckEnv *env, CmTyId pattern, CmTyId type)
     if (t->kind == CM_TY_INFER || t->kind == CM_TY_ERROR
         || t->kind == CM_TY_CONST_UNKNOWN || t->kind == CM_TY_LIFETIME
         || t->kind == CM_TY_CONST_PARAM
+        /* An unresolved projection is an unknown: it may well be the
+         * pattern's type (`Option<&T>` vs `Option<<I as
+         * Iterator>::Item>`). */
+        || t->kind == CM_TY_PROJECTION
         || t->kind == CM_TY_NEVER) return 1;
     if (p->kind != t->kind) return 0;
     if (p->a != t->a && p->kind != CM_TY_CLOSURE) return 0;
