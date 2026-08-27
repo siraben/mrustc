@@ -2496,6 +2496,20 @@ classes: body vs signature 608; method not found 346; operator on
 unsupported type 194; call argument mismatch 191; method argument
 mismatch 177; call through non-function 152; assignment mismatch 93;
 deref of non-pointer 73; branch unify 71; qualified path 57.
+
+M9-04 fifth pass (same day): coercion falls back to a deep lenient
+structural equality — any position holding a projection, generic
+parameter, `Self`, opaque, or const argument on either side is accepted
+(clears `Result<T, TryFromIntError>` vs `<T as TryFrom>::Error` and the
+`Option<...Item>` families); branch joins route through full coercion;
+method receivers normalize projections and `[T; N]` unsizes to `[T]`
+during lookup, so slice inherent methods (`len`, `as_ptr`, `iter`)
+resolve on arrays.  Whole core: 20,323/22,524 bodies typed (was
+18,196 two passes back), 1,463 error nodes (was 2,115).  Remaining:
+body vs signature 316; operator 196; method-arg 163; call-through-
+non-fn 152; call-arg 130; method not found 119; assignment 75; deref
+73; qualified 57; unresolved value path 44 (the `impl_Display!` fmt
+helpers); branch 40; field 31.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

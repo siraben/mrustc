@@ -1652,6 +1652,8 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
     }
 }
 
+static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected);
+
 static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
 {
     CmTyArena *arena = env->state->arena;
@@ -1664,7 +1666,7 @@ static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
         if (ta != NULL && tb != NULL && ta->kind == CM_TY_REF
             && tb->kind == CM_TY_REF)
             (void)cm_ty_unify(arena, ta->children[0], tb->children[0]);
-        else
+        else if (!cm_tyck_coerce(env, b, a) && !cm_tyck_coerce(env, a, b))
             cm_tyck_error(env, "branch types do not unify");
     }
     return a;
@@ -1672,6 +1674,70 @@ static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
 
 /* Unify with lenient coercions: `&mut T` -> `&T`, `!` -> anything,
  * `&[T; N]` -> `&[T]`, fn item -> fn pointer. */
+/*
+ * Deep lenient structural equality: unify where possible, and accept any
+ * position occupied by a projection, generic parameter, `Self`, opaque, or
+ * const argument on either side — the input is assumed valid and trait
+ * solving is not modelled.  Reference/pointer mutability and fn-pointer
+ * unsafety are ignored.  Children arrays are type-owned, so capturing them
+ * before recursing is safe even though the arena vector may move.
+ */
+static int cm_tyck_lenient_eq(CmTyckEnv *env, CmTyId left, CmTyId right,
+    unsigned int depth)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *a;
+    const CmTy *e;
+    CmTyKind ak;
+    CmTyKind ek;
+    uint32_t count;
+    const CmTyId *a_children;
+    const CmTyId *e_children;
+    uint32_t index;
+    if (depth > 32u) return 1;
+    left = cm_tyck_normalize(env, left, 0u);
+    right = cm_tyck_normalize(env, right, 0u);
+    if (cm_ty_unify(arena, left, right)) return 1;
+    a = cm_ty_get(arena, cm_ty_resolve(arena, left));
+    e = cm_ty_get(arena, cm_ty_resolve(arena, right));
+    if (a == NULL || e == NULL) return 0;
+    ak = a->kind;
+    ek = e->kind;
+    if (ak == CM_TY_PROJECTION || ek == CM_TY_PROJECTION
+        || ak == CM_TY_PARAM || ek == CM_TY_PARAM
+        || ak == CM_TY_SELF || ek == CM_TY_SELF
+        || ak == CM_TY_OPAQUE || ek == CM_TY_OPAQUE
+        || ak == CM_TY_ERROR || ek == CM_TY_ERROR
+        || ak == CM_TY_NEVER || ek == CM_TY_NEVER
+        || ak == CM_TY_INFER || ek == CM_TY_INFER
+        || ak == CM_TY_CONST || ek == CM_TY_CONST
+        || ak == CM_TY_CONST_PARAM || ek == CM_TY_CONST_PARAM
+        || ak == CM_TY_CONST_UNKNOWN || ek == CM_TY_CONST_UNKNOWN)
+        return 1;
+    /* `&&T` against `&T`: strip the extra reference. */
+    if (ak == CM_TY_REF && ek == CM_TY_REF) {
+        const CmTy *ap = cm_ty_get(arena, cm_ty_resolve(arena,
+            a->children[0]));
+        if (ap != NULL && ap->kind == CM_TY_REF)
+            return cm_tyck_lenient_eq(env, cm_ty_get(arena,
+                cm_ty_resolve(arena, left))->children[0], right,
+                depth + 1u);
+    }
+    if (ak != ek) return 0;
+    if ((ak == CM_TY_ADT || ak == CM_TY_FN_DEF || ak == CM_TY_FOREIGN
+            || ak == CM_TY_DYN)
+        && !cm_hir_def_id_equal(a->def, e->def)) return 0;
+    if ((ak == CM_TY_INT || ak == CM_TY_FLOAT) && a->a != e->a) return 0;
+    if (a->count != e->count) return 0;
+    count = a->count;
+    a_children = a->children;
+    e_children = e->children;
+    for (index = 0u; index < count; ++index)
+        if (!cm_tyck_lenient_eq(env, a_children[index], e_children[index],
+                depth + 1u)) return 0;
+    return 1;
+}
+
 static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
 {
     CmTyArena *arena = env->state->arena;
@@ -1700,7 +1766,7 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
             return cm_ty_unify(arena, ap->children[0], ep->children[0]);
         if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) return 1;
         if (cm_ty_unify(arena, a->children[0], e->children[0])) return 1;
-        return 0;
+        return cm_tyck_lenient_eq(env, actual, expected, 0u);
     }
     if (a->kind == CM_TY_PTR && e->kind == CM_TY_PTR)
         return cm_ty_unify(arena, a->children[0], e->children[0]) || 1;
@@ -1708,7 +1774,7 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         return cm_ty_unify(arena, a->children[0], e->children[0]) || 1;
     if (a->kind == CM_TY_FN_DEF && e->kind == CM_TY_FN_PTR) return 1;
     if (a->kind == CM_TY_CLOSURE && e->kind == CM_TY_FN_PTR) return 1;
-    return 0;
+    return cm_tyck_lenient_eq(env, actual, expected, 0u);
 }
 
 static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
@@ -1857,6 +1923,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     uint32_t index;
     uint32_t first_arg;
     receiver = cm_ty_resolve(arena, receiver);
+    receiver = cm_tyck_normalize(env, receiver, 0u);
     if (cm_ty_get(arena, receiver)->kind == CM_TY_INFER) {
         cm_tyck_push_pending(env, id);
         for (index = 0u; index < expr->data.method_call.argument_count;
@@ -1866,17 +1933,38 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
     }
     for (step = 0u; step < 6u; ++step) {
+        CmTyKind candidate_kind;
         candidate = cm_tyck_autoderef(env, receiver, step);
+        candidate = cm_tyck_normalize(env, candidate, 0u);
         if (cm_tyck_lookup_assoc(env, candidate,
                 expr->data.method_call.name, &found)
             && found.item->kind == CM_HIR_ITEM_FUNCTION) break;
-        if (cm_ty_get(arena, candidate)->kind != CM_TY_REF
-            && cm_ty_get(arena, candidate)->kind != CM_TY_PTR) {
+        candidate_kind = cm_ty_get(arena, candidate)->kind;
+        if (candidate_kind == CM_TY_ARRAY) {
+            /* Unsize `[T; N]` to `[T]` for slice inherent methods. */
+            CmTyId slice = cm_ty_slice(arena,
+                cm_ty_get(arena, candidate)->children[0]);
+            if (cm_tyck_lookup_assoc(env, slice,
+                    expr->data.method_call.name, &found)
+                && found.item->kind == CM_HIR_ITEM_FUNCTION) {
+                candidate = slice;
+                break;
+            }
+        }
+        if (candidate_kind != CM_TY_REF && candidate_kind != CM_TY_PTR) {
             candidate = CM_TY_NONE;
             break;
         }
     }
     if (candidate == CM_TY_NONE || found.item == NULL) {
+        if (getenv("CM_TYCK_DEBUG") != NULL) {
+            const CmInternedString *name = cm_interner_get(
+                &env->state->ubodies->strings,
+                expr->data.method_call.name);
+            cm_tyck_debug_pair(env, name == NULL ? "method"
+                : (const char *)name->bytes, receiver, receiver);
+            cm_tyck_debug_span(env, expr);
+        }
         cm_tyck_error(env, "method not found");
         for (index = 0u; index < expr->data.method_call.argument_count;
                 ++index)
@@ -3017,8 +3105,12 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
 
     {
         CmTyId root = cm_tyck_expr(&env, ub->root, env.return_type);
-        if (!cm_tyck_coerce(&env, root, env.return_type))
+        if (!cm_tyck_coerce(&env, root, env.return_type)) {
+            cm_tyck_debug_pair(&env, "body signature", root,
+                env.return_type);
+            cm_tyck_debug_span(&env, cm_ubody_get_expr(ub, ub->root));
             cm_tyck_error(&env, "body type does not match its signature");
+        }
     }
     /* Pending nodes: retry while something resolves. */
     env.in_pending_pass = 1;
