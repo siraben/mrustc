@@ -40,6 +40,17 @@ typedef struct CmTyckState {
     size_t impl_count;
     CmTyckChild *children; /* sorted by parent def */
     size_t child_count;
+    /* source id -> AST, for items reached through re-exports. */
+    struct { CmSourceId source; const CmAst *ast; } *source_asts;
+    size_t source_ast_count;
+    /* Lazily resolved `core::ops` range types. */
+    int range_resolved;
+    CmHirDefId range_full;
+    CmHirDefId range;
+    CmHirDefId range_from;
+    CmHirDefId range_to;
+    CmHirDefId range_inclusive;
+    CmHirDefId range_to_inclusive;
     CmTyckResult result;
 } CmTyckState;
 
@@ -78,12 +89,21 @@ typedef struct CmTyckEnv {
     int progressed;
 } CmTyckEnv;
 
+static int cm_tyck_debug_budget = -1;
+
 static void cm_tyck_debug_pair(CmTyckEnv *env, const char *what, CmTyId a,
     CmTyId b)
 {
     CmStrBuf left;
     CmStrBuf right;
+    const char *limit;
     if (getenv("CM_TYCK_DEBUG") == NULL) return;
+    if (cm_tyck_debug_budget < 0) {
+        limit = getenv("CM_TYCK_DEBUG_LIMIT");
+        cm_tyck_debug_budget = limit == NULL ? 40 : atoi(limit);
+    }
+    if (cm_tyck_debug_budget == 0) return;
+    cm_tyck_debug_budget -= 1;
     cm_str_buf_init(&left);
     cm_str_buf_init(&right);
     cm_ty_print(env->state->arena, env->state->hir, a, &left);
@@ -92,6 +112,15 @@ static void cm_tyck_debug_pair(CmTyckEnv *env, const char *what, CmTyId a,
         cm_str_buf_c_str(&right));
     cm_str_buf_destroy(&right);
     cm_str_buf_destroy(&left);
+}
+
+static void cm_tyck_debug_span(CmTyckEnv *env, const CmUExpr *expr)
+{
+    (void)env;
+    if (getenv("CM_TYCK_DEBUG") == NULL || cm_tyck_debug_budget <= 0) return;
+    fprintf(stderr, "TYCK   at source=%lu %lu..%lu\n",
+        (unsigned long)expr->span.source, (unsigned long)expr->span.start,
+        (unsigned long)expr->span.end);
 }
 
 static void cm_tyck_error(CmTyckEnv *env, const char *reason)
@@ -217,6 +246,111 @@ static const CmHirItem *cm_tyck_child_named(const CmTyckState *state,
             return child->item;
     }
     return NULL;
+}
+
+static void cm_tyck_build_source_asts(CmTyckState *state)
+{
+    size_t count = cm_module_graph_module_count(state->graph);
+    size_t index;
+    size_t used = 0u;
+    state->source_asts = (void *)cm_alloc_zeroed(count + 1u,
+        sizeof(*state->source_asts));
+    for (index = 0u; index < count; ++index) {
+        CmResolveModuleInfo info;
+        const CmAst *ast = NULL;
+        size_t seen;
+        if (!cm_module_graph_get_module_at(state->graph, index, &info)
+            || !cm_module_graph_borrow_ast(state->graph, info.id, &ast)
+            || ast == NULL) continue;
+        for (seen = 0u; seen < used; ++seen)
+            if (state->source_asts[seen].source == info.source) break;
+        if (seen != used) continue;
+        state->source_asts[used].source = info.source;
+        state->source_asts[used].ast = ast;
+        used += 1u;
+    }
+    state->source_ast_count = used;
+}
+
+static const CmAst *cm_tyck_ast_for_source(const CmTyckState *state,
+    CmSourceId source)
+{
+    size_t index;
+    for (index = 0u; index < state->source_ast_count; ++index)
+        if (state->source_asts[index].source == source)
+            return state->source_asts[index].ast;
+    return NULL;
+}
+
+/*
+ * The HIR item declared by a resolver binding, matched by AST span.  The
+ * declaring AST is found by source id: a re-exported item is declared in a
+ * different module than the one the path resolved from.
+ */
+static const CmHirItem *cm_tyck_item_from_binding(const CmTyckState *state,
+    const CmResolvedBinding *binding)
+{
+    const CmAst *declaring;
+    const CmAstItem *ast_item;
+    size_t index;
+    if (binding->declaration.item == CM_AST_ITEM_NONE) return NULL;
+    declaring = cm_tyck_ast_for_source(state, binding->declaration.source);
+    if (declaring == NULL) return NULL;
+    ast_item = cm_ast_get_item(declaring, binding->declaration.item);
+    if (ast_item == NULL) return NULL;
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &state->hir->items, index);
+        if (item != NULL
+            && item->span.source == binding->declaration.source
+            && item->span.start == ast_item->span.start) return item;
+    }
+    return NULL;
+}
+
+/* Resolve a crate-root-relative type path such as `ops::Range`. */
+static int cm_tyck_lookup_type_path(CmTyckState *state,
+    const char *const *segments, size_t count, CmHirDefId *out)
+{
+    CmResolvePathSegmentView views[8];
+    CmResolvedBinding binding;
+    CmModuleId root;
+    const CmHirItem *item;
+    size_t index;
+    if (count > 8u || !cm_module_graph_get_root(state->graph, &root))
+        return 0;
+    for (index = 0u; index < count; ++index) {
+        views[index].bytes = (const unsigned char *)segments[index];
+        views[index].length = strlen(segments[index]);
+    }
+    if (cm_import_resolve_path_checked(state->imports, state->graph,
+            state->revision, root, 0, views, count,
+            CM_RESOLVE_NAMESPACE_TYPE, &binding) != CM_IMPORT_LOOKUP_OK)
+        return 0;
+    item = cm_tyck_item_from_binding(state, &binding);
+    if (item == NULL) return 0;
+    *out = item->definition;
+    return 1;
+}
+
+static void cm_tyck_resolve_ranges(CmTyckState *state)
+{
+    static const char *const full[] = { "ops", "RangeFull" };
+    static const char *const half[] = { "ops", "Range" };
+    static const char *const from[] = { "ops", "RangeFrom" };
+    static const char *const to[] = { "ops", "RangeTo" };
+    static const char *const inclusive[] = { "ops", "RangeInclusive" };
+    static const char *const to_inclusive[] = { "ops", "RangeToInclusive" };
+    if (state->range_resolved) return;
+    state->range_resolved = 1;
+    (void)cm_tyck_lookup_type_path(state, full, 2u, &state->range_full);
+    (void)cm_tyck_lookup_type_path(state, half, 2u, &state->range);
+    (void)cm_tyck_lookup_type_path(state, from, 2u, &state->range_from);
+    (void)cm_tyck_lookup_type_path(state, to, 2u, &state->range_to);
+    (void)cm_tyck_lookup_type_path(state, inclusive, 2u,
+        &state->range_inclusive);
+    (void)cm_tyck_lookup_type_path(state, to_inclusive, 2u,
+        &state->range_to_inclusive);
 }
 
 static void cm_tyck_build_index(CmTyckState *state)
@@ -581,6 +715,73 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     return 0;
 }
 
+/* Is `def` one of the callable traits? */
+static int cm_tyck_is_fn_trait(CmTyckEnv *env, CmHirDefId def)
+{
+    const CmHirItem *item = cm_tyck_item(env->state, def);
+    const CmInternedString *name;
+    if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT) return 0;
+    name = cm_interner_get(&env->state->hir->strings, item->name);
+    return name != NULL
+        && ((name->len == 2u && memcmp(name->bytes, "Fn", 2u) == 0)
+            || (name->len == 5u && memcmp(name->bytes, "FnMut", 5u) == 0)
+            || (name->len == 6u && memcmp(name->bytes, "FnOnce", 6u) == 0));
+}
+
+/*
+ * A callable bound on `callee` (a generic parameter or `Self`): the
+ * predicate's trait argument tuple gives the parameter types and its
+ * `Output` equality the return type.
+ */
+static int cm_tyck_fn_bound(CmTyckEnv *env, CmTyId callee, CmTyId *params,
+    uint32_t limit, uint32_t *out_count, CmTyId *out_return)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmHirItem *owners[2];
+    int owner;
+    callee = cm_ty_resolve(arena, callee);
+    owners[0] = env->item;
+    owners[1] = env->parent;
+    for (owner = 0; owner < 2; ++owner) {
+        const CmHirItem *item = owners[owner];
+        uint32_t index;
+        if (item == NULL) continue;
+        for (index = 0u; index < item->predicate_count; ++index) {
+            const CmHirTraitPredicate *pred = &item->predicates[index];
+            CmTyId subject = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                env->state->hir, pred->subject),
+                cm_tyck_subst_of(&env->self_subst));
+            const CmTy *arguments;
+            if (cm_ty_resolve(arena, subject) != callee) continue;
+            if (!cm_tyck_is_fn_trait(env, pred->trait_type.definition))
+                continue;
+            *out_count = 0u;
+            *out_return = arena->unit;
+            if (pred->trait_type.argument_count != 0u
+                && pred->trait_type.arguments[0].kind
+                    == CM_HIR_GENERIC_ARG_TYPE) {
+                CmTyId tuple = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                    env->state->hir, pred->trait_type.arguments[0].data.type),
+                    cm_tyck_subst_of(&env->self_subst));
+                arguments = cm_ty_get(arena, cm_ty_resolve(arena, tuple));
+                if (arguments != NULL && arguments->kind == CM_TY_TUPLE) {
+                    uint32_t argument;
+                    *out_count = arguments->count > limit ? limit
+                        : arguments->count;
+                    for (argument = 0u; argument < *out_count; ++argument)
+                        params[argument] = arguments->children[argument];
+                }
+            }
+            if (pred->equality_count != 0u)
+                *out_return = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                    env->state->hir, pred->equalities[0].value),
+                    cm_tyck_subst_of(&env->self_subst));
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Signature of a found fn: parameter types (receiver excluded/included
  * as declared) and return type, substituted. */
 static uint32_t cm_tyck_signature(CmTyckEnv *env, const CmHirItem *fn,
@@ -778,19 +979,12 @@ static CmTyId cm_tyck_ast_path_type(CmTyckEnv *env, CmAstPathId path_id)
                     (uint32_t)binding.primitive_kind - CM_HIR_PRIMITIVE_I8));
             }
         }
-        for (item_index = 0u; item_index < env->state->hir->items.len;
-                ++item_index) {
-            const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
-                &env->state->hir->items, item_index);
-            const CmAst *declaring;
-            const CmAstItem *ast_item;
-            if (item == NULL || item->span.source != binding.declaration.source)
-                continue;
-            if (!cm_module_graph_borrow_ast(env->state->graph,
-                    binding.module, &declaring)) continue;
-            ast_item = cm_ast_get_item(declaring, binding.declaration.item);
-            if (ast_item == NULL || ast_item->span.start != item->span.start)
-                continue;
+        {
+            const CmHirItem *item = cm_tyck_item_from_binding(env->state,
+                &binding);
+            if (item == NULL) return cm_ty_fresh(arena,
+                CM_HIR_INFER_GENERAL);
+            (void)item_index;
             if (item->kind == CM_HIR_ITEM_STRUCT || item->kind
                     == CM_HIR_ITEM_ENUM || item->kind == CM_HIR_ITEM_UNION) {
                 CmTyckInstance instance;
@@ -826,7 +1020,6 @@ static CmTyId cm_tyck_ast_path_type(CmTyckEnv *env, CmAstPathId path_id)
             if (item->kind == CM_HIR_ITEM_EXTERN_TYPE)
                 return cm_ty_with_def(arena, CM_TY_FOREIGN, item->definition,
                     NULL, 0u);
-            break;
         }
     }
     /* `T::Assoc`, `Self::Assoc`, unresolvable: an inference variable. */
@@ -925,6 +1118,54 @@ static void cm_tyck_set_expr(CmTyckEnv *env, CmUExprId id, CmTyId type)
 
 static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected);
 static void cm_tyck_pat(CmTyckEnv *env, CmUPatId id, CmTyId expected);
+
+/*
+ * Item type of an iterable: `into_iter` (when present) then `next`, whose
+ * `Option<Item>` return names the item.  Avoids modelling IntoIterator's
+ * associated types before trait solving exists.
+ */
+static int cm_tyck_iterator_item(CmTyckEnv *env, CmTyId iterable,
+    CmTyId item_type)
+{
+    CmTyArena *arena = env->state->arena;
+    CmTyId iterator = iterable;
+    CmTyckFound found;
+    CmInternId into_iter = cm_interner_lookup(&env->state->ubodies->strings,
+        "into_iter", 9u);
+    CmInternId next = cm_interner_lookup(&env->state->ubodies->strings,
+        "next", 4u);
+    CmTyId params[CM_TYCK_MAX_ARGS];
+    CmTyId ret;
+    const CmTy *option;
+    if (cm_ty_get(arena, cm_ty_resolve(arena, iterable))->kind == CM_TY_INFER)
+        return 0;
+    if (into_iter != CM_INTERN_ID_NONE
+        && cm_tyck_lookup_assoc(env, iterable, into_iter, &found)
+        && found.item->kind == CM_HIR_ITEM_FUNCTION) {
+        (void)cm_tyck_signature(env, found.item,
+            cm_tyck_subst_of(&found.instance), params, CM_TYCK_MAX_ARGS,
+            &ret);
+        iterator = ret;
+    }
+    if (next == CM_INTERN_ID_NONE
+        || !cm_tyck_lookup_assoc(env, iterator, next, &found)
+        || found.item->kind != CM_HIR_ITEM_FUNCTION) return 0;
+    (void)cm_tyck_signature(env, found.item,
+        cm_tyck_subst_of(&found.instance), params, CM_TYCK_MAX_ARGS, &ret);
+    option = cm_ty_get(arena, cm_ty_resolve(arena, ret));
+    if (option == NULL || option->kind != CM_TY_ADT) return 0;
+    {
+        uint32_t index;
+        for (index = 0u; index < option->count; ++index) {
+            const CmTy *argument = cm_ty_get(arena, cm_ty_resolve(arena,
+                option->children[index]));
+            if (argument != NULL && argument->kind == CM_TY_LIFETIME)
+                continue;
+            return cm_ty_unify(arena, item_type, option->children[index]);
+        }
+    }
+    return 0;
+}
 
 static void cm_tyck_push_pending(CmTyckEnv *env, CmUExprId id)
 {
@@ -1264,9 +1505,36 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
         cm_tyck_error(env, "associated value not found");
         return arena->error;
     }
-    case CM_U_RESOLVED_NESTED_ITEM:
-        cm_tyck_error(env, "body-local item not lowered");
+    case CM_U_RESOLVED_NESTED_ITEM: {
+        /* Items declared inside a body are not HIR items; their types come
+         * straight from the AST declaration. */
+        const CmAstItem *nested = cm_ast_get_item(env->ast,
+            res->nested_item);
+        if (nested == NULL) {
+            cm_tyck_error(env, "body-local item is unavailable");
+            return arena->error;
+        }
+        if (nested->kind == CM_AST_ITEM_FUNCTION) {
+            CmTyId params[CM_TYCK_MAX_ARGS];
+            uint32_t index;
+            uint32_t count = nested->data.function_item.parameter_count;
+            CmTyId ret;
+            if (count > CM_TYCK_MAX_ARGS - 1u) count = CM_TYCK_MAX_ARGS - 1u;
+            for (index = 0u; index < count; ++index)
+                params[index] = cm_tyck_ast_type(env,
+                    nested->data.function_item.parameters[index].type);
+            ret = nested->data.function_item.return_type == CM_AST_TYPE_NONE
+                ? arena->unit
+                : cm_tyck_ast_type(env,
+                    nested->data.function_item.return_type);
+            return cm_ty_fn_ptr(arena, params, count, ret, 0);
+        }
+        if (nested->kind == CM_AST_ITEM_CONST
+            || nested->kind == CM_AST_ITEM_STATIC)
+            return cm_tyck_ast_type(env, nested->data.value_item.type);
+        /* Nested structs/enums have no HIR definition to name yet. */
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+    }
     case CM_U_RESOLVED_UNRESOLVED:
     default:
         cm_tyck_error(env, "unresolved value path");
@@ -1390,9 +1658,47 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
         cm_tyck_push_pending(env, id);
     } else if (ct != NULL && ct->kind == CM_TY_ERROR) {
         /* already reported */
+    } else if (ct != NULL && cm_tyck_fn_bound(env, callee, params,
+            CM_TYCK_MAX_ARGS, &count, &ret)) {
+        known = 1;
+    } else if (ct != NULL && ct->kind == CM_TY_DYN) {
+        /* `dyn Fn(..) -> R` objects: arguments are typed loosely. */
     } else if (ct != NULL) {
-        /* Fn-trait objects and generics: arguments are typed loosely. */
-        cm_tyck_error(env, "call through non-function type");
+        CmTyckFound found;
+        CmInternId call_name = cm_interner_lookup(
+            &env->state->ubodies->strings, "call", 4u);
+        CmInternId call_mut = cm_interner_lookup(
+            &env->state->ubodies->strings, "call_mut", 8u);
+        CmInternId call_once = cm_interner_lookup(
+            &env->state->ubodies->strings, "call_once", 9u);
+        int resolved = 0;
+        int attempt;
+        for (attempt = 0; attempt < 3 && !resolved; ++attempt) {
+            CmInternId name = attempt == 0 ? call_name
+                : attempt == 1 ? call_mut : call_once;
+            if (name == CM_INTERN_ID_NONE) continue;
+            if (cm_tyck_lookup_assoc(env, callee, name, &found)
+                && found.item->kind == CM_HIR_ITEM_FUNCTION) {
+                CmTyId signature_params[CM_TYCK_MAX_ARGS];
+                uint32_t signature_count = cm_tyck_signature(env, found.item,
+                    cm_tyck_subst_of(&found.instance), signature_params,
+                    CM_TYCK_MAX_ARGS, &ret);
+                const CmTy *tuple = signature_count >= 2u
+                    ? cm_ty_get(arena, cm_ty_resolve(arena,
+                        signature_params[1])) : NULL;
+                count = 0u;
+                if (tuple != NULL && tuple->kind == CM_TY_TUPLE) {
+                    uint32_t argument;
+                    count = tuple->count > CM_TYCK_MAX_ARGS
+                        ? CM_TYCK_MAX_ARGS : tuple->count;
+                    for (argument = 0u; argument < count; ++argument)
+                        params[argument] = tuple->children[argument];
+                }
+                known = 1;
+                resolved = 1;
+            }
+        }
+        if (!resolved) cm_tyck_error(env, "call through non-function type");
     }
     if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
         && (callee_expr->data.path.resolution.kind == CM_U_RESOLVED_VARIANT
@@ -1409,6 +1715,7 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
         if (known && index < count && !cm_tyck_coerce(env, actual,
                 params[index])) {
             cm_tyck_debug_pair(env, "call argument", actual, params[index]);
+            cm_tyck_debug_span(env, expr);
             cm_tyck_error(env, "call argument type mismatch");
         }
     }
@@ -1675,11 +1982,44 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
     case CM_U_EXPR_PATH:
         result = cm_tyck_path_type(env, expr, id);
         break;
-    case CM_U_EXPR_QUALIFIED_PATH:
-        /* <T as Trait>::item: resolved through the trait declaration. */
-        result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
-        cm_tyck_error(env, "qualified path not resolved");
+    case CM_U_EXPR_QUALIFIED_PATH: {
+        /* `<T as Trait>::item` and `<T>::item`. */
+        CmTyId self_type = expr->data.qualified_path.self_type.type
+                == CM_AST_TYPE_NONE ? arena->error
+            : cm_tyck_ast_type(env, expr->data.qualified_path.self_type.type);
+        const CmAstPath *associated = cm_ast_get_path(env->ast,
+            expr->data.qualified_path.associated_path.path);
+        CmInternId name = CM_INTERN_ID_NONE;
+        CmTyckFound found;
+        result = arena->error;
+        if (associated != NULL && associated->segment_count != 0u) {
+            const CmInternedString *text = cm_ast_get_string(env->ast,
+                associated->segments[associated->segment_count - 1u].name);
+            if (text != NULL)
+                name = cm_interner_lookup(&env->state->ubodies->strings,
+                    text->bytes, text->len);
+        }
+        if (name != CM_INTERN_ID_NONE
+            && cm_tyck_lookup_assoc(env, self_type, name, &found)) {
+            if (found.item->kind == CM_HIR_ITEM_FUNCTION)
+                result = cm_ty_with_def(arena, CM_TY_FN_DEF,
+                    found.item->definition, found.instance.types,
+                    found.instance.count);
+            else if (found.item->kind == CM_HIR_ITEM_CONST)
+                result = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                    env->state->hir, found.item->data.value_item.type),
+                    cm_tyck_subst_of(&found.instance));
+            else
+                cm_tyck_error(env, "qualified path is not a value");
+        } else if (cm_ty_get(arena, cm_ty_resolve(arena, self_type))->kind
+                == CM_TY_INFER) {
+            cm_tyck_push_pending(env, id);
+            result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+        } else {
+            cm_tyck_error(env, "qualified path not resolved");
+        }
         break;
+    }
     case CM_U_EXPR_BLOCK: {
         CmTyId last = arena->unit;
         int diverges = 0;
@@ -1954,12 +2294,30 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             : cm_tyck_expr(env, expr->data.range.start, CM_TY_NONE);
         CmTyId end = expr->data.range.end == CM_U_EXPR_NONE ? CM_TY_NONE
             : cm_tyck_expr(env, expr->data.range.end, start);
+        CmTyId element = start != CM_TY_NONE ? start
+            : end != CM_TY_NONE ? end : CM_TY_NONE;
+        CmHirDefId def;
+        cm_tyck_resolve_ranges(env->state);
         if (start != CM_TY_NONE && end != CM_TY_NONE)
             (void)cm_ty_unify(arena, start, end);
-        /* Range ADTs are resolved by typeck's caller later; until then a
-         * variable stands in. */
-        result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
-        cm_tyck_error(env, "range type not modelled");
+        if (start == CM_TY_NONE && end == CM_TY_NONE)
+            def = env->state->range_full;
+        else if (start == CM_TY_NONE)
+            def = expr->data.range.is_inclusive
+                ? env->state->range_to_inclusive : env->state->range_to;
+        else if (end == CM_TY_NONE)
+            def = env->state->range_from;
+        else
+            def = expr->data.range.is_inclusive
+                ? env->state->range_inclusive : env->state->range;
+        if (cm_hir_def_id_is_none(def)) {
+            cm_tyck_error(env, "range type not available");
+            result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+        } else if (element == CM_TY_NONE) {
+            result = cm_ty_with_def(arena, CM_TY_ADT, def, NULL, 0u);
+        } else {
+            result = cm_ty_with_def(arena, CM_TY_ADT, def, &element, 1u);
+        }
         break;
     }
     case CM_U_EXPR_LET: {
@@ -2086,10 +2444,12 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                         || pt->kind == CM_TY_SLICE))
                     (void)cm_ty_unify(arena, item_type,
                         cm_ty_ref(arena, pt->children[0], it->a != 0u));
+                else if (!cm_tyck_iterator_item(env, iterable, item_type))
+                    cm_tyck_error(env, "for loop iterable is not iterable");
             } else if (it != NULL && it->kind == CM_TY_ARRAY) {
                 (void)cm_ty_unify(arena, item_type, it->children[0]);
-            } else {
-                cm_tyck_error(env, "for loop over non-array iterable");
+            } else if (!cm_tyck_iterator_item(env, iterable, item_type)) {
+                cm_tyck_error(env, "for loop iterable is not iterable");
             }
             cm_tyck_pat(env, expr->data.for_expr.pattern, item_type);
             (void)cm_tyck_expr(env, expr->data.for_expr.body, arena->unit);
@@ -2604,6 +2964,7 @@ CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     state->revision = revision;
     state->imports = imports;
     state->modules = modules;
+    cm_tyck_build_source_asts(state);
     cm_tyck_build_index(state);
     cm_vec_clear(&set->bodies);
     for (index = 0u; index < bodies->bodies.len; ++index) {
@@ -2624,6 +2985,7 @@ CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
         cm_vec_push(&set->bodies, &body);
     }
     result = state->result;
+    cm_free(state->source_asts);
     cm_free(state->children);
     cm_free(state->impls);
     cm_free(state);

@@ -2448,6 +2448,20 @@ operator on unsupported type 169; struct literal path 127; for loop over
 non-array iterable 122; assignment mismatch 109; branch types 67; deref of
 non-pointer 66; return mismatch 35; field not found 25; associated value
 16; tuple field 14; path pattern 7.
+
+M9-04 second pass (same day): body-local items are typed from their AST
+declaration, `<T as Trait>::item` resolves through the same associated-item
+search, `a..b` builds the real `core::ops` range ADTs (found through a
+source-indexed AST map so re-exported items resolve), calls through
+`Fn`/`FnMut`/`FnOnce` bounds take their parameter tuple and `Output`
+equality from the predicate, callable ADTs go through `call`/`call_mut`/
+`call_once`, and `for` loops derive the item type from `into_iter`/`next`.
+Whole core: 17,101/22,524 bodies typed (was 16,339), 5,478 unresolved
+nodes (was 8,043), 6,254 error nodes (was 12,858).  Remaining classes:
+unresolved value path 2,180 (the `ubody` SIMD paths); call argument
+mismatch 1,388; body vs signature 1,101; method not found 354; method
+argument mismatch 297; operator on unsupported type 194; call through
+non-function 159; struct literal path 127; assignment mismatch 114.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
