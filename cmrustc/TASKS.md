@@ -2697,6 +2697,13 @@ residue mode — revisited when MIR consumption (M9-05) shows which
 residue matters — and **M9-03 (whole-context multi-crate) is now
 ACTIVE**: lower alloc, then std, against the in-memory core context.
 
+M9-04 statement-boundary refinement (2026-08-28, run 63): **151 error
+nodes**, 21,233/22,524 bodies typed.  Block-like expressions in
+statement position now stop only when the expression begins at the
+statement's first token, so parenthesized forms like
+`(unsafe { … }) != 0` keep their binary tail (alloc parse regression);
+core improved 153 -> 151.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

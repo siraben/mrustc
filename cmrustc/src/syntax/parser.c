@@ -2328,9 +2328,17 @@ static CmAstExprId cm_parser_parse_expression_bp_mode(CmParser *parser,
             && cm_parser_expr_is_block_like(parser, left)) {
             /* Statement position: a block-like expression ends the
              * statement unless continued by `.` or `?`, exactly as in
-             * rustc (`unsafe { .. }.method()`, `match .. {}?`). */
-            enum cm_token_kind next = cm_parser_kind(parser);
-            if (next != CM_TOKEN_DOT && next != CM_TOKEN_QUESTION) break;
+             * rustc — but only when the statement *begins* with the
+             * block construct: `(unsafe { .. }) != 0` is an ordinary
+             * expression statement (parentheses are transparent, so
+             * compare the expression's start to the first token). */
+            const CmAstExpr *left_expr = cm_ast_get_expr(parser->ast, left);
+            if (left_expr != NULL && left_expr->span.start
+                    == cm_parser_offset_u32(parser, first->start)) {
+                enum cm_token_kind next = cm_parser_kind(parser);
+                if (next != CM_TOKEN_DOT && next != CM_TOKEN_QUESTION)
+                    break;
+            }
         }
         if (cm_parser_kind(parser) == CM_TOKEN_LPAREN) {
             CmAstExpr expression;
