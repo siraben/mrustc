@@ -344,6 +344,18 @@ ledger; this document orders its tasks by the deepest consumable artifact.
   declaration slice must preserve its exact `Try`/`Residual` projections and
   associated equalities; its generic inline body remains outside executable
   metadata.
+- Commit `574fda73` captured that declaration in a single-module fixture;
+  commit `ebdcf4bc` collects public traits before values so the real
+  cross-module `core::array`/`core::ops` layout authenticates. The clean pinned Rust 1.90 probe at `ebdcf4bc` again reports zero graph, import,
+  and HIR errors, 38,176 HIR items, and the exact 451-module/1,658-type/20,747-value
+  library census. It advances the v3.0 frontier to `core/src/array/iter.rs:356`:
+  `pub trait NonDrop {}` (`def=1:19141`, source item `104:48`, rejected item
+  `113`) at `stage=items`/`item-source-invalid`. Because traits are now collected
+  first, this is the first public trait in the whole crate outside the admitted
+  trait declaration profile; its attributes are `#[doc(hidden)]`,
+  `#[unstable(issue = "none", feature = "std_internals")]`, and
+  `#[rustc_unsafe_specialization_marker]`, and the next trait slice must
+  authenticate that exact declaration or report the precise rejected fact.
 - Parenthesized callable-trait input elision is normalized before metadata:
   omitted input lifetimes become deterministic predicate-owned late-bound
   parameters, and an elided output inherits the sole distinct input lifetime.

@@ -247,6 +247,18 @@ F>` (`def=1:18902`, source item `100:21`, rejected item `10805`) at
 retain the exact `Try`/`Residual` projection and associated-equality closure
 used by `ChangeOutputType<R, [R::Output; N]>`; it must not treat the generic
 inline body as transported executable authority.
+Commit `574fda73` captured that declaration in a single-module fixture only;
+commit `ebdcf4bc` collects public traits before values so the real cross-module
+`core::array`/`core::ops` layout authenticates. The clean pinned Rust 1.90 probe at `ebdcf4bc` again reports zero graph, import,
+and HIR errors, 38,176 HIR items, and the exact 451-module/1,658-type/20,747-value
+library census. It advances the v3.0 frontier to `core/src/array/iter.rs:356`:
+`pub trait NonDrop {}` (`def=1:19141`, source item `104:48`, rejected item
+`113`) at `stage=items`/`item-source-invalid`. Because traits are now collected
+first, this is the first public trait in the whole crate outside the admitted
+trait declaration profile; its attributes are `#[doc(hidden)]`,
+`#[unstable(issue = "none", feature = "std_internals")]`, and
+`#[rustc_unsafe_specialization_marker]`, and the next trait slice must
+authenticate that exact declaration or report the precise rejected fact.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and

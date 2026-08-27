@@ -2166,6 +2166,26 @@ frontier to `core/src/array/mod.rs:146`: `try_from_fn<R, const N: usize, F>`
 the exact `Try`/`Residual` projection and associated-equality closure used by
 `ChangeOutputType<R, [R::Output; N]>`; its generic inline body remains a
 separate executable-metadata boundary.
+Commit `574fda73` captured that declaration and its `Try`/`Residual` closure in
+a single-module fixture, but the real crate still rejected it: `core::array`
+sorts before `core::ops`, and the value pass authenticated `Try`'s captured
+profile before the trait pass had reached it. Commit `ebdcf4bc` collects every
+public trait before any other binding (the captured arrays are sorted
+afterwards, so emitted bytes are unchanged) and proves the split layout with a
+cross-module fixture. The same session repaired the development, strict, and
+TinyCC lanes, red since `f9e5726d`/`dcb7e0d4`, by admitting unrestricted `pub`
+foreign types and moving the v2 driver fixtures to named-field structs
+(`16200315`).
+The clean pinned Rust 1.90 probe at `ebdcf4bc` again reports zero graph, import,
+and HIR errors, 38,176 HIR items, and the exact 451-module/1,658-type/20,747-value
+library census. It advances the v3.0 frontier to `core/src/array/iter.rs:356`:
+`pub trait NonDrop {}` (`def=1:19141`, source item `104:48`, rejected item
+`113`) at `stage=items`/`item-source-invalid`. Because traits are now collected
+first, this is the first public trait in the whole crate outside the admitted
+trait declaration profile; its attributes are `#[doc(hidden)]`,
+`#[unstable(issue = "none", feature = "std_internals")]`, and
+`#[rustc_unsafe_specialization_marker]`, and the next trait slice must
+authenticate that exact declaration or report the precise rejected fact.
 
 The authoritative progress metric is the deepest nonempty artifact that a
 later stage can consume and, where applicable, execute. Parser, graph, and HIR
