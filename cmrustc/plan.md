@@ -24,8 +24,8 @@ Pipeline stages and status, in execution order:
 | Body macro expansion (M9-01) | **done** | 14,889 invocations, 0 failures; only 56 `asm!` + 3 `offset_of!` retained |
 | cfg-inactive *statement* stripping in bodies | done | `dcb484f5` |
 | Untyped bodies `ubody` (M9-02) | **done** | 22,524/22,524 bodies, 321,714 exprs, **33** unresolved paths |
-| Inference typeck (M9-04) | **active** | 20,854/22,524 bodies fully typed, **747** error nodes (run 14, `fcc31e3a`); run 16 in flight with predicate-search gating |
-| Whole-context snapshot + multi-crate (M9-03) | todo | |
+| Inference typeck (M9-04) | residue mode (153 nodes, explained) | 20,854/22,524 bodies fully typed, **747** error nodes (run 14, `fcc31e3a`); run 16 in flight with predicate-search gating |
+| Whole-context snapshot + multi-crate (M9-03) | **active** | |
 | MIR (M9-05) | todo | legacy G3 MIR exists for a small subset only |
 | C codegen + link (M9-06) | todo | legacy G3 codegen exists for a small subset only |
 

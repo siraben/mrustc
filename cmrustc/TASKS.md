@@ -2685,8 +2685,20 @@ vs signature 25 -> 23, operator resurfaced at 8 (shifted receivers).
 Remaining: body vs signature 23; method not found 17; assoc-value 16;
 unresolved value path 14; field 10; branch 10.
 
+M9-04 twentieth pass / stage checkpoint (2026-08-27, run 62): **153
+error nodes**, 21,232/22,524 bodies typed (99.3% of expressions).  The
+residue is explained scatter, none blocking: body-vs-signature 23
+(SlicePattern/Copied remnants, `position` closure ties), method not
+found 17 (spec-trait `&mut Self`, SliceIndex-Output receivers),
+assoc-value 16 (dec2flt/portable-simd assoc consts), unresolved value
+path 14 (cfg'd target-feature helpers), field 10 (error cascades),
+branch/path-pattern/operator/assignment 8-10 each.  M9-04 moves to
+residue mode — revisited when MIR consumption (M9-05) shows which
+residue matters — and **M9-03 (whole-context multi-crate) is now
+ACTIVE**: lower alloc, then std, against the in-memory core context.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
-| M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
+| M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
 | M9-05 | TODO | HIR-to-MIR for all bodies | all typed bodies produce MIR |
 | M9-06 | TODO | C emission and link for core/alloc/std | `hello` links and runs under TinyCC and GCC |
