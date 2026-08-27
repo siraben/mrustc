@@ -1,7 +1,9 @@
+#include "cm/alloc.h"
 #include "cm/driver/cfg.h"
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/ubody.h"
 #include "cm/resolve/body_expand.h"
 #include "cm/hir/module_map.h"
 #include "cm/hir/metadata.h"
@@ -488,6 +490,87 @@ static void body_census(const CmHirContext *hir, const CmModuleGraph *graph,
             census.macros[index].count);
 }
 
+
+/* Histogram of unresolved body paths by their first segment. */
+typedef struct UnresolvedName {
+    char name[64];
+    unsigned long count;
+} UnresolvedName;
+
+static int unresolved_compare(const void *left, const void *right)
+{
+    const UnresolvedName *a = (const UnresolvedName *)left;
+    const UnresolvedName *b = (const UnresolvedName *)right;
+    if (a->count != b->count) return a->count < b->count ? 1 : -1;
+    return strcmp(a->name, b->name);
+}
+
+static void ubody_unresolved_note(UnresolvedName *names, size_t *count,
+    const CmUBodySet *set, const CmInternId *segments, uint32_t segment_count,
+    unsigned long *single, unsigned long *multi)
+{
+    const CmInternedString *name;
+    char text[64];
+    size_t length;
+    size_t index;
+    if (segments == NULL || segment_count == 0u) return;
+    if (segment_count == 1u) *single += 1u; else *multi += 1u;
+    name = cm_interner_get(&set->strings, segments[0]);
+    if (name == NULL) return;
+    length = name->len < 63u ? name->len : 63u;
+    memcpy(text, name->bytes, length);
+    text[length] = '\0';
+    for (index = 0u; index < *count; ++index)
+        if (strcmp(names[index].name, text) == 0) {
+            names[index].count += 1u;
+            return;
+        }
+    if (*count >= 4096u) return;
+    strcpy(names[*count].name, text);
+    names[*count].count = 1u;
+    *count += 1u;
+}
+
+static void ubody_unresolved_census(const CmUBodySet *set)
+{
+    UnresolvedName *names = (UnresolvedName *)cm_alloc_zeroed(4096u,
+        sizeof(*names));
+    size_t count = 0u;
+    size_t body_index;
+    size_t index;
+    unsigned long single = 0u;
+    unsigned long multi = 0u;
+    for (body_index = 0u; body_index < set->bodies.len; ++body_index) {
+        const CmUBody *body = (const CmUBody *)cm_vec_at_const(&set->bodies,
+            body_index);
+        for (index = 0u; index < body->expressions.len; ++index) {
+            const CmUExpr *expr = (const CmUExpr *)cm_vec_at_const(
+                &body->expressions, index);
+            if (expr->kind == CM_U_EXPR_PATH && expr->data.path.resolution
+                    .kind == CM_U_RESOLVED_UNRESOLVED)
+                ubody_unresolved_note(names, &count, set,
+                    expr->data.path.segments, expr->data.path.segment_count,
+                    &single, &multi);
+        }
+        for (index = 0u; index < body->patterns.len; ++index) {
+            const CmUPat *pat = (const CmUPat *)cm_vec_at_const(
+                &body->patterns, index);
+            if (pat->kind == CM_U_PAT_PATH && pat->data.path.resolution.kind
+                    == CM_U_RESOLVED_UNRESOLVED)
+                ubody_unresolved_note(names, &count, set,
+                    pat->data.path.segments, pat->data.path.segment_count,
+                    &single, &multi);
+        }
+    }
+    qsort(names, count, sizeof(*names), unresolved_compare);
+    printf("ubody-unresolved single=%lu multi=%lu distinct=%lu\n", single,
+        multi, (unsigned long)count);
+    for (index = 0u; index < count && index < 40u; ++index)
+        printf("ubody-unresolved %s=%lu\n", names[index].name,
+            names[index].count);
+    cm_free(names);
+}
+
 int main(int argc, char **argv)
 {
     CmSourceSet sources;
@@ -643,8 +726,31 @@ int main(int argc, char **argv)
             (unsigned long)generic_count,
             (unsigned long)const_generic_count,
             (unsigned long)lifetime_generic_count);
-        if (body_census_requested)
+        if (body_census_requested) {
+            CmUBodySet ubodies;
+            CmUBodyLowerResult ubody_result;
             body_census(&hir, &graph, graph_result.revision, &modules);
+            cm_ubody_set_init(&ubodies);
+            ubody_result = cm_ubody_lower_all(&ubodies, &hir, &graph,
+                graph_result.revision, &imports, &modules);
+            printf("ubody bodies=%lu lowered=%lu no_source=%lu failed=%lu "
+                "expressions=%lu unresolved_paths=%lu nested_items=%lu "
+                "retained_macros=%lu\n",
+                (unsigned long)ubody_result.bodies,
+                (unsigned long)ubody_result.lowered,
+                (unsigned long)ubody_result.no_source,
+                (unsigned long)ubody_result.failed,
+                (unsigned long)ubody_result.expressions,
+                (unsigned long)ubody_result.unresolved_paths,
+                (unsigned long)ubody_result.nested_items,
+                (unsigned long)ubody_result.retained_macros);
+            if (ubody_result.first_failure != NULL)
+                printf("ubody first_failure body=%lu reason=%s\n",
+                    (unsigned long)ubody_result.first_failure_body,
+                    ubody_result.first_failure);
+            ubody_unresolved_census(&ubodies);
+            cm_ubody_set_destroy(&ubodies);
+        }
         (void)fflush(stdout);
         {
             CmHirLibraryArtifact artifact;
