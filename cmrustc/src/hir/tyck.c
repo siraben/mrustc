@@ -2709,13 +2709,14 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     }
     /* `x.cast::<u16>()`: bind the method's own generics (the last
      * instance entries) to the explicit turbofish arguments. */
-    if (expr->data.method_call.generic_arguments.path != CM_AST_PATH_NONE
-        && expr->data.method_call.generic_arguments.source == env->source) {
-        const CmAstPath *turbofish = cm_ast_get_path(env->ast,
-            expr->data.method_call.generic_arguments.path);
-        if (turbofish != NULL && turbofish->segment_count != 0u) {
-            const CmAstPathSegment *segment =
-                &turbofish->segments[turbofish->segment_count - 1u];
+    /* `x.cast::<u16>()`: bind the method's own type generics to the
+     * explicit turbofish arguments, read straight from the AST
+     * method-call node (ubody keeps each expression's AST id). */
+    {
+        const CmAstExpr *ast_expr = expr->ast == CM_AST_EXPR_NONE ? NULL
+            : cm_ast_get_expr(env->ast, expr->ast);
+        if (ast_expr != NULL && ast_expr->kind == CM_AST_EXPR_METHOD_CALL
+            && ast_expr->data.method_call.generic_argument_count != 0u) {
             uint32_t own = found.item->generic_parameter_count;
             uint32_t base = found.instance.count >= own
                 ? found.instance.count - own : 0u;
@@ -2723,10 +2724,11 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
             uint32_t slot = base;
             uint32_t explicit_types = 0u;
             uint32_t own_types = 0u;
-            for (argument = 0u; argument < segment->argument_count;
-                    ++argument)
-                if (segment->arguments[argument].kind
-                        == CM_AST_GENERIC_TYPE) explicit_types += 1u;
+            for (argument = 0u;
+                    argument < ast_expr->data.method_call
+                        .generic_argument_count; ++argument)
+                if (ast_expr->data.method_call.generic_arguments[argument]
+                        .kind == CM_AST_GENERIC_TYPE) explicit_types += 1u;
             for (argument = 0u; argument < own; ++argument) {
                 const CmHirGenericParam *parameter =
                     cm_hir_get_generic_param(env->state->hir,
@@ -2735,12 +2737,12 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                     && parameter->kind == CM_HIR_GENERIC_TYPE)
                     own_types += 1u;
             }
-            /* Bind positionally only when the counts agree. */
             for (argument = 0u; explicit_types == own_types
-                    && argument < segment->argument_count
+                    && argument < ast_expr->data.method_call
+                        .generic_argument_count
                     && slot < found.instance.count; ++argument) {
-                const CmAstGenericArg *garg =
-                    &segment->arguments[argument];
+                const CmAstGenericArg *garg = &ast_expr->data.method_call
+                    .generic_arguments[argument];
                 if (garg->kind != CM_AST_GENERIC_TYPE) continue;
                 while (slot < found.instance.count) {
                     const CmHirGenericParam *parameter =

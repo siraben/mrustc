@@ -2647,6 +2647,16 @@ assignment 16 -> 8.  Remaining: body vs signature 69; method not
 found 31; assoc-value 16; unresolved value path 14 (cfg'd arch
 helpers); field 10.
 
+M9-04 sixteenth pass (2026-08-27, run 51): method-call turbofish
+arguments are read directly from the AST method-call node (ubody's
+generic-arguments path ref was a stub that was always NONE) and bound
+to the chosen method's own type generics — `self.cast::<$unsigned>()`
+finally pins the element width, collapsing the Simd `Unsigned` family.
+Whole core: **179 error nodes** (was 208), 21,214/22,524 bodies typed.
+Remaining: body vs signature 44; method not found 29; assoc-value 16;
+unresolved value path 14 (cfg'd arch helpers); field 10; branch 9;
+path-pattern 8; assignment 8.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
