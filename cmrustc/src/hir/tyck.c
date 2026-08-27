@@ -942,6 +942,8 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
     CmTyKind self_kind;
     CmTyId projection_args[8];
     uint32_t projection_arg_count;
+    CmTyId assoc_args[8];
+    uint32_t assoc_arg_count;
     type = cm_ty_resolve(arena, type);
     projection = cm_ty_get(arena, type);
     if (projection == NULL || projection->kind != CM_TY_PROJECTION
@@ -950,10 +952,18 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
     trait_def = projection->def;
     assoc_def = projection->def2;
     first_child = projection->children[0];
-    projection_arg_count = projection->count > 1u
-        ? (projection->count - 1u > 8u ? 8u : projection->count - 1u) : 0u;
-    memcpy(projection_args, projection->children + 1u,
-        projection_arg_count * sizeof(CmTyId));
+    {
+        uint32_t trait_arg_total = projection->b;
+        uint32_t assoc_total = projection->count > trait_arg_total + 1u
+            ? projection->count - 1u - trait_arg_total : 0u;
+        projection_arg_count = trait_arg_total > 8u ? 8u : trait_arg_total;
+        memcpy(projection_args, projection->children + 1u,
+            projection_arg_count * sizeof(CmTyId));
+        assoc_arg_count = assoc_total > 8u ? 8u : assoc_total;
+        memcpy(assoc_args,
+            projection->children + 1u + trait_arg_total,
+            assoc_arg_count * sizeof(CmTyId));
+    }
     self_type = cm_tyck_normalize(env, first_child, depth + 1u);
     self_type = cm_ty_resolve(arena, self_type);
     self = cm_ty_get(arena, self_type);
@@ -1128,11 +1138,21 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                 }
                 cm_tyck_instance_init(&instance, self_type);
                 cm_tyck_instance_fresh(env, &instance, impl->item);
-                /* LENIENT(gat): a generic associated type's own
-                 * parameters (`type Cast<T2> = Simd<T2, N>`) become
-                 * fresh inference variables; the projection's GAT
-                 * arguments are not yet threaded through to bind them. */
+                /* A generic associated type's own parameters bind to
+                 * the projection's trailing GAT arguments
+                 * (`Self::Cast<T>` -> `type Cast<T2> = Simd<T2, N>`). */
                 cm_tyck_instance_fresh(env, &instance, definition);
+                {
+                    uint32_t own = definition->generic_parameter_count;
+                    uint32_t base = instance.count >= own
+                        ? instance.count - own : instance.count;
+                    uint32_t garg;
+                    for (garg = 0u; garg < assoc_arg_count
+                            && base + garg < instance.count; ++garg)
+                        (void)cm_ty_unify(arena,
+                            instance.types[base + garg],
+                            assoc_args[garg]);
+                }
                 (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
                     impl->self_pattern, cm_tyck_subst_of(&instance)));
                 return cm_tyck_normalize(env, cm_ty_subst(arena,
@@ -2099,6 +2119,26 @@ static CmTyId cm_tyck_user_deref(CmTyckEnv *env, CmTyId type)
     return ret == CM_TY_NONE ? CM_TY_NONE : ret;
 }
 
+static CmTyId cm_tyck_primitive_ty(CmTyckEnv *env,
+    CmHirPrimitiveKind primitive)
+{
+    CmTyArena *arena = env->state->arena;
+    switch (primitive) {
+    case CM_HIR_PRIMITIVE_BOOL: return arena->boolean;
+    case CM_HIR_PRIMITIVE_CHAR: return arena->character;
+    case CM_HIR_PRIMITIVE_STR: return arena->str;
+    case CM_HIR_PRIMITIVE_F16: return cm_ty_float(arena, CM_HIR_FLOAT_F16);
+    case CM_HIR_PRIMITIVE_F32: return cm_ty_float(arena, CM_HIR_FLOAT_F32);
+    case CM_HIR_PRIMITIVE_F64: return arena->f64;
+    case CM_HIR_PRIMITIVE_F128: return cm_ty_float(arena,
+        CM_HIR_FLOAT_F128);
+    case CM_HIR_PRIMITIVE_NONE: return CM_TY_NONE;
+    default:
+        return cm_ty_int(arena, (CmHirIntType)((uint32_t)primitive
+            - CM_HIR_PRIMITIVE_I8));
+    }
+}
+
 static CmAstTypeId expr_qualified_self_type(CmTyckEnv *env,
     const CmUExpr *callee_expr)
 {
@@ -2300,6 +2340,68 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                 == CM_U_RESOLVED_DEFINITION)
         && !known) {
         /* Constructor whose FN_PTR view failed above: type args anyway. */
+    }
+    if (known && callee_expr != NULL
+        && callee_expr->kind == CM_U_EXPR_PATH
+        && (callee_expr->data.path.resolution.kind
+                == CM_U_RESOLVED_TYPE_ASSOC
+            || callee_expr->data.path.resolution.kind
+                == CM_U_RESOLVED_PRIMITIVE
+            || callee_expr->data.path.resolution.kind
+                == CM_U_RESOLVED_SELF_TYPE)
+        && callee_expr->data.path.segment_count >= 2u) {
+        /* `usize::from(x)`: retry overlapping assoc-fn impls by the
+         * argument types, like qualified paths. */
+        uint32_t argument;
+        int compatible = 1;
+        for (argument = 0u; argument < call_arg_count && argument < count;
+                ++argument) {
+            if (call_arg_types[argument] == CM_TY_NONE) continue;
+            if (!cm_tyck_matches(env, params[argument],
+                    call_arg_types[argument])
+                && !cm_tyck_matches(env, call_arg_types[argument],
+                    params[argument])) {
+                compatible = 0;
+                break;
+            }
+        }
+        if (!compatible) {
+            const CmUResolution *res = &callee_expr->data.path.resolution;
+            CmTyId path_self = CM_TY_NONE;
+            CmInternId path_name = callee_expr->data.path.segments[
+                callee_expr->data.path.segment_count - 1u];
+            if (res->kind == CM_U_RESOLVED_SELF_TYPE) {
+                path_self = env->self_type;
+            } else if (res->kind == CM_U_RESOLVED_TYPE_ASSOC) {
+                const CmHirItem *base_item = cm_tyck_item(env->state,
+                    res->definition);
+                if (base_item != NULL
+                    && (base_item->kind == CM_HIR_ITEM_STRUCT
+                        || base_item->kind == CM_HIR_ITEM_ENUM
+                        || base_item->kind == CM_HIR_ITEM_UNION))
+                    path_self = cm_tyck_adt_fresh(env, base_item, NULL);
+            } else {
+                path_self = cm_tyck_primitive_ty(env, res->primitive);
+            }
+            if (path_self != CM_TY_NONE) {
+                unsigned int variant;
+                for (variant = 1u; variant < 32u; ++variant) {
+                    CmTyckFound retry;
+                    size_t undo_mark = cm_ty_undo_mark(arena);
+                    if (!cm_tyck_lookup_assoc_in(env, path_self,
+                            path_name, &retry, 3u, variant)) break;
+                    if (retry.item->kind == CM_HIR_ITEM_FUNCTION
+                        && cm_tyck_method_args_compatible(env, &retry,
+                            call_arg_types, call_arg_count)) {
+                        count = cm_tyck_signature(env, retry.item,
+                            cm_tyck_subst_of(&retry.instance), params,
+                            CM_TYCK_MAX_ARGS, &ret);
+                        break;
+                    }
+                    cm_ty_undo_to(arena, undo_mark);
+                }
+            }
+        }
     }
     if (known && callee_expr != NULL
         && callee_expr->kind == CM_U_EXPR_QUALIFIED_PATH) {

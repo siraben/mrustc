@@ -2635,6 +2635,18 @@ Remaining: call-arg 85; body vs signature 69; method not found 31;
 branch 17; assoc-value 16; assignment 16; unresolved value path 14
 (cfg'd arch helpers); field 10.
 
+M9-04 fifteenth pass (2026-08-27, run 50): projections carry their
+associated type's own arguments (children = [self, trait args...,
+GAT args...], trait-arg count in `b`) and normalization binds the
+freshened GAT parameters to them — the LENIENT(gat) hole is closed;
+the argument-compatibility retry extends to path callees resolving
+through primitives, `Self`, and type-assoc bases (`usize::from(x)`,
+`Self::try_from(n)`).  Whole core: **208 error nodes** (was 302),
+21,156/22,524 bodies typed; call-arg 85 -> 7, branch 17 -> 9,
+assignment 16 -> 8.  Remaining: body vs signature 69; method not
+found 31; assoc-value 16; unresolved value path 14 (cfg'd arch
+helpers); field 10.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

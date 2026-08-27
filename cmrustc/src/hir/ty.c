@@ -222,21 +222,26 @@ CmTyId cm_ty_const_value(CmTyArena *arena, uint64_t lo, uint64_t hi)
 
 CmTyId cm_ty_projection(CmTyArena *arena, CmTyId self, CmHirDefId trait,
     const CmTyId *trait_args, uint32_t trait_arg_count,
-    CmHirDefId associated)
+    CmHirDefId associated, const CmTyId *assoc_args,
+    uint32_t assoc_arg_count)
 {
     CmTy ty;
-    CmTyId *children = (CmTyId *)cm_alloc_zeroed(trait_arg_count + 1u,
-        sizeof(CmTyId));
+    CmTyId *children = (CmTyId *)cm_alloc_zeroed(
+        trait_arg_count + assoc_arg_count + 1u, sizeof(CmTyId));
     CmTyId id;
     memset(&ty, 0, sizeof(ty));
     ty.kind = CM_TY_PROJECTION;
     ty.def = trait;
     ty.def2 = associated;
+    ty.b = trait_arg_count;
     children[0] = self;
     if (trait_arg_count != 0u)
         memcpy(children + 1, trait_args, trait_arg_count * sizeof(CmTyId));
+    if (assoc_arg_count != 0u)
+        memcpy(children + 1 + trait_arg_count, assoc_args,
+            assoc_arg_count * sizeof(CmTyId));
     ty.children = children;
-    ty.count = trait_arg_count + 1u;
+    ty.count = trait_arg_count + assoc_arg_count + 1u;
     id = cm_ty_make(arena, &ty);
     cm_free(children);
     return id;
@@ -698,10 +703,20 @@ CmTyId cm_ty_from_hir(CmTyArena *arena, const CmHirContext *hir,
         const CmHirType *again = cm_hir_get_type(hir, type);
         count = cm_ty_args_from_hir(arena, hir,
             again->data.projection_type.trait_type.arguments,
-            again->data.projection_type.trait_type.argument_count, args, 63u);
-        return cm_ty_projection(arena, self,
-            again->data.projection_type.trait_type.definition, args, count,
-            again->data.projection_type.associated_type.definition);
+            again->data.projection_type.trait_type.argument_count, args, 32u);
+        {
+            CmTyId assoc_args[16];
+            uint32_t assoc_count = cm_ty_args_from_hir(arena, hir,
+                cm_hir_get_type(hir, type)->data.projection_type
+                    .associated_type.arguments,
+                cm_hir_get_type(hir, type)->data.projection_type
+                    .associated_type.argument_count, assoc_args, 16u);
+            return cm_ty_projection(arena, self,
+                cm_hir_get_type(hir, type)->data.projection_type
+                    .trait_type.definition, args, count,
+                cm_hir_get_type(hir, type)->data.projection_type
+                    .associated_type.definition, assoc_args, assoc_count);
+        }
     }
     case CM_HIR_TYPE_DYN_TRAIT_KIND: {
         CmHirDefId def;

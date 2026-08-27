@@ -114,9 +114,12 @@ CmTyId cm_ty_with_def(CmTyArena *arena, CmTyKind kind, CmHirDefId def,
     const CmTyId *args, uint32_t count);
 CmTyId cm_ty_param(CmTyArena *arena, CmHirGenericParamId parameter);
 CmTyId cm_ty_const_value(CmTyArena *arena, uint64_t lo, uint64_t hi);
+/* children = [self, trait args..., associated-type args...]; the
+ * trait-arg count is stored in `b` so GAT arguments are recoverable. */
 CmTyId cm_ty_projection(CmTyArena *arena, CmTyId self, CmHirDefId trait,
     const CmTyId *trait_args, uint32_t trait_arg_count,
-    CmHirDefId associated);
+    CmHirDefId associated, const CmTyId *assoc_args,
+    uint32_t assoc_arg_count);
 CmTyId cm_ty_closure(CmTyArena *arena, uint32_t body, uint32_t expression);
 
 /* Fresh inference variable of the given kind. */
