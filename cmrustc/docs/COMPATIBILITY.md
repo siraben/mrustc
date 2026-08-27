@@ -701,6 +701,13 @@ anonymous consts from `define_valid_range_type!` no longer collide.
 Source-written targetless foreign types in authenticated extern-C blocks now
 retain an `EXTERN_TYPE` item with effective attributes and resolve as
 `CM_HIR_TYPE_FOREIGN_KIND`, clearing `type VTable;` in `ptr/metadata.rs:165`.
+Foreign types admit exactly the inherited and unrestricted `pub`
+visibilities, so a public reexport of an extern type is representable
+without reexporting a private item; path-restricted foreign-type visibility
+stays fail-closed. Library capture records public tuple- and unit-struct
+constructor value bindings; the bounded v2 declaration format rejects such a
+crate rather than omitting the constructor, so v2 fixtures use named-field
+structs.
 Generated-item provenance accepts named declarative `macro` definitions as
 well as `macro_rules!`, clearing `marker_impls!` in `marker.rs`. Bound-level
 higher-ranked trait bounds now retain predicate-owned binder names, order,

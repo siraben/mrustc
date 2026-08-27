@@ -983,6 +983,26 @@ static int cm_hir_library_item_binding_kind(CmHirItemKind item_kind,
     }
 }
 
+/*
+ * Graph declarations whose HIR item kind differs from the AST-derived kind:
+ * trait aliases lower as CM_HIR_ITEM_TRAIT_ALIAS and extern-block foreign
+ * types lower as CM_HIR_ITEM_EXTERN_TYPE.
+ */
+static int cm_hir_library_alternate_item_kind(CmHirItemKind kind,
+    CmHirItemKind *out_kind)
+{
+    switch (kind) {
+    case CM_HIR_ITEM_TRAIT:
+        *out_kind = CM_HIR_ITEM_TRAIT_ALIAS;
+        return 1;
+    case CM_HIR_ITEM_TYPE_ALIAS:
+        *out_kind = CM_HIR_ITEM_EXTERN_TYPE;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int cm_hir_library_item_namespace_binding_kind(
     const CmHirItem *item, int value_namespace,
     CmHirLibraryBindingKind *out_binding_kind,
@@ -3312,12 +3332,14 @@ static int cm_hir_library_add_direct_entry(
                 matches += 1u;
             }
         }
-        if (matches == 0u && hir_item_kind == CM_HIR_ITEM_TRAIT) {
+        if (matches == 0u
+            && cm_hir_library_alternate_item_kind(hir_item_kind,
+                &scan_kind)) {
             /*
-             * `trait Alias = Bound;` lowers under its own item kind while
-             * the module graph records it as a trait declaration.
+             * `trait Alias = Bound;` and `extern "C" { type Foreign; }`
+             * lower under their own item kinds while the module graph
+             * records them as trait and type-alias declarations.
              */
-            scan_kind = CM_HIR_ITEM_TRAIT_ALIAS;
             for (item_index = 0u; item_index < state->context->items.len;
                     ++item_index) {
                 const CmHirItem *item;

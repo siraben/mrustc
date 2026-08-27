@@ -8952,6 +8952,20 @@ static int cm_lower_predeclare_all_generic_defaults(CmLowerState *state,
     return !state->failed;
 }
 
+/*
+ * Foreign types admit exactly the inherited (private) and unrestricted `pub`
+ * visibilities.  Rust forbids re-exporting a private item, so a public
+ * foreign-type reexport requires the public form; path-restricted forms
+ * remain fail-closed until a real frontier needs them.
+ */
+static int cm_lower_foreign_type_visibility_supported(const CmAstItem *item)
+{
+    return item != NULL
+        && (item->visibility.kind == CM_AST_VIS_INHERITED
+            || (item->visibility.kind == CM_AST_VIS_PUBLIC
+                && item->visibility.restriction == CM_AST_PATH_NONE));
+}
+
 static int cm_lower_visibility(CmLowerState *state,
     CmAstVisibility ast_visibility, CmHirModuleId module, CmSpan span,
     CmAstItemId ast_item_id, CmHirVisibility *out_visibility)
@@ -14963,7 +14977,7 @@ static int cm_lower_alias_item(CmLowerState *state,
         if (record->parent_kind != CM_LOWER_PARENT_NONE
             || record->is_generated
             || !cm_lower_string_is(state, record->inherited_abi, "C")
-            || ast_item->visibility.kind != CM_AST_VIS_INHERITED
+            || !cm_lower_foreign_type_visibility_supported(ast_item)
             || ast_item->generic_parameter_count != 0u
             || cm_lower_item_has_where_clause(ast_item)
             || ast_item->is_default
@@ -16513,7 +16527,7 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
                     || item->data.function_item.abi != CM_INTERN_ID_NONE
                     || item->data.function_item.body != CM_AST_EXPR_NONE))
             || (item->kind == CM_AST_ITEM_TYPE_ALIAS
-                && (item->visibility.kind != CM_AST_VIS_INHERITED
+                && (!cm_lower_foreign_type_visibility_supported(item)
                     || item->data.value_item.has_value
                     || item->data.value_item.type != CM_AST_TYPE_NONE
                     || item->data.value_item.initializer != CM_AST_EXPR_NONE

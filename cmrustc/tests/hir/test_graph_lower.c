@@ -5795,7 +5795,7 @@ static void test_preflight_rejections(void)
         "unsafe extern \"C\" { type Generic<T>; }\n",
         "unsafe extern \"C\" { type Bounded: Sized; }\n",
         "unsafe extern \"C\" { type Alias = u8; }\n",
-        "unsafe extern \"C\" { pub type Visible; }\n",
+        "unsafe extern \"C\" { pub(crate) type Restricted; }\n",
         "static mut SOURCE: u8 = 1;\n",
         "macro_rules! make { () => { static SOURCE: u8 = 1; } } "
             "make!();\n",
@@ -6320,6 +6320,66 @@ static void test_foreign_type_generic_use_rejection(void)
         && cm_interner_length(&hir.strings) == 0u
         && cm_hir_module_map_count(&map) == 0u,
         "foreign generic-use rejection did not rewind HIR transactionally");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_public_foreign_type_declaration(void)
+{
+    static const unsigned char source[] =
+        "unsafe extern \"C\" {\n"
+        "    pub type Exposed;\n"
+        "    type Internal;\n"
+        "}\n"
+        "pub use self::Exposed as Api;\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *exposed;
+    const CmHirItem *internal;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "public-foreign-type/lib.rs",
+        source, sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add public foreign type fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    check(graph_result.error_count == 0u,
+        "public foreign type fixture did not build a graph");
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "hir-graph-lower public foreign type: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    check(result.error_count == 0u,
+        "public foreign type declaration did not lower");
+    exposed = find_hir_item(&hir, result.root_module, "Exposed");
+    internal = find_hir_item(&hir, result.root_module, "Internal");
+    check(exposed != NULL && exposed->kind == CM_HIR_ITEM_EXTERN_TYPE
+        && exposed->visibility.kind == CM_HIR_VIS_PUBLIC
+        && cm_hir_def_id_is_none(exposed->visibility.restriction)
+        && exposed->generic_parameter_count == 0u
+        && internal != NULL && internal->kind == CM_HIR_ITEM_EXTERN_TYPE
+        && internal->visibility.kind == CM_HIR_VIS_PRIVATE,
+        "public foreign type HIR lost its exact visibility");
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_module_graph_destroy(&graph);
@@ -13834,6 +13894,7 @@ int main(void)
     test_safe_extern_c_declarations();
     test_unadjusted_extern_declaration();
     test_foreign_type_declaration();
+    test_public_foreign_type_declaration();
     test_foreign_type_generic_use_rejection();
     test_source_const();
     test_trait_associated_const_declarations();

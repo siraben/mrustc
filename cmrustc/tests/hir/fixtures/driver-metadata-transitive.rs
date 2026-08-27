@@ -1,3 +1,5 @@
 use consumer::ConsumerMarker as ImportedConsumerMarker;
 
-pub struct FinalMarker;
+pub struct FinalMarker {
+    pub value: u8,
+}

@@ -945,7 +945,7 @@ static int parsed_producer_init(ParsedProducerFixture *fixture,
     int reverse_order)
 {
     static const unsigned char forward_source[] =
-        "unsafe extern \"C\" { type RootApiRaw; }\n"
+        "unsafe extern \"C\" { pub type RootApiRaw; }\n"
         "pub use self::RootApiRaw as RootApi;\n"
         "pub struct Wrapper<T = u32>(pub T);\n"
         "pub enum Choice<T> { None, Some(T) }\n"
@@ -959,7 +959,7 @@ static int parsed_producer_init(ParsedProducerFixture *fixture,
         "pub type Alias = Wrapper<u32>;\n"
         "pub type BorrowedAlias<'a, T = u16> = Borrowed<'a, T>;\n"
         "pub mod child {\n"
-        "    unsafe extern \"C\" { type ChildApiRaw; }\n"
+        "    unsafe extern \"C\" { pub type ChildApiRaw; }\n"
         "    pub use self::ChildApiRaw as ChildApi;\n"
         "    pub use crate::Alias as Renamed;\n"
         "    pub use crate::BorrowedAlias as RenamedBorrowed;\n"
@@ -975,7 +975,7 @@ static int parsed_producer_init(ParsedProducerFixture *fixture,
         "    pub use crate::BorrowedAlias as RenamedBorrowed;\n"
         "    pub use crate::Alias as Renamed;\n"
         "    pub use self::ChildApiRaw as ChildApi;\n"
-        "    unsafe extern \"C\" { type ChildApiRaw; }\n"
+        "    unsafe extern \"C\" { pub type ChildApiRaw; }\n"
         "}\n"
         "pub type BorrowedAlias<'a, T = u16> = Borrowed<'a, T>;\n"
         "pub type Alias = Wrapper<u32>;\n"
@@ -989,13 +989,13 @@ static int parsed_producer_init(ParsedProducerFixture *fixture,
         "pub enum Choice<T> { None, Some(T) }\n"
         "pub struct Wrapper<T = u32>(pub T);\n"
         "pub use self::RootApiRaw as RootApi;\n"
-        "unsafe extern \"C\" { type RootApiRaw; }\n";
+        "unsafe extern \"C\" { pub type RootApiRaw; }\n";
 
     return reverse_order
         ? parsed_producer_build(fixture, reverse_source,
-            sizeof(reverse_source) - 1u, 3u, 12u, 0u, 0)
+            sizeof(reverse_source) - 1u, 3u, 14u, 0u, 0)
         : parsed_producer_build(fixture, forward_source,
-            sizeof(forward_source) - 1u, 3u, 12u, 0u, 0);
+            sizeof(forward_source) - 1u, 3u, 14u, 0u, 0);
 }
 
 static void parsed_producer_destroy(ParsedProducerFixture *fixture)
@@ -3903,7 +3903,7 @@ static int produce_process_artifact(const char *path, int reverse_order)
     result = cm_hir_metadata_encode_artifact(&encoded, &producer.artifact);
     ok = result.status == CM_HIR_METADATA_ARTIFACT_OK
         && result.module_count == 3u
-        && result.public_entry_count == 12u
+        && result.public_entry_count == 14u
         && write_metadata_file(path, &encoded);
     if (!ok) {
         fprintf(stderr,
@@ -4348,7 +4348,7 @@ static int consume_process_artifact(const char *path)
     assert(result.crate_id > sentinel_crate);
     assert(result.root_module > sentinel_last_module);
     assert(result.module_count == 3u);
-    assert(result.public_entry_count == 12u);
+    assert(result.public_entry_count == 14u);
     assert(cm_hir_library_artifact_identity(&artifact, &loaded_identity));
     assert(loaded_identity.context == &context);
     assert(loaded_identity.crate_id == result.crate_id);
