@@ -215,6 +215,40 @@ typedef struct FromFnFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[5];
 } FromFnFixture;
 
+typedef struct TryFromFnFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[6];
+    CmHirDeclarationSupertrait supertraits[2];
+    uint32_t fn_mut_super_arguments[1];
+    uint32_t try_super_arguments[1];
+    CmHirDeclarationAssociatedItem associated[9];
+    uint32_t call_mut_parameters[2];
+    uint32_t call_once_parameters[2];
+    uint32_t from_residual_parameters[1];
+    uint32_t from_output_parameters[1];
+    uint32_t branch_parameters[1];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationVariant variants[2];
+    CmHirDeclarationVariantField variant_fields[2];
+    CmHirDeclarationGeneric generics[9];
+    CmHirDeclarationType types[28];
+    uint32_t tuple_elements[1];
+    uint32_t fn_mut_projection_arguments[1];
+    uint32_t fn_once_projection_arguments[1];
+    uint32_t try_type_projection_arguments[1];
+    uint32_t control_flow_arguments[2];
+    uint32_t return_projection_arguments[1];
+    CmHirDeclarationValue values[1];
+    uint32_t value_parameters[1];
+    CmHirDeclarationPredicate predicates[6];
+    uint32_t callable_arguments[1];
+    uint32_t residual_arguments[1];
+    CmHirDeclarationPredicateEquality callable_equalities[1];
+    CmHirDeclarationPredicateEquality try_type_equalities[2];
+    CmHirDeclarationNamespaceEntry namespace_entries[9];
+} TryFromFnFixture;
+
 typedef struct RepeatFixture {
     CmHirDeclarationMetadata metadata;
     CmHirDeclarationModule modules[1];
@@ -1022,6 +1056,480 @@ static void from_fn_fixture_init(FromFnFixture *fixture)
     fixture->namespace_entries[4].export_ordinal = 8u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 5u;
+}
+
+static void try_from_fn_fixture_init(TryFromFnFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    CmHirDeclarationAssociatedItem *associated;
+    size_t index;
+
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("try_from_fn_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-try-from-fn-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    for (index = 0u; index < 6u; ++index) {
+        fixture->traits[index].owner_module = 1u;
+        fixture->traits[index].visibility.kind =
+            CM_HIR_DECL_VISIBILITY_PUBLIC;
+        fixture->traits[index].safety = CM_HIR_DECL_SAFETY_SAFE;
+    }
+    fixture->traits[0].name = (CmHirDeclarationString)S("FnMut");
+    fixture->traits[0].source_ordinal = 3u;
+    fixture->traits[0].generic_start = 1u;
+    fixture->traits[0].generic_count = 1u;
+    fixture->traits[0].predicate_start = 5u;
+    fixture->traits[0].predicate_count = 1u;
+    fixture->traits[0].associated_start = 1u;
+    fixture->traits[0].associated_count = 1u;
+    fixture->traits[0].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
+    fixture->traits[0].lang_item = (CmHirDeclarationString)S("fn_mut");
+    fixture->fn_mut_super_arguments[0] = 3u;
+    fixture->supertraits[0].modifier = CM_HIR_DECL_SUPERTRAIT_REQUIRED;
+    fixture->supertraits[0].trait_local = 2u;
+    fixture->supertraits[0].argument_count = 1u;
+    fixture->supertraits[0].argument_types =
+        fixture->fn_mut_super_arguments;
+    fixture->traits[0].supertrait_count = 1u;
+    fixture->traits[0].supertraits = &fixture->supertraits[0];
+
+    fixture->traits[1].name = (CmHirDeclarationString)S("FnOnce");
+    fixture->traits[1].source_ordinal = 2u;
+    fixture->traits[1].generic_start = 2u;
+    fixture->traits[1].generic_count = 1u;
+    fixture->traits[1].predicate_start = 6u;
+    fixture->traits[1].predicate_count = 1u;
+    fixture->traits[1].associated_start = 2u;
+    fixture->traits[1].associated_count = 2u;
+    fixture->traits[1].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
+    fixture->traits[1].lang_item = (CmHirDeclarationString)S("fn_once");
+
+    fixture->traits[2].name =
+        (CmHirDeclarationString)S("FromResidual");
+    fixture->traits[2].source_ordinal = 5u;
+    fixture->traits[2].generic_start = 3u;
+    fixture->traits[2].generic_count = 1u;
+    fixture->traits[2].associated_start = 4u;
+    fixture->traits[2].associated_count = 1u;
+    fixture->traits[2].flags = CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
+    fixture->traits[2].diagnostic_item =
+        (CmHirDeclarationString)S("FromResidual");
+
+    fixture->traits[3].name = (CmHirDeclarationString)S("Residual");
+    fixture->traits[3].source_ordinal = 7u;
+    fixture->traits[3].generic_start = 4u;
+    fixture->traits[3].generic_count = 1u;
+    fixture->traits[3].associated_start = 5u;
+    fixture->traits[3].associated_count = 1u;
+    fixture->traits[3].flags = CM_HIR_DECL_TRAIT_IS_CONST;
+
+    fixture->traits[4].name = (CmHirDeclarationString)S("Try");
+    fixture->traits[4].source_ordinal = 6u;
+    fixture->traits[4].associated_start = 6u;
+    fixture->traits[4].associated_count = 4u;
+    fixture->traits[4].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
+    fixture->traits[4].lang_item = (CmHirDeclarationString)S("Try");
+    fixture->try_super_arguments[0] = 25u;
+    fixture->supertraits[1].modifier =
+        CM_HIR_DECL_SUPERTRAIT_CONST_IF_CONST;
+    fixture->supertraits[1].trait_local = 3u;
+    fixture->supertraits[1].argument_count = 1u;
+    fixture->supertraits[1].argument_types = fixture->try_super_arguments;
+    fixture->traits[4].supertrait_count = 1u;
+    fixture->traits[4].supertraits = &fixture->supertraits[1];
+
+    fixture->traits[5].name = (CmHirDeclarationString)S("Tuple");
+    fixture->traits[5].source_ordinal = 1u;
+    fixture->traits[5].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    fixture->traits[5].lang_item =
+        (CmHirDeclarationString)S("tuple_trait");
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 6u;
+
+    for (index = 0u; index < 9u; ++index) {
+        fixture->generics[index].kind = CM_HIR_DECL_GENERIC_TYPE;
+        fixture->generics[index].name =
+            (CmHirDeclarationString)S("T");
+    }
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].name = (CmHirDeclarationString)S("Args");
+    fixture->generics[1] = fixture->generics[0];
+    fixture->generics[1].owner_local = 2u;
+    fixture->generics[2].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[2].owner_local = 3u;
+    fixture->generics[2].name = (CmHirDeclarationString)S("R");
+    fixture->generics[2].has_default = 1u;
+    fixture->generics[2].default_type = 22u;
+    fixture->generics[3].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[3].owner_local = 4u;
+    fixture->generics[3].name = (CmHirDeclarationString)S("O");
+    fixture->generics[4].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[4].owner_local = 1u;
+    fixture->generics[4].name = (CmHirDeclarationString)S("B");
+    fixture->generics[5].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[5].owner_local = 1u;
+    fixture->generics[5].index = 1u;
+    fixture->generics[5].name = (CmHirDeclarationString)S("C");
+    fixture->generics[5].has_default = 1u;
+    fixture->generics[5].default_type = 1u;
+    fixture->generics[6].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[6].owner_local = 1u;
+    fixture->generics[6].name = (CmHirDeclarationString)S("R");
+    fixture->generics[7].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[7].owner_local = 1u;
+    fixture->generics[7].index = 1u;
+    fixture->generics[7].kind = CM_HIR_DECL_GENERIC_CONST;
+    fixture->generics[7].name = (CmHirDeclarationString)S("N");
+    fixture->generics[7].declared_type = 2u;
+    fixture->generics[8].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[8].owner_local = 1u;
+    fixture->generics[8].index = 2u;
+    fixture->generics[8].name = (CmHirDeclarationString)S("F");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 9u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    for (index = 0u; index < 8u; ++index)
+        fixture->types[index + 2u].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[2].generic_local = 1u;
+    fixture->types[3].generic_local = 2u;
+    fixture->types[4].generic_local = 3u;
+    fixture->types[5].generic_local = 4u;
+    fixture->types[6].generic_local = 5u;
+    fixture->types[7].generic_local = 6u;
+    fixture->types[8].generic_local = 7u;
+    fixture->types[9].generic_local = 9u;
+    for (index = 0u; index < 5u; ++index) {
+        fixture->types[index + 10u].kind = CM_HIR_DECL_TYPE_SELF;
+        fixture->types[index + 10u].self_trait_local =
+            (uint32_t)(index + 1u);
+    }
+    fixture->types[15].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[15].child_type = 11u;
+    fixture->types[15].mutability = CM_HIR_DECL_MUTABLE;
+    fixture->types[15].region.kind = CM_HIR_DECL_REGION_ERASED;
+    fixture->tuple_elements[0] = 2u;
+    fixture->types[16].kind = CM_HIR_DECL_TYPE_TUPLE;
+    fixture->types[16].element_count = 1u;
+    fixture->types[16].element_types = fixture->tuple_elements;
+
+#define SET_PROJECTION(type_index, self_local, trait_value, assoc_value) do { \
+        fixture->types[(type_index) - 1u].kind = \
+            CM_HIR_DECL_TYPE_PROJECTION; \
+        fixture->types[(type_index) - 1u].projection_self_type = \
+            (self_local); \
+        fixture->types[(type_index) - 1u].projection_trait_local = \
+            (trait_value); \
+        fixture->types[(type_index) - 1u].projection_associated_local = \
+            (assoc_value); \
+    } while (0)
+    SET_PROJECTION(18u, 9u, 5u, 6u);
+    SET_PROJECTION(19u, 9u, 5u, 7u);
+    SET_PROJECTION(20u, 11u, 2u, 2u);
+    fixture->fn_mut_projection_arguments[0] = 3u;
+    fixture->types[19].projection_argument_count = 1u;
+    fixture->types[19].projection_argument_types =
+        fixture->fn_mut_projection_arguments;
+    SET_PROJECTION(21u, 12u, 2u, 2u);
+    fixture->fn_once_projection_arguments[0] = 4u;
+    fixture->types[20].projection_argument_count = 1u;
+    fixture->types[20].projection_argument_types =
+        fixture->fn_once_projection_arguments;
+    SET_PROJECTION(22u, 13u, 5u, 7u);
+    SET_PROJECTION(23u, 14u, 4u, 5u);
+    fixture->try_type_projection_arguments[0] = 6u;
+    fixture->types[22].projection_argument_count = 1u;
+    fixture->types[22].projection_argument_types =
+        fixture->try_type_projection_arguments;
+    SET_PROJECTION(24u, 15u, 5u, 6u);
+    SET_PROJECTION(25u, 15u, 5u, 7u);
+#undef SET_PROJECTION
+    fixture->control_flow_arguments[0] = 25u;
+    fixture->control_flow_arguments[1] = 24u;
+    fixture->types[25].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[25].item_local = 1u;
+    fixture->types[25].argument_count = 2u;
+    fixture->types[25].argument_types = fixture->control_flow_arguments;
+    fixture->types[26].kind = CM_HIR_DECL_TYPE_ARRAY;
+    fixture->types[26].child_type = 18u;
+    fixture->types[26].array_length_kind =
+        CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER;
+    fixture->types[26].array_length_generic_local = 8u;
+    fixture->types[27].kind = CM_HIR_DECL_TYPE_PROJECTION;
+    fixture->types[27].projection_self_type = 19u;
+    fixture->types[27].projection_trait_local = 4u;
+    fixture->types[27].projection_associated_local = 5u;
+    fixture->return_projection_arguments[0] = 27u;
+    fixture->types[27].projection_argument_count = 1u;
+    fixture->types[27].projection_argument_types =
+        fixture->return_projection_arguments;
+    metadata->types = fixture->types;
+    metadata->type_count = 28u;
+
+    for (index = 0u; index < 9u; ++index) {
+        fixture->associated[index].parent_kind =
+            CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL;
+        fixture->associated[index].visibility.kind =
+            CM_HIR_DECL_VISIBILITY_PRIVATE;
+        fixture->associated[index].safety = CM_HIR_DECL_SAFETY_SAFE;
+    }
+    fixture->call_mut_parameters[0] = 16u;
+    fixture->call_mut_parameters[1] = 3u;
+    associated = &fixture->associated[0];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    associated->parent_local = 1u;
+    associated->name = (CmHirDeclarationString)S("call_mut");
+    associated->source_ordinal = 1u;
+    associated->receiver = CM_HIR_DECL_RECEIVER_REF_MUTABLE;
+    associated->parameter_count = 2u;
+    associated->parameter_types = fixture->call_mut_parameters;
+    associated->return_type = 20u;
+    associated->abi = (CmHirDeclarationString)S("rust-call");
+    associated = &fixture->associated[1];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    associated->parent_local = 2u;
+    associated->name = (CmHirDeclarationString)S("Output");
+    associated->source_ordinal = 1u;
+    associated->flags = CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    associated->lang_item =
+        (CmHirDeclarationString)S("fn_once_output");
+    fixture->call_once_parameters[0] = 12u;
+    fixture->call_once_parameters[1] = 4u;
+    associated = &fixture->associated[2];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    associated->parent_local = 2u;
+    associated->name = (CmHirDeclarationString)S("call_once");
+    associated->source_ordinal = 2u;
+    associated->receiver = CM_HIR_DECL_RECEIVER_VALUE;
+    associated->parameter_count = 2u;
+    associated->parameter_types = fixture->call_once_parameters;
+    associated->return_type = 21u;
+    associated->abi = (CmHirDeclarationString)S("rust-call");
+    fixture->from_residual_parameters[0] = 5u;
+    associated = &fixture->associated[3];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    associated->parent_local = 3u;
+    associated->name = (CmHirDeclarationString)S("from_residual");
+    associated->source_ordinal = 1u;
+    associated->receiver = CM_HIR_DECL_RECEIVER_NONE;
+    associated->parameter_count = 1u;
+    associated->parameter_types = fixture->from_residual_parameters;
+    associated->return_type = 13u;
+    associated->abi = (CmHirDeclarationString)S("Rust");
+    associated->flags = CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    associated->lang_item =
+        (CmHirDeclarationString)S("from_residual");
+    associated = &fixture->associated[4];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    associated->parent_local = 4u;
+    associated->name = (CmHirDeclarationString)S("TryType");
+    associated->source_ordinal = 1u;
+    associated->predicate_start = 4u;
+    associated->predicate_count = 1u;
+    associated = &fixture->associated[5];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    associated->parent_local = 5u;
+    associated->name = (CmHirDeclarationString)S("Output");
+    associated->source_ordinal = 1u;
+    associated = &fixture->associated[6];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    associated->parent_local = 5u;
+    associated->name = (CmHirDeclarationString)S("Residual");
+    associated->source_ordinal = 2u;
+    fixture->from_output_parameters[0] = 24u;
+    associated = &fixture->associated[7];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    associated->parent_local = 5u;
+    associated->name = (CmHirDeclarationString)S("from_output");
+    associated->source_ordinal = 3u;
+    associated->receiver = CM_HIR_DECL_RECEIVER_NONE;
+    associated->parameter_count = 1u;
+    associated->parameter_types = fixture->from_output_parameters;
+    associated->return_type = 15u;
+    associated->abi = (CmHirDeclarationString)S("Rust");
+    associated->flags = CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    associated->lang_item = (CmHirDeclarationString)S("from_output");
+    fixture->branch_parameters[0] = 15u;
+    associated = &fixture->associated[8];
+    associated->kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    associated->parent_local = 5u;
+    associated->name = (CmHirDeclarationString)S("branch");
+    associated->source_ordinal = 4u;
+    associated->receiver = CM_HIR_DECL_RECEIVER_VALUE;
+    associated->parameter_count = 1u;
+    associated->parameter_types = fixture->branch_parameters;
+    associated->return_type = 26u;
+    associated->abi = (CmHirDeclarationString)S("Rust");
+    associated->flags = CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    associated->lang_item = (CmHirDeclarationString)S("branch");
+    metadata->associated_items = fixture->associated;
+    metadata->associated_count = 9u;
+
+    fixture->variant_fields[0].source_ordinal = 0u;
+    fixture->variant_fields[0].type_local = 8u;
+    fixture->variant_fields[1].source_ordinal = 0u;
+    fixture->variant_fields[1].type_local = 7u;
+    fixture->variants[0].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[0].name = (CmHirDeclarationString)S("Continue");
+    fixture->variants[0].source_ordinal = 0u;
+    fixture->variants[0].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[0].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[0].field_count = 1u;
+    fixture->variants[0].fields = &fixture->variant_fields[0];
+    fixture->variants[0].lang_item =
+        (CmHirDeclarationString)S("Continue");
+    fixture->variants[1].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[1].name = (CmHirDeclarationString)S("Break");
+    fixture->variants[1].source_ordinal = 1u;
+    fixture->variants[1].discriminant_primitive =
+        CM_HIR_DECL_VARIANT_DISCRIMINANT_IMPLICIT;
+    fixture->variants[1].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[1].field_count = 1u;
+    fixture->variants[1].fields = &fixture->variant_fields[1];
+    fixture->variants[1].lang_item =
+        (CmHirDeclarationString)S("Break");
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("ControlFlow");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 4u;
+    fixture->items[0].generic_start = 5u;
+    fixture->items[0].generic_count = 2u;
+    fixture->items[0].aggregate_flags = CM_HIR_DECL_AGGREGATE_MUST_USE;
+    fixture->items[0].enum_repr_primitive = CM_HIR_DECL_ENUM_REPR_RUST;
+    fixture->items[0].variant_count = 2u;
+    fixture->items[0].variants = fixture->variants;
+    fixture->items[0].diagnostic_item =
+        (CmHirDeclarationString)S("ControlFlow");
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->callable_arguments[0] = 17u;
+    fixture->callable_equalities[0].associated_local = 2u;
+    fixture->callable_equalities[0].value_type = 9u;
+    fixture->predicates[0].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[0].owner_value = 1u;
+    fixture->predicates[0].subject_type = 10u;
+    fixture->predicates[0].trait_local = 1u;
+    fixture->predicates[0].argument_count = 1u;
+    fixture->predicates[0].argument_types = fixture->callable_arguments;
+    fixture->predicates[0].equality_count = 1u;
+    fixture->predicates[0].equalities = fixture->callable_equalities;
+    fixture->predicates[1].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[1].owner_value = 1u;
+    fixture->predicates[1].ordinal = 1u;
+    fixture->predicates[1].subject_type = 9u;
+    fixture->predicates[1].trait_local = 5u;
+    fixture->residual_arguments[0] = 27u;
+    fixture->predicates[2].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[2].owner_value = 1u;
+    fixture->predicates[2].ordinal = 2u;
+    fixture->predicates[2].subject_type = 19u;
+    fixture->predicates[2].trait_local = 4u;
+    fixture->predicates[2].argument_count = 1u;
+    fixture->predicates[2].argument_types = fixture->residual_arguments;
+    fixture->try_type_equalities[0].associated_local = 6u;
+    fixture->try_type_equalities[0].value_type = 6u;
+    fixture->try_type_equalities[1].associated_local = 7u;
+    fixture->try_type_equalities[1].value_type = 14u;
+    fixture->predicates[3].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED;
+    fixture->predicates[3].owner_associated = 5u;
+    fixture->predicates[3].subject_type = 23u;
+    fixture->predicates[3].trait_local = 5u;
+    fixture->predicates[3].equality_count = 2u;
+    fixture->predicates[3].equalities = fixture->try_type_equalities;
+    fixture->predicates[4].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
+    fixture->predicates[4].owner_nominal = 1u;
+    fixture->predicates[4].subject_type = 3u;
+    fixture->predicates[4].trait_local = 6u;
+    fixture->predicates[5].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
+    fixture->predicates[5].owner_nominal = 2u;
+    fixture->predicates[5].subject_type = 4u;
+    fixture->predicates[5].trait_local = 6u;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 6u;
+
+    fixture->value_parameters[0] = 10u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("try_from_fn");
+    fixture->values[0].source_ordinal = 8u;
+    fixture->values[0].generic_start = 7u;
+    fixture->values[0].generic_count = 3u;
+    fixture->values[0].predicate_start = 1u;
+    fixture->values[0].predicate_count = 3u;
+    fixture->values[0].parameter_count = 1u;
+    fixture->values[0].parameter_types = fixture->value_parameters;
+    fixture->values[0].return_type = 28u;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    for (index = 0u; index < 7u; ++index) {
+        CmHirDeclarationNamespaceEntry *entry =
+            &fixture->namespace_entries[index];
+        entry->owner_module = 1u;
+        entry->namespace_kind = CM_HIR_DECL_NAMESPACE_TYPE;
+    }
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    fixture->namespace_entries[0].target_kind = CM_HIR_DECL_TARGET_ITEM;
+    fixture->namespace_entries[0].target_local = 1u;
+    fixture->namespace_entries[0].export_ordinal = 4u;
+    for (index = 0u; index < 6u; ++index) {
+        fixture->namespace_entries[index + 1u].name =
+            fixture->traits[index].name;
+        fixture->namespace_entries[index + 1u].target_kind =
+            CM_HIR_DECL_TARGET_NOMINAL;
+        fixture->namespace_entries[index + 1u].target_local =
+            (uint32_t)(index + 1u);
+        fixture->namespace_entries[index + 1u].export_ordinal =
+            fixture->traits[index].source_ordinal;
+    }
+    fixture->namespace_entries[7].owner_module = 1u;
+    fixture->namespace_entries[7].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[7].name = fixture->values[0].name;
+    fixture->namespace_entries[7].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[7].target_local = 1u;
+    fixture->namespace_entries[7].export_ordinal = 8u;
+    fixture->namespace_entries[8] = fixture->namespace_entries[7];
+    fixture->namespace_entries[8].name =
+        (CmHirDeclarationString)S("try_from_fn_alias");
+    fixture->namespace_entries[8].export_ordinal = 9u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 9u;
 }
 
 static void repeat_fixture_init(RepeatFixture *fixture)
@@ -2698,6 +3206,24 @@ static const CmHirItem *find_item(const CmHirContext *context,
     return NULL;
 }
 
+static const CmHirItem *find_associated_item(const CmHirContext *context,
+    CmHirItemKind kind, CmHirDefId parent, const char *name)
+{
+    size_t index;
+    size_t length = strlen(name);
+    for (index = 0u; index < context->items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &context->items, index);
+        const CmInternedString *item_name = item == NULL ? NULL
+            : cm_interner_get(&context->strings, item->name);
+        if (item != NULL && item->kind == kind
+            && cm_hir_def_id_equal(item->parent_definition, parent)
+            && item_name != NULL && item_name->len == length
+            && memcmp(item_name->bytes, name, length) == 0) return item;
+    }
+    return NULL;
+}
+
 static void assert_item_attribute(const CmHirContext *context,
     const CmHirItem *item, uint32_t index, const char *expected,
     CmSourceId source)
@@ -3813,6 +4339,102 @@ static void test_from_fn_fresh_consumer(CmHirContext *context,
     {
         const CmHirItem *imported = find_item(context,
             CM_HIR_ITEM_FUNCTION, "from_fn");
+        assert(imported != NULL && cm_hir_def_id_equal(imported->definition,
+            imported_definition)
+            && imported->data.function_item.body == CM_HIR_BODY_NONE
+            && cm_hir_get_body(context,
+                imported->data.function_item.body) == NULL);
+    }
+    assert(cm_hir_lower_body(context, CM_HIR_BODY_NONE, &graph,
+        graph_result.revision, &imports, &map).status
+        == CM_HIR_BODY_LOWER_INVALID_ARGUMENT);
+    cm_hir_module_map_destroy(&map);
+    cm_import_resolver_destroy(&imports);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
+static void test_try_from_fn_fresh_consumer(CmHirContext *context,
+    const CmHirLibraryArtifact *artifact, CmHirDefId imported_definition)
+{
+    static const unsigned char source_text[] =
+        "use dep::FnMut;\n"
+        "use dep::Residual;\n"
+        "use dep::Try;\n"
+        "use dep::try_from_fn as direct_try;\n"
+        "use dep::try_from_fn_alias as alias_try;\n"
+        "pub fn direct<R, const N: usize, F>(f: F) "
+            "-> <<R as Try>::Residual as "
+                "Residual<[<R as Try>::Output; N]>>::TryType "
+            "where F: FnMut(usize) -> R, R: Try, "
+                "R::Residual: Residual<[R::Output; N]> "
+            "{ direct_try(f) }\n"
+        "pub fn via_alias<R, const N: usize, F>(f: F) "
+            "-> <<R as Try>::Residual as "
+                "Residual<[<R as Try>::Output; N]>>::TryType "
+            "where F: FnMut(usize) -> R, R: Try, "
+                "R::Residual: Residual<[R::Output; N]> "
+            "{ alias_try(f) }\n";
+    static const char *const names[] = { "direct", "via_alias" };
+    CmSourceSet sources;
+    CmSourceId root_source;
+    CmModuleGraph graph;
+    CmCfgSet cfg;
+    CmModuleGraphOptions graph_options;
+    CmModuleGraphResult graph_result;
+    CmImportResolver imports;
+    CmImportResult import_result;
+    CmHirModuleMap map;
+    CmHirLowerOptions lower_options;
+    CmHirLowerResult lower_result;
+    const CmHirLibraryArtifact *libraries[1];
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    cm_cfg_set_init(&cfg);
+    cm_import_resolver_init(&imports);
+    cm_hir_module_map_init(&map);
+    assert(cm_source_add_memory(&sources, "try-from-fn-consumer.rs",
+        source_text, sizeof(source_text) - 1u, &root_source)
+        == CM_SOURCE_OK);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root_source,
+        &graph_options);
+    assert(graph_result.error_count == 0u);
+    import_result = cm_import_resolve(&imports, &graph,
+        graph_result.revision);
+    assert(import_result.revision == graph_result.revision);
+    cm_hir_lower_options_init(&lower_options);
+    lower_options.crate_name = "try_from_fn_consumer";
+    libraries[0] = artifact;
+    lower_options.dependency_libraries = libraries;
+    lower_options.dependency_library_count = 1u;
+    lower_result = cm_hir_lower_module_graph(context, &graph,
+        graph_result.revision, &imports, &map, &lower_options);
+    if (lower_result.error_count != 0u) {
+        fprintf(stderr, "try-from-fn consumer: %s: %s\n",
+            cm_hir_lower_error_kind_name(lower_result.first_error.kind),
+            lower_result.first_error.message);
+    }
+    assert(lower_result.error_count == 0u);
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        const CmHirItem *function = find_item(context,
+            CM_HIR_ITEM_FUNCTION, names[index]);
+        const CmHirType *result = function == NULL ? NULL
+            : cm_hir_get_type(context,
+                function->data.function_item.signature.return_type);
+        assert(function != NULL && function->generic_parameter_count == 3u
+            && function->predicate_count == 3u
+            && function->data.function_item.signature.parameter_count == 1u
+            && function->data.function_item.body != CM_HIR_BODY_NONE
+            && result != NULL
+            && result->kind == CM_HIR_TYPE_PROJECTION_KIND);
+    }
+    {
+        const CmHirItem *imported = find_item(context,
+            CM_HIR_ITEM_FUNCTION, "try_from_fn");
         assert(imported != NULL && cm_hir_def_id_equal(imported->definition,
             imported_definition)
             && imported->data.function_item.body == CM_HIR_BODY_NONE
@@ -7964,6 +8586,296 @@ static void test_from_fn_materialize_and_consume(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_try_from_fn_materialize_and_consume(void)
+{
+    TryFromFnFixture fixture;
+    CmByteBuf encoded;
+    CmByteBuf replay;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationMaterializeExpectation expectation;
+    CmHirDeclarationMaterializeResult result;
+    CmHirContext context;
+    CmHirLibraryArtifact artifact;
+    CmHirLibraryArtifactIdentity identity;
+    const CmHirItem *fn_mut;
+    const CmHirItem *fn_once;
+    const CmHirItem *from_residual;
+    const CmHirItem *residual;
+    const CmHirItem *try_trait;
+    const CmHirItem *control_flow;
+    const CmHirItem *try_type;
+    const CmHirItem *from_output;
+    const CmHirItem *from_residual_method;
+    const CmHirItem *try_function;
+    const CmHirGenericParam *parameter;
+    const CmHirType *type;
+    const CmHirType *other_type;
+    CmHirLibraryBinding direct;
+    CmHirLibraryBinding alias;
+    CmHirLibraryPathSegment path[2];
+    CmHirLibraryValue library_function;
+    CmHirLibraryPathSegment method_name;
+    CmHirLibraryValue library_method;
+    ContextLengths lengths;
+    uint32_t saved_local;
+    uint32_t saved_count;
+    uint8_t saved_byte;
+
+    try_from_fn_fixture_init(&fixture);
+    assert(cm_hir_declaration_metadata_validate(&fixture.metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+        &decoded) == CM_HIR_DECL_METADATA_OK);
+    assert(cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+
+    expectation = expectation_for(&decoded);
+    cm_hir_context_init(&context);
+    cm_hir_library_artifact_init(&artifact);
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "dep", 261u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_OK
+        && result.item_count == 1u
+        && result.public_type_entry_count == 7u
+        && result.public_value_entry_count == 2u);
+
+    fn_mut = find_item(&context, CM_HIR_ITEM_TRAIT, "FnMut");
+    fn_once = find_item(&context, CM_HIR_ITEM_TRAIT, "FnOnce");
+    from_residual = find_item(&context, CM_HIR_ITEM_TRAIT,
+        "FromResidual");
+    residual = find_item(&context, CM_HIR_ITEM_TRAIT, "Residual");
+    try_trait = find_item(&context, CM_HIR_ITEM_TRAIT, "Try");
+    control_flow = find_item(&context, CM_HIR_ITEM_ENUM, "ControlFlow");
+    try_function = find_item(&context, CM_HIR_ITEM_FUNCTION,
+        "try_from_fn");
+    assert(fn_mut != NULL && fn_once != NULL && from_residual != NULL
+        && residual != NULL && try_trait != NULL && control_flow != NULL
+        && try_function != NULL);
+    try_type = find_associated_item(&context, CM_HIR_ITEM_TYPE_ALIAS,
+        residual->definition, "TryType");
+    from_output = find_associated_item(&context, CM_HIR_ITEM_FUNCTION,
+        try_trait->definition, "from_output");
+    from_residual_method = find_associated_item(&context,
+        CM_HIR_ITEM_FUNCTION, from_residual->definition, "from_residual");
+    assert(try_type != NULL && from_output != NULL
+        && from_residual_method != NULL);
+
+    assert(try_trait->data.trait_item.safety == CM_HIR_SAFE
+        && try_trait->data.trait_item.is_const == 1
+        && try_trait->data.trait_item.supertrait_count == 1u
+        && try_trait->data.trait_item.supertraits[0].modifier
+            == CM_HIR_SUPERTRAIT_CONST_IF_CONST
+        && cm_hir_def_id_equal(try_trait->data.trait_item.supertraits[0]
+            .trait_type.definition, from_residual->definition)
+        && try_trait->data.trait_item.supertraits[0]
+            .trait_type.argument_count == 1u);
+    assert_item_attribute(&context, try_trait, 0u, "lang = \"Try\"",
+        261u);
+    assert_item_attribute(&context, try_trait, 1u, "const_trait", 261u);
+    assert_item_attribute(&context, from_residual, 0u,
+        "rustc_diagnostic_item = \"FromResidual\"", 261u);
+    assert_item_attribute(&context, from_residual, 1u, "const_trait", 261u);
+    assert_item_attribute(&context, residual, 0u, "const_trait", 261u);
+
+    parameter = cm_hir_get_generic_param(&context,
+        from_residual->generic_parameter_start);
+    assert(parameter != NULL && parameter->has_default
+        && parameter->default_argument.kind == CM_HIR_GENERIC_ARG_TYPE);
+    type = cm_hir_get_type(&context,
+        parameter->default_argument.data.type);
+    other_type = cm_hir_get_type(&context,
+        try_trait->data.trait_item.supertraits[0]
+            .trait_type.arguments[0].data.type);
+    assert(type != NULL && other_type != NULL
+        && type->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && other_type->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && type->data.projection_type.self_type
+            != other_type->data.projection_type.self_type);
+    type = cm_hir_get_type(&context, type->data.projection_type.self_type);
+    other_type = cm_hir_get_type(&context,
+        other_type->data.projection_type.self_type);
+    assert(type != NULL && other_type != NULL
+        && type->kind == CM_HIR_TYPE_SELF_KIND
+        && other_type->kind == CM_HIR_TYPE_SELF_KIND
+        && cm_hir_def_id_equal(type->data.self_type.owner,
+            from_residual->definition)
+        && cm_hir_def_id_equal(other_type->data.self_type.owner,
+            try_trait->definition));
+
+    assert(try_type->predicate_count == 0u
+        && try_type->data.type_alias_item.target == CM_HIR_TYPE_NONE
+        && try_type->data.type_alias_item.bound_count == 1u
+        && try_type->data.type_alias_item.bounds != NULL
+        && try_type->data.type_alias_item.bounds[0].modifier
+            == CM_HIR_ASSOC_BOUND_REQUIRED
+        && cm_hir_def_id_equal(try_type->data.type_alias_item.bounds[0]
+            .trait_type.definition, try_trait->definition)
+        && try_type->data.type_alias_item.bounds[0].equality_count == 2u);
+    assert(cm_hir_def_id_equal(try_type->data.type_alias_item.bounds[0]
+            .equalities[0].associated_type,
+        find_associated_item(&context, CM_HIR_ITEM_TYPE_ALIAS,
+            try_trait->definition, "Output")->definition)
+        && cm_hir_def_id_equal(try_type->data.type_alias_item.bounds[0]
+            .equalities[1].associated_type,
+        find_associated_item(&context, CM_HIR_ITEM_TYPE_ALIAS,
+            try_trait->definition, "Residual")->definition));
+
+    assert(from_output->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_NONE
+        && from_output->data.function_item.signature.parameter_count == 1u
+        && from_output->data.function_item.signature.parameters[0].name
+            == CM_INTERN_ID_NONE
+        && from_output->data.function_item.signature.parameters[0]
+            .binding_kind == CM_HIR_BINDING_DISCARD
+        && from_residual_method->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_NONE
+        && from_residual_method->data.function_item.signature.parameters[0]
+            .name == CM_INTERN_ID_NONE
+        && from_residual_method->data.function_item.signature.parameters[0]
+            .binding_kind == CM_HIR_BINDING_DISCARD);
+    assert_item_attribute(&context, from_output, 0u,
+        "lang = \"from_output\"", 261u);
+    assert_item_attribute(&context, from_residual_method, 0u,
+        "lang = \"from_residual\"", 261u);
+
+    assert(control_flow->generic_parameter_count == 2u
+        && control_flow->data.enum_item.variant_count == 2u
+        && control_flow->attribute_count == 2u);
+    assert_item_attribute(&context, control_flow, 0u,
+        "rustc_diagnostic_item = \"ControlFlow\"", 261u);
+    assert_item_attribute(&context, control_flow, 1u, "must_use", 261u);
+    parameter = cm_hir_get_generic_param(&context,
+        control_flow->generic_parameter_start + 1u);
+    type = parameter == NULL || !parameter->has_default
+        || parameter->default_argument.kind != CM_HIR_GENERIC_ARG_TYPE
+        ? NULL : cm_hir_get_type(&context,
+            parameter->default_argument.data.type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_UNIT_KIND
+        && control_flow->data.enum_item.variants[0].form
+            == CM_HIR_AGGREGATE_TUPLE
+        && control_flow->data.enum_item.variants[1].form
+            == CM_HIR_AGGREGATE_TUPLE);
+    {
+        const CmInternedString *continue_lang = cm_interner_get(
+            &context.strings,
+            control_flow->data.enum_item.variants[0].lang_item);
+        const CmInternedString *break_lang = cm_interner_get(
+            &context.strings,
+            control_flow->data.enum_item.variants[1].lang_item);
+        assert(continue_lang != NULL && break_lang != NULL
+            && continue_lang->len == sizeof("Continue") - 1u
+            && memcmp(continue_lang->bytes, "Continue",
+                sizeof("Continue") - 1u) == 0
+            && break_lang->len == sizeof("Break") - 1u
+            && memcmp(break_lang->bytes, "Break",
+                sizeof("Break") - 1u) == 0);
+    }
+
+    assert(try_function->generic_parameter_count == 3u
+        && try_function->predicate_count == 3u
+        && try_function->data.function_item.signature.parameter_count == 1u
+        && try_function->data.function_item.body == CM_HIR_BODY_NONE
+        && cm_hir_get_body(&context,
+            try_function->data.function_item.body) == NULL);
+    type = cm_hir_get_type(&context,
+        try_function->data.function_item.signature.return_type);
+    assert(type != NULL && type->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && cm_hir_def_id_equal(type->data.projection_type
+            .trait_type.definition, residual->definition)
+        && cm_hir_def_id_equal(type->data.projection_type
+            .associated_type.definition, try_type->definition));
+
+    direct = lookup_value_binding(&artifact, "try_from_fn");
+    alias = lookup_value_binding(&artifact, "try_from_fn_alias");
+    assert(direct.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && alias.kind == CM_HIR_LIBRARY_BINDING_VALUE
+        && cm_hir_def_id_equal(direct.definition, try_function->definition)
+        && cm_hir_def_id_equal(alias.definition,
+            try_function->definition));
+    path[0].bytes = (const unsigned char *)"dep";
+    path[0].length = sizeof("dep") - 1u;
+    path[1].bytes = (const unsigned char *)"try_from_fn";
+    path[1].length = sizeof("try_from_fn") - 1u;
+    memset(&library_function, 0, sizeof(library_function));
+    assert(cm_hir_library_artifact_lookup_value(&artifact, path, 2u,
+            &library_function) == CM_HIR_LIBRARY_OK
+        && library_function.kind == CM_HIR_LIBRARY_VALUE_FUNCTION
+        && library_function.data.function.nominal_reference_count == 6u
+        && library_function.data.function.associated_availability_count
+            == 1u);
+    method_name.bytes = (const unsigned char *)"from_output";
+    method_name.length = sizeof("from_output") - 1u;
+    memset(&library_method, 0, sizeof(library_method));
+    assert(cm_hir_library_artifact_lookup_associated_method(&artifact,
+            try_trait->definition, &method_name, &library_method)
+            == CM_HIR_LIBRARY_OK
+        && cm_hir_def_id_equal(library_method.definition,
+            from_output->definition)
+        && library_method.data.function.receiver == CM_HIR_RECEIVER_NONE
+        && lookup_value_binding_status(&artifact, "from_output")
+            == CM_HIR_LIBRARY_NOT_FOUND);
+    test_try_from_fn_fresh_consumer(&context, &artifact,
+        try_function->definition);
+
+    lengths = context_lengths(&context);
+    assert(cm_hir_library_artifact_identity(&artifact, &identity));
+    saved_local = decoded.generics[2].default_type;
+    decoded.generics[2].default_type = 25u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 262u);
+    decoded.generics[2].default_type = saved_local;
+    saved_local = decoded.traits[4].supertraits[0].argument_types[0];
+    decoded.traits[4].supertraits[0].argument_types[0] = 22u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 263u);
+    decoded.traits[4].supertraits[0].argument_types[0] = saved_local;
+    saved_byte = decoded.traits[4].supertraits[0].modifier;
+    decoded.traits[4].supertraits[0].modifier =
+        CM_HIR_DECL_SUPERTRAIT_REQUIRED;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 264u);
+    decoded.traits[4].supertraits[0].modifier = saved_byte;
+    saved_count = decoded.associated_items[4].predicate_count;
+    decoded.associated_items[4].predicate_count = 0u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 265u);
+    decoded.associated_items[4].predicate_count = saved_count;
+    saved_local = decoded.predicates[3].equalities[1].associated_local;
+    decoded.predicates[3].equalities[1].associated_local = 6u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 266u);
+    decoded.predicates[3].equalities[1].associated_local = saved_local;
+    saved_byte = decoded.associated_items[7].receiver;
+    decoded.associated_items[7].receiver = CM_HIR_DECL_RECEIVER_VALUE;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 267u);
+    decoded.associated_items[7].receiver = saved_byte;
+    saved_local = decoded.values[0].return_type;
+    decoded.values[0].return_type = 27u;
+    assert_item_metadata_rejected(&context, &artifact, &decoded,
+        &expectation, lengths, &identity, 268u);
+    decoded.values[0].return_type = saved_local;
+    result = cm_hir_declaration_metadata_materialize(&context, &artifact,
+        &decoded, &expectation, "bad-name", 269u);
+    assert(result.status == CM_HIR_DECL_MATERIALIZE_ARTIFACT_FAILURE
+        && result.library_status == CM_HIR_LIBRARY_INVALID_ARGUMENT);
+    assert_context_lengths(&context, lengths);
+    assert_artifact_identity_same(&artifact, &identity);
+
+    cm_hir_library_artifact_destroy(&artifact);
+    cm_hir_context_destroy(&context);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_repeat_materialize_and_consume(void)
 {
     RepeatFixture fixture;
@@ -8845,6 +9757,7 @@ int main(void)
     test_option_tuple_materialize_and_consume();
     test_into_iter_materialize_and_consume();
     test_from_fn_materialize_and_consume();
+    test_try_from_fn_materialize_and_consume();
     test_repeat_materialize_and_consume();
     test_from_mut_materialize_and_consume();
     test_from_ref_materialize_and_consume();

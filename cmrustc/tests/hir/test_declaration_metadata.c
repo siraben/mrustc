@@ -246,6 +246,32 @@ typedef struct RepeatFixture {
     CmHirDeclarationNamespaceEntry namespace_entries[8];
 } RepeatFixture;
 
+typedef struct TryFromFnFixture {
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationModule modules[1];
+    CmHirDeclarationTrait traits[6];
+    CmHirDeclarationSupertrait supertraits[2];
+    uint32_t fn_mut_super_arguments[1];
+    uint32_t try_super_arguments[1];
+    CmHirDeclarationAssociatedItem associated_items[9];
+    uint32_t method_parameters[7];
+    CmHirDeclarationGeneric generics[9];
+    CmHirDeclarationType types[28];
+    uint32_t tuple_elements[1];
+    uint32_t callable_projection_arguments[2];
+    uint32_t residual_projection_arguments[2];
+    uint32_t control_flow_arguments[2];
+    CmHirDeclarationItem items[1];
+    CmHirDeclarationVariant variants[2];
+    CmHirDeclarationVariantField variant_fields[2];
+    CmHirDeclarationValue values[1];
+    uint32_t value_parameters[1];
+    CmHirDeclarationPredicate predicates[6];
+    uint32_t predicate_arguments[3];
+    CmHirDeclarationPredicateEquality equalities[3];
+    CmHirDeclarationNamespaceEntry namespace_entries[8];
+} TryFromFnFixture;
+
 static void put_u16(unsigned char *bytes, uint16_t value)
 {
     bytes[0] = (unsigned char)(value & UINT16_C(0xff));
@@ -2636,6 +2662,440 @@ static void from_fn_fixture_init(FromFnFixture *fixture)
     fixture->namespace_entries[4].export_ordinal = 8u;
     metadata->namespace_entries = fixture->namespace_entries;
     metadata->namespace_count = 5u;
+}
+
+static void try_from_fn_fixture_init(TryFromFnFixture *fixture)
+{
+    CmHirDeclarationMetadata *metadata;
+    const uint8_t callable_flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST
+        | CM_HIR_DECL_TRAIT_RUSTC_PAREN_SUGAR
+        | CM_HIR_DECL_TRAIT_FUNDAMENTAL;
+    uint32_t index;
+    memset(fixture, 0, sizeof(*fixture));
+    metadata = &fixture->metadata;
+    metadata->crate_name = (CmHirDeclarationString)S("try_from_fn_like");
+    metadata->crate_disambiguator =
+        (CmHirDeclarationString)S("decl-try-from-fn-v1");
+    metadata->edition = CM_HIR_DECL_EDITION_2021;
+    metadata->target_triple =
+        (CmHirDeclarationString)S("x86_64-unknown-linux-gnu");
+    metadata->data_layout = (CmHirDeclarationString)S("e-p:64:64");
+    metadata->panic_strategy = CM_HIR_DECL_PANIC_ABORT;
+    fixture->modules[0].name = metadata->crate_name;
+    metadata->root_module = 1u;
+    metadata->modules = fixture->modules;
+    metadata->module_count = 1u;
+
+    for (index = 0u; index < 6u; ++index) {
+        fixture->traits[index].owner_module = 1u;
+        fixture->traits[index].visibility.kind =
+            CM_HIR_DECL_VISIBILITY_PUBLIC;
+        fixture->traits[index].source_ordinal = index + 1u;
+        fixture->traits[index].safety = CM_HIR_DECL_SAFETY_SAFE;
+    }
+    fixture->traits[0].name = (CmHirDeclarationString)S("FnMut");
+    fixture->traits[0].generic_start = 1u;
+    fixture->traits[0].generic_count = 1u;
+    fixture->traits[0].predicate_start = 5u;
+    fixture->traits[0].predicate_count = 1u;
+    fixture->traits[0].associated_start = 1u;
+    fixture->traits[0].associated_count = 1u;
+    fixture->traits[0].flags = callable_flags;
+    fixture->traits[0].lang_item = (CmHirDeclarationString)S("fn_mut");
+    fixture->traits[0].supertrait_count = 1u;
+    fixture->traits[0].supertraits = &fixture->supertraits[0];
+    fixture->fn_mut_super_arguments[0] = 3u;
+    fixture->supertraits[0].modifier = CM_HIR_DECL_SUPERTRAIT_REQUIRED;
+    fixture->supertraits[0].trait_local = 2u;
+    fixture->supertraits[0].argument_count = 1u;
+    fixture->supertraits[0].argument_types =
+        fixture->fn_mut_super_arguments;
+
+    fixture->traits[1].name = (CmHirDeclarationString)S("FnOnce");
+    fixture->traits[1].generic_start = 2u;
+    fixture->traits[1].generic_count = 1u;
+    fixture->traits[1].predicate_start = 6u;
+    fixture->traits[1].predicate_count = 1u;
+    fixture->traits[1].associated_start = 2u;
+    fixture->traits[1].associated_count = 2u;
+    fixture->traits[1].flags = callable_flags;
+    fixture->traits[1].lang_item = (CmHirDeclarationString)S("fn_once");
+
+    fixture->traits[2].name = (CmHirDeclarationString)S("FromResidual");
+    fixture->traits[2].generic_start = 3u;
+    fixture->traits[2].generic_count = 1u;
+    fixture->traits[2].associated_start = 4u;
+    fixture->traits[2].associated_count = 1u;
+    fixture->traits[2].flags =
+        CM_HIR_DECL_TRAIT_HAS_DIAGNOSTIC_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
+    fixture->traits[2].diagnostic_item =
+        (CmHirDeclarationString)S("FromResidual");
+
+    fixture->traits[3].name = (CmHirDeclarationString)S("Residual");
+    fixture->traits[3].generic_start = 4u;
+    fixture->traits[3].generic_count = 1u;
+    fixture->traits[3].associated_start = 5u;
+    fixture->traits[3].associated_count = 1u;
+    fixture->traits[3].flags = CM_HIR_DECL_TRAIT_IS_CONST;
+
+    fixture->traits[4].name = (CmHirDeclarationString)S("Try");
+    fixture->traits[4].associated_start = 6u;
+    fixture->traits[4].associated_count = 4u;
+    fixture->traits[4].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_IS_CONST;
+    fixture->traits[4].lang_item = (CmHirDeclarationString)S("Try");
+    fixture->traits[4].supertrait_count = 1u;
+    fixture->traits[4].supertraits = &fixture->supertraits[1];
+    fixture->try_super_arguments[0] = 25u;
+    fixture->supertraits[1].modifier =
+        CM_HIR_DECL_SUPERTRAIT_CONST_IF_CONST;
+    fixture->supertraits[1].trait_local = 3u;
+    fixture->supertraits[1].argument_count = 1u;
+    fixture->supertraits[1].argument_types = fixture->try_super_arguments;
+
+    fixture->traits[5].name = (CmHirDeclarationString)S("Tuple");
+    fixture->traits[5].flags = CM_HIR_DECL_TRAIT_HAS_LANG_ITEM
+        | CM_HIR_DECL_TRAIT_DENY_EXPLICIT_IMPL
+        | CM_HIR_DECL_TRAIT_DO_NOT_IMPLEMENT_VIA_OBJECT;
+    fixture->traits[5].lang_item =
+        (CmHirDeclarationString)S("tuple_trait");
+    metadata->traits = fixture->traits;
+    metadata->trait_count = 6u;
+
+    fixture->generics[0].owner_kind = CM_HIR_DECL_GENERIC_NOMINAL;
+    fixture->generics[0].owner_local = 1u;
+    fixture->generics[0].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[0].name = (CmHirDeclarationString)S("Args");
+    fixture->generics[1] = fixture->generics[0];
+    fixture->generics[1].owner_local = 2u;
+    fixture->generics[2] = fixture->generics[0];
+    fixture->generics[2].owner_local = 3u;
+    fixture->generics[2].name = (CmHirDeclarationString)S("R");
+    fixture->generics[2].has_default = 1u;
+    fixture->generics[2].default_type = 22u;
+    fixture->generics[3] = fixture->generics[0];
+    fixture->generics[3].owner_local = 4u;
+    fixture->generics[3].name = (CmHirDeclarationString)S("O");
+    fixture->generics[4].owner_kind = CM_HIR_DECL_GENERIC_ITEM;
+    fixture->generics[4].owner_local = 1u;
+    fixture->generics[4].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[4].name = (CmHirDeclarationString)S("B");
+    fixture->generics[5] = fixture->generics[4];
+    fixture->generics[5].index = 1u;
+    fixture->generics[5].name = (CmHirDeclarationString)S("C");
+    fixture->generics[5].has_default = 1u;
+    fixture->generics[5].default_type = 1u;
+    fixture->generics[6].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[6].owner_local = 1u;
+    fixture->generics[6].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[6].name = (CmHirDeclarationString)S("R");
+    fixture->generics[7].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[7].owner_local = 1u;
+    fixture->generics[7].index = 1u;
+    fixture->generics[7].kind = CM_HIR_DECL_GENERIC_CONST;
+    fixture->generics[7].name = (CmHirDeclarationString)S("N");
+    fixture->generics[7].declared_type = 2u;
+    fixture->generics[8].owner_kind = CM_HIR_DECL_GENERIC_VALUE;
+    fixture->generics[8].owner_local = 1u;
+    fixture->generics[8].index = 2u;
+    fixture->generics[8].kind = CM_HIR_DECL_GENERIC_TYPE;
+    fixture->generics[8].name = (CmHirDeclarationString)S("F");
+    metadata->generics = fixture->generics;
+    metadata->generic_count = 9u;
+
+    fixture->types[0].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[0].primitive = CM_HIR_DECL_PRIMITIVE_UNIT;
+    fixture->types[1].kind = CM_HIR_DECL_TYPE_PRIMITIVE;
+    fixture->types[1].primitive = CM_HIR_DECL_PRIMITIVE_USIZE;
+    for (index = 0u; index < 4u; ++index) {
+        fixture->types[2u + index].kind = CM_HIR_DECL_TYPE_GENERIC;
+        fixture->types[2u + index].generic_local = index + 1u;
+    }
+    fixture->types[6].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[6].generic_local = 5u;
+    fixture->types[7].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[7].generic_local = 6u;
+    fixture->types[8].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[8].generic_local = 7u;
+    fixture->types[9].kind = CM_HIR_DECL_TYPE_GENERIC;
+    fixture->types[9].generic_local = 9u;
+    for (index = 0u; index < 5u; ++index) {
+        fixture->types[10u + index].kind = CM_HIR_DECL_TYPE_SELF;
+        fixture->types[10u + index].self_trait_local = index + 1u;
+    }
+    fixture->types[15].kind = CM_HIR_DECL_TYPE_REFERENCE;
+    fixture->types[15].child_type = 11u;
+    fixture->types[15].mutability = CM_HIR_DECL_MUTABLE;
+    fixture->types[15].region.kind = CM_HIR_DECL_REGION_ERASED;
+    fixture->tuple_elements[0] = 2u;
+    fixture->types[16].kind = CM_HIR_DECL_TYPE_TUPLE;
+    fixture->types[16].element_count = 1u;
+    fixture->types[16].element_types = fixture->tuple_elements;
+#define PROJECTION(local_, self_, trait_, associated_) do { \
+        fixture->types[(local_) - 1u].kind = CM_HIR_DECL_TYPE_PROJECTION; \
+        fixture->types[(local_) - 1u].projection_self_type = (self_); \
+        fixture->types[(local_) - 1u].projection_trait_local = (trait_); \
+        fixture->types[(local_) - 1u].projection_associated_local = \
+            (associated_); \
+    } while (0)
+    PROJECTION(18u, 9u, 5u, 6u);
+    PROJECTION(19u, 9u, 5u, 7u);
+    PROJECTION(20u, 11u, 2u, 2u);
+    fixture->callable_projection_arguments[0] = 3u;
+    fixture->types[19].projection_argument_count = 1u;
+    fixture->types[19].projection_argument_types =
+        &fixture->callable_projection_arguments[0];
+    PROJECTION(21u, 12u, 2u, 2u);
+    fixture->callable_projection_arguments[1] = 4u;
+    fixture->types[20].projection_argument_count = 1u;
+    fixture->types[20].projection_argument_types =
+        &fixture->callable_projection_arguments[1];
+    PROJECTION(22u, 13u, 5u, 7u);
+    PROJECTION(23u, 14u, 4u, 5u);
+    fixture->residual_projection_arguments[0] = 6u;
+    fixture->types[22].projection_argument_count = 1u;
+    fixture->types[22].projection_argument_types =
+        &fixture->residual_projection_arguments[0];
+    PROJECTION(24u, 15u, 5u, 6u);
+    PROJECTION(25u, 15u, 5u, 7u);
+    fixture->control_flow_arguments[0] = 25u;
+    fixture->control_flow_arguments[1] = 24u;
+    fixture->types[25].kind = CM_HIR_DECL_TYPE_NAMED_ADT_APPLICATION;
+    fixture->types[25].item_local = 1u;
+    fixture->types[25].argument_count = 2u;
+    fixture->types[25].argument_types = fixture->control_flow_arguments;
+    fixture->types[26].kind = CM_HIR_DECL_TYPE_ARRAY;
+    fixture->types[26].child_type = 18u;
+    fixture->types[26].array_length_kind =
+        CM_HIR_DECL_ARRAY_LENGTH_CONST_PARAMETER;
+    fixture->types[26].array_length_generic_local = 8u;
+    PROJECTION(28u, 19u, 4u, 5u);
+    fixture->residual_projection_arguments[1] = 27u;
+    fixture->types[27].projection_argument_count = 1u;
+    fixture->types[27].projection_argument_types =
+        &fixture->residual_projection_arguments[1];
+#undef PROJECTION
+    metadata->types = fixture->types;
+    metadata->type_count = 28u;
+
+#define ASSOCIATED_COMMON(slot_, parent_, name_, ordinal_) do { \
+        fixture->associated_items[(slot_)].parent_kind = \
+            CM_HIR_DECL_ASSOCIATED_PARENT_NOMINAL; \
+        fixture->associated_items[(slot_)].parent_local = (parent_); \
+        fixture->associated_items[(slot_)].name = \
+            (CmHirDeclarationString)S(name_); \
+        fixture->associated_items[(slot_)].visibility.kind = \
+            CM_HIR_DECL_VISIBILITY_PRIVATE; \
+        fixture->associated_items[(slot_)].source_ordinal = (ordinal_); \
+        fixture->associated_items[(slot_)].safety = \
+            CM_HIR_DECL_SAFETY_SAFE; \
+    } while (0)
+    ASSOCIATED_COMMON(0u, 1u, "call_mut", 1u);
+    fixture->associated_items[0].kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fixture->associated_items[0].receiver =
+        CM_HIR_DECL_RECEIVER_REF_MUTABLE;
+    fixture->method_parameters[0] = 16u;
+    fixture->method_parameters[1] = 3u;
+    fixture->associated_items[0].parameter_count = 2u;
+    fixture->associated_items[0].parameter_types =
+        &fixture->method_parameters[0];
+    fixture->associated_items[0].return_type = 20u;
+    fixture->associated_items[0].abi = (CmHirDeclarationString)S("rust-call");
+    ASSOCIATED_COMMON(1u, 2u, "Output", 1u);
+    fixture->associated_items[1].kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    fixture->associated_items[1].flags =
+        CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    fixture->associated_items[1].lang_item =
+        (CmHirDeclarationString)S("fn_once_output");
+    ASSOCIATED_COMMON(2u, 2u, "call_once", 2u);
+    fixture->associated_items[2].kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fixture->associated_items[2].receiver = CM_HIR_DECL_RECEIVER_VALUE;
+    fixture->method_parameters[2] = 12u;
+    fixture->method_parameters[3] = 4u;
+    fixture->associated_items[2].parameter_count = 2u;
+    fixture->associated_items[2].parameter_types =
+        &fixture->method_parameters[2];
+    fixture->associated_items[2].return_type = 21u;
+    fixture->associated_items[2].abi =
+        (CmHirDeclarationString)S("rust-call");
+    ASSOCIATED_COMMON(3u, 3u, "from_residual", 1u);
+    fixture->associated_items[3].kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fixture->associated_items[3].receiver = CM_HIR_DECL_RECEIVER_NONE;
+    fixture->method_parameters[4] = 5u;
+    fixture->associated_items[3].parameter_count = 1u;
+    fixture->associated_items[3].parameter_types =
+        &fixture->method_parameters[4];
+    fixture->associated_items[3].return_type = 13u;
+    fixture->associated_items[3].abi = (CmHirDeclarationString)S("Rust");
+    fixture->associated_items[3].flags =
+        CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    fixture->associated_items[3].lang_item =
+        (CmHirDeclarationString)S("from_residual");
+    ASSOCIATED_COMMON(4u, 4u, "TryType", 1u);
+    fixture->associated_items[4].kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    fixture->associated_items[4].predicate_start = 4u;
+    fixture->associated_items[4].predicate_count = 1u;
+    ASSOCIATED_COMMON(5u, 5u, "Output", 1u);
+    fixture->associated_items[5].kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    ASSOCIATED_COMMON(6u, 5u, "Residual", 2u);
+    fixture->associated_items[6].kind = CM_HIR_DECL_ASSOCIATED_TYPE;
+    ASSOCIATED_COMMON(7u, 5u, "from_output", 3u);
+    fixture->associated_items[7].kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fixture->associated_items[7].receiver = CM_HIR_DECL_RECEIVER_NONE;
+    fixture->associated_items[7].parameter_count = 1u;
+    fixture->associated_items[7].parameter_types =
+        &fixture->method_parameters[5];
+    fixture->method_parameters[5] = 24u;
+    fixture->associated_items[7].return_type = 15u;
+    fixture->associated_items[7].abi = (CmHirDeclarationString)S("Rust");
+    fixture->associated_items[7].flags =
+        CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    fixture->associated_items[7].lang_item =
+        (CmHirDeclarationString)S("from_output");
+    ASSOCIATED_COMMON(8u, 5u, "branch", 4u);
+    fixture->associated_items[8].kind = CM_HIR_DECL_ASSOCIATED_METHOD;
+    fixture->associated_items[8].receiver = CM_HIR_DECL_RECEIVER_VALUE;
+    fixture->associated_items[8].parameter_count = 1u;
+    fixture->associated_items[8].parameter_types =
+        &fixture->method_parameters[6];
+    fixture->method_parameters[6] = 15u;
+    fixture->associated_items[8].return_type = 26u;
+    fixture->associated_items[8].abi = (CmHirDeclarationString)S("Rust");
+    fixture->associated_items[8].flags =
+        CM_HIR_DECL_ASSOCIATED_HAS_LANG_ITEM;
+    fixture->associated_items[8].lang_item =
+        (CmHirDeclarationString)S("branch");
+#undef ASSOCIATED_COMMON
+    metadata->associated_items = fixture->associated_items;
+    metadata->associated_count = 9u;
+
+    fixture->variant_fields[0].source_ordinal = 0u;
+    fixture->variant_fields[0].type_local = 8u;
+    fixture->variants[0].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[0].name = (CmHirDeclarationString)S("Continue");
+    fixture->variants[0].source_ordinal = 1u;
+    fixture->variants[0].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[0].field_count = 1u;
+    fixture->variants[0].fields = &fixture->variant_fields[0];
+    fixture->variants[0].lang_item = (CmHirDeclarationString)S("Continue");
+    fixture->variant_fields[1].source_ordinal = 0u;
+    fixture->variant_fields[1].type_local = 7u;
+    fixture->variants[1].kind = CM_HIR_DECL_VARIANT_TUPLE;
+    fixture->variants[1].name = (CmHirDeclarationString)S("Break");
+    fixture->variants[1].source_ordinal = 2u;
+    fixture->variants[1].flags = CM_HIR_DECL_VARIANT_HAS_LANG_ITEM;
+    fixture->variants[1].field_count = 1u;
+    fixture->variants[1].fields = &fixture->variant_fields[1];
+    fixture->variants[1].lang_item = (CmHirDeclarationString)S("Break");
+    fixture->items[0].kind = CM_HIR_DECL_ITEM_ENUM;
+    fixture->items[0].owner_module = 1u;
+    fixture->items[0].name = (CmHirDeclarationString)S("ControlFlow");
+    fixture->items[0].visibility.kind = CM_HIR_DECL_VISIBILITY_PUBLIC;
+    fixture->items[0].source_ordinal = 7u;
+    fixture->items[0].generic_start = 5u;
+    fixture->items[0].generic_count = 2u;
+    fixture->items[0].aggregate_flags = CM_HIR_DECL_AGGREGATE_MUST_USE;
+    fixture->items[0].variant_count = 2u;
+    fixture->items[0].variants = fixture->variants;
+    fixture->items[0].diagnostic_item =
+        (CmHirDeclarationString)S("ControlFlow");
+    metadata->items = fixture->items;
+    metadata->item_count = 1u;
+
+    fixture->predicate_arguments[0] = 17u;
+    fixture->equalities[0].associated_local = 2u;
+    fixture->equalities[0].value_type = 9u;
+    fixture->predicates[0].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[0].owner_value = 1u;
+    fixture->predicates[0].ordinal = 0u;
+    fixture->predicates[0].subject_type = 10u;
+    fixture->predicates[0].trait_local = 1u;
+    fixture->predicates[0].argument_count = 1u;
+    fixture->predicates[0].argument_types = &fixture->predicate_arguments[0];
+    fixture->predicates[0].equality_count = 1u;
+    fixture->predicates[0].equalities = &fixture->equalities[0];
+    fixture->predicates[1].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[1].owner_value = 1u;
+    fixture->predicates[1].ordinal = 1u;
+    fixture->predicates[1].subject_type = 9u;
+    fixture->predicates[1].trait_local = 5u;
+    fixture->predicates[2].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_VALUE;
+    fixture->predicates[2].owner_value = 1u;
+    fixture->predicates[2].ordinal = 2u;
+    fixture->predicates[2].subject_type = 19u;
+    fixture->predicates[2].trait_local = 4u;
+    fixture->predicate_arguments[1] = 27u;
+    fixture->predicates[2].argument_count = 1u;
+    fixture->predicates[2].argument_types = &fixture->predicate_arguments[1];
+    fixture->predicates[3].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED;
+    fixture->predicates[3].owner_associated = 5u;
+    fixture->predicates[3].subject_type = 23u;
+    fixture->predicates[3].trait_local = 5u;
+    fixture->equalities[1].associated_local = 6u;
+    fixture->equalities[1].value_type = 6u;
+    fixture->equalities[2].associated_local = 7u;
+    fixture->equalities[2].value_type = 14u;
+    fixture->predicates[3].equality_count = 2u;
+    fixture->predicates[3].equalities = &fixture->equalities[1];
+    fixture->predicates[4].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
+    fixture->predicates[4].owner_nominal = 1u;
+    fixture->predicates[4].subject_type = 3u;
+    fixture->predicates[4].trait_local = 6u;
+    fixture->predicates[5].owner_kind =
+        CM_HIR_DECL_PREDICATE_OWNER_NOMINAL;
+    fixture->predicates[5].owner_nominal = 2u;
+    fixture->predicates[5].subject_type = 4u;
+    fixture->predicates[5].trait_local = 6u;
+    metadata->predicates = fixture->predicates;
+    metadata->predicate_count = 6u;
+
+    fixture->value_parameters[0] = 10u;
+    fixture->values[0].kind = CM_HIR_DECL_VALUE_FUNCTION;
+    fixture->values[0].owner_module = 1u;
+    fixture->values[0].name = (CmHirDeclarationString)S("try_array");
+    fixture->values[0].source_ordinal = 8u;
+    fixture->values[0].generic_start = 7u;
+    fixture->values[0].generic_count = 3u;
+    fixture->values[0].predicate_start = 1u;
+    fixture->values[0].predicate_count = 3u;
+    fixture->values[0].parameter_count = 1u;
+    fixture->values[0].parameter_types = fixture->value_parameters;
+    fixture->values[0].return_type = 28u;
+    fixture->values[0].has_body = 1u;
+    metadata->values = fixture->values;
+    metadata->value_count = 1u;
+
+    for (index = 0u; index < 7u; ++index) {
+        fixture->namespace_entries[index].owner_module = 1u;
+        fixture->namespace_entries[index].namespace_kind =
+            CM_HIR_DECL_NAMESPACE_TYPE;
+        fixture->namespace_entries[index].target_kind = index == 0u
+            ? CM_HIR_DECL_TARGET_ITEM : CM_HIR_DECL_TARGET_NOMINAL;
+        fixture->namespace_entries[index].target_local = index == 0u
+            ? 1u : index;
+        fixture->namespace_entries[index].export_ordinal = index == 0u
+            ? 7u : index;
+    }
+    fixture->namespace_entries[0].name = fixture->items[0].name;
+    for (index = 0u; index < 6u; ++index)
+        fixture->namespace_entries[index + 1u].name =
+            fixture->traits[index].name;
+    fixture->namespace_entries[7].owner_module = 1u;
+    fixture->namespace_entries[7].namespace_kind =
+        CM_HIR_DECL_NAMESPACE_VALUE;
+    fixture->namespace_entries[7].name = fixture->values[0].name;
+    fixture->namespace_entries[7].target_kind = CM_HIR_DECL_TARGET_VALUE;
+    fixture->namespace_entries[7].target_local = 1u;
+    fixture->namespace_entries[7].export_ordinal = 8u;
+    metadata->namespace_entries = fixture->namespace_entries;
+    metadata->namespace_count = 8u;
 }
 
 static void repeat_fixture_init(RepeatFixture *fixture)
@@ -6817,6 +7277,137 @@ static void test_from_fn_callable_closure(void)
     cm_byte_buf_destroy(&encoded);
 }
 
+static void test_try_from_fn_closure(void)
+{
+    TryFromFnFixture fixture;
+    TryFromFnFixture repeated_fixture;
+    CmHirDeclarationMetadata decoded;
+    CmByteBuf encoded;
+    CmByteBuf repeated;
+    CmByteBuf replay;
+    CmByteBuf bad;
+    size_t record;
+    size_t tail;
+    try_from_fn_fixture_init(&fixture);
+    try_from_fn_fixture_init(&repeated_fixture);
+    assert(fixture.generics[2].default_type == 22u
+        && fixture.try_super_arguments[0] == 25u
+        && fixture.generics[2].default_type
+            != fixture.try_super_arguments[0]
+        && cm_hir_declaration_metadata_validate(&fixture.metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    cm_byte_buf_init(&encoded);
+    cm_byte_buf_init(&repeated);
+    cm_byte_buf_init(&replay);
+    assert(cm_hir_declaration_metadata_encode(&fixture.metadata, &encoded)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&repeated_fixture.metadata,
+            &repeated) == CM_HIR_DECL_METADATA_OK
+        && encoded.len == repeated.len
+        && memcmp(encoded.data, repeated.data, encoded.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(encoded.data, encoded.len,
+            &decoded) == CM_HIR_DECL_METADATA_OK
+        && decoded.trait_count == 6u
+        && decoded.associated_count == 9u
+        && decoded.generic_count == 9u
+        && decoded.generics[2].has_default == 1u
+        && decoded.generics[2].default_type == 22u
+        && decoded.generics[5].default_type == 1u
+        && decoded.traits[4].supertraits[0].modifier
+            == CM_HIR_DECL_SUPERTRAIT_CONST_IF_CONST
+        && decoded.traits[4].supertraits[0].argument_types[0] == 25u
+        && decoded.associated_items[4].predicate_count == 1u
+        && decoded.predicates[3].equality_count == 2u
+        && decoded.types[19].kind == CM_HIR_DECL_TYPE_PROJECTION
+        && decoded.types[17].projection_argument_count == 0u
+        && decoded.types[17].projection_argument_types == NULL
+        && decoded.items[0].aggregate_flags
+            == CM_HIR_DECL_AGGREGATE_MUST_USE
+        && decoded.values[0].return_type == 28u
+        && cm_hir_declaration_metadata_encode(&decoded, &replay)
+            == CM_HIR_DECL_METADATA_OK
+        && replay.len == encoded.len
+        && memcmp(replay.data, encoded.data, encoded.len) == 0);
+
+#define ASSERT_INVALID_TRY(change_) do { \
+        try_from_fn_fixture_init(&fixture); \
+        change_; \
+        assert(cm_hir_declaration_metadata_validate(&fixture.metadata) \
+            == CM_HIR_DECL_METADATA_UNSUPPORTED_DESCRIPTOR); \
+    } while (0)
+    ASSERT_INVALID_TRY(fixture.generics[2].default_type = 25u);
+    ASSERT_INVALID_TRY(fixture.generics[2].default_type = 5u);
+    ASSERT_INVALID_TRY(fixture.generics[4].has_default = 1u;
+        fixture.generics[4].default_type = 1u;
+        fixture.generics[5].has_default = 0u;
+        fixture.generics[5].default_type = 0u);
+    ASSERT_INVALID_TRY(fixture.generics[5].default_type = 8u);
+    ASSERT_INVALID_TRY(fixture.supertraits[1].modifier =
+        CM_HIR_DECL_SUPERTRAIT_REQUIRED);
+    ASSERT_INVALID_TRY(fixture.try_super_arguments[0] = 22u);
+    ASSERT_INVALID_TRY(fixture.associated_items[4].predicate_count = 0u;
+        fixture.associated_items[4].predicate_start = 0u);
+    ASSERT_INVALID_TRY(fixture.predicates[3].subject_type = 25u);
+    ASSERT_INVALID_TRY(fixture.predicates[3].equality_count = 1u);
+    ASSERT_INVALID_TRY(fixture.equalities[1].associated_local = 7u);
+    ASSERT_INVALID_TRY(fixture.associated_items[7].receiver =
+        CM_HIR_DECL_RECEIVER_VALUE);
+    ASSERT_INVALID_TRY(fixture.method_parameters[4] = 3u);
+    ASSERT_INVALID_TRY(fixture.associated_items[8].return_type = 1u);
+    ASSERT_INVALID_TRY(fixture.items[0].aggregate_flags = 0u);
+    ASSERT_INVALID_TRY(fixture.items[0].enum_flags =
+        CM_HIR_DECL_ENUM_HAS_LANG_ITEM;
+        fixture.items[0].enum_lang_item =
+            (CmHirDeclarationString)S("unsupported_control_flow_lang"));
+    ASSERT_INVALID_TRY(fixture.predicates[0].modifier =
+        CM_HIR_DECL_PREDICATE_CONST);
+    ASSERT_INVALID_TRY(fixture.predicates[1].modifier =
+        CM_HIR_DECL_PREDICATE_CONST_IF_CONST);
+    ASSERT_INVALID_TRY(fixture.predicates[2].modifier =
+        CM_HIR_DECL_PREDICATE_CONST);
+    ASSERT_INVALID_TRY(fixture.values[0].return_type = 27u);
+    ASSERT_INVALID_TRY(fixture.residual_projection_arguments[1] = 18u);
+    ASSERT_INVALID_TRY(fixture.residual_projection_arguments[1] = 3u);
+    ASSERT_INVALID_TRY(fixture.metadata.namespace_count = 7u);
+    ASSERT_INVALID_TRY(fixture.metadata.associated_items = NULL);
+#undef ASSERT_INVALID_TRY
+
+    bad = copy_bytes(&encoded);
+    record = generic_record_offset(&bad, UINT32_C(2));
+    tail = skip_string(&bad, record + 16u);
+    put_u32(bad.data + tail + 8u, UINT32_MAX);
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    record = type_record_offset(&bad, UINT32_C(17));
+    put_u32(bad.data + record + 16u, UINT32_C(1));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    record = item_record_offset(&bad, UINT32_C(0));
+    record = skip_string(&bad, record + 8u) + 44u;
+    put_u16(bad.data + record + 2u, UINT16_C(0));
+    recompute_crc(&bad);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    bad.data[bad.len - 1u] ^= UINT8_C(1);
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+    bad = copy_bytes(&encoded);
+    bad.len -= 1u;
+    assert_failed_transaction(&bad);
+    cm_byte_buf_destroy(&bad);
+
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&replay);
+    cm_byte_buf_destroy(&repeated);
+    cm_byte_buf_destroy(&encoded);
+}
+
 static void test_repeat_clone_closure(void)
 {
     RepeatFixture fixture;
@@ -6995,6 +7586,7 @@ int main(void)
     test_primitive_namespace_target();
     test_into_iter_const_generic_closure();
     test_from_fn_callable_closure();
+    test_try_from_fn_closure();
     test_repeat_clone_closure();
     cm_byte_buf_init(&bytes1);
     cm_byte_buf_init(&bytes2);

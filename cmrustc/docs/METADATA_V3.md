@@ -487,9 +487,11 @@ profiles accept only `COMPLETE_DECLARATION`.
 array. The currently retained compiler flags are specialization-trait,
 coinductive, and trivial-field-reads; every unknown bit rejects. These flags
 occupy a formerly reserved zero `NOMD` slot, so declarations without them keep
-their prior bytes. Each supertrait has
+their prior bytes. Each supertrait has a `REQUIRED` or `CONST_IF_CONST`
 modifier, a complete named trait reference, associated equalities, and its
-bound-position lifetime binder. `is_const_trait` is the exact lowered
+bound-position lifetime binder. `CONST_IF_CONST` retains the source `~const`
+edge; it does not by itself establish that the target trait is const-capable.
+`is_const_trait` is the exact lowered
 `#[const_trait]` fact and belongs to the complete trait declaration rather
 than the otherwise absent general semantic-attribute family. It is never
 inferred from a predicate modifier. Const-dependent solving may still defer
@@ -538,7 +540,12 @@ Variant payloads are:
 
 - `TYPE`: ordered associated-type bounds, optional default/value type, and a
   bit distinguishing a targetless trait declaration from an impl value. GAT
-  parameters and their predicates are owned by this `associated_local`.
+  parameters and their predicates are owned by this `associated_local`. A
+  retained associated-type bound uses an `ASSOCIATED`-owned predicate range.
+  Its subject is the exact projection of the parent trait's `Self` through
+  this declaration, including ordered declaration type arguments. The
+  consumer validates that derived subject before rebuilding the HIR-native
+  associated bound; it does not attach it as an ordinary item predicate.
 - `CONST`: declared type plus `has_default_body`. V3.0/v3.1/v3.2 do not carry the
   body; a true bit is a promise that a later body artifact may satisfy, not an
   evaluated value.
@@ -561,6 +568,16 @@ parameters. Owner tags cover `NOMINAL`, `ASSOCIATED`, `ITEM`, `VALUE`, and
 appear in index order. Lifetime/type parameters have no declared type; const
 parameters have one. Defaults may reference only earlier parameters and the
 authenticated enclosing `Self` where the HIR permits it.
+
+The current default-bearing profile accepts only a `TYPE` parameter owned by
+a nominal or item declaration. `has_default` requires a nonzero
+`default_type`; that type must be in the same lexical owner scope and may not
+reference a later parameter. A zero flag requires a zero local, value-owned
+defaults reject, and const-parameter defaults remain outside this bounded
+profile. The consumer reserves every generic first, constructs the canonical
+type DAG, and applies defaults before binding declarations, so projection
+defaults can refer to already-reserved associated identities without a name
+lookup.
 
 Every early-bound region and parameter type/const carries a `generic_local`
 whose owner is in the lexical owner chain of the record using it. Late-bound
@@ -692,6 +709,30 @@ stability, inline, must-use, const-unstable, and diagnostic text are
 source-authenticated projections. Materialization keeps every implementation
 body absent, including `clone_from` and `repeat`; this profile does not grant
 clone shims, generic MIR, monomorphization, or execution authority.
+
+The current `try_from_fn` declaration profile retains value-owned `R`,
+`const N: usize`, and `F`; parameter `F`; and the normalized return
+`<R::Residual as Residual<[R::Output; N]>>::TryType`. Its required predicates
+are `F: FnMut<(usize,), Output = R>`, `R: Try`, and
+`R::Residual: Residual<[R::Output; N]>`. The closed nominal dependency graph
+includes `Tuple`, `FnOnce`, `FnMut`, `FromResidual`, `Try`, `Residual`, and the
+must-use `ControlFlow<B, C = ()>` enum. It retains the exact
+`Try: ~const FromResidual<Self::Residual>` supertrait, receiver-free
+`from_output` and `from_residual`, value-receiver `branch`, targetless
+`Output`, `Residual`, and `TryType`, and the associated bound
+`TryType: Try<Output = O, Residual = Self>`.
+
+Capture resolver-authenticates the private source alias `ChangeOutputType`
+and records its already-lowered nested projection rather than emitting an
+alias declaration. Live HIR stores an associated-type bound's subject
+implicitly, so capture deterministically derives the descriptor-only
+`<Self as Residual<O>>::TryType` projection from the authenticated parent,
+associated declaration, and ordered owner generics. It enters the same
+canonical type sort and deduplicates with an equivalent live projection.
+Materialization validates that identity before reconstructing the implicit
+associated bound. Function and default method bodies remain `BODY_NONE`; this
+profile carries declaration authority, not generic MIR, monomorphization, or
+execution authority.
 
 The current `from_ref`/`from_mut` profile similarly transports only the
 declaration. It retains ordinary `T`, one erased reference parameter to `T`,

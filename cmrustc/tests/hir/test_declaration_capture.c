@@ -228,6 +228,104 @@ static const unsigned char from_fn_fixture_source[] =
     "pub fn build<T, const N: usize, F>(f: F) -> [T; N]\n"
     "where F: FnMut(usize) -> T { f }\n";
 
+static const unsigned char try_from_fn_fixture_source[] =
+    "#[unstable(feature = \"tuple_trait\", issue = \"none\")]\n"
+    "#[lang = \"tuple_trait\"]\n"
+    "#[diagnostic::on_unimplemented(message = \"not a tuple\")]\n"
+    "#[rustc_deny_explicit_impl]\n"
+    "#[rustc_do_not_implement_via_object]\n"
+    "pub trait Tuple {}\n"
+    "#[lang = \"fn_once\"]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "#[rustc_paren_sugar]\n"
+    "#[rustc_on_unimplemented(message = \"not callable\")]\n"
+    "#[fundamental]\n"
+    "#[must_use = \"closures are lazy\"]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_trait_impl\", "
+        "issue = \"none\")]\n"
+    "pub trait FnOnce<Args: Tuple> {\n"
+    "  #[lang = \"fn_once_output\"]\n"
+    "  #[stable(feature = \"fn_once_output\", since = \"1.0.0\")]\n"
+    "  type Output;\n"
+    "  #[unstable(feature = \"fn_traits\", issue = \"none\")]\n"
+    "  extern \"rust-call\" fn call_once(self, args: Args) "
+        "-> Self::Output;\n"
+    "}\n"
+    "#[lang = \"fn_mut\"]\n"
+    "#[stable(feature = \"rust1\", since = \"1.0.0\")]\n"
+    "#[rustc_paren_sugar]\n"
+    "#[rustc_on_unimplemented(message = \"not callable\")]\n"
+    "#[fundamental]\n"
+    "#[must_use = \"closures are lazy\"]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_trait_impl\", "
+        "issue = \"none\")]\n"
+    "pub trait FnMut<Args: Tuple>: FnOnce<Args> {\n"
+    "  #[unstable(feature = \"fn_traits\", issue = \"none\")]\n"
+    "  extern \"rust-call\" fn call_mut(&mut self, args: Args) "
+        "-> Self::Output;\n"
+    "}\n"
+    "#[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n"
+    "#[rustc_diagnostic_item = \"ControlFlow\"]\n"
+    "#[must_use]\n"
+    "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n"
+    "pub enum ControlFlow<B, C = ()> {\n"
+    "  #[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n"
+    "  #[lang = \"Continue\"]\n"
+    "  Continue(C),\n"
+    "  #[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n"
+    "  #[lang = \"Break\"]\n"
+    "  Break(B),\n"
+    "}\n"
+    "#[rustc_on_unimplemented(message = \"from residual\")]\n"
+    "#[rustc_diagnostic_item = \"FromResidual\"]\n"
+    "#[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n"
+    "pub trait FromResidual<R = <Self as Try>::Residual> {\n"
+    "  #[lang = \"from_residual\"]\n"
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "  fn from_residual(residual: R) -> Self;\n"
+    "}\n"
+    "#[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "#[rustc_on_unimplemented(message = \"not try\")]\n"
+    "#[doc(alias = \"?\")]\n"
+    "#[lang = \"Try\"]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n"
+    "pub trait Try: ~const FromResidual {\n"
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "  type Output;\n"
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "  type Residual;\n"
+    "  #[lang = \"from_output\"]\n"
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "  fn from_output(output: Self::Output) -> Self;\n"
+    "  #[lang = \"branch\"]\n"
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n"
+    "  fn branch(self) -> ControlFlow<Self::Residual, Self::Output>;\n"
+    "}\n"
+    "#[unstable(feature = \"try_trait_v2_residual\", issue = \"91285\")]\n"
+    "#[const_trait]\n"
+    "#[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n"
+    "pub trait Residual<O> {\n"
+    "  #[unstable(feature = \"try_trait_v2_residual\", issue = \"91285\")]\n"
+    "  type TryType: Try<Output = O, Residual = Self>;\n"
+    "}\n"
+    "#[unstable(feature = \"pub_crate_should_not_need_unstable_attr\", "
+        "issue = \"none\")]\n"
+    "#[allow(type_alias_bounds)]\n"
+    "pub(crate) type ChangeOutputType<T: "
+        "Try<Residual: Residual<V>>, V> =\n"
+    "  <T::Residual as Residual<V>>::TryType;\n"
+    "#[inline]\n"
+    "#[unstable(feature = \"array_try_from_fn\", issue = \"89379\")]\n"
+    "pub fn build<R, const N: usize, F>(cb: F)\n"
+    "  -> ChangeOutputType<R, [R::Output; N]>\n"
+    "where F: FnMut(usize) -> R, R: Try,\n"
+    "  R::Residual: Residual<[R::Output; N]> { cb }\n";
+
 static const unsigned char from_mut_fixture_source[] =
     "pub trait Gate {}\n"
     "pub fn needs<X: Gate>() {}\n"
@@ -720,6 +818,12 @@ static void from_fn_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "from-fn-like.rs",
         from_fn_fixture_source, sizeof(from_fn_fixture_source) - 1u);
+}
+
+static void try_from_fn_fixture_init(CaptureFixture *fixture, int with_noise)
+{
+    fixture_init_source(fixture, with_noise, "try-from-fn-like.rs",
+        try_from_fn_fixture_source, sizeof(try_from_fn_fixture_source) - 1u);
 }
 
 static void from_mut_fixture_init(CaptureFixture *fixture, int with_noise)
@@ -5228,6 +5332,372 @@ static void test_from_fn_hostile_mutations_are_atomic(void)
     fixture_destroy(&fixture);
 }
 
+static void add_equivalent_try_type_subject(CaptureFixture *fixture)
+{
+    CmHirItemId ignored_id;
+    const CmHirItem *residual = find_item(fixture, "Residual", &ignored_id);
+    const CmHirItem *try_type = find_item(fixture, "TryType", &ignored_id);
+    CmHirTypeId self_id = CM_HIR_TYPE_NONE;
+    CmHirTypeId argument_id = CM_HIR_TYPE_NONE;
+    CmHirGenericArg *argument;
+    CmHirType projection;
+    size_t index;
+    assert(residual != NULL && try_type != NULL
+        && residual->generic_parameter_count == 1u);
+    for (index = 0u; index < fixture->hir.types.len; ++index) {
+        const CmHirType *type = cm_hir_get_type(&fixture->hir,
+            (CmHirTypeId)(index + 1u));
+        if (type != NULL && type->kind == CM_HIR_TYPE_SELF_KIND
+            && cm_hir_def_id_equal(type->data.self_type.owner,
+                residual->definition)) self_id = (CmHirTypeId)(index + 1u);
+        if (type != NULL && type->kind == CM_HIR_TYPE_PARAMETER_KIND
+            && type->data.parameter_type.parameter
+                == residual->generic_parameter_start)
+            argument_id = (CmHirTypeId)(index + 1u);
+    }
+    assert(self_id != CM_HIR_TYPE_NONE && argument_id != CM_HIR_TYPE_NONE);
+    argument = (CmHirGenericArg *)cm_arena_alloc_zeroed(
+        &fixture->hir.storage, 1u, sizeof(*argument), sizeof(void *));
+    assert(argument != NULL);
+    argument->kind = CM_HIR_GENERIC_ARG_TYPE;
+    argument->data.type = argument_id;
+    memset(&projection, 0, sizeof(projection));
+    projection.kind = CM_HIR_TYPE_PROJECTION_KIND;
+    projection.span = try_type->span;
+    projection.data.projection_type.self_type = self_id;
+    projection.data.projection_type.trait_type.definition =
+        residual->definition;
+    projection.data.projection_type.trait_type.argument_count = 1u;
+    projection.data.projection_type.trait_type.arguments = argument;
+    projection.data.projection_type.associated_type.definition =
+        try_type->definition;
+    assert(cm_vec_push(&fixture->hir.types, &projection) != NULL);
+}
+
+static void test_try_from_fn_closure_and_determinism(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CaptureFixture equivalent;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationCaptureInput noisy_input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata equivalent_metadata;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationValue *build;
+    const CmHirDeclarationAssociatedItem *try_type = NULL;
+    const CmHirDeclarationTrait *residual = NULL;
+    const CmHirDeclarationPredicate *associated_predicate;
+    const CmHirDeclarationType *associated_subject;
+    const CmHirDeclarationType *associated_self;
+    const CmHirDeclarationType *associated_argument;
+    const CmHirDeclarationType *return_type;
+    const CmHirDeclarationItem *control_flow;
+    uint32_t residual_local = 0u;
+    uint32_t try_type_local = 0u;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf equivalent_bytes;
+    CmByteBuf decoded_bytes;
+    size_t index;
+    try_from_fn_fixture_init(&fixture, 0);
+    try_from_fn_fixture_init(&noisy, 1);
+    try_from_fn_fixture_init(&equivalent, 0);
+    add_equivalent_try_type_subject(&equivalent);
+    input = capture_input(&fixture);
+    noisy_input = capture_input(&noisy);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&equivalent_metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.trait_count == 6u && result.associated_count == 9u
+        && result.item_count == 1u && result.value_count == 1u
+        && result.predicate_count == 6u
+        && result.projected_semantic_attribute_count == 34u
+        && metadata.generic_count == 9u && metadata.type_count == 28u
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    input = capture_input(&equivalent);
+    result = cm_hir_declaration_metadata_capture(&input,
+        &equivalent_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && equivalent_metadata.type_count == 28u
+        && cm_hir_declaration_metadata_validate(&equivalent_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    result = cm_hir_declaration_metadata_capture(&noisy_input,
+        &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.projected_semantic_attribute_count == 34u
+        && cm_hir_declaration_metadata_validate(&noisy_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    build = find_declaration_value(&metadata, "build", NULL);
+    control_flow = find_declaration_item(&metadata, "ControlFlow", NULL);
+    for (index = 0u; index < metadata.associated_count; ++index)
+        if (declaration_string_is(metadata.associated_items[index].name,
+                "TryType")) {
+            try_type = &metadata.associated_items[index];
+            try_type_local = (uint32_t)(index + 1u);
+        }
+    for (index = 0u; index < metadata.trait_count; ++index)
+        if (declaration_string_is(metadata.traits[index].name,
+                "Residual")) {
+            residual = &metadata.traits[index];
+            residual_local = (uint32_t)(index + 1u);
+        }
+    assert(build != NULL && control_flow != NULL && try_type != NULL
+        && residual != NULL && residual_local != 0u && try_type_local != 0u
+        && build->generic_count == 3u && build->predicate_count == 3u
+        && build->parameter_count == 1u && build->has_body == 1u
+        && control_flow->aggregate_flags
+            == CM_HIR_DECL_AGGREGATE_MUST_USE
+        && try_type->kind == CM_HIR_DECL_ASSOCIATED_TYPE
+        && try_type->predicate_count == 1u
+        && try_type->predicate_start != 0u);
+    associated_predicate = &metadata.predicates[
+        try_type->predicate_start - 1u];
+    associated_subject = &metadata.types[
+        associated_predicate->subject_type - 1u];
+    associated_self = &metadata.types[
+        associated_subject->projection_self_type - 1u];
+    associated_argument = &metadata.types[
+        associated_subject->projection_argument_types[0] - 1u];
+    return_type = &metadata.types[build->return_type - 1u];
+    assert(associated_predicate->owner_kind
+            == CM_HIR_DECL_PREDICATE_OWNER_ASSOCIATED
+        && associated_predicate->owner_associated
+            == (uint32_t)(try_type - metadata.associated_items + 1)
+        && associated_predicate->argument_count == 0u
+        && associated_predicate->equality_count == 2u
+        && associated_subject->kind == CM_HIR_DECL_TYPE_PROJECTION
+        && associated_subject->projection_trait_local == residual_local
+        && associated_subject->projection_associated_local == try_type_local
+        && associated_subject->projection_argument_count == 1u
+        && associated_subject->projection_argument_types != NULL
+        && associated_self->kind == CM_HIR_DECL_TYPE_SELF
+        && associated_self->self_trait_local == residual_local
+        && associated_argument->kind == CM_HIR_DECL_TYPE_GENERIC
+        && associated_argument->generic_local == residual->generic_start
+        && return_type->kind == CM_HIR_DECL_TYPE_PROJECTION);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&equivalent_bytes);
+    cm_byte_buf_init(&decoded_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&equivalent_metadata,
+            &equivalent_bytes) == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && bytes.len == equivalent_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    assert(memcmp(bytes.data, equivalent_bytes.data, bytes.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(bytes.data, bytes.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&decoded, &decoded_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == decoded_bytes.len
+        && memcmp(bytes.data, decoded_bytes.data, bytes.len) == 0);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&decoded_bytes);
+    cm_byte_buf_destroy(&equivalent_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&equivalent_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&noisy);
+    fixture_destroy(&equivalent);
+    fixture_destroy(&fixture);
+}
+
+static void test_try_from_fn_hostile_mutations_are_atomic(void)
+{
+    CaptureFixture fixture;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationCaptureResult result;
+    CmHirDeclarationTrait *saved_traits;
+    CmHirDeclarationAssociatedItem *saved_associated;
+    CmHirDeclarationItem *saved_items;
+    CmHirDeclarationGeneric *saved_generics;
+    CmHirDeclarationValue *saved_values;
+    CmHirDeclarationType *saved_types;
+    CmHirDeclarationPredicate *saved_predicates;
+    CmHirItem *build;
+    CmHirItem *alias;
+    CmHirItem *residual;
+    CmHirItem *try_trait;
+    CmHirItem *try_type;
+    CmHirItem *try_output;
+    CmHirItem *control_flow;
+    CmHirGenericParam *residual_generic;
+    CmHirType *alias_target;
+    CmHirType *return_type;
+    CmHirBody *body;
+    CmHirItemId ignored_id;
+    CmHirDefId saved_definition;
+    CmHirTypeId saved_type;
+    CmHirGenericParamKind saved_generic_kind;
+    CmHirVisibilityKind saved_visibility;
+    CmInternId saved_metadata;
+    CmHirTraitPredicateModifier saved_modifier;
+    uint32_t saved_source_attribute;
+    uint32_t attribute_index;
+    uint32_t must_use_index = UINT32_MAX;
+
+    try_from_fn_fixture_init(&fixture, 0);
+    input = capture_input(&fixture);
+    cm_hir_declaration_metadata_init(&metadata);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK);
+    saved_traits = metadata.traits;
+    saved_associated = metadata.associated_items;
+    saved_items = metadata.items;
+    saved_generics = metadata.generics;
+    saved_values = metadata.values;
+    saved_types = metadata.types;
+    saved_predicates = metadata.predicates;
+    build = (CmHirItem *)find_item(&fixture, "build", &ignored_id);
+    alias = (CmHirItem *)find_item(&fixture, "ChangeOutputType", &ignored_id);
+    residual = (CmHirItem *)find_item(&fixture, "Residual", &ignored_id);
+    try_trait = (CmHirItem *)find_item(&fixture, "Try", &ignored_id);
+    try_type = (CmHirItem *)find_item(&fixture, "TryType", &ignored_id);
+    try_output = (CmHirItem *)find_item(&fixture, "Output", &ignored_id);
+    control_flow = (CmHirItem *)find_item(&fixture, "ControlFlow",
+        &ignored_id);
+    assert(build != NULL && alias != NULL && residual != NULL
+        && try_trait != NULL && try_type != NULL && try_output != NULL
+        && control_flow != NULL && alias->attribute_count == 2u
+        && try_type->data.type_alias_item.bound_count == 1u
+        && try_type->data.type_alias_item.bounds != NULL
+        && try_type->data.type_alias_item.bounds[0].equality_count == 2u);
+    residual_generic = (CmHirGenericParam *)cm_hir_get_generic_param(
+        &fixture.hir, residual->generic_parameter_start);
+    alias_target = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        alias->data.type_alias_item.target);
+    return_type = (CmHirType *)cm_hir_get_type(&fixture.hir,
+        build->data.function_item.signature.return_type);
+    body = (CmHirBody *)cm_hir_get_body(&fixture.hir,
+        build->data.function_item.body);
+    assert(residual_generic != NULL && alias_target != NULL
+        && alias_target->kind == CM_HIR_TYPE_PROJECTION_KIND
+        && return_type != NULL
+        && return_type->kind == CM_HIR_TYPE_PROJECTION_KIND && body != NULL);
+    for (attribute_index = 0u;
+            attribute_index < control_flow->attribute_count;
+            ++attribute_index) {
+        const CmInternedString *attribute = cm_interner_get(
+            &fixture.hir.strings,
+            control_flow->attributes[attribute_index].metadata);
+        if (attribute != NULL && attribute->len == 8u
+            && memcmp(attribute->bytes, "must_use", 8u) == 0)
+            must_use_index = attribute_index;
+    }
+    assert(must_use_index != UINT32_MAX);
+
+#define ASSERT_TRY_FROM_FN_ATOMIC_FAILURE() do { \
+    result = cm_hir_declaration_metadata_capture(&input, &metadata); \
+    assert(result.status != CM_HIR_DECL_CAPTURE_OK \
+        && metadata.traits == saved_traits \
+        && metadata.associated_items == saved_associated \
+        && metadata.items == saved_items \
+        && metadata.generics == saved_generics \
+        && metadata.values == saved_values \
+        && metadata.types == saved_types \
+        && metadata.predicates == saved_predicates); \
+} while (0)
+
+    saved_modifier = build->predicates[0].modifier;
+    build->predicates[0].modifier = CM_HIR_PREDICATE_CONST_IF_CONST;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    build->predicates[0].modifier = saved_modifier;
+
+    saved_definition = alias->definition;
+    alias->definition.index += 1000u;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    alias->definition = saved_definition;
+
+    saved_visibility = alias->visibility.kind;
+    alias->visibility.kind = CM_HIR_VIS_PUBLIC;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    alias->visibility.kind = saved_visibility;
+
+    saved_metadata = alias->attributes[1].metadata;
+    alias->attributes[1].metadata = alias->attributes[0].metadata;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    alias->attributes[1].metadata = saved_metadata;
+
+    saved_source_attribute = alias->attributes[0].source_attribute;
+    alias->attributes[0].source_attribute = saved_source_attribute + 1u;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    alias->attributes[0].source_attribute = saved_source_attribute;
+
+    saved_definition = alias_target->data.projection_type
+        .associated_type.definition;
+    alias_target->data.projection_type.associated_type.definition =
+        try_output->definition;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    alias_target->data.projection_type.associated_type.definition =
+        saved_definition;
+
+    saved_definition = return_type->data.projection_type
+        .trait_type.definition;
+    return_type->data.projection_type.trait_type.definition =
+        try_trait->definition;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    return_type->data.projection_type.trait_type.definition =
+        saved_definition;
+
+    saved_definition = try_type->parent_definition;
+    try_type->parent_definition = try_trait->definition;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    try_type->parent_definition = saved_definition;
+
+    saved_definition = try_type->data.type_alias_item.bounds[0]
+        .trait_type.definition;
+    try_type->data.type_alias_item.bounds[0].trait_type.definition =
+        residual->definition;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    try_type->data.type_alias_item.bounds[0].trait_type.definition =
+        saved_definition;
+
+    saved_definition = try_type->data.type_alias_item.bounds[0]
+        .equalities[0].associated_type;
+    try_type->data.type_alias_item.bounds[0].equalities[0].associated_type =
+        try_type->definition;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    try_type->data.type_alias_item.bounds[0].equalities[0].associated_type =
+        saved_definition;
+
+    saved_generic_kind = residual_generic->kind;
+    residual_generic->kind = CM_HIR_GENERIC_CONST;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    residual_generic->kind = saved_generic_kind;
+
+    saved_metadata = control_flow->attributes[must_use_index].metadata;
+    control_flow->attributes[must_use_index].metadata =
+        control_flow->attributes[0].metadata;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    control_flow->attributes[must_use_index].metadata = saved_metadata;
+
+    saved_type = body->expected_type;
+    body->expected_type = build->data.function_item.signature
+        .parameters[0].type;
+    ASSERT_TRY_FROM_FN_ATOMIC_FAILURE();
+    body->expected_type = saved_type;
+
+#undef ASSERT_TRY_FROM_FN_ATOMIC_FAILURE
+    assert(cm_hir_declaration_metadata_validate(&metadata)
+        == CM_HIR_DECL_METADATA_OK);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&fixture);
+}
+
 static void test_from_mut_elision_profile_and_determinism(void)
 {
     CaptureFixture fixture;
@@ -8783,6 +9253,8 @@ int main(void)
     test_into_iter_hostile_shapes_are_atomic();
     test_from_fn_callable_closure_and_determinism();
     test_from_fn_hostile_mutations_are_atomic();
+    test_try_from_fn_closure_and_determinism();
+    test_try_from_fn_hostile_mutations_are_atomic();
     test_repeat_clone_closure_and_determinism();
     test_repeat_clone_hostile_mutations_are_atomic();
     test_from_mut_elision_profile_and_determinism();

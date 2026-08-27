@@ -194,7 +194,8 @@ typedef struct CmHirDeclarationTrait {
 #define CM_HIR_DECL_TRAIT_COMPILER_TRIVIAL_FIELD_READS UINT16_C(4)
 
 typedef enum CmHirDeclarationSupertraitModifier {
-    CM_HIR_DECL_SUPERTRAIT_REQUIRED = 1
+    CM_HIR_DECL_SUPERTRAIT_REQUIRED = 1,
+    CM_HIR_DECL_SUPERTRAIT_CONST_IF_CONST = 2
 } CmHirDeclarationSupertraitModifier;
 
 struct CmHirDeclarationSupertrait {
@@ -278,6 +279,7 @@ typedef enum CmHirDeclarationAggregateForm {
 #define CM_HIR_DECL_AGGREGATE_RUSTC_PUB_TRANSPARENT UINT16_C(2)
 #define CM_HIR_DECL_AGGREGATE_HAS_DIAGNOSTIC_ITEM UINT16_C(4)
 #define CM_HIR_DECL_AGGREGATE_RUSTC_INSIGNIFICANT_DTOR UINT16_C(8)
+#define CM_HIR_DECL_AGGREGATE_MUST_USE UINT16_C(16)
 
 typedef struct CmHirDeclarationField {
     CmHirDeclarationString name;
@@ -381,10 +383,12 @@ typedef struct CmHirDeclarationGeneric {
     uint8_t kind;
     uint8_t is_relaxed_sized;
     CmHirDeclarationString name;
-    /* Defaults remain unavailable in this bounded declaration slice. */
+    /* TYPE-only default; encoded in the legacy trailing GPAR zero u32. */
     uint8_t has_default;
     /* CONST-only declared type; TYPE parameters require zero. */
     uint32_t declared_type;
+    /* Required exactly for a TYPE parameter with has_default set. */
+    uint32_t default_type;
 } CmHirDeclarationGeneric;
 
 typedef enum CmHirDeclarationArrayLengthKind {
