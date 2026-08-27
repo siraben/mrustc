@@ -1014,10 +1014,255 @@ static const char *cm_body_format_trait(const char *spec, size_t length)
     return NULL;
 }
 
+/* One `{...}` placeholder, decoded from the format string. */
+typedef struct CmBodyPlaceholder {
+    size_t argument;          /* index into the argument table */
+    const char *constructor;  /* rt::Argument::new_* */
+    uint32_t flags;           /* rt::Placeholder::flags */
+    int width_kind;           /* 0 implied, 1 literal, 2 argument */
+    size_t width;
+    int precision_kind;
+    size_t precision;
+    int needs_placeholder;
+} CmBodyPlaceholder;
+
+#define CM_BODY_FMT_SIGN_PLUS (UINT32_C(1) << 21)
+#define CM_BODY_FMT_SIGN_MINUS (UINT32_C(1) << 22)
+#define CM_BODY_FMT_ALTERNATE (UINT32_C(1) << 23)
+#define CM_BODY_FMT_ZERO_PAD (UINT32_C(1) << 24)
+#define CM_BODY_FMT_DEBUG_LOWER_HEX (UINT32_C(1) << 25)
+#define CM_BODY_FMT_DEBUG_UPPER_HEX (UINT32_C(1) << 26)
+#define CM_BODY_FMT_WIDTH (UINT32_C(1) << 27)
+#define CM_BODY_FMT_PRECISION (UINT32_C(1) << 28)
+#define CM_BODY_FMT_ALIGN_LEFT (UINT32_C(0) << 29)
+#define CM_BODY_FMT_ALIGN_RIGHT (UINT32_C(1) << 29)
+#define CM_BODY_FMT_ALIGN_CENTER (UINT32_C(2) << 29)
+#define CM_BODY_FMT_ALIGN_UNKNOWN (UINT32_C(3) << 29)
+#define CM_BODY_FMT_ALWAYS_SET (UINT32_C(1) << 31)
+
+typedef struct CmBodyFormatState {
+    CmBodyFormatArg args[CM_BODY_FORMAT_ARG_LIMIT];
+    size_t arg_count;
+    size_t positional_count;
+    size_t next_positional;
+    CmBodyPlaceholder placeholders[CM_BODY_FORMAT_ARG_LIMIT];
+    size_t placeholder_count;
+} CmBodyFormatState;
+
+/* Resolve an argument reference (`""`, `0`, `name`) to a table index. */
+static int cm_body_format_argument_index(CmBodyFormatState *format,
+    const char *argument, size_t argument_length, int is_count,
+    size_t *out_index)
+{
+    size_t search;
+    if (argument_length == 0u) {
+        if (format->next_positional >= format->positional_count) return 0;
+        *out_index = format->next_positional;
+        format->next_positional += 1u;
+        return 1;
+    }
+    if (argument[0] >= '0' && argument[0] <= '9') {
+        size_t digit;
+        size_t index = 0u;
+        for (digit = 0u; digit < argument_length; ++digit) {
+            if (argument[digit] < '0' || argument[digit] > '9') return 0;
+            index = index * 10u + (size_t)(argument[digit] - '0');
+        }
+        if (index >= format->positional_count) return 0;
+        *out_index = index;
+        return 1;
+    }
+    for (search = 0u; search < format->arg_count; ++search)
+        if (format->args[search].name != NULL
+            && format->args[search].name_length == argument_length
+            && memcmp(format->args[search].name, argument, argument_length)
+                == 0) {
+            *out_index = search;
+            return 1;
+        }
+    /* Implicit capture of a local. */
+    if (format->arg_count == CM_BODY_FORMAT_ARG_LIMIT) return 0;
+    format->args[format->arg_count].text = argument;
+    format->args[format->arg_count].length = argument_length;
+    format->args[format->arg_count].name = argument;
+    format->args[format->arg_count].name_length = argument_length;
+    *out_index = format->arg_count;
+    format->arg_count += 1u;
+    (void)is_count;
+    return 1;
+}
+
+/* Parse `[[fill]align][sign][#][0][width][.precision][type]`. */
+static int cm_body_format_parse_spec(CmBodyFormatState *format,
+    const char *spec, size_t length, CmBodyPlaceholder *out)
+{
+    size_t index = 0u;
+    uint32_t fill = 32u;
+    uint32_t align = CM_BODY_FMT_ALIGN_UNKNOWN;
+    uint32_t flags = 0u;
+    const char *type_text;
+    size_t type_length;
+    out->flags = 0u;
+    out->width_kind = 0;
+    out->precision_kind = 0;
+    out->width = 0u;
+    out->precision = 0u;
+    out->needs_placeholder = 0;
+    /* fill + align: a single (possibly multi-byte) char before an align. */
+    if (length >= 2u) {
+        size_t char_length = 1u;
+        unsigned char lead = (unsigned char)spec[0];
+        if (lead >= 0xF0u) char_length = 4u;
+        else if (lead >= 0xE0u) char_length = 3u;
+        else if (lead >= 0xC0u) char_length = 2u;
+        if (char_length < length && (spec[char_length] == '<'
+                || spec[char_length] == '>' || spec[char_length] == '^')) {
+            uint32_t code = 0u;
+            size_t byte;
+            if (char_length == 1u) {
+                code = lead;
+            } else {
+                code = lead & (uint32_t)(0xFFu >> (char_length + 1u));
+                for (byte = 1u; byte < char_length; ++byte)
+                    code = (code << 6) | ((unsigned char)spec[byte] & 0x3Fu);
+            }
+            fill = code & 0x1FFFFFu;
+            index = char_length;
+        }
+    }
+    if (index < length && (spec[index] == '<' || spec[index] == '>'
+            || spec[index] == '^')) {
+        align = spec[index] == '<' ? CM_BODY_FMT_ALIGN_LEFT
+            : spec[index] == '>' ? CM_BODY_FMT_ALIGN_RIGHT
+            : CM_BODY_FMT_ALIGN_CENTER;
+        index += 1u;
+        out->needs_placeholder = 1;
+    }
+    if (index < length && spec[index] == '+') {
+        flags |= CM_BODY_FMT_SIGN_PLUS;
+        index += 1u;
+        out->needs_placeholder = 1;
+    } else if (index < length && spec[index] == '-') {
+        flags |= CM_BODY_FMT_SIGN_MINUS;
+        index += 1u;
+        out->needs_placeholder = 1;
+    }
+    if (index < length && spec[index] == '#') {
+        flags |= CM_BODY_FMT_ALTERNATE;
+        index += 1u;
+        out->needs_placeholder = 1;
+    }
+    if (index < length && spec[index] == '0'
+        && !(index + 1u < length && spec[index + 1u] == '$')) {
+        flags |= CM_BODY_FMT_ZERO_PAD;
+        index += 1u;
+        out->needs_placeholder = 1;
+    }
+    /* width: integer | name$ | integer$ (a bare identifier run without
+     * `$` is the type, e.g. `x` in `{:08x}`). */
+    {
+        size_t start = index;
+        size_t run = index;
+        size_t digits = index;
+        while (run < length && cm_body_is_ident_continue(spec[run]))
+            run += 1u;
+        while (digits < length && spec[digits] >= '0' && spec[digits] <= '9')
+            digits += 1u;
+        if (run > start && run < length && spec[run] == '$') {
+            size_t argument;
+            if (!cm_body_format_argument_index(format, spec + start,
+                    run - start, 1, &argument)) return 0;
+            out->width_kind = 2;
+            out->width = argument;
+            index = run + 1u;
+        } else if (digits > start) {
+            size_t digit;
+            size_t value = 0u;
+            for (digit = start; digit < digits; ++digit)
+                value = value * 10u + (size_t)(spec[digit] - '0');
+            out->width_kind = 1;
+            out->width = value;
+            index = digits;
+        }
+        if (out->width_kind != 0) {
+            flags |= CM_BODY_FMT_WIDTH;
+            out->needs_placeholder = 1;
+        }
+    }
+    if (index < length && spec[index] == '.') {
+        size_t start;
+        index += 1u;
+        start = index;
+        if (index < length && spec[index] == '*') {
+            size_t argument;
+            /* `.*` takes the next positional argument as the precision. */
+            if (!cm_body_format_argument_index(format, "", 0u, 1, &argument))
+                return 0;
+            out->precision_kind = 2;
+            out->precision = argument;
+            index += 1u;
+        } else {
+            while (index < length && cm_body_is_ident_continue(spec[index]))
+                index += 1u;
+            if (index == start) return 0;
+            if (index < length && spec[index] == '$') {
+                size_t argument;
+                if (!cm_body_format_argument_index(format, spec + start,
+                        index - start, 1, &argument)) return 0;
+                out->precision_kind = 2;
+                out->precision = argument;
+                index += 1u;
+            } else {
+                size_t digit;
+                size_t value = 0u;
+                for (digit = start; digit < index; ++digit) {
+                    if (spec[digit] < '0' || spec[digit] > '9') return 0;
+                    value = value * 10u + (size_t)(spec[digit] - '0');
+                }
+                out->precision_kind = 1;
+                out->precision = value;
+            }
+        }
+        flags |= CM_BODY_FMT_PRECISION;
+        out->needs_placeholder = 1;
+    }
+    type_text = spec + index;
+    type_length = length - index;
+    if (type_length == 2u && type_text[1] == '?'
+        && (type_text[0] == 'x' || type_text[0] == 'X')) {
+        flags |= type_text[0] == 'x' ? CM_BODY_FMT_DEBUG_LOWER_HEX
+            : CM_BODY_FMT_DEBUG_UPPER_HEX;
+        out->constructor = "new_debug";
+        out->needs_placeholder = 1;
+    } else {
+        out->constructor = cm_body_format_trait(type_text, type_length);
+        if (out->constructor == NULL) return 0;
+    }
+    out->flags = fill | align | flags | CM_BODY_FMT_ALWAYS_SET;
+    return 1;
+}
+
+static void cm_body_append_count(CmStrBuf *text, const char *crate_id,
+    int kind, size_t value)
+{
+    char number[32];
+    int written;
+    cm_str_buf_append(text, crate_id);
+    cm_str_buf_append(text, "::fmt::rt::Count::");
+    if (kind == 0) {
+        cm_str_buf_append(text, "Implied");
+        return;
+    }
+    written = snprintf(number, sizeof(number), kind == 1 ? "Is(%luu16)"
+        : "Param(%luusize)", (unsigned long)value);
+    if (written > 0 && (size_t)written < sizeof(number))
+        cm_str_buf_append(text, number);
+}
+
 /*
- * `format_args!("...", args...)`.  Supports positional, named, implicit
- * captured arguments and the trait selectors; width/precision/fill/flags
- * (which need `rt::Placeholder`) are counted as unsupported for now.
+ * `format_args!("...", args...)`.  Positional, named, and implicitly
+ * captured arguments; trait selectors; and width/precision/fill/align/sign
+ * specs through `Arguments::new_v1_formatted` with `rt::Placeholder`.
  */
 static int cm_body_builtin_format_args(CmBodyExpandState *state,
     CmAstExprId id, const char *name, const char *arguments, size_t length,
@@ -1026,18 +1271,12 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     size_t starts[CM_BODY_FORMAT_ARG_LIMIT + 1u];
     size_t lengths[CM_BODY_FORMAT_ARG_LIMIT + 1u];
     size_t count;
-    CmBodyFormatArg args[CM_BODY_FORMAT_ARG_LIMIT];
-    size_t arg_count = 0u;
-    size_t positional_count = 0u;
-    const char *format;
+    CmBodyFormatState *format;
+    const char *format_text;
     size_t format_length;
     size_t index;
-    size_t next_positional = 0u;
-    size_t placeholder_count = 0u;
-    /* argument index per placeholder and trait constructor per placeholder */
-    size_t placeholder_arg[CM_BODY_FORMAT_ARG_LIMIT];
-    const char *placeholder_trait[CM_BODY_FORMAT_ARG_LIMIT];
-    int trailing_piece = 0;
+    int any_placeholder_needed = 0;
+    int ok = 0;
 
     count = cm_body_split_commas(arguments, length, starts, lengths,
         CM_BODY_FORMAT_ARG_LIMIT + 1u);
@@ -1051,59 +1290,64 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
             "format string is not a literal expression");
         return 0;
     }
+    format = (CmBodyFormatState *)cm_alloc_zeroed(1u, sizeof(*format));
     /* scratch holds `"..."`; keep it alive while pieces are built. */
-    format = state->scratch.data + 1;
+    format_text = state->scratch.data + 1;
     format_length = state->scratch.len - 2u;
     for (index = 1u; index < count; ++index) {
         const char *text = arguments + starts[index];
         size_t text_length = lengths[index];
         size_t probe = 0u;
-        args[arg_count].text = text;
-        args[arg_count].length = text_length;
-        args[arg_count].name = NULL;
-        args[arg_count].name_length = 0u;
+        CmBodyFormatArg *arg = &format->args[format->arg_count];
+        arg->text = text;
+        arg->length = text_length;
+        arg->name = NULL;
+        arg->name_length = 0u;
         /* `name = expr` (but not `==`). */
         if (text_length != 0u && cm_body_is_ident_start(text[0])) {
-            while (probe < text_length && cm_body_is_ident_continue(text[probe]))
-                probe += 1u;
+            while (probe < text_length
+                && cm_body_is_ident_continue(text[probe])) probe += 1u;
             {
                 size_t after = probe;
                 while (after < text_length && cm_body_is_space(text[after]))
                     after += 1u;
                 if (after < text_length && text[after] == '='
-                    && !(after + 1u < text_length && text[after + 1u] == '=')) {
+                    && !(after + 1u < text_length
+                        && text[after + 1u] == '=')) {
                     const char *value = text + after + 1u;
                     size_t value_length = text_length - after - 1u;
                     cm_body_trim(&value, &value_length);
-                    args[arg_count].name = text;
-                    args[arg_count].name_length = probe;
-                    args[arg_count].text = value;
-                    args[arg_count].length = value_length;
+                    arg->name = text;
+                    arg->name_length = probe;
+                    arg->text = value;
+                    arg->length = value_length;
                 }
             }
         }
-        if (args[arg_count].name == NULL) positional_count += 1u;
-        arg_count += 1u;
+        if (arg->name == NULL) format->positional_count += 1u;
+        format->arg_count += 1u;
     }
 
     /* Parse the format string into pieces and placeholders. */
     cm_str_buf_clear(&state->pieces);
     cm_str_buf_append(&state->pieces, "&[\"");
     for (index = 0u; index < format_length; ++index) {
-        char c = format[index];
-        if (c == '{' && index + 1u < format_length && format[index + 1u] == '{') {
+        char c = format_text[index];
+        if (c == '{' && index + 1u < format_length
+            && format_text[index + 1u] == '{') {
             cm_str_buf_push(&state->pieces, '{');
             index += 1u;
             continue;
         }
-        if (c == '}' && index + 1u < format_length && format[index + 1u] == '}') {
+        if (c == '}' && index + 1u < format_length
+            && format_text[index + 1u] == '}') {
             cm_str_buf_push(&state->pieces, '}');
             index += 1u;
             continue;
         }
         if (c == '\\' && index + 1u < format_length) {
             cm_str_buf_push(&state->pieces, c);
-            cm_str_buf_push(&state->pieces, format[index + 1u]);
+            cm_str_buf_push(&state->pieces, format_text[index + 1u]);
             index += 1u;
             continue;
         }
@@ -1118,14 +1362,15 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
             size_t argument_length;
             const char *spec = NULL;
             size_t spec_length = 0u;
-            const char *trait;
-            size_t arg_index;
-            while (close < format_length && format[close] != '}') close += 1u;
+            CmBodyPlaceholder *placeholder;
+            while (close < format_length && format_text[close] != '}')
+                close += 1u;
             if (close >= format_length) {
-                cm_body_fail(state, name, span, "unterminated format placeholder");
-                return 0;
+                cm_body_fail(state, name, span,
+                    "unterminated format placeholder");
+                goto cleanup;
             }
-            argument = format + index + 1u;
+            argument = format_text + index + 1u;
             argument_length = close - index - 1u;
             for (colon = 0u; colon < argument_length; ++colon)
                 if (argument[colon] == ':') break;
@@ -1135,88 +1380,51 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
                 argument_length = colon;
             }
             cm_body_trim(&argument, &argument_length);
-            trait = cm_body_format_trait(spec, spec_length);
-            if (trait == NULL) {
-                /* Width, precision, fill, alignment, sign, `#`, `0`. */
-                state->result.remaining_builtin += 1u;
-                return 0;
-            }
-            if (placeholder_count == CM_BODY_FORMAT_ARG_LIMIT) {
+            if (format->placeholder_count == CM_BODY_FORMAT_ARG_LIMIT) {
                 cm_body_fail(state, name, span, "too many placeholders");
-                return 0;
+                goto cleanup;
             }
-            if (argument_length == 0u) {
-                arg_index = next_positional;
-                next_positional += 1u;
-                if (arg_index >= positional_count) {
-                    cm_body_fail(state, name, span,
-                        "format placeholder has no positional argument");
-                    return 0;
-                }
-            } else if (argument[0] >= '0' && argument[0] <= '9') {
-                size_t digit;
-                arg_index = 0u;
-                for (digit = 0u; digit < argument_length; ++digit)
-                    arg_index = arg_index * 10u
-                        + (size_t)(argument[digit] - '0');
-                if (arg_index >= positional_count) {
-                    cm_body_fail(state, name, span,
-                        "format placeholder index out of range");
-                    return 0;
-                }
-            } else {
-                size_t search;
-                arg_index = arg_count;
-                for (search = 0u; search < arg_count; ++search)
-                    if (args[search].name != NULL
-                        && args[search].name_length == argument_length
-                        && memcmp(args[search].name, argument,
-                            argument_length) == 0) {
-                        arg_index = search;
-                        break;
-                    }
-                if (arg_index == arg_count) {
-                    /* Implicit capture of a local. */
-                    if (arg_count == CM_BODY_FORMAT_ARG_LIMIT) {
-                        cm_body_fail(state, name, span, "too many arguments");
-                        return 0;
-                    }
-                    args[arg_count].text = argument;
-                    args[arg_count].length = argument_length;
-                    args[arg_count].name = argument;
-                    args[arg_count].name_length = argument_length;
-                    arg_count += 1u;
-                }
+            placeholder = &format->placeholders[format->placeholder_count];
+            memset(placeholder, 0, sizeof(*placeholder));
+            if (!cm_body_format_argument_index(format, argument,
+                    argument_length, 0, &placeholder->argument)) {
+                cm_body_fail(state, name, span,
+                    "format placeholder argument is unavailable");
+                goto cleanup;
             }
-            placeholder_arg[placeholder_count] = arg_index;
-            placeholder_trait[placeholder_count] = trait;
-            placeholder_count += 1u;
+            if (!cm_body_format_parse_spec(format, spec, spec_length,
+                    placeholder)) {
+                cm_body_fail(state, name, span,
+                    "unsupported format specification");
+                goto cleanup;
+            }
+            if (placeholder->needs_placeholder) any_placeholder_needed = 1;
+            format->placeholder_count += 1u;
             cm_str_buf_append(&state->pieces, "\", \"");
             index = close;
         }
     }
-    /* Close the last piece; drop it when empty and placeholders exist. */
     {
         /* An empty trailing piece is dropped: `"a ", "` becomes `"a "`. */
         size_t tail = state->pieces.len;
-        trailing_piece = 1;
-        if (placeholder_count != 0u && tail >= 4u
+        int trailing = 1;
+        if (format->placeholder_count != 0u && tail >= 4u
             && memcmp(state->pieces.data + tail - 4u, "\", \"", 4u) == 0) {
             state->pieces.len = tail - 3u;
-            trailing_piece = 0;
+            trailing = 0;
         }
-        cm_str_buf_append(&state->pieces, trailing_piece ? "\"]" : "]");
+        cm_str_buf_append(&state->pieces, trailing ? "\"]" : "]");
     }
 
     cm_str_buf_clear(&state->text);
-    if (placeholder_count == 0u) {
-        if (arg_count != 0u) {
+    if (format->placeholder_count == 0u) {
+        if (format->arg_count != 0u) {
             /* Arguments without placeholders: evaluate them for effect. */
             cm_str_buf_append(&state->text, "{ ");
-            for (index = 0u; index < arg_count; ++index) {
+            for (index = 0u; index < format->arg_count; ++index) {
                 cm_str_buf_append(&state->text, "let _ = &(");
-                cm_str_buf_append_n(&state->text, args[index].text,
-                    args[index].length);
+                cm_str_buf_append_n(&state->text, format->args[index].text,
+                    format->args[index].length);
                 cm_str_buf_append(&state->text, "); ");
             }
         }
@@ -1225,37 +1433,102 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
         cm_str_buf_append_n(&state->text, state->pieces.data,
             state->pieces.len);
         cm_str_buf_append(&state->text, ")");
-        if (arg_count != 0u) cm_str_buf_append(&state->text, " }");
-        return cm_body_finish_generated(state, id, name, span);
+        if (format->arg_count != 0u) cm_str_buf_append(&state->text, " }");
+        ok = cm_body_finish_generated(state, id, name, span);
+        goto cleanup;
     }
-    /* match (&a, &b, ...) { args => Arguments::new_v1(pieces, &[...]) } */
+    /* match (&a, &b, ...) { args => Arguments::new_v1[_formatted](...) } */
     cm_str_buf_append(&state->text, "match (");
-    for (index = 0u; index < arg_count; ++index) {
+    for (index = 0u; index < format->arg_count; ++index) {
         cm_str_buf_append(&state->text, "&(");
-        cm_str_buf_append_n(&state->text, args[index].text,
-            args[index].length);
+        cm_str_buf_append_n(&state->text, format->args[index].text,
+            format->args[index].length);
         cm_str_buf_append(&state->text, "), ");
     }
     cm_str_buf_append(&state->text, ") { args => ");
+    if (any_placeholder_needed) cm_str_buf_append(&state->text, "unsafe { ");
     cm_str_buf_append(&state->text, state->options->crate_identifier);
-    cm_str_buf_append(&state->text, "::fmt::Arguments::new_v1(");
+    cm_str_buf_append(&state->text, any_placeholder_needed
+        ? "::fmt::Arguments::new_v1_formatted("
+        : "::fmt::Arguments::new_v1(");
     cm_str_buf_append_n(&state->text, state->pieces.data, state->pieces.len);
     cm_str_buf_append(&state->text, ", &[");
-    for (index = 0u; index < placeholder_count; ++index) {
+    /* The argument table: one rt::Argument per placeholder, followed by
+     * count arguments (`from_usize`) referenced by width/precision. */
+    for (index = 0u; index < format->placeholder_count; ++index) {
         char number[32];
         int written;
         cm_str_buf_append(&state->text, state->options->crate_identifier);
         cm_str_buf_append(&state->text, "::fmt::rt::Argument::");
-        cm_str_buf_append(&state->text, placeholder_trait[index]);
-        written = snprintf(number, sizeof(number), "(args.%lu)",
-            (unsigned long)placeholder_arg[index]);
-        if (written <= 0 || (size_t)written >= sizeof(number)) return 0;
+        cm_str_buf_append(&state->text,
+            format->placeholders[index].constructor);
+        written = snprintf(number, sizeof(number), "(args.%lu), ",
+            (unsigned long)format->placeholders[index].argument);
+        if (written <= 0 || (size_t)written >= sizeof(number)) goto cleanup;
         cm_str_buf_append(&state->text, number);
-        if (index + 1u < placeholder_count)
-            cm_str_buf_append(&state->text, ", ");
     }
-    cm_str_buf_append(&state->text, "]) }");
-    return cm_body_finish_generated(state, id, name, span);
+    if (any_placeholder_needed) {
+        /* Count arguments get slots after the placeholders. */
+        size_t slot = format->placeholder_count;
+        for (index = 0u; index < format->placeholder_count; ++index) {
+            CmBodyPlaceholder *placeholder = &format->placeholders[index];
+            int which;
+            for (which = 0; which < 2; ++which) {
+                int kind = which == 0 ? placeholder->width_kind
+                    : placeholder->precision_kind;
+                size_t argument = which == 0 ? placeholder->width
+                    : placeholder->precision;
+                char number[48];
+                int written;
+                if (kind != 2) continue;
+                written = snprintf(number, sizeof(number),
+                    "::fmt::rt::Argument::from_usize(args.%lu), ",
+                    (unsigned long)argument);
+                if (written <= 0 || (size_t)written >= sizeof(number))
+                    goto cleanup;
+                cm_str_buf_append(&state->text,
+                    state->options->crate_identifier);
+                cm_str_buf_append(&state->text, number);
+                if (which == 0) placeholder->width = slot;
+                else placeholder->precision = slot;
+                slot += 1u;
+            }
+        }
+    }
+    cm_str_buf_append(&state->text, "]");
+    if (any_placeholder_needed) {
+        cm_str_buf_append(&state->text, ", &[");
+        for (index = 0u; index < format->placeholder_count; ++index) {
+            const CmBodyPlaceholder *placeholder =
+                &format->placeholders[index];
+            char number[128];
+            int written;
+            cm_str_buf_append(&state->text,
+                state->options->crate_identifier);
+            written = snprintf(number, sizeof(number),
+                "::fmt::rt::Placeholder { position: %luusize, flags: %luu32, "
+                "precision: ", (unsigned long)index,
+                (unsigned long)placeholder->flags);
+            if (written <= 0 || (size_t)written >= sizeof(number))
+                goto cleanup;
+            cm_str_buf_append(&state->text, number);
+            cm_body_append_count(&state->text,
+                state->options->crate_identifier,
+                placeholder->precision_kind, placeholder->precision);
+            cm_str_buf_append(&state->text, ", width: ");
+            cm_body_append_count(&state->text,
+                state->options->crate_identifier,
+                placeholder->width_kind, placeholder->width);
+            cm_str_buf_append(&state->text, " }, ");
+        }
+        cm_str_buf_append(&state->text, "]) } }");
+    } else {
+        cm_str_buf_append(&state->text, ") }");
+    }
+    ok = cm_body_finish_generated(state, id, name, span);
+cleanup:
+    cm_free(format);
+    return ok;
 }
 
 /*

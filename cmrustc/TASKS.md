@@ -2379,7 +2379,7 @@ M9-04..M9-06 and will be closed when those land.
 
 | ID | State | Task | Acceptance |
 |---|---|---|---|
-| M9-01 | ACTIVE | Expression-position macro expansion for core bodies | `probe_core_hir --body-census` reports zero bodies with unexpanded macros other than deliberately retained `asm!`/`offset_of!` |
+| M9-01 | DONE | Expression-position macro expansion for core bodies | `probe_core_hir --body-census` at `da886a58`+: 0 failed, 0 unsupported; only 56 `asm!` and 3 `offset_of!` retained for HIR lowering |
 
 M9-01 baseline (2026-08-26, `probe_core_hir --body-census` on pinned core):
 22,524 bodies, all with an AST; 19,298 macro-free and 3,226 containing 4,510
@@ -2413,7 +2413,13 @@ skipped; and the `macro_rules` matcher rejects `expr` candidates containing a
 top-level `,`/`;`/`=>` and requires them to parse, which turned SipHash's
 `compress!` from a step-limit failure into a 0.2 s pass (the whole-core probe
 is back to about 13 minutes, of which expansion is under a second).
-| M9-02 | TODO | Untyped HIR lowering of every core body (all expression and pattern forms) | probe reports zero unlowered core bodies |
+The final slice adds width/precision/fill/alignment/sign/`#`/`0` and
+`{:x?}` specs through `Arguments::new_v1_formatted` with `rt::Placeholder`
+records and `rt::Argument::from_usize` count arguments, closing M9-01:
+14,889 invocations, 8,329 rules and 6,501 builtins expanded, zero failures,
+59 retained (`asm!` 56, `offset_of!` 3) that M9-02 lowers to dedicated
+HIR nodes.
+| M9-02 | ACTIVE | Untyped HIR lowering of every core body (all expression and pattern forms) | probe reports zero unlowered core bodies |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | TODO | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |
 | M9-05 | TODO | HIR-to-MIR for all bodies | all typed bodies produce MIR |

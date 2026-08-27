@@ -203,6 +203,9 @@ static const char positive_source[] =
     "    let _s: &str = stringify!(z + 1);\n"
     "    assert!(z < 9, concat!(\"limit \", stringify!(z), \" {}\"), z);\n"
     "    let _c: &str = concat!(\"a\", 1, stringify!(b + c), 'x');\n"
+    "    let width = 6usize;\n"
+    "    let _f = format_args!(\"{:>5} {:08x} {:.3} {:#?} {:x?} {0:width$} "
+        "{1:>1$} {0:+} {0}\", z, y, 1.5, y, z, width = width);\n"
     "    let _p = cfg_select! {\n"
     "        target_os = \"windows\" => { 1u32 }\n"
     "        all(unix, target_os = \"linux\") => { 2u32 }\n"
@@ -258,7 +261,7 @@ static void test_positive_chain(void)
     /* twice x4, local, panic_2021, pre x2, shared x2, ub::twice */
     check(result.expanded_rules >= 11u, "macro_rules expansions missing");
     /* assert x3, cfg, panic, stringify, concat, const_format_args x3 */
-    check(result.expanded_builtin >= 12u, "builtin expansions missing");
+    check(result.expanded_builtin >= 13u, "builtin expansions missing");
     check(cm_module_graph_get_root(&fixture.graph, &root)
         && cm_module_graph_borrow_ast(&fixture.graph, root, &ast)
         && ast != NULL, "root AST unavailable");
@@ -278,7 +281,7 @@ static void test_positive_chain(void)
              * through the generated match/new_v1 chain. */
             check(count_kind(ast, body, CM_AST_EXPR_BINARY) >= 4u,
                 "expanded arithmetic missing");
-            check(count_kind(ast, body, CM_AST_EXPR_MATCH) >= 1u,
+            check(count_kind(ast, body, CM_AST_EXPR_MATCH) >= 2u,
                 "format_args match missing");
             check(count_kind(ast, body, CM_AST_EXPR_IF) >= 3u,
                 "assert conditionals missing");
