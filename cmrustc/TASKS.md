@@ -2621,6 +2621,20 @@ Whole core: 497 -> 444 -> 415 -> 361 -> 355 -> **327 error nodes**,
 69 (30 = Simd integer-op family); body vs signature 56; assignment 19;
 branch 17; assoc-value 16; unresolved value path 14; field 7.
 
+M9-04 fourteenth pass (2026-08-27 late, runs 43-49): generic associated
+types normalize by freshening the associated item's own parameters
+(`type Cast<T2> = Simd<T2, N>` — LENIENT(gat), GAT arguments not yet
+threaded); method lookup gained a four-pass order — inherent, specific
+trait impls with the item, blanket (bare-parameter-self) trait impls,
+then declaration fallbacks — so `impl<T: Clone> SpecArrayClone for T`
+no longer captures every `clone` and childless marker impls no longer
+shadow real ones (the `searcher_methods!` wrapper family); method-call
+turbofish arguments bind the method's own type generics positionally.
+Whole core: 310 (GAT alone) -> 302 error nodes, 21,104/22,524 typed.
+Remaining: call-arg 85; body vs signature 69; method not found 31;
+branch 17; assoc-value 16; assignment 16; unresolved value path 14
+(cfg'd arch helpers); field 10.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

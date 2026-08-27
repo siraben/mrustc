@@ -656,21 +656,40 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     self_type = cm_ty_resolve(arena, self_type);
     self = cm_ty_get(arena, self_type);
     if (self == NULL || self->kind == CM_TY_INFER) return 0;
-    for (pass = 0; pass < 2; ++pass) {
+    /* Pass 0: inherent impls.  Pass 1: specific trait impls that
+     * provide the item themselves.  Pass 2: blanket (bare-parameter
+     * self) trait impls with the item — `impl<T: Clone>
+     * SpecArrayClone for T` must not shadow a type's own impl.
+     * Pass 3: declaration fallbacks. */
+    for (pass = 0; pass < 4; ++pass) {
         if ((pass == 0 && (passes & 1u) == 0u)
-            || (pass == 1 && (passes & 2u) == 0u)) continue;
+            || (pass != 0 && (passes & 2u) == 0u)) continue;
         for (index = 0u; index < env->state->impl_count; ++index) {
             const CmTyckImpl *impl = &env->state->impls[index];
             const CmHirItem *child;
             CmHirDefId owner_trait;
             if ((pass == 0) != (impl->has_trait == 0)) continue;
+            if (pass == 1 || pass == 2) {
+                const CmTy *pattern = cm_ty_get(arena, cm_ty_resolve(arena,
+                    impl->self_pattern));
+                int blanket;
+                while (pattern != NULL && (pattern->kind == CM_TY_REF
+                        || pattern->kind == CM_TY_PTR))
+                    pattern = cm_ty_get(arena, cm_ty_resolve(arena,
+                        pattern->children[0]));
+                blanket = pattern != NULL
+                    && (pattern->kind == CM_TY_PARAM
+                        || pattern->kind == CM_TY_SELF);
+                if (blanket != (pass == 2)) continue;
+            }
             if (!cm_tyck_matches(env, impl->self_pattern, self_type)) continue;
             if (impl->has_trait) {
-                /* The impl must provide or inherit the named item. */
                 child = cm_tyck_child_named(env->state, impl->item->definition,
                     name, (CmHirItemKind)-1);
                 if (child == NULL) {
-                    const CmHirItem *declared = cm_tyck_trait_method(env,
+                    const CmHirItem *declared;
+                    if (pass == 1 || pass == 2) continue;
+                    declared = cm_tyck_trait_method(env,
                         impl->trait_def, name, 0u, &owner_trait);
                     if (declared == NULL) continue;
                     /* Default method: instantiate the trait declaration
@@ -689,6 +708,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                     out->via_trait_declaration = 1;
                     return 1;
                 }
+                if (pass == 3) continue;
             } else {
                 child = cm_tyck_child_named(env->state, impl->item->definition,
                     name, (CmHirItemKind)-1);
@@ -1108,6 +1128,11 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                 }
                 cm_tyck_instance_init(&instance, self_type);
                 cm_tyck_instance_fresh(env, &instance, impl->item);
+                /* LENIENT(gat): a generic associated type's own
+                 * parameters (`type Cast<T2> = Simd<T2, N>`) become
+                 * fresh inference variables; the projection's GAT
+                 * arguments are not yet threaded through to bind them. */
+                cm_tyck_instance_fresh(env, &instance, definition);
                 (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
                     impl->self_pattern, cm_tyck_subst_of(&instance)));
                 return cm_tyck_normalize(env, cm_ty_subst(arena,
@@ -2446,19 +2471,71 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                     if (cm_tyck_debug_fn_matches(env)) {
                         const CmTy *cd = cm_ty_get(arena,
                             cm_ty_resolve(arena, candidate));
+                        const CmInternedString *mname = cm_interner_get(
+                            &env->state->ubodies->strings,
+                            expr->data.method_call.name);
                         int child_kind = -1;
+                        long child_param = -1;
                         if (cd != NULL && cd->count != 0u) {
                             const CmTy *cc = cm_ty_get(arena,
                                 cm_ty_resolve(arena, cd->children[0]));
-                            if (cc != NULL) child_kind = (int)cc->kind;
+                            if (cc != NULL) {
+                                child_kind = (int)cc->kind;
+                                if (cc->kind == CM_TY_PARAM)
+                                    child_param = (long)cc->a;
+                            }
                         }
-                        fprintf(stderr, "TYCK trace phase=%u step=%u"
-                            " variant=%u looked=%d kind=%d child0=%d ",
+                        const CmInternedString *pname = looked
+                                && found.parent != NULL
+                            ? cm_interner_get(&env->state->hir->strings,
+                                found.parent->name)
+                            : NULL;
+                        fprintf(stderr, "TYCK trace m=%.*s phase=%u"
+                            " step=%u variant=%u looked=%d kind=%d"
+                            " child0=%d child0a=%ld gstart=%ld"
+                            " gcount=%ld via=%d parent=%.*s ",
+                            mname == NULL ? 1 : (int)mname->len,
+                            mname == NULL ? "?"
+                                : (const char *)mname->bytes,
                             phase, step, variant, looked,
                             looked ? (int)found.item->kind : -1,
-                            child_kind);
+                            child_kind, child_param,
+                            looked ? (long)found.item
+                                ->generic_parameter_start : -1,
+                            looked ? (long)found.item
+                                ->generic_parameter_count : -1,
+                            looked ? found.via_trait_declaration : -1,
+                            pname == NULL ? 1 : (int)pname->len,
+                            pname == NULL ? "?"
+                                : (const char *)pname->bytes);
                         cm_tyck_debug_pair(env, "cand", candidate,
                             candidate);
+                        if (looked && found.parent != NULL
+                            && found.parent->kind == CM_HIR_ITEM_IMPL) {
+                            const CmHirItem *trait_item = cm_tyck_item(
+                                env->state, found.parent
+                                    ->data.impl_item.trait_type.definition);
+                            const CmInternedString *tname = trait_item
+                                    == NULL ? NULL
+                                : cm_interner_get(&env->state->hir->strings,
+                                    trait_item->name);
+                            const CmInternedString *iname =
+                                cm_interner_get(&env->state->hir->strings,
+                                    found.item->name);
+                            fprintf(stderr, "TYCK chosen trait=%.*s"
+                                " item=%.*s ",
+                                tname == NULL ? 1 : (int)tname->len,
+                                tname == NULL ? "?"
+                                    : (const char *)tname->bytes,
+                                iname == NULL ? 1 : (int)iname->len,
+                                iname == NULL ? "?"
+                                    : (const char *)iname->bytes);
+                            cm_tyck_debug_pair(env, "impl-self",
+                                cm_ty_from_hir(arena, env->state->hir,
+                                    found.parent
+                                        ->data.impl_item.self_type),
+                                candidate);
+                        }
                     }
                     if (!looked
                         || found.item->kind != CM_HIR_ITEM_FUNCTION) {
@@ -2527,6 +2604,56 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         }
         cm_tyck_error(env, "method not found");
         return arena->error;
+    }
+    /* `x.cast::<u16>()`: bind the method's own generics (the last
+     * instance entries) to the explicit turbofish arguments. */
+    if (expr->data.method_call.generic_arguments.path != CM_AST_PATH_NONE
+        && expr->data.method_call.generic_arguments.source == env->source) {
+        const CmAstPath *turbofish = cm_ast_get_path(env->ast,
+            expr->data.method_call.generic_arguments.path);
+        if (turbofish != NULL && turbofish->segment_count != 0u) {
+            const CmAstPathSegment *segment =
+                &turbofish->segments[turbofish->segment_count - 1u];
+            uint32_t own = found.item->generic_parameter_count;
+            uint32_t base = found.instance.count >= own
+                ? found.instance.count - own : 0u;
+            uint32_t argument;
+            uint32_t slot = base;
+            uint32_t explicit_types = 0u;
+            uint32_t own_types = 0u;
+            for (argument = 0u; argument < segment->argument_count;
+                    ++argument)
+                if (segment->arguments[argument].kind
+                        == CM_AST_GENERIC_TYPE) explicit_types += 1u;
+            for (argument = 0u; argument < own; ++argument) {
+                const CmHirGenericParam *parameter =
+                    cm_hir_get_generic_param(env->state->hir,
+                        found.item->generic_parameter_start + argument);
+                if (parameter != NULL
+                    && parameter->kind == CM_HIR_GENERIC_TYPE)
+                    own_types += 1u;
+            }
+            /* Bind positionally only when the counts agree. */
+            for (argument = 0u; explicit_types == own_types
+                    && argument < segment->argument_count
+                    && slot < found.instance.count; ++argument) {
+                const CmAstGenericArg *garg =
+                    &segment->arguments[argument];
+                if (garg->kind != CM_AST_GENERIC_TYPE) continue;
+                while (slot < found.instance.count) {
+                    const CmHirGenericParam *parameter =
+                        cm_hir_get_generic_param(env->state->hir,
+                            found.instance.parameters[slot]);
+                    if (parameter != NULL
+                        && parameter->kind == CM_HIR_GENERIC_TYPE) break;
+                    slot += 1u;
+                }
+                if (slot >= found.instance.count) break;
+                (void)cm_ty_unify(arena, found.instance.types[slot],
+                    cm_tyck_ast_type(env, garg->type));
+                slot += 1u;
+            }
+        }
     }
     count = cm_tyck_signature(env, found.item, cm_tyck_subst_of(&found.instance), params,
         CM_TYCK_MAX_ARGS, &ret);
@@ -2648,8 +2775,11 @@ static CmTyId cm_tyck_struct_literal(CmTyckEnv *env, const CmUExpr *expr)
         {
             CmTyId actual = cm_tyck_expr(env, field->value, expected);
             if (expected != CM_TY_NONE
-                && !cm_tyck_coerce(env, actual, expected))
+                && !cm_tyck_coerce(env, actual, expected)) {
+                cm_tyck_debug_pair(env, "struct-field", actual, expected);
+                cm_tyck_debug_span(env, expr);
                 cm_tyck_error(env, "struct field type mismatch");
+            }
         }
     }
     if (expr->data.struct_expr.base != CM_U_EXPR_NONE)
@@ -2932,6 +3062,16 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             }
             result = cm_tyck_field_type(env, candidate,
                 expr->data.field.name, &found);
+            if (cm_tyck_debug_fn_matches(env)) {
+                const CmInternedString *fname = cm_interner_get(
+                    &env->state->ubodies->strings,
+                    expr->data.field.name);
+                fprintf(stderr, "TYCK ftrace f=%.*s step=%u found=%d ",
+                    fname == NULL ? 1 : (int)fname->len,
+                    fname == NULL ? "?" : (const char *)fname->bytes,
+                    step, found);
+                cm_tyck_debug_pair(env, "field", candidate, result);
+            }
             if (!found && ct->kind == CM_TY_ADT) {
                 /* `ManuallyDrop<Waker>`-style wrappers: user Deref. */
                 CmTyId derefed = cm_tyck_user_deref(env, candidate);
