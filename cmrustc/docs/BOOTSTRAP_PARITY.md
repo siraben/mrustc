@@ -259,6 +259,16 @@ trait declaration profile; its attributes are `#[doc(hidden)]`,
 `#[unstable(issue = "none", feature = "std_internals")]`, and
 `#[rustc_unsafe_specialization_marker]`, and the next trait slice must
 authenticate that exact declaration or report the precise rejected fact.
+Commit `58b4090e` retains that marker as a closed compiler flag on exactly that
+trait shape. The clean pinned Rust 1.90 probe at `58b4090e` again reports zero graph, import,
+and HIR errors, 38,176 HIR items, and the exact 451-module/1,658-type/20,747-value
+library census. It advances the v3.0 frontier to `core/src/asserting.rs:105`:
+`pub trait Printable: Copy + Debug {}` (`def=1:19374`, source item `108:21`,
+rejected item `117`) at `stage=items`/`item-source-invalid`. This is the first
+plain public trait with ordinary supertraits; admitting it requires the
+reachable `Copy` (`Clone`/`Sized` family) and `fmt::Debug` (`Formatter`,
+`fmt::Result`) declaration closures rather than another single-trait
+attribute profile.
 
 There is still no compiler-built `core.rlib`, `alloc`, `std`, `rustc`, or
 `cargo`, and there is no C `hcargo`.  The implemented `--emit-cmrlib` and
