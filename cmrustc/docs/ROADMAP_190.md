@@ -48,10 +48,11 @@ whole-`core` count printed by `probe_core_hir`:
    `include_str!`, `concat!`, `cfg!`, `line!`...). **Done 2026-08-27:**
    the pass expands every core invocation except the 56 `asm!` and 3
    `offset_of!` deliberately retained for HIR lowering.
-2. **M9-02 untyped HIR bodies.** Extend `CmHirExprKind`/patterns to cover
-   every AST form and lower every core body with `type = NONE`; frontier
-   metric is `bodies_unlowered`. Path resolution inside bodies uses the
-   existing resolver; locals get indices; closures become HIR closures.
+2. **M9-02 untyped HIR bodies.** **Done 2026-08-27:** a separate lenient
+   `ubody` IR (`include/cm/hir/ubody.h`) rather than widening the typed
+   `CmHirExpr`; every core body lowers (22,524, 321,921 expressions) with
+   paths resolved as far as name resolution allows and types kept as AST
+   references for typeck.
 3. **M9-03 whole-context HIR snapshot and multi-crate lowering.** Emit
    `core` as one snapshot; lower `alloc`, then `std`, against it with
    `extern crate`/`$crate` paths resolving into the loaded context.

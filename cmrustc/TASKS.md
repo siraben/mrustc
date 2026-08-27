@@ -2419,9 +2419,20 @@ records and `rt::Argument::from_usize` count arguments, closing M9-01:
 14,889 invocations, 8,329 rules and 6,501 builtins expanded, zero failures,
 59 retained (`asm!` 56, `offset_of!` 3) that M9-02 lowers to dedicated
 HIR nodes.
-| M9-02 | ACTIVE | Untyped HIR lowering of every core body (all expression and pattern forms) | probe reports zero unlowered core bodies |
+
+M9-02 (2026-08-27, `bd0f4917`+): `src/hir/ubody.c` lowers every core body
+into the untyped `ubody` IR — 22,524/22,524 bodies, 321,921 expressions,
+743 nested item statements recorded, 59 retained `asm!`/`offset_of!`
+nodes, 0 failures. Path resolution inside bodies covers locals, items,
+enum variants (including bare identifier patterns), `Self`, generic
+parameters, primitive prefixes, type + associated tails, the implicit
+`crate::prelude::v1`, and body-local items; 2,257 paths remain unresolved,
+dominated by `core::arch` SIMD type names (`i32x4::new`, ...) reached through
+glob imports of macro-generated items, which typeck or the resolver must
+still cover. Nested items are not yet lowered as HIR items.
+| M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
-| M9-04 | TODO | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |
+| M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |
 | M9-05 | TODO | HIR-to-MIR for all bodies | all typed bodies produce MIR |
 | M9-06 | TODO | C emission and link for core/alloc/std | `hello` links and runs under TinyCC and GCC |
 
