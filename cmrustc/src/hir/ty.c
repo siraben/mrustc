@@ -301,7 +301,7 @@ static CmTyId cm_ty_resolve_deep_at(CmTyArena *arena, CmTyId id,
     ty = cm_ty_get(arena, id);
     if (ty == NULL || ty->count == 0u || ty->count > 64u) return id;
     copy = *ty;
-    for (index = 0u; index < ty->count; ++index) {
+    for (index = 0u; index < copy.count; ++index) {
         children[index] = cm_ty_resolve_deep_at(arena,
             cm_ty_get(arena, id)->children[index], depth + 1u);
         if (children[index] != cm_ty_get(arena, id)->children[index])
@@ -326,9 +326,13 @@ static int cm_ty_has_infer_at(CmTyArena *arena, CmTyId id, unsigned int depth)
     ty = cm_ty_get(arena, id);
     if (ty == NULL) return 0;
     if (ty->kind == CM_TY_INFER) return 1;
-    for (index = 0u; index < ty->count; ++index)
-        if (cm_ty_has_infer_at(arena, cm_ty_get(arena, id)->children[index],
-                depth + 1u)) return 1;
+    {
+        uint32_t count = ty->count;
+        for (index = 0u; index < count; ++index)
+            if (cm_ty_has_infer_at(arena,
+                    cm_ty_get(arena, id)->children[index], depth + 1u))
+                return 1;
+    }
     return 0;
 }
 
@@ -364,9 +368,13 @@ static int cm_ty_occurs(CmTyArena *arena, uint32_t root, CmTyId target,
     ty = cm_ty_get(arena, target);
     if (ty == NULL) return 0;
     if (ty->kind == CM_TY_INFER) return cm_ty_var_root(arena, ty->a) == root;
-    for (index = 0u; index < ty->count; ++index)
-        if (cm_ty_occurs(arena, root, cm_ty_get(arena, target)->children[index],
-                depth + 1u)) return 1;
+    {
+        uint32_t count = ty->count;
+        for (index = 0u; index < count; ++index)
+            if (cm_ty_occurs(arena, root,
+                    cm_ty_get(arena, target)->children[index], depth + 1u))
+                return 1;
+    }
     return 0;
 }
 
@@ -431,10 +439,13 @@ int cm_ty_unify(CmTyArena *arena, CmTyId left, CmTyId right)
         || !cm_hir_def_id_equal(a->def2, b->def2)) return 0;
     if (a->lo != b->lo || a->hi != b->hi) return 0;
     if (a->count != b->count) return 0;
-    for (index = 0u; index < a->count; ++index) {
-        CmTyId ca = cm_ty_get(arena, left)->children[index];
-        CmTyId cb = cm_ty_get(arena, right)->children[index];
-        if (!cm_ty_unify(arena, ca, cb)) return 0;
+    {
+        uint32_t count = a->count;
+        for (index = 0u; index < count; ++index) {
+            CmTyId ca = cm_ty_get(arena, left)->children[index];
+            CmTyId cb = cm_ty_get(arena, right)->children[index];
+            if (!cm_ty_unify(arena, ca, cb)) return 0;
+        }
     }
     return 1;
 }
@@ -476,7 +487,7 @@ static CmTyId cm_ty_subst_at(CmTyArena *arena, CmTyId id,
         return subst->self_type;
     if (ty->count == 0u || ty->count > 64u) return id;
     copy = *ty;
-    for (index = 0u; index < ty->count; ++index) {
+    for (index = 0u; index < copy.count; ++index) {
         CmTyId child = cm_ty_get(arena, id)->children[index];
         children[index] = cm_ty_subst_at(arena, child, subst, depth + 1u);
         if (children[index] != child) changed = 1;
@@ -739,15 +750,17 @@ void cm_ty_print(CmTyArena *arena, const CmHirContext *hir, CmTyId id,
         cm_str_buf_append(out, ty->a ? "*mut " : "*const ");
         cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[0], out);
         return;
-    case CM_TY_TUPLE:
+    case CM_TY_TUPLE: {
+        uint32_t count = ty->count;
         cm_str_buf_append(out, "(");
-        for (index = 0u; index < ty->count; ++index) {
+        for (index = 0u; index < count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
             cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[index],
                 out);
         }
-        cm_str_buf_append(out, ty->count == 1u ? ",)" : ")");
+        cm_str_buf_append(out, count == 1u ? ",)" : ")");
         return;
+    }
     case CM_TY_ARRAY:
         cm_str_buf_append(out, "[");
         cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[0], out);
@@ -760,17 +773,19 @@ void cm_ty_print(CmTyArena *arena, const CmHirContext *hir, CmTyId id,
         cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[0], out);
         cm_str_buf_append(out, "]");
         return;
-    case CM_TY_FN_PTR:
+    case CM_TY_FN_PTR: {
+        uint32_t count = ty->count;
         cm_str_buf_append(out, "fn(");
-        for (index = 0u; index + 1u < ty->count; ++index) {
+        for (index = 0u; index + 1u < count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
             cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[index],
                 out);
         }
         cm_str_buf_append(out, ") -> ");
         cm_ty_print(arena, hir,
-            cm_ty_get(arena, id)->children[ty->count - 1u], out);
+            cm_ty_get(arena, id)->children[count - 1u], out);
         return;
+    }
     case CM_TY_FN_DEF:
     case CM_TY_ADT:
     case CM_TY_FOREIGN:
@@ -779,8 +794,9 @@ void cm_ty_print(CmTyArena *arena, const CmHirContext *hir, CmTyId id,
         if (ty->kind == CM_TY_FN_DEF) cm_str_buf_append(out, "fn ");
         cm_ty_print_def(hir, ty->def, out);
         if (ty->count != 0u) {
+            uint32_t count = ty->count;
             cm_str_buf_append(out, "<");
-            for (index = 0u; index < ty->count; ++index) {
+            for (index = 0u; index < count; ++index) {
                 if (index != 0u) cm_str_buf_append(out, ", ");
                 cm_ty_print(arena, hir, cm_ty_get(arena, id)->children[index],
                     out);

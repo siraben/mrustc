@@ -2462,6 +2462,23 @@ unresolved value path 2,180 (the `ubody` SIMD paths); call argument
 mismatch 1,388; body vs signature 1,101; method not found 354; method
 argument mismatch 297; operator on unsupported type 194; call through
 non-function 159; struct literal path 127; assignment mismatch 114.
+
+M9-04 third pass (same day): associated-type projections normalize —
+`<Self as Trait>::Assoc` resolves through matching impls' associated type
+items, and on `T`/`Self` receivers through trait-predicate equalities;
+coercion normalizes both sides before unifying and stays lenient about
+residual projection/param mismatches.  Alongside this the type arena and
+typeck were hardened against `CmTy*` pointers held across type creation
+(the arena vector moves): loop counts and children are copied to locals
+before any allocating call (`cm_ty_unify`, occurs/infer/subst/resolve
+walkers, `cm_ty_print`, matcher, normalize, fn-bound and iterator-item
+helpers); the tyck unit test is ASan/UBSan clean.  Whole core:
+18,196/22,524 bodies typed (was 17,101), 5,034 unresolved nodes (was
+5,478), 4,413 error nodes (was 6,254).  Remaining classes: unresolved
+value path 2,180 (the `ubody` SIMD paths); body vs signature 608; method
+not found 354; call argument mismatch 195; operator on unsupported type
+194; method argument mismatch 180; call through non-function 159; struct
+literal path 127; assignment mismatch 95.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
