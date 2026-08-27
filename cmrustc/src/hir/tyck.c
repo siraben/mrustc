@@ -2493,10 +2493,29 @@ static int cm_tyck_method_args_compatible(CmTyckEnv *env,
     uint32_t index;
     for (index = 0u; index < arg_count; ++index) {
         uint32_t slot = first + index;
+        CmTyId param_type;
+        CmTyId arg_type;
         if (slot >= count) break;
         if (arg_types[index] == CM_TY_NONE) continue;
-        if (!cm_tyck_matches(env, params[slot], arg_types[index])
-            && !cm_tyck_matches(env, arg_types[index], params[slot]))
+        param_type = params[slot];
+        arg_type = arg_types[index];
+        /* `&T` coerces to `*const T`: compare pointees across any
+         * reference/pointer mix, as coercion will. */
+        {
+            const CmTy *pt = cm_ty_get(env->state->arena,
+                cm_ty_resolve(env->state->arena, param_type));
+            const CmTy *at = cm_ty_get(env->state->arena,
+                cm_ty_resolve(env->state->arena, arg_type));
+            if (pt != NULL && at != NULL
+                && (pt->kind == CM_TY_REF || pt->kind == CM_TY_PTR)
+                && (at->kind == CM_TY_REF || at->kind == CM_TY_PTR)
+                && pt->kind != at->kind) {
+                param_type = pt->children[0];
+                arg_type = at->children[0];
+            }
+        }
+        if (!cm_tyck_matches(env, param_type, arg_type)
+            && !cm_tyck_matches(env, arg_type, param_type))
             return 0;
     }
     return 1;
