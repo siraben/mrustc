@@ -2657,6 +2657,15 @@ Remaining: body vs signature 44; method not found 29; assoc-value 16;
 unresolved value path 14 (cfg'd arch helpers); field 10; branch 9;
 path-pattern 8; assignment 8.
 
+M9-04 seventeenth pass (2026-08-27, run 54): method autoderef takes one
+user-`Deref` step when reference/pointer stripping is exhausted
+(`&ByteStr` receivers reach `[u8]` inherent methods), with candidate
+enumeration and rollback intact.  Whole core: **175 error nodes** (was
+179), 21,215/22,524 typed.  The identical-print SliceIndex body-sig
+family (~16) is under def-identity diagnosis — both sides normalize to
+the same rendered projection, so the suspected culprit is two distinct
+HIR defs for one nominal type.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

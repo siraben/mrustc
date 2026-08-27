@@ -2672,6 +2672,36 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                 }
                 if (candidate_kind != CM_TY_REF
                     && candidate_kind != CM_TY_PTR) {
+                    /* One user-Deref step (`ByteStr` -> `[u8]`) before
+                     * giving up on this chain. */
+                    if (candidate_kind == CM_TY_ADT) {
+                        CmTyId derefed = cm_tyck_user_deref(env,
+                            candidate);
+                        if (derefed != CM_TY_NONE) {
+                            unsigned int deref_variant;
+                            for (deref_variant = 0u; deref_variant < 32u;
+                                    ++deref_variant) {
+                                size_t deref_mark = cm_ty_undo_mark(arena);
+                                if (!cm_tyck_lookup_assoc_in(env, derefed,
+                                        expr->data.method_call.name,
+                                        &found, mask, deref_variant)
+                                    || found.item->kind
+                                        != CM_HIR_ITEM_FUNCTION) {
+                                    cm_ty_undo_to(arena, deref_mark);
+                                    found.item = NULL;
+                                    break;
+                                }
+                                if (cm_tyck_method_args_compatible(env,
+                                        &found, arg_types, arg_count)) {
+                                    candidate = derefed;
+                                    break;
+                                }
+                                cm_ty_undo_to(arena, deref_mark);
+                                found.item = NULL;
+                            }
+                        }
+                    }
+                    if (found.item != NULL) break;
                     candidate = CM_TY_NONE;
                     break;
                 }
@@ -3748,8 +3778,10 @@ static void cm_tyck_pat(CmTyckEnv *env, CmUPatId id, CmTyId expected)
             const CmTy *et = cm_ty_get(arena, cm_ty_resolve(arena, expected));
             if (et != NULL && et->kind == CM_TY_REF)
                 (void)cm_ty_unify(arena, et->children[0], type);
-            else if (!cm_ty_unify(arena, expected, type))
+            else if (!cm_ty_unify(arena, expected, type)) {
+                cm_tyck_debug_pair(env, "path-pattern", type, expected);
                 cm_tyck_error(env, "path pattern type mismatch");
+            }
         }
         break;
     }
@@ -4079,8 +4111,29 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     {
         CmTyId root = cm_tyck_expr(&env, ub->root, env.return_type);
         if (!cm_tyck_coerce(&env, root, env.return_type)) {
+            if (getenv("CM_TYCK_DEBUG") != NULL) {
+                const CmTy *ra = cm_ty_get(arena, cm_ty_resolve(arena,
+                    root));
+                const CmTy *re = cm_ty_get(arena, cm_ty_resolve(arena,
+                    env.return_type));
+                fprintf(stderr, "TYCK sig-kinds a=%d e=%d ab=%lu eb=%lu"
+                    " acount=%lu ecount=%lu adef=%lu:%lu edef=%lu:%lu\n",
+                    ra == NULL ? -1 : (int)ra->kind,
+                    re == NULL ? -1 : (int)re->kind,
+                    ra == NULL ? 0ul : (unsigned long)ra->b,
+                    re == NULL ? 0ul : (unsigned long)re->b,
+                    ra == NULL ? 0ul : (unsigned long)ra->count,
+                    re == NULL ? 0ul : (unsigned long)re->count,
+                    ra == NULL ? 0ul : (unsigned long)ra->def.crate_id,
+                    ra == NULL ? 0ul : (unsigned long)ra->def.index,
+                    re == NULL ? 0ul : (unsigned long)re->def.crate_id,
+                    re == NULL ? 0ul : (unsigned long)re->def.index);
+            }
             cm_tyck_debug_pair(&env, "body signature", root,
                 env.return_type);
+            cm_tyck_debug_pair(&env, "sig-normalized",
+                cm_tyck_normalize(&env, root, 0u),
+                cm_tyck_normalize(&env, env.return_type, 0u));
             cm_tyck_debug_span(&env, cm_ubody_get_expr(ub, ub->root));
             cm_tyck_error(&env, "body type does not match its signature");
         }
