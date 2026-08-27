@@ -2292,12 +2292,14 @@ static unsigned int cm_parser_binary_precedence(enum cm_token_kind kind,
     case CM_TOKEN_DOT_DOT: case CM_TOKEN_DOT_DOT_EQ: return 2u;
     case CM_TOKEN_PIPE_PIPE: return 3u;
     case CM_TOKEN_AMP_AMP: return 4u;
-    case CM_TOKEN_PIPE: return 5u;
-    case CM_TOKEN_CARET: return 6u;
-    case CM_TOKEN_AMP: return 7u;
-    case CM_TOKEN_EQ_EQ: case CM_TOKEN_NOT_EQ: return 8u;
+    /* Rust binds bitwise operators tighter than comparisons, and all
+     * comparisons share one non-associative level. */
+    case CM_TOKEN_EQ_EQ: case CM_TOKEN_NOT_EQ:
     case CM_TOKEN_LT: case CM_TOKEN_LT_EQ: case CM_TOKEN_GT:
-    case CM_TOKEN_GT_EQ: return 9u;
+    case CM_TOKEN_GT_EQ: return 5u;
+    case CM_TOKEN_PIPE: return 6u;
+    case CM_TOKEN_CARET: return 7u;
+    case CM_TOKEN_AMP: return 8u;
     case CM_TOKEN_SHL: case CM_TOKEN_SHR: return 10u;
     case CM_TOKEN_PLUS: case CM_TOKEN_MINUS: return 11u;
     case CM_TOKEN_STAR: case CM_TOKEN_SLASH: case CM_TOKEN_PERCENT: return 12u;

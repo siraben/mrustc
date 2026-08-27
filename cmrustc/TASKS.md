@@ -2538,6 +2538,18 @@ so debug spans resolve to files.  Whole core: 20,663/22,524 typed, 945
 error nodes (was 1,187).  Remaining: body vs signature 244; method-arg
 160; call-arg 130; method not found 111; assignment 75;
 call-through-non-fn 70; branch 36; unresolved value path 33.
+
+M9-04 eighth pass (same day): trait methods reached as plain
+definitions get a fresh inferred `Self` in their first FN_DEF slot
+(`fmt::UpperHex::fmt(self, f)` no longer borrows the enclosing impl's
+Self); projection normalization scans specific impls before blanket
+ones (`impl<T, U: Into<T>> TryFrom<U> for T` no longer shadows
+`impl TryFrom<u16> for u8`); and the parser's binary precedence now
+matches Rust — bitwise `&`/`^`/`|` bind tighter than comparisons, all
+comparisons on one level (`x & FLAG != 0` parsed wrong before).  Whole
+core: 20,854/22,524 typed, 747 error nodes (was 945).  Remaining:
+method-arg 160; call-arg 127; method not found 111; body vs signature
+103; call-through-non-fn 70; branch 33; unresolved value path 33.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

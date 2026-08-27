@@ -490,6 +490,24 @@ static CmTyId cm_tyck_fn_def(CmTyckEnv *env, const CmHirItem *item,
     const CmHirItem *parent, CmTyId self_type, CmTyckInstance *out_instance)
 {
     CmTyckInstance instance;
+    /* A trait method reached as a plain definition: Self is inferred from
+     * use, and the call site expects it in the first argument slot. */
+    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT
+        && self_type == CM_TY_NONE) {
+        CmTyId args[CM_TYCK_MAX_ARGS];
+        uint32_t index;
+        CmTyId self = cm_ty_fresh(env->state->arena, CM_HIR_INFER_GENERAL);
+        cm_tyck_instance_init(&instance, self);
+        cm_tyck_instance_fresh(env, &instance, parent);
+        cm_tyck_instance_fresh(env, &instance, item);
+        if (out_instance != NULL) *out_instance = instance;
+        args[0] = self;
+        for (index = 0u; index < instance.count
+                && index + 1u < CM_TYCK_MAX_ARGS; ++index)
+            args[index + 1u] = instance.types[index];
+        return cm_ty_with_def(env->state->arena, CM_TY_FN_DEF,
+            item->definition, args, instance.count + 1u);
+    }
     cm_tyck_instance_init(&instance, self_type);
     cm_tyck_instance_fresh(env, &instance, parent);
     cm_tyck_instance_fresh(env, &instance, item);
@@ -875,25 +893,44 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
         }
         return type;
     }
-    for (index = 0u; index < env->state->impl_count; ++index) {
-        const CmTyckImpl *impl = &env->state->impls[index];
-        const CmHirItem *definition;
-        CmTyckInstance instance;
-        if (!impl->has_trait
-            || !cm_hir_def_id_equal(impl->trait_def, trait_def))
-            continue;
-        if (!cm_tyck_matches(env, impl->self_pattern, self_type)) continue;
-        definition = cm_tyck_child_named_hir(env->state,
-            impl->item->definition, associated->name);
-        if (definition == NULL
-            || definition->kind != CM_HIR_ITEM_TYPE_ALIAS) continue;
-        cm_tyck_instance_init(&instance, self_type);
-        cm_tyck_instance_fresh(env, &instance, impl->item);
-        (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
-            impl->self_pattern, cm_tyck_subst_of(&instance)));
-        return cm_tyck_normalize(env, cm_ty_subst(arena, cm_ty_from_hir(arena,
-            env->state->hir, definition->data.type_alias_item.target),
-            cm_tyck_subst_of(&instance)), depth + 1u);
+    /* Specific impls first: a blanket `impl<T, U: Into<T>> TryFrom<U>
+     * for T` must not shadow `impl TryFrom<u16> for u8`. */
+    {
+        int scan;
+        for (scan = 0; scan < 2; ++scan)
+        for (index = 0u; index < env->state->impl_count; ++index) {
+            const CmTyckImpl *impl = &env->state->impls[index];
+            const CmHirItem *definition;
+            CmTyckInstance instance;
+            const CmTy *pattern;
+            int blanket;
+            if (!impl->has_trait
+                || !cm_hir_def_id_equal(impl->trait_def, trait_def))
+                continue;
+            pattern = cm_ty_get(arena, cm_ty_resolve(arena,
+                impl->self_pattern));
+            while (pattern != NULL && (pattern->kind == CM_TY_REF
+                    || pattern->kind == CM_TY_PTR))
+                pattern = cm_ty_get(arena, cm_ty_resolve(arena,
+                    pattern->children[0]));
+            blanket = pattern != NULL && (pattern->kind == CM_TY_PARAM
+                || pattern->kind == CM_TY_SELF);
+            if (blanket != (scan == 1)) continue;
+            if (!cm_tyck_matches(env, impl->self_pattern, self_type))
+                continue;
+            definition = cm_tyck_child_named_hir(env->state,
+                impl->item->definition, associated->name);
+            if (definition == NULL
+                || definition->kind != CM_HIR_ITEM_TYPE_ALIAS) continue;
+            cm_tyck_instance_init(&instance, self_type);
+            cm_tyck_instance_fresh(env, &instance, impl->item);
+            (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
+                impl->self_pattern, cm_tyck_subst_of(&instance)));
+            return cm_tyck_normalize(env, cm_ty_subst(arena,
+                cm_ty_from_hir(arena, env->state->hir,
+                    definition->data.type_alias_item.target),
+                cm_tyck_subst_of(&instance)), depth + 1u);
+        }
     }
     return type;
 }
