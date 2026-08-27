@@ -2479,6 +2479,23 @@ value path 2,180 (the `ubody` SIMD paths); body vs signature 608; method
 not found 354; call argument mismatch 195; operator on unsupported type
 194; method argument mismatch 180; call through non-function 159; struct
 literal path 127; assignment mismatch 95.
+
+M9-04 fourth pass (2026-08-27): resolver bindings now join to HIR items
+by exact AST identity — `CmHirItem` records its declaring
+`(ast_source, ast_item)` and `ubody`/typeck look items up by that pair
+instead of by span, which failed for every macro-generated item (their
+HIR spans are coarse invocation anchors).  `ubody` also honors
+body-local `use` declarations: block item statements collect parsed
+use-tree entries (named, aliased, enum-variant globs, module globs) and
+path resolution substitutes them before and after module-level lookup.
+Together these clear the `core_arch` SIMD family and
+`IntErrorKind`-style variant imports.  Whole core: `ubody` unresolved
+paths 2,257 -> 44; 19,928/22,524 bodies typed (was 18,196), 4,089
+unresolved nodes (was 5,034), 2,115 error nodes (was 4,413).  Remaining
+classes: body vs signature 608; method not found 346; operator on
+unsupported type 194; call argument mismatch 191; method argument
+mismatch 177; call through non-function 152; assignment mismatch 93;
+deref of non-pointer 73; branch unify 71; qualified path 57.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

@@ -1,6 +1,7 @@
 #include "cm/hir/ubody.h"
 #include "cm/alloc.h"
 #include "cm/arena.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,22 @@ typedef struct CmUNestedItem {
 } CmUNestedItem;
 
 #define CM_U_NESTED_LIMIT 512u
+#define CM_U_BODY_USE_LIMIT 128u
+#define CM_U_USE_SEG_LIMIT 16u
+
+/*
+ * One body-local `use` binding.  Segment views borrow the AST's interned
+ * use-tree text, which outlives lowering.  A glob entry has no name.
+ */
+typedef struct CmUBodyUse {
+    const unsigned char *segment_bytes[CM_U_USE_SEG_LIMIT];
+    uint32_t segment_lengths[CM_U_USE_SEG_LIMIT];
+    uint32_t segment_count;
+    const unsigned char *name_bytes;
+    uint32_t name_length;
+    int is_glob;
+    int absolute;
+} CmUBodyUse;
 
 typedef struct CmUItemKey {
     CmSourceId source;
@@ -65,6 +82,8 @@ typedef struct CmULowerState {
     size_t scope_count;
     CmUNestedItem nested[CM_U_NESTED_LIMIT];
     size_t nested_count;
+    CmUBodyUse body_uses[CM_U_BODY_USE_LIMIT];
+    size_t body_use_count;
     const char *failure;
 } CmULowerState;
 
@@ -256,9 +275,9 @@ static void cm_u_build_item_keys(CmULowerState *state)
     for (index = 0u; index < state->hir->items.len; ++index) {
         const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
             &state->hir->items, index);
-        if (item == NULL || item->span.source == 0u) continue;
-        state->item_keys[count].source = item->span.source;
-        state->item_keys[count].start = item->span.start;
+        if (item == NULL || item->ast_source == 0u) continue;
+        state->item_keys[count].source = item->ast_source;
+        state->item_keys[count].start = item->ast_item;
         state->item_keys[count].definition = item->definition;
         count += 1u;
     }
@@ -324,23 +343,42 @@ static const CmAst *cm_u_ast_for_source(const CmULowerState *state,
 }
 
 /* Map a resolver binding to a HIR definition. */
+static int cm_u_debug_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = getenv("CM_UBODY_DEBUG") != NULL;
+    return cached;
+}
+
+static void cm_u_debug_path(const CmULowerState *state, const CmAstPath *path,
+    const char *stage)
+{
+    uint32_t index;
+    if (!cm_u_debug_enabled() || path == NULL) return;
+    fprintf(stderr, "ubody-debug source=%u module=%u %s path=",
+        (unsigned)state->source, (unsigned)state->module, stage);
+    for (index = 0u; index < path->segment_count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(state->ast,
+            path->segments[index].name);
+        fprintf(stderr, "%s%.*s", index == 0u ? "" : "::",
+            name == NULL ? 0 : (int)name->len,
+            name == NULL ? "" : (const char *)name->bytes);
+    }
+    fputc(10, stderr);
+}
+
 static int cm_u_binding_definition(const CmULowerState *state,
     const CmResolvedBinding *binding, CmUResolution *out)
 {
-    const CmAst *declaring;
-    const CmAstItem *item;
     CmHirDefId definition;
     if (binding->variant.enumeration.item != CM_AST_ITEM_NONE) {
         CmHirDefId enum_definition;
         const CmHirDefinition *record;
         size_t index;
-        declaring = cm_u_ast_for_source(state,
-            binding->variant.enumeration.source);
-        item = declaring == NULL ? NULL
-            : cm_ast_get_item(declaring, binding->variant.enumeration.item);
-        if (item == NULL || !cm_u_find_item_definition(state,
-                binding->variant.enumeration.source, item->span.start,
-                &enum_definition)) return 0;
+        if (!cm_u_find_item_definition(state,
+                binding->variant.enumeration.source,
+                binding->variant.enumeration.item, &enum_definition))
+            return 0;
         record = cm_hir_lookup_definition(state->hir, enum_definition);
         if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return 0;
         /* Variant definitions are separate records naming the enum item. */
@@ -366,12 +404,15 @@ static int cm_u_binding_definition(const CmULowerState *state,
         return 1;
     }
     if (binding->declaration.item == CM_AST_ITEM_NONE) return 0;
-    declaring = cm_u_ast_for_source(state, binding->declaration.source);
-    item = declaring == NULL ? NULL
-        : cm_ast_get_item(declaring, binding->declaration.item);
-    if (item == NULL) return 0;
     if (!cm_u_find_item_definition(state, binding->declaration.source,
-            item->span.start, &definition)) return 0;
+            binding->declaration.item, &definition)) {
+        if (cm_u_debug_enabled())
+            fprintf(stderr, "ubody-debug binding source=%u item=%u:"
+                " no HIR definition\n",
+                (unsigned)binding->declaration.source,
+                (unsigned)binding->declaration.item);
+        return 0;
+    }
     out->kind = CM_U_RESOLVED_DEFINITION;
     out->definition = definition;
     return 1;
@@ -422,6 +463,220 @@ static CmHirGenericParamId cm_u_generic_by_name(const CmULowerState *state,
  * 0.  `prefer_type` tries the type namespace first (struct literals and
  * patterns).
  */
+/* ------------------------------------------------------------------ */
+/* Body-local `use` declarations                                        */
+
+static void cm_u_use_skip_space(const unsigned char *text, size_t length,
+    size_t *pos)
+{
+    while (*pos < length && (text[*pos] == ' ' || text[*pos] == '\t'
+            || text[*pos] == '\n' || text[*pos] == '\r'))
+        *pos += 1u;
+}
+
+static int cm_u_use_ident_byte(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '_' || c == '#';
+}
+
+static void cm_u_use_emit(CmULowerState *state,
+    const unsigned char **seg_bytes, const uint32_t *seg_lengths,
+    uint32_t seg_count, int absolute, int is_glob,
+    const unsigned char *alias_bytes, uint32_t alias_length)
+{
+    CmUBodyUse *entry;
+    uint32_t index;
+    if (state->body_use_count == CM_U_BODY_USE_LIMIT) return;
+    if (!is_glob && alias_bytes == NULL && seg_count == 0u) return;
+    if (alias_bytes != NULL && alias_length == 1u && alias_bytes[0] == '_')
+        return;
+    entry = &state->body_uses[state->body_use_count];
+    memset(entry, 0, sizeof(*entry));
+    for (index = 0u; index < seg_count; ++index) {
+        entry->segment_bytes[index] = seg_bytes[index];
+        entry->segment_lengths[index] = seg_lengths[index];
+    }
+    entry->segment_count = seg_count;
+    entry->absolute = absolute;
+    entry->is_glob = is_glob;
+    if (!is_glob) {
+        uint32_t name_from = seg_count - 1u;
+        if (alias_bytes != NULL) {
+            entry->name_bytes = alias_bytes;
+            entry->name_length = alias_length;
+        } else {
+            /* `path::to::mod::self` imports the module under its name. */
+            if (seg_lengths[name_from] == 4u
+                && memcmp(seg_bytes[name_from], "self", 4u) == 0) {
+                if (name_from == 0u) return;
+                name_from -= 1u;
+                entry->segment_count = seg_count - 1u;
+            }
+            entry->name_bytes = seg_bytes[name_from];
+            entry->name_length = seg_lengths[name_from];
+        }
+    }
+    state->body_use_count += 1u;
+}
+
+/* Mirrors the resolver's textual use-tree grammar, leniently. */
+static void cm_u_use_parse(CmULowerState *state, const unsigned char *text,
+    size_t length, size_t *pos, const unsigned char **seg_bytes,
+    uint32_t *seg_lengths, uint32_t seg_count, int absolute, int depth)
+{
+    if (depth > 8u) return;
+    cm_u_use_skip_space(text, length, pos);
+    if (seg_count == 0u && *pos + 1u < length && text[*pos] == ':'
+        && text[*pos + 1u] == ':') {
+        absolute = 1;
+        *pos += 2u;
+        cm_u_use_skip_space(text, length, pos);
+    }
+    for (;;) {
+        if (*pos < length && text[*pos] == '{') {
+            *pos += 1u;
+            for (;;) {
+                cm_u_use_skip_space(text, length, pos);
+                if (*pos >= length) return;
+                if (text[*pos] == '}') { *pos += 1u; return; }
+                cm_u_use_parse(state, text, length, pos, seg_bytes,
+                    seg_lengths, seg_count, absolute, depth + 1);
+                cm_u_use_skip_space(text, length, pos);
+                if (*pos < length && text[*pos] == ',') *pos += 1u;
+            }
+        }
+        if (*pos < length && text[*pos] == '*') {
+            *pos += 1u;
+            cm_u_use_emit(state, seg_bytes, seg_lengths, seg_count,
+                absolute, 1, NULL, 0u);
+            return;
+        }
+        if (*pos >= length || !cm_u_use_ident_byte(text[*pos])) return;
+        {
+            size_t start = *pos;
+            while (*pos < length && cm_u_use_ident_byte(text[*pos]))
+                *pos += 1u;
+            if (seg_count == CM_U_USE_SEG_LIMIT) return;
+            seg_bytes[seg_count] = text + start;
+            seg_lengths[seg_count] = (uint32_t)(*pos - start);
+            seg_count += 1u;
+        }
+        cm_u_use_skip_space(text, length, pos);
+        if (*pos + 1u < length && text[*pos] == ':'
+            && text[*pos + 1u] == ':') {
+            *pos += 2u;
+            cm_u_use_skip_space(text, length, pos);
+            continue;
+        }
+        if (*pos + 1u < length && text[*pos] == 'a' && text[*pos + 1u] == 's'
+            && (*pos + 2u >= length
+                || !cm_u_use_ident_byte(text[*pos + 2u]))) {
+            size_t start;
+            *pos += 2u;
+            cm_u_use_skip_space(text, length, pos);
+            start = *pos;
+            while (*pos < length && cm_u_use_ident_byte(text[*pos]))
+                *pos += 1u;
+            cm_u_use_emit(state, seg_bytes, seg_lengths, seg_count,
+                absolute, 0, text + start, (uint32_t)(*pos - start));
+            return;
+        }
+        cm_u_use_emit(state, seg_bytes, seg_lengths, seg_count, absolute, 0,
+            NULL, 0u);
+        return;
+    }
+}
+
+static void cm_u_collect_body_use(CmULowerState *state,
+    const CmAstItem *item)
+{
+    const CmInternedString *tree = cm_ast_get_string(state->ast,
+        item->data.use_item.tree);
+    const unsigned char *seg_bytes[CM_U_USE_SEG_LIMIT];
+    uint32_t seg_lengths[CM_U_USE_SEG_LIMIT];
+    size_t pos = 0u;
+    if (tree == NULL) return;
+    cm_u_use_parse(state, tree->bytes, tree->len, &pos, seg_bytes,
+        seg_lengths, 0u, 0, 0);
+}
+
+static const CmUBodyUse *cm_u_body_use_named(const CmULowerState *state,
+    CmInternId first)
+{
+    const CmInternedString *name = cm_ast_get_string(state->ast, first);
+    size_t index;
+    if (name == NULL) return NULL;
+    for (index = state->body_use_count; index != 0u; --index) {
+        const CmUBodyUse *entry = &state->body_uses[index - 1u];
+        if (!entry->is_glob && entry->name_length == name->len
+            && memcmp(entry->name_bytes, name->bytes, name->len) == 0)
+            return entry;
+    }
+    return NULL;
+}
+
+/*
+ * Resolve `entry segments + path[skip..]` through module-level import
+ * resolution, mapping any associated tail back onto the original path.
+ */
+static int cm_u_resolve_substituted(CmULowerState *state,
+    const CmUBodyUse *entry, const CmAstPath *path, uint32_t skip,
+    int prefer_type, CmUResolution *out)
+{
+    CmResolvePathSegmentView views[64];
+    CmResolvedBinding binding;
+    uint32_t total = 0u;
+    uint32_t index;
+    uint32_t original_count = path->segment_count;
+    int attempt;
+    if (entry->segment_count + (original_count - skip) > 64u) return 0;
+    for (index = 0u; index < entry->segment_count; ++index) {
+        views[total].bytes = entry->segment_bytes[index];
+        views[total].length = entry->segment_lengths[index];
+        total += 1u;
+    }
+    for (index = skip; index < original_count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(state->ast,
+            path->segments[index].name);
+        if (name == NULL) return 0;
+        views[total].bytes = name->bytes;
+        views[total].length = name->len;
+        total += 1u;
+    }
+    if (total == 0u) return 0;
+    for (attempt = 0; attempt < 2; ++attempt) {
+        CmResolveNamespace ns = (attempt == 0) == (prefer_type != 0)
+            ? CM_RESOLVE_NAMESPACE_TYPE : CM_RESOLVE_NAMESPACE_VALUE;
+        if (cm_import_resolve_path_checked(state->imports, state->graph,
+                state->revision, state->module, entry->absolute, views,
+                total, ns, &binding) == CM_IMPORT_LOOKUP_OK
+            && cm_u_binding_definition(state, &binding, out)) {
+            out->rest_from = original_count;
+            return 1;
+        }
+    }
+    /* Type prefix + associated tail, only where the tail stays within the
+     * original path segments. */
+    for (index = total - 1u; index != 0u; --index) {
+        CmUResolution prefix;
+        if (index < entry->segment_count) break;
+        memset(&prefix, 0, sizeof(prefix));
+        if (cm_import_resolve_path_checked(state->imports, state->graph,
+                state->revision, state->module, entry->absolute, views,
+                index, CM_RESOLVE_NAMESPACE_TYPE, &binding)
+                == CM_IMPORT_LOOKUP_OK
+            && cm_u_binding_definition(state, &binding, &prefix)
+            && prefix.kind == CM_U_RESOLVED_DEFINITION) {
+            out->kind = CM_U_RESOLVED_TYPE_ASSOC;
+            out->definition = prefix.definition;
+            out->rest_from = skip + (index - entry->segment_count);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int cm_u_resolve_path(CmULowerState *state, const CmAstPath *path,
     int prefer_type, CmUResolution *out)
 {
@@ -493,6 +748,13 @@ static int cm_u_resolve_path(CmULowerState *state, const CmAstPath *path,
             out->rest_from = 1u;
             return 1;
         }
+    }
+    if (!path->absolute && state->body_use_count != 0u) {
+        const CmUBodyUse *entry = cm_u_body_use_named(state,
+            path->segments[0].name);
+        if (entry != NULL && cm_u_resolve_substituted(state, entry, path,
+                1u, prefer_type, out))
+            return 1;
     }
     {
         int first_type = prefer_type;
@@ -566,8 +828,20 @@ static int cm_u_resolve_path(CmULowerState *state, const CmAstPath *path,
             return 1;
         }
     }
+    if (!path->absolute) {
+        size_t use_index;
+        for (use_index = state->body_use_count; use_index != 0u;
+                --use_index) {
+            const CmUBodyUse *entry = &state->body_uses[use_index - 1u];
+            if (!entry->is_glob) continue;
+            if (cm_u_resolve_substituted(state, entry, path, 0u,
+                    prefer_type, out))
+                return 1;
+        }
+    }
     out->kind = CM_U_RESOLVED_UNRESOLVED;
     out->rest_from = 0u;
+    cm_u_debug_path(state, path, "unresolved");
     return 0;
 }
 
@@ -1038,6 +1312,7 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
     case CM_AST_EXPR_TRY_BLOCK: {
         size_t saved = state->scope_count;
         size_t saved_nested = state->nested_count;
+        size_t saved_uses = state->body_use_count;
         uint32_t count = expr->data.block.statement_count;
         CmUStmtId *ids = (CmUStmtId *)cm_u_alloc(state, count, sizeof(*ids));
         node.kind = CM_U_EXPR_BLOCK;
@@ -1048,7 +1323,12 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
             const CmAstItem *item = stmt == NULL
                     || stmt->kind != CM_AST_STMT_ITEM ? NULL
                 : cm_ast_get_item(state->ast, stmt->data.item_stmt.item);
-            if (item == NULL || item->name == CM_INTERN_ID_NONE
+            if (item == NULL) continue;
+            if (item->kind == CM_AST_ITEM_USE) {
+                cm_u_collect_body_use(state, item);
+                continue;
+            }
+            if (item->name == CM_INTERN_ID_NONE
                 || state->nested_count == CM_U_NESTED_LIMIT) continue;
             state->nested[state->nested_count].name = cm_u_intern_ast(state,
                 item->name);
@@ -1066,6 +1346,7 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
         node.data.block.is_const = expr->data.block.is_const;
         state->scope_count = saved;
         state->nested_count = saved_nested;
+        state->body_use_count = saved_uses;
         break;
     }
     case CM_AST_EXPR_CALL:

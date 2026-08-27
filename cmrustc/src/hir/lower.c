@@ -10321,6 +10321,8 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     out_item->is_specializable = ast_item->is_default;
     out_item->name = record->hir_name;
     out_item->span = span;
+    out_item->ast_source = record->source;
+    out_item->ast_item = ast_item_id;
     out_item->attributes = cm_lower_item_attributes(state,
         record, span, ast_item_id,
         &out_item->attribute_count);

@@ -660,6 +660,14 @@ typedef struct CmHirItem {
     CmInternId name;
     CmHirVisibility visibility;
     CmSpan span;
+    /*
+     * Declaring AST identity: the exact (source, AST item id) this item was
+     * lowered from.  Generated items keep a coarse diagnostic `span`, so
+     * resolver-binding joins must use this pair, never spans.  Zero source
+     * means "not lowered from a local AST" (dependency metadata).
+     */
+    CmSourceId ast_source;
+    uint32_t ast_item;
     /* Effective structural `#[...]` attributes in source order. */
     CmHirAttribute *attributes;
     uint32_t attribute_count;

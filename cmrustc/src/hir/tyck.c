@@ -290,20 +290,14 @@ static const CmAst *cm_tyck_ast_for_source(const CmTyckState *state,
 static const CmHirItem *cm_tyck_item_from_binding(const CmTyckState *state,
     const CmResolvedBinding *binding)
 {
-    const CmAst *declaring;
-    const CmAstItem *ast_item;
     size_t index;
     if (binding->declaration.item == CM_AST_ITEM_NONE) return NULL;
-    declaring = cm_tyck_ast_for_source(state, binding->declaration.source);
-    if (declaring == NULL) return NULL;
-    ast_item = cm_ast_get_item(declaring, binding->declaration.item);
-    if (ast_item == NULL) return NULL;
     for (index = 0u; index < state->hir->items.len; ++index) {
         const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
             &state->hir->items, index);
         if (item != NULL
-            && item->span.source == binding->declaration.source
-            && item->span.start == ast_item->span.start) return item;
+            && item->ast_source == binding->declaration.source
+            && item->ast_item == binding->declaration.item) return item;
     }
     return NULL;
 }
