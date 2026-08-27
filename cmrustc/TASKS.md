@@ -2430,9 +2430,27 @@ parameters, primitive prefixes, type + associated tails, the implicit
 dominated by `core::arch` SIMD type names (`i32x4::new`, ...) reached through
 glob imports of macro-generated items, which typeck or the resolver must
 still cover. Nested items are not yet lowered as HIR items.
+
+M9-04 first pass (2026-08-27): `src/hir/ty.c` (hash-consed structural type
+arena with union-find inference variables, occurs check, substitution,
+HIR-to-Ty conversion, printer) and `src/hir/tyck.c` (lenient inference over
+`ubody`: literals, paths, calls, method calls with autoderef, fields,
+indexing, operators with operator-trait fallback, closures, match/if/loops
+with break typing, struct literals and patterns, coercions, a pending
+worklist retried until it stops progressing, then integer/float defaulting).
+Whole core: 16,339/22,524 bodies fully typed, 6,185 partial, 8,043
+unresolved nodes, 12,858 error nodes. Error classes, largest first:
+body-local item not lowered 5,564; unresolved value path 2,180; body type
+does not match its signature 1,099; call argument mismatch 1,058;
+qualified path not resolved 653; call through non-function type 540; range
+type not modelled 387; method not found 333; method argument mismatch 260;
+operator on unsupported type 169; struct literal path 127; for loop over
+non-array iterable 122; assignment mismatch 109; branch types 67; deref of
+non-pointer 66; return mismatch 35; field not found 25; associated value
+16; tuple field 14; path pattern 7.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
-| M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |
+| M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
 | M9-05 | TODO | HIR-to-MIR for all bodies | all typed bodies produce MIR |
 | M9-06 | TODO | C emission and link for core/alloc/std | `hello` links and runs under TinyCC and GCC |
 

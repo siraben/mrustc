@@ -3,6 +3,7 @@
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/tyck.h"
 #include "cm/hir/ubody.h"
 #include "cm/resolve/body_expand.h"
 #include "cm/hir/module_map.h"
@@ -749,6 +750,31 @@ int main(int argc, char **argv)
                     (unsigned long)ubody_result.first_failure_body,
                     ubody_result.first_failure);
             ubody_unresolved_census(&ubodies);
+            {
+                CmTyckSet tyck;
+                CmTyckResult tyck_result;
+                size_t class_index;
+                cm_tyck_set_init(&tyck);
+                tyck_result = cm_tyck_all(&tyck, &hir, &ubodies, &graph,
+                    graph_result.revision, &imports, &modules);
+                printf("tyck bodies=%lu typed=%lu partial=%lu skipped=%lu "
+                    "expressions=%lu unresolved_nodes=%lu error_nodes=%lu\n",
+                    (unsigned long)tyck_result.bodies,
+                    (unsigned long)tyck_result.typed,
+                    (unsigned long)tyck_result.partial,
+                    (unsigned long)tyck_result.skipped,
+                    (unsigned long)tyck_result.expressions,
+                    (unsigned long)tyck_result.unresolved_nodes,
+                    (unsigned long)tyck_result.error_nodes);
+                for (class_index = 0u;
+                        class_index < tyck_result.error_class_count;
+                        ++class_index)
+                    printf("tyck-error %s=%lu\n",
+                        tyck_result.error_classes[class_index].reason,
+                        (unsigned long)
+                            tyck_result.error_classes[class_index].count);
+                cm_tyck_set_destroy(&tyck);
+            }
             cm_ubody_set_destroy(&ubodies);
         }
         (void)fflush(stdout);
