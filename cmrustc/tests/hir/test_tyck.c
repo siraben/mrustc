@@ -119,6 +119,8 @@ static const CmHirItem *function_named(const Fixture *fixture,
             &fixture->hir.items, index);
         const CmInternedString *item_name;
         if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION) continue;
+        /* Skip bodyless trait declarations that share the name. */
+        if (item->data.function_item.body == CM_HIR_BODY_NONE) continue;
         item_name = cm_interner_get(&fixture->hir.strings, item->name);
         if (item_name != NULL && item_name->len == strlen(name)
             && memcmp(item_name->bytes, name, item_name->len) == 0)
@@ -273,10 +275,73 @@ static void test_generated_and_body_use(void)
     fixture_destroy(&fixture);
 }
 
+/*
+ * Selection and lowering regressions: slice `rest @ ..` binds the
+ * subslice; integer literals take method calls (`999.eq2(&3)` is not a
+ * float); qualified associated calls and binary operators pick impls by
+ * argument types; field access derefs through user `Deref`.
+ */
+static const char selection_source[] =
+    "pub trait Eq2 { fn eq2(&self, o: &Self) -> bool; }\n"
+    "impl Eq2 for i32 { fn eq2(&self, _o: &i32) -> bool { true } }\n"
+    "pub fn lit_method() -> bool { 999.eq2(&3) }\n"
+    "pub fn takes(d: &[u8]) -> u8 { takes(d) }\n"
+    "pub fn walk(src: &[u8]) -> u8 {\n"
+    "    let mut digits = src;\n"
+    "    while let [c, rest @ ..] = digits {\n"
+    "        let _x = *c;\n"
+    "        digits = rest;\n"
+    "        return takes(rest);\n"
+    "    }\n"
+    "    0\n"
+    "}\n"
+    "pub struct NZ(pub u32);\n"
+    "pub trait From2<T> { fn from2(v: T) -> Self; }\n"
+    "impl From2<NZ> for u64 { fn from2(_v: NZ) -> u64 { 1 } }\n"
+    "impl From2<u32> for u64 { fn from2(_v: u32) -> u64 { 2 } }\n"
+    "pub fn qcall(mant: u32) -> u64 { <u64>::from2(mant) }\n"
+    "pub struct W2<T>(pub T);\n"
+    "pub trait BOr<R = Self> { type Output; fn bitor(self, r: R) -> Self::Output; }\n"
+    "pub trait BOrA<R = Self> { fn bora(&mut self, r: R); }\n"
+    "impl<T> BOr<NZ> for W2<T> { type Output = NZ; fn bitor(self, r: NZ) -> NZ { r } }\n"
+    "impl BOr for W2<u8> {\n"
+    "    type Output = W2<u8>;\n"
+    "    fn bitor(self, o: W2<u8>) -> W2<u8> { o }\n"
+    "}\n"
+    "impl BOrA for W2<u8> {\n"
+    "    fn bora(&mut self, o: W2<u8>) { *self = *self | o; }\n"
+    "}\n"
+    "pub struct Waker2 { pub data: u32 }\n"
+    "pub struct MD<T> { value: T }\n"
+    "pub trait Deref { type Target; fn deref(&self) -> &Self::Target; }\n"
+    "impl<T> Deref for MD<T> {\n"
+    "    type Target = T;\n"
+    "    fn deref(&self) -> &T { &self.value }\n"
+    "}\n"
+    "pub fn wake2(w: &MD<Waker2>) -> u32 { w.data }\n";
+
+static void test_selection(void)
+{
+    Fixture fixture;
+    if (!fixture_init(&fixture, selection_source)) return;
+    check(body_typed(&fixture, "lit_method"),
+        "integer literal method call not typed");
+    check(body_typed(&fixture, "walk"),
+        "slice rest binding not typed as subslice");
+    check(body_typed(&fixture, "qcall"),
+        "qualified call did not pick the matching impl");
+    check(body_typed(&fixture, "bora"),
+        "operator did not pick the matching impl");
+    check(body_typed(&fixture, "wake2"),
+        "field access through user Deref not typed");
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     test_inference();
     test_generated_and_body_use();
+    test_selection();
     if (failures != 0) {
         fprintf(stderr, "tyck tests: %d failure(s)\n", failures);
         return 1;

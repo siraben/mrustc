@@ -578,6 +578,7 @@ static int cm_tyck_matches(CmTyckEnv *env, CmTyId pattern, CmTyId type)
         || p->kind == CM_TY_OPAQUE) return 1;
     if (t->kind == CM_TY_INFER || t->kind == CM_TY_ERROR
         || t->kind == CM_TY_CONST_UNKNOWN || t->kind == CM_TY_LIFETIME
+        || t->kind == CM_TY_CONST_PARAM
         || t->kind == CM_TY_NEVER) return 1;
     if (p->kind != t->kind) return 0;
     if (p->a != t->a && p->kind != CM_TY_CLOSURE) return 0;
@@ -2042,6 +2043,17 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
 static int cm_tyck_method_args_compatible(CmTyckEnv *env,
     const CmTyckFound *found, const CmTyId *arg_types, uint32_t arg_count);
 
+/* CM_TYCK_DEBUG_FN=<name>: trace candidate decisions inside that fn. */
+static int cm_tyck_debug_fn_matches(CmTyckEnv *env)
+{
+    const char *filter = getenv("CM_TYCK_DEBUG_FN");
+    const CmInternedString *name;
+    if (filter == NULL || env->item == NULL) return 0;
+    name = cm_interner_get(&env->state->hir->strings, env->item->name);
+    return name != NULL && name->len == strlen(filter)
+        && memcmp(name->bytes, filter, name->len) == 0;
+}
+
 /* One user-Deref step: `<T as Deref>::deref(&T) -> &Target`; NONE when
  * no deref impl is visible. */
 static CmTyId cm_tyck_user_deref(CmTyckEnv *env, CmTyId type)
@@ -2428,9 +2440,27 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                 candidate = cm_tyck_normalize(env, candidate, 0u);
                 for (variant = 0u; variant < 32u; ++variant) {
                     size_t undo_mark = cm_ty_undo_mark(arena);
-                    if (!cm_tyck_lookup_assoc_in(env, candidate,
-                            expr->data.method_call.name, &found, mask,
-                            variant)
+                    int looked = cm_tyck_lookup_assoc_in(env, candidate,
+                        expr->data.method_call.name, &found, mask,
+                        variant);
+                    if (cm_tyck_debug_fn_matches(env)) {
+                        const CmTy *cd = cm_ty_get(arena,
+                            cm_ty_resolve(arena, candidate));
+                        int child_kind = -1;
+                        if (cd != NULL && cd->count != 0u) {
+                            const CmTy *cc = cm_ty_get(arena,
+                                cm_ty_resolve(arena, cd->children[0]));
+                            if (cc != NULL) child_kind = (int)cc->kind;
+                        }
+                        fprintf(stderr, "TYCK trace phase=%u step=%u"
+                            " variant=%u looked=%d kind=%d child0=%d ",
+                            phase, step, variant, looked,
+                            looked ? (int)found.item->kind : -1,
+                            child_kind);
+                        cm_tyck_debug_pair(env, "cand", candidate,
+                            candidate);
+                    }
+                    if (!looked
                         || found.item->kind != CM_HIR_ITEM_FUNCTION) {
                         cm_ty_undo_to(arena, undo_mark);
                         found.item = NULL;
