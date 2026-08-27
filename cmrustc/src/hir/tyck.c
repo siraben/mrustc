@@ -730,12 +730,14 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                     if (cm_ty_resolve(arena, subject) != self_type
                         && !(subject_kind == CM_TY_SELF
                             && self->kind == CM_TY_SELF)
-                        /* Only an ADT-shaped subject (`Simd<T, N>:
-                         * SimdUint`) matches structurally.  Bare params
+                        /* ADT- and projection-shaped subjects
+                         * (`Simd<T, N>: SimdUint`, `P::Searcher:
+                         * Searcher`) match structurally.  Bare params
                          * and reference-topped subjects (`&mut I:
                          * Iterator`) must match exactly, else the bound
                          * would apply to every (reference) receiver. */
-                        && (subject_kind != CM_TY_ADT
+                        && ((subject_kind != CM_TY_ADT
+                                && subject_kind != CM_TY_PROJECTION)
                             || !cm_tyck_matches(env, subject, self_type)))
                         continue;
                 }
@@ -760,6 +762,35 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
             const CmHirItem *declared = cm_tyck_trait_method(env,
                 env->parent->definition, name, 0u, &owner_trait);
             if (declared != NULL) {
+                cm_tyck_instance_init(&out->instance, self_type);
+                cm_tyck_instance_fresh(env, &out->instance,
+                    cm_tyck_item(env->state, owner_trait));
+                cm_tyck_instance_fresh(env, &out->instance, declared);
+                out->item = declared;
+                out->parent = cm_tyck_item(env->state, owner_trait);
+                out->self_type = self_type;
+                out->via_trait_declaration = 1;
+                return 1;
+            }
+        }
+    }
+    /* A projection receiver: the associated type's declared bounds
+     * (`trait Pattern { type Searcher: Searcher<'a>; }`) supply methods. */
+    if ((passes & 2u) != 0u && self->kind == CM_TY_PROJECTION) {
+        const CmHirItem *associated = cm_tyck_item(env->state, self->def2);
+        if (associated != NULL
+            && associated->kind == CM_HIR_ITEM_TYPE_ALIAS) {
+            uint32_t bound;
+            for (bound = 0u;
+                    bound < associated->data.type_alias_item.bound_count;
+                    ++bound) {
+                const CmHirAssociatedTypeBound *type_bound =
+                    &associated->data.type_alias_item.bounds[bound];
+                CmHirDefId owner_trait;
+                const CmHirItem *declared = cm_tyck_trait_method(env,
+                    type_bound->trait_type.definition, name, 0u,
+                    &owner_trait);
+                if (declared == NULL) continue;
                 cm_tyck_instance_init(&out->instance, self_type);
                 cm_tyck_instance_fresh(env, &out->instance,
                     cm_tyck_item(env->state, owner_trait));
@@ -927,11 +958,16 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                         ++equality)
                     if (cm_hir_def_id_equal(
                             pred->equalities[equality].associated_type,
-                            assoc_def))
+                            assoc_def)) {
+                        CmTyId equality_value = cm_ty_from_hir(arena,
+                            env->state->hir,
+                            pred->equalities[equality].value);
+                        if (equality_value == CM_TY_NONE) continue;
                         return cm_tyck_normalize(env, cm_ty_subst(arena,
-                            cm_ty_from_hir(arena, env->state->hir,
-                                pred->equalities[equality].value),
-                            cm_tyck_subst_of(&env->self_subst)), depth + 1u);
+                            equality_value,
+                            cm_tyck_subst_of(&env->self_subst)),
+                            depth + 1u);
+                    }
             }
         }
         return type;
@@ -1001,15 +1037,41 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                 impl->item->definition, associated->name);
             if (definition == NULL
                 || definition->kind != CM_HIR_ITEM_TYPE_ALIAS) continue;
-            cm_tyck_instance_init(&instance, self_type);
-            cm_tyck_instance_fresh(env, &instance, impl->item);
-            (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
-                impl->self_pattern, cm_tyck_subst_of(&instance)));
-            return cm_tyck_normalize(env, cm_ty_subst(arena,
-                cm_ty_from_hir(arena, env->state->hir,
-                    definition->data.type_alias_item.target),
-                cm_tyck_subst_of(&instance)), depth + 1u);
+            {
+                CmTyId target_type = cm_ty_from_hir(arena, env->state->hir,
+                    definition->data.type_alias_item.target);
+                if (target_type == CM_TY_NONE) continue;
+                cm_tyck_instance_init(&instance, self_type);
+                cm_tyck_instance_fresh(env, &instance, impl->item);
+                (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
+                    impl->self_pattern, cm_tyck_subst_of(&instance)));
+                return cm_tyck_normalize(env, cm_ty_subst(arena,
+                    target_type, cm_tyck_subst_of(&instance)), depth + 1u);
+            }
         }
+    }
+    if (getenv("CM_TYCK_DEBUG") != NULL && self_kind == CM_TY_ADT) {
+        size_t by_trait = 0u;
+        size_t by_self = 0u;
+        size_t no_child = 0u;
+        for (index = 0u; index < env->state->impl_count; ++index) {
+            const CmTyckImpl *impl = &env->state->impls[index];
+            if (!impl->has_trait
+                || !cm_hir_def_id_equal(impl->trait_def, trait_def))
+                continue;
+            by_trait += 1u;
+            if (!cm_tyck_matches(env, impl->self_pattern, self_type))
+                continue;
+            by_self += 1u;
+            if (cm_tyck_child_named_hir(env->state,
+                    impl->item->definition, associated->name) == NULL)
+                no_child += 1u;
+        }
+        fprintf(stderr, "TYCK normalize-miss impls_for_trait=%lu"
+            " self_matched=%lu missing_child=%lu ",
+            (unsigned long)by_trait, (unsigned long)by_self,
+            (unsigned long)no_child);
+        cm_tyck_debug_pair(env, "projection", type, self_type);
     }
     return type;
 }
@@ -1881,7 +1943,12 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
     if (cm_ty_unify(arena, actual, expected)) return 1;
     a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
     e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
-    if (a == NULL || e == NULL) return 0;
+    if (a == NULL || e == NULL) {
+        if (getenv("CM_TYCK_DEBUG") != NULL)
+            fprintf(stderr, "TYCK coerce-null actual=%lu expected=%lu\n",
+                (unsigned long)actual, (unsigned long)expected);
+        return 0;
+    }
     /* A projection that cannot be normalized yet is accepted: the input is
      * assumed to be valid Rust and trait solving is not modelled. */
     if (a->kind == CM_TY_PROJECTION || e->kind == CM_TY_PROJECTION) return 1;

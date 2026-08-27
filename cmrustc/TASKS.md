@@ -2581,6 +2581,17 @@ the first candidate as fallback (`cm_tyck_lookup_assoc_in` gained a
 call-arg 106; method not found 85; body vs signature 75; assignment 73
 (the Wrapping family — operator-route instrumentation in flight);
 call-through-non-fn 50; unresolved value path 33; branch 31.
+
+M9-04 eleventh pass (same day): projection receivers resolve methods
+through the associated type's declared bounds (`trait Pattern { type
+Searcher: Searcher<'a>; }` — clears the `haystack`/`next_match`
+family); predicate subjects may also be projections; normalization
+skips impls whose equality or Output target fails HIR conversion
+instead of recursing on an invalid id.  Whole core: 20,970/22,524
+typed, 516 error nodes (was 534).  Remaining: call-arg 106; method not
+found 75 (30 = Simd `count_ones` family); assignment 73 (Wrapping —
+`coerce-null=0` rules out invalid ids; next suspicion: normalize picks
+a wrong-width impl); body vs signature 70; call-through-non-fn 50.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
