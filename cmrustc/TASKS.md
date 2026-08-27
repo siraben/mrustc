@@ -2550,6 +2550,24 @@ comparisons on one level (`x & FLAG != 0` parsed wrong before).  Whole
 core: 20,854/22,524 typed, 747 error nodes (was 945).  Remaining:
 method-arg 160; call-arg 127; method not found 111; body vs signature
 103; call-through-non-fn 70; branch 33; unresolved value path 33.
+
+M9-04 ninth pass (same day, runs 15-21): trait bounds with structured
+ADT subjects (`Simd<T, N>: SimdUint`, `P::Searcher: Searcher`) supply
+methods for matching receivers (bare-parameter subjects still match
+exactly); normalization matches parameterized trait arguments
+(`SliceIndex<[T]>` vs `SliceIndex<str>`), with generic projection
+arguments as wildcards; **statement-position expressions stop after a
+block-like expression unless continued by `.` or `?`** — previously
+`while .. {} (a, b)` parsed as a call (this silently mis-parsed 8 core
+files; the probe now prints graph-error details); compiler-known method
+names are interned, not looked up, so operator/deref/call lookups no
+longer depend on a name appearing textually in some body.  Whole core:
+20,827/22,524 typed, 759 error nodes — method-not-found 111 -> 85 and
+non-fn-callee 70 -> 50 improved; assignment (72) and body-vs-signature
+(129) regressed vs the eighth pass and are the next targets (the
+`Wrapping<$t>` `*self = *self | other` family and `SliceIndex` bodies).
+Remaining: method-arg 156; body vs signature 129; call-arg 126; method
+not found 85; assignment 73; call-through-non-fn 50; branch 31.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

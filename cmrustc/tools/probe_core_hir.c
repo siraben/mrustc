@@ -635,6 +635,21 @@ int main(int argc, char **argv)
         (unsigned long)import_result.error_count,
         (unsigned long)sources.length,
         (unsigned long)cm_module_graph_module_count(&graph));
+    if (graph_result.error_count != 0u) {
+        uint32_t error_index;
+        for (error_index = 0u; error_index < 20u; ++error_index) {
+            CmResolveError resolve_error;
+            const CmSourceFile *error_file;
+            if (!cm_module_graph_get_error(&graph, error_index,
+                    &resolve_error)) break;
+            error_file = cm_source_get(&sources, resolve_error.span.source);
+            printf("graph-error kind=%s source=%s line=%lu column=%lu\n",
+                cm_resolve_error_kind_name(resolve_error.kind),
+                error_file == NULL ? "<none>" : error_file->path,
+                (unsigned long)resolve_error.line,
+                (unsigned long)resolve_error.column);
+        }
+    }
     if (graph_result.error_count != 0u || import_result.error_count != 0u) {
         status = 1;
         goto cleanup;

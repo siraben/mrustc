@@ -2326,7 +2326,11 @@ static CmAstExprId cm_parser_parse_expression_bp_mode(CmParser *parser,
     for (;;) {
         if (stop_after_block_like
             && cm_parser_expr_is_block_like(parser, left)) {
-            break;
+            /* Statement position: a block-like expression ends the
+             * statement unless continued by `.` or `?`, exactly as in
+             * rustc (`unsafe { .. }.method()`, `match .. {}?`). */
+            enum cm_token_kind next = cm_parser_kind(parser);
+            if (next != CM_TOKEN_DOT && next != CM_TOKEN_QUESTION) break;
         }
         if (cm_parser_kind(parser) == CM_TOKEN_LPAREN) {
             CmAstExpr expression;
@@ -2620,7 +2624,11 @@ static CmAstExprId cm_parser_parse_block_mode(CmParser *parser,
             } else {
                 CmAstExprId value;
 
-                value = cm_parser_parse_expression(parser);
+                /* Statement position: a block-like expression ends the
+                 * statement; a following `(`/`[`/operator starts a new
+                 * statement rather than a call, index, or binary op. */
+                value = cm_parser_parse_expression_bp_mode(parser, 1u, 1,
+                    1);
                 cm_parser_attach_expression_attributes(parser, value,
                     &attributes);
                 if (cm_parser_eat(parser, CM_TOKEN_SEMICOLON)) {
