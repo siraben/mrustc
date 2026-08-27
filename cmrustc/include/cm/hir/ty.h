@@ -68,9 +68,17 @@ typedef struct CmTyVar {
     CmHirInferenceKind kind;
 } CmTyVar;
 
+typedef struct CmTyUndoEntry {
+    uint32_t variable;
+    uint32_t old_parent;
+    CmTyId old_binding;
+    CmHirInferenceKind old_kind;
+} CmTyUndoEntry;
+
 typedef struct CmTyArena {
     CmVec types;   /* CmTy */
     CmVec vars;    /* CmTyVar */
+    CmVec undo;    /* CmTyUndoEntry: every var mutation, for rollback */
     CmMap intern;  /* key bytes -> CmTyId */
     CmTyId unit;
     CmTyId error;
@@ -121,6 +129,9 @@ CmTyId cm_ty_resolve_deep(CmTyArena *arena, CmTyId id);
 int cm_ty_has_infer(CmTyArena *arena, CmTyId id);
 /* Structural unification with variable binding; 1 on success. */
 int cm_ty_unify(CmTyArena *arena, CmTyId left, CmTyId right);
+/* Speculative unification: mark, try, and roll back rejected bindings. */
+size_t cm_ty_undo_mark(const CmTyArena *arena);
+void cm_ty_undo_to(CmTyArena *arena, size_t mark);
 /* Bind every unbound integer/float variable to i32/f64. */
 void cm_ty_apply_defaults(CmTyArena *arena);
 

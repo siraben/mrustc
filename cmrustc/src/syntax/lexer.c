@@ -285,7 +285,10 @@ static int cm_scan_number(struct cm_lexer_state *state)
     if (base == 10u
         && state->previous_significant_kind != CM_TOKEN_DOT
         && cm_peek(state, 0) == (unsigned char)'.' &&
-        cm_peek(state, 1) != (unsigned char)'.') {
+        cm_peek(state, 1) != (unsigned char)'.'
+        /* `999.try_into()` is an integer and a method call, not a
+         * float followed by garbage. */
+        && !cm_is_ident_start(cm_peek(state, 1))) {
         is_float = 1;
         cm_advance(state);
         while (cm_is_dec_digit(cm_peek(state, 0)) ||

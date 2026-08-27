@@ -62,6 +62,7 @@ void cm_ty_arena_init(CmTyArena *arena)
     memset(arena, 0, sizeof(*arena));
     cm_vec_init(&arena->types, sizeof(CmTy));
     cm_vec_init(&arena->vars, sizeof(CmTyVar));
+    cm_vec_init(&arena->undo, sizeof(CmTyUndoEntry));
     cm_map_init(&arena->intern, sizeof(CmTyId));
     arena->error = cm_ty_simple(arena, CM_TY_ERROR, 0u, 0u);
     arena->unit = cm_ty_tuple(arena, NULL, 0u);
@@ -87,6 +88,7 @@ void cm_ty_arena_destroy(CmTyArena *arena)
     }
     cm_map_destroy(&arena->intern);
     cm_vec_destroy(&arena->vars);
+    cm_vec_destroy(&arena->undo);
     cm_vec_destroy(&arena->types);
 }
 
@@ -378,6 +380,37 @@ static int cm_ty_occurs(CmTyArena *arena, uint32_t root, CmTyId target,
     return 0;
 }
 
+static void cm_ty_undo_log(CmTyArena *arena, uint32_t variable)
+{
+    const CmTyVar *var = (const CmTyVar *)cm_vec_at(&arena->vars, variable);
+    CmTyUndoEntry entry;
+    if (var == NULL) return;
+    entry.variable = variable;
+    entry.old_parent = var->parent;
+    entry.old_binding = var->binding;
+    entry.old_kind = var->kind;
+    (void)cm_vec_push(&arena->undo, &entry);
+}
+
+size_t cm_ty_undo_mark(const CmTyArena *arena)
+{
+    return arena->undo.len;
+}
+
+void cm_ty_undo_to(CmTyArena *arena, size_t mark)
+{
+    while (arena->undo.len > mark) {
+        CmTyUndoEntry entry;
+        CmTyVar *var;
+        if (!cm_vec_pop(&arena->undo, &entry)) break;
+        var = (CmTyVar *)cm_vec_at(&arena->vars, entry.variable);
+        if (var == NULL) continue;
+        var->parent = entry.old_parent;
+        var->binding = entry.old_binding;
+        var->kind = entry.old_kind;
+    }
+}
+
 static int cm_ty_bind_var(CmTyArena *arena, uint32_t variable, CmTyId target)
 {
     uint32_t root = cm_ty_var_root(arena, variable);
@@ -391,6 +424,8 @@ static int cm_ty_bind_var(CmTyArena *arena, uint32_t variable, CmTyId target)
         other_var = (CmTyVar *)cm_vec_at(&arena->vars, other);
         if (!cm_ty_var_accepts(var->kind, ty)) return 0;
         /* Merge: the more specific kind wins. */
+        cm_ty_undo_log(arena, root);
+        cm_ty_undo_log(arena, other);
         if (var->kind == CM_HIR_INFER_GENERAL) {
             var->parent = other;
         } else {
@@ -403,9 +438,13 @@ static int cm_ty_bind_var(CmTyArena *arena, uint32_t variable, CmTyId target)
     if (!cm_ty_var_accepts(var->kind, ty)) return 0;
     if (cm_ty_occurs(arena, root, target, 0u)) {
         /* Lenient: an infinite type is treated as an error, not a failure. */
+        cm_ty_undo_log(arena, root);
+        var = (CmTyVar *)cm_vec_at(&arena->vars, root);
         var->binding = arena->error;
         return 1;
     }
+    cm_ty_undo_log(arena, root);
+    var = (CmTyVar *)cm_vec_at(&arena->vars, root);
     var->binding = target;
     return 1;
 }

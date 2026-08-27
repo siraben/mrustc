@@ -1214,6 +1214,11 @@ static CmUPatId cm_u_lower_pat(CmULowerState *state, CmAstPatternId id)
         node.data.range.end = cm_u_lower_pat(state, pat->data.range.end);
         node.data.range.is_inclusive = pat->data.range.is_inclusive;
         break;
+    case CM_AST_PATTERN_REST:
+        /* `..` — as a binding subpattern (`rest @ ..`) it marks the
+         * binding as a subslice binding; WILD would lose that. */
+        node.kind = CM_U_PAT_REST;
+        break;
     default:
         node.kind = CM_U_PAT_WILD;
         break;
