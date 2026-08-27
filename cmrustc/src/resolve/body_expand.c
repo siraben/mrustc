@@ -2,6 +2,7 @@
 #include "cm/alloc.h"
 #include "cm/buf.h"
 #include "cm/macro/ast_builtin.h"
+#include "cm/macro/expand.h"
 #include "cm/macro/syntax_adapter.h"
 #include "cm/syntax/parser.h"
 #include "cm/vec.h"
@@ -1774,6 +1775,53 @@ static void cm_body_walk_item(CmBodyExpandState *state, CmAstItemId id,
     unsigned int depth);
 
 static void cm_body_walk_stmt(CmBodyExpandState *state, CmAstStmtId id,
+    unsigned int depth);
+
+/*
+ * Statement-level cfg: is this statement active under the build's cfg set?
+ * Attributes on the statement itself and, for an item statement, on the
+ * item are consulted.  Evaluation failures keep the statement (lenient).
+ */
+static int cm_body_attributes_cfg_active(CmBodyExpandState *state,
+    const CmAstAttributeId *ids, uint32_t count)
+{
+    CmExpandOptions options;
+    CmExpandedAttributeList expanded;
+    CmExpandResult result;
+    int active = 1;
+    if (count == 0u || ids == NULL || state->options->cfg == NULL) return 1;
+    cm_expand_options_init(&options, state->options->cfg);
+    cm_expanded_attribute_list_init(&expanded);
+    result = cm_expand_cfg_attribute_list(state->ast, 0u, ids, count,
+        &options, &expanded);
+    if (result.status == CM_MACRO_OK) active = expanded.is_active;
+    cm_expanded_attribute_list_destroy(&expanded);
+    return active;
+}
+
+static int cm_body_stmt_cfg_active(CmBodyExpandState *state,
+    const CmAstStmt *stmt)
+{
+    if (!cm_body_attributes_cfg_active(state, stmt->attributes,
+            stmt->attribute_count)) return 0;
+    if (stmt->kind == CM_AST_STMT_ITEM) {
+        const CmAstItem *item = cm_ast_get_item(state->ast,
+            stmt->data.item_stmt.item);
+        if (item != NULL && !cm_body_attributes_cfg_active(state,
+                item->attributes, item->attribute_count)) return 0;
+    }
+    return 1;
+}
+
+static int cm_body_expr_cfg_active(CmBodyExpandState *state, CmAstExprId id)
+{
+    const CmAstExpr *expr = cm_ast_get_expr(state->ast, id);
+    if (expr == NULL) return 1;
+    return cm_body_attributes_cfg_active(state, expr->attributes,
+        expr->attribute_count);
+}
+
+static void cm_body_walk_stmt(CmBodyExpandState *state, CmAstStmtId id,
     unsigned int depth)
 {
     const CmAstStmt *stmt = cm_ast_get_stmt(state->ast, id);
@@ -1810,6 +1858,44 @@ static void cm_body_walk_expr(CmBodyExpandState *state, CmAstExprId id,
         uint32_t statement_count = expr->data.block.statement_count;
         CmAstExprId tail = expr->data.block.tail;
         CmAstStmtId *statements = expr->data.block.statements;
+        /* Strip cfg-inactive statements and tail in place; a trailing
+         * semicolonless expression statement becomes the new tail. */
+        if (state->options->cfg != NULL
+            && (statement_count != 0u || tail != CM_AST_EXPR_NONE)) {
+            uint32_t kept = 0u;
+            int changed = 0;
+            for (index = 0u; index < statement_count; ++index) {
+                const CmAstStmt *stmt = cm_ast_get_stmt(state->ast,
+                    statements[index]);
+                if (stmt != NULL && !cm_body_stmt_cfg_active(state, stmt)) {
+                    changed = 1;
+                    continue;
+                }
+                statements[kept] = statements[index];
+                kept += 1u;
+            }
+            if (tail != CM_AST_EXPR_NONE
+                && !cm_body_expr_cfg_active(state, tail)) {
+                tail = CM_AST_EXPR_NONE;
+                changed = 1;
+            }
+            if (changed && tail == CM_AST_EXPR_NONE && kept != 0u) {
+                const CmAstStmt *last = cm_ast_get_stmt(state->ast,
+                    statements[kept - 1u]);
+                if (last != NULL && last->kind == CM_AST_STMT_EXPR
+                    && !last->data.expr_stmt.has_semicolon) {
+                    tail = last->data.expr_stmt.expression;
+                    kept -= 1u;
+                }
+            }
+            if (changed) {
+                CmAstExpr *destination = (CmAstExpr *)cm_vec_at(
+                    &state->ast->expressions, (size_t)id - 1u);
+                destination->data.block.statement_count = kept;
+                destination->data.block.tail = tail;
+                statement_count = kept;
+            }
+        }
         for (index = 0u; index < statement_count; ++index)
             cm_body_walk_stmt(state, statements[index], depth);
         cm_body_walk_expr(state, tail, depth);

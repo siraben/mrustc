@@ -244,6 +244,16 @@ static const char generated_source[] =
     "    use crate::Wide as W;\n"
     "    let w = W(3);\n"
     "    if flag && w.0 > 2 { Alpha } else { Beta }\n"
+    "}\n"
+    "pub fn cfgd() -> Wide {\n"
+    "    #[cfg(not(feature = \"optimize_for_size\"))]\n"
+    "    {\n"
+    "        Wide(1)\n"
+    "    }\n"
+    "    #[cfg(feature = \"optimize_for_size\")]\n"
+    "    {\n"
+    "        missing_helper(2)\n"
+    "    }\n"
     "}\n";
 
 static void test_generated_and_body_use(void)
@@ -258,6 +268,8 @@ static void test_generated_and_body_use(void)
         "direct path to macro-generated item not typed");
     check(body_typed(&fixture, "pick"),
         "body-local use not typed");
+    check(body_typed(&fixture, "cfgd"),
+        "cfg-inactive body statements not stripped");
     fixture_destroy(&fixture);
 }
 

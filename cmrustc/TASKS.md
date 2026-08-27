@@ -2510,6 +2510,22 @@ body vs signature 316; operator 196; method-arg 163; call-through-
 non-fn 152; call-arg 130; method not found 119; assignment 75; deref
 73; qualified 57; unresolved value path 44 (the `impl_Display!` fmt
 helpers); branch 40; field 31.
+
+M9-04 sixth pass (same day): body expansion strips cfg-inactive
+statements and tails from blocks in place (a trailing semicolonless
+expression statement is promoted to the new tail), so
+`#[cfg(feature = "optimize_for_size")]` alternates and their dead
+callees disappear (`ubody` unresolved 44 -> 33).  Typeck: tuple/unit
+constructors called through a non-function callee type resolve via
+`cm_tyck_ctor_of`; binary operators normalize their left operand and
+leniently accept projections/params/`Self`/const params; deref falls
+back the same way (a `&`-pattern often binds the reference away);
+qualified-path associated names are interned, not looked up.  Whole
+core after the operator/deref/ctor pass: 20,437/22,524 typed, 1,187
+error nodes (operator and deref classes cleared).  Remaining: body vs
+signature 316; method-arg 162; call-through-non-fn 152 (unchanged —
+population not the ctor shape); call-arg 129; method not found 116;
+assignment 75; qualified 57 (fix landed after this run); branch 40.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

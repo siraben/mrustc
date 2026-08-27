@@ -1857,6 +1857,24 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             &env->state->ubodies->strings, "call_once", 9u);
         int resolved = 0;
         int attempt;
+        if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH) {
+            /* Tuple or unit constructor called as a function. */
+            CmTyckCtor ctor = cm_tyck_ctor_of(env,
+                &callee_expr->data.path.resolution);
+            if (ctor.valid) {
+                CmTyckInstance instance;
+                CmTyId adt = cm_tyck_adt_fresh(env, ctor.adt, &instance);
+                count = ctor.field_count > CM_TYCK_MAX_ARGS
+                    ? CM_TYCK_MAX_ARGS : ctor.field_count;
+                for (index = 0u; index < count; ++index)
+                    params[index] = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                        env->state->hir, ctor.fields[index].type),
+                        cm_tyck_subst_of(&instance));
+                ret = adt;
+                known = 1;
+                resolved = 1;
+            }
+        }
         for (attempt = 0; attempt < 3 && !resolved; ++attempt) {
             CmInternId name = attempt == 0 ? call_name
                 : attempt == 1 ? call_mut : call_once;
@@ -1881,7 +1899,11 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                 resolved = 1;
             }
         }
-        if (!resolved) cm_tyck_error(env, "call through non-function type");
+        if (!resolved) {
+            cm_tyck_debug_pair(env, "non-function callee", callee, callee);
+            cm_tyck_debug_span(env, expr);
+            cm_tyck_error(env, "call through non-function type");
+        }
     }
     if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
         && (callee_expr->data.path.resolution.kind == CM_U_RESOLVED_VARIANT
@@ -1983,7 +2005,12 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         CmTyId actual = cm_tyck_expr(env,
             expr->data.method_call.arguments[index], arg_expected);
         if (slot < count && !cm_tyck_coerce(env, actual, params[slot]))
-            cm_tyck_error(env, "method argument type mismatch");
+            {
+                cm_tyck_debug_pair(env, "method argument", actual,
+                    params[first_arg + index]);
+                cm_tyck_debug_span(env, expr);
+                cm_tyck_error(env, "method argument type mismatch");
+            }
     }
     return ret;
 }
@@ -2111,6 +2138,7 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
         comparison || shift ? CM_TY_NONE : expected);
     right = cm_tyck_expr(env, expr->data.binary.right,
         shift ? CM_TY_NONE : left);
+    left = cm_tyck_normalize(env, left, 0u);
     lt = cm_ty_get(arena, cm_ty_resolve(arena, left));
     if (lt != NULL && (lt->kind == CM_TY_INT || lt->kind == CM_TY_FLOAT
             || lt->kind == CM_TY_BOOL || lt->kind == CM_TY_CHAR
@@ -2163,6 +2191,17 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
     }
     if (lt != NULL && lt->kind == CM_TY_INFER) return cm_ty_fresh(arena,
         CM_HIR_INFER_GENERAL);
+    /* Arithmetic on a projection, generic parameter, `Self`, or const
+     * parameter: the operator trait bound is assumed and the result keeps
+     * the operand type. */
+    if (lt != NULL && (lt->kind == CM_TY_PROJECTION
+            || lt->kind == CM_TY_PARAM || lt->kind == CM_TY_SELF
+            || lt->kind == CM_TY_CONST_PARAM
+            || lt->kind == CM_TY_CONST_UNKNOWN
+            || lt->kind == CM_TY_ERROR))
+        return comparison ? arena->boolean : left;
+    cm_tyck_debug_pair(env, "operator", left, right);
+    cm_tyck_debug_span(env, expr);
     cm_tyck_error(env, "operator on unsupported type");
     return arena->error;
 }
@@ -2200,8 +2239,12 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         if (associated != NULL && associated->segment_count != 0u) {
             const CmInternedString *text = cm_ast_get_string(env->ast,
                 associated->segments[associated->segment_count - 1u].name);
+            /* Intern (not lookup): the associated name need not appear
+             * anywhere else in a body.  The interner is append-only, so
+             * this cast is safe. */
             if (text != NULL)
-                name = cm_interner_lookup(&env->state->ubodies->strings,
+                name = cm_interner_intern(
+                    (CmInterner *)&env->state->ubodies->strings,
                     text->bytes, text->len);
         }
         if (name != CM_INTERN_ID_NONE
@@ -2221,6 +2264,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             cm_tyck_push_pending(env, id);
             result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
         } else {
+            cm_tyck_debug_pair(env, "qualified path", self_type, self_type);
+            cm_tyck_debug_span(env, expr);
             cm_tyck_error(env, "qualified path not resolved");
         }
         break;
@@ -2408,7 +2453,20 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                     rt = cm_ty_get(arena, cm_ty_resolve(arena, ret));
                     result = rt != NULL && rt->kind == CM_TY_REF
                         ? rt->children[0] : ret;
+                } else if (ot->kind == CM_TY_PROJECTION
+                        || ot->kind == CM_TY_PARAM
+                        || ot->kind == CM_TY_SELF
+                        || ot->kind == CM_TY_ERROR) {
+                    /* Deref through an unknown Deref impl. */
+                    result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+                } else if (ot->kind == CM_TY_INT || ot->kind == CM_TY_FLOAT
+                        || ot->kind == CM_TY_BOOL
+                        || ot->kind == CM_TY_CHAR) {
+                    /* A `&`-pattern bound the reference away already. */
+                    result = operand;
                 } else {
+                    cm_tyck_debug_pair(env, "deref", operand, operand);
+                    cm_tyck_debug_span(env, expr);
                     cm_tyck_error(env, "deref of non-pointer");
                 }
             }
@@ -2454,8 +2512,11 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         CmTyId value = cm_tyck_expr(env, expr->data.assign.value,
             expr->kind == CM_U_EXPR_ASSIGN ? target : CM_TY_NONE);
         if (expr->kind == CM_U_EXPR_ASSIGN) {
-            if (!cm_tyck_coerce(env, value, target))
+            if (!cm_tyck_coerce(env, value, target)) {
+                cm_tyck_debug_pair(env, "assignment", value, target);
+                cm_tyck_debug_span(env, expr);
                 cm_tyck_error(env, "assignment type mismatch");
+            }
         } else {
             const CmTy *tt = cm_ty_get(arena, cm_ty_resolve(arena, target));
             if (tt != NULL && (tt->kind == CM_TY_INT || tt->kind == CM_TY_FLOAT
