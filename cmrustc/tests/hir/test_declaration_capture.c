@@ -326,6 +326,126 @@ static const unsigned char try_from_fn_fixture_source[] =
     "where F: FnMut(usize) -> R, R: Try,\n"
     "  R::Residual: Residual<[R::Output; N]> { cb }\n";
 
+/*
+ * The same declaration split across two modules in the real `core` layout:
+ * `array::build` sorts before `ops`, so the `Try`/`Residual` profiles it
+ * authenticates must be captured before the value pass, not by luck of
+ * namespace order.  TRY_ATTRS parameterizes the `Try` attributes so a
+ * profile mismatch is proven to reject rather than pass vacuously.
+ */
+#define TRY_FROM_FN_SPLIT_SOURCE(TRY_ATTRS, TRY_SUPERTRAIT) \
+    "pub mod array {\n" \
+    "  use crate::ops::{ChangeOutputType, FnMut, Residual, Try};\n" \
+    "  #[inline]\n" \
+    "  #[unstable(feature = \"array_try_from_fn\", issue = \"89379\")]\n" \
+    "  pub fn build<R, const N: usize, F>(cb: F)\n" \
+    "    -> ChangeOutputType<R, [R::Output; N]>\n" \
+    "  where F: FnMut(usize) -> R, R: Try,\n" \
+    "    R::Residual: Residual<[R::Output; N]> { cb }\n" \
+    "}\n" \
+    "pub mod ops {\n" \
+    "  #[unstable(feature = \"tuple_trait\", issue = \"none\")]\n" \
+    "  #[lang = \"tuple_trait\"]\n" \
+    "  #[diagnostic::on_unimplemented(message = \"not a tuple\")]\n" \
+    "  #[rustc_deny_explicit_impl]\n" \
+    "  #[rustc_do_not_implement_via_object]\n" \
+    "  pub trait Tuple {}\n" \
+    "  #[lang = \"fn_once\"]\n" \
+    "  #[stable(feature = \"rust1\", since = \"1.0.0\")]\n" \
+    "  #[rustc_paren_sugar]\n" \
+    "  #[rustc_on_unimplemented(message = \"not callable\")]\n" \
+    "  #[fundamental]\n" \
+    "  #[must_use = \"closures are lazy\"]\n" \
+    "  #[const_trait]\n" \
+    "  #[rustc_const_unstable(feature = \"const_trait_impl\", " \
+        "issue = \"none\")]\n" \
+    "  pub trait FnOnce<Args: Tuple> {\n" \
+    "    #[lang = \"fn_once_output\"]\n" \
+    "    #[stable(feature = \"fn_once_output\", since = \"1.0.0\")]\n" \
+    "    type Output;\n" \
+    "    #[unstable(feature = \"fn_traits\", issue = \"none\")]\n" \
+    "    extern \"rust-call\" fn call_once(self, args: Args) " \
+        "-> Self::Output;\n" \
+    "  }\n" \
+    "  #[lang = \"fn_mut\"]\n" \
+    "  #[stable(feature = \"rust1\", since = \"1.0.0\")]\n" \
+    "  #[rustc_paren_sugar]\n" \
+    "  #[rustc_on_unimplemented(message = \"not callable\")]\n" \
+    "  #[fundamental]\n" \
+    "  #[must_use = \"closures are lazy\"]\n" \
+    "  #[const_trait]\n" \
+    "  #[rustc_const_unstable(feature = \"const_trait_impl\", " \
+        "issue = \"none\")]\n" \
+    "  pub trait FnMut<Args: Tuple>: FnOnce<Args> {\n" \
+    "    #[unstable(feature = \"fn_traits\", issue = \"none\")]\n" \
+    "    extern \"rust-call\" fn call_mut(&mut self, args: Args) " \
+        "-> Self::Output;\n" \
+    "  }\n" \
+    "  #[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n" \
+    "  #[rustc_diagnostic_item = \"ControlFlow\"]\n" \
+    "  #[must_use]\n" \
+    "  #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n" \
+    "  pub enum ControlFlow<B, C = ()> {\n" \
+    "    #[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n" \
+    "    #[lang = \"Continue\"]\n" \
+    "    Continue(C),\n" \
+    "    #[stable(feature = \"control_flow_enum_type\", since = \"1.55.0\")]\n" \
+    "    #[lang = \"Break\"]\n" \
+    "    Break(B),\n" \
+    "  }\n" \
+    "  #[rustc_on_unimplemented(message = \"from residual\")]\n" \
+    "  #[rustc_diagnostic_item = \"FromResidual\"]\n" \
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "  #[const_trait]\n" \
+    "  #[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n" \
+    "  pub trait FromResidual<R = <Self as Try>::Residual> {\n" \
+    "    #[lang = \"from_residual\"]\n" \
+    "    #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "    fn from_residual(residual: R) -> Self;\n" \
+    "  }\n" \
+    "  #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "  #[rustc_on_unimplemented(message = \"not try\")]\n" \
+    "  #[doc(alias = \"?\")]\n" \
+    "  #[lang = \"Try\"]\n" \
+    TRY_ATTRS \
+    "  pub trait Try: " TRY_SUPERTRAIT " {\n" \
+    "    #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "    type Output;\n" \
+    "    #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "    type Residual;\n" \
+    "    #[lang = \"from_output\"]\n" \
+    "    #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "    fn from_output(output: Self::Output) -> Self;\n" \
+    "    #[lang = \"branch\"]\n" \
+    "    #[unstable(feature = \"try_trait_v2\", issue = \"84277\")]\n" \
+    "    fn branch(self) -> ControlFlow<Self::Residual, Self::Output>;\n" \
+    "  }\n" \
+    "  #[unstable(feature = \"try_trait_v2_residual\", issue = \"91285\")]\n" \
+    "  #[const_trait]\n" \
+    "  #[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n" \
+    "  pub trait Residual<O> {\n" \
+    "    #[unstable(feature = \"try_trait_v2_residual\", issue = \"91285\")]\n" \
+    "    type TryType: Try<Output = O, Residual = Self>;\n" \
+    "  }\n" \
+    "  #[unstable(feature = \"pub_crate_should_not_need_unstable_attr\", " \
+        "issue = \"none\")]\n" \
+    "  #[allow(type_alias_bounds)]\n" \
+    "  pub(crate) type ChangeOutputType<T: " \
+        "Try<Residual: Residual<V>>, V> =\n" \
+    "    <T::Residual as Residual<V>>::TryType;\n" \
+    "}\n"
+
+static const unsigned char try_from_fn_split_fixture_source[] =
+    TRY_FROM_FN_SPLIT_SOURCE(
+        "  #[const_trait]\n"
+        "  #[rustc_const_unstable(feature = \"const_try\", issue = \"74935\")]\n",
+        "~const FromResidual");
+
+/* A consistent non-const `Try`: it captures as a trait, but not with the
+ * exact profile the array declaration authenticates. */
+static const unsigned char try_from_fn_split_plain_try_fixture_source[] =
+    TRY_FROM_FN_SPLIT_SOURCE("", "FromResidual");
+
 static const unsigned char from_mut_fixture_source[] =
     "pub trait Gate {}\n"
     "pub fn needs<X: Gate>() {}\n"
@@ -824,6 +944,19 @@ static void try_from_fn_fixture_init(CaptureFixture *fixture, int with_noise)
 {
     fixture_init_source(fixture, with_noise, "try-from-fn-like.rs",
         try_from_fn_fixture_source, sizeof(try_from_fn_fixture_source) - 1u);
+}
+
+static void try_from_fn_split_fixture_init(CaptureFixture *fixture,
+    int with_noise, int plain_try)
+{
+    if (plain_try)
+        fixture_init_source(fixture, with_noise, "try-from-fn-split.rs",
+            try_from_fn_split_plain_try_fixture_source,
+            sizeof(try_from_fn_split_plain_try_fixture_source) - 1u);
+    else
+        fixture_init_source(fixture, with_noise, "try-from-fn-split.rs",
+            try_from_fn_split_fixture_source,
+            sizeof(try_from_fn_split_fixture_source) - 1u);
 }
 
 static void from_mut_fixture_init(CaptureFixture *fixture, int with_noise)
@@ -5515,6 +5648,98 @@ static void test_try_from_fn_closure_and_determinism(void)
     fixture_destroy(&fixture);
 }
 
+static void test_try_from_fn_cross_module_trait_order(void)
+{
+    CaptureFixture fixture;
+    CaptureFixture noisy;
+    CaptureFixture plain;
+    CmHirDeclarationCaptureInput input;
+    CmHirDeclarationMetadata metadata;
+    CmHirDeclarationMetadata noisy_metadata;
+    CmHirDeclarationMetadata plain_metadata;
+    CmHirDeclarationMetadata decoded;
+    CmHirDeclarationCaptureResult result;
+    const CmHirDeclarationValue *build;
+    const CmHirDeclarationItem *control_flow;
+    const CmHirDeclarationType *return_type;
+    CmByteBuf bytes;
+    CmByteBuf noisy_bytes;
+    CmByteBuf decoded_bytes;
+    try_from_fn_split_fixture_init(&fixture, 0, 0);
+    try_from_fn_split_fixture_init(&noisy, 1, 0);
+    try_from_fn_split_fixture_init(&plain, 0, 1);
+    cm_hir_declaration_metadata_init(&metadata);
+    cm_hir_declaration_metadata_init(&noisy_metadata);
+    cm_hir_declaration_metadata_init(&plain_metadata);
+    /* `array` sorts before `ops`: the value pass must still see `Try` and
+     * `Residual` with their captured profiles. */
+    input = capture_input(&fixture);
+    result = cm_hir_declaration_metadata_capture(&input, &metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && result.module_count == 3u
+        && result.trait_count == 6u && result.associated_count == 9u
+        && result.item_count == 1u && result.value_count == 1u
+        && result.predicate_count == 6u
+        && result.projected_semantic_attribute_count == 34u
+        && metadata.generic_count == 9u && metadata.type_count == 28u
+        && cm_hir_declaration_metadata_validate(&metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    input = capture_input(&noisy);
+    result = cm_hir_declaration_metadata_capture(&input, &noisy_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_OK
+        && cm_hir_declaration_metadata_validate(&noisy_metadata)
+            == CM_HIR_DECL_METADATA_OK);
+    build = find_declaration_value(&metadata, "build", NULL);
+    control_flow = find_declaration_item(&metadata, "ControlFlow", NULL);
+    assert(build != NULL && control_flow != NULL
+        && build->generic_count == 3u && build->predicate_count == 3u
+        && build->parameter_count == 1u && build->has_body == 1u
+        && build->return_type != 0u);
+    return_type = &metadata.types[build->return_type - 1u];
+    assert(return_type->kind == CM_HIR_DECL_TYPE_PROJECTION);
+    cm_byte_buf_init(&bytes);
+    cm_byte_buf_init(&noisy_bytes);
+    cm_byte_buf_init(&decoded_bytes);
+    assert(cm_hir_declaration_metadata_encode(&metadata, &bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&noisy_metadata, &noisy_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == noisy_bytes.len
+        && memcmp(bytes.data, noisy_bytes.data, bytes.len) == 0);
+    cm_hir_declaration_metadata_init(&decoded);
+    assert(cm_hir_declaration_metadata_decode(bytes.data, bytes.len,
+                &decoded) == CM_HIR_DECL_METADATA_OK
+        && cm_hir_declaration_metadata_encode(&decoded, &decoded_bytes)
+            == CM_HIR_DECL_METADATA_OK
+        && bytes.len == decoded_bytes.len
+        && memcmp(bytes.data, decoded_bytes.data, bytes.len) == 0);
+    /* The trait pass stays fail-closed across modules: a consistent but
+     * non-const lang `Try` is not an admitted trait profile, so the split
+     * crate rejects atomically at the trait, before any value, with zero
+     * published metadata. */
+    input = capture_input(&plain);
+    result = cm_hir_declaration_metadata_capture(&input, &plain_metadata);
+    assert(result.status == CM_HIR_DECL_CAPTURE_UNSUPPORTED_HIR
+        && result.failure_stage == CM_HIR_DECL_CAPTURE_STAGE_ITEMS
+        && result.failure_reason
+            == CM_HIR_DECL_CAPTURE_REASON_ITEM_SOURCE_INVALID
+        && result.has_rejected_binding
+        && result.rejected_binding_kind == CM_HIR_LIBRARY_BINDING_TRAIT
+        && plain_metadata.trait_count == 0u
+        && plain_metadata.value_count == 0u
+        && plain_metadata.module_count == 0u);
+    cm_hir_declaration_metadata_destroy(&decoded);
+    cm_byte_buf_destroy(&decoded_bytes);
+    cm_byte_buf_destroy(&noisy_bytes);
+    cm_byte_buf_destroy(&bytes);
+    cm_hir_declaration_metadata_destroy(&plain_metadata);
+    cm_hir_declaration_metadata_destroy(&noisy_metadata);
+    cm_hir_declaration_metadata_destroy(&metadata);
+    fixture_destroy(&plain);
+    fixture_destroy(&noisy);
+    fixture_destroy(&fixture);
+}
+
 static void test_try_from_fn_hostile_mutations_are_atomic(void)
 {
     CaptureFixture fixture;
@@ -9254,6 +9479,7 @@ int main(void)
     test_from_fn_callable_closure_and_determinism();
     test_from_fn_hostile_mutations_are_atomic();
     test_try_from_fn_closure_and_determinism();
+    test_try_from_fn_cross_module_trait_order();
     test_try_from_fn_hostile_mutations_are_atomic();
     test_repeat_clone_closure_and_determinism();
     test_repeat_clone_hostile_mutations_are_atomic();

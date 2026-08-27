@@ -9388,6 +9388,7 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
     CmHirDeclarationCaptureResult *result)
 {
     size_t index;
+    size_t pass;
     if (!cm_decl_reexport_attributes(state, result)) return 0;
     if (state->hir->items.len
             > CM_HIR_DECL_METADATA_MAX_ASSOCIATED_ITEMS) {
@@ -9405,9 +9406,18 @@ static int cm_decl_collect_items(CmDeclCaptureState *state,
         state->item_capacity, sizeof(*state->items));
     state->values = (CmDeclCaptureItem *)cm_alloc_zeroed(
         state->namespace_count, sizeof(*state->values));
+    /* Public traits are collected before every other binding so that value
+     * declaration shapes may authenticate the exact captured trait profile
+     * of a trait declared in a later-sorted module, such as
+     * `core::array::try_from_fn` naming `core::ops::Try`. The captured
+     * arrays are sorted after this loop, so the pass order never changes
+     * the emitted metadata. */
+    for (pass = 0u; pass < 2u; ++pass)
     for (index = 0u; index < state->namespace_count; ++index) {
         CmDeclCaptureNamespace *entry = &state->namespace_values[index];
         CmDeclCaptureItem value;
+        if ((entry->target.kind == CM_HIR_LIBRARY_BINDING_TRAIT)
+                != (pass == 0u)) continue;
         memset(&value, 0, sizeof(value));
         if (entry->target.kind == CM_HIR_LIBRARY_BINDING_MODULE) {
             if (cm_decl_module_by_definition(state,
