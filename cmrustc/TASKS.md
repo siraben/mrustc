@@ -2568,6 +2568,19 @@ non-fn-callee 70 -> 50 improved; assignment (72) and body-vs-signature
 `Wrapping<$t>` `*self = *self | other` family and `SliceIndex` bodies).
 Remaining: method-arg 156; body vs signature 129; call-arg 126; method
 not found 85; assignment 73; call-through-non-fn 50; branch 31.
+
+M9-04 tenth pass (same day): method lookup selects among overlapping
+impl candidates by the call's argument types — arguments are typed
+first (closures deferred to the chosen method's expectation), then the
+first candidate whose parameters accept them non-bindingly wins, with
+the first candidate as fallback (`cm_tyck_lookup_assoc_in` gained a
+`skip`).  This resolves the `impl_partial_eq!` double-direction impls
+(`PartialEq<ByteStr> for [u8]`), the 27 overlapping `SliceIndex` impls
+([T]/str/ByteStr on the same ranges), and friends.  Whole core:
+20,966/22,524 typed, **534 error nodes** (was 759).  Remaining:
+call-arg 106; method not found 85; body vs signature 75; assignment 73
+(the Wrapping family — operator-route instrumentation in flight);
+call-through-non-fn 50; unresolved value path 33; branch 31.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

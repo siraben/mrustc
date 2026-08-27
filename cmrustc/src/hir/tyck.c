@@ -634,9 +634,14 @@ typedef struct CmTyckFound {
  * impls first, then trait impls, then trait bounds for parameters, then
  * dyn principals.  Binds the chosen impl's generics against `self_type`.
  */
-/* passes: 1 = inherent impls, 2 = trait impls/bounds/dyn, 3 = both. */
+/*
+ * passes: 1 = inherent impls, 2 = trait impls/bounds/dyn, 3 = both.
+ * skip: return the (skip+1)-th impl candidate; predicate/dyn fallbacks
+ * participate only at skip 0.
+ */
 static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
-    CmInternId name, CmTyckFound *out, unsigned int passes)
+    CmInternId name, CmTyckFound *out, unsigned int passes,
+    unsigned int skip)
 {
     CmTyArena *arena = env->state->arena;
     size_t index;
@@ -665,6 +670,10 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                     if (declared == NULL) continue;
                     /* Default method: instantiate the trait declaration
                      * with Self = self_type. */
+                    if (skip != 0u) {
+                        skip -= 1u;
+                        continue;
+                    }
                     cm_tyck_instance_init(&out->instance, self_type);
                     cm_tyck_instance_fresh(env, &out->instance,
                         cm_tyck_item(env->state, owner_trait));
@@ -680,6 +689,10 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                     name, (CmHirItemKind)-1);
                 if (child == NULL) continue;
             }
+            if (skip != 0u) {
+                skip -= 1u;
+                continue;
+            }
             cm_tyck_instance_init(&out->instance, self_type);
             cm_tyck_instance_fresh(env, &out->instance, impl->item);
             (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
@@ -691,6 +704,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
             return 1;
         }
     }
+    if (skip != 0u) return 0;
     /* Trait bounds in scope: `T: Trait`, and equally
      * `Simd<T, N>: SimdUint` or `P::Searcher: Searcher` — the subject is
      * matched structurally, with its generic parameters as wildcards. */
@@ -781,7 +795,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
 static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     CmInternId name, CmTyckFound *out)
 {
-    return cm_tyck_lookup_assoc_in(env, self_type, name, out, 3u);
+    return cm_tyck_lookup_assoc_in(env, self_type, name, out, 3u, 0u);
 }
 
 /* Is `def` one of the callable traits? */
@@ -2086,6 +2100,34 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
     return ret;
 }
 
+/*
+ * Non-binding check: could this candidate's parameters accept the
+ * already-typed arguments?  CM_TY_NONE argument slots (deferred
+ * closures) always fit.  Used to pick among overlapping impls
+ * (`PartialEq<ByteStr> for [u8]` vs `PartialEq<[B]> for [A]`).
+ */
+static int cm_tyck_method_args_compatible(CmTyckEnv *env,
+    const CmTyckFound *found, const CmTyId *arg_types, uint32_t arg_count)
+{
+    CmTyId params[CM_TYCK_MAX_ARGS];
+    CmTyId ret;
+    CmTyckFound copy = *found;
+    uint32_t count = cm_tyck_signature(env, found->item,
+        cm_tyck_subst_of(&copy.instance), params, CM_TYCK_MAX_ARGS, &ret);
+    uint32_t first = found->item->data.function_item.signature.receiver
+        != CM_HIR_RECEIVER_NONE ? 1u : 0u;
+    uint32_t index;
+    for (index = 0u; index < arg_count; ++index) {
+        uint32_t slot = first + index;
+        if (slot >= count) break;
+        if (arg_types[index] == CM_TY_NONE) continue;
+        if (!cm_tyck_matches(env, params[slot], arg_types[index])
+            && !cm_tyck_matches(env, arg_types[index], params[slot]))
+            return 0;
+    }
+    return 1;
+}
+
 static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     CmUExprId id)
 {
@@ -2096,6 +2138,8 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     unsigned int step;
     CmTyckFound found;
     CmTyId params[CM_TYCK_MAX_ARGS];
+    CmTyId arg_types[CM_TYCK_MAX_ARGS];
+    uint32_t arg_count = 0u;
     uint32_t count;
     CmTyId ret;
     uint32_t index;
@@ -2110,29 +2154,68 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                 CM_TY_NONE);
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
     }
+    /* Type the arguments first so overlapping impls can be told apart
+     * by what the call actually passes.  Closures are deferred: their
+     * parameter types come from the chosen method's expectation. */
+    {
+        uint32_t argument;
+        for (argument = 0u; argument < expr->data.method_call.argument_count;
+                ++argument) {
+            const CmUExpr *arg_expr = cm_ubody_get_expr(env->ub,
+                expr->data.method_call.arguments[argument]);
+            CmTyId typed = CM_TY_NONE;
+            if (arg_expr == NULL || arg_expr->kind != CM_U_EXPR_CLOSURE)
+                typed = cm_tyck_expr(env,
+                    expr->data.method_call.arguments[argument], CM_TY_NONE);
+            if (argument < CM_TYCK_MAX_ARGS) arg_types[argument] = typed;
+        }
+        arg_count = expr->data.method_call.argument_count
+                > CM_TYCK_MAX_ARGS ? CM_TYCK_MAX_ARGS
+            : expr->data.method_call.argument_count;
+    }
     {
         /* Inherent methods across every autoderef step win over trait
          * impls at any step: a blanket `impl<H: Hasher + ?Sized> Hasher
-         * for &mut H` must not capture `DebugStruct::finish`. */
+         * for &mut H` must not capture `DebugStruct::finish`.  Within a
+         * step, the first candidate whose parameters accept the typed
+         * arguments wins; the very first candidate is the fallback. */
         unsigned int phase;
+        CmTyckFound fallback;
+        CmTyId fallback_candidate = CM_TY_NONE;
+        int have_fallback = 0;
         found.item = NULL;
         for (phase = 0u; phase < 2u && found.item == NULL; ++phase) {
             unsigned int mask = phase == 0u ? 1u : 2u;
             for (step = 0u; step < 6u; ++step) {
                 CmTyKind candidate_kind;
+                unsigned int variant;
                 candidate = cm_tyck_autoderef(env, receiver, step);
                 candidate = cm_tyck_normalize(env, candidate, 0u);
-                if (cm_tyck_lookup_assoc_in(env, candidate,
-                        expr->data.method_call.name, &found, mask)
-                    && found.item->kind == CM_HIR_ITEM_FUNCTION) break;
-                found.item = NULL;
+                for (variant = 0u; variant < 8u; ++variant) {
+                    if (!cm_tyck_lookup_assoc_in(env, candidate,
+                            expr->data.method_call.name, &found, mask,
+                            variant)
+                        || found.item->kind != CM_HIR_ITEM_FUNCTION) {
+                        found.item = NULL;
+                        break;
+                    }
+                    if (cm_tyck_method_args_compatible(env, &found,
+                            arg_types, arg_count)) break;
+                    if (!have_fallback) {
+                        fallback = found;
+                        fallback_candidate = candidate;
+                        have_fallback = 1;
+                    }
+                    found.item = NULL;
+                }
+                if (found.item != NULL) break;
                 candidate_kind = cm_ty_get(arena, candidate)->kind;
                 if (candidate_kind == CM_TY_ARRAY) {
                     /* Unsize `[T; N]` to `[T]` for slice methods. */
                     CmTyId slice = cm_ty_slice(arena,
                         cm_ty_get(arena, candidate)->children[0]);
                     if (cm_tyck_lookup_assoc_in(env, slice,
-                            expr->data.method_call.name, &found, mask)
+                            expr->data.method_call.name, &found, mask, 0u)
                         && found.item->kind == CM_HIR_ITEM_FUNCTION) {
                         candidate = slice;
                         break;
@@ -2145,6 +2228,10 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                     break;
                 }
             }
+        }
+        if (found.item == NULL && have_fallback) {
+            found = fallback;
+            candidate = fallback_candidate;
         }
         if (found.item == NULL) candidate = CM_TY_NONE;
     }
@@ -2172,8 +2259,10 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     for (index = 0u; index < expr->data.method_call.argument_count; ++index) {
         uint32_t slot = first_arg + index;
         CmTyId arg_expected = slot < count ? params[slot] : CM_TY_NONE;
-        CmTyId actual = cm_tyck_expr(env,
-            expr->data.method_call.arguments[index], arg_expected);
+        CmTyId actual = index < arg_count && arg_types[index] != CM_TY_NONE
+            ? arg_types[index]
+            : cm_tyck_expr(env, expr->data.method_call.arguments[index],
+                arg_expected);
         if (slot < count && !cm_tyck_coerce(env, actual, params[slot]))
             {
                 cm_tyck_debug_pair(env, "method argument", actual,
@@ -2359,6 +2448,21 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
                 uint32_t count = cm_tyck_signature(env, found.item,
                     cm_tyck_subst_of(&found.instance), params, CM_TYCK_MAX_ARGS, &ret);
                 if (count >= 2u) (void)cm_tyck_coerce(env, right, params[1]);
+                if (getenv("CM_TYCK_DEBUG") != NULL) {
+                    const CmTy *rt = cm_ty_get(arena,
+                        cm_ty_resolve(arena, ret));
+                    if (found.via_trait_declaration) {
+                        fprintf(stderr, "TYCK op-via-decl %s ", name);
+                        cm_tyck_debug_pair(env, "operand", left, ret);
+                    } else if (rt != NULL
+                            && rt->kind == CM_TY_PROJECTION) {
+                        fprintf(stderr, "TYCK op-impl-proj %s parent=%s ",
+                            name, found.parent == NULL ? "?"
+                            : found.parent->kind == CM_HIR_ITEM_IMPL
+                                ? "impl" : "other");
+                        cm_tyck_debug_pair(env, "operand", left, ret);
+                    }
+                }
                 return ret;
             }
         }
@@ -2709,6 +2813,11 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             expr->kind == CM_U_EXPR_ASSIGN ? target : CM_TY_NONE);
         if (expr->kind == CM_U_EXPR_ASSIGN) {
             if (!cm_tyck_coerce(env, value, target)) {
+                const CmUExpr *value_expr = cm_ubody_get_expr(env->ub,
+                    expr->data.assign.value);
+                if (getenv("CM_TYCK_DEBUG") != NULL && value_expr != NULL)
+                    fprintf(stderr, "TYCK assign-value-kind=%d\n",
+                        (int)value_expr->kind);
                 cm_tyck_debug_pair(env, "assignment", value, target);
                 cm_tyck_debug_span(env, expr);
                 cm_tyck_error(env, "assignment type mismatch");
