@@ -11,6 +11,59 @@ This is the development critical path from the audited 2026-08-23 tree to a
 bootstrapped upstream Rust 1.90.0 compiler. `TASKS.md` remains the detailed
 ledger; this document orders its tasks by the deepest consumable artifact.
 
+## Revised strategy: mrustc-style leniency (2026-08-26)
+
+Direction set on 2026-08-26: build the **smallest compiler core that can
+bootstrap rustc**, targeting the same Rust 1.90.0 that the pinned upstream
+mrustc bootstraps, and adopt mrustc's stance that the input is already valid
+Rust. Concretely:
+
+- Stop authenticating declarations against the AST one profile at a time. The
+  `declaration_capture` v3 profile machinery (`cm_decl_*_shape`,
+  per-trait attribute profiles) admitted roughly one `core` item per hour and
+  was measuring the first rejected item of 252 traits and 20,747 values; the
+  `Printable: Copy + Debug` frontier showed that every further step needs the
+  general closure anyway. It stays as regression coverage for the executable
+  G3 profile but is no longer the bootstrap path.
+- Transport HIR generically. The HIR context is a set of id-indexed arenas
+  (`crates`, `modules`, `items`, `bodies`, `closures`, `expressions`,
+  `types`, `generic_parameters`, `definitions`); a whole-context snapshot with
+  id/interner/source remapping replaces per-item metadata, the way mrustc
+  serialises its HIR. Assume the producer was correct; validate structure,
+  not semantics.
+- Approximate like mrustc: no borrow checking, no coherence or privacy
+  enforcement, lenient attribute handling, desugaring in the front-end
+  (`for`, `while let`, `?`, `if let` chains) instead of modelling every
+  form downstream.
+
+Ordered pipeline milestones (M9 in `TASKS.md`); each is measured by a
+whole-`core` count printed by `probe_core_hir`:
+
+1. **M9-01 expression-position macro expansion.** `probe_core_hir
+   --body-census` counts AST expression kinds and macro invocations across
+   all 22,524 core bodies; the frontier metric is bodies still containing an
+   unexpanded `CM_AST_EXPR_MACRO`. Reuse `cm_macro_rules_reparse_expression`,
+   the item-macro planner's textual scope, and the builtin table; add the
+   compiler builtins core bodies need (`format_args!`, `assert!`,
+   `include_str!`, `concat!`, `cfg!`, `line!`...).
+2. **M9-02 untyped HIR bodies.** Extend `CmHirExprKind`/patterns to cover
+   every AST form and lower every core body with `type = NONE`; frontier
+   metric is `bodies_unlowered`. Path resolution inside bodies uses the
+   existing resolver; locals get indices; closures become HIR closures.
+3. **M9-03 whole-context HIR snapshot and multi-crate lowering.** Emit
+   `core` as one snapshot; lower `alloc`, then `std`, against it with
+   `extern crate`/`$crate` paths resolving into the loaded context.
+4. **M9-04 inference typeck** over lowered bodies (mrustc `typeck/expr_cs`
+   shape: type variables, method lookup with autoderef, coercions, trait
+   selection incl. impls from loaded crates), measured by typed bodies.
+5. **M9-05 MIR** for all bodies, **M9-06 C emission and link** (TinyCC and
+   GCC), then the M6/M7 crate orchestration and self-host gates unchanged.
+
+Fail-closed rules remain for *format* integrity (a snapshot that cannot be
+read rejects atomically); they no longer apply to language surface. The
+sections below predate this change and describe the audited state they
+measured.
+
 ## Audited baseline
 
 - The audit began at `a6e7c309`. Commits through `1630867d` added declaration

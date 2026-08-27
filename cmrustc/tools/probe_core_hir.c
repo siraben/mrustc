@@ -2,10 +2,12 @@
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
 #include "cm/hir/lower.h"
+#include "cm/hir/module_map.h"
 #include "cm/hir/metadata.h"
 #include "cm/sha256.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static size_t source_line(const CmSourceFile *source, size_t offset)
@@ -208,6 +210,283 @@ cleanup:
     cm_hir_artifact_config_destroy(&config);
 }
 
+
+/* ---- body census: AST expression kinds and macro invocations per body ---- */
+
+#define CENSUS_MAX_KINDS 64u
+#define CENSUS_MAX_MACROS 512u
+
+typedef struct CensusMacro {
+    char name[64];
+    unsigned long count;
+    unsigned long bodies;
+} CensusMacro;
+
+typedef struct Census {
+    unsigned long expr_kinds[CENSUS_MAX_KINDS];
+    unsigned long stmt_let;
+    unsigned long stmt_let_else;
+    unsigned long stmt_item;
+    unsigned long bodies;
+    unsigned long bodies_with_ast;
+    unsigned long bodies_with_macros;
+    unsigned long body_macro_seen;
+    CensusMacro macros[CENSUS_MAX_MACROS];
+    size_t macro_count;
+    unsigned long current_body_macros;
+} Census;
+
+static const char *const census_kind_names[] = {
+    "literal", "path", "qualified_path", "block", "call", "method_call",
+    "field", "tuple_field", "index", "unary", "binary", "assign", "cast",
+    "try", "try_block", "range", "let", "return", "break", "continue", "if",
+    "match", "loop", "while", "for", "closure", "tuple", "array", "struct",
+    "macro", "raw_reference"
+};
+
+static void census_macro(Census *census, const CmAst *ast,
+    const CmAstMacroInvocation *invocation)
+{
+    const CmAstPath *path = cm_ast_get_path(ast, invocation->path);
+    const CmInternedString *name = NULL;
+    char text[64];
+    size_t index;
+    size_t length;
+    if (path != NULL && path->segment_count != 0u && path->segments != NULL)
+        name = cm_ast_get_string(ast,
+            path->segments[path->segment_count - 1u].name);
+    if (name == NULL) {
+        strcpy(text, "<unknown>");
+    } else {
+        length = name->len < sizeof(text) - 1u ? name->len : sizeof(text) - 1u;
+        memcpy(text, name->bytes, length);
+        text[length] = '\0';
+    }
+    census->current_body_macros += 1u;
+    for (index = 0u; index < census->macro_count; ++index) {
+        if (strcmp(census->macros[index].name, text) == 0) {
+            census->macros[index].count += 1u;
+            if (census->macros[index].bodies != census->bodies) {
+                census->macros[index].bodies = census->bodies;
+            }
+            return;
+        }
+    }
+    if (census->macro_count == CENSUS_MAX_MACROS) return;
+    strcpy(census->macros[census->macro_count].name, text);
+    census->macros[census->macro_count].count = 1u;
+    census->macros[census->macro_count].bodies = census->bodies;
+    census->macro_count += 1u;
+}
+
+static void census_expr(Census *census, const CmAst *ast, CmAstExprId id);
+
+static void census_stmt(Census *census, const CmAst *ast, CmAstStmtId id)
+{
+    const CmAstStmt *stmt = cm_ast_get_stmt(ast, id);
+    if (stmt == NULL) return;
+    switch (stmt->kind) {
+    case CM_AST_STMT_LET:
+        census->stmt_let += 1u;
+        if (stmt->data.let_stmt.else_block != CM_AST_EXPR_NONE)
+            census->stmt_let_else += 1u;
+        census_expr(census, ast, stmt->data.let_stmt.initializer);
+        census_expr(census, ast, stmt->data.let_stmt.else_block);
+        break;
+    case CM_AST_STMT_EXPR:
+        census_expr(census, ast, stmt->data.expr_stmt.expression);
+        break;
+    case CM_AST_STMT_ITEM:
+        census->stmt_item += 1u;
+        break;
+    }
+}
+
+static void census_expr(Census *census, const CmAst *ast, CmAstExprId id)
+{
+    const CmAstExpr *expr = cm_ast_get_expr(ast, id);
+    uint32_t index;
+    if (expr == NULL) return;
+    if ((unsigned int)expr->kind < CENSUS_MAX_KINDS)
+        census->expr_kinds[expr->kind] += 1u;
+    switch (expr->kind) {
+    case CM_AST_EXPR_BLOCK:
+    case CM_AST_EXPR_TRY_BLOCK:
+        for (index = 0u; index < expr->data.block.statement_count; ++index)
+            census_stmt(census, ast, expr->data.block.statements[index]);
+        census_expr(census, ast, expr->data.block.tail);
+        break;
+    case CM_AST_EXPR_CALL:
+        census_expr(census, ast, expr->data.call.callee);
+        for (index = 0u; index < expr->data.call.argument_count; ++index)
+            census_expr(census, ast, expr->data.call.arguments[index]);
+        break;
+    case CM_AST_EXPR_METHOD_CALL:
+        census_expr(census, ast, expr->data.method_call.receiver);
+        for (index = 0u; index < expr->data.method_call.argument_count;
+                ++index)
+            census_expr(census, ast,
+                expr->data.method_call.arguments[index]);
+        break;
+    case CM_AST_EXPR_FIELD:
+        census_expr(census, ast, expr->data.field.base);
+        break;
+    case CM_AST_EXPR_TUPLE_FIELD:
+        census_expr(census, ast, expr->data.tuple_field.base);
+        break;
+    case CM_AST_EXPR_INDEX:
+        census_expr(census, ast, expr->data.index.base);
+        census_expr(census, ast, expr->data.index.index);
+        break;
+    case CM_AST_EXPR_UNARY:
+        census_expr(census, ast, expr->data.unary.operand);
+        break;
+    case CM_AST_EXPR_RAW_REFERENCE:
+        census_expr(census, ast, expr->data.raw_reference.operand);
+        break;
+    case CM_AST_EXPR_BINARY:
+    case CM_AST_EXPR_ASSIGN:
+        census_expr(census, ast, expr->data.binary.left);
+        census_expr(census, ast, expr->data.binary.right);
+        break;
+    case CM_AST_EXPR_CAST:
+        census_expr(census, ast, expr->data.cast.value);
+        break;
+    case CM_AST_EXPR_TRY:
+        census_expr(census, ast, expr->data.try_expr.operand);
+        break;
+    case CM_AST_EXPR_RANGE:
+        census_expr(census, ast, expr->data.range.start);
+        census_expr(census, ast, expr->data.range.end);
+        break;
+    case CM_AST_EXPR_LET:
+        census_expr(census, ast, expr->data.let_expr.initializer);
+        break;
+    case CM_AST_EXPR_RETURN:
+    case CM_AST_EXPR_BREAK:
+    case CM_AST_EXPR_CONTINUE:
+        census_expr(census, ast, expr->data.flow.value);
+        break;
+    case CM_AST_EXPR_IF:
+        census_expr(census, ast, expr->data.if_expr.condition);
+        census_expr(census, ast, expr->data.if_expr.then_expr);
+        census_expr(census, ast, expr->data.if_expr.else_expr);
+        break;
+    case CM_AST_EXPR_MATCH:
+        census_expr(census, ast, expr->data.match_expr.scrutinee);
+        for (index = 0u; index < expr->data.match_expr.arm_count; ++index) {
+            const CmAstMatchArm *arm = &expr->data.match_expr.arms[index];
+            census_expr(census, ast, arm->guard);
+            census_expr(census, ast, arm->guard_initializer);
+            census_expr(census, ast, arm->body);
+        }
+        break;
+    case CM_AST_EXPR_LOOP:
+        census_expr(census, ast, expr->data.loop_expr.body);
+        break;
+    case CM_AST_EXPR_WHILE:
+        census_expr(census, ast, expr->data.while_expr.condition);
+        census_expr(census, ast, expr->data.while_expr.body);
+        break;
+    case CM_AST_EXPR_FOR:
+        census_expr(census, ast, expr->data.for_expr.iterable);
+        census_expr(census, ast, expr->data.for_expr.body);
+        break;
+    case CM_AST_EXPR_CLOSURE:
+        census_expr(census, ast, expr->data.closure.body);
+        break;
+    case CM_AST_EXPR_TUPLE:
+    case CM_AST_EXPR_ARRAY:
+        for (index = 0u; index < expr->data.list.element_count; ++index)
+            census_expr(census, ast, expr->data.list.elements[index]);
+        census_expr(census, ast, expr->data.list.repeat_value);
+        census_expr(census, ast, expr->data.list.repeat_length);
+        break;
+    case CM_AST_EXPR_STRUCT:
+        for (index = 0u; index < expr->data.struct_expr.field_count; ++index)
+            census_expr(census, ast,
+                expr->data.struct_expr.fields[index].value);
+        census_expr(census, ast, expr->data.struct_expr.base);
+        break;
+    case CM_AST_EXPR_MACRO:
+        census_macro(census, ast, &expr->data.macro_expr);
+        break;
+    default:
+        break;
+    }
+}
+
+static int census_macro_compare(const void *left, const void *right)
+{
+    const CensusMacro *a = (const CensusMacro *)left;
+    const CensusMacro *b = (const CensusMacro *)right;
+    if (a->count != b->count) return a->count < b->count ? 1 : -1;
+    return strcmp(a->name, b->name);
+}
+
+static void body_census(const CmHirContext *hir, const CmModuleGraph *graph,
+    CmModuleGraphRevision revision, const CmHirModuleMap *modules)
+{
+    Census census;
+    size_t index;
+    unsigned long unresolved = 0u;
+    memset(&census, 0, sizeof(census));
+    for (index = 0u; index < hir->bodies.len; ++index) {
+        const CmHirBody *body = (const CmHirBody *)cm_vec_at_const(
+            &hir->bodies, index);
+        const CmHirDefinition *definition;
+        const CmHirItem *item;
+        CmModuleId module = 0u;
+        const CmAst *ast = NULL;
+        if (body == NULL) continue;
+        census.bodies += 1u;
+        definition = cm_hir_lookup_definition(hir, body->origin.definition);
+        item = definition == NULL
+                || definition->kind != CM_HIR_DEFINITION_ITEM
+            ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        if (item == NULL) {
+            definition = cm_hir_lookup_definition(hir,
+                body->origin.enclosing_definition);
+            item = definition == NULL
+                    || definition->kind != CM_HIR_DEFINITION_ITEM
+                ? NULL : cm_hir_get_item(hir, definition->entity.item_id);
+        }
+        if (item == NULL
+            || cm_hir_module_map_lookup_module(modules, graph, revision, hir,
+                item->owner_module, &module) != CM_HIR_MODULE_MAP_OK
+            || !cm_module_graph_borrow_ast(graph, module, &ast)
+            || ast == NULL) {
+            unresolved += 1u;
+            continue;
+        }
+        census.bodies_with_ast += 1u;
+        census.current_body_macros = 0u;
+        census_expr(&census, ast, body->source_expression_id);
+        if (census.current_body_macros != 0u)
+            census.bodies_with_macros += 1u;
+    }
+    printf("body-census bodies=%lu with_ast=%lu unresolved=%lu "
+        "with_macros=%lu macro_free=%lu let=%lu let_else=%lu item_stmts=%lu\n",
+        census.bodies, census.bodies_with_ast, unresolved,
+        census.bodies_with_macros,
+        census.bodies_with_ast - census.bodies_with_macros,
+        census.stmt_let, census.stmt_let_else, census.stmt_item);
+    for (index = 0u; index < CENSUS_MAX_KINDS; ++index) {
+        if (census.expr_kinds[index] == 0u) continue;
+        if (index < sizeof(census_kind_names) / sizeof(census_kind_names[0]))
+            printf("body-census expr %s=%lu\n", census_kind_names[index],
+                census.expr_kinds[index]);
+        else
+            printf("body-census expr kind%lu=%lu\n", (unsigned long)index,
+                census.expr_kinds[index]);
+    }
+    qsort(census.macros, census.macro_count, sizeof(census.macros[0]),
+        census_macro_compare);
+    for (index = 0u; index < census.macro_count; ++index)
+        printf("body-census macro %s=%lu\n", census.macros[index].name,
+            census.macros[index].count);
+}
+
 int main(int argc, char **argv)
 {
     CmSourceSet sources;
@@ -228,16 +507,21 @@ int main(int argc, char **argv)
     size_t line;
     size_t related_line;
     int require_metadata;
+    int body_census_requested;
     int status;
 
     if (argc != 2 && (argc != 3
-            || strcmp(argv[2], "--require-metadata") != 0)) {
+            || (strcmp(argv[2], "--require-metadata") != 0
+                && strcmp(argv[2], "--body-census") != 0))) {
         fprintf(stderr, "usage: %s /path/to/library/core/src/lib.rs "
             "[--require-metadata]\n",
             argc == 0 ? "probe_core_hir" : argv[0]);
         return 2;
     }
-    require_metadata = argc == 3;
+    require_metadata = argc == 3
+        && strcmp(argv[2], "--require-metadata") == 0;
+    body_census_requested = argc == 3
+        && strcmp(argv[2], "--body-census") == 0;
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
     cm_import_resolver_init(&imports);
@@ -320,6 +604,8 @@ int main(int argc, char **argv)
             (unsigned long)generic_count,
             (unsigned long)const_generic_count,
             (unsigned long)lifetime_generic_count);
+        if (body_census_requested)
+            body_census(&hir, &graph, graph_result.revision, &modules);
         (void)fflush(stdout);
         {
             CmHirLibraryArtifact artifact;

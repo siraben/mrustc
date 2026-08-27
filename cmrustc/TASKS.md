@@ -2371,6 +2371,38 @@ hello-world, and Cargo-workspace probes. The root `TestRustcBootstrap.sh` is a
 useful upstream-mrustc oracle for that rung, but its unchecked downloads and
 repository-local scratch are not acceptable as final `cmrustc` evidence.
 
+## M9: Lenient bootstrap pipeline (revised strategy, 2026-08-26)
+
+See `docs/ROADMAP_190.md`, "Revised strategy". These tasks supersede the
+declaration-profile path for M6-06/M6-07; M4/M5 entries are absorbed by
+M9-04..M9-06 and will be closed when those land.
+
+| ID | State | Task | Acceptance |
+|---|---|---|---|
+| M9-01 | ACTIVE | Expression-position macro expansion for core bodies | `probe_core_hir --body-census` reports zero bodies with unexpanded macros |
+
+M9-01 baseline (2026-08-26, `probe_core_hir --body-census` on pinned core):
+22,524 bodies, all with an AST; 19,298 macro-free and 3,226 containing 4,510
+macro invocations; 8,547 `let` statements (24 `let-else`), 486 item
+statements inside bodies. Expression kinds: path 96,623, block 34,879, call
+26,684, literal 22,622, method_call 17,572, unary 8,901, binary 7,902, tuple
+4,906, macro 4,510, field 3,538, if 3,000, cast 2,795, assign 2,723,
+tuple_field 2,032, match 698, index 696, return 599, array 569,
+qualified_path 513, struct 409, try 383, closure 362, range 361, while 199,
+for 133, loop 117, break 71, try_block 52, continue 14, raw_reference 10,
+let 2. Invocations are dominated by `core::arch` `macro_rules`
+(`static_assert_uimm_bits` 932, `simd_shuffle` 468, `static_assert_rounding`
+389, `simd_extract` 373, `swap_bytes` 244, ...) and ordinary `macro_rules`
+(`assert_unsafe_precondition` 130, `matches` 75, `debug_assert` 69, `write`
+55, `unreachable` 9); the compiler builtins reached are `cfg` 264, `assert`
+221, `panic` 119 (via `panic_2021` to `const_format_args`), `stringify` 85,
+`asm` 42, `format_args` 10, `cfg_select` 5, `offset_of` 3, `addr_of` 3.
+| M9-02 | TODO | Untyped HIR lowering of every core body (all expression and pattern forms) | probe reports zero unlowered core bodies |
+| M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
+| M9-04 | TODO | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |
+| M9-05 | TODO | HIR-to-MIR for all bodies | all typed bodies produce MIR |
+| M9-06 | TODO | C emission and link for core/alloc/std | `hello` links and runs under TinyCC and GCC |
+
 ## M8: Stage0 provenance
 
 | ID | State | Task | Acceptance |
