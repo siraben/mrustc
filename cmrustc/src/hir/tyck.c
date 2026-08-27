@@ -606,8 +606,9 @@ typedef struct CmTyckFound {
  * impls first, then trait impls, then trait bounds for parameters, then
  * dyn principals.  Binds the chosen impl's generics against `self_type`.
  */
-static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
-    CmInternId name, CmTyckFound *out)
+/* passes: 1 = inherent impls, 2 = trait impls/bounds/dyn, 3 = both. */
+static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
+    CmInternId name, CmTyckFound *out, unsigned int passes)
 {
     CmTyArena *arena = env->state->arena;
     size_t index;
@@ -618,6 +619,8 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     self = cm_ty_get(arena, self_type);
     if (self == NULL || self->kind == CM_TY_INFER) return 0;
     for (pass = 0; pass < 2; ++pass) {
+        if ((pass == 0 && (passes & 1u) == 0u)
+            || (pass == 1 && (passes & 2u) == 0u)) continue;
         for (index = 0u; index < env->state->impl_count; ++index) {
             const CmTyckImpl *impl = &env->state->impls[index];
             const CmHirItem *child;
@@ -661,7 +664,8 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
         }
     }
     /* Generic parameters: search their trait bounds. */
-    if (self->kind == CM_TY_PARAM || self->kind == CM_TY_SELF) {
+    if ((passes & 2u) != 0u
+        && (self->kind == CM_TY_PARAM || self->kind == CM_TY_SELF)) {
         const CmHirItem *owners[2];
         int owner;
         owners[0] = env->item;
@@ -713,7 +717,8 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
             }
         }
     }
-    if (self->kind == CM_TY_DYN && !cm_hir_def_id_is_none(self->def)) {
+    if ((passes & 2u) != 0u && self->kind == CM_TY_DYN
+        && !cm_hir_def_id_is_none(self->def)) {
         CmHirDefId owner_trait;
         const CmHirItem *declared = cm_tyck_trait_method(env, self->def, name,
             0u, &owner_trait);
@@ -730,6 +735,12 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
         }
     }
     return 0;
+}
+
+static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
+    CmInternId name, CmTyckFound *out)
+{
+    return cm_tyck_lookup_assoc_in(env, self_type, name, out, 3u);
 }
 
 /* Is `def` one of the callable traits? */
@@ -1612,6 +1623,7 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             cm_tyck_push_pending(env, id);
             return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
         }
+        cm_tyck_debug_pair(env, "assoc-value-on", self_type, self_type);
         cm_tyck_error(env, "associated value not found");
         return arena->error;
     }
@@ -1667,7 +1679,10 @@ static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
             && tb->kind == CM_TY_REF)
             (void)cm_ty_unify(arena, ta->children[0], tb->children[0]);
         else if (!cm_tyck_coerce(env, b, a) && !cm_tyck_coerce(env, a, b))
+            {
+            cm_tyck_debug_pair(env, "branch", a, b);
             cm_tyck_error(env, "branch types do not unify");
+        }
     }
     return a;
 }
@@ -1875,6 +1890,29 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                 resolved = 1;
             }
         }
+        if (!resolved && ct->kind == CM_TY_ADT) {
+            /* `Self(v)` and ctors through aliases: the callee already has
+             * the ADT type; take fields from its struct item. */
+            const CmHirItem *item = cm_tyck_item(env->state, ct->def);
+            if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT) {
+                CmTyckInstance instance;
+                CmTyId adt = cm_ty_resolve(arena, callee);
+                cm_tyck_instance_of_type(env, adt, item, NULL, CM_TY_NONE,
+                    &instance);
+                count = item->data.aggregate_item.field_count
+                        > CM_TYCK_MAX_ARGS
+                    ? CM_TYCK_MAX_ARGS
+                    : item->data.aggregate_item.field_count;
+                for (index = 0u; index < count; ++index)
+                    params[index] = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                        env->state->hir,
+                        item->data.aggregate_item.fields[index].type),
+                        cm_tyck_subst_of(&instance));
+                ret = adt;
+                known = 1;
+                resolved = 1;
+            }
+        }
         for (attempt = 0; attempt < 3 && !resolved; ++attempt) {
             CmInternId name = attempt == 0 ? call_name
                 : attempt == 1 ? call_mut : call_once;
@@ -1954,29 +1992,43 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                 CM_TY_NONE);
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
     }
-    for (step = 0u; step < 6u; ++step) {
-        CmTyKind candidate_kind;
-        candidate = cm_tyck_autoderef(env, receiver, step);
-        candidate = cm_tyck_normalize(env, candidate, 0u);
-        if (cm_tyck_lookup_assoc(env, candidate,
-                expr->data.method_call.name, &found)
-            && found.item->kind == CM_HIR_ITEM_FUNCTION) break;
-        candidate_kind = cm_ty_get(arena, candidate)->kind;
-        if (candidate_kind == CM_TY_ARRAY) {
-            /* Unsize `[T; N]` to `[T]` for slice inherent methods. */
-            CmTyId slice = cm_ty_slice(arena,
-                cm_ty_get(arena, candidate)->children[0]);
-            if (cm_tyck_lookup_assoc(env, slice,
-                    expr->data.method_call.name, &found)
-                && found.item->kind == CM_HIR_ITEM_FUNCTION) {
-                candidate = slice;
-                break;
+    {
+        /* Inherent methods across every autoderef step win over trait
+         * impls at any step: a blanket `impl<H: Hasher + ?Sized> Hasher
+         * for &mut H` must not capture `DebugStruct::finish`. */
+        unsigned int phase;
+        found.item = NULL;
+        for (phase = 0u; phase < 2u && found.item == NULL; ++phase) {
+            unsigned int mask = phase == 0u ? 1u : 2u;
+            for (step = 0u; step < 6u; ++step) {
+                CmTyKind candidate_kind;
+                candidate = cm_tyck_autoderef(env, receiver, step);
+                candidate = cm_tyck_normalize(env, candidate, 0u);
+                if (cm_tyck_lookup_assoc_in(env, candidate,
+                        expr->data.method_call.name, &found, mask)
+                    && found.item->kind == CM_HIR_ITEM_FUNCTION) break;
+                found.item = NULL;
+                candidate_kind = cm_ty_get(arena, candidate)->kind;
+                if (candidate_kind == CM_TY_ARRAY) {
+                    /* Unsize `[T; N]` to `[T]` for slice methods. */
+                    CmTyId slice = cm_ty_slice(arena,
+                        cm_ty_get(arena, candidate)->children[0]);
+                    if (cm_tyck_lookup_assoc_in(env, slice,
+                            expr->data.method_call.name, &found, mask)
+                        && found.item->kind == CM_HIR_ITEM_FUNCTION) {
+                        candidate = slice;
+                        break;
+                    }
+                    found.item = NULL;
+                }
+                if (candidate_kind != CM_TY_REF
+                    && candidate_kind != CM_TY_PTR) {
+                    candidate = CM_TY_NONE;
+                    break;
+                }
             }
         }
-        if (candidate_kind != CM_TY_REF && candidate_kind != CM_TY_PTR) {
-            candidate = CM_TY_NONE;
-            break;
-        }
+        if (found.item == NULL) candidate = CM_TY_NONE;
     }
     if (candidate == CM_TY_NONE || found.item == NULL) {
         if (getenv("CM_TYCK_DEBUG") != NULL) {
@@ -2085,7 +2137,12 @@ static CmTyId cm_tyck_struct_literal(CmTyckEnv *env, const CmUExpr *expr)
         }
     }
     if (adt == CM_TY_NONE) {
-        cm_tyck_error(env, "struct literal path is not a struct or variant");
+        {
+            cm_tyck_debug_pair(env, "struct-literal", adt, adt);
+            cm_tyck_debug_span(env, expr);
+            cm_tyck_error(env,
+                "struct literal path is not a struct or variant");
+        }
         for (index = 0u; index < expr->data.struct_expr.field_count; ++index)
             (void)cm_tyck_expr(env, expr->data.struct_expr.fields[index].value,
                 CM_TY_NONE);
@@ -2329,9 +2386,18 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         result = arena->error;
         for (step = 0u; step < 6u && !found; ++step) {
             CmTyId candidate = cm_tyck_autoderef(env, base, step);
-            const CmTy *ct = cm_ty_get(arena, candidate);
+            const CmTy *ct;
+            candidate = cm_tyck_normalize(env, candidate, 0u);
+            ct = cm_ty_get(arena, candidate);
             if (ct->kind == CM_TY_INFER) {
                 cm_tyck_push_pending(env, id);
+                result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+                found = 1;
+                break;
+            }
+            if (ct->kind == CM_TY_PROJECTION || ct->kind == CM_TY_PARAM
+                || ct->kind == CM_TY_SELF) {
+                /* Field of an unresolved projection or parameter. */
                 result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
                 found = 1;
                 break;
@@ -2341,7 +2407,11 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             if (!found && ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR)
                 break;
         }
-        if (!found) cm_tyck_error(env, "field not found");
+        if (!found) {
+            cm_tyck_debug_pair(env, "field-of", base, base);
+            cm_tyck_debug_span(env, expr);
+            cm_tyck_error(env, "field not found");
+        }
         break;
     }
     case CM_U_EXPR_TUPLE_FIELD: {
@@ -2352,9 +2422,17 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         result = arena->error;
         for (step = 0u; step < 6u && !found; ++step) {
             CmTyId candidate = cm_tyck_autoderef(env, base, step);
-            const CmTy *ct = cm_ty_get(arena, candidate);
+            const CmTy *ct;
+            candidate = cm_tyck_normalize(env, candidate, 0u);
+            ct = cm_ty_get(arena, candidate);
             if (ct->kind == CM_TY_INFER) {
                 cm_tyck_push_pending(env, id);
+                result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
+                found = 1;
+                break;
+            }
+            if (ct->kind == CM_TY_PROJECTION || ct->kind == CM_TY_PARAM
+                || ct->kind == CM_TY_SELF) {
                 result = cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
                 found = 1;
                 break;
@@ -2364,7 +2442,11 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             if (!found && ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR)
                 break;
         }
-        if (!found) cm_tyck_error(env, "tuple field not found");
+        if (!found) {
+            cm_tyck_debug_pair(env, "tuple-field-of", base, base);
+            cm_tyck_debug_span(env, expr);
+            cm_tyck_error(env, "tuple field not found");
+        }
         break;
     }
     case CM_U_EXPR_INDEX: {

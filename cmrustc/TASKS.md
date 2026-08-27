@@ -2526,6 +2526,18 @@ error nodes (operator and deref classes cleared).  Remaining: body vs
 signature 316; method-arg 162; call-through-non-fn 152 (unchanged —
 population not the ctor shape); call-arg 129; method not found 116;
 assignment 75; qualified 57 (fix landed after this run); branch 40.
+
+M9-04 seventh pass (same day): method lookup runs in two phases —
+inherent impls across every autoderef step win before any trait impl
+is consulted, so blanket impls (`impl<H: Hasher + ?Sized> Hasher for
+&mut H`) no longer capture inherent methods like `DebugStruct::finish`;
+`Self(v)` and aliased tuple constructors type through the ADT-typed
+callee; field and tuple-field bases normalize projections and accept
+params/`Self` leniently; the probe gained `--source-map` (id -> path)
+so debug spans resolve to files.  Whole core: 20,663/22,524 typed, 945
+error nodes (was 1,187).  Remaining: body vs signature 244; method-arg
+160; call-arg 130; method not found 111; assignment 75;
+call-through-non-fn 70; branch 36; unresolved value path 33.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

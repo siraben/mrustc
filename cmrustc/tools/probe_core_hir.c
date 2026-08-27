@@ -595,8 +595,10 @@ int main(int argc, char **argv)
     int body_census_requested;
     int status;
 
+    int source_map_requested;
     if (argc != 2 && (argc != 3
             || (strcmp(argv[2], "--require-metadata") != 0
+                && strcmp(argv[2], "--source-map") != 0
                 && strcmp(argv[2], "--body-census") != 0))) {
         fprintf(stderr, "usage: %s /path/to/library/core/src/lib.rs "
             "[--require-metadata]\n",
@@ -607,6 +609,8 @@ int main(int argc, char **argv)
         && strcmp(argv[2], "--require-metadata") == 0;
     body_census_requested = argc == 3
         && strcmp(argv[2], "--body-census") == 0;
+    source_map_requested = argc == 3
+        && strcmp(argv[2], "--source-map") == 0;
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
     cm_import_resolver_init(&imports);
@@ -633,6 +637,16 @@ int main(int argc, char **argv)
         (unsigned long)cm_module_graph_module_count(&graph));
     if (graph_result.error_count != 0u || import_result.error_count != 0u) {
         status = 1;
+        goto cleanup;
+    }
+    if (source_map_requested) {
+        size_t source_index;
+        for (source_index = 0u; source_index < sources.length;
+                ++source_index)
+            printf("source-map id=%lu path=%s\n",
+                (unsigned long)sources.files[source_index].id,
+                sources.files[source_index].path);
+        status = 0;
         goto cleanup;
     }
     if (body_census_requested) {
