@@ -56,6 +56,14 @@ typedef struct CmResolvedBinding {
     int is_ambiguous;
     /* True for a successfully resolved `as _` leaf with no published name. */
     int is_anonymous;
+    /*
+     * 0 for a crate-local binding.  For a binding synthesized from a
+     * registered dependency (M9-03), 1 + the dependency's registration
+     * index: `target_module` then names a module in that dependency's
+     * graph, not this one.  `declaration` refs stay source-qualified and
+     * remain globally valid via the shared CmSourceSet.
+     */
+    uint32_t dependency;
 } CmResolvedBinding;
 
 typedef struct CmImportError {
@@ -115,6 +123,17 @@ typedef struct CmImportLeafView {
 
 void cm_import_resolver_init(CmImportResolver *resolver);
 void cm_import_resolver_destroy(CmImportResolver *resolver);
+/*
+ * Registers an external crate for `name::...` resolution (M9-03).  The
+ * dependency resolver/graph must outlive this resolver and already be
+ * resolved at dep_revision.  Both graphs must share one CmSourceSet so
+ * source-qualified item refs remain globally unique.  Registration
+ * survives cm_import_resolve calls.
+ */
+int cm_import_resolver_add_dependency(CmImportResolver *resolver,
+    const char *name, const CmImportResolver *dependency,
+    const CmModuleGraph *dependency_graph,
+    CmModuleGraphRevision dependency_revision);
 CmImportResult cm_import_resolve(CmImportResolver *resolver,
     const CmModuleGraph *graph, CmModuleGraphRevision expected_revision);
 

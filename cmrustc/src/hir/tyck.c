@@ -286,16 +286,6 @@ static void cm_tyck_build_source_asts(CmTyckState *state)
     state->source_ast_count = used;
 }
 
-static const CmAst *cm_tyck_ast_for_source(const CmTyckState *state,
-    CmSourceId source)
-{
-    size_t index;
-    for (index = 0u; index < state->source_ast_count; ++index)
-        if (state->source_asts[index].source == source)
-            return state->source_asts[index].ast;
-    return NULL;
-}
-
 /*
  * The HIR item declared by a resolver binding, matched by AST span.  The
  * declaring AST is found by source id: a re-exported item is declared in a

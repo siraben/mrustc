@@ -332,16 +332,6 @@ static void cm_u_build_source_asts(CmULowerState *state)
     state->source_ast_count = used;
 }
 
-static const CmAst *cm_u_ast_for_source(const CmULowerState *state,
-    CmSourceId source)
-{
-    size_t index;
-    for (index = 0u; index < state->source_ast_count; ++index)
-        if (state->source_asts[index].source == source)
-            return state->source_asts[index].ast;
-    return NULL;
-}
-
 /* Map a resolver binding to a HIR definition. */
 static int cm_u_debug_enabled(void)
 {
@@ -525,7 +515,7 @@ static void cm_u_use_parse(CmULowerState *state, const unsigned char *text,
     size_t length, size_t *pos, const unsigned char **seg_bytes,
     uint32_t *seg_lengths, uint32_t seg_count, int absolute, int depth)
 {
-    if (depth > 8u) return;
+    if (depth > 8) return;
     cm_u_use_skip_space(text, length, pos);
     if (seg_count == 0u && *pos + 1u < length && text[*pos] == ':'
         && text[*pos + 1u] == ':') {

@@ -6,6 +6,7 @@
 #include "cm/hir/tyck.h"
 #include "cm/hir/ubody.h"
 #include "cm/resolve/body_expand.h"
+#include "cm/resolve/dependency_macro.h"
 #include "cm/hir/module_map.h"
 #include "cm/hir/metadata.h"
 #include "cm/sha256.h"
@@ -596,7 +597,10 @@ int main(int argc, char **argv)
     int status;
 
     int source_map_requested;
-    if (argc != 2 && (argc != 3
+    const char *with_core_path = NULL;
+    if (argc == 4 && strcmp(argv[2], "--with-core") == 0) {
+        with_core_path = argv[3];
+    } else if (argc != 2 && (argc != 3
             || (strcmp(argv[2], "--require-metadata") != 0
                 && strcmp(argv[2], "--source-map") != 0
                 && strcmp(argv[2], "--body-census") != 0))) {
@@ -626,10 +630,76 @@ int main(int argc, char **argv)
     cm_module_graph_options_init(&graph_options);
     graph_options.cfg = &cfg;
     graph_options.edition = CM_EDITION_2024;
+    if (with_core_path != NULL) {
+        /* M9-03: build the dependency crate first (shared source set so
+         * source ids stay globally unique), then register its macros. */
+        static CmModuleGraph core_graph;
+        static CmDependencyMacroArtifact core_macros;
+        static CmImportResolver core_imports;
+        static const CmDependencyMacroArtifact *artifact_list[1];
+        CmSourceId core_root;
+        CmModuleGraphOptions core_options;
+        CmModuleGraphResult core_result;
+        CmDependencyMacroArtifactResult artifact_result;
+        cm_module_graph_init(&core_graph);
+        cm_dependency_macro_artifact_init(&core_macros);
+        if (cm_source_load_file(&sources, with_core_path, &core_root)
+                != CM_SOURCE_OK) {
+            fputs("with-core: cannot load core root\n", stderr);
+            goto cleanup;
+        }
+        cm_module_graph_options_init(&core_options);
+        core_options.cfg = &cfg;
+        core_options.edition = CM_EDITION_2024;
+        core_result = cm_module_graph_build(&core_graph, &sources,
+            core_root, &core_options);
+        printf("core-graph errors=%lu modules=%lu\n",
+            (unsigned long)core_result.error_count,
+            (unsigned long)cm_module_graph_module_count(&core_graph));
+        if (core_result.error_count != 0u) goto cleanup;
+        artifact_result = cm_dependency_macro_artifact_build(&core_macros,
+            &core_graph, core_result.revision, "core", "core_crate");
+        printf("core-artifact status=%d import_errors=%lu\n",
+            (int)artifact_result.status,
+            (unsigned long)artifact_result.import_error_count);
+        artifact_list[0] = &core_macros;
+        graph_options.dependency_macros = artifact_list;
+        graph_options.dependency_macro_count = 1u;
+        {
+            CmImportResult core_import_result;
+            cm_import_resolver_init(&core_imports);
+            core_import_result = cm_import_resolve(&core_imports,
+                &core_graph, core_result.revision);
+            printf("core-imports errors=%lu\n",
+                (unsigned long)core_import_result.error_count);
+            (void)cm_import_resolver_add_dependency(&imports, "core",
+                &core_imports, &core_graph, core_result.revision);
+        }
+    }
     graph_result = cm_module_graph_build(&graph, &sources, root,
         &graph_options);
     import_result = cm_import_resolve(&imports, &graph,
         graph_result.revision);
+    if (with_core_path != NULL && import_result.error_count != 0u) {
+        uint32_t import_index;
+        for (import_index = 0u; import_index < 60u; ++import_index) {
+            CmImportError import_error;
+            char error_name[128];
+            char error_detail[256];
+            if (!cm_import_get_error(&imports, import_index,
+                    &import_error)) break;
+            error_name[0] = '\0';
+            error_detail[0] = '\0';
+            (void)cm_import_copy_string(&imports, import_error.name,
+                error_name, sizeof(error_name));
+            (void)cm_import_copy_string(&imports, import_error.detail,
+                error_detail, sizeof(error_detail));
+            printf("import-error kind=%s module=%lu name=%s detail=%s\n",
+                cm_import_error_kind_name(import_error.kind),
+                (unsigned long)import_error.module, error_name,
+                error_detail);
+        }
+    }
     printf("graph errors=%lu imports=%lu sources=%lu modules=%lu\n",
         (unsigned long)graph_result.error_count,
         (unsigned long)import_result.error_count,

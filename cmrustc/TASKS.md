@@ -2704,6 +2704,25 @@ statement's first token, so parenthesized forms like
 `(unsafe { … }) != 0` keep their binary tail (alloc parse regression);
 core improved 153 -> 151.
 
+M9-03 first pass (2026-08-28): cross-crate import resolution.  The
+import resolver accepts registered dependencies
+(`cm_import_resolver_add_dependency`, stored across resolve cycles);
+a still-unresolved leaf whose first segment names a dependency is
+resolved through the dependency's own resolver — single and aliased
+leaves via `cm_import_resolve_path_checked` in all three namespaces,
+globs by enumerating the target module's public bindings, and
+`{self}` leaves by dropping the `self` segment (module, enum, and
+type prefixes).  Synthesized bindings keep the dependency's
+source-qualified declaration refs (valid via the shared CmSourceSet)
+and carry a new `CmResolvedBinding.dependency` tag so dep-graph
+`target_module` ids are never read as local module ids.
+`probe_core_hir --with-core <core lib.rs>` builds core (graph 0
+errors, 451 modules; imports 0 errors; dependency-macro artifact ok)
+and resolves the target against it: alloc `use core::…` imports
+**598 -> 0** (426 shared sources, 68 alloc modules).  Next frontier:
+alloc HIR lowering rejects the `unsafe extern "Rust"` allocator
+block (abi allowlist + rustc_* foreign-fn attributes).
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

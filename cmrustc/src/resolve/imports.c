@@ -50,6 +50,14 @@ typedef struct CmImportLeaf {
     CmResolveStringId blocked_name;
 } CmImportLeaf;
 
+typedef struct CmImportDependency {
+    char name[64];
+    const CmImportResolver *resolver;
+    const CmModuleGraph *graph;
+    CmModuleGraphRevision revision;
+    CmModuleId root;
+} CmImportDependency;
+
 typedef struct CmImportResolverState {
     uint64_t lifetime_id;
     uint64_t generation;
@@ -65,6 +73,8 @@ typedef struct CmImportResolverState {
     CmModuleId root;
     const CmModuleGraph *graph;
     CmModuleGraphRevision revision;
+    /* Registered external crates; survives clear/resolve cycles. */
+    CmVec dependencies; /* CmImportDependency */
 } CmImportResolverState;
 
 static uint64_t cm_import_resolver_lifetime_counter;
@@ -130,6 +140,7 @@ static void cm_import_state_init(CmImportResolverState *state)
     cm_vec_init(&state->leaves, sizeof(CmImportLeaf));
     cm_vec_init(&state->prelude_bindings, sizeof(CmResolvedBinding));
     cm_vec_init(&state->errors, sizeof(CmImportError));
+    cm_vec_init(&state->dependencies, sizeof(CmImportDependency));
 }
 
 static void cm_import_state_clear(CmImportResolverState *state)
@@ -137,9 +148,11 @@ static void cm_import_state_clear(CmImportResolverState *state)
     size_t index;
     uint64_t lifetime_id;
     uint64_t generation;
+    CmVec dependencies;
 
     lifetime_id = state->lifetime_id;
     generation = state->generation;
+    dependencies = state->dependencies;
 
     for (index = 0u; index < state->modules.len; ++index) {
         CmImportModuleState *module;
@@ -176,6 +189,7 @@ static void cm_import_state_clear(CmImportResolverState *state)
     cm_import_state_init(state);
     state->lifetime_id = lifetime_id;
     state->generation = generation;
+    state->dependencies = dependencies;
 }
 
 static void cm_import_state_destroy(CmImportResolverState *state)
@@ -187,6 +201,7 @@ static void cm_import_state_destroy(CmImportResolverState *state)
     cm_vec_destroy(&state->leaves);
     cm_vec_destroy(&state->modules);
     cm_vec_destroy(&state->enumerations);
+    cm_vec_destroy(&state->dependencies);
     cm_interner_destroy(&state->strings);
     memset(state, 0, sizeof(*state));
 }
@@ -1053,6 +1068,194 @@ static const CmImportBinding *cm_module_self_binding(
         module->name);
 }
 
+int cm_import_resolver_add_dependency(CmImportResolver *resolver,
+    const char *name, const CmImportResolver *dependency,
+    const CmModuleGraph *dependency_graph,
+    CmModuleGraphRevision dependency_revision)
+{
+    CmImportResolverState *state = cm_import_state(resolver);
+    CmImportDependency entry;
+    if (state == NULL || name == NULL || dependency == NULL
+        || dependency_graph == NULL
+        || strlen(name) >= sizeof(entry.name)) return 0;
+    memset(&entry, 0, sizeof(entry));
+    strcpy(entry.name, name);
+    entry.resolver = dependency;
+    entry.graph = dependency_graph;
+    entry.revision = dependency_revision;
+    if (!cm_module_graph_get_root(dependency_graph, &entry.root)) return 0;
+    return cm_vec_push(&state->dependencies, &entry) != NULL;
+}
+
+static const CmImportDependency *cm_import_find_dependency(
+    const CmImportResolverState *state, CmResolveStringId name)
+{
+    size_t index;
+    for (index = 0u; index < state->dependencies.len; ++index) {
+        const CmImportDependency *entry = (const CmImportDependency *)
+            cm_vec_at_const(&state->dependencies, index);
+        if (entry != NULL && cm_import_string_is(state, name, entry->name))
+            return entry;
+    }
+    return NULL;
+}
+
+static size_t cm_import_segment_views(const CmImportResolverState *state,
+    const CmResolveStringId *ids, size_t count,
+    CmResolvePathSegmentView *views, size_t limit)
+{
+    size_t index;
+    if (count > limit) return 0u;
+    for (index = 0u; index < count; ++index) {
+        const CmInternedString *text = cm_import_string(state, ids[index]);
+        if (text == NULL) return 0u;
+        views[index].bytes = text->bytes;
+        views[index].length = text->len;
+    }
+    return count;
+}
+
+static CmResolveStringId cm_import_reintern_dependency_name(
+    CmImportResolverState *state, const CmImportResolver *dep,
+    CmResolveStringId dep_name)
+{
+    const CmImportResolverState *dep_state = cm_import_state_const(dep);
+    const CmInternedString *text = dep_state == NULL ? NULL
+        : cm_import_string(dep_state, dep_name);
+    if (text == NULL) return CM_RESOLVE_STRING_NONE;
+    return (CmResolveStringId)cm_interner_intern(&state->strings,
+        text->bytes, text->len);
+}
+
+/*
+ * Resolve one still-unresolved leaf whose first segment names a registered
+ * external crate (M9-03): single, aliased, and glob use-trees.  Synthesized
+ * bindings carry the dependency's source-qualified refs, valid across
+ * graphs because both share one CmSourceSet.
+ */
+static int cm_resolve_leaf_dependency(CmImportResolverState *state,
+    CmImportLeaf *leaf)
+{
+    const CmImportDependency *dep;
+    CmImportModuleState *destination;
+    const CmResolveStringId *ids;
+    CmResolvePathSegmentView views[64];
+    size_t count;
+    uint32_t dependency_tag;
+    int changed = 0;
+    if (leaf->ever_resolved || leaf->segments.len == 0u
+        || leaf->absolute) return 0;
+    ids = (const CmResolveStringId *)leaf->segments.data;
+    dep = cm_import_find_dependency(state, ids[0]);
+    if (dep == NULL) return 0;
+    {
+        const CmImportDependency *base = (const CmImportDependency *)
+            state->dependencies.data;
+        dependency_tag = (uint32_t)(dep - base) + 1u;
+    }
+    destination = cm_import_module(state, leaf->module);
+    if (destination == NULL) return 0;
+    count = cm_import_segment_views(state, ids + 1u,
+        leaf->segments.len - 1u, views, 64u);
+    if (leaf->segments.len > 1u && count == 0u) return 0;
+    if (!leaf->is_glob && count != 0u
+        && views[count - 1u].length == 4u
+        && memcmp(views[count - 1u].bytes, "self", 4u) == 0) {
+        /*
+         * `use core::x::{self, ...}` — drop the `self` segment and import
+         * whatever the prefix names (module, enum, type) under the leaf's
+         * published name via the namespace loop below.  A bare crate
+         * `{self}` synthesizes the root module binding directly.
+         */
+        count -= 1u;
+        if (count == 0u) {
+            CmResolvedBinding imported;
+            memset(&imported, 0, sizeof(imported));
+            imported.item_kind = CM_AST_ITEM_MODULE;
+            imported.is_public = 1;
+            imported.is_crate_visible = 1;
+            imported.revision = state->revision;
+            imported.target_module = dep->root;
+            imported.dependency = dependency_tag;
+            imported.name = leaf->import_name;
+            imported.module = leaf->module;
+            imported.import_declaration = leaf->declaration;
+            cm_import_apply_leaf_visibility(&imported, leaf);
+            imported.is_import = 1;
+            imported.is_ambiguous = 0;
+            imported.is_anonymous = leaf->is_anonymous;
+            cm_record_leaf_binding(leaf, &imported);
+            changed = cm_add_binding(destination, &imported, 1);
+            leaf->ever_resolved = 1;
+            return changed;
+        }
+    }
+    if (leaf->is_glob) {
+        CmModuleId source_module = dep->root;
+        int namespace_index;
+        if (count != 0u) {
+            CmResolvedBinding module_binding;
+            if (cm_import_resolve_path_checked(dep->resolver, dep->graph,
+                    dep->revision, dep->root, 0, views, count,
+                    CM_RESOLVE_NAMESPACE_TYPE, &module_binding)
+                    != CM_IMPORT_LOOKUP_OK
+                || module_binding.target_module == CM_MODULE_NONE)
+                return 0;
+            source_module = module_binding.target_module;
+        }
+        for (namespace_index = 0; namespace_index < 3; ++namespace_index) {
+            size_t binding_count = cm_import_binding_count(dep->resolver,
+                source_module, (CmResolveNamespace)namespace_index);
+            size_t index;
+            for (index = 0u; index < binding_count; ++index) {
+                CmResolvedBinding imported;
+                if (!cm_import_get_binding(dep->resolver, source_module,
+                        (CmResolveNamespace)namespace_index,
+                        (uint32_t)index, &imported)) continue;
+                if (!imported.is_public || imported.is_ambiguous) continue;
+                imported.name = cm_import_reintern_dependency_name(state,
+                    dep->resolver, imported.name);
+                if (imported.name == CM_RESOLVE_STRING_NONE) continue;
+                imported.module = leaf->module;
+                imported.import_declaration = leaf->declaration;
+                imported.dependency = dependency_tag;
+                cm_import_apply_leaf_visibility(&imported, leaf);
+                imported.is_import = 1;
+                imported.is_ambiguous = 0;
+                imported.is_anonymous = leaf->is_anonymous;
+                cm_record_leaf_binding(leaf, &imported);
+                changed |= cm_add_binding(destination, &imported, 1);
+            }
+        }
+        leaf->ever_resolved = 1;
+        return changed;
+    }
+    {
+        int namespace_index;
+        int any = 0;
+        for (namespace_index = 0; namespace_index < 3; ++namespace_index) {
+            CmResolvedBinding imported;
+            if (cm_import_resolve_path_checked(dep->resolver, dep->graph,
+                    dep->revision, dep->root, 0, views, count,
+                    (CmResolveNamespace)namespace_index, &imported)
+                    != CM_IMPORT_LOOKUP_OK) continue;
+            imported.name = leaf->import_name;
+            imported.module = leaf->module;
+            imported.import_declaration = leaf->declaration;
+            imported.dependency = dependency_tag;
+            cm_import_apply_leaf_visibility(&imported, leaf);
+            imported.is_import = 1;
+            imported.is_ambiguous = 0;
+            imported.is_anonymous = leaf->is_anonymous;
+            cm_record_leaf_binding(leaf, &imported);
+            changed |= cm_add_binding(destination, &imported, 1);
+            any = 1;
+        }
+        if (any) leaf->ever_resolved = 1;
+    }
+    return changed;
+}
+
 static int cm_resolve_leaf(CmImportResolverState *state, CmImportLeaf *leaf)
 {
     CmImportModuleState *destination;
@@ -1711,7 +1914,10 @@ CmImportResult cm_import_resolve(CmImportResolver *resolver,
             CmImportLeaf *leaf;
 
             leaf = (CmImportLeaf *)cm_vec_at(&state->leaves, index);
-            if (leaf != NULL) changed |= cm_resolve_leaf(state, leaf);
+            if (leaf == NULL) continue;
+            changed |= cm_resolve_leaf(state, leaf);
+            if (!leaf->ever_resolved)
+                changed |= cm_resolve_leaf_dependency(state, leaf);
         }
         ++pass;
     } while (changed && pass <= state->leaves.len +
