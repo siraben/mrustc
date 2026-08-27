@@ -1915,6 +1915,14 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             cm_tyck_push_pending(env, id);
             return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
         }
+        if (getenv("CM_TYCK_DEBUG") != NULL) {
+            const CmInternedString *assoc_name = cm_interner_get(
+                &env->state->ubodies->strings, last);
+            fprintf(stderr, "TYCK assoc-name=%.*s ",
+                assoc_name == NULL ? 1 : (int)assoc_name->len,
+                assoc_name == NULL ? "?"
+                    : (const char *)assoc_name->bytes);
+        }
         cm_tyck_debug_pair(env, "assoc-value-on", self_type, self_type);
         cm_tyck_error(env, "associated value not found");
         return arena->error;
@@ -2500,7 +2508,17 @@ static int cm_tyck_method_args_compatible(CmTyckEnv *env,
         CmTyId param_type;
         CmTyId arg_type;
         if (slot >= count) break;
-        if (arg_types[index] == CM_TY_NONE) continue;
+        if (arg_types[index] == CM_TY_NONE) {
+            /* A deferred closure argument: the parameter must at least
+             * be callable-shaped, not a scalar. */
+            const CmTy *pt = cm_ty_get(env->state->arena,
+                cm_ty_resolve(env->state->arena, params[slot]));
+            if (pt != NULL && (pt->kind == CM_TY_INT
+                    || pt->kind == CM_TY_FLOAT || pt->kind == CM_TY_BOOL
+                    || pt->kind == CM_TY_CHAR || pt->kind == CM_TY_STR))
+                return 0;
+            continue;
+        }
         param_type = params[slot];
         arg_type = arg_types[index];
         /* `&T` coerces to `*const T`: compare pointees across any
