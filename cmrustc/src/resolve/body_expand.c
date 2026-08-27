@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /*
  * Lenient expression-position macro expansion (M9-01).  See body_expand.h.
@@ -40,6 +41,11 @@ typedef struct CmBodyExpandState {
     CmStrBuf text;
     CmStrBuf scratch;
     CmStrBuf pieces;
+    /* Debug timing (CM_BODY_EXPAND_DEBUG): clock ticks per phase. */
+    clock_t ticks_lookup;
+    clock_t ticks_expand;
+    clock_t ticks_parse;
+    int debug;
 } CmBodyExpandState;
 
 typedef enum CmBodyBuiltin {
@@ -50,6 +56,9 @@ typedef enum CmBodyBuiltin {
     CM_BODY_BUILTIN_UNREACHABLE,
     CM_BODY_BUILTIN_FORMAT_ARGS,
     CM_BODY_BUILTIN_ASM,
+    CM_BODY_BUILTIN_CFG_SELECT,
+    /* Retained for HIR lowering: needs layout/semantic information. */
+    CM_BODY_BUILTIN_RETAINED,
     CM_BODY_BUILTIN_UNSUPPORTED
 } CmBodyBuiltin;
 
@@ -195,6 +204,44 @@ static size_t cm_body_skip_literal(const char *text, size_t length,
     return index;
 }
 
+/* Advance over a line or block comment starting at `index`, if any. */
+static size_t cm_body_skip_comment(const char *text, size_t length,
+    size_t index)
+{
+    if (index + 1u < length && text[index] == '/' && text[index + 1u] == '/') {
+        while (index < length && text[index] != '\n') index += 1u;
+        return index;
+    }
+    if (index + 1u < length && text[index] == '/' && text[index + 1u] == '*') {
+        size_t depth = 1u;
+        index += 2u;
+        while (index < length && depth != 0u) {
+            if (index + 1u < length && text[index] == '/'
+                && text[index + 1u] == '*') {
+                depth += 1u;
+                index += 2u;
+            } else if (index + 1u < length && text[index] == '*'
+                && text[index + 1u] == '/') {
+                depth -= 1u;
+                index += 2u;
+            } else {
+                index += 1u;
+            }
+        }
+        return index;
+    }
+    return index;
+}
+
+/* Skip literals and comments at `index`; returns the new index. */
+static size_t cm_body_skip_opaque(const char *text, size_t length,
+    size_t index)
+{
+    size_t skipped = cm_body_skip_literal(text, length, index);
+    if (skipped != index) return skipped;
+    return cm_body_skip_comment(text, length, index);
+}
+
 /*
  * Split `text` at top-level commas.  `out_starts`/`out_lengths` receive up
  * to `limit` trimmed pieces; returns the piece count (which may exceed the
@@ -208,7 +255,7 @@ static size_t cm_body_split_commas(const char *text, size_t length,
     size_t piece_start = 0u;
     size_t count = 0u;
     while (index < length) {
-        size_t skipped = cm_body_skip_literal(text, length, index);
+        size_t skipped = cm_body_skip_opaque(text, length, index);
         char c;
         if (skipped != index) {
             index = skipped;
@@ -421,7 +468,7 @@ static CmBodyBuiltin cm_body_builtin_by_name(const char *name)
         "module_path", "env", "option_env"
     };
     static const char *const unsupported[] = {
-        "cfg_select", "offset_of", "include_str", "include",
+        "include_str", "include",
         "include_bytes", "compile_error", "concat_idents", "trace_macros",
         "log_syntax", "global_asm", "naked_asm", "const_format_args_nl",
         "format_args_nl", "type_ascribe"
@@ -437,6 +484,8 @@ static CmBodyBuiltin cm_body_builtin_by_name(const char *name)
         || strcmp(name, "const_format_args") == 0)
         return CM_BODY_BUILTIN_FORMAT_ARGS;
     if (strcmp(name, "asm") == 0) return CM_BODY_BUILTIN_ASM;
+    if (strcmp(name, "cfg_select") == 0) return CM_BODY_BUILTIN_CFG_SELECT;
+    if (strcmp(name, "offset_of") == 0) return CM_BODY_BUILTIN_RETAINED;
     for (index = 0u; index < sizeof(unsupported) / sizeof(unsupported[0]);
             ++index)
         if (strcmp(name, unsupported[index]) == 0)
@@ -605,6 +654,38 @@ static int cm_body_lookup_unqualified(CmBodyExpandState *state,
 }
 
 /*
+ * First segment of a relative path: a child module, a `use`-imported
+ * module, or (2015-style / lenient) a crate-root module of that name.
+ */
+static int cm_body_module_by_name(CmBodyExpandState *state,
+    CmModuleId current, const char *name, CmModuleId *out_module)
+{
+    CmModuleId root;
+    if (cm_body_child_module(state, current, name, out_module)) return 1;
+    if (state->options->imports != NULL) {
+        size_t count = cm_import_binding_count(state->options->imports,
+            current, CM_RESOLVE_NAMESPACE_TYPE);
+        uint32_t index;
+        for (index = 0u; (size_t)index < count; ++index) {
+            CmResolvedBinding binding;
+            char text[CM_BODY_NAME_LIMIT];
+            if (!cm_import_get_binding(state->options->imports, current,
+                    CM_RESOLVE_NAMESPACE_TYPE, index, &binding)) continue;
+            if (binding.target_module == CM_MODULE_NONE) continue;
+            if (!cm_import_copy_string(state->options->imports,
+                    binding.name, text, sizeof(text))) continue;
+            if (strcmp(text, name) == 0) {
+                *out_module = binding.target_module;
+                return 1;
+            }
+        }
+    }
+    return cm_module_graph_get_root(state->graph, &root)
+        && root != current
+        && cm_body_child_module(state, root, name, out_module);
+}
+
+/*
  * Resolve a (possibly qualified) macro path.  Unqualified names use the
  * body-local definitions, then the module's textual scope.  Qualified paths
  * walk `crate`/`self`/`super`/module names and end in the macro namespace.
@@ -662,6 +743,9 @@ static int cm_body_resolve_path(CmBodyExpandState *state, const CmAst *ast,
             && strcmp(name, "core") == 0
             && strcmp(state->options->crate_identifier, "crate") == 0) {
             if (!cm_module_graph_get_root(state->graph, &module)) return 0;
+        } else if (segment == 0u && !path->absolute) {
+            if (!cm_body_module_by_name(state, module, name, &module))
+                return 0;
         } else if (!cm_body_child_module(state, module, name, &module)) {
             return 0;
         }
@@ -713,8 +797,10 @@ static CmAstExprId cm_body_parse_text(CmBodyExpandState *state,
 static CmAstExprId cm_body_parse_expansion(CmBodyExpandState *state,
     const char *text, size_t length, const char **out_error)
 {
+    clock_t started = state->debug ? clock() : 0;
     CmAstExprId expression = cm_body_parse_text(state, text, length,
         out_error);
+    if (state->debug) state->ticks_parse += clock() - started;
     if (expression != CM_AST_EXPR_NONE) return expression;
     cm_str_buf_clear(&state->scratch);
     cm_str_buf_append(&state->scratch, "{ ");
@@ -722,6 +808,19 @@ static CmAstExprId cm_body_parse_expansion(CmBodyExpandState *state,
     cm_str_buf_append(&state->scratch, " }");
     return cm_body_parse_text(state, state->scratch.data,
         state->scratch.len, out_error);
+}
+
+/* Does transcribed text start (after `{`/spaces) with `builtin #`? */
+static int cm_body_text_is_builtin_syntax(const char *text, size_t length)
+{
+    size_t index = 0u;
+    while (index < length && (cm_body_is_space(text[index])
+            || text[index] == '{' || text[index] == '(')) index += 1u;
+    if (length - index < 8u || memcmp(text + index, "builtin", 7u) != 0)
+        return 0;
+    index += 7u;
+    while (index < length && cm_body_is_space(text[index])) index += 1u;
+    return index < length && text[index] == '#';
 }
 
 /* ------------------------------------------------------------------ */
@@ -741,13 +840,28 @@ static int cm_body_expand_rules(CmBodyExpandState *state, CmAstExprId id,
     cm_macro_syntax_options_init(&options);
     options.edition = state->options->edition;
     options.crate_identifier = state->options->crate_identifier;
+    /* Lenient: real core macros (`compress!`, SIMD helpers) exceed the
+     * defensive defaults. */
+    options.limits.max_nesting = CM_MACRO_RULES_ABSOLUTE_MAX_NESTING;
+    options.limits.max_backtrack_steps = (size_t)2000000u;
+    options.limits.max_repetition_iterations = (size_t)5000000u;
     cm_str_buf_clear(&state->text);
-    expansion = cm_macro_syntax_expand(target->definition_ast,
-        target->definition_item, state->ast, &expr->data.macro_expr,
-        &options, &state->text);
+    {
+        clock_t started = state->debug ? clock() : 0;
+        expansion = cm_macro_syntax_expand(target->definition_ast,
+            target->definition_item, state->ast, &expr->data.macro_expr,
+            &options, &state->text);
+        if (state->debug) state->ticks_expand += clock() - started;
+    }
     if (expansion.status != CM_MACRO_OK) {
         cm_body_fail(state, name, span, expansion.diagnostic.message == NULL
             ? "macro_rules expansion failed" : expansion.diagnostic.message);
+        return 0;
+    }
+    if (cm_body_text_is_builtin_syntax(state->text.data, state->text.len)) {
+        /* `builtin # name(...)` bodies (`offset_of!`, `type_ascribe!`):
+         * keep the invocation node for HIR lowering. */
+        state->result.remaining_asm += 1u;
         return 0;
     }
     replacement = cm_body_parse_expansion(state, state->text.data,
@@ -1144,6 +1258,148 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     return cm_body_finish_generated(state, id, name, span);
 }
 
+/*
+ * `cfg_select! { pred => { body } ... _ => { body } }` in expression or
+ * statement position: the first arm whose predicate holds is spliced in.
+ */
+static int cm_body_builtin_cfg_select(CmBodyExpandState *state,
+    CmAstExprId id, const char *name, const char *arguments, size_t length,
+    CmAstSpan span)
+{
+    size_t index = 0u;
+    const CmCfgEnvironment *environment = state->options->cfg == NULL
+        ? NULL : &state->options->cfg->environment;
+    while (index < length) {
+        size_t predicate_start;
+        size_t predicate_end;
+        size_t depth = 0u;
+        size_t body_start;
+        size_t body_end;
+        const char *predicate;
+        size_t predicate_length;
+        int selected = 0;
+        for (;;) {
+            size_t skipped;
+            while (index < length && cm_body_is_space(arguments[index]))
+                index += 1u;
+            skipped = cm_body_skip_comment(arguments, length, index);
+            if (skipped == index) break;
+            index = skipped;
+        }
+        if (index >= length) break;
+        predicate_start = index;
+        /* Predicate runs to the top-level `=>`. */
+        while (index < length) {
+            size_t skipped = cm_body_skip_opaque(arguments, length, index);
+            char c;
+            if (skipped != index) {
+                index = skipped;
+                continue;
+            }
+            c = arguments[index];
+            if (c == '(' || c == '[' || c == '{') depth += 1u;
+            else if ((c == ')' || c == ']' || c == '}') && depth != 0u)
+                depth -= 1u;
+            else if (c == '=' && depth == 0u && index + 1u < length
+                && arguments[index + 1u] == '>') break;
+            index += 1u;
+        }
+        if (index >= length) {
+            cm_body_fail(state, name, span, "cfg_select arm without =>");
+            return 0;
+        }
+        predicate_end = index;
+        index += 2u;
+        while (index < length && cm_body_is_space(arguments[index]))
+            index += 1u;
+        body_start = index;
+        if (index < length && arguments[index] == '{') {
+            depth = 0u;
+            while (index < length) {
+                size_t skipped = cm_body_skip_opaque(arguments, length,
+                    index);
+                char c;
+                if (skipped != index) {
+                    index = skipped;
+                    continue;
+                }
+                c = arguments[index];
+                if (c == '{') depth += 1u;
+                else if (c == '}') {
+                    depth -= 1u;
+                    if (depth == 0u) {
+                        index += 1u;
+                        break;
+                    }
+                }
+                index += 1u;
+            }
+            body_end = index;
+        } else {
+            depth = 0u;
+            while (index < length) {
+                size_t skipped = cm_body_skip_opaque(arguments, length,
+                    index);
+                char c;
+                if (skipped != index) {
+                    index = skipped;
+                    continue;
+                }
+                c = arguments[index];
+                if (c == '(' || c == '[' || c == '{') depth += 1u;
+                else if ((c == ')' || c == ']' || c == '}') && depth != 0u)
+                    depth -= 1u;
+                else if (c == ',' && depth == 0u) break;
+                index += 1u;
+            }
+            body_end = index;
+            if (index < length) index += 1u; /* skip `,` */
+        }
+        /* Copy the predicate without comments for the cfg evaluator. */
+        cm_str_buf_clear(&state->pieces);
+        {
+            size_t at = predicate_start;
+            while (at < predicate_end) {
+                size_t skipped = cm_body_skip_comment(arguments,
+                    predicate_end, at);
+                if (skipped != at) {
+                    cm_str_buf_push(&state->pieces, ' ');
+                    at = skipped;
+                    continue;
+                }
+                cm_str_buf_push(&state->pieces, arguments[at]);
+                at += 1u;
+            }
+        }
+        predicate = state->pieces.data;
+        predicate_length = state->pieces.len;
+        cm_body_trim(&predicate, &predicate_length);
+        if (predicate_length == 1u && predicate[0] == '_') {
+            selected = 1;
+        } else if (environment != NULL) {
+            CmCfgEvaluation evaluation = cm_cfg_evaluate(environment,
+                predicate, predicate_length);
+            if (evaluation.status != CM_MACRO_OK) {
+                cm_body_fail(state, name, span,
+                    evaluation.diagnostic.message == NULL
+                    ? "cfg_select predicate did not evaluate"
+                    : evaluation.diagnostic.message);
+                return 0;
+            }
+            selected = evaluation.value;
+        }
+        if (selected) {
+            cm_str_buf_clear(&state->text);
+            cm_str_buf_append_n(&state->text, arguments + body_start,
+                body_end - body_start);
+            if (state->text.len == 0u) cm_str_buf_append(&state->text, "()");
+            return cm_body_finish_generated(state, id, name, span);
+        }
+    }
+    cm_body_fail(state, name, span, "no cfg_select arm matched");
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Expansion dispatch                                                   */
 
@@ -1183,8 +1439,12 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
         return 0;
     }
     memset(&target, 0, sizeof(target));
-    resolved = cm_body_resolve_path(state, state->ast, path, name,
-        sizeof(name), &target);
+    {
+        clock_t started = state->debug ? clock() : 0;
+        resolved = cm_body_resolve_path(state, state->ast, path, name,
+            sizeof(name), &target);
+        if (state->debug) state->ticks_lookup += clock() - started;
+    }
     if (resolved && !target.is_builtin)
         return cm_body_expand_rules(state, id, name, &target);
     builtin = cm_body_builtin_by_name(name);
@@ -1214,7 +1474,11 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
     case CM_BODY_BUILTIN_FORMAT_ARGS:
         return cm_body_builtin_format_args(state, id, name, arguments,
             argument_length, span);
+    case CM_BODY_BUILTIN_CFG_SELECT:
+        return cm_body_builtin_cfg_select(state, id, name, arguments,
+            argument_length, span);
     case CM_BODY_BUILTIN_ASM:
+    case CM_BODY_BUILTIN_RETAINED:
         state->result.remaining_asm += 1u;
         return 0;
     case CM_BODY_BUILTIN_UNSUPPORTED:
@@ -1515,6 +1779,7 @@ CmBodyExpandResult cm_body_expand_graph(CmModuleGraph *graph,
     cm_str_buf_init(&state->text);
     cm_str_buf_init(&state->scratch);
     cm_str_buf_init(&state->pieces);
+    state->debug = getenv("CM_BODY_EXPAND_DEBUG") != NULL;
     module_count = cm_module_graph_module_count(graph);
     for (index = 0u; index < module_count; ++index) {
         CmResolveModuleInfo info;
@@ -1522,6 +1787,12 @@ CmBodyExpandResult cm_body_expand_graph(CmModuleGraph *graph,
         cm_body_walk_module(state, info.id);
     }
     result = state->result;
+    if (state->debug)
+        fprintf(stderr, "body-expand timing: lookup=%.2fs expand=%.2fs "
+            "parse=%.2fs\n",
+            (double)state->ticks_lookup / (double)CLOCKS_PER_SEC,
+            (double)state->ticks_expand / (double)CLOCKS_PER_SEC,
+            (double)state->ticks_parse / (double)CLOCKS_PER_SEC);
     cm_str_buf_destroy(&state->pieces);
     cm_str_buf_destroy(&state->scratch);
     cm_str_buf_destroy(&state->text);

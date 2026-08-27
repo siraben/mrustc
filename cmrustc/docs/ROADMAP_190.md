@@ -45,7 +45,9 @@ whole-`core` count printed by `probe_core_hir`:
    unexpanded `CM_AST_EXPR_MACRO`. Reuse `cm_macro_rules_reparse_expression`,
    the item-macro planner's textual scope, and the builtin table; add the
    compiler builtins core bodies need (`format_args!`, `assert!`,
-   `include_str!`, `concat!`, `cfg!`, `line!`...).
+   `include_str!`, `concat!`, `cfg!`, `line!`...). Status 2026-08-26: the
+   pass expands every core invocation except 56 retained `asm!`, 3 retained
+   `offset_of!`, and 10 `format_args!` with width/precision specs.
 2. **M9-02 untyped HIR bodies.** Extend `CmHirExprKind`/patterns to cover
    every AST form and lower every core body with `type = NONE`; frontier
    metric is `bodies_unlowered`. Path resolution inside bodies uses the

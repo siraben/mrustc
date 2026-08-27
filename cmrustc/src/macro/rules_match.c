@@ -385,6 +385,85 @@ static int cm_rules_type_candidate_parses(CmRulesMatchState *state,
     return valid;
 }
 
+/*
+ * An `expr` candidate never contains a top-level `,`, `;`, or `=>` outside
+ * groups and turbofish angle brackets, and must parse as one complete
+ * expression.  Without this filter a pattern such as
+ * `($v0:expr, $v1:expr, $v2:expr, $v3:expr)` backtracks over every split of
+ * the input (SipHash's `compress!` exceeded the step budget).
+ */
+static int cm_rules_expr_candidate_valid(CmRulesMatchState *state,
+    cm_tt_id input, size_t count)
+{
+    const struct cm_tt_node *node;
+    const struct cm_tt_node *first;
+    const struct cm_tt_node *last;
+    cm_tt_id last_id;
+    size_t angle_depth = 0u;
+    size_t remaining = count;
+    int after_path_sep = 0;
+    /* A leading closure parameter list `|a, b|` may contain commas. */
+    int in_closure_params = 0;
+    int at_start = 1;
+    size_t start;
+    size_t end;
+    CmAst ast;
+    CmExpressionFragment fragment;
+    int valid;
+
+    if (count == 0u) return 0;
+    node = cm_token_tree_node(state->input_tree, input);
+    while (node != NULL && remaining != 0u) {
+        if (node->kind == CM_TT_NODE_TOKEN) {
+            enum cm_token_kind kind = node->data.token.kind;
+            if (at_start && kind == CM_TOKEN_IDENT) {
+                /* `move |...|`, `async move |...|`: stay at start. */
+            } else if (at_start && kind == CM_TOKEN_PIPE) {
+                in_closure_params = 1;
+                at_start = 0;
+            } else if (in_closure_params && kind == CM_TOKEN_PIPE) {
+                in_closure_params = 0;
+                at_start = 0;
+            } else {
+                at_start = 0;
+            }
+            if (in_closure_params) {
+                after_path_sep = 0;
+            } else if (kind == CM_TOKEN_LT && after_path_sep) {
+                angle_depth += 1u;
+            } else if (kind == CM_TOKEN_GT && angle_depth != 0u) {
+                angle_depth -= 1u;
+            } else if (kind == CM_TOKEN_SHR && angle_depth != 0u) {
+                angle_depth = angle_depth > 1u ? angle_depth - 2u : 0u;
+            } else if (angle_depth == 0u
+                && (kind == CM_TOKEN_COMMA || kind == CM_TOKEN_SEMICOLON
+                    || kind == CM_TOKEN_FAT_ARROW)) {
+                return 0;
+            }
+            if (!in_closure_params) after_path_sep = kind == CM_TOKEN_PATH_SEP;
+        } else {
+            after_path_sep = 0;
+            at_start = 0;
+        }
+        node = cm_token_tree_node(state->input_tree, node->next_sibling);
+        remaining -= 1u;
+    }
+    first = cm_token_tree_node(state->input_tree, input);
+    last_id = cm_rules_last_consumed(state->input_tree, input, count);
+    last = cm_token_tree_node(state->input_tree, last_id);
+    if (first == NULL || last == NULL) return 0;
+    start = cm_rules_node_start(first);
+    end = cm_rules_node_end(last);
+    if (start > end || end > state->input_source_length) return 0;
+    cm_ast_init(&ast);
+    fragment = cm_parse_expression_fragment(&ast,
+        state->input_source + start, end - start, CM_EDITION_2024);
+    valid = fragment.parse.error_count == 0u
+        && fragment.expression != CM_AST_EXPR_NONE;
+    cm_ast_destroy(&ast);
+    return valid;
+}
+
 static int cm_rules_fragment_candidate_valid(CmRulesMatchState *state,
     CmMacroFragmentKind fragment, cm_tt_id input, size_t count)
 {
@@ -393,6 +472,9 @@ static int cm_rules_fragment_candidate_valid(CmRulesMatchState *state,
     }
     if (fragment == CM_MACRO_FRAGMENT_PATH) {
         return cm_rules_type_or_path_candidate_valid(state, input, count);
+    }
+    if (fragment == CM_MACRO_FRAGMENT_EXPR) {
+        return cm_rules_expr_candidate_valid(state, input, count);
     }
     return 1;
 }

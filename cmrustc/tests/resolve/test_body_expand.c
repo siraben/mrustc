@@ -203,6 +203,20 @@ static const char positive_source[] =
     "    let _s: &str = stringify!(z + 1);\n"
     "    assert!(z < 9, concat!(\"limit \", stringify!(z), \" {}\"), z);\n"
     "    let _c: &str = concat!(\"a\", 1, stringify!(b + c), 'x');\n"
+    "    let _p = cfg_select! {\n"
+    "        target_os = \"windows\" => { 1u32 }\n"
+    "        all(unix, target_os = \"linux\") => { 2u32 }\n"
+    "        _ => { 3u32 }\n"
+    "    };\n"
+    "    let _q = cfg_select! {\n"
+    "        // leading comment, as in core::ffi::primitives\n"
+    "        feature = \"optimize_for_size\" => { 1u32 }\n"
+    "        /* block */ all(\n"
+    "            unix, // trailing comment\n"
+    "            not(windows),\n"
+    "        ) => { 4u32 }\n"
+    "        _ => { 2u32 }\n"
+    "    };\n"
     "    z\n"
     "}\n"
     "impl Holder {\n"
@@ -213,10 +227,13 @@ static const char positive_source[] =
     "#[macro_use]\n"
     "mod shared { macro_rules! shared { () => { 1u32 }; } }\n"
     "mod ub { macro_rules! pre { ($c:expr) => { if !$c { loop {} } }; }\n"
-    "         pub(crate) use pre; }\n"
+    "         pub(crate) use pre;\n"
+    "         pub macro twice($e:expr) { $e + $e } }\n"
     "mod other {\n"
     "    use crate::ub::pre;\n"
-    "    pub fn g(v: u32) -> u32 { pre!(v > 0); shared!() + twice!(v) }\n"
+    "    use crate::ub;\n"
+    "    pub fn g(v: u32) -> u32 { pre!(v > 0); ub::pre!(v > 1);\n"
+    "        shared!() + twice!(v) + ub::twice!(1) }\n"
     "    pub mod deeper { pub fn h() -> u32 { shared!() } }\n"
     "}\n";
 
@@ -238,10 +255,10 @@ static void test_positive_chain(void)
             result.first_failure_macro, result.first_failure_reason);
     check(result.remaining_asm == 0u && result.remaining_builtin == 0u,
         "positive fixture left invocations behind");
-    /* twice x4, local, panic_2021, pre, shared x2 */
-    check(result.expanded_rules >= 9u, "macro_rules expansions missing");
+    /* twice x4, local, panic_2021, pre x2, shared x2, ub::twice */
+    check(result.expanded_rules >= 11u, "macro_rules expansions missing");
     /* assert x3, cfg, panic, stringify, concat, const_format_args x3 */
-    check(result.expanded_builtin >= 10u, "builtin expansions missing");
+    check(result.expanded_builtin >= 12u, "builtin expansions missing");
     check(cm_module_graph_get_root(&fixture.graph, &root)
         && cm_module_graph_borrow_ast(&fixture.graph, root, &ast)
         && ast != NULL, "root AST unavailable");
@@ -275,9 +292,16 @@ static void test_positive_chain(void)
 }
 
 static const char negative_source[] =
+    "pub mod mem {\n"
+    "    pub macro offset_of($Container:ty, $($fields:expr)+ $(,)?) {\n"
+    "        builtin # offset_of($Container, $($fields)+)\n"
+    "    }\n"
+    "}\n"
+    "pub struct S { pub f: u32 }\n"
     "pub fn user() -> u32 {\n"
     "    let a = nope!(1);\n"
     "    unsafe { asm!(\"nop\") };\n"
+    "    let _o = crate::mem::offset_of!(S, f);\n"
     "    a\n"
     "}\n";
 
@@ -293,7 +317,7 @@ static void test_negative_counts(void)
         "first failure did not name the unknown macro");
     check(strcmp(result.first_failure_reason, "macro is not in scope") == 0,
         "first failure reason unexpected");
-    check(result.remaining_asm == 1u, "asm! was not retained");
+    check(result.remaining_asm == 2u, "asm!/offset_of! were not retained");
     check(result.expanded_rules == 0u && result.expanded_builtin == 0u,
         "negative fixture expanded something");
     fixture_destroy(&fixture);

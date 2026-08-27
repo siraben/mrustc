@@ -2379,7 +2379,7 @@ M9-04..M9-06 and will be closed when those land.
 
 | ID | State | Task | Acceptance |
 |---|---|---|---|
-| M9-01 | ACTIVE | Expression-position macro expansion for core bodies | `probe_core_hir --body-census` reports zero bodies with unexpanded macros |
+| M9-01 | ACTIVE | Expression-position macro expansion for core bodies | `probe_core_hir --body-census` reports zero bodies with unexpanded macros other than deliberately retained `asm!`/`offset_of!` |
 
 M9-01 baseline (2026-08-26, `probe_core_hir --body-census` on pinned core):
 22,524 bodies, all with an AST; 19,298 macro-free and 3,226 containing 4,510
@@ -2397,6 +2397,22 @@ let 2. Invocations are dominated by `core::arch` `macro_rules`
 55, `unreachable` 9); the compiler builtins reached are `cfg` 264, `assert`
 221, `panic` 119 (via `panic_2021` to `const_format_args`), `stringify` 85,
 `asm` 42, `format_args` 10, `cfg_select` 5, `offset_of` 3, `addr_of` 3.
+
+M9-01 progress (2026-08-26, commit `078f2496` and follow-ups): the lenient
+pass in `src/resolve/body_expand.c` reaches 14,889 invocations (nested
+expansions included) and expands 8,329 `macro_rules`/`macro` and 6,488
+builtin uses with zero failures. The whole-core census now reports 64 bodies
+still holding 69 invocations: 56 `asm!` and 3 `offset_of!` (a `builtin #`
+`pub macro`) are retained on purpose for HIR lowering, and 10 `format_args!`
+uses need width/precision placeholders (`rt::Placeholder`). Fixes on the way
+there: textual scope now includes ancestor modules, `use`-imported macro
+bindings, and the crate-root macro namespace; relative first segments resolve
+through imported modules; nested `concat!`/`stringify!` fold textually;
+`cfg_select!` arms evaluate through the cfg environment with comments
+skipped; and the `macro_rules` matcher rejects `expr` candidates containing a
+top-level `,`/`;`/`=>` and requires them to parse, which turned SipHash's
+`compress!` from a step-limit failure into a 0.2 s pass (the whole-core probe
+is back to about 13 minutes, of which expansion is under a second).
 | M9-02 | TODO | Untyped HIR lowering of every core body (all expression and pattern forms) | probe reports zero unlowered core bodies |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | TODO | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types |

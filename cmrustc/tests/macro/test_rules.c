@@ -203,6 +203,18 @@ static void test_simple_and_opaque(void)
         "macro_rules ! inner {($ value : ty) => "
         "{shadow $ value} ; ($ other : expr) => "
         "{outer captured $ other} ;}", 0, 1, NULL);
+    (void)match_and_transcribe("sip-compress",
+        "{ ($state:expr) => { one $state }; "
+        "($v0:expr, $v1:expr, $v2:expr, $v3:expr) => { "
+        "four $v0 $v1 $v2 $v3 }; }",
+        "(s.v0, s.v1, s.v2, s.v3)", "four s.v0 s.v1 s.v2 s.v3", 1, 4, NULL);
+    (void)match_and_transcribe("expr-closure-comma",
+        "{ ($t:ty, $x:expr, $f:expr) => { arg $t $x $f }; }",
+        "(T, x, |_: &T, _| Ok(()))", "arg T x |_: &T, _| Ok(())", 0, 3,
+        NULL);
+    (void)match_and_transcribe("expr-turbofish-comma",
+        "{ ($e:expr, $n:ident) => { got $e $n }; }",
+        "(f::<A, B>(1), tail)", "got f::<A, B>(1) tail", 0, 2, NULL);
     (void)match_and_transcribe("negative-literal",
         "{ ($value:literal) => { $value }; }", "(-12)",
         "-12", 0, 1, NULL);

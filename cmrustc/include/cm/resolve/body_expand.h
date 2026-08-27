@@ -41,7 +41,8 @@ typedef struct CmBodyExpandResult {
     size_t invocations;
     size_t expanded_rules;
     size_t expanded_builtin;
-    /* Deliberately retained invocations: inline assembly. */
+    /* Deliberately retained invocations: inline assembly and `offset_of!`,
+     * which HIR lowering turns into dedicated nodes. */
     size_t remaining_asm;
     /* Builtins this pass does not implement yet. */
     size_t remaining_builtin;
