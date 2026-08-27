@@ -2592,6 +2592,18 @@ typed, 516 error nodes (was 534).  Remaining: call-arg 106; method not
 found 75 (30 = Simd `count_ones` family); assignment 73 (Wrapping —
 `coerce-null=0` rules out invalid ids; next suspicion: normalize picks
 a wrong-width impl); body vs signature 70; call-through-non-fn 50.
+
+M9-04 twelfth pass (same day): the parser attaches expression-statement
+attributes to the expression, so cfg stripping now also consults the
+statement expression's attributes — `#[cfg(feature =
+"optimize_for_size")] { offset = fmt_u64(...) }` statements inside
+macro-generated bodies are finally stripped (the `impl_Display!`
+`${concat(...)}` helper family).  Whole core: 21,009/22,524 typed, 497
+error nodes (was 516); `ubody` unresolved paths 33 -> 14.  The Wrapping
+assignment family is now pinned by `assignment-normalized` output:
+`<Wrapping<u8> as BitOr>::Output` normalizes through the blanket
+`impl<T> BitOr<NonZero<T>> for T` because no specific impl matches in
+scan-0 — the blanket-fallback statistics run will show why.
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | TODO | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

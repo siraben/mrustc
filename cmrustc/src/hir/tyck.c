@@ -1041,6 +1041,43 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                 CmTyId target_type = cm_ty_from_hir(arena, env->state->hir,
                     definition->data.type_alias_item.target);
                 if (target_type == CM_TY_NONE) continue;
+                if (scan == 1 && getenv("CM_TYCK_DEBUG") != NULL) {
+                    /* Blanket fallback: report why no specific impl
+                     * matched. */
+                    size_t scan0_trait = 0u;
+                    size_t scan0_self = 0u;
+                    size_t probe_index;
+                    for (probe_index = 0u;
+                            probe_index < env->state->impl_count;
+                            ++probe_index) {
+                        const CmTyckImpl *other =
+                            &env->state->impls[probe_index];
+                        const CmTy *other_pattern;
+                        if (!other->has_trait
+                            || !cm_hir_def_id_equal(other->trait_def,
+                                trait_def)) continue;
+                        other_pattern = cm_ty_get(arena, cm_ty_resolve(
+                            arena, other->self_pattern));
+                        while (other_pattern != NULL
+                                && (other_pattern->kind == CM_TY_REF
+                                    || other_pattern->kind == CM_TY_PTR))
+                            other_pattern = cm_ty_get(arena,
+                                cm_ty_resolve(arena,
+                                    other_pattern->children[0]));
+                        if (other_pattern != NULL
+                            && (other_pattern->kind == CM_TY_PARAM
+                                || other_pattern->kind == CM_TY_SELF))
+                            continue;
+                        scan0_trait += 1u;
+                        if (cm_tyck_matches(env, other->self_pattern,
+                                self_type)) scan0_self += 1u;
+                    }
+                    fprintf(stderr, "TYCK normalize-blanket scan0_trait="
+                        "%lu scan0_self=%lu ",
+                        (unsigned long)scan0_trait,
+                        (unsigned long)scan0_self);
+                    cm_tyck_debug_pair(env, "projection", type, self_type);
+                }
                 cm_tyck_instance_init(&instance, self_type);
                 cm_tyck_instance_fresh(env, &instance, impl->item);
                 (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
@@ -2886,6 +2923,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                     fprintf(stderr, "TYCK assign-value-kind=%d\n",
                         (int)value_expr->kind);
                 cm_tyck_debug_pair(env, "assignment", value, target);
+                cm_tyck_debug_pair(env, "assignment-normalized",
+                    cm_tyck_normalize(env, value, 0u), target);
                 cm_tyck_debug_span(env, expr);
                 cm_tyck_error(env, "assignment type mismatch");
             }

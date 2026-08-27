@@ -1795,15 +1795,26 @@ static int cm_body_attributes_cfg_active(CmBodyExpandState *state,
     result = cm_expand_cfg_attribute_list(state->ast, 0u, ids, count,
         &options, &expanded);
     if (result.status == CM_MACRO_OK) active = expanded.is_active;
+    if (state->debug)
+        fprintf(stderr, "body-expand cfg-attrs count=%u status=%d"
+            " active=%d\n", (unsigned)count, (int)result.status, active);
     cm_expanded_attribute_list_destroy(&expanded);
     return active;
 }
+
+static int cm_body_expr_cfg_active(CmBodyExpandState *state,
+    CmAstExprId id);
 
 static int cm_body_stmt_cfg_active(CmBodyExpandState *state,
     const CmAstStmt *stmt)
 {
     if (!cm_body_attributes_cfg_active(state, stmt->attributes,
             stmt->attribute_count)) return 0;
+    /* The parser attaches expression-statement attributes to the
+     * expression itself. */
+    if (stmt->kind == CM_AST_STMT_EXPR
+        && !cm_body_expr_cfg_active(state,
+            stmt->data.expr_stmt.expression)) return 0;
     if (stmt->kind == CM_AST_STMT_ITEM) {
         const CmAstItem *item = cm_ast_get_item(state->ast,
             stmt->data.item_stmt.item);
@@ -1864,6 +1875,9 @@ static void cm_body_walk_expr(CmBodyExpandState *state, CmAstExprId id,
             && (statement_count != 0u || tail != CM_AST_EXPR_NONE)) {
             uint32_t kept = 0u;
             int changed = 0;
+            if (state->debug)
+                fprintf(stderr, "body-expand cfg-scan block stmts=%u\n",
+                    (unsigned)statement_count);
             for (index = 0u; index < statement_count; ++index) {
                 const CmAstStmt *stmt = cm_ast_get_stmt(state->ast,
                     statements[index]);
