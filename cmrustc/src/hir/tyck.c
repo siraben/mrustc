@@ -1360,6 +1360,14 @@ static CmTyId cm_tyck_autoderef(CmTyckEnv *env, CmTyId type, unsigned int steps)
     type = cm_ty_resolve(arena, type);
     ty = cm_ty_get(arena, type);
     if (ty == NULL || steps == 0u) return type;
+    if (ty->kind == CM_TY_PROJECTION) {
+        /* A projection uncovered mid-chain (`&<usize as
+         * SliceIndex<[&str]>>::Output` = `&&str`) must normalize before
+         * the next layer peels, or the walk stalls on it. */
+        CmTyId normalized = cm_tyck_normalize(env, type, 0u);
+        if (normalized == type) return type;
+        return cm_tyck_autoderef(env, normalized, steps);
+    }
     if (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR)
         return cm_tyck_autoderef(env, ty->children[0], steps - 1u);
     return type;
