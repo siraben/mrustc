@@ -2748,6 +2748,16 @@ Whole-crate: alloc `use` imports stay 0, alloc HIR advances to
 run 64: **151 error nodes** unchanged.  All three lanes + ASan/UBSan
 green.
 
+M9-03 third pass (2026-08-28): structurally inert generic-parameter
+attributes (`may_dangle`, `unstable`, `rustc_*`, `allow`, `doc`) are
+accepted and dropped during HIR lowering; semantic ones (`cfg`)
+still reject.  Attribute text is the raw `#[...]` source range, so
+matching strips the prefix.  The fail-closed lower test now asserts
+the lenient contract for `#[may_dangle]` and keeps `#[cfg(test)]`
+fail-closed.  Whole-crate: alloc HIR advances past `raw_vec` to
+`collections/mod.rs:172` (supertrait path unresolved).  Lanes +
+ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

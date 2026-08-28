@@ -8025,6 +8025,13 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
             for (attribute_index = 0u;
                  attribute_index < ast_parameter->attribute_count;
                  ++attribute_index) {
+                static const char *const ignorable[] = {
+                    "may_dangle", "unstable", "rustc_", "allow", "doc"
+                };
+                const CmInternedString *text;
+                size_t ignorable_index;
+                int ignored;
+
                 attribute = cm_ast_get_attribute(state->ast,
                     ast_parameter->attributes[attribute_index]);
                 if (attribute == NULL
@@ -8035,15 +8042,70 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
                         "generic parameter attribute is malformed");
                     return 0;
                 }
+                /*
+                 * M9 leniency: structurally inert generic-parameter
+                 * attributes are accepted and dropped; anything that could
+                 * change semantics (e.g. `cfg`) still rejects.
+                 */
+                text = cm_ast_get_string(state->ast, attribute->text);
+                ignored = 0;
+                {
+                    /* Attribute text is the raw source range, including
+                     * the leading `#[`; compare from the name start. */
+                    const unsigned char *name_bytes = text == NULL
+                        ? NULL : text->bytes;
+                    size_t name_length = text == NULL ? 0u : text->len;
+                    while (name_length != 0u
+                        && (name_bytes[0] == (unsigned char)'#'
+                            || name_bytes[0] == (unsigned char)'!'
+                            || name_bytes[0] == (unsigned char)'['
+                            || name_bytes[0] == (unsigned char)' ')) {
+                        name_bytes += 1;
+                        name_length -= 1u;
+                    }
+                    while (name_length != 0u
+                        && name_bytes[name_length - 1u]
+                            == (unsigned char)']') {
+                        name_length -= 1u;
+                    }
+                for (ignorable_index = 0u;
+                     !ignored && text != NULL
+                         && ignorable_index < CM_ARRAY_LEN(ignorable);
+                     ++ignorable_index) {
+                    size_t expected_length = strlen(
+                        ignorable[ignorable_index]);
+                    unsigned char next;
+
+                    if (name_length < expected_length
+                        || memcmp(name_bytes, ignorable[ignorable_index],
+                            expected_length) != 0) continue;
+                    if (name_length == expected_length) {
+                        ignored = 1;
+                        break;
+                    }
+                    next = name_bytes[expected_length];
+                    if (!((next >= (unsigned char)'a'
+                                && next <= (unsigned char)'z')
+                            || (next >= (unsigned char)'A'
+                                && next <= (unsigned char)'Z')
+                            || (next >= (unsigned char)'0'
+                                && next <= (unsigned char)'9')
+                            || next == (unsigned char)'_')
+                        || ignorable[ignorable_index][expected_length - 1u]
+                            == '_') {
+                        ignored = 1;
+                    }
+                }
+                }
+                if (!ignored) {
+                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
+                        cm_lower_span(state, attribute->span), ast_item_id,
+                        CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
+                        "generic parameter attributes are outside the "
+                        "supported HIR slice");
+                    return 0;
+                }
             }
-            attribute = cm_ast_get_attribute(state->ast,
-                ast_parameter->attributes[0]);
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-                cm_lower_span(state, attribute->span), ast_item_id,
-                CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-                "generic parameter attributes are outside the supported "
-                "HIR slice");
-            return 0;
         }
         if ((ast_parameter->bound_count != 0u
                 && ast_parameter->bounds == NULL)

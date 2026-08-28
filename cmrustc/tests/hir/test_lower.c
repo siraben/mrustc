@@ -8953,26 +8953,34 @@ static void test_lifetime_generic_parameter_bounds(void)
 
 static void test_generic_parameter_attributes_fail_closed(void)
 {
-    static const char source[] =
+    static const char lenient_source[] =
         "fn dropck<#[may_dangle] T>(value: T) {}";
+    static const char rejected_source[] =
+        "fn dropck<#[cfg(test)] T>(value: T) {}";
     const char *anchor;
     CmHirContext context;
     CmHirLowerResult result;
 
-    result = lower_source(source, &context, NULL);
-    anchor = strstr(source, "#[may_dangle]");
+    /* M9 leniency: structurally inert generic-parameter attributes are
+     * accepted and dropped. */
+    result = lower_source(lenient_source, &context, NULL);
+    assert(result.error_count == 0u
+        && find_item(&context, "dropck") != NULL);
+    cm_hir_context_destroy(&context);
+
+    /* Anything that could change semantics still rejects. */
+    result = lower_source(rejected_source, &context, NULL);
+    anchor = strstr(rejected_source, "#[cfg(test)]");
     assert(anchor != NULL
         && result.error_count == 1u
         && result.lowered_item_count == 0u
         && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_GENERIC
-        && result.first_error.span.source == 7u
-        && result.first_error.span.start == (uint32_t)(anchor - source)
-        && result.first_error.span.end
-            == (uint32_t)(anchor - source)
-                + (uint32_t)(sizeof("#[may_dangle]") - 1u)
+        && result.first_error.span.start == (uint32_t)(anchor
+            - rejected_source)
         && strstr(result.first_error.message,
             "generic parameter attributes") != NULL
         && find_item(&context, "dropck") == NULL);
+
     cm_hir_context_destroy(&context);
 }
 
