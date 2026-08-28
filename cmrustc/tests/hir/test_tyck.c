@@ -91,11 +91,12 @@ static int fixture_init(Fixture *fixture, const char *source)
     }
     cm_ubody_set_init(&fixture->bodies);
     (void)cm_ubody_lower_all(&fixture->bodies, &fixture->hir, &fixture->graph,
-        fixture->graph_result.revision, &fixture->imports, &fixture->map);
+        fixture->graph_result.revision, &fixture->imports, &fixture->map,
+        NULL, 0u);
     cm_tyck_set_init(&fixture->tyck);
     fixture->result = cm_tyck_all(&fixture->tyck, &fixture->hir,
         &fixture->bodies, &fixture->graph, fixture->graph_result.revision,
-        &fixture->imports, &fixture->map);
+        &fixture->imports, &fixture->map, NULL, 0u);
     return 1;
 }
 

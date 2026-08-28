@@ -129,6 +129,8 @@ typedef struct CmLowerState {
     const CmHirLowerOptions *options;
     CmHirLowerResult result;
     CmVec item_records;
+    /* Heap-stable synthesized records for dependency-crate items (M9-03). */
+    CmVec dependency_records; /* CmLowerItemRecord* */
     CmVec variant_records;
     CmVec macro_records;
     CmVec generic_records;
@@ -2047,6 +2049,91 @@ static int cm_lower_path_is_module_keyword_only(const CmLowerState *state,
     return 1;
 }
 
+static const CmHirItem *cm_lower_find_dependency_item(
+    const CmLowerState *state, CmResolveItemRef declaration,
+    uint32_t *out_match_count);
+
+/*
+ * The record-shaped view of one dependency-crate item (M9-03), synthesized
+ * on demand from the already-lowered HIR item and the dependency graph's
+ * declaring AST, then cached.  Records are heap allocations so pointers
+ * stay stable while the cache grows.
+ */
+static int cm_lower_dependency_record(CmLowerState *state,
+    const CmHirLowerDependency *dependency, CmResolveItemRef declaration,
+    const CmLowerItemRecord **out_record)
+{
+    const CmHirItem *item;
+    const CmAst *declaring_ast;
+    CmLowerItemRecord *record;
+    CmAstItemKind kind;
+    uint32_t matches;
+    size_t index;
+    size_t module_count;
+
+    *out_record = NULL;
+    for (index = 0u; index < state->dependency_records.len; ++index) {
+        CmLowerItemRecord **cached = (CmLowerItemRecord **)cm_vec_at(
+            &state->dependency_records, index);
+        if (cached != NULL && *cached != NULL
+            && (*cached)->source == declaration.source
+            && (*cached)->ast_id == declaration.item) {
+            *out_record = *cached;
+            return 1;
+        }
+    }
+    item = cm_lower_find_dependency_item(state, declaration, &matches);
+    if (item == NULL || matches != 1u) return 0;
+    switch (item->kind) {
+    case CM_HIR_ITEM_FUNCTION: kind = CM_AST_ITEM_FUNCTION; break;
+    case CM_HIR_ITEM_STRUCT: kind = CM_AST_ITEM_STRUCT; break;
+    case CM_HIR_ITEM_UNION: kind = CM_AST_ITEM_UNION; break;
+    case CM_HIR_ITEM_ENUM: kind = CM_AST_ITEM_ENUM; break;
+    case CM_HIR_ITEM_TYPE_ALIAS: kind = CM_AST_ITEM_TYPE_ALIAS; break;
+    case CM_HIR_ITEM_CONST: kind = CM_AST_ITEM_CONST; break;
+    case CM_HIR_ITEM_STATIC: kind = CM_AST_ITEM_STATIC; break;
+    case CM_HIR_ITEM_TRAIT: kind = CM_AST_ITEM_TRAIT; break;
+    default: return 0;
+    }
+    declaring_ast = NULL;
+    module_count = cm_module_graph_module_count(dependency->graph);
+    for (index = 0u; index < module_count; ++index) {
+        CmResolveModuleInfo module_info;
+        const CmAst *candidate;
+
+        if (!cm_module_graph_get_module_at(dependency->graph, index,
+                &module_info)
+            || module_info.source != declaration.source) continue;
+        candidate = NULL;
+        if (cm_module_graph_borrow_ast(dependency->graph, module_info.id,
+                &candidate)
+            && candidate != NULL
+            && cm_ast_get_item(candidate, declaration.item) != NULL) {
+            declaring_ast = candidate;
+            break;
+        }
+    }
+    if (declaring_ast == NULL) return 0;
+    record = (CmLowerItemRecord *)cm_alloc_zeroed(1u, sizeof(*record));
+    record->ast = declaring_ast;
+    record->source = declaration.source;
+    record->ast_id = declaration.item;
+    record->owner_module = item->owner_module;
+    record->definition = item->definition;
+    record->parent_definition = item->parent_definition;
+    record->kind = kind;
+    record->hir_name = item->name;
+    record->generic_parameter_start = item->generic_parameter_start;
+    record->generic_parameter_count = item->generic_parameter_count;
+    record->effective_span = item->span;
+    if (cm_vec_push(&state->dependency_records, &record) == NULL) {
+        cm_free(record);
+        return 0;
+    }
+    *out_record = record;
+    return 1;
+}
+
 static CmLowerLookupResult cm_lower_lookup_graph_path(
     const CmLowerState *state, const CmAstPath *path,
     CmHirLowerPathUse use, const CmLowerItemRecord **out_record,
@@ -2102,6 +2189,58 @@ static CmLowerLookupResult cm_lower_lookup_graph_path(
             && (binding.import_declaration.source != 0u
                 || binding.import_declaration.item != CM_AST_ITEM_NONE))) {
         return CM_LOWER_LOOKUP_RESOLVER_ERROR;
+    }
+    if (binding.dependency != 0u) {
+        const CmHirLowerDependency *dependency;
+
+        if (state->options == NULL || state->options->dependencies == NULL
+            || (size_t)binding.dependency
+                > state->options->dependency_count) {
+            return CM_LOWER_LOOKUP_RESOLVER_ERROR;
+        }
+        dependency = &state->options->dependencies[binding.dependency - 1u];
+        if (binding.item_kind == CM_AST_ITEM_MODULE) {
+            CmHirModuleId dependency_hir_module;
+            const CmHirModule *dependency_module;
+
+            if (binding.target_module == CM_MODULE_NONE
+                || cm_hir_module_map_lookup_hir(dependency->module_map,
+                    dependency->graph, dependency->revision,
+                    binding.target_module, state->hir,
+                    &dependency_hir_module) != CM_HIR_MODULE_MAP_OK
+                || (dependency_module = cm_hir_get_module(state->hir,
+                    dependency_hir_module)) == NULL) {
+                return CM_LOWER_LOOKUP_RESOLVER_ERROR;
+            }
+            if (use != CM_HIR_LOWER_PATH_VISIBILITY)
+                return CM_LOWER_LOOKUP_WRONG_NAMESPACE;
+            *out_module_definition = dependency_module->definition;
+            return CM_LOWER_LOOKUP_MODULE;
+        }
+        if (binding.target_module != CM_MODULE_NONE
+            || binding.declaration.source == 0u
+            || binding.declaration.item == CM_AST_ITEM_NONE
+            || !cm_lower_dependency_record((CmLowerState *)state,
+                dependency, binding.declaration, &record)) {
+            return CM_LOWER_LOOKUP_RESOLVER_ERROR;
+        }
+        if (use == CM_HIR_LOWER_PATH_VISIBILITY)
+            return CM_LOWER_LOOKUP_WRONG_NAMESPACE;
+        if (record->kind == CM_AST_ITEM_STRUCT
+            || record->kind == CM_AST_ITEM_UNION
+            || record->kind == CM_AST_ITEM_ENUM) {
+            *out_record = record;
+            return CM_LOWER_LOOKUP_DEFINITION;
+        }
+        if (record->kind == CM_AST_ITEM_TYPE_ALIAS) {
+            *out_record = record;
+            return CM_LOWER_LOOKUP_ALIAS;
+        }
+        if (record->kind == CM_AST_ITEM_TRAIT) {
+            *out_record = record;
+            return CM_LOWER_LOOKUP_TRAIT;
+        }
+        return CM_LOWER_LOOKUP_WRONG_NAMESPACE;
     }
     if (binding.item_kind == CM_AST_ITEM_MODULE) {
         CmHirModuleId hir_module;
@@ -16504,7 +16643,9 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
             || (!cm_lower_string_is(state,
                     item->data.extern_block_item.abi, "C")
                 && !cm_lower_string_is(state,
-                    item->data.extern_block_item.abi, "unadjusted"))
+                    item->data.extern_block_item.abi, "unadjusted")
+                && !cm_lower_string_is(state,
+                    item->data.extern_block_item.abi, "Rust"))
             || !cm_lower_graph_extern_block_attributes_supported(state,
                 graph, module, effective))) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -18235,6 +18376,131 @@ static int cm_lower_macro_import_target(CmLowerState *state,
     return 1;
 }
 
+/*
+ * The already-lowered HIR item a dependency binding's declaration names,
+ * found by AST identity across the whole context (source ids are globally
+ * unique in a shared CmSourceSet).
+ */
+static const CmHirItem *cm_lower_find_dependency_item(
+    const CmLowerState *state, CmResolveItemRef declaration,
+    uint32_t *out_match_count)
+{
+    const CmHirItem *result;
+    size_t index;
+    uint32_t matches;
+
+    result = NULL;
+    matches = 0u;
+    for (index = 0u; index < state->hir->items.len; ++index) {
+        const CmHirItem *item;
+
+        item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            index);
+        if (item != NULL && item->ast_source == declaration.source
+            && item->ast_item == declaration.item) {
+            result = item;
+            matches += 1u;
+        }
+    }
+    if (out_match_count != NULL) *out_match_count = matches;
+    return result;
+}
+
+/* Map one dependency-tagged binding into the dependency's lowered HIR. */
+static int cm_lower_dependency_import_target(CmLowerState *state,
+    const CmResolvedBinding *binding, CmResolveItemRef import_declaration,
+    CmSpan span, CmHirDefId *out_target)
+{
+    const CmHirLowerDependency *dependency;
+    const CmHirItem *item;
+    uint32_t matches;
+
+    if (state->options == NULL || state->options->dependencies == NULL
+        || (size_t)binding->dependency > state->options->dependency_count) {
+        cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+            import_declaration.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_OK, "binding names an unregistered dependency crate");
+        return 0;
+    }
+    dependency = &state->options->dependencies[binding->dependency - 1u];
+    if (binding->namespace_kind == CM_RESOLVE_NAMESPACE_MACRO) {
+        /*
+         * Dependency macro semantics flow through the dependency-macro
+         * artifact at graph build; the retained import keeps the mapped
+         * item definition when one exists and stays targetless otherwise.
+         */
+        item = cm_lower_find_dependency_item(state, binding->declaration,
+            &matches);
+        if (item != NULL && matches == 1u) *out_target = item->definition;
+        return 1;
+    }
+    if (binding->item_kind == CM_AST_ITEM_MODULE) {
+        CmHirModuleId target_module_id;
+        const CmHirModule *target_module;
+
+        if (binding->namespace_kind != CM_RESOLVE_NAMESPACE_TYPE
+            || binding->target_module == CM_MODULE_NONE
+            || cm_hir_module_map_lookup_hir(dependency->module_map,
+                dependency->graph, dependency->revision,
+                binding->target_module, state->hir,
+                &target_module_id) != CM_HIR_MODULE_MAP_OK
+            || (target_module = cm_hir_get_module(state->hir,
+                target_module_id)) == NULL) {
+            cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+                import_declaration.item, CM_AST_TYPE_NONE,
+                CM_AST_PATH_NONE, CM_HIR_OK,
+                "imported dependency module cannot be mapped into HIR");
+            return 0;
+        }
+        *out_target = target_module->definition;
+        return 1;
+    }
+    if (binding->variant.enumeration.source != 0u
+        || binding->variant.enumeration.item != CM_AST_ITEM_NONE) {
+        item = cm_lower_find_dependency_item(state,
+            binding->variant.enumeration, &matches);
+        if (item == NULL || matches != 1u
+            || item->kind != CM_HIR_ITEM_ENUM
+            || binding->variant.index >= item->data.enum_item.variant_count) {
+            cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+                import_declaration.item, CM_AST_TYPE_NONE,
+                CM_AST_PATH_NONE, CM_HIR_OK,
+                "imported dependency enum variant cannot be mapped into "
+                "HIR");
+            return 0;
+        }
+        *out_target = item->data.enum_item.variants[
+            binding->variant.index].definition;
+        return 1;
+    }
+    item = cm_lower_find_dependency_item(state, binding->declaration,
+        &matches);
+    if (item == NULL || matches != 1u
+        || cm_hir_def_id_is_none(item->definition)
+        || cm_hir_lookup_definition(state->hir, item->definition) == NULL) {
+        char binding_name[96];
+
+        if (!cm_import_copy_string(state->imports, binding->name,
+                binding_name, sizeof(binding_name))) {
+            binding_name[0] = '?';
+            binding_name[1] = '\0';
+        }
+        cm_lower_fail(state, CM_HIR_LOWER_RESOLVER_FAILURE, span,
+            import_declaration.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
+            CM_HIR_OK,
+            "imported dependency item cannot be mapped into HIR "
+            "(name=%s kind=%u ns=%u source=%u item=%u matches=%u)",
+            binding_name, (unsigned int)binding->item_kind,
+            (unsigned int)binding->namespace_kind,
+            (unsigned int)binding->declaration.source,
+            (unsigned int)binding->declaration.item,
+            (unsigned int)matches);
+        return 0;
+    }
+    *out_target = item->definition;
+    return 1;
+}
+
 static int cm_lower_import_target(CmLowerState *state,
     const CmResolvedBinding *binding, CmModuleId owner_graph_module,
     CmResolveItemRef import_declaration, CmSpan span,
@@ -18256,6 +18522,10 @@ static int cm_lower_import_target(CmLowerState *state,
             CM_HIR_OK,
             "resolver returned an inconsistent declaration binding");
         return 0;
+    }
+    if (binding->dependency != 0u) {
+        return cm_lower_dependency_import_target(state, binding,
+            import_declaration, span, out_target);
     }
     if (binding->primitive_kind != CM_RESOLVE_PRIMITIVE_NONE) {
         if (binding->namespace_kind != CM_RESOLVE_NAMESPACE_TYPE
@@ -23669,6 +23939,7 @@ CmHirLowerResult cm_hir_lower_crate(CmHirContext *context, const CmAst *ast,
     state.next_type_inference = 1u;
     state.next_region_inference = 1u;
     cm_vec_init(&state.item_records, sizeof(CmLowerItemRecord));
+    cm_vec_init(&state.dependency_records, sizeof(CmLowerItemRecord *));
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
@@ -23756,6 +24027,18 @@ finish:
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);
+    {
+        size_t dependency_record_index;
+        for (dependency_record_index = 0u;
+             dependency_record_index < state.dependency_records.len;
+             ++dependency_record_index) {
+            CmLowerItemRecord **dependency_record =
+                (CmLowerItemRecord **)cm_vec_at(
+                    &state.dependency_records, dependency_record_index);
+            if (dependency_record != NULL) cm_free(*dependency_record);
+        }
+    }
+    cm_vec_destroy(&state.dependency_records);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }
@@ -23792,6 +24075,7 @@ CmHirLowerResult cm_hir_lower_expanded_crate(CmHirContext *context,
     state.next_type_inference = 1u;
     state.next_region_inference = 1u;
     cm_vec_init(&state.item_records, sizeof(CmLowerItemRecord));
+    cm_vec_init(&state.dependency_records, sizeof(CmLowerItemRecord *));
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
@@ -23890,6 +24174,18 @@ finish:
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);
+    {
+        size_t dependency_record_index;
+        for (dependency_record_index = 0u;
+             dependency_record_index < state.dependency_records.len;
+             ++dependency_record_index) {
+            CmLowerItemRecord **dependency_record =
+                (CmLowerItemRecord **)cm_vec_at(
+                    &state.dependency_records, dependency_record_index);
+            if (dependency_record != NULL) cm_free(*dependency_record);
+        }
+    }
+    cm_vec_destroy(&state.dependency_records);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }
@@ -23984,6 +24280,7 @@ CmHirLowerResult cm_hir_lower_module_graph(CmHirContext *context,
     state.next_type_inference = 1u;
     state.next_region_inference = 1u;
     cm_vec_init(&state.item_records, sizeof(CmLowerItemRecord));
+    cm_vec_init(&state.dependency_records, sizeof(CmLowerItemRecord *));
     cm_vec_init(&state.variant_records, sizeof(CmLowerVariantRecord));
     cm_vec_init(&state.macro_records, sizeof(CmLowerMacroRecord));
     cm_vec_init(&state.generic_records, sizeof(CmLowerGenericRecord));
@@ -24082,6 +24379,18 @@ finish:
     cm_vec_destroy(&state.generic_records);
     cm_vec_destroy(&state.macro_records);
     cm_vec_destroy(&state.variant_records);
+    {
+        size_t dependency_record_index;
+        for (dependency_record_index = 0u;
+             dependency_record_index < state.dependency_records.len;
+             ++dependency_record_index) {
+            CmLowerItemRecord **dependency_record =
+                (CmLowerItemRecord **)cm_vec_at(
+                    &state.dependency_records, dependency_record_index);
+            if (dependency_record != NULL) cm_free(*dependency_record);
+        }
+    }
+    cm_vec_destroy(&state.dependency_records);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }

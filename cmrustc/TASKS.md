@@ -2723,6 +2723,31 @@ and resolves the target against it: alloc `use core::…` imports
 alloc HIR lowering rejects the `unsafe extern "Rust"` allocator
 block (abi allowlist + rustc_* foreign-fn attributes).
 
+M9-03 second pass (2026-08-28): whole-pipeline cross-crate lowering.
+`extern "Rust"` blocks admitted; core lowers into the shared
+CmHirContext first (`core-hir errors=0 items=38,626`, ~11 min);
+dependency-tagged bindings map into that HIR — import targets by
+context-wide AST identity, type/trait/alias paths via on-demand
+heap-cached item records backed by the dependency graph's declaring
+ASTs, module imports/paths via the dependency's module map
+(`CmHirLowerDependency` on the lower options).  The import resolver
+delegates direct `core::…` paths and imported-dependency-module
+paths (`ptr::null_count`) to the dependency's resolver mid-walk.
+ubody/tyck accept dependency bundles (`CmUBodyDependency`) and swap
+the active graph bundle per body by module-map ownership, with
+source-AST tables ingesting all graphs.  Dependency macro-namespace
+bindings stay in the namespace tables but off the leaf records, so
+`use` retention never stores them (macro semantics flow through the
+dependency-macro artifact).  Acceptance: minicore repro
+(`--body-census --with-core`) fully green — imports 0, hir 0
+errors, ubody 5/5, tyck 5/5, 0 error nodes — covering direct paths,
+module value paths, enum `{self}`, and cross-crate trait impls.
+Whole-crate: alloc `use` imports stay 0, alloc HIR advances to
+`raw_vec/mod.rs:402` (generic parameter attributes,
+`#[unstable] A: Allocator = Global`).  Core single-crate regression
+run 64: **151 error nodes** unchanged.  All three lanes + ASan/UBSan
+green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

@@ -1087,6 +1087,28 @@ int cm_import_resolver_add_dependency(CmImportResolver *resolver,
     return cm_vec_push(&state->dependencies, &entry) != NULL;
 }
 
+static const CmImportDependency *cm_import_find_dependency_view(
+    const CmImportResolverState *state,
+    const CmResolvePathSegmentView *segment)
+{
+    size_t index;
+    for (index = 0u; index < state->dependencies.len; ++index) {
+        const CmImportDependency *entry = (const CmImportDependency *)
+            cm_vec_at_const(&state->dependencies, index);
+        if (entry != NULL && segment->length == strlen(entry->name)
+            && memcmp(segment->bytes, entry->name, segment->length) == 0)
+            return entry;
+    }
+    return NULL;
+}
+
+static uint32_t cm_import_dependency_tag(
+    const CmImportResolverState *state, const CmImportDependency *entry)
+{
+    return (uint32_t)(entry
+        - (const CmImportDependency *)state->dependencies.data) + 1u;
+}
+
 static const CmImportDependency *cm_import_find_dependency(
     const CmImportResolverState *state, CmResolveStringId name)
 {
@@ -1216,6 +1238,7 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
                 imported.name = cm_import_reintern_dependency_name(state,
                     dep->resolver, imported.name);
                 if (imported.name == CM_RESOLVE_STRING_NONE) continue;
+                imported.revision = state->revision;
                 imported.module = leaf->module;
                 imported.import_declaration = leaf->declaration;
                 imported.dependency = dependency_tag;
@@ -1223,7 +1246,12 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
                 imported.is_import = 1;
                 imported.is_ambiguous = 0;
                 imported.is_anonymous = leaf->is_anonymous;
-                cm_record_leaf_binding(leaf, &imported);
+                /* Macro semantics flow through the dependency-macro
+                 * artifact; keep the namespace binding but leave it off
+                 * the leaf so HIR import retention never stores it. */
+                if ((CmResolveNamespace)namespace_index
+                        != CM_RESOLVE_NAMESPACE_MACRO)
+                    cm_record_leaf_binding(leaf, &imported);
                 changed |= cm_add_binding(destination, &imported, 1);
             }
         }
@@ -1239,6 +1267,7 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
                     dep->revision, dep->root, 0, views, count,
                     (CmResolveNamespace)namespace_index, &imported)
                     != CM_IMPORT_LOOKUP_OK) continue;
+            imported.revision = state->revision;
             imported.name = leaf->import_name;
             imported.module = leaf->module;
             imported.import_declaration = leaf->declaration;
@@ -1247,7 +1276,9 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
             imported.is_import = 1;
             imported.is_ambiguous = 0;
             imported.is_anonymous = leaf->is_anonymous;
-            cm_record_leaf_binding(leaf, &imported);
+            if ((CmResolveNamespace)namespace_index
+                    != CM_RESOLVE_NAMESPACE_MACRO)
+                cm_record_leaf_binding(leaf, &imported);
             changed |= cm_add_binding(destination, &imported, 1);
             any = 1;
         }
@@ -2337,9 +2368,48 @@ CmImportLookupStatus cm_import_resolve_path(
                 ambiguous = 1;
             }
             if (ambiguous) return CM_IMPORT_LOOKUP_AMBIGUOUS;
+            if (scope_binding == NULL && prelude_binding == NULL
+                && index == 0u && !absolute) {
+                /* M9-03: `core::...` paths delegate to the registered
+                 * dependency crate's own resolver. */
+                const CmImportDependency *dep =
+                    cm_import_find_dependency_view(state, &segments[0]);
+                if (dep != NULL) {
+                    CmImportLookupStatus dep_status;
+                    dep_status = cm_import_resolve_path(dep->resolver,
+                        dep->root, 0, segments + 1u, segment_count - 1u,
+                        namespace_kind, out_binding);
+                    if (dep_status == CM_IMPORT_LOOKUP_OK) {
+                        out_binding->dependency =
+                            cm_import_dependency_tag(state, dep);
+                    }
+                    return dep_status;
+                }
+            }
             if (scope_binding == NULL && prelude_binding == NULL)
                 return cm_import_missing_lookup_status(state, current,
                     segment);
+            if (scope_binding != NULL
+                && scope_binding->value.dependency != 0u
+                && scope_binding->value.target_module != CM_MODULE_NONE
+                && (size_t)scope_binding->value.dependency
+                    <= state->dependencies.len) {
+                /* An imported dependency module: delegate the remaining
+                 * path to that crate's resolver (M9-03). */
+                const CmImportDependency *dep = (const CmImportDependency *)
+                    cm_vec_at_const(&state->dependencies,
+                        (size_t)scope_binding->value.dependency - 1u);
+                CmImportLookupStatus dep_status;
+                dep_status = cm_import_resolve_path(dep->resolver,
+                    scope_binding->value.target_module, 0,
+                    segments + index + 1u, segment_count - index - 1u,
+                    namespace_kind, out_binding);
+                if (dep_status == CM_IMPORT_LOOKUP_OK) {
+                    out_binding->dependency =
+                        cm_import_dependency_tag(state, dep);
+                }
+                return dep_status;
+            }
             if (scope_binding != NULL
                 && scope_binding->value.target_module != CM_MODULE_NONE) {
                 current = scope_binding->value.target_module;
@@ -2397,6 +2467,26 @@ CmImportLookupStatus cm_import_resolve_path(
                 && !absolute && segment_count == 1u
                 && cm_builtin_primitive_binding(state, module, last,
                     out_binding)) return CM_IMPORT_LOOKUP_OK;
+            if (binding == NULL && prelude_binding == NULL
+                && segment_count == 1u && !absolute
+                && namespace_kind == CM_RESOLVE_NAMESPACE_TYPE) {
+                const CmImportDependency *dep =
+                    cm_import_find_dependency_view(state, &segments[0]);
+                if (dep != NULL) {
+                    memset(out_binding, 0, sizeof(*out_binding));
+                    out_binding->revision = state->revision;
+                    out_binding->module = current;
+                    out_binding->name = last;
+                    out_binding->namespace_kind = namespace_kind;
+                    out_binding->item_kind = CM_AST_ITEM_MODULE;
+                    out_binding->target_module = dep->root;
+                    out_binding->is_public = 1;
+                    out_binding->is_crate_visible = 1;
+                    out_binding->dependency =
+                        cm_import_dependency_tag(state, dep);
+                    return CM_IMPORT_LOOKUP_OK;
+                }
+            }
             if (binding == NULL && prelude_binding == NULL)
                 return cm_import_missing_lookup_status(state, current, last);
             if (binding == NULL) {

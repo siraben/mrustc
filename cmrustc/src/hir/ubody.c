@@ -65,6 +65,13 @@ typedef struct CmULowerState {
     CmModuleGraphRevision revision;
     const CmImportResolver *imports;
     const CmHirModuleMap *modules;
+    /* The local crate's own bundle; active fields swap per body (M9-03). */
+    const CmModuleGraph *local_graph;
+    CmModuleGraphRevision local_revision;
+    const CmImportResolver *local_imports;
+    const CmHirModuleMap *local_modules;
+    const CmUBodyDependency *dependencies;
+    size_t dependency_count;
     /* (source, item span start) -> DefId for every HIR item. */
     CmUItemKey *item_keys;
     size_t item_key_count;
@@ -307,28 +314,44 @@ static int cm_u_find_item_definition(const CmULowerState *state,
     return 0;
 }
 
-static void cm_u_build_source_asts(CmULowerState *state)
+static void cm_u_ingest_graph_asts(CmULowerState *state,
+    const CmModuleGraph *graph, size_t *used)
 {
-    size_t count = cm_module_graph_module_count(state->graph);
+    size_t count = cm_module_graph_module_count(graph);
     size_t index;
-    size_t used = 0u;
-    state->source_asts = (CmUSourceAst *)cm_alloc_zeroed(count + 1u,
-        sizeof(*state->source_asts));
     for (index = 0u; index < count; ++index) {
         CmResolveModuleInfo info;
         const CmAst *ast = NULL;
         size_t seen;
-        if (!cm_module_graph_get_module_at(state->graph, index, &info)
-            || !cm_module_graph_borrow_ast(state->graph, info.id, &ast)
+        if (!cm_module_graph_get_module_at(graph, index, &info)
+            || !cm_module_graph_borrow_ast(graph, info.id, &ast)
             || ast == NULL) continue;
-        for (seen = 0u; seen < used; ++seen)
+        for (seen = 0u; seen < *used; ++seen)
             if (state->source_asts[seen].source == info.source) break;
-        if (seen != used) continue;
-        state->source_asts[used].source = info.source;
-        state->source_asts[used].ast = ast;
-        state->source_asts[used].module = info.id;
-        used += 1u;
+        if (seen != *used) continue;
+        state->source_asts[*used].source = info.source;
+        state->source_asts[*used].ast = ast;
+        state->source_asts[*used].module = info.id;
+        *used += 1u;
     }
+}
+
+static void cm_u_build_source_asts(CmULowerState *state)
+{
+    size_t count = cm_module_graph_module_count(state->graph);
+    size_t dependency_index;
+    size_t used = 0u;
+    for (dependency_index = 0u; dependency_index < state->dependency_count;
+         ++dependency_index)
+        count += cm_module_graph_module_count(
+            state->dependencies[dependency_index].graph);
+    state->source_asts = (CmUSourceAst *)cm_alloc_zeroed(count + 1u,
+        sizeof(*state->source_asts));
+    cm_u_ingest_graph_asts(state, state->graph, &used);
+    for (dependency_index = 0u; dependency_index < state->dependency_count;
+         ++dependency_index)
+        cm_u_ingest_graph_asts(state,
+            state->dependencies[dependency_index].graph, &used);
     state->source_ast_count = used;
 }
 
@@ -1725,10 +1748,35 @@ static void cm_u_lower_body(CmULowerState *state, CmHirBodyId body_id,
         hir_body->origin.definition);
     item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
         ? NULL : cm_hir_get_item(state->hir, definition->entity.item_id);
-    if (item == NULL
-        || cm_hir_module_map_lookup_module(state->modules, state->graph,
+    /* Select the graph bundle owning this body's crate (M9-03). */
+    state->graph = state->local_graph;
+    state->revision = state->local_revision;
+    state->imports = state->local_imports;
+    state->modules = state->local_modules;
+    if (item != NULL
+        && cm_hir_module_map_lookup_module(state->modules, state->graph,
             state->revision, state->hir, item->owner_module, &module)
-            != CM_HIR_MODULE_MAP_OK
+            != CM_HIR_MODULE_MAP_OK) {
+        size_t dependency_index;
+        for (dependency_index = 0u;
+             dependency_index < state->dependency_count;
+             ++dependency_index) {
+            const CmUBodyDependency *dependency =
+                &state->dependencies[dependency_index];
+            if (cm_hir_module_map_lookup_module(dependency->modules,
+                    dependency->graph, dependency->revision, state->hir,
+                    item->owner_module, &module)
+                    == CM_HIR_MODULE_MAP_OK) {
+                state->graph = dependency->graph;
+                state->revision = dependency->revision;
+                state->imports = dependency->imports;
+                state->modules = dependency->modules;
+                break;
+            }
+        }
+        if (dependency_index == state->dependency_count) item = NULL;
+    }
+    if (item == NULL
         || !cm_module_graph_borrow_ast(state->graph, module, &ast)
         || ast == NULL) {
         out->status = CM_U_BODY_NO_SOURCE;
@@ -1792,7 +1840,8 @@ static void cm_u_lower_body(CmULowerState *state, CmHirBodyId body_id,
 CmUBodyLowerResult cm_ubody_lower_all(CmUBodySet *set,
     const CmHirContext *hir, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
-    const CmHirModuleMap *modules)
+    const CmHirModuleMap *modules, const CmUBodyDependency *dependencies,
+    size_t dependency_count)
 {
     CmUBodyLowerResult result;
     CmULowerState *state;
@@ -1807,6 +1856,12 @@ CmUBodyLowerResult cm_ubody_lower_all(CmUBodySet *set,
     state->revision = revision;
     state->imports = imports;
     state->modules = modules;
+    state->local_graph = graph;
+    state->local_revision = revision;
+    state->local_imports = imports;
+    state->local_modules = modules;
+    state->dependencies = dependencies;
+    state->dependency_count = dependency_count;
     cm_u_build_item_keys(state);
     cm_u_build_source_asts(state);
     cm_vec_clear(&set->bodies);

@@ -36,6 +36,13 @@ typedef struct CmTyckState {
     CmModuleGraphRevision revision;
     const CmImportResolver *imports;
     const CmHirModuleMap *modules;
+    /* The local crate's own bundle; active fields swap per body (M9-03). */
+    const CmModuleGraph *local_graph;
+    CmModuleGraphRevision local_revision;
+    const CmImportResolver *local_imports;
+    const CmHirModuleMap *local_modules;
+    const CmUBodyDependency *dependencies;
+    size_t dependency_count;
     CmTyckImpl *impls;
     size_t impl_count;
     CmTyckChild *children; /* sorted by parent def */
@@ -262,27 +269,43 @@ static const CmHirItem *cm_tyck_child_named(const CmTyckState *state,
     return NULL;
 }
 
-static void cm_tyck_build_source_asts(CmTyckState *state)
+static void cm_tyck_ingest_graph_asts(CmTyckState *state,
+    const CmModuleGraph *graph, size_t *used)
 {
-    size_t count = cm_module_graph_module_count(state->graph);
+    size_t count = cm_module_graph_module_count(graph);
     size_t index;
-    size_t used = 0u;
-    state->source_asts = (void *)cm_alloc_zeroed(count + 1u,
-        sizeof(*state->source_asts));
     for (index = 0u; index < count; ++index) {
         CmResolveModuleInfo info;
         const CmAst *ast = NULL;
         size_t seen;
-        if (!cm_module_graph_get_module_at(state->graph, index, &info)
-            || !cm_module_graph_borrow_ast(state->graph, info.id, &ast)
+        if (!cm_module_graph_get_module_at(graph, index, &info)
+            || !cm_module_graph_borrow_ast(graph, info.id, &ast)
             || ast == NULL) continue;
-        for (seen = 0u; seen < used; ++seen)
+        for (seen = 0u; seen < *used; ++seen)
             if (state->source_asts[seen].source == info.source) break;
-        if (seen != used) continue;
-        state->source_asts[used].source = info.source;
-        state->source_asts[used].ast = ast;
-        used += 1u;
+        if (seen != *used) continue;
+        state->source_asts[*used].source = info.source;
+        state->source_asts[*used].ast = ast;
+        *used += 1u;
     }
+}
+
+static void cm_tyck_build_source_asts(CmTyckState *state)
+{
+    size_t count = cm_module_graph_module_count(state->graph);
+    size_t dependency_index;
+    size_t used = 0u;
+    for (dependency_index = 0u; dependency_index < state->dependency_count;
+         ++dependency_index)
+        count += cm_module_graph_module_count(
+            state->dependencies[dependency_index].graph);
+    state->source_asts = (void *)cm_alloc_zeroed(count + 1u,
+        sizeof(*state->source_asts));
+    cm_tyck_ingest_graph_asts(state, state->graph, &used);
+    for (dependency_index = 0u; dependency_index < state->dependency_count;
+         ++dependency_index)
+        cm_tyck_ingest_graph_asts(state,
+            state->dependencies[dependency_index].graph, &used);
     state->source_ast_count = used;
 }
 
@@ -4087,10 +4110,34 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
             env.parent->definition, NULL, 0u);
     else
         env.self_type = arena->error;
+    /* Select the graph bundle owning this body's crate (M9-03). */
+    state->graph = state->local_graph;
+    state->revision = state->local_revision;
+    state->imports = state->local_imports;
+    state->modules = state->local_modules;
     if (item != NULL && cm_hir_module_map_lookup_module(state->modules,
             state->graph, state->revision, state->hir, item->owner_module,
-            &env.module) != CM_HIR_MODULE_MAP_OK)
+            &env.module) != CM_HIR_MODULE_MAP_OK) {
+        size_t dependency_index;
         env.module = CM_MODULE_NONE;
+        for (dependency_index = 0u;
+             dependency_index < state->dependency_count;
+             ++dependency_index) {
+            const CmUBodyDependency *dependency =
+                &state->dependencies[dependency_index];
+            if (cm_hir_module_map_lookup_module(dependency->modules,
+                    dependency->graph, dependency->revision, state->hir,
+                    item->owner_module, &env.module)
+                    == CM_HIR_MODULE_MAP_OK) {
+                state->graph = dependency->graph;
+                state->revision = dependency->revision;
+                state->imports = dependency->imports;
+                state->modules = dependency->modules;
+                break;
+            }
+            env.module = CM_MODULE_NONE;
+        }
+    }
     if (env.module == CM_MODULE_NONE
         || !cm_module_graph_borrow_ast(state->graph, env.module, &env.ast)) {
         out->status = CM_TYCK_BODY_SKIPPED;
@@ -4214,7 +4261,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
 CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     const CmUBodySet *bodies, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
-    const CmHirModuleMap *modules)
+    const CmHirModuleMap *modules, const CmUBodyDependency *dependencies,
+    size_t dependency_count)
 {
     CmTyckState *state;
     CmTyckResult result;
@@ -4230,6 +4278,12 @@ CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     state->revision = revision;
     state->imports = imports;
     state->modules = modules;
+    state->local_graph = graph;
+    state->local_revision = revision;
+    state->local_imports = imports;
+    state->local_modules = modules;
+    state->dependencies = dependencies;
+    state->dependency_count = dependency_count;
     cm_tyck_build_source_asts(state);
     cm_tyck_build_index(state);
     cm_vec_clear(&set->bodies);

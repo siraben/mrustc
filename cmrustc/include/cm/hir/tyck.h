@@ -62,6 +62,7 @@ const CmTyckBody *cm_tyck_get(const CmTyckSet *set, CmHirBodyId body);
 CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     const CmUBodySet *bodies, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
-    const CmHirModuleMap *modules);
+    const CmHirModuleMap *modules,
+    const CmUBodyDependency *dependencies, size_t dependency_count);
 
 #endif

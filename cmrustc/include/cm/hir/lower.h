@@ -76,6 +76,18 @@ typedef struct CmHirLowerError {
     char message[192];
 } CmHirLowerError;
 
+/*
+ * One already-lowered dependency crate (M9-03).  `module_map` is the map
+ * produced by lowering that dependency's module graph into the same
+ * CmHirContext this lowering targets; all three references are borrowed
+ * for the synchronous lowering call.
+ */
+typedef struct CmHirLowerDependency {
+    const CmModuleGraph *graph;
+    CmModuleGraphRevision revision;
+    const CmHirModuleMap *module_map;
+} CmHirLowerDependency;
+
 typedef struct CmHirLowerOptions {
     const char *crate_name;
     CmHirEdition edition;
@@ -88,6 +100,13 @@ typedef struct CmHirLowerOptions {
     /* Borrowed for the synchronous lowering call; DefIds share `context`. */
     const CmHirLibraryArtifact *const *dependency_libraries;
     size_t dependency_library_count;
+    /*
+     * Registered in-context dependency crates, indexed by
+     * CmResolvedBinding.dependency - 1.  Bindings tagged with a dependency
+     * map into these crates' already-lowered HIR by AST identity.
+     */
+    const CmHirLowerDependency *dependencies;
+    size_t dependency_count;
     CmHirLowerResolvePath resolve_path;
     void *resolve_context;
 } CmHirLowerOptions;

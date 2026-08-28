@@ -598,23 +598,37 @@ int main(int argc, char **argv)
 
     int source_map_requested;
     const char *with_core_path = NULL;
-    if (argc == 4 && strcmp(argv[2], "--with-core") == 0) {
-        with_core_path = argv[3];
-    } else if (argc != 2 && (argc != 3
-            || (strcmp(argv[2], "--require-metadata") != 0
-                && strcmp(argv[2], "--source-map") != 0
-                && strcmp(argv[2], "--body-census") != 0))) {
-        fprintf(stderr, "usage: %s /path/to/library/core/src/lib.rs "
-            "[--require-metadata]\n",
-            argc == 0 ? "probe_core_hir" : argv[0]);
-        return 2;
+    static CmHirLowerDependency hir_dependencies[1];
+    static CmUBodyDependency body_dependencies[1];
+    require_metadata = 0;
+    body_census_requested = 0;
+    source_map_requested = 0;
+    {
+        int argument_index;
+        int bad_arguments = argc < 2;
+
+        for (argument_index = 2; argument_index < argc; ++argument_index) {
+            if (strcmp(argv[argument_index], "--require-metadata") == 0) {
+                require_metadata = 1;
+            } else if (strcmp(argv[argument_index], "--body-census") == 0) {
+                body_census_requested = 1;
+            } else if (strcmp(argv[argument_index], "--source-map") == 0) {
+                source_map_requested = 1;
+            } else if (strcmp(argv[argument_index], "--with-core") == 0
+                    && argument_index + 1 < argc) {
+                with_core_path = argv[argument_index + 1];
+                ++argument_index;
+            } else {
+                bad_arguments = 1;
+            }
+        }
+        if (bad_arguments) {
+            fprintf(stderr, "usage: %s /path/to/lib.rs [--require-metadata] "
+                "[--body-census] [--source-map] [--with-core core-lib.rs]\n",
+                argc == 0 ? "probe_core_hir" : argv[0]);
+            return 2;
+        }
     }
-    require_metadata = argc == 3
-        && strcmp(argv[2], "--require-metadata") == 0;
-    body_census_requested = argc == 3
-        && strcmp(argv[2], "--body-census") == 0;
-    source_map_requested = argc == 3
-        && strcmp(argv[2], "--source-map") == 0;
     cm_source_set_init(&sources);
     cm_module_graph_init(&graph);
     cm_import_resolver_init(&imports);
@@ -674,6 +688,37 @@ int main(int argc, char **argv)
                 (unsigned long)core_import_result.error_count);
             (void)cm_import_resolver_add_dependency(&imports, "core",
                 &core_imports, &core_graph, core_result.revision);
+        }
+        {
+            static CmHirModuleMap core_hir_modules;
+            CmHirLowerOptions core_lower_options;
+            CmHirLowerResult core_lower_result;
+            cm_hir_module_map_init(&core_hir_modules);
+            cm_hir_lower_options_init(&core_lower_options);
+            core_lower_options.crate_name = "core";
+            core_lower_options.source = core_root;
+            core_lower_options.edition = CM_HIR_EDITION_2024;
+            core_lower_options.pointer_bits = target->pointer_bits;
+            core_lower_result = cm_hir_lower_module_graph(&hir,
+                &core_graph, core_result.revision, &core_imports,
+                &core_hir_modules, &core_lower_options);
+            printf("core-hir errors=%lu items=%lu\n",
+                (unsigned long)core_lower_result.error_count,
+                (unsigned long)core_lower_result.lowered_item_count);
+            if (core_lower_result.error_count != 0u) {
+                printf("core-hir first-error kind=%s message=%s\n",
+                    cm_hir_lower_error_kind_name(
+                        core_lower_result.first_error.kind),
+                    core_lower_result.first_error.message);
+                goto cleanup;
+            }
+            hir_dependencies[0].graph = &core_graph;
+            hir_dependencies[0].revision = core_result.revision;
+            hir_dependencies[0].module_map = &core_hir_modules;
+            body_dependencies[0].graph = &core_graph;
+            body_dependencies[0].revision = core_result.revision;
+            body_dependencies[0].imports = &core_imports;
+            body_dependencies[0].modules = &core_hir_modules;
         }
     }
     graph_result = cm_module_graph_build(&graph, &sources, root,
@@ -773,8 +818,12 @@ int main(int argc, char **argv)
         }
     }
     cm_hir_lower_options_init(&lower_options);
-    lower_options.crate_name = "core";
+    lower_options.crate_name = with_core_path != NULL ? "alloc" : "core";
     lower_options.source = root;
+    if (with_core_path != NULL) {
+        lower_options.dependencies = hir_dependencies;
+        lower_options.dependency_count = 1u;
+    }
     lower_options.edition = CM_HIR_EDITION_2024;
     lower_options.pointer_bits = target->pointer_bits;
     lower_result = cm_hir_lower_module_graph(&hir, &graph,
@@ -832,7 +881,9 @@ int main(int argc, char **argv)
             body_census(&hir, &graph, graph_result.revision, &modules);
             cm_ubody_set_init(&ubodies);
             ubody_result = cm_ubody_lower_all(&ubodies, &hir, &graph,
-                graph_result.revision, &imports, &modules);
+                graph_result.revision, &imports, &modules,
+                with_core_path != NULL ? body_dependencies : NULL,
+                with_core_path != NULL ? 1u : 0u);
             printf("ubody bodies=%lu lowered=%lu no_source=%lu failed=%lu "
                 "expressions=%lu unresolved_paths=%lu nested_items=%lu "
                 "retained_macros=%lu\n",
@@ -855,7 +906,9 @@ int main(int argc, char **argv)
                 size_t class_index;
                 cm_tyck_set_init(&tyck);
                 tyck_result = cm_tyck_all(&tyck, &hir, &ubodies, &graph,
-                    graph_result.revision, &imports, &modules);
+                    graph_result.revision, &imports, &modules,
+                with_core_path != NULL ? body_dependencies : NULL,
+                with_core_path != NULL ? 1u : 0u);
                 printf("tyck bodies=%lu typed=%lu partial=%lu skipped=%lu "
                     "expressions=%lu unresolved_nodes=%lu error_nodes=%lu\n",
                     (unsigned long)tyck_result.bodies,

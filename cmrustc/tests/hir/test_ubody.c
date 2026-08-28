@@ -98,7 +98,7 @@ static int fixture_init(Fixture *fixture, const char *source)
     cm_ubody_set_init(&fixture->bodies);
     fixture->ubody_result = cm_ubody_lower_all(&fixture->bodies,
         &fixture->hir, &fixture->graph, fixture->graph_result.revision,
-        &fixture->imports, &fixture->map);
+        &fixture->imports, &fixture->map, NULL, 0u);
     return 1;
 }
 

@@ -455,9 +455,18 @@ const CmUStmt *cm_ubody_get_stmt(const CmUBody *body, CmUStmtId id);
  * must be the one the HIR was lowered from (after expression-position macro
  * expansion) and `imports` its resolved import table.
  */
+/* One dependency crate's graph bundle for cross-crate body lowering. */
+typedef struct CmUBodyDependency {
+    const CmModuleGraph *graph;
+    CmModuleGraphRevision revision;
+    const CmImportResolver *imports;
+    const CmHirModuleMap *modules;
+} CmUBodyDependency;
+
 CmUBodyLowerResult cm_ubody_lower_all(CmUBodySet *set,
     const CmHirContext *hir, const CmModuleGraph *graph,
     CmModuleGraphRevision revision, const CmImportResolver *imports,
-    const CmHirModuleMap *modules);
+    const CmHirModuleMap *modules, const CmUBodyDependency *dependencies,
+    size_t dependency_count);
 
 #endif
