@@ -2124,10 +2124,23 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         if (cm_ty_unify(arena, a->children[0], e->children[0])) return 1;
         return cm_tyck_lenient_eq(env, actual, expected, 0u);
     }
-    if (a->kind == CM_TY_PTR && e->kind == CM_TY_PTR)
-        return cm_ty_unify(arena, a->children[0], e->children[0]) || 1;
-    if (a->kind == CM_TY_REF && e->kind == CM_TY_PTR)
-        return cm_ty_unify(arena, a->children[0], e->children[0]) || 1;
+    if ((a->kind == CM_TY_PTR || a->kind == CM_TY_REF)
+        && e->kind == CM_TY_PTR) {
+        /* Pointer unsizing binds the slice element: btree's
+         * `let keys: *const [_] = &raw const (*leaf).keys;` must give
+         * the elided slice its `[MaybeUninit<K>; CAP]` element or every
+         * later `get_unchecked` projection stays unresolved. */
+        const CmTy *ap = cm_ty_get(arena, cm_ty_resolve(arena,
+            a->children[0]));
+        const CmTy *ep = cm_ty_get(arena, cm_ty_resolve(arena,
+            e->children[0]));
+        if (ap != NULL && ep != NULL && ap->kind == CM_TY_ARRAY
+            && ep->kind == CM_TY_SLICE)
+            (void)cm_ty_unify(arena, ap->children[0], ep->children[0]);
+        else
+            (void)cm_ty_unify(arena, a->children[0], e->children[0]);
+        return 1;
+    }
     if (a->kind == CM_TY_FN_DEF && e->kind == CM_TY_FN_PTR) return 1;
     if (a->kind == CM_TY_CLOSURE && e->kind == CM_TY_FN_PTR) return 1;
     /* Unsize leniency (M9): `[T; N]` coerces to `[T]`, directly and

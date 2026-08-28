@@ -3126,3 +3126,4 @@ wrapper, so btree's projection receivers still reached matching
 raw.  All seven lookup callers now normalize (root plus one
 reference/pointer layer).  Minicore 24/24.  Lanes + ASan green;
 census re-running.
+- Measured pass: pointer unsizing now binds the slice element (`*const [T; N]` → `*const [_]` coercion unifies the array element into the elided slice element instead of leaving it unbound behind the lenient accept; covers REF→PTR too). Repro: miniuser `ptr_unsize` (let-ascribed `*const [u32]` from `*const [u32; 3]`) — 28/28 bodies typed, 0 error nodes. Gates: gcc test, clang strict, tcc, ASan/UBSan all green. Full alloc census (41) in flight to measure btree `SliceIndex` projection cascade collapse from the 370-node residue.
