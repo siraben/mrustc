@@ -2038,6 +2038,49 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
     }
     case CM_U_RESOLVED_UNRESOLVED:
     default:
+        /* A body-local fn's ubody starts with an empty nested scope, so
+         * references to sibling body-local fns (task.rs's clone_waker /
+         * wake / drop_waker vtable set, btree's self-recursive
+         * clone_subtree) arrive unresolved.  Accept a unique same-source
+         * body-local function by name. */
+        if (expr->data.path.segment_count == 1u && env->item != NULL
+            && env->item->ast_source != 0u) {
+            const CmHirItem *found = NULL;
+            int ambiguous = 0;
+            size_t scan;
+            for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
+                const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
+                    &env->state->hir->items, scan);
+                if (cand == NULL || cand->kind != CM_HIR_ITEM_FUNCTION
+                    || cand->ast_source != env->item->ast_source
+                    || !cm_hir_def_id_is_none(cand->parent_definition))
+                    continue;
+                if (!cm_tyck_name_is(env->state, cand->name,
+                        expr->data.path.segments[0])) continue;
+                if (found != NULL) { ambiguous = 1; break; }
+                found = cand;
+            }
+            if (found != NULL && !ambiguous)
+                return cm_tyck_fn_def(env, found,
+                    cm_tyck_parent_item(env->state, found), CM_TY_NONE,
+                    NULL);
+        }
+        if (getenv("CM_TYCK_DEBUG") != NULL) {
+            uint32_t seg;
+            fprintf(stderr, "TYCK unresolved-value kind=%d segs=",
+                (int)res->kind);
+            for (seg = 0u; seg < expr->data.path.segment_count; ++seg) {
+                const CmInternedString *sn = cm_interner_get(
+                    &env->state->ubodies->strings,
+                    expr->data.path.segments[seg]);
+                fprintf(stderr, "%.*s%s",
+                    sn == NULL ? 1 : (int)sn->len,
+                    sn == NULL ? "?" : (const char *)sn->bytes,
+                    seg + 1u < expr->data.path.segment_count ? "::" : "");
+            }
+            fprintf(stderr, " ");
+            cm_tyck_debug_span(env, expr);
+        }
         cm_tyck_error(env, "unresolved value path");
         return arena->error;
     }
