@@ -63,6 +63,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_STORE_FIELD,   /* operands[0].field(expr) = operands[1] */
     CM_UMIR_RVALUE_STORE_INDEX,   /* operands[0][operands[1]] = operands[2] */
     CM_UMIR_RVALUE_STORE_DEREF,   /* *operands[0] = operands[1] */
+    CM_UMIR_RVALUE_LOAD,          /* *operands[0] (receiver auto-deref) */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

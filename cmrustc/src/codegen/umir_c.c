@@ -1,6 +1,8 @@
 #include "cm/codegen/umir_c.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "cm/hir/model.h"
 #include "cm/alloc.h"
 
@@ -139,6 +141,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_STORE_FIELD:
                     case CM_UMIR_RVALUE_STORE_INDEX:
                     case CM_UMIR_RVALUE_STORE_DEREF:
+                    case CM_UMIR_RVALUE_LOAD:
                         /* Discriminant reads + payload extraction. */
                         break;
                     case CM_UMIR_RVALUE_CLOSURE:
@@ -430,6 +433,7 @@ static long cm_umir_c_variant_field_index(const CmHirContext *hir,
 typedef struct CmUMirInstance {
     CmHirDefId definition;
     CmUExprId closure_expr; /* NONE for the item's own body */
+    CmTyId self_type;       /* bound Self for trait default methods */
     CmHirBodyId body;
     CmTyId *types;          /* generic arguments, parameter order */
     uint32_t count;
@@ -500,7 +504,8 @@ static const CmUMirBody *cm_umir_c_umir_body(const CmUMirSet *umir,
 
 /* Find or add the instance (def, types[count]); returns its index. */
 static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
-    CmUExprId closure_expr, const CmTyId *types, uint32_t count)
+    CmUExprId closure_expr, const CmTyId *types, uint32_t count,
+    CmTyId self_type)
 {
     size_t index;
     CmUMirInstance instance;
@@ -517,7 +522,11 @@ static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
             cm_vec_at_const(&program->instances, index);
         int same = have != NULL && cm_hir_def_id_equal(have->definition,
             def) && have->closure_expr == closure_expr
-            && have->count == count;
+            && have->count == count
+            && cm_ty_resolve((CmTyArena *)&program->tyck->arena,
+                have->self_type)
+                == cm_ty_resolve((CmTyArena *)&program->tyck->arena,
+                    self_type);
         for (arg = 0u; same && arg < count; ++arg)
             if (cm_ty_resolve((CmTyArena *)&program->tyck->arena,
                     have->types[arg])
@@ -528,6 +537,7 @@ static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
     memset(&instance, 0, sizeof(instance));
     instance.definition = def;
     instance.closure_expr = closure_expr;
+    instance.self_type = self_type;
     {
         const CmUMirBody *found = cm_umir_c_umir_body(program->umir,
             program->hir, def, closure_expr);
@@ -545,6 +555,41 @@ static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
     instance.index = (unsigned long)program->instances.len;
     (void)cm_vec_push(&program->instances, &instance);
     return (long)(program->instances.len - 1u);
+}
+
+/* Structural type equality (ids are not hash-consed across sources). */
+static int cm_umir_c_ty_equal(const CmTyckSet *tyck, CmTyId left,
+    CmTyId right, unsigned int depth)
+{
+    CmTyArena *arena = (CmTyArena *)&tyck->arena;
+    const CmTy *a = cm_ty_get(arena, cm_ty_resolve(arena, left));
+    const CmTy *b = cm_ty_get(arena, cm_ty_resolve(arena, right));
+    uint32_t index;
+    if (a == b) return 1;
+    if (a == NULL || b == NULL || depth > 16u) return 0;
+    if (a->kind != b->kind || a->count != b->count) return 0;
+    switch (a->kind) {
+    case CM_TY_INT:
+    case CM_TY_FLOAT:
+    case CM_TY_REF:
+    case CM_TY_PTR:
+    case CM_TY_PARAM:
+        if (a->a != b->a) return 0;
+        break;
+    case CM_TY_ADT:
+    case CM_TY_FN_DEF:
+    case CM_TY_SELF:
+    case CM_TY_FOREIGN:
+    case CM_TY_DYN:
+        if (!cm_hir_def_id_equal(a->def, b->def)) return 0;
+        break;
+    default:
+        break;
+    }
+    for (index = 0u; index < a->count; ++index)
+        if (!cm_umir_c_ty_equal(tyck, a->children[index],
+                b->children[index], depth + 1u)) return 0;
+    return 1;
 }
 
 /* Resolve a trait-method declaration to the impl method for `self`. */
@@ -571,8 +616,8 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
                 trait_item->definition)) continue;
         impl_self = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
             impl->data.impl_item.self_type);
-        if (cm_ty_resolve((CmTyArena *)&tyck->arena, impl_self)
-                != self_resolved) continue;
+        if (!cm_umir_c_ty_equal(tyck, impl_self, self_resolved, 0u))
+            continue;
         for (child = 0u; child < hir->items.len; ++child) {
             const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
                 &hir->items, child);
@@ -594,12 +639,13 @@ static CmTyId cm_umir_c_subst(CmTyId type)
     CmTySubst subst;
     if (cm_umir_c_active_program == NULL
         || cm_umir_c_active_instance == NULL
-        || cm_umir_c_active_instance->count == 0u
+        || (cm_umir_c_active_instance->count == 0u
+            && cm_umir_c_active_instance->self_type == CM_TY_NONE)
         || type == CM_TY_NONE) return type;
     subst.parameters = cm_umir_c_active_instance->parameters;
     subst.types = cm_umir_c_active_instance->types;
     subst.count = cm_umir_c_active_instance->count;
-    subst.self_type = CM_TY_NONE;
+    subst.self_type = cm_umir_c_active_instance->self_type;
     return cm_ty_subst((CmTyArena *)&cm_umir_c_active_program->tyck->arena,
         type, &subst);
 }
@@ -617,18 +663,49 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     uint32_t count = 0u;
     uint32_t index;
     long instance = -1;
+    CmTyId bound_self = CM_TY_NONE;
     if (program != NULL && item != NULL
         && !cm_hir_def_id_is_none(item->parent_definition)) {
         const CmHirItem *parent = cm_umir_c_item_of(hir,
             item->parent_definition);
         if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
-            /* Declaration: resolve against the substituted receiver. */
-            CmHirDefId resolved = cm_umir_c_resolve_impl_method(hir, tyck,
-                item, cm_umir_c_subst(receiver_type));
+            /* Declaration: resolve against the substituted receiver; a
+             * trait default method stays itself with Self bound. */
+            CmTyId self = cm_umir_c_subst(receiver_type);
+            CmHirDefId resolved;
+            {
+                /* `&self` / `&mut self` receivers: the impl's self type
+                 * is the referent. */
+                const CmTy *self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, self));
+                while (self_ty != NULL && (self_ty->kind == CM_TY_REF
+                        || self_ty->kind == CM_TY_PTR)) {
+                    self = self_ty->children[0];
+                    self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena, self));
+                }
+            }
+            resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
+                self);
+            if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                CmStrBuf text;
+                cm_str_buf_init(&text);
+                cm_ty_print((CmTyArena *)&tyck->arena, hir, receiver_type,
+                    &text);
+                cm_str_buf_append(&text, " => ");
+                cm_ty_print((CmTyArena *)&tyck->arena, hir, self, &text);
+                fprintf(stderr, "UMIR decl-call def=%u:%u receiver %.*s"
+                    " resolved=%d\n", (unsigned)def.crate_id,
+                    (unsigned)def.index, (int)text.len, text.data,
+                    !cm_hir_def_id_is_none(resolved));
+                cm_str_buf_destroy(&text);
+            }
             if (!cm_hir_def_id_is_none(resolved)) {
                 def = resolved;
                 item = cm_umir_c_item_of(hir, def);
                 callee_type = CM_TY_NONE;
+            } else {
+                bound_self = self;
             }
         }
     }
@@ -639,14 +716,28 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     if (fn_ty != NULL && fn_ty->kind == CM_TY_FN_DEF)
         for (index = 0u; index < fn_ty->count && count < 32u; ++index)
             args[count++] = cm_umir_c_subst(fn_ty->children[index]);
+    {
+        /* Receiver-derived Self: strip the reference layers a method
+         * receiver carries. */
+        const CmTy *self_ty = bound_self == CM_TY_NONE ? NULL
+            : cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, bound_self));
+        while (self_ty != NULL && (self_ty->kind == CM_TY_REF
+                || self_ty->kind == CM_TY_PTR)) {
+            bound_self = self_ty->children[0];
+            self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, bound_self));
+        }
+    }
     if (program != NULL)
         instance = cm_umir_c_instance(program, def, CM_U_EXPR_NONE, args,
-            count);
+            count, bound_self);
     cm_umir_c_render_symbol(output, def);
     if (instance >= 0) {
         const CmUMirInstance *have = (const CmUMirInstance *)
             cm_vec_at_const(&program->instances, (size_t)instance);
-        if (have != NULL && have->count != 0u) {
+        if (have != NULL && (have->count != 0u
+                || have->self_type != CM_TY_NONE)) {
             cm_str_buf_append(output, "_i");
             cm_umir_c_render_number(output, have->index);
         }
@@ -711,7 +802,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     } else {
         cm_umir_c_render_symbol(output, def);
         if (cm_umir_c_active_instance != NULL
-            && cm_umir_c_active_instance->count != 0u) {
+            && (cm_umir_c_active_instance->count != 0u
+                || cm_umir_c_active_instance->self_type != CM_TY_NONE)) {
             cm_str_buf_append(output, "_i");
             cm_umir_c_render_number(output,
                 cm_umir_c_active_instance->index);
@@ -1011,6 +1103,10 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_append(output, "] = ");
                 cm_umir_c_render_local(output, statement->operands[2]);
                 break;
+            case CM_UMIR_RVALUE_LOAD:
+                cm_str_buf_append(output, "*(long long *)(intptr_t)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                break;
             case CM_UMIR_RVALUE_STORE_DEREF:
                 cm_str_buf_append(output, "0; *(long long *)(intptr_t)");
                 cm_umir_c_render_local(output, statement->operands[0]);
@@ -1082,7 +1178,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                                 (void)cm_umir_c_instance(
                                     cm_umir_c_active_program,
                                     closure_body->origin.definition,
-                                    (CmUExprId)callee_ty0->b, NULL, 0u);
+                                    (CmUExprId)callee_ty0->b, NULL, 0u,
+                                    CM_TY_NONE);
                         }
                         cm_str_buf_append(output, "0; { long long ");
                         cm_umir_c_render_closure_symbol(output,
@@ -1299,6 +1396,7 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     CmUMirProgram program;
     size_t index;
     size_t rendered = 0u;
+    size_t stubs = 0u;
     memset(&program, 0, sizeof(program));
     cm_vec_init(&program.instances, sizeof(CmUMirInstance));
     program.hir = hir;
@@ -1326,7 +1424,7 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         if (cm_umir_c_collect_parameters(hir, owner, parameters, 32u)
                 != 0u) continue;
         (void)cm_umir_c_instance(&program, hir_body->origin.definition,
-            CM_U_EXPR_NONE, NULL, 0u);
+            CM_U_EXPR_NONE, NULL, 0u, CM_TY_NONE);
     }
     cm_umir_c_active_program = &program;
     for (index = 0u; index < program.instances.len; ++index) {
@@ -1339,7 +1437,22 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         body = cm_umir_c_umir_body(umir, hir, instance->definition,
             instance->closure_expr);
         ub = body == NULL ? NULL : cm_ubody_get(ubodies, body->source);
-        if (body == NULL || ub == NULL) continue;
+        if (body == NULL || ub == NULL) {
+            /* No complete u-MIR body (partial typeck, declaration without
+             * a default, unsupported construct): emit a stub so the unit
+             * links; the census counts these as the remaining frontier. */
+            cm_str_buf_append(output, "long long ");
+            cm_umir_c_render_symbol(output, instance->definition);
+            if (instance->count != 0u
+                || instance->self_type != CM_TY_NONE) {
+                cm_str_buf_append(output, "_i");
+                cm_umir_c_render_number(output, instance->index);
+            }
+            cm_str_buf_append(output,
+                "() { return 0; /* stub: no body */ }\n");
+            stubs += 1u;
+            continue;
+        }
         cm_umir_c_active_instance = instance;
         (void)cm_umir_c_render_body(output, hir, body, ubodies, ub, tyck);
         cm_umir_c_active_instance = NULL;
@@ -1348,6 +1461,13 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         rendered += 1u;
     }
     cm_umir_c_active_program = NULL;
+    cm_str_buf_append(output, "/* cm_umir instances=");
+    cm_umir_c_render_number(output, (unsigned long)program.instances.len);
+    cm_str_buf_append(output, " rendered=");
+    cm_umir_c_render_number(output, (unsigned long)rendered);
+    cm_str_buf_append(output, " stubs=");
+    cm_umir_c_render_number(output, (unsigned long)stubs);
+    cm_str_buf_append(output, " */\n");
     for (index = 0u; index < program.instances.len; ++index) {
         CmUMirInstance *instance = (CmUMirInstance *)cm_vec_at(
             &program.instances, index);

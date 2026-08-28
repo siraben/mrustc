@@ -284,6 +284,7 @@ CmMirULowerResult cm_mir_ulower_all(const CmHirContext *hir,
 typedef struct CmUMirBuilder {
     const CmHirContext *hir;
     const CmUBodySet *ubodies;
+    const CmTyckSet *tyck;
     CmUMirBody *body;
     const CmUBody *ub;
     const CmTyckBody *tb;
@@ -544,6 +545,46 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         uint32_t recorded = 0u;
         CmUMirLocalId receiver = cm_umir_emit_expr(builder,
             expr->data.method_call.receiver);
+        /* Receiver adjustment: `&self` callees take the receiver's
+         * address, by-value callees load through a reference. */
+        if (builder->tb->method_targets != NULL && builder->tyck != NULL
+            && builder->hir != NULL) {
+            const CmHirDefinition *record = cm_hir_lookup_definition(
+                builder->hir, builder->tb->method_targets[id]);
+            const CmHirItem *callee = record == NULL
+                    || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+                : cm_hir_get_item(builder->hir, record->entity.item_id);
+            CmTyId receiver_type = cm_umir_expr_type(builder,
+                expr->data.method_call.receiver);
+            const CmTy *rt = receiver_type == CM_TY_NONE ? NULL
+                : cm_ty_get((CmTyArena *)&builder->tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&builder->tyck->arena,
+                        receiver_type));
+            int receiver_is_ref = rt != NULL
+                && (rt->kind == CM_TY_REF || rt->kind == CM_TY_PTR);
+            if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION) {
+                CmHirReceiverKind kind =
+                    callee->data.function_item.signature.receiver;
+                if ((kind == CM_HIR_RECEIVER_REF_SHARED
+                        || kind == CM_HIR_RECEIVER_REF_MUTABLE)
+                    && !receiver_is_ref) {
+                    CmUMirLocalId address = cm_umir_new_local(builder,
+                        receiver_type);
+                    cm_umir_push_operands(builder, address,
+                        CM_UMIR_RVALUE_REF, expr->data.method_call.receiver,
+                        receiver_type, &receiver, 1u);
+                    receiver = address;
+                } else if (kind == CM_HIR_RECEIVER_VALUE
+                    && receiver_is_ref) {
+                    CmUMirLocalId loaded = cm_umir_new_local(builder,
+                        rt->children[0]);
+                    cm_umir_push_operands(builder, loaded,
+                        CM_UMIR_RVALUE_LOAD, expr->data.method_call.receiver,
+                        rt->children[0], &receiver, 1u);
+                    receiver = loaded;
+                }
+            }
+        }
         if (recorded < CM_UMIR_STATEMENT_OPERANDS)
             operands[recorded++] = receiver;
         for (index = 0u; index < expr->data.method_call.argument_count;
@@ -1169,7 +1210,6 @@ static void cm_mir_ulower_closure(CmUMirSet *out, const CmHirContext *hir,
     CmUMirBuilder builder;
     CmTyId return_type;
     size_t local_index;
-    (void)tyck;
     if (closure == NULL || closure->kind != CM_U_EXPR_CLOSURE) return;
     memset(&body, 0, sizeof(body));
     body.source = body_id;
@@ -1192,6 +1232,7 @@ static void cm_mir_ulower_closure(CmUMirSet *out, const CmHirContext *hir,
     memset(&builder, 0, sizeof(builder));
     builder.hir = hir;
     builder.ubodies = bodies;
+    builder.tyck = tyck;
     builder.body = &body;
     builder.ub = ub;
     builder.tb = tb;
@@ -1243,6 +1284,7 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
         memset(&builder, 0, sizeof(builder));
         builder.hir = hir;
         builder.ubodies = bodies;
+        builder.tyck = tyck;
         builder.body = &body;
         builder.ub = ub;
         builder.tb = tb;
