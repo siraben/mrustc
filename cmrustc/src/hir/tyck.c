@@ -1209,6 +1209,28 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                 }
                 (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
                     impl->self_pattern, cm_tyck_subst_of(&instance)));
+                /* Bind the impl's trait arguments against the
+                 * projection's: `SliceIndex<[T]> for usize` normalizing
+                 * `<usize as SliceIndex<[MaybeUninit<V>]>>::Output` must
+                 * bind T, or Output substitutes to an unbound fresh
+                 * variable and downstream method lookup starves. */
+                if (impl->item->kind == CM_HIR_ITEM_IMPL
+                    && projection_arg_count != 0u) {
+                    const CmHirNamedType *bind_trait =
+                        &impl->item->data.impl_item.trait_type;
+                    CmTyId bind_args[8];
+                    uint32_t bind_count = cm_ty_args_from_hir(arena,
+                        env->state->hir, bind_trait->arguments,
+                        bind_trait->argument_count, bind_args, 8u);
+                    uint32_t bind_index;
+                    for (bind_index = 0u; bind_index < bind_count
+                            && bind_index < projection_arg_count;
+                            ++bind_index)
+                        (void)cm_ty_unify(arena, cm_ty_subst(arena,
+                            bind_args[bind_index],
+                            cm_tyck_subst_of(&instance)),
+                            projection_args[bind_index]);
+                }
                 return cm_tyck_normalize(env, cm_ty_subst(arena,
                     target_type, cm_tyck_subst_of(&instance)), depth + 1u);
             }
