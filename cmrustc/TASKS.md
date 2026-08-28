@@ -2814,6 +2814,15 @@ impl of a safe dep trait lowers and types (8/8 bodies).  Indexed
 whole-crate census in flight; numbers in the next entry.  Lanes +
 ASan green.
 
+M9-03 ninth pass (2026-08-28): the synthesized dependency-record
+cache also rides the sorted (source, ast_item) index — each index
+entry memoizes its record pointer, so every dependency type-path
+lookup is one binary search instead of a linear scan over the
+growing record list (the previous census was killed ~30 min in,
+still inside alloc HIR lowering).  Minicore acceptance unchanged
+(8/8).  Lanes + ASan green; census re-running with the indexed
+cache.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

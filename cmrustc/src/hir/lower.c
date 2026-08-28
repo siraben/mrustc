@@ -122,6 +122,8 @@ typedef struct CmLowerDependencyIndexEntry {
     uint32_t ast_item;
     const CmHirItem *item;
     uint32_t duplicate;
+    /* Synthesized dependency record for this item, once created. */
+    struct CmLowerItemRecord *record;
 } CmLowerDependencyIndexEntry;
 
 typedef struct CmLowerState {
@@ -2066,6 +2068,9 @@ static const CmHirItem *cm_lower_find_dependency_item(
     const CmLowerState *state, CmResolveItemRef declaration,
     uint32_t *out_match_count);
 
+static CmLowerDependencyIndexEntry *cm_lower_dependency_index_entry(
+    const CmLowerState *state, CmResolveItemRef declaration);
+
 /*
  * The record-shaped view of one dependency-crate item (M9-03), synthesized
  * on demand from the already-lowered HIR item and the dependency graph's
@@ -2083,20 +2088,19 @@ static int cm_lower_dependency_record(CmLowerState *state,
     uint32_t matches;
     size_t index;
     size_t module_count;
+    CmLowerDependencyIndexEntry *index_entry;
 
     *out_record = NULL;
-    for (index = 0u; index < state->dependency_records.len; ++index) {
-        CmLowerItemRecord **cached = (CmLowerItemRecord **)cm_vec_at(
-            &state->dependency_records, index);
-        if (cached != NULL && *cached != NULL
-            && (*cached)->source == declaration.source
-            && (*cached)->ast_id == declaration.item) {
-            *out_record = *cached;
-            return 1;
-        }
+    index_entry = cm_lower_dependency_index_entry(state, declaration);
+    if (index_entry == NULL || index_entry->duplicate) return 0;
+    if (index_entry->record != NULL) {
+        *out_record = index_entry->record;
+        return 1;
     }
-    item = cm_lower_find_dependency_item(state, declaration, &matches);
-    if (item == NULL || matches != 1u) return 0;
+    item = index_entry->item;
+    matches = 1u;
+    (void)matches;
+    if (item == NULL) return 0;
     switch (item->kind) {
     case CM_HIR_ITEM_FUNCTION: kind = CM_AST_ITEM_FUNCTION; break;
     case CM_HIR_ITEM_STRUCT: kind = CM_AST_ITEM_STRUCT; break;
@@ -2143,6 +2147,7 @@ static int cm_lower_dependency_record(CmLowerState *state,
         cm_free(record);
         return 0;
     }
+    index_entry->record = record;
     *out_record = record;
     return 1;
 }
@@ -18523,27 +18528,32 @@ static void cm_lower_build_dependency_index(CmLowerState *state)
     state->dependency_index_count = used;
 }
 
+static CmLowerDependencyIndexEntry *cm_lower_dependency_index_entry(
+    const CmLowerState *state, CmResolveItemRef declaration)
+{
+    CmLowerDependencyIndexEntry key;
+
+    if (!state->dependency_index_built)
+        cm_lower_build_dependency_index((CmLowerState *)state);
+    memset(&key, 0, sizeof(key));
+    key.source = declaration.source;
+    key.ast_item = declaration.item;
+    return (CmLowerDependencyIndexEntry *)bsearch(&key,
+        state->dependency_index, state->dependency_index_count,
+        sizeof(*state->dependency_index),
+        cm_lower_dependency_index_compare);
+}
+
 static const CmHirItem *cm_lower_find_dependency_item(
     const CmLowerState *state, CmResolveItemRef declaration,
     uint32_t *out_match_count)
 {
-    CmLowerDependencyIndexEntry key;
     const CmLowerDependencyIndexEntry *found;
 
-    if (!state->dependency_index_built)
-        cm_lower_build_dependency_index((CmLowerState *)state);
-    if (out_match_count != NULL) *out_match_count = 0u;
-    memset(&key, 0, sizeof(key));
-    key.source = declaration.source;
-    key.ast_item = declaration.item;
-    found = (const CmLowerDependencyIndexEntry *)bsearch(&key,
-        state->dependency_index, state->dependency_index_count,
-        sizeof(*state->dependency_index),
-        cm_lower_dependency_index_compare);
-    if (found == NULL) return NULL;
+    found = cm_lower_dependency_index_entry(state, declaration);
     if (out_match_count != NULL)
-        *out_match_count = found->duplicate ? 2u : 1u;
-    return found->duplicate ? NULL : found->item;
+        *out_match_count = found == NULL ? 0u : (found->duplicate ? 2u : 1u);
+    return found == NULL || found->duplicate ? NULL : found->item;
 }
 
 /* Map one dependency-tagged binding into the dependency's lowered HIR. */
