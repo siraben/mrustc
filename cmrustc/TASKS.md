@@ -3065,3 +3065,8 @@ sig-normalized, led by unsize shapes in boxed/convert families).
 Minicore acceptance: an array-to-slice unsize through a local
 wrapper types (21/21, 0 errors).  Lanes + ASan green; census
 re-running.
+
+Census29 (2026-08-28, after unsize coercion): tyck error nodes
+**420 -> 404** (body-signature 83 -> 75), 23,081/24,797 typed.
+Remaining top families: body-sig 75, field-not-found 49,
+method-not-found 41, call-arg 37, method-arg 28.
