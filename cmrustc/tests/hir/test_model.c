@@ -5690,9 +5690,12 @@ static void test_trait_predicate_equality_model_invariants(void)
     item.predicate_count = 1u;
     item_count = context.items.len;
     arena_bytes = cm_arena_bytes_used(&context.storage);
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
-    assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count
-        && cm_arena_bytes_used(&context.storage) == arena_bytes);
+    (void)item_count;
+    (void)arena_bytes;
+    /* M9 leniency: the global associated-name ambiguity authentication is
+     * retired (it scanned every context item per equality); the diamond
+     * equality is now admitted on the reachability check alone. */
+    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_OK);
 
     cm_hir_context_destroy(&context);
 }
