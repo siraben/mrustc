@@ -387,7 +387,17 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             type);
         break;
     case CM_U_EXPR_PATH:
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
+        if (expr->data.path.resolution.kind == CM_U_RESOLVED_LOCAL
+            && expr->data.path.resolution.local != CM_U_LOCAL_NONE) {
+            /* Body locals occupy slots 1..n after the return slot. */
+            CmUMirLocalId bound = (CmUMirLocalId)(1u
+                + expr->data.path.resolution.local);
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_LOCAL, id, type, &bound, 1u);
+        } else {
+            cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id,
+                type);
+        }
         break;
     case CM_U_EXPR_BINARY: {
         CmUMirLocalId operands[2];
@@ -520,9 +530,24 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 expr->data.block.statements[index]);
             if (stmt == NULL) continue;
             if (stmt->kind == CM_U_STMT_LET) {
+                CmUMirLocalId init_local = 0u;
+                const CmUPat *pat = cm_ubody_get_pat(builder->ub,
+                    stmt->data.let_stmt.pattern);
                 if (stmt->data.let_stmt.initializer != CM_U_EXPR_NONE)
-                    (void)cm_umir_emit_expr(builder,
+                    init_local = cm_umir_emit_expr(builder,
                         stmt->data.let_stmt.initializer);
+                if (pat != NULL && pat->kind == CM_U_PAT_BINDING
+                    && pat->data.binding.local != CM_U_LOCAL_NONE
+                    && stmt->data.let_stmt.initializer != CM_U_EXPR_NONE) {
+                    CmUMirLocalId bound = (CmUMirLocalId)(1u
+                        + pat->data.binding.local);
+                    cm_umir_push_operands(builder, bound,
+                        CM_UMIR_RVALUE_LOCAL,
+                        stmt->data.let_stmt.initializer,
+                        cm_umir_expr_type(builder,
+                            stmt->data.let_stmt.initializer),
+                        &init_local, 1u);
+                }
                 if (stmt->data.let_stmt.else_block != CM_U_EXPR_NONE)
                     (void)cm_umir_emit_expr(builder,
                         stmt->data.let_stmt.else_block);
@@ -897,6 +922,15 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
         builder.census = &result;
         return_type = tb->return_type;
         (void)cm_vec_push(&body.locals, &return_type);
+        {
+            size_t local_index;
+            for (local_index = 0u; local_index < ub->locals.len;
+                    ++local_index) {
+                CmTyId local_type = tb->local_types == NULL ? CM_TY_NONE
+                    : tb->local_types[local_index];
+                (void)cm_vec_push(&body.locals, &local_type);
+            }
+        }
         builder.current = cm_umir_new_block(&builder);
         (void)cm_umir_emit_expr(&builder, ub->root);
         if (builder.blocked == NULL) {

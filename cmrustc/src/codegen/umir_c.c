@@ -248,7 +248,13 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
                 }
                 break;
             case CM_UMIR_RVALUE_LOCAL:
-                cm_str_buf_append(output, "0 /* path */");
+                if (statement->operand_count == 1u)
+                    cm_umir_c_render_local(output,
+                        statement->operands[0]);
+                else {
+                    cm_str_buf_append(output, "0 /* item path */");
+                    complete = 0;
+                }
                 break;
             case CM_UMIR_RVALUE_BINARY:
                 if (statement->operand_count == 2u) {
