@@ -286,7 +286,26 @@ typedef struct CmUMirBuilder {
     CmUMirBlockId current;
     const char *blocked;
     unsigned int depth;
+    CmMirULowerResult *census;
 } CmUMirBuilder;
+
+/* Census: opaque statements tallied by originating expression kind, so
+ * real emission lands by measured family. */
+static const char *const cm_umir_opaque_names[34] = {
+    "opaque-literal", "opaque-path", "opaque-qualified-path",
+    "opaque-block", "opaque-call", "opaque-method-call", "opaque-field",
+    "opaque-tuple-field", "opaque-index", "opaque-unary", "opaque-ref",
+    "opaque-binary", "opaque-assign", "opaque-assign-op", "opaque-cast",
+    "opaque-try", "opaque-range", "opaque-let", "opaque-return",
+    "opaque-break", "opaque-continue", "opaque-if", "opaque-match",
+    "opaque-loop", "opaque-while", "opaque-for", "opaque-closure",
+    "opaque-tuple", "opaque-array", "opaque-array-repeat",
+    "opaque-struct", "opaque-asm", "opaque-offset-of",
+    "opaque-unsupported"
+};
+
+static void cm_mir_ulower_count(CmMirULowerResult *result,
+    const char *reason);
 
 static CmUMirBlockId cm_umir_new_block(CmUMirBuilder *builder)
 {
@@ -432,6 +451,9 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
          * assignment that keeps the type and source expression. */
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_OPAQUE, id,
             type);
+        if (builder->census != NULL && (size_t)expr->kind < 34u)
+            cm_mir_ulower_count(builder->census,
+                cm_umir_opaque_names[(size_t)expr->kind]);
         break;
     }
     builder->depth -= 1u;
@@ -488,6 +510,7 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
         builder.body = &body;
         builder.ub = ub;
         builder.tb = tb;
+        builder.census = &result;
         return_type = tb->return_type;
         (void)cm_vec_push(&body.locals, &return_type);
         builder.current = cm_umir_new_block(&builder);

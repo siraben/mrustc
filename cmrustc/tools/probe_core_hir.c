@@ -1089,13 +1089,24 @@ int main(int argc, char **argv)
                     built = cm_mir_ulower_build(&umir, &hir, &ubodies,
                         &tyck);
                     printf("umir bodies=%lu built=%lu blocked=%lu"
-                        " statements=%lu blocks=%lu locals=%lu\n",
+                        " statements=%lu blocks=%lu\n",
                         (unsigned long)built.bodies,
                         (unsigned long)built.lowered,
                         (unsigned long)built.blocked,
                         (unsigned long)built.statements,
-                        (unsigned long)built.blocks,
-                        (unsigned long)0);
+                        (unsigned long)built.blocks);
+                    {
+                        size_t umir_class;
+                        printf("umir-opaque");
+                        for (umir_class = 0u;
+                                umir_class < built.class_count;
+                                ++umir_class)
+                            printf(" %s=%lu",
+                                built.classes[umir_class].reason,
+                                (unsigned long)
+                                    built.classes[umir_class].count);
+                        printf("\n");
+                    }
                     cm_umir_set_destroy(&umir);
                     size_t ulower_class;
                     printf("mir bodies=%lu lowered=%lu blocked=%lu"
