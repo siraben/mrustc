@@ -2837,7 +2837,21 @@ dependency invocations expand (unqualified, qualified, `$crate`),
 9/9 bodies typed, 0 errors.  Targets the 158 alloc body-expand
 failures (debug_assert 85, panic_2021 27, debug_assert_eq 26,
 unreachable_2021 8, write 7, assert_unsafe_precondition 3,
-debug_assert_ne 2).  Lanes + ASan green.
+debug_assert_ne 2).  Lanes + ASan green.  Whole-crate confirmation:
+alloc body-expand **574/574 invocations, 0 failures** (was 158).
+
+M9-03 eleventh pass (2026-08-28): type-position macro expansion.
+Body expansion now expands macros in type position in place —
+alloc's `impl SpecToString for to_string_str_wrap_in_ref!(...)`
+family (string.rs:2985, the whole-crate HIR frontier after body
+macros).  The expansion text parses as one type
+(`cm_parse_type_fragment`) and splices over the macro node,
+recursing through type children and nested invocations up to the
+depth cap, with the per-target `$crate` identity; impl headers
+expand in the module walker (top-level impls bypass the item
+walker).  The probe prints per-stage lowering seconds.  Minicore
+acceptance: recursive local `wrapref!(x)` self type lowers and
+types (10/10 bodies, 0 errors).  Lanes + ASan green.
 
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |

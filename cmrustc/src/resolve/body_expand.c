@@ -2165,6 +2165,86 @@ static void cm_body_register_local_macro(CmBodyExpandState *state,
     state->local_count += 1u;
 }
 
+/*
+ * Expand type-position macros in place (M9-01 extension): alloc's
+ * `impl SpecToString for to_string_str_wrap_in_ref!(...)` family.  The
+ * expansion text is parsed as one type and spliced over the macro node;
+ * nested invocations re-expand recursively up to the depth cap.
+ */
+static void cm_body_expand_type_macros(CmBodyExpandState *state,
+    CmAstTypeId id, unsigned int depth)
+{
+    CmAstType *type;
+    const CmAstPath *path;
+    CmBodyMacroTarget target;
+    char name[CM_BODY_NAME_LIMIT];
+    uint32_t index;
+
+    if (id == CM_AST_TYPE_NONE || (size_t)id > state->ast->types.len
+        || depth > state->options->maximum_depth) return;
+    type = (CmAstType *)cm_vec_at(&state->ast->types, (size_t)id - 1u);
+    if (type == NULL) return;
+    if (type->kind != CM_AST_TYPE_MACRO) {
+        cm_body_expand_type_macros(state, type->child, depth + 1u);
+        for (index = 0u; index < type->element_count; ++index)
+            cm_body_expand_type_macros(state, type->elements[index],
+                depth + 1u);
+        return;
+    }
+    path = cm_ast_get_path(state->ast, type->macro_type.path);
+    if (path == NULL) return;
+    state->result.invocations += 1u;
+    memset(&target, 0, sizeof(target));
+    if (!cm_body_resolve_path(state, state->ast, path, name, sizeof(name),
+            &target) || target.is_builtin) {
+        cm_body_fail(state, name[0] != '\0' ? name : "?", type->span,
+            "type-position macro is not in scope");
+        return;
+    }
+    {
+        CmMacroSyntaxOptions options;
+        CmMacroSyntaxResult expansion;
+        CmTypeFragment fragment;
+        CmAstSpan span = type->span;
+
+        cm_macro_syntax_options_init(&options);
+        options.edition = state->options->edition;
+        options.crate_identifier = target.crate_identifier != NULL
+            ? target.crate_identifier : state->options->crate_identifier;
+        options.limits.max_nesting = CM_MACRO_RULES_ABSOLUTE_MAX_NESTING;
+        options.limits.max_backtrack_steps = (size_t)2000000u;
+        options.limits.max_repetition_iterations = (size_t)5000000u;
+        cm_str_buf_clear(&state->text);
+        expansion = cm_macro_syntax_expand(target.definition_ast,
+            target.definition_item, state->ast, &type->macro_type,
+            &options, &state->text);
+        if (expansion.status != CM_MACRO_OK) {
+            cm_body_fail(state, name, span,
+                "type-position macro expansion failed");
+            return;
+        }
+        fragment = cm_parse_type_fragment(state->ast, state->text.data,
+            state->text.len, state->options->edition);
+        if (fragment.parse.error_count != 0u
+            || fragment.type == CM_AST_TYPE_NONE) {
+            cm_body_fail(state, name, span,
+                "type-position macro expansion does not parse as a type");
+            return;
+        }
+        /* The parse may reallocate the type vec: re-fetch both nodes. */
+        type = (CmAstType *)cm_vec_at(&state->ast->types, (size_t)id - 1u);
+        {
+            const CmAstType *replacement = cm_ast_get_type(state->ast,
+                fragment.type);
+            if (type == NULL || replacement == NULL) return;
+            *type = *replacement;
+            type->span = span;
+        }
+        state->result.expanded_rules += 1u;
+        cm_body_expand_type_macros(state, id, depth + 1u);
+    }
+}
+
 static void cm_body_walk_item(CmBodyExpandState *state, CmAstItemId id,
     unsigned int depth)
 {
@@ -2183,6 +2263,10 @@ static void cm_body_walk_item(CmBodyExpandState *state, CmAstItemId id,
         cm_body_walk_expr(state, item->data.value_item.initializer, depth);
         break;
     case CM_AST_ITEM_IMPL:
+        cm_body_expand_type_macros(state, item->data.impl_item.self_type,
+            depth);
+        cm_body_expand_type_macros(state, item->data.impl_item.trait_type,
+            depth);
         for (index = 0u; index < item->data.impl_item.item_count; ++index)
             cm_body_walk_item(state, item->data.impl_item.items[index],
                 depth);
@@ -2219,6 +2303,12 @@ static void cm_body_walk_module(CmBodyExpandState *state, CmModuleId module)
         if (ast_item->kind == CM_AST_ITEM_IMPL
             || ast_item->kind == CM_AST_ITEM_TRAIT) {
             uint32_t child;
+            if (ast_item->kind == CM_AST_ITEM_IMPL) {
+                cm_body_expand_type_macros(state,
+                    ast_item->data.impl_item.self_type, 0u);
+                cm_body_expand_type_macros(state,
+                    ast_item->data.impl_item.trait_type, 0u);
+            }
             for (child = 0u; child < item.child_count; ++child) {
                 CmResolveEffectiveItem view;
                 if (cm_module_graph_get_effective_child(state->graph,

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static size_t source_line(const CmSourceFile *source, size_t offset)
 {
@@ -701,12 +702,17 @@ int main(int argc, char **argv)
             core_lower_options.source = core_root;
             core_lower_options.edition = CM_HIR_EDITION_2024;
             core_lower_options.pointer_bits = target->pointer_bits;
-            core_lower_result = cm_hir_lower_module_graph(&hir,
-                &core_graph, core_result.revision, &core_imports,
-                &core_hir_modules, &core_lower_options);
-            printf("core-hir errors=%lu items=%lu\n",
-                (unsigned long)core_lower_result.error_count,
-                (unsigned long)core_lower_result.lowered_item_count);
+            {
+                clock_t core_lower_started = clock();
+                core_lower_result = cm_hir_lower_module_graph(&hir,
+                    &core_graph, core_result.revision, &core_imports,
+                    &core_hir_modules, &core_lower_options);
+                printf("core-hir errors=%lu items=%lu seconds=%lu\n",
+                    (unsigned long)core_lower_result.error_count,
+                    (unsigned long)core_lower_result.lowered_item_count,
+                    (unsigned long)((clock() - core_lower_started)
+                        / CLOCKS_PER_SEC));
+            }
             if (core_lower_result.error_count != 0u) {
                 printf("core-hir first-error kind=%s message=%s\n",
                     cm_hir_lower_error_kind_name(
@@ -832,8 +838,14 @@ int main(int argc, char **argv)
     }
     lower_options.edition = CM_HIR_EDITION_2024;
     lower_options.pointer_bits = target->pointer_bits;
-    lower_result = cm_hir_lower_module_graph(&hir, &graph,
-        graph_result.revision, &imports, &modules, &lower_options);
+    {
+        clock_t lower_started = clock();
+        lower_result = cm_hir_lower_module_graph(&hir, &graph,
+            graph_result.revision, &imports, &modules, &lower_options);
+        printf("hir-lower seconds=%lu\n",
+            (unsigned long)((clock() - lower_started) / CLOCKS_PER_SEC));
+        fflush(stdout);
+    }
     if (lower_result.error_count == 0u) {
         /* Census the declaration surface the metadata boundary must grow
          * to cover for M6-06: item kinds, generic parameters, and the
