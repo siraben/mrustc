@@ -3087,3 +3087,12 @@ raw tokens, not parenthesized groups.  The wrap now applies only
 to multi-token expr captures; single tokens stay bare (already
 unambiguous, matcher-compatible).  Minicore: 22/22, ubody 0
 failures.  Lanes + ASan green; census re-running.
+
+Grouping call-position rule (2026-08-28): census31 still showed 860
+ubody failures (multi-token expr captures forwarded into nested
+macro matchers).  The wrap now applies only in call position — the
+transcriber peeks the next pattern node and parenthesizes a
+multi-token expr capture only when a paren group follows
+(`$f(args)`); all other splices stay raw.  Minicore: 22/22, ubody
+clean, impl_is_zero-style call still fixed.  Lanes + ASan green;
+census re-running.

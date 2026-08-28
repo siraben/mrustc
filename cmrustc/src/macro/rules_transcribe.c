@@ -627,6 +627,9 @@ static int cm_rules_emit_nodes(CmRulesTranscribeState *state,
                 const CmMacroBinding *metavariable_binding =
                     cm_macro_rules_binding(state->definition,
                         pattern->data.metavariable.binding);
+                const CmMacroPatternNode *next_pattern =
+                    cm_macro_rules_pattern(state->definition,
+                        pattern->next_sibling);
                 int wrap = metavariable_binding != NULL
                     && metavariable_binding->fragment
                         == CM_MACRO_FRAGMENT_EXPR
@@ -634,7 +637,15 @@ static int cm_rules_emit_nodes(CmRulesTranscribeState *state,
                     /* Single-token captures stay bare: they are already
                      * unambiguous and nested macro matchers expect the
                      * raw token, not a parenthesized group. */
-                    && capture->first_node != capture->last_node;
+                    && capture->first_node != capture->last_node
+                    /* Wrap only in call position (`$f(args)`): nested
+                     * macro forwarding (`inner!($e)`, `$e,`) must see the
+                     * raw tokens, and only a following paren group can
+                     * reparse the capture's tail as a call. */
+                    && next_pattern != NULL
+                    && next_pattern->kind == CM_MACRO_PATTERN_GROUP
+                    && next_pattern->data.group.delimiter
+                        == CM_TT_DELIMITER_PAREN;
                 if (wrap) {
                     cm_rules_emit_space(state);
                     cm_str_buf_append(state->output, "(");
