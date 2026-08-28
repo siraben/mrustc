@@ -2980,3 +2980,14 @@ nix develop --command ./rootfs.py --bwrap --arch x86 \
   --target /absolute/fresh/cmrustc-proof --external-sources \
   --cores 4 --internal-ci cmrustc
 ```
+
+M9-03 sixteenth pass (2026-08-28): tuple parameter patterns in
+bodyful methods.  Lowerer gate and model placement relaxed for the
+two-binding case (`extend_one(&mut self, (k, v): (K, V))`); the
+general case requires exactly two bindings, unary tuples stay
+rust-call-only.  Shared-reference patterns over shared-reference
+elements bind the pointee (`(&k, &v): (&K, &V)`, btree map/set) in
+both the lowerer and the model local check.  Fixtures updated
+(model binary-tuple and pointee-local sub-cases, lower method-form
+and rust-call negatives).  Minicore: tuple-param and deref-binding
+methods lower and type (14/14, 0 errors).  Lanes + ASan green.

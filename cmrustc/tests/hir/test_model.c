@@ -2467,8 +2467,8 @@ static void test_unary_rust_call_tuple_parameter_model(void)
     stored_body->locals[1].name = extra_name;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     stored_body->locals[1].name = byte_name;
-    stored_body->locals[1].type = u8_type;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    /* M9 leniency: a pointee-typed local for a shared-reference tuple
+     * element is the `(&k, &v)` deref-binding form and is now valid. */
     stored_body->locals[1].type = u8_ref_type;
     stored_body->locals[1].mutability = CM_HIR_MUTABLE;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
@@ -2481,11 +2481,8 @@ static void test_unary_rust_call_tuple_parameter_model(void)
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     parameters[1].type = ternary_tuple_type;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
-    parameters[1].type = binary_tuple_type;
-    parameters[1].tuple_bindings[1].name = extra_name;
-    parameters[1].tuple_bindings[1].span = locals[2].span;
-    stored_body->local_count = 3u;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    /* M9 leniency: a binary tuple parameter in a bodyful method is now
+     * placement-valid, so that former rejection sub-case is retired. */
     parameters[1].type = unary_tuple_type;
     memset(&parameters[1].tuple_bindings[1], 0,
         sizeof(parameters[1].tuple_bindings[1]));

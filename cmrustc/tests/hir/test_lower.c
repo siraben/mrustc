@@ -11279,13 +11279,12 @@ static void test_unsupported_method_forms_are_errors(void)
         "trait T { const fn f(); }",
         "trait T { fn f(); } impl T for u8 { const fn f() {} }",
         "trait T { fn f(); } impl T for u8 { async fn f() {} }",
-        "trait T { fn f((left, right): (u8, u8)); }",
-        ("trait T { fn f(value: (u8, u8)); } impl T for u8 {"
-            " fn f((left, right): (u8, u8)) {} }")
+        /* A bodyful impl method with a tuple parameter is now admitted
+         * (M9 leniency); only the bodyless declaration still rejects. */
+        "trait T { fn f((left, right): (u8, u8)); }"
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_INVALID_IMPL,
-        CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -11300,7 +11299,6 @@ static void test_unsupported_method_forms_are_errors(void)
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
         "Rust or rust-call ABI",
-        "tuple parameter patterns require bodyful free functions",
         "tuple parameter patterns require bodyful free functions"
     };
     CmAst ast;
@@ -11414,12 +11412,8 @@ static void test_rust_call_impl_unary_tuple_parameters(void)
          " extern \"rust-call\" fn call(&self, prefix: u8, "
          " (value,): (u8,)) {}"
          "}"),
-        ("struct Z; trait T {"
-         " extern \"rust-call\" fn call(&self, args: (u8, u8));"
-         "} impl T for Z {"
-         " extern \"rust-call\" fn call(&self, "
-         " (left, right): (u8, u8)) {}"
-         "}"),
+        /* The binary (left, right) rust-call method is admitted now
+         * (M9 leniency for bodyful tuple parameters). */
         ("struct Z; trait T {"
          " extern \"rust-call\" fn call(&self, args: (u8,));"
          "} impl T for Z {"

@@ -9876,8 +9876,29 @@ static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
         CmSpan binding_span;
         CmInternId binding_name;
 
+        CmHirTypeId binding_local_type;
+
         binding = cm_ast_get_pattern(state->ast,
             pattern->data.list.patterns[binding_index]);
+        binding_local_type =
+            tuple_type->data.tuple_type.elements[binding_index];
+        if (binding != NULL && binding->kind == CM_AST_PATTERN_REFERENCE
+            && !binding->data.reference.is_mutable) {
+            /* M9 leniency: `(&k, &v): (&K, &V)` — a shared-reference
+             * pattern over a shared-reference element binds the pointee
+             * by copy (alloc's btree `extend_one`). */
+            const CmHirType *element_type = cm_hir_get_type(state->hir,
+                binding_local_type);
+            if (element_type != NULL
+                && element_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+                && element_type->data.reference_type.mutability
+                    == CM_HIR_IMMUTABLE) {
+                binding = cm_ast_get_pattern(state->ast,
+                    binding->data.reference.pattern);
+                binding_local_type =
+                    element_type->data.reference_type.pointee;
+            }
+        }
         if (binding == NULL || binding->kind != CM_AST_PATTERN_BINDING
             || binding->data.binding.subpattern != CM_AST_PATTERN_NONE
             || binding->data.binding.is_ref
@@ -9897,8 +9918,7 @@ static int cm_lower_tuple_parameter_pattern(CmLowerState *state,
         out_parameter->tuple_bindings[binding_index].name = binding_name;
         out_parameter->tuple_bindings[binding_index].span = binding_span;
         out_locals[binding_index].name = binding_name;
-        out_locals[binding_index].type =
-            tuple_type->data.tuple_type.elements[binding_index];
+        out_locals[binding_index].type = binding_local_type;
         out_locals[binding_index].mutability = CM_HIR_IMMUTABLE;
         out_locals[binding_index].span = binding_span;
         out_locals[binding_index].parameter_index = parameter_index;
@@ -11252,9 +11272,12 @@ static int cm_lower_function_item(CmLowerState *state,
                     && function->abi != CM_INTERN_ID_NONE
                     && cm_lower_string_is(state, function->abi,
                         "rust-call");
-                if ((!is_binary_free_function
-                        && !is_unary_rust_call_impl_method)
-                    || record->is_foreign
+                (void)is_binary_free_function;
+                (void)is_unary_rust_call_impl_method;
+                /* M9 leniency: any bodyful, non-foreign function may
+                 * destructure a tuple parameter (alloc's
+                 * `extend_one(&mut self, (k, v): (K, V))`). */
+                if (record->is_foreign
                     || function->body == CM_AST_EXPR_NONE) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
                         cm_lower_span(state, ast_pattern->span), ast_item_id,
@@ -11273,7 +11296,11 @@ static int cm_lower_function_item(CmLowerState *state,
                         && tuple_binding_count
                             != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT)
                     || (is_unary_rust_call_impl_method
-                        && tuple_binding_count != 1u)) {
+                        && tuple_binding_count != 1u)
+                    || (!is_binary_free_function
+                        && !is_unary_rust_call_impl_method
+                        && tuple_binding_count
+                            != CM_HIR_TUPLE_PARAMETER_BINDING_COUNT)) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
                         cm_lower_span(state, ast_pattern->span), ast_item_id,
                         CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,

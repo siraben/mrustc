@@ -2512,11 +2512,24 @@ static int cm_hir_function_body_matches_signature(
                 if (local_index >= body->local_count) return 0;
                 local = &body->locals[local_index];
                 binding = &parameter->tuple_bindings[binding_index];
+                int local_type_matches;
+                const CmHirType *element_type;
+
+                element_type = cm_hir_get_type(context,
+                    tuple_type->data.tuple_type.elements[binding_index]);
+                local_type_matches = local->type
+                    == tuple_type->data.tuple_type.elements[binding_index]
+                    /* M9 leniency: `(&k, &v)` binds the pointee. */
+                    || (element_type != NULL
+                        && element_type->kind == CM_HIR_TYPE_REFERENCE_KIND
+                        && element_type->data.reference_type.mutability
+                            == CM_HIR_IMMUTABLE
+                        && local->type
+                            == element_type->data.reference_type.pointee);
                 if (local->parameter_index != index
                     || local->parameter_binding_index != binding_index
                     || local->name != binding->name
-                    || local->type
-                        != tuple_type->data.tuple_type.elements[binding_index]
+                    || !local_type_matches
                     || local->mutability != CM_HIR_IMMUTABLE
                     || local->span.source != binding->span.source
                     || local->span.start != binding->span.start
@@ -2575,9 +2588,10 @@ static int cm_hir_tuple_parameter_placement_valid(
         return 0;
     }
     if (tuple_type->data.tuple_type.element_count == 2u) {
-        return cm_hir_def_id_is_none(item->parent_definition)
-            && item->data.function_item.body != CM_HIR_BODY_NONE
-            && signature->receiver == CM_HIR_RECEIVER_NONE;
+        /* M9 leniency: any bodyful function (trait/impl methods included)
+         * may destructure a two-element tuple parameter — alloc's
+         * `extend_one(&mut self, (k, v): (K, V))`. */
+        return item->data.function_item.body != CM_HIR_BODY_NONE;
     }
     if (tuple_type->data.tuple_type.element_count != 1u
         || item->data.function_item.body == CM_HIR_BODY_NONE
