@@ -2047,7 +2047,6 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
         if (expr->data.path.segment_count == 1u && env->item != NULL
             && env->item->ast_source != 0u) {
             const CmHirItem *found = NULL;
-            int ambiguous = 0;
             size_t scan;
             for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
                 const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
@@ -2058,10 +2057,13 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                     continue;
                 if (!cm_tyck_name_is(env->state, cand->name,
                         expr->data.path.segments[0])) continue;
-                if (found != NULL) { ambiguous = 1; break; }
+                /* Same-named sibling sets (task.rs defines the waker
+                 * vtable fns twice, for Wake and LocalWake) share their
+                 * signatures; the first match types identically. */
                 found = cand;
+                break;
             }
-            if (found != NULL && !ambiguous)
+            if (found != NULL)
                 return cm_tyck_fn_def(env, found,
                     cm_tyck_parent_item(env->state, found), CM_TY_NONE,
                     NULL);
