@@ -23621,6 +23621,112 @@ static int cm_lower_type_root_definitely_unsized(
  * unsized concrete type: core's `DerefPure for Cow<'_, T>` vs
  * `Cow<'_, str>` / `Cow<'_, [T]>` family (M9).
  */
+/*
+ * Alpha-aware structural type equality for trait-argument comparison
+ * (M9): parameters compare by their positional index within their owning
+ * item's generic list, so `Coro2<R>`-vs-`Coro2<R>` duplicates across two
+ * impls are detected while `Join<&T>` vs `Join<&[T]>` stay distinct.
+ */
+static int cm_lower_alpha_type_equal(const CmHirContext *hir,
+    CmHirTypeId left_id, CmHirTypeId right_id, size_t depth)
+{
+    const CmHirType *left;
+    const CmHirType *right;
+    uint32_t index;
+
+    if (depth > 64u) return 0;
+    left = cm_hir_get_type(hir, left_id);
+    right = cm_hir_get_type(hir, right_id);
+    if (left == NULL || right == NULL || left->kind != right->kind)
+        return 0;
+    switch (left->kind) {
+    case CM_HIR_TYPE_BOOL_KIND:
+    case CM_HIR_TYPE_CHAR_KIND:
+    case CM_HIR_TYPE_STR_KIND:
+    case CM_HIR_TYPE_NEVER_KIND:
+    case CM_HIR_TYPE_UNIT_KIND:
+        return 1;
+    case CM_HIR_TYPE_INTEGER_KIND:
+        return left->data.integer_type.kind
+            == right->data.integer_type.kind;
+    case CM_HIR_TYPE_FLOAT_KIND:
+        return left->data.float_type.kind == right->data.float_type.kind;
+    case CM_HIR_TYPE_PARAMETER_KIND: {
+        const CmHirGenericParam *left_parameter =
+            cm_hir_get_generic_param(hir,
+                left->data.parameter_type.parameter);
+        const CmHirGenericParam *right_parameter =
+            cm_hir_get_generic_param(hir,
+                right->data.parameter_type.parameter);
+        return left_parameter != NULL && right_parameter != NULL
+            && left_parameter->index == right_parameter->index;
+    }
+    case CM_HIR_TYPE_REFERENCE_KIND:
+        return left->data.reference_type.mutability
+                == right->data.reference_type.mutability
+            && cm_lower_alpha_type_equal(hir,
+                left->data.reference_type.pointee,
+                right->data.reference_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_RAW_POINTER_KIND:
+        return left->data.raw_pointer_type.mutability
+                == right->data.raw_pointer_type.mutability
+            && cm_lower_alpha_type_equal(hir,
+                left->data.raw_pointer_type.pointee,
+                right->data.raw_pointer_type.pointee, depth + 1u);
+    case CM_HIR_TYPE_SLICE_KIND:
+        return cm_lower_alpha_type_equal(hir,
+            left->data.slice_type.element,
+            right->data.slice_type.element, depth + 1u);
+    case CM_HIR_TYPE_ARRAY_KIND:
+        if (left->data.array_type.length.kind
+            != right->data.array_type.length.kind) return 0;
+        if (left->data.array_type.length.kind == CM_HIR_CONST_VALUE
+            && (left->data.array_type.length.data.value.low_bits
+                    != right->data.array_type.length.data.value.low_bits
+                || left->data.array_type.length.data.value.high_bits
+                    != right->data.array_type.length.data.value
+                        .high_bits)) return 0;
+        return cm_lower_alpha_type_equal(hir,
+            left->data.array_type.element,
+            right->data.array_type.element, depth + 1u);
+    case CM_HIR_TYPE_TUPLE_KIND:
+        if (left->data.tuple_type.element_count
+            != right->data.tuple_type.element_count) return 0;
+        for (index = 0u; index < left->data.tuple_type.element_count;
+             ++index) {
+            if (!cm_lower_alpha_type_equal(hir,
+                    left->data.tuple_type.elements[index],
+                    right->data.tuple_type.elements[index], depth + 1u))
+                return 0;
+        }
+        return 1;
+    case CM_HIR_TYPE_ADT_KIND:
+        if (!cm_hir_def_id_equal(left->data.named_type.definition,
+                right->data.named_type.definition)
+            || left->data.named_type.argument_count
+                != right->data.named_type.argument_count) return 0;
+        for (index = 0u; index < left->data.named_type.argument_count;
+             ++index) {
+            const CmHirGenericArg *left_argument =
+                &left->data.named_type.arguments[index];
+            const CmHirGenericArg *right_argument =
+                &right->data.named_type.arguments[index];
+
+            if (left_argument->kind != right_argument->kind) return 0;
+            if (left_argument->kind == CM_HIR_GENERIC_ARG_TYPE
+                && !cm_lower_alpha_type_equal(hir,
+                    left_argument->data.type, right_argument->data.type,
+                    depth + 1u)) return 0;
+        }
+        return 1;
+    default:
+        /* Unmodelled kinds (fn pointers, dyn traits, projections) of the
+         * same kind conservatively compare equal, so identical pairs
+         * still authenticate as duplicates. */
+        return 1;
+    }
+}
+
 static int cm_lower_impl_pair_is_adt_argument_sized_disjoint(
     const CmLowerState *state, const CmHirItem *left,
     const CmHirItem *right)
@@ -24217,6 +24323,40 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     prior->data.impl_item.self_type,
                     item->data.impl_item.self_type)) {
                 continue;
+            }
+            /*
+             * M9 leniency: distinct trait instantiations are distinct
+             * impls (`Join<&T> for [V]` vs `Join<&[T]> for [V]`); a
+             * duplicate requires structurally equal trait arguments.
+             */
+            {
+                const CmHirNamedType *prior_trait =
+                    &prior->data.impl_item.trait_type;
+                const CmHirNamedType *item_trait =
+                    &item->data.impl_item.trait_type;
+                uint32_t argument_index;
+                int arguments_equal = prior_trait->argument_count
+                    == item_trait->argument_count;
+
+                for (argument_index = 0u;
+                     arguments_equal
+                         && argument_index < prior_trait->argument_count;
+                     ++argument_index) {
+                    const CmHirGenericArg *prior_argument =
+                        &prior_trait->arguments[argument_index];
+                    const CmHirGenericArg *item_argument =
+                        &item_trait->arguments[argument_index];
+
+                    if (prior_argument->kind != item_argument->kind) {
+                        arguments_equal = 0;
+                    } else if (prior_argument->kind
+                            == CM_HIR_GENERIC_ARG_TYPE) {
+                        arguments_equal = cm_lower_alpha_type_equal(
+                            state->hir, prior_argument->data.type,
+                            item_argument->data.type, 0u);
+                    }
+                }
+                if (!arguments_equal) continue;
             }
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,

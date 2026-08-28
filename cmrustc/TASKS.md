@@ -3019,3 +3019,21 @@ positive blanket (`!Iterator for Box<[I], A>` vs
 conflict now fires only for exactly equal self types.  Minicore:
 a blanket-plus-negative pair lowers and types (18/18, 0 errors).
 Lanes + ASan green.
+
+M9-03 twentieth pass / MILESTONE (2026-08-28): the full cross-crate
+pipeline runs end-to-end.  With the trait-argument guard —
+"duplicate exact" and same-polarity overlap require structurally
+alpha-equal trait arguments (positional parameter equality,
+same-kind-unhandled compares equal) — alloc's `Join<&T>` vs
+`Join<&[T]>` family admits, and census25 completed every stage:
+**alloc HIR lowering 0 errors** (42,158 items, 24,797 bodies across
+both crates, hir-lower 5s), body-expand 664/664, ubody
+21,613/24,797 lowered, tyck 20,136 typed / 424 error nodes /
+275,537 expressions.  M9-03's HIR acceptance (alloc lowers against
+in-memory core with zero errors) is met.  Closed-world fixtures
+whose authentications exceed rustc semantics moved to the lenient
+contract (fn-ptr non-self bound, chained parameter overlaps,
+open/closed trait-argument providers, TryFrom conservative loop).
+Next frontier: ubody failed=3,184 "unexpanded macro invocation in
+body" — with-core mode never body-expands the core graph; core's
+bodies retain expression macros.  Lanes + ASan green.
