@@ -3118,3 +3118,11 @@ Census35 (2026-08-28): 372 -> 370 error nodes — the receiver
 normalization landed but barely fired; the SliceIndex projections
 evidently miss inside cm_tyck_normalize itself.  Targeted trace
 re-running on the new binary to capture the normalize-miss reason.
+
+Inner-lookup normalization (2026-08-28): the receiver
+normalization moved into cm_tyck_lookup_assoc_in — the method-call
+candidate loop calls the inner lookup directly and bypassed the
+wrapper, so btree's projection receivers still reached matching
+raw.  All seven lookup callers now normalize (root plus one
+reference/pointer layer).  Minicore 24/24.  Lanes + ASan green;
+census re-running.
