@@ -1228,6 +1228,16 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 cm_umir_opaque_names[(size_t)expr->kind]);
         break;
     }
+    if (builder->tb != NULL && builder->tb->unsize_targets != NULL
+        && builder->tb->unsize_targets[id] != CM_TY_NONE
+        && builder->blocked == NULL) {
+        /* The value coerces to a trait object here: build the pair. */
+        CmTyId target = builder->tb->unsize_targets[id];
+        CmUMirLocalId fat = cm_umir_new_local(builder, target);
+        cm_umir_push_operands(builder, fat, CM_UMIR_RVALUE_UNSIZE, id,
+            target, &destination, 1u);
+        destination = fat;
+    }
     builder->depth -= 1u;
     return destination;
 }

@@ -76,6 +76,8 @@ typedef struct CmTyckLoop {
 } CmTyckLoop;
 
 typedef struct CmTyckEnv {
+    /* Expression whose value is being coerced (unsize recording). */
+    CmUExprId coerce_site;
     CmTyckState *state;
     const CmUBody *ub;
     CmTyckBody *out;
@@ -172,6 +174,7 @@ void cm_tyck_set_destroy(CmTyckSet *set)
         cm_free(body->pat_types);
         cm_free(body->local_types);
         cm_free(body->method_targets);
+        cm_free(body->unsize_targets);
     }
     cm_vec_destroy(&set->storage);
     cm_vec_destroy(&set->bodies);
@@ -2121,6 +2124,18 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
 
 static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected);
 
+/* Coerce the value of expression `site`: an `&T -> &dyn Trait` unsize
+ * found on the way is recorded against it. */
+static int cm_tyck_coerce_at(CmTyckEnv *env, CmUExprId site, CmTyId actual,
+    CmTyId expected)
+{
+    int ok;
+    env->coerce_site = site;
+    ok = cm_tyck_coerce(env, actual, expected);
+    env->coerce_site = CM_U_EXPR_NONE;
+    return ok;
+}
+
 static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
 {
     CmTyArena *arena = env->state->arena;
@@ -2246,7 +2261,12 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         if (ap != NULL && ep != NULL && ap->kind == CM_TY_ARRAY
             && ep->kind == CM_TY_SLICE)
             return cm_ty_unify(arena, ap->children[0], ep->children[0]);
-        if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) return 1;
+        if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) {
+            if (ap->kind != CM_TY_DYN && env->coerce_site != CM_U_EXPR_NONE
+                && env->out != NULL && env->out->unsize_targets != NULL)
+                env->out->unsize_targets[env->coerce_site] = expected;
+            return 1;
+        }
         /* Unsize through a reference to one ADT application:
          * `&PolymorphicIter<[T; N]>` coerces to `&PolymorphicIter<[T]>`
          * (core's array iter unsize helpers). */
@@ -2712,8 +2732,8 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             ? call_arg_types[index]
             : cm_tyck_expr(env, expr->data.call.arguments[index],
                 arg_expected);
-        if (known && index < count && !cm_tyck_coerce(env, actual,
-                params[index])) {
+        if (known && index < count && !cm_tyck_coerce_at(env,
+                expr->data.call.arguments[index], actual, params[index])) {
             cm_tyck_debug_pair(env, "call argument", actual, params[index]);
             cm_tyck_debug_span(env, expr);
             cm_tyck_error(env, "call argument type mismatch");
@@ -3120,7 +3140,9 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
             ? arg_types[index]
             : cm_tyck_expr(env, expr->data.method_call.arguments[index],
                 arg_expected);
-        if (slot < count && !cm_tyck_coerce(env, actual, params[slot]))
+        if (slot < count && !cm_tyck_coerce_at(env,
+                expr->data.method_call.arguments[index], actual,
+                params[slot]))
             {
                 cm_tyck_debug_pair(env, "method argument", actual,
                     params[first_arg + index]);
@@ -3246,7 +3268,7 @@ static CmTyId cm_tyck_struct_literal(CmTyckEnv *env, const CmUExpr *expr)
         {
             CmTyId actual = cm_tyck_expr(env, field->value, expected);
             if (expected != CM_TY_NONE
-                && !cm_tyck_coerce(env, actual, expected)) {
+                && !cm_tyck_coerce_at(env, field->value, actual, expected)) {
                 cm_tyck_debug_pair(env, "struct-field", actual, expected);
                 cm_tyck_debug_span(env, expr);
                 cm_tyck_error(env, "struct field type mismatch");
@@ -3475,7 +3497,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                     : init != CM_TY_NONE ? init
                     : cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
                 if (declared != CM_TY_NONE && init != CM_TY_NONE
-                    && !cm_tyck_coerce(env, init, declared)) {
+                    && !cm_tyck_coerce_at(env,
+                        stmt->data.let_stmt.initializer, init, declared)) {
                     cm_tyck_debug_pair(env, "let-init", init, declared);
                     cm_tyck_debug_span(env,
                         cm_ubody_get_expr(env->ub,
@@ -3865,7 +3888,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         if (expr->data.flow.value != CM_U_EXPR_NONE) {
             CmTyId value = cm_tyck_expr(env, expr->data.flow.value,
                 env->return_type);
-            if (!cm_tyck_coerce(env, value, env->return_type))
+            if (!cm_tyck_coerce_at(env, expr->data.flow.value, value,
+                    env->return_type))
                 cm_tyck_error(env, "return type mismatch");
         }
         result = arena->never;
@@ -4418,6 +4442,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
         sizeof(CmTyId));
     out->method_targets = (CmHirDefId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmHirDefId));
+    out->unsize_targets = (CmTyId *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(CmTyId));
     item = cm_tyck_item(state, hir_body->origin.definition);
     env.item = item;
     env.parent = cm_tyck_parent_item(state, item);

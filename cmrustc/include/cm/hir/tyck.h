@@ -29,6 +29,10 @@ typedef struct CmTyckBody {
     /* Chosen method definition per METHOD_CALL expression (none when
      * unresolved); MIR emission renders the callee symbol from it. */
     CmHirDefId *method_targets;
+    /* `&T -> &dyn Trait` coercion recorded per coerced expression: the
+     * target reference type (none elsewhere); MIR emission builds the
+     * [data, vtable] pair there. */
+    CmTyId *unsize_targets;
     CmTyId return_type;
     uint32_t unresolved_nodes;
     uint32_t error_nodes;
