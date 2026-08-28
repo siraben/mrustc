@@ -692,6 +692,25 @@ int main(int argc, char **argv)
             (void)cm_import_resolver_add_dependency(&imports, "core",
                 &core_imports, &core_graph, core_result.revision);
         }
+        if (body_census_requested) {
+            /* M9-03: core bodies need expression-macro expansion too;
+             * with-core previously expanded only the target graph. */
+            CmBodyExpandOptions core_expand_options;
+            CmBodyExpandResult core_expand_result;
+
+            cm_body_expand_options_init(&core_expand_options);
+            core_expand_options.edition = CM_EDITION_2024;
+            core_expand_options.crate_identifier = "crate";
+            core_expand_options.cfg = &cfg;
+            core_expand_options.imports = &core_imports;
+            core_expand_result = cm_body_expand_graph(&core_graph,
+                core_result.revision, &core_expand_options);
+            printf("core-body-expand bodies=%lu invocations=%lu "
+                "failed=%lu\n",
+                (unsigned long)core_expand_result.bodies,
+                (unsigned long)core_expand_result.invocations,
+                (unsigned long)core_expand_result.failed);
+        }
         {
             static CmHirModuleMap core_hir_modules;
             CmHirLowerOptions core_lower_options;

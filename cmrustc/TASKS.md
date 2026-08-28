@@ -3037,3 +3037,12 @@ open/closed trait-argument providers, TryFrom conservative loop).
 Next frontier: ubody failed=3,184 "unexpanded macro invocation in
 body" — with-core mode never body-expands the core graph; core's
 bodies retain expression macros.  Lanes + ASan green.
+
+M9-03 twenty-first pass (2026-08-28): core body expansion in
+with-core mode.  The census path now runs cm_body_expand_graph on
+the core graph too (core's own imports, crate_identifier "crate")
+before core-hir lowering, so core's ~23.7k bodies get
+expression-macro expansion instead of failing ubody with
+"unexpanded macro invocation in body" (was 3,184 failures).
+Minicore acceptance unchanged (20/20).  Lanes + ASan green;
+census re-running.
