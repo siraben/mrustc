@@ -128,6 +128,11 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                         break;
                     case CM_UMIR_RVALUE_TRY_UNWRAP:
                     case CM_UMIR_RVALUE_ITER_NEXT:
+                    case CM_UMIR_RVALUE_VARIANT:
+                    case CM_UMIR_RVALUE_SLOT:
+                    case CM_UMIR_RVALUE_STORE_FIELD:
+                    case CM_UMIR_RVALUE_STORE_INDEX:
+                    case CM_UMIR_RVALUE_STORE_DEREF:
                         /* Discriminant reads + payload extraction. */
                         break;
                     case CM_UMIR_RVALUE_CLOSURE:
@@ -290,6 +295,34 @@ static const char *cm_umir_c_binary_operator(CmUBinaryOp op)
     case CM_U_BINARY_GE: return ">=";
     default: return "+";
     }
+}
+
+static unsigned int cm_umir_c_ref_depth(const CmTyckSet *tyck, CmTyId type)
+{
+    unsigned int depth = 0u;
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    while (ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR)
+            && depth < 8u) {
+        depth += 1u;
+        ty = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, ty->children[0]));
+    }
+    return depth;
+}
+
+/* `((long long *)(intptr_t)LOAD...(local))` — the slot-array base of an
+ * aggregate reached through `depth` reference layers. */
+static void cm_umir_c_render_base(CmStrBuf *output, CmUMirLocalId local,
+    unsigned int depth)
+{
+    unsigned int index;
+    cm_str_buf_append(output, "((long long *)(intptr_t)");
+    for (index = 0u; index < depth; ++index)
+        cm_str_buf_append(output, "*(long long *)(intptr_t)");
+    cm_umir_c_render_local(output, local);
+    cm_str_buf_push(output, ')');
 }
 
 static CmTyId cm_umir_c_local_type(const CmUMirBody *body,
@@ -535,19 +568,27 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         operand_abi = "long long";
                     /* `(long long)(OP (abi)local)` — balanced by
                      * construction. */
-                    cm_str_buf_append(output, "(long long)(");
-                    if (expr->data.unary.op == CM_U_UNARY_NEG)
-                        cm_str_buf_push(output, '-');
-                    else if (expr->data.unary.op == CM_U_UNARY_NOT)
-                        cm_str_buf_push(output,
-                            strcmp(operand_abi, "uint8_t") == 0
-                                ? '!' : '~');
-                    cm_str_buf_push(output, '(');
-                    cm_str_buf_append(output, operand_abi);
-                    cm_str_buf_push(output, ')');
-                    cm_umir_c_render_local(output,
-                        statement->operands[0]);
-                    cm_str_buf_push(output, ')');
+                    if (expr->data.unary.op == CM_U_UNARY_DEREF) {
+                        /* Load through the reference. */
+                        cm_str_buf_append(output,
+                            "*(long long *)(intptr_t)");
+                        cm_umir_c_render_local(output,
+                            statement->operands[0]);
+                    } else {
+                        cm_str_buf_append(output, "(long long)(");
+                        if (expr->data.unary.op == CM_U_UNARY_NEG)
+                            cm_str_buf_push(output, '-');
+                        else
+                            cm_str_buf_push(output,
+                                strcmp(operand_abi, "uint8_t") == 0
+                                    ? '!' : '~');
+                        cm_str_buf_push(output, '(');
+                        cm_str_buf_append(output, operand_abi);
+                        cm_str_buf_push(output, ')');
+                        cm_umir_c_render_local(output,
+                            statement->operands[0]);
+                        cm_str_buf_push(output, ')');
+                    }
                 } else {
                     cm_str_buf_append(output, "0 /* unary */");
                     complete = 0;
@@ -629,12 +670,64 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 break;
             }
             case CM_UMIR_RVALUE_SLOT:
-                cm_str_buf_append(output, "((long long *)(intptr_t)");
-                cm_umir_c_render_local(output, statement->operands[0]);
-                cm_str_buf_append(output, ")[");
+                cm_umir_c_render_base(output, statement->operands[0],
+                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
+                        statement->operands[0])));
+                cm_str_buf_push(output, '[');
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->immediate);
                 cm_str_buf_push(output, ']');
+                break;
+            case CM_UMIR_RVALUE_REF:
+                /* A reference is the address of the referent's slot. */
+                cm_str_buf_append(output, "(long long)(intptr_t)&");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                break;
+            case CM_UMIR_RVALUE_CAST:
+                cm_str_buf_append(output, "(long long)(");
+                cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena,
+                    statement->type));
+                cm_str_buf_push(output, ')');
+                cm_umir_c_render_local(output, statement->operands[0]);
+                break;
+            case CM_UMIR_RVALUE_STORE_FIELD: {
+                long slot = -1;
+                if (expr != NULL && expr->kind == CM_U_EXPR_TUPLE_FIELD)
+                    slot = (long)expr->data.tuple_field.index;
+                else if (expr != NULL && expr->kind == CM_U_EXPR_FIELD)
+                    slot = cm_umir_c_field_index(hir, tyck, ubodies,
+                        cm_umir_c_local_type(body, statement->operands[0]),
+                        expr->data.field.name);
+                if (slot >= 0) {
+                    cm_str_buf_append(output, "0; ");
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(
+                            body, statement->operands[0])));
+                    cm_str_buf_push(output, '[');
+                    cm_umir_c_render_number(output, (unsigned long)slot);
+                    cm_str_buf_append(output, "] = ");
+                    cm_umir_c_render_local(output, statement->operands[1]);
+                } else {
+                    cm_str_buf_append(output, "0 /* store field */");
+                    complete = 0;
+                }
+                break;
+            }
+            case CM_UMIR_RVALUE_STORE_INDEX:
+                cm_str_buf_append(output, "0; ");
+                cm_umir_c_render_base(output, statement->operands[0],
+                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
+                        statement->operands[0])));
+                cm_str_buf_push(output, '[');
+                cm_umir_c_render_local(output, statement->operands[1]);
+                cm_str_buf_append(output, "] = ");
+                cm_umir_c_render_local(output, statement->operands[2]);
+                break;
+            case CM_UMIR_RVALUE_STORE_DEREF:
+                cm_str_buf_append(output, "0; *(long long *)(intptr_t)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                cm_str_buf_append(output, " = ");
+                cm_umir_c_render_local(output, statement->operands[1]);
                 break;
             case CM_UMIR_RVALUE_FIELD: {
                 long slot = -1;
@@ -648,10 +741,10 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             expr->data.field.name);
                 }
                 if (slot >= 0) {
-                    cm_str_buf_append(output, "((long long *)(intptr_t)");
-                    cm_umir_c_render_local(output,
-                        statement->operands[0]);
-                    cm_str_buf_append(output, ")[");
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(
+                            body, statement->operands[0])));
+                    cm_str_buf_push(output, '[');
                     cm_umir_c_render_number(output, (unsigned long)slot);
                     cm_str_buf_push(output, ']');
                 } else {
@@ -660,6 +753,14 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             }
+            case CM_UMIR_RVALUE_INDEX:
+                cm_umir_c_render_base(output, statement->operands[0],
+                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
+                        statement->operands[0])));
+                cm_str_buf_push(output, '[');
+                cm_umir_c_render_local(output, statement->operands[1]);
+                cm_str_buf_push(output, ']');
+                break;
             case CM_UMIR_RVALUE_CALL: {
                 /* Callee is the first operand's defining PATH. */
                 CmHirDefId callee_def = cm_hir_def_id_none();

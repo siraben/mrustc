@@ -16,7 +16,7 @@ CMRUSTC_CC="$CC" "$PROBE" "$fixture" --emit-umir-c "$out_dir/echo.c" \
 grep -q '^emit-umir-c' "$out_dir/probe.out" || { cat "$out_dir/probe.out"; exit 1; }
 "$CC" -std=c99 -w -o "$out_dir/echo" "$out_dir/echo.c" "$harness" \
     || { echo "umir echo: C compile/link failed"; head -40 "$out_dir/echo.c"; exit 1; }
-if "$out_dir/echo"; then
+if timeout 10 "$out_dir/echo"; then
     echo "umir echo executable acceptance: ok"
 else
     echo "umir echo executable acceptance: FAILED (exit $?)"

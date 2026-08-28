@@ -60,6 +60,9 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_OFFSET_OF,     /* retained offset_of text (S10) */
     CM_UMIR_RVALUE_VARIANT,       /* enum ctor: slot[0]=immediate, fields */
     CM_UMIR_RVALUE_SLOT,          /* payload read: operands[0][immediate] */
+    CM_UMIR_RVALUE_STORE_FIELD,   /* operands[0].field(expr) = operands[1] */
+    CM_UMIR_RVALUE_STORE_INDEX,   /* operands[0][operands[1]] = operands[2] */
+    CM_UMIR_RVALUE_STORE_DEREF,   /* *operands[0] = operands[1] */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
@@ -82,6 +85,7 @@ typedef struct CmUMirStatement {
 
 typedef enum CmUMirTerminatorKind {
     CM_UMIR_TERMINATOR_RETURN = 0,
+    CM_UMIR_TERMINATOR_NONE,      /* not yet sealed (builder-internal) */
     CM_UMIR_TERMINATOR_GOTO,
     CM_UMIR_TERMINATOR_SWITCH_BOOL,
     /* Match dispatch: condition local selects among arm blocks that all

@@ -22,7 +22,7 @@ for harness in "$test_dir"/fixtures/*-harness.c; do
         && grep -q '^emit-umir-c' "$out_dir/$base.probe" \
         && "$CC" -std=c99 -w -o "$out_dir/$base" "$out_dir/$base.c" "$harness" \
             >"$out_dir/$base.cc" 2>&1 \
-        && "$out_dir/$base" >/dev/null 2>&1; then
+        && timeout 10 "$out_dir/$base" >/dev/null 2>&1; then
         pass=$((pass + 1)); echo "umir-fixture $base=pass"
     else
         fail=$((fail + 1)); echo "umir-fixture $base=fail"

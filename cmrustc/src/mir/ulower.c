@@ -320,9 +320,21 @@ static CmUMirBlockId cm_umir_new_block(CmUMirBuilder *builder)
     CmUMirBlock block;
     memset(&block, 0, sizeof(block));
     cm_vec_init(&block.statements, sizeof(CmUMirStatement));
-    block.terminator = CM_UMIR_TERMINATOR_RETURN;
+    block.terminator = CM_UMIR_TERMINATOR_NONE;
     (void)cm_vec_push(&builder->body->blocks, &block);
     return (CmUMirBlockId)(builder->body->blocks.len - 1u);
+}
+
+/* Seal the current block with a goto unless a break/continue/return
+ * already terminated it. */
+static void cm_umir_seal_goto(CmUMirBuilder *builder, CmUMirBlockId target)
+{
+    CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+        builder->current);
+    if (current == NULL || current->terminator != CM_UMIR_TERMINATOR_NONE)
+        return;
+    current->terminator = CM_UMIR_TERMINATOR_GOTO;
+    current->goto_target = target;
 }
 
 static CmUMirLocalId cm_umir_new_local(CmUMirBuilder *builder, CmTyId type)
@@ -562,11 +574,70 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     }
     case CM_U_EXPR_ASSIGN:
     case CM_U_EXPR_ASSIGN_OP: {
-        CmUMirLocalId operands[2];
-        operands[0] = cm_umir_emit_expr(builder, expr->data.assign.value);
-        operands[1] = cm_umir_emit_expr(builder, expr->data.assign.target);
-        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_ASSIGN,
-            id, type, operands, 2u);
+        const CmUExpr *target = cm_ubody_get_expr(builder->ub,
+            expr->data.assign.target);
+        CmUMirLocalId value = cm_umir_emit_expr(builder,
+            expr->data.assign.value);
+        if (expr->kind == CM_U_EXPR_ASSIGN_OP) {
+            /* `t op= v` : read the place, combine, then store. */
+            CmUMirLocalId current = cm_umir_emit_expr(builder,
+                expr->data.assign.target);
+            CmUMirLocalId combined = cm_umir_new_local(builder,
+                cm_umir_expr_type(builder, expr->data.assign.target));
+            CmUMirLocalId pair[2];
+            pair[0] = current;
+            pair[1] = value;
+            cm_umir_push_operands(builder, combined, CM_UMIR_RVALUE_BINARY,
+                id, cm_umir_expr_type(builder, expr->data.assign.target),
+                pair, 2u);
+            value = combined;
+        }
+        if (target != NULL && target->kind == CM_U_EXPR_PATH
+            && target->data.path.resolution.kind == CM_U_RESOLVED_LOCAL
+            && target->data.path.resolution.local != CM_U_LOCAL_NONE) {
+            CmUMirLocalId bound = (CmUMirLocalId)(1u
+                + target->data.path.resolution.local);
+            cm_umir_push_operands(builder, bound, CM_UMIR_RVALUE_LOCAL,
+                expr->data.assign.value,
+                cm_umir_expr_type(builder, expr->data.assign.value),
+                &value, 1u);
+        } else if (target != NULL && (target->kind == CM_U_EXPR_FIELD
+                || target->kind == CM_U_EXPR_TUPLE_FIELD)) {
+            CmUMirLocalId operands[2];
+            operands[0] = cm_umir_emit_expr(builder,
+                target->kind == CM_U_EXPR_FIELD ? target->data.field.base
+                    : target->data.tuple_field.base);
+            operands[1] = value;
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_STORE_FIELD, expr->data.assign.target,
+                type, operands, 2u);
+        } else if (target != NULL && target->kind == CM_U_EXPR_INDEX) {
+            CmUMirLocalId operands[3];
+            operands[0] = cm_umir_emit_expr(builder,
+                target->data.index.base);
+            operands[1] = cm_umir_emit_expr(builder,
+                target->data.index.index);
+            operands[2] = value;
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_STORE_INDEX, expr->data.assign.target,
+                type, operands, 3u);
+        } else if (target != NULL && target->kind == CM_U_EXPR_UNARY
+                && target->data.unary.op == CM_U_UNARY_DEREF) {
+            CmUMirLocalId operands[2];
+            operands[0] = cm_umir_emit_expr(builder,
+                target->data.unary.operand);
+            operands[1] = value;
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_STORE_DEREF, expr->data.assign.target,
+                type, operands, 2u);
+        } else {
+            CmUMirLocalId operands[2];
+            operands[0] = value;
+            operands[1] = cm_umir_emit_expr(builder,
+                expr->data.assign.target);
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_ASSIGN, id, type, operands, 2u);
+        }
         break;
     }
     case CM_U_EXPR_FIELD: {
@@ -702,12 +773,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 CM_UMIR_RVALUE_LOCAL, expr->data.if_expr.then_expr, type,
                 &then_value, 1u);
         }
-        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-            builder->current);
-        if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_GOTO;
-            current->goto_target = join;
-        }
+        cm_umir_seal_goto(builder, join);
         builder->current = else_block;
         if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE) {
             CmUMirLocalId else_value = cm_umir_emit_expr(builder,
@@ -716,12 +782,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 CM_UMIR_RVALUE_LOCAL, expr->data.if_expr.else_expr, type,
                 &else_value, 1u);
         }
-        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-            builder->current);
-        if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_GOTO;
-            current->goto_target = join;
-        }
+        cm_umir_seal_goto(builder, join);
         builder->current = join;
         break;
     }
@@ -767,12 +828,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = header;
         (void)cm_umir_emit_expr(builder, expr->data.loop_expr.body);
         if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
-        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-            builder->current);
-        if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_GOTO;
-            current->goto_target = header;
-        }
+        cm_umir_seal_goto(builder, header);
         builder->current = exit_block;
         break;
     }
@@ -806,12 +862,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = body_block;
         (void)cm_umir_emit_expr(builder, expr->data.while_expr.body);
         if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
-        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-            builder->current);
-        if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_GOTO;
-            current->goto_target = header;
-        }
+        cm_umir_seal_goto(builder, header);
         builder->current = exit_block;
         break;
     }
@@ -890,12 +941,8 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 expr->data.match_expr.arms[arm].body);
             cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_LOCAL,
                 expr->data.match_expr.arms[arm].body, type, &arm_value, 1u);
-            arm_current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-                builder->current);
-            if (arm_current != NULL) {
-                arm_current->terminator = CM_UMIR_TERMINATOR_GOTO;
-                arm_current->goto_target = join;
-            }
+            (void)arm_current;
+            cm_umir_seal_goto(builder, join);
         }
         {
             CmUMirBlock *dispatch_block = (CmUMirBlock *)cm_vec_at(
@@ -915,6 +962,97 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = join;
         break;
     }
+    case CM_U_EXPR_BREAK:
+    case CM_U_EXPR_CONTINUE: {
+        CmUMirBlock *current;
+        CmUMirBlockId target;
+        if (expr->kind == CM_U_EXPR_BREAK
+            && expr->data.flow.value != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.flow.value);
+        if (builder->loop_depth == 0u) break;
+        target = expr->kind == CM_U_EXPR_BREAK
+            ? builder->loop_exits[builder->loop_depth - 1u]
+            : builder->loop_headers[builder->loop_depth - 1u];
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = target;
+        }
+        break;
+    }
+    case CM_U_EXPR_TRY: {
+        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+            expr->data.try_expr.operand);
+        CmUMirBlockId return_block = cm_umir_new_block(builder);
+        CmUMirBlockId continue_block = cm_umir_new_block(builder);
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            current->condition = operand;
+            current->true_target = return_block;
+            current->false_target = continue_block;
+        }
+        {
+            CmUMirBlock *ret = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, return_block);
+            if (ret != NULL)
+                ret->terminator = CM_UMIR_TERMINATOR_RETURN;
+        }
+        builder->current = continue_block;
+        cm_umir_push_operands(builder, destination,
+            CM_UMIR_RVALUE_TRY_UNWRAP, id, type, &operand, 1u);
+        break;
+    }
+    case CM_U_EXPR_FOR: {
+        CmUMirBlockId header;
+        CmUMirBlockId body_block;
+        CmUMirBlockId exit_block;
+        CmUMirLocalId element;
+        CmUMirLocalId iterable = cm_umir_emit_expr(builder,
+            expr->data.for_expr.iterable);
+        header = cm_umir_new_block(builder);
+        body_block = cm_umir_new_block(builder);
+        exit_block = cm_umir_new_block(builder);
+        cm_umir_seal_goto(builder, header);
+        builder->current = header;
+        element = cm_umir_new_local(builder, type);
+        cm_umir_push_operands(builder, element, CM_UMIR_RVALUE_ITER_NEXT,
+            id, type, &iterable, 1u);
+        {
+            CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, builder->current);
+            if (current != NULL) {
+                current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                current->condition = element;
+                current->true_target = body_block;
+                current->false_target = exit_block;
+            }
+        }
+        if (builder->loop_depth < 64u) {
+            builder->loop_headers[builder->loop_depth] = header;
+            builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_depth += 1u;
+        }
+        builder->current = body_block;
+        (void)cm_umir_emit_expr(builder, expr->data.for_expr.body);
+        if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
+        cm_umir_seal_goto(builder, header);
+        builder->current = exit_block;
+        break;
+    }
+    case CM_U_EXPR_CLOSURE:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CLOSURE, id,
+            type);
+        break;
+    case CM_U_EXPR_ASM:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_ASM, id, type);
+        break;
+    case CM_U_EXPR_OFFSET_OF:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_OFFSET_OF, id,
+            type);
+        break;
     default:
         /* Every other kind is representable later: emit an opaque
          * assignment that keeps the type and source expression. */
@@ -1004,6 +1142,17 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
             if (builder.blocked == NULL && root_local != 0u)
                 cm_umir_push_operands(&builder, 0u, CM_UMIR_RVALUE_LOCAL,
                     ub->root, return_type, &root_local, 1u);
+        }
+        {
+            size_t seal_index;
+            for (seal_index = 0u; seal_index < body.blocks.len;
+                    ++seal_index) {
+                CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(
+                    &body.blocks, seal_index);
+                if (block != NULL
+                    && block->terminator == CM_UMIR_TERMINATOR_NONE)
+                    block->terminator = CM_UMIR_TERMINATOR_RETURN;
+            }
         }
         if (builder.blocked == NULL) {
             body.complete = 1;
