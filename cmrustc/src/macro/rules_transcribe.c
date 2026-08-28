@@ -630,7 +630,11 @@ static int cm_rules_emit_nodes(CmRulesTranscribeState *state,
                 int wrap = metavariable_binding != NULL
                     && metavariable_binding->fragment
                         == CM_MACRO_FRAGMENT_EXPR
-                    && capture->first_node != CM_TT_ID_NONE;
+                    && capture->first_node != CM_TT_ID_NONE
+                    /* Single-token captures stay bare: they are already
+                     * unambiguous and nested macro matchers expect the
+                     * raw token, not a parenthesized group. */
+                    && capture->first_node != capture->last_node;
                 if (wrap) {
                     cm_rules_emit_space(state);
                     cm_str_buf_append(state->output, "(");

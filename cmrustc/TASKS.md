@@ -3079,3 +3079,11 @@ reparses as calling the literal `0` (alloc's impl_is_zero! — the
 16-sample "non-function callee: i32" family).  Minicore: an
 immediately-invoked closure through an expr capture types (22/22,
 0 errors).  Lanes + ASan green; census re-running.
+
+Grouping refinement (2026-08-28): census30 showed the parentheses
+cut error nodes 404 -> 372 (body-sig 75 -> 59) but broke 1,504
+body expansions — nested macro forwarding (`inner!($e)`) matches
+raw tokens, not parenthesized groups.  The wrap now applies only
+to multi-token expr captures; single tokens stay bare (already
+unambiguous, matcher-compatible).  Minicore: 22/22, ubody 0
+failures.  Lanes + ASan green; census re-running.
