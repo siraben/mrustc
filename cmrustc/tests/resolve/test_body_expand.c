@@ -258,8 +258,10 @@ static void test_positive_chain(void)
             result.first_failure_macro, result.first_failure_reason);
     check(result.remaining_asm == 0u && result.remaining_builtin == 0u,
         "positive fixture left invocations behind");
-    /* twice x4, local, panic_2021, pre x2, shared x2, ub::twice */
-    check(result.expanded_rules >= 11u, "macro_rules expansions missing");
+    /* twice x4, local, pre x2, shared x2, ub::twice — panic! expands
+     * its panicking::panic_fmt/format_args chain directly now, so
+     * panic_2021 no longer contributes a rules expansion. */
+    check(result.expanded_rules >= 10u, "macro_rules expansions missing");
     /* assert x3, cfg, panic, stringify, concat, const_format_args x3 */
     check(result.expanded_builtin >= 13u, "builtin expansions missing");
     check(cm_module_graph_get_root(&fixture.graph, &root)

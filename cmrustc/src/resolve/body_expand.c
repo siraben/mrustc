@@ -1071,19 +1071,44 @@ static int cm_body_builtin_assert(CmBodyExpandState *state, CmAstExprId id,
     return cm_body_finish_generated(state, id, name, span);
 }
 
-/* `panic!`/`unreachable!` forward to the edition-specific core macro. */
+/*
+ * `panic!`/`unreachable!`, expanded directly with core's panic_2021
+ * semantics: the edition macros are macros-2.0 `pub macro` items the
+ * dependency artifact does not index, so forwarding to them left 43
+ * alloc bodies with "macro is not in scope".
+ */
 static int cm_body_builtin_forward(CmBodyExpandState *state, CmAstExprId id,
     const char *name, const char *arguments, size_t length, CmAstSpan span,
     const char *target, const char *prefix)
 {
+    int is_unreachable = strcmp(target, "unreachable") == 0;
+    const char *trimmed = arguments;
+    size_t trimmed_length = length;
+    cm_body_trim(&trimmed, &trimmed_length);
     cm_str_buf_clear(&state->text);
+    if (trimmed_length == 0u) {
+        cm_str_buf_append(&state->text, prefix);
+        cm_str_buf_append(&state->text, is_unreachable
+            ? "::panicking::panic(\"internal error: entered unreachable "
+              "code\")"
+            : "::panicking::panic(\"explicit panic\")");
+        return cm_body_finish_generated(state, id, name, span);
+    }
+    if (!is_unreachable && trimmed_length != 0u && trimmed[0] == '"'
+        && cm_body_literal_text(trimmed, trimmed_length, &state->scratch)) {
+        /* A lone string literal panics with the literal itself. */
+        cm_str_buf_append(&state->text, prefix);
+        cm_str_buf_append(&state->text, "::panicking::panic(");
+        cm_str_buf_append_n(&state->text, trimmed, trimmed_length);
+        cm_str_buf_append(&state->text, ")");
+        return cm_body_finish_generated(state, id, name, span);
+    }
     cm_str_buf_append(&state->text, prefix);
-    cm_str_buf_append(&state->text, "::panic::");
-    cm_str_buf_append(&state->text, target);
-    cm_str_buf_append(&state->text, state->options->edition
-            >= CM_EDITION_2021 ? "_2021!(" : "_2015!(");
+    cm_str_buf_append(&state->text, "::panicking::panic_fmt(");
+    cm_str_buf_append(&state->text, prefix);
+    cm_str_buf_append(&state->text, "::format_args!(");
     cm_str_buf_append_n(&state->text, arguments, length);
-    cm_str_buf_append(&state->text, ")");
+    cm_str_buf_append(&state->text, "))");
     return cm_body_finish_generated(state, id, name, span);
 }
 
