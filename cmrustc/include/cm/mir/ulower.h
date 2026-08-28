@@ -53,6 +53,8 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_FIELD,         /* place read: field / tuple index */
     CM_UMIR_RVALUE_AGGREGATE,     /* tuple / array / struct literal */
     CM_UMIR_RVALUE_INDEX,         /* place read: base[index] */
+    CM_UMIR_RVALUE_TRY_UNWRAP,    /* ok-value of a ? operand */
+    CM_UMIR_RVALUE_ITER_NEXT,     /* next() element in a for loop */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

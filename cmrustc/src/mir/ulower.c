@@ -287,6 +287,10 @@ typedef struct CmUMirBuilder {
     const char *blocked;
     unsigned int depth;
     CmMirULowerResult *census;
+    /* Innermost-first loop context for break/continue targets. */
+    CmUMirBlockId loop_headers[64];
+    CmUMirBlockId loop_exits[64];
+    unsigned int loop_depth;
 } CmUMirBuilder;
 
 /* Census: opaque statements tallied by originating expression kind, so
@@ -543,8 +547,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             current->terminator = CM_UMIR_TERMINATOR_GOTO;
             current->goto_target = header;
         }
+        if (builder->loop_depth < 64u) {
+            builder->loop_headers[builder->loop_depth] = header;
+            builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_depth += 1u;
+        }
         builder->current = header;
         (void)cm_umir_emit_expr(builder, expr->data.loop_expr.body);
+        if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL) {
@@ -576,8 +586,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             current->true_target = body_block;
             current->false_target = exit_block;
         }
+        if (builder->loop_depth < 64u) {
+            builder->loop_headers[builder->loop_depth] = header;
+            builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_depth += 1u;
+        }
         builder->current = body_block;
         (void)cm_umir_emit_expr(builder, expr->data.while_expr.body);
+        if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL) {
@@ -650,6 +666,98 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             }
         }
         builder->current = join;
+        break;
+    }
+    case CM_U_EXPR_BREAK:
+    case CM_U_EXPR_CONTINUE: {
+        CmUMirBlock *current;
+        CmUMirBlockId target;
+        if (expr->kind == CM_U_EXPR_BREAK
+            && expr->data.flow.value != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.flow.value);
+        if (builder->loop_depth == 0u) break;
+        target = expr->kind == CM_U_EXPR_BREAK
+            ? builder->loop_exits[builder->loop_depth - 1u]
+            : builder->loop_headers[builder->loop_depth - 1u];
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = target;
+        }
+        break;
+    }
+    case CM_U_EXPR_TRY: {
+        /* `expr?` : evaluate, then branch to an early-return block on
+         * the error arm; the ok value continues. */
+        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+            expr->data.try_expr.operand);
+        CmUMirBlockId return_block = cm_umir_new_block(builder);
+        CmUMirBlockId continue_block = cm_umir_new_block(builder);
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            current->condition = operand;
+            current->true_target = return_block;
+            current->false_target = continue_block;
+        }
+        {
+            CmUMirBlock *ret = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, return_block);
+            if (ret != NULL)
+                ret->terminator = CM_UMIR_TERMINATOR_RETURN;
+        }
+        builder->current = continue_block;
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_TRY_UNWRAP, id,
+            type);
+        break;
+    }
+    case CM_U_EXPR_FOR: {
+        /* Desugared iterator loop: header calls next, switch continues
+         * into the body with the element or exits. */
+        CmUMirBlockId header;
+        CmUMirBlockId body_block;
+        CmUMirBlockId exit_block;
+        CmUMirLocalId element;
+        CmUMirBlock *current;
+        (void)cm_umir_emit_expr(builder, expr->data.for_expr.iterable);
+        header = cm_umir_new_block(builder);
+        body_block = cm_umir_new_block(builder);
+        exit_block = cm_umir_new_block(builder);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = header;
+        element = cm_umir_new_local(builder, type);
+        cm_umir_push(builder, element, CM_UMIR_RVALUE_ITER_NEXT, id,
+            type);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            current->condition = element;
+            current->true_target = body_block;
+            current->false_target = exit_block;
+        }
+        if (builder->loop_depth < 64u) {
+            builder->loop_headers[builder->loop_depth] = header;
+            builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_depth += 1u;
+        }
+        builder->current = body_block;
+        (void)cm_umir_emit_expr(builder, expr->data.for_expr.body);
+        if (builder->loop_depth != 0u) builder->loop_depth -= 1u;
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = exit_block;
         break;
     }
     default:
