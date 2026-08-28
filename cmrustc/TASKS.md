@@ -3096,3 +3096,10 @@ multi-token expr capture only when a paren group follows
 (`$f(args)`); all other splices stay raw.  Minicore: 22/22, ubody
 clean, impl_is_zero-style call still fixed.  Lanes + ASan green;
 census re-running.
+
+Census32 (2026-08-28): the call-position grouping rule verified
+whole-crate — core-body-expand 23,683 bodies **0 failed**, ubody
+**24,797/24,797** lowered, tyck 23,097 typed / **372 error nodes**
+(404 before grouping; the 32-node gain held with no expansion
+breakage).  Top residue families: body-sig 59, field-not-found 49,
+method-not-found 41, call-arg 37, method-arg 28.
