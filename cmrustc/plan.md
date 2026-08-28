@@ -26,7 +26,7 @@ Pipeline stages and status, in execution order:
 | Untyped bodies `ubody` (M9-02) | **done** | 22,524/22,524 bodies, 321,714 exprs, **33** unresolved paths |
 | Inference typeck (M9-04) | two-crate residue mode | core-only run 64: **151** error nodes; two-crate (core+alloc, census26): 23,071/24,797 typed, **420** error nodes over 352,590 exprs |
 | Whole-context snapshot + multi-crate (M9-03) | **HIR/ubody acceptance met** (census26, `16e5eab2`) | alloc lowers against in-memory core with 0 errors (42,158 items); ubody 24,797/24,797; dependency imports/prelude/macros/coherence leniencies landed |
-| MIR (M9-05) | todo | legacy G3 MIR exists for a small subset only |
+| MIR (M9-05) | **ubody->u-MIR expression coverage complete** (census81, `ab7a3023`) | all 23,326 typed bodies emit complete u-MIR (260,137 statements, 46,280 blocks, empty opaque histogram); const eval (S7) and the 1,616 partial-tyck bodies remain |
 | C codegen + link (M9-06) | todo | legacy G3 codegen exists for a small subset only |
 
 Key numbers trend (whole-core `--body-census`): typed 16,339 → 17,101 →
