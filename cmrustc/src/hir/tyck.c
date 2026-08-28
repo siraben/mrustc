@@ -2994,6 +2994,9 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         }
         if (found.item == NULL) candidate = CM_TY_NONE;
     }
+    if (found.item != NULL && env->out->method_targets != NULL
+        && id != CM_U_EXPR_NONE)
+        env->out->method_targets[id] = found.item->definition;
     if (candidate == CM_TY_NONE || found.item == NULL) {
         const CmTy *rt = cm_ty_get(arena, cm_ty_resolve(arena,
             cm_tyck_normalize(env, receiver, 0u)));
@@ -4378,6 +4381,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
         sizeof(CmTyId));
     out->local_types = (CmTyId *)cm_alloc_zeroed(ub->locals.len + 1u,
         sizeof(CmTyId));
+    out->method_targets = (CmHirDefId *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(CmHirDefId));
     item = cm_tyck_item(state, hir_body->origin.definition);
     env.item = item;
     env.parent = cm_tyck_parent_item(state, item);

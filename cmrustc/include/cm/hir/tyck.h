@@ -26,6 +26,9 @@ typedef struct CmTyckBody {
     CmTyId *expr_types;   /* indexed by expression id (1-based) */
     CmTyId *pat_types;
     CmTyId *local_types;
+    /* Chosen method definition per METHOD_CALL expression (none when
+     * unresolved); MIR emission renders the callee symbol from it. */
+    CmHirDefId *method_targets;
     CmTyId return_type;
     uint32_t unresolved_nodes;
     uint32_t error_nodes;

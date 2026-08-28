@@ -191,6 +191,38 @@ static void cm_umir_c_render_local(CmStrBuf *output, CmUMirLocalId local)
     cm_umir_c_render_number(output, (unsigned long)local);
 }
 
+static void cm_umir_c_render_symbol(CmStrBuf *output, CmHirDefId def)
+{
+    cm_str_buf_append(output, "cm_u_");
+    cm_umir_c_render_number(output, (unsigned long)def.crate_id);
+    cm_str_buf_push(output, '_');
+    cm_umir_c_render_number(output, (unsigned long)def.index);
+}
+
+/* `{ long long sym(); _dest = sym(args...); }` — the block-scope
+ * prototype keeps every call site self-contained for the syntax check;
+ * definitions are linked once instances are collected. */
+static int cm_umir_c_render_call(CmStrBuf *output,
+    const CmUMirStatement *statement, CmHirDefId def, uint32_t first_arg)
+{
+    uint32_t index;
+    if (cm_hir_def_id_is_none(def) || statement->operand_overflow != 0u)
+        return 0;
+    cm_str_buf_append(output, "0; { long long ");
+    cm_umir_c_render_symbol(output, def);
+    cm_str_buf_append(output, "(); ");
+    cm_umir_c_render_local(output, statement->destination);
+    cm_str_buf_append(output, " = ");
+    cm_umir_c_render_symbol(output, def);
+    cm_str_buf_push(output, '(');
+    for (index = first_arg; index < statement->operand_count; ++index) {
+        if (index != first_arg) cm_str_buf_append(output, ", ");
+        cm_umir_c_render_local(output, statement->operands[index]);
+    }
+    cm_str_buf_append(output, "); }");
+    return 1;
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
     const CmUBody *ub, const CmTyckSet *tyck, unsigned long symbol)
 {
@@ -280,6 +312,33 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
                     complete = 0;
                 }
                 break;
+            case CM_UMIR_RVALUE_CALL: {
+                /* Callee is the first operand's defining PATH. */
+                CmHirDefId def = cm_hir_def_id_none();
+                const CmUExpr *callee = expr == NULL
+                        || expr->kind != CM_U_EXPR_CALL ? NULL
+                    : cm_ubody_get_expr(ub, expr->data.call.callee);
+                if (callee != NULL && callee->kind == CM_U_EXPR_PATH
+                    && callee->data.path.resolution.kind
+                        == CM_U_RESOLVED_DEFINITION)
+                    def = callee->data.path.resolution.definition;
+                if (!cm_umir_c_render_call(output, statement, def, 1u)) {
+                    cm_str_buf_append(output, "0 /* call */");
+                    complete = 0;
+                }
+                break;
+            }
+            case CM_UMIR_RVALUE_METHOD_CALL: {
+                const CmTyckBody *tb = cm_tyck_get(tyck, body->source);
+                CmHirDefId def = tb == NULL || tb->method_targets == NULL
+                    ? cm_hir_def_id_none()
+                    : tb->method_targets[statement->expr];
+                if (!cm_umir_c_render_call(output, statement, def, 0u)) {
+                    cm_str_buf_append(output, "0 /* method */");
+                    complete = 0;
+                }
+                break;
+            }
             default:
                 cm_str_buf_append(output, "0 /* todo */");
                 complete = 0;
