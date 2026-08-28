@@ -3002,3 +3002,12 @@ same-class overlaps still reject.  Seven lower-test fixtures moved
 to the lenient contract.  Minicore: a dependency-ADT impl head
 (`impl Marker2 for core::RcLike<Eyepatch>`) lowers and types
 (15/15, 0 errors).  Lanes + ASan green.
+
+M9-03 eighteenth pass (2026-08-28): ADT-argument implicit-Sized
+disjointness.  Two ordered-generic impls over the same ADT head are
+disjoint when one binds an owned, implicitly Sized type parameter
+at an argument position where the other holds a definitely unsized
+concrete type — core's `DerefPure for Cow<'_, T>` vs
+`Cow<'_, str>` / `Cow<'_, [T]>` family (borrow.rs:354 frontier).
+Minicore: the CowLike<T>/CowLike<str> impl pair lowers and types
+(17/17, 0 errors).  Lanes + ASan green.

@@ -23615,6 +23615,74 @@ static int cm_lower_type_root_definitely_unsized(
     return 0;
 }
 
+/*
+ * One ADT-argument position separates the pair when one side binds an
+ * owned, implicitly Sized type parameter and the other holds a definitely
+ * unsized concrete type: core's `DerefPure for Cow<'_, T>` vs
+ * `Cow<'_, str>` / `Cow<'_, [T]>` family (M9).
+ */
+static int cm_lower_impl_pair_is_adt_argument_sized_disjoint(
+    const CmLowerState *state, const CmHirItem *left,
+    const CmHirItem *right)
+{
+    const CmHirType *left_type;
+    const CmHirType *right_type;
+    uint32_t index;
+    uint32_t count;
+
+    left_type = cm_hir_get_type(state->hir,
+        left->data.impl_item.self_type);
+    right_type = cm_hir_get_type(state->hir,
+        right->data.impl_item.self_type);
+    if (left_type == NULL || right_type == NULL
+        || left_type->kind != CM_HIR_TYPE_ADT_KIND
+        || right_type->kind != CM_HIR_TYPE_ADT_KIND
+        || !cm_hir_def_id_equal(left_type->data.named_type.definition,
+            right_type->data.named_type.definition)) {
+        return 0;
+    }
+    count = left_type->data.named_type.argument_count;
+    if (right_type->data.named_type.argument_count < count)
+        count = right_type->data.named_type.argument_count;
+    for (index = 0u; index < count; ++index) {
+        const CmHirGenericArg *left_argument =
+            &left_type->data.named_type.arguments[index];
+        const CmHirGenericArg *right_argument =
+            &right_type->data.named_type.arguments[index];
+        uint32_t side;
+
+        if (left_argument->kind != CM_HIR_GENERIC_ARG_TYPE
+            || right_argument->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
+        for (side = 0u; side < 2u; ++side) {
+            const CmHirGenericArg *parameter_side = side == 0u
+                ? left_argument : right_argument;
+            const CmHirGenericArg *concrete_side = side == 0u
+                ? right_argument : left_argument;
+            const CmHirItem *parameter_owner = side == 0u ? left : right;
+            const CmHirType *argument_type = cm_hir_get_type(state->hir,
+                parameter_side->data.type);
+            const CmHirGenericParam *parameter;
+
+            if (argument_type == NULL
+                || argument_type->kind != CM_HIR_TYPE_PARAMETER_KIND
+                || !cm_lower_impl_owned_parameter(state->hir,
+                    parameter_owner,
+                    argument_type->data.parameter_type.parameter,
+                    CM_HIR_GENERIC_TYPE)) continue;
+            parameter = cm_hir_get_generic_param(state->hir,
+                argument_type->data.parameter_type.parameter);
+            if (parameter != NULL
+                && parameter->kind == CM_HIR_GENERIC_TYPE
+                && !parameter->is_relaxed_sized
+                && cm_lower_type_root_definitely_unsized(state,
+                    concrete_side->data.type)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int cm_lower_impl_pair_is_implicit_sized_disjoint(
     const CmLowerState *state, CmLowerImplSelfClass left_class,
     const CmHirItem *left, CmLowerImplSelfClass right_class,
@@ -23626,7 +23694,9 @@ static int cm_lower_impl_pair_is_implicit_sized_disjoint(
         || (cm_lower_impl_is_sized_single_parameter(state, right_class,
                 right)
             && cm_lower_type_root_definitely_unsized(state,
-                left->data.impl_item.self_type));
+                left->data.impl_item.self_type))
+        || cm_lower_impl_pair_is_adt_argument_sized_disjoint(state, left,
+            right);
 }
 
 static int cm_lower_type_root_definitely_not_fn_pointer(
