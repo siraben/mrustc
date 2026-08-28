@@ -29,7 +29,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
  * a construct fell back to a placeholder comment; the text is always
  * syntactically complete either way.
  */
-int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
-    const CmUBody *ub, const CmTyckSet *tyck, unsigned long symbol);
+int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
+    const CmUMirBody *body, const CmUBody *ub, const CmTyckSet *tyck);
 
 #endif

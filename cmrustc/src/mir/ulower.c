@@ -557,8 +557,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             }
         }
         if (builder->blocked == NULL
-            && expr->data.block.tail != CM_U_EXPR_NONE)
-            (void)cm_umir_emit_expr(builder, expr->data.block.tail);
+            && expr->data.block.tail != CM_U_EXPR_NONE) {
+            CmUMirLocalId tail = cm_umir_emit_expr(builder,
+                expr->data.block.tail);
+            /* The block's value is its tail's value. */
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_LOCAL, expr->data.block.tail, type, &tail,
+                1u);
+        }
         break;
     }
     case CM_U_EXPR_IF: {
@@ -576,7 +582,13 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             current->false_target = else_block;
         }
         builder->current = then_block;
-        (void)cm_umir_emit_expr(builder, expr->data.if_expr.then_expr);
+        {
+            CmUMirLocalId then_value = cm_umir_emit_expr(builder,
+                expr->data.if_expr.then_expr);
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_LOCAL, expr->data.if_expr.then_expr, type,
+                &then_value, 1u);
+        }
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL) {
@@ -584,8 +596,13 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             current->goto_target = join;
         }
         builder->current = else_block;
-        if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE)
-            (void)cm_umir_emit_expr(builder, expr->data.if_expr.else_expr);
+        if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE) {
+            CmUMirLocalId else_value = cm_umir_emit_expr(builder,
+                expr->data.if_expr.else_expr);
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_LOCAL, expr->data.if_expr.else_expr, type,
+                &else_value, 1u);
+        }
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL) {
@@ -932,7 +949,13 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
             }
         }
         builder.current = cm_umir_new_block(&builder);
-        (void)cm_umir_emit_expr(&builder, ub->root);
+        {
+            CmUMirLocalId root_local = cm_umir_emit_expr(&builder,
+                ub->root);
+            if (builder.blocked == NULL && root_local != 0u)
+                cm_umir_push_operands(&builder, 0u, CM_UMIR_RVALUE_LOCAL,
+                    ub->root, return_type, &root_local, 1u);
+        }
         if (builder.blocked == NULL) {
             body.complete = 1;
             result.lowered += 1u;

@@ -1,6 +1,7 @@
 #include "cm/codegen/umir_c.h"
 
 #include <string.h>
+#include "cm/hir/model.h"
 
 /*
  * M9-06 v1: dry C-emission over u-MIR — no output buffer yet.  Every
@@ -223,17 +224,82 @@ static int cm_umir_c_render_call(CmStrBuf *output,
     return 1;
 }
 
-int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
-    const CmUBody *ub, const CmTyckSet *tyck, unsigned long symbol)
+/* ABI type at an exported boundary: exact C integer widths. */
+static const char *cm_umir_c_abi_type(const CmTyArena *arena, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)arena, cm_ty_resolve((CmTyArena *)arena,
+            type));
+    if (ty == NULL) return "long long";
+    switch (ty->kind) {
+    case CM_TY_BOOL: return "uint8_t";
+    case CM_TY_CHAR: return "uint32_t";
+    case CM_TY_TUPLE: return ty->count == 0u ? "void" : "long long";
+    case CM_TY_INT:
+        switch ((CmHirIntType)ty->a) {
+        case CM_HIR_INT_I8: return "int8_t";
+        case CM_HIR_INT_I16: return "int16_t";
+        case CM_HIR_INT_I32: return "int32_t";
+        case CM_HIR_INT_I64: return "int64_t";
+        case CM_HIR_INT_ISIZE: return "intptr_t";
+        case CM_HIR_INT_U8: return "uint8_t";
+        case CM_HIR_INT_U16: return "uint16_t";
+        case CM_HIR_INT_U32: return "uint32_t";
+        case CM_HIR_INT_U64: return "uint64_t";
+        case CM_HIR_INT_USIZE: return "uintptr_t";
+        default: return "long long";
+        }
+    default: return "long long";
+    }
+}
+
+static int cm_umir_c_item_has_attribute(const CmHirContext *hir,
+    const CmHirItem *item, const char *name)
+{
+    uint32_t index;
+    size_t length = strlen(name);
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmInternedString *text = cm_interner_get(&hir->strings,
+            item->attributes[index].metadata);
+        if (text != NULL && text->len == length
+            && memcmp(text->bytes, name, length) == 0) return 1;
+    }
+    return 0;
+}
+
+int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
+    const CmUMirBody *body, const CmUBody *ub, const CmTyckSet *tyck)
 {
     size_t block_index;
     size_t local_index;
+    uint32_t param;
     int complete = 1;
-    if (output == NULL || body == NULL || ub == NULL || tyck == NULL)
-        return 0;
-    cm_str_buf_append(output, "static void cm_u_body_");
-    cm_umir_c_render_number(output, symbol);
-    cm_str_buf_append(output, "(void)\n{\n");
+    const CmHirBody *hir_body;
+    const CmHirItem *owner = NULL;
+    const CmTyckBody *tb;
+    CmHirDefId def;
+    if (output == NULL || hir == NULL || body == NULL || ub == NULL
+        || tyck == NULL) return 0;
+    hir_body = cm_hir_get_body(hir, body->source);
+    if (hir_body == NULL) return 0;
+    def = hir_body->origin.definition;
+    {
+        const CmHirDefinition *record = cm_hir_lookup_definition(hir, def);
+        if (record != NULL && record->kind == CM_HIR_DEFINITION_ITEM)
+            owner = cm_hir_get_item(hir, record->entity.item_id);
+    }
+    tb = cm_tyck_get(tyck, body->source);
+    /* Definition: uniform long long slots; parameters arrive as p<i>. */
+    cm_str_buf_append(output, "long long ");
+    cm_umir_c_render_symbol(output, def);
+    cm_str_buf_push(output, '(');
+    if (ub->parameter_count == 0u) cm_str_buf_append(output, "void");
+    for (param = 0u; param < ub->parameter_count; ++param) {
+        if (param != 0u) cm_str_buf_append(output, ", ");
+        cm_str_buf_append(output, "long long p");
+        cm_umir_c_render_number(output, (unsigned long)param);
+    }
+    cm_str_buf_append(output, ")\n{\n");
     for (local_index = 0u; local_index < body->locals.len;
             ++local_index) {
         const CmTyId *type = (const CmTyId *)cm_vec_at_const(
@@ -244,6 +310,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
         cm_str_buf_push(output, ' ');
         cm_umir_c_render_local(output, (CmUMirLocalId)local_index);
         cm_str_buf_append(output, " = 0;\n");
+    }
+    /* Prologue: bind parameter patterns to their local slots. */
+    for (param = 0u; param < ub->parameter_count; ++param) {
+        const CmUPat *pat = cm_ubody_get_pat(ub, ub->parameters[param]);
+        if (pat == NULL || pat->kind != CM_U_PAT_BINDING
+            || pat->data.binding.local == CM_U_LOCAL_NONE) continue;
+        cm_str_buf_append(output, "    ");
+        cm_umir_c_render_local(output,
+            (CmUMirLocalId)(1u + pat->data.binding.local));
+        cm_str_buf_append(output, " = p");
+        cm_umir_c_render_number(output, (unsigned long)param);
+        cm_str_buf_append(output, ";\n");
     }
     for (block_index = 0u; block_index < body->blocks.len;
             ++block_index) {
@@ -314,26 +392,51 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
                 break;
             case CM_UMIR_RVALUE_CALL: {
                 /* Callee is the first operand's defining PATH. */
-                CmHirDefId def = cm_hir_def_id_none();
+                CmHirDefId callee_def = cm_hir_def_id_none();
                 const CmUExpr *callee = expr == NULL
                         || expr->kind != CM_U_EXPR_CALL ? NULL
                     : cm_ubody_get_expr(ub, expr->data.call.callee);
-                if (callee != NULL && callee->kind == CM_U_EXPR_PATH
+                {
+                    const CmTyckBody *ctb = cm_tyck_get(tyck, body->source);
+                    if (ctb != NULL && ctb->method_targets != NULL
+                        && expr != NULL && expr->kind == CM_U_EXPR_CALL)
+                        callee_def = ctb->method_targets[expr->data.call.callee];
+                }
+                if (cm_hir_def_id_is_none(callee_def) && callee != NULL
+                    && callee->kind == CM_U_EXPR_PATH
                     && callee->data.path.resolution.kind
                         == CM_U_RESOLVED_DEFINITION)
-                    def = callee->data.path.resolution.definition;
-                if (!cm_umir_c_render_call(output, statement, def, 1u)) {
+                    callee_def = callee->data.path.resolution.definition;
+                if (cm_hir_def_id_is_none(callee_def) && expr != NULL
+                    && expr->kind == CM_U_EXPR_CALL) {
+                    /* Any callee shape: its tyck type is a FN_DEF that
+                     * names the definition. */
+                    const CmTyckBody *ctb = cm_tyck_get(tyck,
+                        body->source);
+                    if (ctb != NULL && ctb->expr_types != NULL) {
+                        const CmTy *callee_ty = cm_ty_get(
+                            (CmTyArena *)&tyck->arena,
+                            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                ctb->expr_types[expr->data.call.callee]));
+                        if (callee_ty != NULL
+                            && callee_ty->kind == CM_TY_FN_DEF)
+                            callee_def = callee_ty->def;
+                    }
+                }
+                if (!cm_umir_c_render_call(output, statement, callee_def, 1u)) {
                     cm_str_buf_append(output, "0 /* call */");
                     complete = 0;
                 }
                 break;
             }
             case CM_UMIR_RVALUE_METHOD_CALL: {
-                const CmTyckBody *tb = cm_tyck_get(tyck, body->source);
-                CmHirDefId def = tb == NULL || tb->method_targets == NULL
+                const CmTyckBody *mtb = cm_tyck_get(tyck, body->source);
+                CmHirDefId method_def = mtb == NULL
+                        || mtb->method_targets == NULL
                     ? cm_hir_def_id_none()
-                    : tb->method_targets[statement->expr];
-                if (!cm_umir_c_render_call(output, statement, def, 0u)) {
+                    : mtb->method_targets[statement->expr];
+                if (!cm_umir_c_render_call(output, statement, method_def,
+                        0u)) {
                     cm_str_buf_append(output, "0 /* method */");
                     complete = 0;
                 }
@@ -349,7 +452,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
         cm_str_buf_append(output, "    ");
         switch (block->terminator) {
         case CM_UMIR_TERMINATOR_RETURN:
-            cm_str_buf_append(output, "return;\n");
+            cm_str_buf_append(output, "return _l0;\n");
             break;
         case CM_UMIR_TERMINATOR_GOTO:
             cm_str_buf_append(output, "goto _b");
@@ -372,10 +475,55 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
             cm_str_buf_append(output, ";\n");
             break;
         default:
-            cm_str_buf_append(output, "return;\n");
+            cm_str_buf_append(output, "return _l0;\n");
             break;
         }
     }
     cm_str_buf_append(output, "}\n");
+    /* `#[no_mangle]` exports: an ABI-typed wrapper with the item name. */
+    if (owner != NULL && owner->kind == CM_HIR_ITEM_FUNCTION
+        && cm_umir_c_item_has_attribute(hir, owner, "no_mangle")) {
+        const CmInternedString *name = cm_interner_get(&hir->strings,
+            owner->name);
+        const char *ret_abi = tb == NULL ? "long long"
+            : cm_umir_c_abi_type(&tyck->arena, tb->return_type);
+        if (name != NULL) {
+            cm_str_buf_append(output, ret_abi);
+            cm_str_buf_push(output, ' ');
+            cm_str_buf_append_n(output, (const char *)name->bytes,
+                name->len);
+            cm_str_buf_push(output, '(');
+            if (ub->parameter_count == 0u) cm_str_buf_append(output, "void");
+            for (param = 0u; param < ub->parameter_count; ++param) {
+                const CmUPat *pat = cm_ubody_get_pat(ub,
+                    ub->parameters[param]);
+                CmTyId ptype = pat != NULL
+                        && pat->kind == CM_U_PAT_BINDING
+                        && tb != NULL && tb->local_types != NULL
+                        && pat->data.binding.local != CM_U_LOCAL_NONE
+                    ? tb->local_types[pat->data.binding.local]
+                    : CM_TY_NONE;
+                if (param != 0u) cm_str_buf_append(output, ", ");
+                cm_str_buf_append(output,
+                    cm_umir_c_abi_type(&tyck->arena, ptype));
+                cm_str_buf_append(output, " a");
+                cm_umir_c_render_number(output, (unsigned long)param);
+            }
+            cm_str_buf_append(output, ")\n{\n    ");
+            if (strcmp(ret_abi, "void") != 0) {
+                cm_str_buf_append(output, "return (");
+                cm_str_buf_append(output, ret_abi);
+                cm_str_buf_push(output, ')');
+            }
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_push(output, '(');
+            for (param = 0u; param < ub->parameter_count; ++param) {
+                if (param != 0u) cm_str_buf_append(output, ", ");
+                cm_str_buf_append(output, "(long long)a");
+                cm_umir_c_render_number(output, (unsigned long)param);
+            }
+            cm_str_buf_append(output, ");\n}\n");
+        }
+    }
     return complete;
 }

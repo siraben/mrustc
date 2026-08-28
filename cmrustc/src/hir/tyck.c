@@ -1800,9 +1800,12 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             cm_tyck_error(env, "path names no HIR item");
             return arena->error;
         }
-        if (item->kind == CM_HIR_ITEM_FUNCTION)
+        if (item->kind == CM_HIR_ITEM_FUNCTION) {
+            if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
+                env->out->method_targets[id] = item->definition;
             return cm_tyck_fn_def(env, item, cm_tyck_parent_item(env->state,
                 item), CM_TY_NONE, NULL);
+        }
         if (item->kind == CM_HIR_ITEM_CONST || item->kind == CM_HIR_ITEM_STATIC)
             return cm_ty_from_hir(arena, env->state->hir,
                 item->data.value_item.type);
@@ -1979,10 +1982,14 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return self_type;
         }
         if (cm_tyck_lookup_assoc(env, self_type, last, &found)) {
-            if (found.item->kind == CM_HIR_ITEM_FUNCTION)
+            if (found.item->kind == CM_HIR_ITEM_FUNCTION) {
+                if (env->out->method_targets != NULL
+                    && id != CM_U_EXPR_NONE)
+                    env->out->method_targets[id] = found.item->definition;
                 return cm_ty_with_def(arena, CM_TY_FN_DEF,
                     found.item->definition, found.instance.types,
                     found.instance.count);
+            }
             if (found.item->kind == CM_HIR_ITEM_CONST)
                 return cm_ty_subst(arena, cm_ty_from_hir(arena,
                     env->state->hir, found.item->data.value_item.type),
@@ -2660,6 +2667,11 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                     if (retry.item->kind == CM_HIR_ITEM_FUNCTION
                         && cm_tyck_method_args_compatible(env, &retry,
                             call_arg_types, call_arg_count)) {
+                        if (env->out->method_targets != NULL
+                            && expr->data.call.callee != CM_U_EXPR_NONE)
+                            env->out->method_targets[
+                                expr->data.call.callee]
+                                    = retry.item->definition;
                         count = cm_tyck_signature(env, retry.item,
                             cm_tyck_subst_of(&retry.instance), params,
                             CM_TYCK_MAX_ARGS, &ret);

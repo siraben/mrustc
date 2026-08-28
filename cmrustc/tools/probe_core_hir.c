@@ -601,6 +601,7 @@ int main(int argc, char **argv)
 
     int source_map_requested;
     const char *with_core_path = NULL;
+    const char *emit_umir_c_path = NULL;
     static CmHirLowerDependency hir_dependencies[1];
     static CmUBodyDependency body_dependencies[1];
     static const CmDependencyMacroArtifact *expand_artifacts[1];
@@ -621,6 +622,11 @@ int main(int argc, char **argv)
             } else if (strcmp(argv[argument_index], "--with-core") == 0
                     && argument_index + 1 < argc) {
                 with_core_path = argv[argument_index + 1];
+                ++argument_index;
+            } else if (strcmp(argv[argument_index], "--emit-umir-c") == 0
+                    && argument_index + 1 < argc) {
+                emit_umir_c_path = argv[argument_index + 1];
+                body_census_requested = 1;
                 ++argument_index;
             } else {
                 bad_arguments = 1;
@@ -1149,11 +1155,41 @@ int main(int argc, char **argv)
                             sample_ub = cm_ubody_get(&ubodies,
                                 sample_body->source);
                             if (sample_ub == NULL) continue;
-                            if (cm_umir_c_render_body(&rendered,
-                                    sample_body, sample_ub, &tyck,
-                                    (unsigned long)sample_index))
+                            if (cm_umir_c_render_body(&rendered, &hir,
+                                    sample_body, sample_ub, &tyck))
                                 render_complete += 1u;
                             sampled += 1u;
+                        }
+                        if (emit_umir_c_path != NULL) {
+                            CmStrBuf unit;
+                            size_t unit_index;
+                            FILE *unit_file;
+                            cm_str_buf_init(&unit);
+                            cm_str_buf_append(&unit, "#include <stdint.h>\n");
+                            for (unit_index = 0u;
+                                    unit_index < umir.bodies.len;
+                                    ++unit_index) {
+                                const CmUMirBody *unit_body =
+                                    (const CmUMirBody *)cm_vec_at_const(
+                                        &umir.bodies, unit_index);
+                                const CmUBody *unit_ub;
+                                if (unit_body == NULL
+                                    || !unit_body->complete) continue;
+                                unit_ub = cm_ubody_get(&ubodies,
+                                    unit_body->source);
+                                if (unit_ub == NULL) continue;
+                                (void)cm_umir_c_render_body(&unit, &hir,
+                                    unit_body, unit_ub, &tyck);
+                            }
+                            unit_file = fopen(emit_umir_c_path, "w");
+                            if (unit_file != NULL) {
+                                (void)fwrite(unit.data, 1u, unit.len,
+                                    unit_file);
+                                (void)fclose(unit_file);
+                            }
+                            printf("emit-umir-c path=%s bytes=%lu\n",
+                                emit_umir_c_path, (unsigned long)unit.len);
+                            cm_str_buf_destroy(&unit);
                         }
                         {
                             FILE *render_file = fopen(
