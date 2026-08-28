@@ -16,6 +16,12 @@ typedef struct CmMirULowerState {
     const CmTyckBody *tb;
     const char *blocked;
     unsigned int depth;
+    /* Desugar-able control flow encountered: counted, not blocking. */
+    int needs_match;
+    int needs_try;
+    int needs_range;
+    int needs_for;
+    int needs_let_condition;
 } CmMirULowerState;
 
 static void cm_mir_ulower_expr(CmMirULowerState *state, CmUExprId id);
@@ -154,20 +160,36 @@ static void cm_mir_ulower_expr(CmMirULowerState *state, CmUExprId id)
         break;
     case CM_U_EXPR_QUALIFIED_PATH:
         break;
-    case CM_U_EXPR_MATCH:
-        state->blocked = "match";
+    case CM_U_EXPR_MATCH: {
+        uint32_t arm;
+        state->needs_match = 1;
+        cm_mir_ulower_expr(state, expr->data.match_expr.scrutinee);
+        for (arm = 0u; arm < expr->data.match_expr.arm_count
+                && state->blocked == NULL; ++arm) {
+            cm_mir_ulower_expr(state,
+                expr->data.match_expr.arms[arm].guard);
+            cm_mir_ulower_expr(state,
+                expr->data.match_expr.arms[arm].body);
+        }
         break;
+    }
     case CM_U_EXPR_TRY:
-        state->blocked = "try";
+        state->needs_try = 1;
+        cm_mir_ulower_expr(state, expr->data.try_expr.operand);
         break;
     case CM_U_EXPR_RANGE:
-        state->blocked = "range";
+        state->needs_range = 1;
+        cm_mir_ulower_expr(state, expr->data.range.start);
+        cm_mir_ulower_expr(state, expr->data.range.end);
         break;
     case CM_U_EXPR_LET:
-        state->blocked = "let-condition";
+        state->needs_let_condition = 1;
+        cm_mir_ulower_expr(state, expr->data.let_expr.initializer);
         break;
     case CM_U_EXPR_FOR:
-        state->blocked = "for";
+        state->needs_for = 1;
+        cm_mir_ulower_expr(state, expr->data.for_expr.iterable);
+        cm_mir_ulower_expr(state, expr->data.for_expr.body);
         break;
     case CM_U_EXPR_CLOSURE:
         state->blocked = "closure";
@@ -223,6 +245,16 @@ CmMirULowerResult cm_mir_ulower_all(const CmHirContext *hir,
         cm_mir_ulower_expr(&state, ub->root);
         if (state.blocked == NULL) {
             result.lowered += 1u;
+            if (state.needs_match)
+                cm_mir_ulower_count(&result, "needs-match");
+            if (state.needs_try)
+                cm_mir_ulower_count(&result, "needs-try");
+            if (state.needs_range)
+                cm_mir_ulower_count(&result, "needs-range");
+            if (state.needs_for)
+                cm_mir_ulower_count(&result, "needs-for");
+            if (state.needs_let_condition)
+                cm_mir_ulower_count(&result, "needs-let-condition");
         } else {
             result.blocked += 1u;
             cm_mir_ulower_count(&result, state.blocked);
