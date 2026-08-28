@@ -327,18 +327,34 @@ static CmUMirLocalId cm_umir_new_local(CmUMirBuilder *builder, CmTyId type)
     return (CmUMirLocalId)(builder->body->locals.len - 1u);
 }
 
-static void cm_umir_push(CmUMirBuilder *builder, CmUMirLocalId destination,
-    CmUMirRvalueKind kind, CmUExprId expr, CmTyId type)
+static void cm_umir_push_operands(CmUMirBuilder *builder,
+    CmUMirLocalId destination, CmUMirRvalueKind kind, CmUExprId expr,
+    CmTyId type, const CmUMirLocalId *operands, uint32_t operand_count)
 {
     CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
         builder->current);
     CmUMirStatement statement;
+    uint32_t index;
+    uint32_t stored = operand_count > CM_UMIR_STATEMENT_OPERANDS
+        ? CM_UMIR_STATEMENT_OPERANDS : operand_count;
     if (block == NULL) return;
+    memset(&statement, 0, sizeof(statement));
     statement.destination = destination;
     statement.kind = kind;
     statement.expr = expr;
     statement.type = type;
+    for (index = 0u; index < stored; ++index)
+        statement.operands[index] = operands[index];
+    statement.operand_count = stored;
+    statement.operand_overflow = operand_count - stored;
     (void)cm_vec_push(&block->statements, &statement);
+}
+
+static void cm_umir_push(CmUMirBuilder *builder, CmUMirLocalId destination,
+    CmUMirRvalueKind kind, CmUExprId expr, CmTyId type)
+{
+    cm_umir_push_operands(builder, destination, kind, expr, type, NULL,
+        0u);
 }
 
 static CmTyId cm_umir_expr_type(const CmUMirBuilder *builder, CmUExprId id)
@@ -373,59 +389,97 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     case CM_U_EXPR_PATH:
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
         break;
-    case CM_U_EXPR_BINARY:
-        (void)cm_umir_emit_expr(builder, expr->data.binary.left);
-        (void)cm_umir_emit_expr(builder, expr->data.binary.right);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_BINARY, id,
-            type);
+    case CM_U_EXPR_BINARY: {
+        CmUMirLocalId operands[2];
+        operands[0] = cm_umir_emit_expr(builder, expr->data.binary.left);
+        operands[1] = cm_umir_emit_expr(builder, expr->data.binary.right);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_BINARY,
+            id, type, operands, 2u);
         break;
-    case CM_U_EXPR_UNARY:
-        (void)cm_umir_emit_expr(builder, expr->data.unary.operand);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_UNARY, id, type);
+    }
+    case CM_U_EXPR_UNARY: {
+        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+            expr->data.unary.operand);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_UNARY,
+            id, type, &operand, 1u);
         break;
+    }
     case CM_U_EXPR_CALL: {
         uint32_t index;
-        (void)cm_umir_emit_expr(builder, expr->data.call.callee);
-        for (index = 0u; index < expr->data.call.argument_count; ++index)
-            (void)cm_umir_emit_expr(builder,
+        CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
+        uint32_t recorded = 0u;
+        CmUMirLocalId callee = cm_umir_emit_expr(builder,
+            expr->data.call.callee);
+        if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+            operands[recorded++] = callee;
+        for (index = 0u; index < expr->data.call.argument_count; ++index) {
+            CmUMirLocalId argument = cm_umir_emit_expr(builder,
                 expr->data.call.arguments[index]);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CALL, id, type);
+            if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                operands[recorded++] = argument;
+        }
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_CALL,
+            id, type, operands,
+            1u + expr->data.call.argument_count);
         break;
     }
     case CM_U_EXPR_METHOD_CALL: {
         uint32_t index;
-        (void)cm_umir_emit_expr(builder, expr->data.method_call.receiver);
+        CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
+        uint32_t recorded = 0u;
+        CmUMirLocalId receiver = cm_umir_emit_expr(builder,
+            expr->data.method_call.receiver);
+        if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+            operands[recorded++] = receiver;
         for (index = 0u; index < expr->data.method_call.argument_count;
-                ++index)
-            (void)cm_umir_emit_expr(builder,
+                ++index) {
+            CmUMirLocalId argument = cm_umir_emit_expr(builder,
                 expr->data.method_call.arguments[index]);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_METHOD_CALL, id,
-            type);
+            if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                operands[recorded++] = argument;
+        }
+        cm_umir_push_operands(builder, destination,
+            CM_UMIR_RVALUE_METHOD_CALL, id, type, operands,
+            1u + expr->data.method_call.argument_count);
         break;
     }
-    case CM_U_EXPR_REF:
-        (void)cm_umir_emit_expr(builder, expr->data.ref.operand);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_REF, id, type);
+    case CM_U_EXPR_REF: {
+        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+            expr->data.ref.operand);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_REF,
+            id, type, &operand, 1u);
         break;
-    case CM_U_EXPR_CAST:
-        (void)cm_umir_emit_expr(builder, expr->data.cast.value);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CAST, id, type);
+    }
+    case CM_U_EXPR_CAST: {
+        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+            expr->data.cast.value);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_CAST,
+            id, type, &operand, 1u);
         break;
+    }
     case CM_U_EXPR_ASSIGN:
-    case CM_U_EXPR_ASSIGN_OP:
-        (void)cm_umir_emit_expr(builder, expr->data.assign.value);
-        (void)cm_umir_emit_expr(builder, expr->data.assign.target);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_ASSIGN, id,
-            type);
+    case CM_U_EXPR_ASSIGN_OP: {
+        CmUMirLocalId operands[2];
+        operands[0] = cm_umir_emit_expr(builder, expr->data.assign.value);
+        operands[1] = cm_umir_emit_expr(builder, expr->data.assign.target);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_ASSIGN,
+            id, type, operands, 2u);
         break;
-    case CM_U_EXPR_FIELD:
-        (void)cm_umir_emit_expr(builder, expr->data.field.base);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_FIELD, id, type);
+    }
+    case CM_U_EXPR_FIELD: {
+        CmUMirLocalId base = cm_umir_emit_expr(builder,
+            expr->data.field.base);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_FIELD,
+            id, type, &base, 1u);
         break;
-    case CM_U_EXPR_TUPLE_FIELD:
-        (void)cm_umir_emit_expr(builder, expr->data.tuple_field.base);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_FIELD, id, type);
+    }
+    case CM_U_EXPR_TUPLE_FIELD: {
+        CmUMirLocalId base = cm_umir_emit_expr(builder,
+            expr->data.tuple_field.base);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_FIELD,
+            id, type, &base, 1u);
         break;
+    }
     case CM_U_EXPR_TUPLE:
     case CM_U_EXPR_ARRAY: {
         uint32_t index;
@@ -516,11 +570,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = join;
         break;
     }
-    case CM_U_EXPR_INDEX:
-        (void)cm_umir_emit_expr(builder, expr->data.index.base);
-        (void)cm_umir_emit_expr(builder, expr->data.index.index);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_INDEX, id, type);
+    case CM_U_EXPR_INDEX: {
+        CmUMirLocalId operands[2];
+        operands[0] = cm_umir_emit_expr(builder, expr->data.index.base);
+        operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_INDEX,
+            id, type, operands, 2u);
         break;
+    }
     case CM_U_EXPR_QUALIFIED_PATH:
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
         break;

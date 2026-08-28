@@ -61,11 +61,19 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
+#define CM_UMIR_STATEMENT_OPERANDS 4u
+
 typedef struct CmUMirStatement {
     CmUMirLocalId destination;
     CmUMirRvalueKind kind;
     CmUExprId expr;      /* originating ubody expression */
     CmTyId type;         /* tyck arena type of the destination */
+    /* Operand locals in evaluation order; calls with more arguments
+     * carry the overflow count so emission can recover them from the
+     * preceding statements. */
+    CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
+    uint32_t operand_count;
+    uint32_t operand_overflow;
 } CmUMirStatement;
 
 typedef enum CmUMirTerminatorKind {
