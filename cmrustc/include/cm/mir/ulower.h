@@ -55,6 +55,9 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_INDEX,         /* place read: base[index] */
     CM_UMIR_RVALUE_TRY_UNWRAP,    /* ok-value of a ? operand */
     CM_UMIR_RVALUE_ITER_NEXT,     /* next() element in a for loop */
+    CM_UMIR_RVALUE_CLOSURE,       /* closure value; body lowered at use */
+    CM_UMIR_RVALUE_ASM,           /* retained inline-asm text (S10) */
+    CM_UMIR_RVALUE_OFFSET_OF,     /* retained offset_of text (S10) */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

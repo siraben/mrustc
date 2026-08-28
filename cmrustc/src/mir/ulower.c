@@ -760,6 +760,19 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = exit_block;
         break;
     }
+    case CM_U_EXPR_CLOSURE:
+        /* The capture list and body lower when instances are collected
+         * (S11); the value is a marker carrying its expression. */
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CLOSURE, id,
+            type);
+        break;
+    case CM_U_EXPR_ASM:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_ASM, id, type);
+        break;
+    case CM_U_EXPR_OFFSET_OF:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_OFFSET_OF, id,
+            type);
+        break;
     default:
         /* Every other kind is representable later: emit an opaque
          * assignment that keeps the type and source expression. */
