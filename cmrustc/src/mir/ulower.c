@@ -512,6 +512,146 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = join;
         break;
     }
+    case CM_U_EXPR_INDEX:
+        (void)cm_umir_emit_expr(builder, expr->data.index.base);
+        (void)cm_umir_emit_expr(builder, expr->data.index.index);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_INDEX, id, type);
+        break;
+    case CM_U_EXPR_QUALIFIED_PATH:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
+        break;
+    case CM_U_EXPR_RANGE:
+        if (expr->data.range.start != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.range.start);
+        if (expr->data.range.end != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.range.end);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
+            type);
+        break;
+    case CM_U_EXPR_ARRAY_REPEAT:
+        (void)cm_umir_emit_expr(builder, expr->data.repeat.value);
+        (void)cm_umir_emit_expr(builder, expr->data.repeat.length);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
+            type);
+        break;
+    case CM_U_EXPR_LOOP: {
+        CmUMirBlockId header = cm_umir_new_block(builder);
+        CmUMirBlockId exit_block = cm_umir_new_block(builder);
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = header;
+        (void)cm_umir_emit_expr(builder, expr->data.loop_expr.body);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = exit_block;
+        break;
+    }
+    case CM_U_EXPR_WHILE: {
+        CmUMirBlockId header = cm_umir_new_block(builder);
+        CmUMirBlockId body_block = cm_umir_new_block(builder);
+        CmUMirBlockId exit_block = cm_umir_new_block(builder);
+        CmUMirLocalId condition;
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = header;
+        condition = cm_umir_emit_expr(builder,
+            expr->data.while_expr.condition);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            current->condition = condition;
+            current->true_target = body_block;
+            current->false_target = exit_block;
+        }
+        builder->current = body_block;
+        (void)cm_umir_emit_expr(builder, expr->data.while_expr.body);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = header;
+        }
+        builder->current = exit_block;
+        break;
+    }
+    case CM_U_EXPR_MATCH: {
+        uint32_t arm;
+        CmUMirLocalId scrutinee = cm_umir_emit_expr(builder,
+            expr->data.match_expr.scrutinee);
+        CmUMirBlockId join = cm_umir_new_block(builder);
+        CmUMirBlockId first_arm = 0u;
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        for (arm = 0u; arm < expr->data.match_expr.arm_count
+                && builder->blocked == NULL; ++arm) {
+            CmUMirBlockId arm_block = cm_umir_new_block(builder);
+            CmUMirBlock *arm_current;
+            if (arm == 0u) first_arm = arm_block;
+            builder->current = arm_block;
+            if (expr->data.match_expr.arms[arm].guard != CM_U_EXPR_NONE)
+                (void)cm_umir_emit_expr(builder,
+                    expr->data.match_expr.arms[arm].guard);
+            (void)cm_umir_emit_expr(builder,
+                expr->data.match_expr.arms[arm].body);
+            arm_current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                builder->current);
+            if (arm_current != NULL) {
+                arm_current->terminator = CM_UMIR_TERMINATOR_GOTO;
+                arm_current->goto_target = join;
+            }
+        }
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current == join ? join : builder->current);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks, 0u);
+        (void)current;
+        {
+            CmUMirBlock *dispatch = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, builder->current);
+            (void)dispatch;
+        }
+        {
+            /* The dispatch block is where the scrutinee was emitted. */
+            CmUMirBlock *origin = NULL;
+            size_t block_index;
+            for (block_index = 0u; block_index < builder->body->blocks.len;
+                    ++block_index) {
+                CmUMirBlock *candidate = (CmUMirBlock *)cm_vec_at(
+                    &builder->body->blocks, block_index);
+                if (candidate != NULL && candidate->terminator
+                        == CM_UMIR_TERMINATOR_RETURN
+                    && block_index != (size_t)join) {
+                    origin = candidate;
+                }
+            }
+            (void)origin;
+        }
+        {
+            CmUMirBlock *dispatch_block = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, builder->current);
+            if (dispatch_block != NULL
+                && expr->data.match_expr.arm_count != 0u) {
+                dispatch_block->terminator = CM_UMIR_TERMINATOR_SWITCH;
+                dispatch_block->condition = scrutinee;
+                dispatch_block->true_target = first_arm;
+                dispatch_block->goto_target = join;
+            }
+        }
+        builder->current = join;
+        break;
+    }
     default:
         /* Every other kind is representable later: emit an opaque
          * assignment that keeps the type and source expression. */

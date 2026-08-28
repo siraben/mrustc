@@ -52,6 +52,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_ASSIGN,        /* store value into target place */
     CM_UMIR_RVALUE_FIELD,         /* place read: field / tuple index */
     CM_UMIR_RVALUE_AGGREGATE,     /* tuple / array / struct literal */
+    CM_UMIR_RVALUE_INDEX,         /* place read: base[index] */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
@@ -65,7 +66,11 @@ typedef struct CmUMirStatement {
 typedef enum CmUMirTerminatorKind {
     CM_UMIR_TERMINATOR_RETURN = 0,
     CM_UMIR_TERMINATOR_GOTO,
-    CM_UMIR_TERMINATOR_SWITCH_BOOL
+    CM_UMIR_TERMINATOR_SWITCH_BOOL,
+    /* Match dispatch: condition local selects among arm blocks that all
+     * rejoin at goto_target; arm targets live in the arm blocks chain
+     * starting at true_target. */
+    CM_UMIR_TERMINATOR_SWITCH
 } CmUMirTerminatorKind;
 
 typedef struct CmUMirBlock {
