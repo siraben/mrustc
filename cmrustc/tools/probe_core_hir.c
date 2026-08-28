@@ -971,6 +971,70 @@ int main(int argc, char **argv)
                         tyck_result.error_classes[class_index].reason,
                         (unsigned long)
                             tyck_result.error_classes[class_index].count);
+                /* M9-05 entry census: which typed bodies are ready for
+                 * ubody->MIR lowering, and what blocks the rest. */
+                {
+                    size_t mir_ready = 0u;
+                    size_t mir_not_typed = 0u;
+                    size_t mir_skipped = 0u;
+                    size_t mir_asm = 0u;
+                    size_t mir_offset_of = 0u;
+                    size_t mir_closure = 0u;
+                    size_t mir_unsupported = 0u;
+                    size_t body_index;
+                    for (body_index = 1u;
+                            body_index <= tyck_result.bodies;
+                            ++body_index) {
+                        const CmTyckBody *tb = cm_tyck_get(&tyck,
+                            (CmHirBodyId)body_index);
+                        const CmUBody *ub = cm_ubody_get(&ubodies,
+                            (CmHirBodyId)body_index);
+                        size_t expr_index;
+                        int has_asm = 0;
+                        int has_offset = 0;
+                        int has_closure = 0;
+                        int has_unsupported = 0;
+                        if (tb == NULL || ub == NULL
+                            || tb->status == CM_TYCK_BODY_SKIPPED) {
+                            mir_skipped += 1u;
+                            continue;
+                        }
+                        if (tb->status != CM_TYCK_BODY_TYPED) {
+                            mir_not_typed += 1u;
+                            continue;
+                        }
+                        for (expr_index = 1u;
+                                expr_index <= ub->expressions.len;
+                                ++expr_index) {
+                            const CmUExpr *expr = cm_ubody_get_expr(ub,
+                                (CmUExprId)expr_index);
+                            if (expr == NULL) continue;
+                            if (expr->kind == CM_U_EXPR_ASM) has_asm = 1;
+                            else if (expr->kind == CM_U_EXPR_OFFSET_OF)
+                                has_offset = 1;
+                            else if (expr->kind == CM_U_EXPR_CLOSURE)
+                                has_closure = 1;
+                            else if (expr->kind == CM_U_EXPR_UNSUPPORTED)
+                                has_unsupported = 1;
+                        }
+                        if (has_asm) mir_asm += 1u;
+                        else if (has_offset) mir_offset_of += 1u;
+                        else if (has_unsupported) mir_unsupported += 1u;
+                        else if (has_closure) mir_closure += 1u;
+                        else mir_ready += 1u;
+                    }
+                    printf("mir-ready bodies=%lu of=%lu not_typed=%lu"
+                        " closure=%lu asm=%lu offset_of=%lu"
+                        " unsupported=%lu skipped=%lu\n",
+                        (unsigned long)mir_ready,
+                        (unsigned long)tyck_result.bodies,
+                        (unsigned long)mir_not_typed,
+                        (unsigned long)mir_closure,
+                        (unsigned long)mir_asm,
+                        (unsigned long)mir_offset_of,
+                        (unsigned long)mir_unsupported,
+                        (unsigned long)mir_skipped);
+                }
                 cm_tyck_set_destroy(&tyck);
             }
             cm_ubody_set_destroy(&ubodies);
