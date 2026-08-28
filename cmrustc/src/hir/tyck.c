@@ -2175,6 +2175,8 @@ static int cm_tyck_lenient_eq(CmTyckEnv *env, CmTyId left, CmTyId right,
     return 1;
 }
 
+static CmTyId cm_tyck_user_deref(CmTyckEnv *env, CmTyId type);
+
 static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
 {
     CmTyArena *arena = env->state->arena;
@@ -2219,6 +2221,16 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
         if (a == NULL || e == NULL) return 0;
         if (cm_ty_unify(arena, a->children[0], e->children[0])) return 1;
+        /* Deref coercion at argument position: `&Vec<u8>` passed where
+         * `&[u8]` is expected goes through the pointee's `deref`. */
+        if (ap != NULL && ap->kind == CM_TY_ADT) {
+            CmTyId derefed = cm_tyck_user_deref(env, a->children[0]);
+            a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+            e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+            if (a == NULL || e == NULL) return 0;
+            if (derefed != CM_TY_NONE
+                && cm_ty_unify(arena, derefed, e->children[0])) return 1;
+        }
         return cm_tyck_lenient_eq(env, actual, expected, 0u);
     }
     if ((a->kind == CM_TY_PTR || a->kind == CM_TY_REF)
