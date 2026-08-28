@@ -334,6 +334,36 @@ static long cm_umir_c_field_index(const CmHirContext *hir,
     return -1;
 }
 
+static long cm_umir_c_variant_field_index(const CmHirContext *hir,
+    const CmUResolution *res, CmInternId name, const CmUBodySet *ubodies)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    const CmHirVariant *variant;
+    const CmInternedString *wanted;
+    uint32_t index;
+    if (res->kind != CM_U_RESOLVED_VARIANT) return -1;
+    record = cm_hir_lookup_definition(hir, res->definition);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ENUM_VARIANT)
+        return -1;
+    item = cm_hir_get_item(hir, record->entity.enum_variant.enum_item_id);
+    if (item == NULL || item->kind != CM_HIR_ITEM_ENUM
+        || record->entity.enum_variant.variant_index
+            >= item->data.enum_item.variant_count) return -1;
+    variant = &item->data.enum_item.variants[
+        record->entity.enum_variant.variant_index];
+    wanted = cm_interner_get(&ubodies->strings, name);
+    if (wanted == NULL) return -1;
+    for (index = 0u; index < variant->field_count; ++index) {
+        const CmInternedString *have = cm_interner_get(&hir->strings,
+            variant->fields[index].name);
+        if (have != NULL && have->len == wanted->len
+            && memcmp(have->bytes, wanted->bytes, have->len) == 0)
+            return (long)index;
+    }
+    return -1;
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck)
@@ -395,9 +425,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     &block->statements, statement_index);
             unsigned long slots;
             if (statement == NULL
-                || statement->kind != CM_UMIR_RVALUE_AGGREGATE) continue;
+                || (statement->kind != CM_UMIR_RVALUE_AGGREGATE
+                    && statement->kind != CM_UMIR_RVALUE_VARIANT)) continue;
             slots = (unsigned long)statement->operand_count
-                + (unsigned long)statement->operand_overflow;
+                + (unsigned long)statement->operand_overflow
+                + (statement->kind == CM_UMIR_RVALUE_VARIANT ? 1u : 0u);
             cm_str_buf_append(output, "    long long _agg");
             cm_umir_c_render_number(output,
                 (unsigned long)statement->destination);
@@ -501,20 +533,21 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             statement->operands[0]));
                     if (strcmp(operand_abi, "void") == 0)
                         operand_abi = "long long";
+                    /* `(long long)(OP (abi)local)` — balanced by
+                     * construction. */
                     cm_str_buf_append(output, "(long long)(");
                     if (expr->data.unary.op == CM_U_UNARY_NEG)
-                        cm_str_buf_append(output, "-(");
+                        cm_str_buf_push(output, '-');
                     else if (expr->data.unary.op == CM_U_UNARY_NOT)
-                        cm_str_buf_append(output,
+                        cm_str_buf_push(output,
                             strcmp(operand_abi, "uint8_t") == 0
-                                ? "!(" : "~(");
-                    else
-                        cm_str_buf_append(output, "(");
+                                ? '!' : '~');
+                    cm_str_buf_push(output, '(');
                     cm_str_buf_append(output, operand_abi);
                     cm_str_buf_push(output, ')');
                     cm_umir_c_render_local(output,
                         statement->operands[0]);
-                    cm_str_buf_append(output, "))");
+                    cm_str_buf_push(output, ')');
                 } else {
                     cm_str_buf_append(output, "0 /* unary */");
                     complete = 0;
@@ -554,6 +587,55 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     (unsigned long)statement->destination);
                 break;
             }
+            case CM_UMIR_RVALUE_VARIANT: {
+                uint32_t field;
+                int mapped = statement->operand_overflow == 0u;
+                cm_str_buf_append(output, "0; _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[0] = ");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->immediate);
+                cm_str_buf_append(output, "; ");
+                for (field = 0u; field < statement->operand_count && mapped;
+                        ++field) {
+                    long slot = (long)field;
+                    if (expr != NULL && expr->kind == CM_U_EXPR_STRUCT
+                        && field < expr->data.struct_expr.field_count) {
+                        slot = cm_umir_c_variant_field_index(hir,
+                            &expr->data.struct_expr.resolution,
+                            expr->data.struct_expr.fields[field].name,
+                            ubodies);
+                        if (slot < 0) { mapped = 0; break; }
+                    }
+                    cm_str_buf_append(output, "_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_push(output, '[');
+                    cm_umir_c_render_number(output, 1u + (unsigned long)slot);
+                    cm_str_buf_append(output, "] = ");
+                    cm_umir_c_render_local(output,
+                        statement->operands[field]);
+                    cm_str_buf_append(output, "; ");
+                }
+                if (!mapped) {
+                    cm_str_buf_append(output, "/* variant */");
+                    complete = 0;
+                }
+                cm_umir_c_render_local(output, statement->destination);
+                cm_str_buf_append(output, " = (long long)(intptr_t)_agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                break;
+            }
+            case CM_UMIR_RVALUE_SLOT:
+                cm_str_buf_append(output, "((long long *)(intptr_t)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                cm_str_buf_append(output, ")[");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->immediate);
+                cm_str_buf_push(output, ']');
+                break;
             case CM_UMIR_RVALUE_FIELD: {
                 long slot = -1;
                 if (statement->operand_count == 1u && expr != NULL) {
@@ -648,8 +730,31 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 (unsigned long)block->goto_target);
             cm_str_buf_append(output, ";\n");
             break;
+        case CM_UMIR_TERMINATOR_SWITCH: {
+            uint32_t arm;
+            CmUMirBlockId fallback = block->goto_target;
+            cm_str_buf_append(output, "switch ((int)((long long *)(intptr_t)");
+            cm_umir_c_render_local(output, block->condition);
+            cm_str_buf_append(output, ")[0]) {");
+            for (arm = 0u; arm < block->arm_count; ++arm) {
+                if (block->arm_discriminants[arm] < 0) {
+                    fallback = block->arm_targets[arm];
+                    continue;
+                }
+                cm_str_buf_append(output, " case ");
+                cm_umir_c_render_number(output,
+                    (unsigned long)block->arm_discriminants[arm]);
+                cm_str_buf_append(output, ": goto _b");
+                cm_umir_c_render_number(output,
+                    (unsigned long)block->arm_targets[arm]);
+                cm_str_buf_push(output, ';');
+            }
+            cm_str_buf_append(output, " default: goto _b");
+            cm_umir_c_render_number(output, (unsigned long)fallback);
+            cm_str_buf_append(output, "; }\n");
+            break;
+        }
         case CM_UMIR_TERMINATOR_SWITCH_BOOL:
-        case CM_UMIR_TERMINATOR_SWITCH:
             cm_str_buf_append(output, "if (");
             cm_umir_c_render_local(output, block->condition);
             cm_str_buf_append(output, ") goto _b");
@@ -657,9 +762,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 (unsigned long)block->true_target);
             cm_str_buf_append(output, "; else goto _b");
             cm_umir_c_render_number(output,
-                (unsigned long)(block->terminator
-                        == CM_UMIR_TERMINATOR_SWITCH
-                    ? block->goto_target : block->false_target));
+                (unsigned long)block->false_target);
             cm_str_buf_append(output, ";\n");
             break;
         default:

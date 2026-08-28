@@ -58,6 +58,8 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_CLOSURE,       /* closure value; body lowered at use */
     CM_UMIR_RVALUE_ASM,           /* retained inline-asm text (S10) */
     CM_UMIR_RVALUE_OFFSET_OF,     /* retained offset_of text (S10) */
+    CM_UMIR_RVALUE_VARIANT,       /* enum ctor: slot[0]=immediate, fields */
+    CM_UMIR_RVALUE_SLOT,          /* payload read: operands[0][immediate] */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
@@ -74,6 +76,8 @@ typedef struct CmUMirStatement {
     CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
     uint32_t operand_count;
     uint32_t operand_overflow;
+    /* VARIANT: discriminant index; SLOT: slot index. */
+    uint32_t immediate;
 } CmUMirStatement;
 
 typedef enum CmUMirTerminatorKind {
@@ -93,6 +97,10 @@ typedef struct CmUMirBlock {
     CmUMirBlockId true_target;
     CmUMirBlockId false_target;
     CmUMirLocalId condition;
+    /* SWITCH: arm targets with their discriminants (-1 = default). */
+    CmUMirBlockId *arm_targets;
+    long *arm_discriminants;
+    uint32_t arm_count;
 } CmUMirBlock;
 
 typedef struct CmUMirBody {

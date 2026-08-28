@@ -1142,6 +1142,7 @@ int main(int argc, char **argv)
                         size_t sampled = 0u;
                         size_t render_complete = 0u;
                         cm_str_buf_init(&rendered);
+                        cm_str_buf_append(&rendered, "#include <stdint.h>\n");
                         for (sample_index = 0u;
                                 sample_index < umir.bodies.len
                                 && sampled < 200u;
