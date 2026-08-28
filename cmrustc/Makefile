@@ -101,6 +101,7 @@ HIR_SOURCES := \
 MIR_SOURCES := \
 	src/mir/model.c \
 	src/mir/lower.c \
+	src/mir/ulower.c \
 	src/mir/dump.c
 CODEGEN_SOURCES := \
 	src/codegen/c.c \

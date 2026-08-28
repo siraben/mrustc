@@ -1,4 +1,5 @@
 #include "cm/alloc.h"
+#include "cm/mir/ulower.h"
 #include "cm/driver/cfg.h"
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
@@ -1078,6 +1079,22 @@ int main(int argc, char **argv)
                             printf(" %s=%lu", kind_names[kind],
                                 (unsigned long)kind_counts[kind]);
                     printf("\n");
+                }
+                {
+                    CmMirULowerResult ulower = cm_mir_ulower_all(&hir,
+                        &ubodies, &tyck);
+                    size_t ulower_class;
+                    printf("mir bodies=%lu lowered=%lu blocked=%lu\n",
+                        (unsigned long)ulower.bodies,
+                        (unsigned long)ulower.lowered,
+                        (unsigned long)ulower.blocked);
+                    for (ulower_class = 0u;
+                            ulower_class < ulower.class_count;
+                            ++ulower_class)
+                        printf("mir-blocked %s=%lu\n",
+                            ulower.classes[ulower_class].reason,
+                            (unsigned long)
+                                ulower.classes[ulower_class].count);
                 }
                 cm_tyck_set_destroy(&tyck);
             }
