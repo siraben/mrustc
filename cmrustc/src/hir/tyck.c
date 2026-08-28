@@ -865,9 +865,32 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     return 0;
 }
 
+static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
+    unsigned int depth);
+
 static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     CmInternId name, CmTyckFound *out)
 {
+    CmTyArena *arena = env->state->arena;
+    const CmTy *ty;
+
+    /* Normalize the receiver first — a projection returned by a method
+     * signature (`get_unchecked` yielding `<usize as SliceIndex<[T]>>
+     * ::Output`) must resolve before candidate matching, including one
+     * reference/pointer layer (btree's `(&mut *p).assume_init_mut()`). */
+    self_type = cm_tyck_normalize(env, self_type, 0u);
+    ty = cm_ty_get(arena, cm_ty_resolve(arena, self_type));
+    if (ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR)) {
+        CmTyId pointee = ty->children[0];
+        int mutability = (int)ty->a;
+        int is_reference = ty->kind == CM_TY_REF;
+        CmTyId normalized = cm_tyck_normalize(env, pointee, 0u);
+        if (normalized != pointee) {
+            self_type = is_reference
+                ? cm_ty_ref(arena, normalized, mutability)
+                : cm_ty_ptr(arena, normalized, mutability);
+        }
+    }
     return cm_tyck_lookup_assoc_in(env, self_type, name, out, 3u, 0u);
 }
 

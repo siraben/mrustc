@@ -3103,3 +3103,13 @@ whole-crate — core-body-expand 23,683 bodies **0 failed**, ubody
 (404 before grouping; the 32-node gain held with no expansion
 breakage).  Top residue families: body-sig 59, field-not-found 49,
 method-not-found 41, call-arg 37, method-arg 28.
+
+Receiver normalization (2026-08-28): method lookup normalizes the
+receiver first, including through one reference/pointer layer.
+Targeted traces (CM_TYCK_DEBUG_FN=into_key_val_mut_at) showed
+btree's `(&mut *p.get_unchecked_mut(i)).assume_init_mut()` chain
+reaching candidate matching with the raw
+`&mut <usize as SliceIndex<[T]>>::Output` projection — the
+signature-returned projection was never normalized before lookup.
+Minicore: a method call on a projection-typed receiver resolves
+(24/24, 0 errors).  Lanes + ASan green; census re-running.
