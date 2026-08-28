@@ -3070,3 +3070,12 @@ Census29 (2026-08-28, after unsize coercion): tyck error nodes
 **420 -> 404** (body-signature 83 -> 75), 23,081/24,797 typed.
 Remaining top families: body-sig 75, field-not-found 49,
 method-not-found 41, call-arg 37, method-arg 28.
+
+M9-01 grouping pass (2026-08-28): `$x:expr` captures transcribe as
+one invisible group.  Textual macro transcription now parenthesizes
+expr-fragment captures (rustc splices them as a single token
+group), so `$is_zero(*self)` with `$is_zero = |x| x == 0` no longer
+reparses as calling the literal `0` (alloc's impl_is_zero! — the
+16-sample "non-function callee: i32" family).  Minicore: an
+immediately-invoked closure through an expr capture types (22/22,
+0 errors).  Lanes + ASan green; census re-running.

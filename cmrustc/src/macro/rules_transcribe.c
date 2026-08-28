@@ -619,8 +619,30 @@ static int cm_rules_emit_nodes(CmRulesTranscribeState *state,
                     "metavariable is used at an incompatible repetition depth");
                 return 0;
             }
-            if (!cm_rules_emit_capture(state, capture, 1)) {
-                return 0;
+            {
+                /* rustc splices `$x:expr` captures as one invisible group;
+                 * textual transcription must parenthesize them so
+                 * `$f(*self)` with `$f = |x| x == 0` does not reparse as
+                 * calling the literal `0` (alloc's impl_is_zero!). */
+                const CmMacroBinding *metavariable_binding =
+                    cm_macro_rules_binding(state->definition,
+                        pattern->data.metavariable.binding);
+                int wrap = metavariable_binding != NULL
+                    && metavariable_binding->fragment
+                        == CM_MACRO_FRAGMENT_EXPR
+                    && capture->first_node != CM_TT_ID_NONE;
+                if (wrap) {
+                    cm_rules_emit_space(state);
+                    cm_str_buf_append(state->output, "(");
+                    state->need_space = 0;
+                }
+                if (!cm_rules_emit_capture(state, capture, !wrap)) {
+                    return 0;
+                }
+                if (wrap) {
+                    cm_str_buf_append(state->output, ")");
+                    state->need_space = 1;
+                }
             }
             break;
         case CM_MACRO_PATTERN_REPETITION:
