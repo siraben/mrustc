@@ -1167,22 +1167,9 @@ int main(int argc, char **argv)
                             size_t unit_index;
                             FILE *unit_file;
                             cm_str_buf_init(&unit);
-                            cm_str_buf_append(&unit, "#include <stdint.h>\n");
-                            for (unit_index = 0u;
-                                    unit_index < umir.bodies.len;
-                                    ++unit_index) {
-                                const CmUMirBody *unit_body =
-                                    (const CmUMirBody *)cm_vec_at_const(
-                                        &umir.bodies, unit_index);
-                                const CmUBody *unit_ub;
-                                if (unit_body == NULL
-                                    || !unit_body->complete) continue;
-                                unit_ub = cm_ubody_get(&ubodies,
-                                    unit_body->source);
-                                if (unit_ub == NULL) continue;
-                                (void)cm_umir_c_render_body(&unit, &hir,
-                                    unit_body, &ubodies, unit_ub, &tyck);
-                            }
+                            (void)unit_index;
+                            (void)cm_umir_c_render_program(&unit, &hir,
+                                &umir, &ubodies, &tyck);
                             unit_file = fopen(emit_umir_c_path, "w");
                             if (unit_file != NULL) {
                                 (void)fwrite(unit.data, 1u, unit.len,

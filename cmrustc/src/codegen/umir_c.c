@@ -2,6 +2,12 @@
 
 #include <string.h>
 #include "cm/hir/model.h"
+#include "cm/alloc.h"
+
+static CmTyId cm_umir_c_subst(CmTyId type);
+static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck, CmHirDefId def,
+    CmTyId callee_type, CmTyId receiver_type);
 
 /*
  * M9-06 v1: dry C-emission over u-MIR — no output buffer yet.  Every
@@ -209,17 +215,24 @@ static void cm_umir_c_render_symbol(CmStrBuf *output, CmHirDefId def)
  * prototype keeps every call site self-contained for the syntax check;
  * definitions are linked once instances are collected. */
 static int cm_umir_c_render_call(CmStrBuf *output,
-    const CmUMirStatement *statement, CmHirDefId def, uint32_t first_arg)
+    const CmHirContext *hir, const CmTyckSet *tyck,
+    const CmUMirStatement *statement, CmHirDefId def, uint32_t first_arg,
+    CmTyId callee_type, CmTyId receiver_type)
 {
     uint32_t index;
+    CmStrBuf symbol;
     if (cm_hir_def_id_is_none(def) || statement->operand_overflow != 0u)
         return 0;
+    cm_str_buf_init(&symbol);
+    cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def, callee_type,
+        receiver_type);
     cm_str_buf_append(output, "0; { long long ");
-    cm_umir_c_render_symbol(output, def);
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
     cm_str_buf_append(output, "(); ");
     cm_umir_c_render_local(output, statement->destination);
     cm_str_buf_append(output, " = ");
-    cm_umir_c_render_symbol(output, def);
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
+    cm_str_buf_destroy(&symbol);
     cm_str_buf_push(output, '(');
     for (index = first_arg; index < statement->operand_count; ++index) {
         if (index != first_arg) cm_str_buf_append(output, ", ");
@@ -271,6 +284,7 @@ static int cm_umir_c_item_has_attribute(const CmHirContext *hir,
     }
     return 0;
 }
+
 
 static const char *cm_umir_c_binary_operator(CmUBinaryOp op)
 {
@@ -330,7 +344,7 @@ static CmTyId cm_umir_c_local_type(const CmUMirBody *body,
 {
     const CmTyId *type = (const CmTyId *)cm_vec_at_const(&body->locals,
         local);
-    return type == NULL ? CM_TY_NONE : *type;
+    return type == NULL ? CM_TY_NONE : cm_umir_c_subst(*type);
 }
 
 /* Declared field index of `name` in the ADT behind `type`, or -1. */
@@ -397,6 +411,238 @@ static long cm_umir_c_variant_field_index(const CmHirContext *hir,
     return -1;
 }
 
+/* ------------------------------------------------------------------ */
+/* Instances                                                            */
+
+typedef struct CmUMirInstance {
+    CmHirDefId definition;
+    CmHirBodyId body;
+    CmTyId *types;          /* generic arguments, parameter order */
+    uint32_t count;
+    CmHirGenericParamId *parameters;
+    unsigned long index;    /* symbol suffix */
+    int rendered;
+} CmUMirInstance;
+
+typedef struct CmUMirProgram {
+    CmVec instances;        /* CmUMirInstance */
+    const CmHirContext *hir;
+    const CmUMirSet *umir;
+    const CmUBodySet *ubodies;
+    const CmTyckSet *tyck;
+} CmUMirProgram;
+
+/* Generic parameters of `item` and its impl/trait parent, in FN_DEF
+ * argument order (parent first). */
+static uint32_t cm_umir_c_collect_parameters(const CmHirContext *hir,
+    const CmHirItem *item, CmHirGenericParamId *out, uint32_t capacity)
+{
+    uint32_t count = 0u;
+    const CmHirItem *parent = NULL;
+    uint32_t index;
+    if (!cm_hir_def_id_is_none(item->parent_definition)) {
+        const CmHirDefinition *record = cm_hir_lookup_definition(hir,
+            item->parent_definition);
+        if (record != NULL && record->kind == CM_HIR_DEFINITION_ITEM)
+            parent = cm_hir_get_item(hir, record->entity.item_id);
+    }
+    if (parent != NULL)
+        for (index = 0u; index < parent->generic_parameter_count
+                && count < capacity; ++index)
+            out[count++] = parent->generic_parameter_start + index;
+    for (index = 0u; index < item->generic_parameter_count
+            && count < capacity; ++index)
+        out[count++] = item->generic_parameter_start + index;
+    return count;
+}
+
+static const CmHirItem *cm_umir_c_item_of(const CmHirContext *hir,
+    CmHirDefId def)
+{
+    const CmHirDefinition *record = cm_hir_lookup_definition(hir, def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM)
+        return NULL;
+    return cm_hir_get_item(hir, record->entity.item_id);
+}
+
+/* Body id owned by `def`, or 0. */
+static CmHirBodyId cm_umir_c_body_of(const CmUMirSet *umir,
+    const CmHirContext *hir, CmHirDefId def)
+{
+    size_t index;
+    for (index = 0u; index < umir->bodies.len; ++index) {
+        const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
+            &umir->bodies, index);
+        const CmHirBody *hir_body;
+        if (body == NULL || !body->complete) continue;
+        hir_body = cm_hir_get_body(hir, body->source);
+        if (hir_body != NULL
+            && cm_hir_def_id_equal(hir_body->origin.definition, def))
+            return body->source;
+    }
+    return 0u;
+}
+
+static const CmUMirBody *cm_umir_c_umir_body(const CmUMirSet *umir,
+    CmHirBodyId body_id)
+{
+    size_t index;
+    for (index = 0u; index < umir->bodies.len; ++index) {
+        const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
+            &umir->bodies, index);
+        if (body != NULL && body->source == body_id) return body;
+    }
+    return NULL;
+}
+
+/* Find or add the instance (def, types[count]); returns its index. */
+static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
+    const CmTyId *types, uint32_t count)
+{
+    size_t index;
+    CmUMirInstance instance;
+    const CmHirItem *item = cm_umir_c_item_of(program->hir, def);
+    CmHirGenericParamId parameters[32];
+    uint32_t parameter_count;
+    uint32_t arg;
+    if (item == NULL) return -1;
+    parameter_count = cm_umir_c_collect_parameters(program->hir, item,
+        parameters, 32u);
+    if (count > parameter_count) count = parameter_count;
+    for (index = 0u; index < program->instances.len; ++index) {
+        const CmUMirInstance *have = (const CmUMirInstance *)
+            cm_vec_at_const(&program->instances, index);
+        int same = have != NULL && cm_hir_def_id_equal(have->definition,
+            def) && have->count == count;
+        for (arg = 0u; same && arg < count; ++arg)
+            if (cm_ty_resolve((CmTyArena *)&program->tyck->arena,
+                    have->types[arg])
+                != cm_ty_resolve((CmTyArena *)&program->tyck->arena,
+                    types[arg])) same = 0;
+        if (same) return (long)index;
+    }
+    memset(&instance, 0, sizeof(instance));
+    instance.definition = def;
+    instance.body = cm_umir_c_body_of(program->umir, program->hir, def);
+    instance.count = count;
+    instance.types = (CmTyId *)cm_alloc_zeroed(count == 0u ? 1u : count,
+        sizeof(CmTyId));
+    instance.parameters = (CmHirGenericParamId *)cm_alloc_zeroed(
+        count == 0u ? 1u : count, sizeof(CmHirGenericParamId));
+    for (arg = 0u; arg < count; ++arg) {
+        instance.types[arg] = types[arg];
+        instance.parameters[arg] = parameters[arg];
+    }
+    instance.index = (unsigned long)program->instances.len;
+    (void)cm_vec_push(&program->instances, &instance);
+    return (long)(program->instances.len - 1u);
+}
+
+/* Resolve a trait-method declaration to the impl method for `self`. */
+static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmHirItem *declaration, CmTyId self)
+{
+    const CmHirItem *trait_item;
+    size_t index;
+    CmTyId self_resolved = cm_ty_resolve((CmTyArena *)&tyck->arena, self);
+    if (declaration == NULL
+        || cm_hir_def_id_is_none(declaration->parent_definition))
+        return cm_hir_def_id_none();
+    trait_item = cm_umir_c_item_of(hir, declaration->parent_definition);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT)
+        return cm_hir_def_id_none();
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, index);
+        CmTyId impl_self;
+        size_t child;
+        if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
+            || !cm_hir_def_id_equal(
+                impl->data.impl_item.trait_type.definition,
+                trait_item->definition)) continue;
+        impl_self = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+            impl->data.impl_item.self_type);
+        if (cm_ty_resolve((CmTyArena *)&tyck->arena, impl_self)
+                != self_resolved) continue;
+        for (child = 0u; child < hir->items.len; ++child) {
+            const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, child);
+            if (method != NULL && method->kind == CM_HIR_ITEM_FUNCTION
+                && cm_hir_def_id_equal(method->parent_definition,
+                    impl->definition)
+                && method->name == declaration->name)
+                return method->definition;
+        }
+    }
+    return cm_hir_def_id_none();
+}
+
+static CmUMirProgram *cm_umir_c_active_program = NULL;
+static const CmUMirInstance *cm_umir_c_active_instance = NULL;
+
+static CmTyId cm_umir_c_subst(CmTyId type)
+{
+    CmTySubst subst;
+    if (cm_umir_c_active_program == NULL
+        || cm_umir_c_active_instance == NULL
+        || cm_umir_c_active_instance->count == 0u
+        || type == CM_TY_NONE) return type;
+    subst.parameters = cm_umir_c_active_instance->parameters;
+    subst.types = cm_umir_c_active_instance->types;
+    subst.count = cm_umir_c_active_instance->count;
+    subst.self_type = CM_TY_NONE;
+    return cm_ty_subst((CmTyArena *)&cm_umir_c_active_program->tyck->arena,
+        type, &subst);
+}
+
+/* Symbol for a callee reached with FN_DEF type `callee_type`: registers
+ * the instance when the program is collecting. */
+static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck, CmHirDefId def,
+    CmTyId callee_type, CmTyId receiver_type)
+{
+    CmUMirProgram *program = cm_umir_c_active_program;
+    const CmHirItem *item = cm_umir_c_item_of(hir, def);
+    const CmTy *fn_ty;
+    CmTyId args[32];
+    uint32_t count = 0u;
+    uint32_t index;
+    long instance = -1;
+    if (program != NULL && item != NULL
+        && !cm_hir_def_id_is_none(item->parent_definition)) {
+        const CmHirItem *parent = cm_umir_c_item_of(hir,
+            item->parent_definition);
+        if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
+            /* Declaration: resolve against the substituted receiver. */
+            CmHirDefId resolved = cm_umir_c_resolve_impl_method(hir, tyck,
+                item, cm_umir_c_subst(receiver_type));
+            if (!cm_hir_def_id_is_none(resolved)) {
+                def = resolved;
+                item = cm_umir_c_item_of(hir, def);
+                callee_type = CM_TY_NONE;
+            }
+        }
+    }
+    fn_ty = callee_type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                cm_umir_c_subst(callee_type)));
+    if (fn_ty != NULL && fn_ty->kind == CM_TY_FN_DEF)
+        for (index = 0u; index < fn_ty->count && count < 32u; ++index)
+            args[count++] = cm_umir_c_subst(fn_ty->children[index]);
+    if (program != NULL)
+        instance = cm_umir_c_instance(program, def, args, count);
+    cm_umir_c_render_symbol(output, def);
+    if (instance >= 0) {
+        const CmUMirInstance *have = (const CmUMirInstance *)
+            cm_vec_at_const(&program->instances, (size_t)instance);
+        if (have != NULL && have->count != 0u) {
+            cm_str_buf_append(output, "_i");
+            cm_umir_c_render_number(output, have->index);
+        }
+    }
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck)
@@ -423,6 +669,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     /* Definition: uniform long long slots; parameters arrive as p<i>. */
     cm_str_buf_append(output, "long long ");
     cm_umir_c_render_symbol(output, def);
+    if (cm_umir_c_active_instance != NULL
+        && cm_umir_c_active_instance->count != 0u) {
+        cm_str_buf_append(output, "_i");
+        cm_umir_c_render_number(output, cm_umir_c_active_instance->index);
+    }
     cm_str_buf_push(output, '(');
     if (ub->parameter_count == 0u) cm_str_buf_append(output, "void");
     for (param = 0u; param < ub->parameter_count; ++param) {
@@ -794,7 +1045,13 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             callee_def = callee_ty->def;
                     }
                 }
-                if (!cm_umir_c_render_call(output, statement, callee_def, 1u)) {
+                if (!cm_umir_c_render_call(output, hir, tyck, statement,
+                        callee_def, 1u,
+                        expr != NULL && expr->kind == CM_U_EXPR_CALL
+                            && tb != NULL && tb->expr_types != NULL
+                            ? tb->expr_types[expr->data.call.callee]
+                            : CM_TY_NONE,
+                        CM_TY_NONE)) {
                     cm_str_buf_append(output, "0 /* call */");
                     complete = 0;
                 }
@@ -806,8 +1063,12 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         || mtb->method_targets == NULL
                     ? cm_hir_def_id_none()
                     : mtb->method_targets[statement->expr];
-                if (!cm_umir_c_render_call(output, statement, method_def,
-                        0u)) {
+                if (!cm_umir_c_render_call(output, hir, tyck, statement,
+                        method_def, 0u, CM_TY_NONE,
+                        statement->operand_count != 0u
+                            ? cm_umir_c_local_type(body,
+                                statement->operands[0])
+                            : CM_TY_NONE)) {
                     cm_str_buf_append(output, "0 /* method */");
                     complete = 0;
                 }
@@ -918,4 +1179,68 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         }
     }
     return complete;
+}
+
+size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
+    const CmUMirSet *umir, const CmUBodySet *ubodies,
+    const CmTyckSet *tyck)
+{
+    CmUMirProgram program;
+    size_t index;
+    size_t rendered = 0u;
+    memset(&program, 0, sizeof(program));
+    cm_vec_init(&program.instances, sizeof(CmUMirInstance));
+    program.hir = hir;
+    program.umir = umir;
+    program.ubodies = ubodies;
+    program.tyck = tyck;
+    cm_str_buf_append(output, "#include <stdint.h>\n");
+    /* Roots: every complete body whose owner is a `#[no_mangle]` export,
+     * plus every non-generic complete body (kept so symbol references
+     * from the sample census stay resolvable). */
+    for (index = 0u; index < umir->bodies.len; ++index) {
+        const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
+            &umir->bodies, index);
+        const CmHirBody *hir_body;
+        const CmHirItem *owner;
+        CmHirGenericParamId parameters[32];
+        if (body == NULL || !body->complete) continue;
+        hir_body = cm_hir_get_body(hir, body->source);
+        if (hir_body == NULL) continue;
+        owner = cm_umir_c_item_of(hir, hir_body->origin.definition);
+        if (owner == NULL) continue;
+        if (cm_umir_c_collect_parameters(hir, owner, parameters, 32u)
+                != 0u) continue; /* generic: reached via instances */
+        (void)cm_umir_c_instance(&program, hir_body->origin.definition,
+            NULL, 0u);
+    }
+    cm_umir_c_active_program = &program;
+    for (index = 0u; index < program.instances.len; ++index) {
+        CmUMirInstance *instance = (CmUMirInstance *)cm_vec_at(
+            &program.instances, index);
+        const CmUMirBody *body;
+        const CmUBody *ub;
+        if (instance == NULL || instance->rendered) continue;
+        instance->rendered = 1;
+        body = cm_umir_c_umir_body(umir, instance->body);
+        ub = body == NULL ? NULL : cm_ubody_get(ubodies, body->source);
+        if (body == NULL || ub == NULL) continue;
+        cm_umir_c_active_instance = instance;
+        (void)cm_umir_c_render_body(output, hir, body, ubodies, ub, tyck);
+        cm_umir_c_active_instance = NULL;
+        /* Rendering may have appended instances; the vec may have moved,
+         * so re-fetch by index on the next iteration. */
+        rendered += 1u;
+    }
+    cm_umir_c_active_program = NULL;
+    for (index = 0u; index < program.instances.len; ++index) {
+        CmUMirInstance *instance = (CmUMirInstance *)cm_vec_at(
+            &program.instances, index);
+        if (instance != NULL) {
+            cm_free(instance->types);
+            cm_free(instance->parameters);
+        }
+    }
+    cm_vec_destroy(&program.instances);
+    return rendered;
 }

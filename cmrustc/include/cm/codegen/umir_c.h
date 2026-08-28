@@ -33,4 +33,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck);
 
+/*
+ * Instance collection (M9-06 monomorphization, v1): starting from the
+ * `#[no_mangle]` exports, every reachable (definition, substitution)
+ * pair is rendered once under its substitution; trait-method calls on
+ * substituted receivers resolve to the concrete impl's method.  Writes
+ * one complete translation unit.
+ */
+size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
+    const CmUMirSet *umir, const CmUBodySet *ubodies,
+    const CmTyckSet *tyck);
+
 #endif
