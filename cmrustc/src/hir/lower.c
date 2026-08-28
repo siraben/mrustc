@@ -56,6 +56,9 @@ typedef struct CmLowerItemRecord {
     uint32_t generic_parameter_count;
     int is_generated;
     int is_foreign;
+    /* Declared inside a function body: invisible to module-level name
+     * resolution, but lowered normally so bodies can type its uses. */
+    int body_local;
     CmInternId inherited_abi;
     const CmExpandedItem *expanded_item;
 } CmLowerItemRecord;
@@ -1314,6 +1317,7 @@ static int cm_lower_name_exists(const CmLowerState *state,
         if ((cm_lower_item_namespace_mask(record->kind)
                 & cm_lower_item_namespace_mask(kind)) != 0u
             && record->owner_module == module
+            && !record->body_local
             && cm_hir_def_id_is_none(record->parent_definition)
             && !cm_lower_anonymous_const(record->ast, record_item)
             && cm_lower_hir_name_matches_ast(state, record->hir_name,
@@ -1926,6 +1930,7 @@ static const CmLowerItemRecord *cm_lower_find_name_in_module(
             &state->item_records, index);
         if ((cm_lower_item_namespace_mask(record->kind) & 1u) != 0u
             && record->owner_module == module
+            && !record->body_local
             && cm_hir_def_id_is_none(record->parent_definition)
             && cm_lower_hir_name_matches_ast(state, record->hir_name,
                 ast_name)) {
@@ -2474,6 +2479,7 @@ static const CmLowerItemRecord *cm_lower_named_const_length(
             name = record == NULL ? NULL
                 : cm_interner_get(&state->hir->strings, record->hir_name);
             if (record != NULL && record->owner_module == module
+                && !record->body_local
                 && cm_hir_def_id_is_none(record->parent_definition)
                 && record->kind == CM_AST_ITEM_CONST && name != NULL
                 && name->len == segment.length
@@ -18211,6 +18217,83 @@ static int cm_lower_graph_apply_inner_attributes(CmLowerState *state,
     return !state->failed;
 }
 
+/*
+ * Reserve items declared in statement position inside a function body
+ * (`fn retain { struct SetLenOnDrop { .. } .. }`).  They are lowered like
+ * module items but flagged body_local, so module-level name resolution
+ * never sees them; ubody path resolution reaches them by exact
+ * (source, AST item) reference.
+ */
+static int cm_lower_graph_reserve_body_items(CmLowerState *state,
+    const CmAst *ast, CmHirModuleId owner_module,
+    const CmLowerItemRecord *fn_record, CmAstExprId body)
+{
+    const CmAstExpr *block = cm_ast_get_expr(ast, body);
+    uint32_t index;
+
+    if (block == NULL || (block->kind != CM_AST_EXPR_BLOCK
+            && block->kind != CM_AST_EXPR_TRY_BLOCK)) return 1;
+    for (index = 0u; index < block->data.block.statement_count
+            && !state->failed; ++index) {
+        const CmAstStmt *stmt = cm_ast_get_stmt(ast,
+            block->data.block.statements[index]);
+        const CmAstItem *item;
+        CmLowerItemRecord record;
+        CmHirItemKind hir_item_kind;
+        CmHirStatus status;
+        CmSpan span;
+
+        if (stmt == NULL || stmt->kind != CM_AST_STMT_ITEM) continue;
+        item = cm_ast_get_item(ast, stmt->data.item_stmt.item);
+        if (item == NULL) continue;
+        /* Impls and traits stay unreserved: their paths name body-local
+         * types that module-level resolution deliberately cannot see. */
+        if (item->kind != CM_AST_ITEM_STRUCT
+            && item->kind != CM_AST_ITEM_UNION
+            && item->kind != CM_AST_ITEM_ENUM
+            && item->kind != CM_AST_ITEM_FUNCTION) continue;
+        if (!cm_lower_item_kind_supported(item->kind)) continue;
+        span = cm_lower_span(state, item->span);
+        memset(&record, 0, sizeof(record));
+        record.ast = ast;
+        record.source = fn_record->source;
+        record.graph_module = fn_record->graph_module;
+        record.ast_id = stmt->data.item_stmt.item;
+        record.owner_module = owner_module;
+        record.parent_definition = cm_hir_def_id_none();
+        record.parent_kind = CM_LOWER_PARENT_NONE;
+        record.kind = item->kind;
+        record.provenance = fn_record->provenance;
+        record.effective_span = span;
+        record.body_local = 1;
+        record.hir_name = item->kind == CM_AST_ITEM_IMPL
+            ? CM_INTERN_ID_NONE
+            : cm_lower_copy_string(state, item->name, span, record.ast_id);
+        if (state->failed) return 0;
+        if (!cm_lower_hir_item_kind(item, &hir_item_kind)) continue;
+        status = cm_hir_reserve_item_definition_as(state->hir,
+            state->result.crate_id, hir_item_kind, span,
+            &record.definition);
+        if (status != CM_HIR_OK) {
+            cm_lower_fail_hir(state, span, record.ast_id, status,
+                "cannot reserve body-local item definition");
+            return 0;
+        }
+        if (!cm_lower_reserve_enum_variant_definitions(state, item,
+                &record)) return 0;
+        (void)cm_vec_push(&state->item_records, &record);
+        cm_lower_item_index_insert(state, record.source, record.ast_id,
+            (uint32_t)(state->item_records.len - 1u));
+        if (item->kind == CM_AST_ITEM_FUNCTION
+            && item->data.function_item.body != CM_AST_EXPR_NONE) {
+            if (!cm_lower_graph_reserve_body_items(state, ast,
+                    owner_module, fn_record,
+                    item->data.function_item.body)) return 0;
+        }
+    }
+    return !state->failed;
+}
+
 static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
     const CmModuleGraph *graph, const CmHirModuleMap *modules,
     CmModuleId graph_module, const CmAst *ast,
@@ -18469,6 +18552,15 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
     (void)cm_vec_push(&state->item_records, &record);
     cm_lower_item_index_insert(state, record.source, record.ast_id,
         (uint32_t)(state->item_records.len - 1u));
+    if (item->kind == CM_AST_ITEM_FUNCTION
+        && item->data.function_item.body != CM_AST_EXPR_NONE) {
+        const CmLowerItemRecord *pushed =
+            (const CmLowerItemRecord *)cm_vec_at_const(
+                &state->item_records, state->item_records.len - 1u);
+        CmLowerItemRecord fn_copy = *pushed;
+        if (!cm_lower_graph_reserve_body_items(state, ast, owner_module,
+                &fn_copy, item->data.function_item.body)) return 0;
+    }
     for (index = 0u; index < effective->child_count && !state->failed;
          ++index) {
         CmResolveEffectiveItem child;
@@ -19714,8 +19806,33 @@ static int cm_lower_records_in_phase(CmLowerState *state,
         record = (const CmLowerItemRecord *)cm_vec_at_const(
             &state->item_records, index);
         if (record == NULL) return 0;
-        if (cm_lower_record_in_phase(record, phase)
-            && !cm_lower_one_record(state, record)) {
+        if (!cm_lower_record_in_phase(record, phase)) continue;
+        if (record->body_local) {
+            /* Fail-soft: a body-local item whose types cannot be
+             * resolved at module scope (body-local `use`, cross-scope
+             * names) is dropped, not fatal — bodies then see it exactly
+             * as before reservation. */
+            int saved_failed = state->failed;
+            CmHirLowerResult saved_result = state->result;
+            if (!cm_lower_one_record(state, record) || state->failed) {
+                size_t dead_index;
+                state->failed = saved_failed;
+                state->result = saved_result;
+                for (dead_index = 0u; dead_index < state->hir->items.len;
+                        ++dead_index) {
+                    CmHirItem *dead = (CmHirItem *)cm_vec_at(
+                        &state->hir->items, dead_index);
+                    if (dead == NULL || !cm_hir_def_id_equal(
+                            dead->definition, record->definition))
+                        continue;
+                    dead->ast_source = 0u;
+                    dead->ast_item = 0u;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (!cm_lower_one_record(state, record)) {
             return 0;
         }
     }

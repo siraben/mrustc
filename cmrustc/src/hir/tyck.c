@@ -3041,6 +3041,24 @@ static CmTyId cm_tyck_struct_literal(CmTyckEnv *env, const CmUExpr *expr)
             }
         }
     }
+    if (adt == CM_TY_NONE && res->kind == CM_U_RESOLVED_NESTED_ITEM) {
+        /* Body-local structs are lowered as body_local HIR items; find
+         * the definition by exact declaring-AST identity. */
+        size_t scan;
+        for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
+            const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+                &env->state->hir->items, scan);
+            if (item == NULL || item->ast_source != res->nested_source
+                || item->ast_item != res->nested_item) continue;
+            if (item->kind == CM_HIR_ITEM_STRUCT
+                || item->kind == CM_HIR_ITEM_UNION) {
+                adt = cm_tyck_adt_fresh(env, item, &instance);
+                fields = item->data.aggregate_item.fields;
+                field_count = item->data.aggregate_item.field_count;
+            }
+            break;
+        }
+    }
     if (adt == CM_TY_NONE) {
         {
             cm_tyck_debug_pair(env, "struct-literal", adt, adt);

@@ -733,9 +733,18 @@ int main(int argc, char **argv)
                         / CLOCKS_PER_SEC));
             }
             if (core_lower_result.error_count != 0u) {
-                printf("core-hir first-error kind=%s message=%s\n",
+                const CmSourceFile *cerr_source = cm_source_get(&sources,
+                    core_lower_result.first_error.span.source);
+                printf("core-hir first-error kind=%s source=%s line=%lu"
+                    " item=%u span=%lu..%lu message=%s\n",
                     cm_hir_lower_error_kind_name(
                         core_lower_result.first_error.kind),
+                    cerr_source == NULL ? "<none>" : cerr_source->path,
+                    (unsigned long)source_line(cerr_source,
+                        (size_t)core_lower_result.first_error.span.start),
+                    (unsigned int)core_lower_result.first_error.item,
+                    (unsigned long)core_lower_result.first_error.span.start,
+                    (unsigned long)core_lower_result.first_error.span.end,
                     core_lower_result.first_error.message);
                 goto cleanup;
             }
