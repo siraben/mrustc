@@ -1625,10 +1625,6 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     } else {
         cm_str_buf_append(&state->text, ") }");
     }
-    if (getenv("CM_BODY_EXPAND_DEBUG") != NULL
-        && memmem(state->text.data, state->text.len, "size hint", 9u) != NULL)
-        fprintf(stderr, "body-expand format_args text:\n%.*s\n",
-            (int)state->text.len, state->text.data);
     ok = cm_body_finish_generated(state, id, name, span);
 cleanup:
     cm_free(format);
@@ -1822,9 +1818,13 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
             sizeof(name), &target);
         if (state->debug) state->ticks_lookup += clock() - started;
     }
-    if (resolved && !target.is_builtin)
-        return cm_body_expand_rules(state, id, name, &target);
     builtin = cm_body_builtin_by_name(name);
+    /* Builtins win over resolved macro declarations: a dependency's
+     * `format_args!` resolves to core's `#[rustc_builtin_macro]` stub
+     * whose rules expand to `{{ }}` — routing it through macro_rules
+     * types every formatted panic argument as unit. */
+    if (resolved && !target.is_builtin && builtin == CM_BODY_BUILTIN_NONE)
+        return cm_body_expand_rules(state, id, name, &target);
     switch (builtin) {
     case CM_BODY_BUILTIN_AST:
         if (strcmp(name, "concat") == 0 || strcmp(name, "stringify") == 0) {
