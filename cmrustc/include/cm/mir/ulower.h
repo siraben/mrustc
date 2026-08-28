@@ -46,6 +46,12 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_BINARY,
     CM_UMIR_RVALUE_UNARY,
     CM_UMIR_RVALUE_CALL,          /* callee + args are prior locals */
+    CM_UMIR_RVALUE_METHOD_CALL,   /* receiver + args are prior locals */
+    CM_UMIR_RVALUE_REF,           /* borrow of a prior local */
+    CM_UMIR_RVALUE_CAST,
+    CM_UMIR_RVALUE_ASSIGN,        /* store value into target place */
+    CM_UMIR_RVALUE_FIELD,         /* place read: field / tuple index */
+    CM_UMIR_RVALUE_AGGREGATE,     /* tuple / array / struct literal */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

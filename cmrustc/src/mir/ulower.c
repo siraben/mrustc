@@ -388,6 +388,72 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_CALL, id, type);
         break;
     }
+    case CM_U_EXPR_METHOD_CALL: {
+        uint32_t index;
+        (void)cm_umir_emit_expr(builder, expr->data.method_call.receiver);
+        for (index = 0u; index < expr->data.method_call.argument_count;
+                ++index)
+            (void)cm_umir_emit_expr(builder,
+                expr->data.method_call.arguments[index]);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_METHOD_CALL, id,
+            type);
+        break;
+    }
+    case CM_U_EXPR_REF:
+        (void)cm_umir_emit_expr(builder, expr->data.ref.operand);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_REF, id, type);
+        break;
+    case CM_U_EXPR_CAST:
+        (void)cm_umir_emit_expr(builder, expr->data.cast.value);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CAST, id, type);
+        break;
+    case CM_U_EXPR_ASSIGN:
+    case CM_U_EXPR_ASSIGN_OP:
+        (void)cm_umir_emit_expr(builder, expr->data.assign.value);
+        (void)cm_umir_emit_expr(builder, expr->data.assign.target);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_ASSIGN, id,
+            type);
+        break;
+    case CM_U_EXPR_FIELD:
+        (void)cm_umir_emit_expr(builder, expr->data.field.base);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_FIELD, id, type);
+        break;
+    case CM_U_EXPR_TUPLE_FIELD:
+        (void)cm_umir_emit_expr(builder, expr->data.tuple_field.base);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_FIELD, id, type);
+        break;
+    case CM_U_EXPR_TUPLE:
+    case CM_U_EXPR_ARRAY: {
+        uint32_t index;
+        for (index = 0u; index < expr->data.list.element_count; ++index)
+            (void)cm_umir_emit_expr(builder,
+                expr->data.list.elements[index]);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
+            type);
+        break;
+    }
+    case CM_U_EXPR_STRUCT: {
+        uint32_t index;
+        for (index = 0u; index < expr->data.struct_expr.field_count;
+                ++index)
+            (void)cm_umir_emit_expr(builder,
+                expr->data.struct_expr.fields[index].value);
+        if (expr->data.struct_expr.base != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder,
+                expr->data.struct_expr.base);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
+            type);
+        break;
+    }
+    case CM_U_EXPR_RETURN: {
+        CmUMirBlock *current;
+        (void)cm_umir_emit_expr(builder, expr->data.flow.value);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL)
+            current->terminator = CM_UMIR_TERMINATOR_RETURN;
+        break;
+    }
     case CM_U_EXPR_BLOCK: {
         uint32_t index;
         for (index = 0u; index < expr->data.block.statement_count
