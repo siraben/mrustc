@@ -1025,6 +1025,12 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
             fprintf(stderr, "TYCK norm-silent self-infer\n");
         return type;
     }
+    /* An unresolved-projection self must not scan impls: `<<I::Item as
+     * Try>::Residual as Residual>::TryType` would leniently match the
+     * first Residual impl (the Option flavor) and normalize Result-typed
+     * bodies to Option.  Leave it symbolic; coercion treats unresolved
+     * projections leniently. */
+    if (self_kind == CM_TY_PROJECTION) return type;
     if (self_kind == CM_TY_PARAM || self_kind == CM_TY_SELF) {
         const CmHirItem *owners[2];
         int owner;
