@@ -1156,7 +1156,8 @@ int main(int argc, char **argv)
                                 sample_body->source);
                             if (sample_ub == NULL) continue;
                             if (cm_umir_c_render_body(&rendered, &hir,
-                                    sample_body, sample_ub, &tyck))
+                                    sample_body, &ubodies, sample_ub,
+                                    &tyck))
                                 render_complete += 1u;
                             sampled += 1u;
                         }
@@ -1179,7 +1180,7 @@ int main(int argc, char **argv)
                                     unit_body->source);
                                 if (unit_ub == NULL) continue;
                                 (void)cm_umir_c_render_body(&unit, &hir,
-                                    unit_body, unit_ub, &tyck);
+                                    unit_body, &ubodies, unit_ub, &tyck);
                             }
                             unit_file = fopen(emit_umir_c_path, "w");
                             if (unit_file != NULL) {

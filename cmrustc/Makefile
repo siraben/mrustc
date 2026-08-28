@@ -205,6 +205,7 @@ CODEGEN_EXECUTABLE_RECIPE_TEST_PROGRAM := $(BUILD_DIR)/test_codegen_executable_r
 CODEGEN_PRODUCTION_BARRIER_SCRIPT := tests/codegen/run_production_barrier.sh
 G3_CROSS_CRATE_SCRIPT := tests/codegen/run_g3_cross_crate.sh
 UMIR_ECHO_SCRIPT := tests/codegen/run_umir_echo.sh
+UMIR_FIXTURES_SCRIPT := tests/codegen/run_umir_fixtures.sh
 CORE_HIR_PROBE_PROGRAM := $(BUILD_DIR)/probe_core_hir
 CORE_HIR_PROBE_SOURCE ?= /tmp/cmrustc-rust190-source/rustc-1.90.0-src/library/core/src/lib.rs
 AST_DUMP_PROGRAM := $(BUILD_DIR)/dump_ast
@@ -520,6 +521,8 @@ test check: all $(TEST_PROGRAM) $(TARGET_CFG_TEST_PROGRAM) $(PROCESS_TEST_PROGRA
 	$(MAKE) $(CORE_HIR_PROBE_PROGRAM) BUILD_DIR=$(BUILD_DIR)
 	PROBE=$(abspath $(CORE_HIR_PROBE_PROGRAM)) CC="$(CC)" \
 		$(UMIR_ECHO_SCRIPT)
+	PROBE=$(abspath $(CORE_HIR_PROBE_PROGRAM)) CC="$(CC)" \
+		CMRUSTC_REQUIRE_UMIR_FIXTURES=1 $(UMIR_FIXTURES_SCRIPT)
 
 strict:
 	$(MAKE) BUILD_DIR=build/strict CC="$(STRICT_CC)" CFLAGS="$(STRICT_CFLAGS)" test

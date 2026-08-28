@@ -493,24 +493,36 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     case CM_U_EXPR_TUPLE:
     case CM_U_EXPR_ARRAY: {
         uint32_t index;
-        for (index = 0u; index < expr->data.list.element_count; ++index)
-            (void)cm_umir_emit_expr(builder,
+        CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
+        uint32_t recorded = 0u;
+        for (index = 0u; index < expr->data.list.element_count; ++index) {
+            CmUMirLocalId element = cm_umir_emit_expr(builder,
                 expr->data.list.elements[index]);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
-            type);
+            if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                operands[recorded++] = element;
+        }
+        cm_umir_push_operands(builder, destination,
+            CM_UMIR_RVALUE_AGGREGATE, id, type, operands,
+            expr->data.list.element_count);
         break;
     }
     case CM_U_EXPR_STRUCT: {
         uint32_t index;
+        CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
+        uint32_t recorded = 0u;
         for (index = 0u; index < expr->data.struct_expr.field_count;
-                ++index)
-            (void)cm_umir_emit_expr(builder,
+                ++index) {
+            CmUMirLocalId value = cm_umir_emit_expr(builder,
                 expr->data.struct_expr.fields[index].value);
+            if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                operands[recorded++] = value;
+        }
         if (expr->data.struct_expr.base != CM_U_EXPR_NONE)
             (void)cm_umir_emit_expr(builder,
                 expr->data.struct_expr.base);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
-            type);
+        cm_umir_push_operands(builder, destination,
+            CM_UMIR_RVALUE_AGGREGATE, id, type, operands,
+            expr->data.struct_expr.field_count);
         break;
     }
     case CM_U_EXPR_RETURN: {

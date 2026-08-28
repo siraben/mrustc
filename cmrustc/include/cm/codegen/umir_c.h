@@ -30,6 +30,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
  * syntactically complete either way.
  */
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
-    const CmUMirBody *body, const CmUBody *ub, const CmTyckSet *tyck);
+    const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
+    const CmTyckSet *tyck);
 
 #endif

@@ -267,8 +267,76 @@ static int cm_umir_c_item_has_attribute(const CmHirContext *hir,
     return 0;
 }
 
+static const char *cm_umir_c_binary_operator(CmUBinaryOp op)
+{
+    switch (op) {
+    case CM_U_BINARY_ADD: return "+";
+    case CM_U_BINARY_SUB: return "-";
+    case CM_U_BINARY_MUL: return "*";
+    case CM_U_BINARY_DIV: return "/";
+    case CM_U_BINARY_REM: return "%";
+    case CM_U_BINARY_AND: return "&&";
+    case CM_U_BINARY_OR: return "||";
+    case CM_U_BINARY_BIT_AND: return "&";
+    case CM_U_BINARY_BIT_OR: return "|";
+    case CM_U_BINARY_BIT_XOR: return "^";
+    case CM_U_BINARY_SHL: return "<<";
+    case CM_U_BINARY_SHR: return ">>";
+    case CM_U_BINARY_EQ: return "==";
+    case CM_U_BINARY_NE: return "!=";
+    case CM_U_BINARY_LT: return "<";
+    case CM_U_BINARY_LE: return "<=";
+    case CM_U_BINARY_GT: return ">";
+    case CM_U_BINARY_GE: return ">=";
+    default: return "+";
+    }
+}
+
+static CmTyId cm_umir_c_local_type(const CmUMirBody *body,
+    CmUMirLocalId local)
+{
+    const CmTyId *type = (const CmTyId *)cm_vec_at_const(&body->locals,
+        local);
+    return type == NULL ? CM_TY_NONE : *type;
+}
+
+/* Declared field index of `name` in the ADT behind `type`, or -1. */
+static long cm_umir_c_field_index(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmUBodySet *ubodies, CmTyId type,
+    CmInternId name)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    const CmInternedString *wanted;
+    uint32_t index;
+    while (ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR))
+        ty = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, ty->children[0]));
+    if (ty == NULL || ty->kind != CM_TY_ADT) return -1;
+    record = cm_hir_lookup_definition(hir, ty->def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return -1;
+    item = cm_hir_get_item(hir, record->entity.item_id);
+    if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+            && item->kind != CM_HIR_ITEM_UNION)) return -1;
+    wanted = cm_interner_get(&ubodies->strings, name);
+    if (wanted == NULL) return -1;
+    for (index = 0u; index < item->data.aggregate_item.field_count;
+            ++index) {
+        const CmInternedString *have = cm_interner_get(&hir->strings,
+            item->data.aggregate_item.fields[index].name);
+        if (have != NULL && have->len == wanted->len
+            && memcmp(have->bytes, wanted->bytes, have->len) == 0)
+            return (long)index;
+    }
+    return -1;
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
-    const CmUMirBody *body, const CmUBody *ub, const CmTyckSet *tyck)
+    const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
+    const CmTyckSet *tyck)
 {
     size_t block_index;
     size_t local_index;
@@ -310,6 +378,33 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         cm_str_buf_push(output, ' ');
         cm_umir_c_render_local(output, (CmUMirLocalId)local_index);
         cm_str_buf_append(output, " = 0;\n");
+    }
+    /* Aggregates live as function-scope slot arrays (M9 leniency: an
+     * aggregate value is a pointer to its declared-order field slots). */
+    for (block_index = 0u; block_index < body->blocks.len;
+            ++block_index) {
+        const CmUMirBlock *block = (const CmUMirBlock *)cm_vec_at_const(
+            &body->blocks, block_index);
+        size_t statement_index;
+        if (block == NULL) continue;
+        for (statement_index = 0u;
+                statement_index < block->statements.len;
+                ++statement_index) {
+            const CmUMirStatement *statement =
+                (const CmUMirStatement *)cm_vec_at_const(
+                    &block->statements, statement_index);
+            unsigned long slots;
+            if (statement == NULL
+                || statement->kind != CM_UMIR_RVALUE_AGGREGATE) continue;
+            slots = (unsigned long)statement->operand_count
+                + (unsigned long)statement->operand_overflow;
+            cm_str_buf_append(output, "    long long _agg");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_append(output, "[");
+            cm_umir_c_render_number(output, slots == 0u ? 1u : slots);
+            cm_str_buf_append(output, "];\n");
+        }
     }
     /* Prologue: bind parameter patterns to their local slots. */
     for (param = 0u; param < ub->parameter_count; ++param) {
@@ -367,29 +462,122 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             case CM_UMIR_RVALUE_BINARY:
-                if (statement->operand_count == 2u) {
-                    cm_str_buf_push(output, '(');
-                    cm_str_buf_append(output, "(long long)");
+                if (statement->operand_count == 2u && expr != NULL
+                    && (expr->kind == CM_U_EXPR_BINARY
+                        || expr->kind == CM_U_EXPR_ASSIGN_OP)) {
+                    /* Operands compute at their own ABI width so
+                     * wrapping, signedness, and comparisons are exact. */
+                    const char *operand_abi = cm_umir_c_abi_type(
+                        &tyck->arena, cm_umir_c_local_type(body,
+                            statement->operands[0]));
+                    CmUBinaryOp op = expr->kind == CM_U_EXPR_BINARY
+                        ? expr->data.binary.op : expr->data.assign.op;
+                    if (strcmp(operand_abi, "void") == 0)
+                        operand_abi = "long long";
+                    cm_str_buf_append(output, "(long long)((");
+                    cm_str_buf_append(output, operand_abi);
+                    cm_str_buf_push(output, ')');
                     cm_umir_c_render_local(output,
                         statement->operands[0]);
-                    cm_str_buf_append(output, " + (long long)");
+                    cm_str_buf_push(output, ' ');
+                    cm_str_buf_append(output,
+                        cm_umir_c_binary_operator(op));
+                    cm_str_buf_append(output, " (");
+                    cm_str_buf_append(output, operand_abi);
+                    cm_str_buf_push(output, ')');
                     cm_umir_c_render_local(output,
                         statement->operands[1]);
-                    cm_str_buf_append(output, ") /* op */");
+                    cm_str_buf_push(output, ')');
                 } else {
                     cm_str_buf_append(output, "0 /* binary */");
                     complete = 0;
                 }
                 break;
             case CM_UMIR_RVALUE_UNARY:
-                if (statement->operand_count == 1u)
+                if (statement->operand_count == 1u && expr != NULL
+                    && expr->kind == CM_U_EXPR_UNARY) {
+                    const char *operand_abi = cm_umir_c_abi_type(
+                        &tyck->arena, cm_umir_c_local_type(body,
+                            statement->operands[0]));
+                    if (strcmp(operand_abi, "void") == 0)
+                        operand_abi = "long long";
+                    cm_str_buf_append(output, "(long long)(");
+                    if (expr->data.unary.op == CM_U_UNARY_NEG)
+                        cm_str_buf_append(output, "-(");
+                    else if (expr->data.unary.op == CM_U_UNARY_NOT)
+                        cm_str_buf_append(output,
+                            strcmp(operand_abi, "uint8_t") == 0
+                                ? "!(" : "~(");
+                    else
+                        cm_str_buf_append(output, "(");
+                    cm_str_buf_append(output, operand_abi);
+                    cm_str_buf_push(output, ')');
                     cm_umir_c_render_local(output,
                         statement->operands[0]);
-                else {
+                    cm_str_buf_append(output, "))");
+                } else {
                     cm_str_buf_append(output, "0 /* unary */");
                     complete = 0;
                 }
                 break;
+            case CM_UMIR_RVALUE_AGGREGATE: {
+                uint32_t field;
+                uint32_t slot_count = statement->operand_count;
+                int mapped = statement->operand_overflow == 0u;
+                cm_str_buf_append(output, "0; ");
+                for (field = 0u; field < slot_count && mapped; ++field) {
+                    long slot = (long)field;
+                    if (expr != NULL && expr->kind == CM_U_EXPR_STRUCT
+                        && field < expr->data.struct_expr.field_count) {
+                        slot = cm_umir_c_field_index(hir, tyck, ubodies,
+                            statement->type,
+                            expr->data.struct_expr.fields[field].name);
+                        if (slot < 0) { mapped = 0; break; }
+                    }
+                    cm_str_buf_append(output, "_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_push(output, '[');
+                    cm_umir_c_render_number(output, (unsigned long)slot);
+                    cm_str_buf_append(output, "] = ");
+                    cm_umir_c_render_local(output,
+                        statement->operands[field]);
+                    cm_str_buf_append(output, "; ");
+                }
+                if (!mapped) {
+                    cm_str_buf_append(output, "/* aggregate */");
+                    complete = 0;
+                }
+                cm_umir_c_render_local(output, statement->destination);
+                cm_str_buf_append(output, " = (long long)(intptr_t)_agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                break;
+            }
+            case CM_UMIR_RVALUE_FIELD: {
+                long slot = -1;
+                if (statement->operand_count == 1u && expr != NULL) {
+                    if (expr->kind == CM_U_EXPR_TUPLE_FIELD)
+                        slot = (long)expr->data.tuple_field.index;
+                    else if (expr->kind == CM_U_EXPR_FIELD)
+                        slot = cm_umir_c_field_index(hir, tyck, ubodies,
+                            cm_umir_c_local_type(body,
+                                statement->operands[0]),
+                            expr->data.field.name);
+                }
+                if (slot >= 0) {
+                    cm_str_buf_append(output, "((long long *)(intptr_t)");
+                    cm_umir_c_render_local(output,
+                        statement->operands[0]);
+                    cm_str_buf_append(output, ")[");
+                    cm_umir_c_render_number(output, (unsigned long)slot);
+                    cm_str_buf_push(output, ']');
+                } else {
+                    cm_str_buf_append(output, "0 /* field */");
+                    complete = 0;
+                }
+                break;
+            }
             case CM_UMIR_RVALUE_CALL: {
                 /* Callee is the first operand's defining PATH. */
                 CmHirDefId callee_def = cm_hir_def_id_none();
