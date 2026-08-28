@@ -3046,3 +3046,12 @@ expression-macro expansion instead of failing ubody with
 "unexpanded macro invocation in body" (was 3,184 failures).
 Minicore acceptance unchanged (20/20).  Lanes + ASan green;
 census re-running.
+
+M9-03 acceptance numbers (2026-08-28, census26): the two-crate
+pipeline is green through every stage — core-body-expand 23,683
+bodies / 14,860 invocations / 0 failed; core-hir 0 errors (51s);
+alloc hir-lower 5s, 0 errors; combined HIR 42,158 items / 24,797
+bodies; **ubody 24,797/24,797 lowered, 0 failed** (19 unresolved
+paths: avx2/neon helpers, lang shims); tyck 23,071/24,797 typed,
+**420 error nodes** over 352,590 expressions.  The loop moves to
+the cross-crate tyck residue.
