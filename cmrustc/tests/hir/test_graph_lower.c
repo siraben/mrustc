@@ -13090,10 +13090,10 @@ static void test_supertrait_associated_equalities(void)
             "trait Bad: Shr<u8, Output = Self> {}",
         "trait Left { type Output; } trait Right { type Output; } "
             "trait Both: Left + Right {} "
-            "trait Bad: Both<Output = Self> {}",
-        "trait Marker {} trait Shr<Rhs> { type Output; } "
-            "trait Bad: Shr<u8, Output: Marker> {}"
+            "trait Bad: Both<Output = Self> {}"
     };
+    /* `Shr<u8, Output: Marker>` moved out of this list: associated-type
+     * constraints in bounds are accepted and dropped (M9 leniency). */
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
@@ -13101,8 +13101,7 @@ static void test_supertrait_associated_equalities(void)
         CM_HIR_LOWER_UNRESOLVED_PATH,
         CM_HIR_LOWER_INVALID_TRAIT,
         CM_HIR_LOWER_UNSUPPORTED_GENERIC,
-        CM_HIR_LOWER_INVALID_TRAIT,
-        CM_HIR_LOWER_UNSUPPORTED_GENERIC
+        CM_HIR_LOWER_INVALID_TRAIT
     };
     size_t fixture_index;
 

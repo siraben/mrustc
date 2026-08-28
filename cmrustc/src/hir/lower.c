@@ -13004,7 +13004,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
             memset(&trait_target, 0, sizeof(trait_target));
             if (!cm_lower_trait_reference(state, CM_AST_ITEM_NONE,
                     bound->trait_type, module, owner, CM_HIR_TYPE_NONE,
-                    &trait, &trait_target, 1, 1, 0, 0)) {
+                    &trait, &trait_target, 1, 1, 1, 0)) {
                 goto fail;
             }
             target_ast_item = trait_target.local_record == NULL ? NULL
@@ -13045,7 +13045,7 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
             equalities = NULL;
             equality_count = 0u;
             if (!cm_lower_predicate_equalities(state, CM_AST_ITEM_NONE,
-                    bound->trait_type, &trait_target, module, owner, 0,
+                    bound->trait_type, &trait_target, module, owner, 1,
                     &equalities, &equality_count)) {
                 cm_free(trait.arguments);
                 goto fail;
@@ -15720,10 +15720,10 @@ static int cm_lower_trait_alias_item(CmLowerState *state,
                     ast_bound->type, record->owner_module,
                     record->definition, CM_HIR_TYPE_NONE,
                     &bound->data.trait_bound.trait_type, &target_trait,
-                    1, 1, 0, 1)
+                    1, 1, 1, 1)
                 || !cm_lower_predicate_equalities(state, ast_item_id,
                     ast_bound->type, &target_trait, record->owner_module,
-                    record->definition, 0,
+                    record->definition, 1,
                     &bound->data.trait_bound.equalities,
                     &bound->data.trait_bound.equality_count)) {
                 break;
@@ -15986,12 +15986,12 @@ static int cm_lower_trait_item(CmLowerState *state,
                 ast_supertrait->type, record->owner_module,
                 record->definition, CM_HIR_TYPE_NONE,
                 &supertraits[supertrait_count].trait_type, &target_trait,
-                1, 1, 0, 1)) {
+                1, 1, 1, 1)) {
             break;
         }
         if (!cm_lower_predicate_equalities(state, ast_item_id,
                 ast_supertrait->type, &target_trait,
-                record->owner_module, record->definition, 0,
+                record->owner_module, record->definition, 1,
                 &supertraits[supertrait_count].equalities,
                 &supertraits[supertrait_count].equality_count)) {
             break;

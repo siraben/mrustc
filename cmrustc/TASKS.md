@@ -2770,6 +2770,17 @@ types (6/6 bodies).  Whole-crate: alloc HIR advances past the
 `in_place_collect.rs:216` (associated-type constraints).  Lanes +
 ASan green.
 
+M9-03 fifth pass (2026-08-28): associated-type constraints
+(`Trait<Assoc: Bound>`) in dyn-trait bounds, where/bound
+predicates, and supertraits are accepted and dropped (M9 leniency:
+bound promises are not enforced by the lenient tyck; `cfg`-like
+semantic forms unaffected).  The graph-lower fail-closed fixture
+for `Shr<u8, Output: Marker>` moved out of the rejected list.
+Minicore acceptance: `trait U: core::Sourcey<Item: Hash>` lowers,
+6/6 bodies typed.  Whole-crate: alloc HIR advances past
+`in_place_collect.rs` to `rc.rs:2937` (ADT generic default
+structural substitution).  Lanes + ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
