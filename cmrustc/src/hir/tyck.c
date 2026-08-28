@@ -2902,6 +2902,11 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                          * `AsRef<[u8]>`, not the first AsRef impl. */
                         int return_ok = 1;
                         if (expected != CM_TY_NONE) {
+                            /* Judge-only: the probe's bindings must not
+                             * leak into the accepted candidate, or the
+                             * expectation prematurely forces generics
+                             * and later argument checks fail. */
+                            size_t probe_mark = cm_ty_undo_mark(arena);
                             CmTyId probe_params[CM_TYCK_MAX_ARGS];
                             CmTyId probe_ret = CM_TY_NONE;
                             (void)cm_tyck_signature(env, found.item,
@@ -2911,6 +2916,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                             if (probe_ret != CM_TY_NONE
                                 && !cm_tyck_coerce(env, probe_ret,
                                     expected)) return_ok = 0;
+                            cm_ty_undo_to(arena, probe_mark);
                         }
                         if (return_ok) break;
                         if (!have_fallback) {
