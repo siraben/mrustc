@@ -1035,6 +1035,50 @@ int main(int argc, char **argv)
                         (unsigned long)mir_unsupported,
                         (unsigned long)mir_skipped);
                 }
+                /* Expression-kind totals across mir-ready bodies: the
+                 * ubody->MIR implementation priority list, by count. */
+                {
+                    static const char *const kind_names[] = {
+                        "literal", "path", "qualified_path", "block",
+                        "call", "method_call", "field", "tuple_field",
+                        "index", "unary", "ref", "binary", "assign",
+                        "assign_op", "cast", "try", "range", "let",
+                        "return", "break", "continue", "if", "match",
+                        "loop", "while", "for", "closure", "tuple",
+                        "array", "array_repeat", "struct", "asm",
+                        "offset_of", "unsupported"
+                    };
+                    size_t kind_counts[34];
+                    size_t body_index;
+                    size_t kind;
+                    memset(kind_counts, 0, sizeof(kind_counts));
+                    for (body_index = 1u;
+                            body_index <= tyck_result.bodies;
+                            ++body_index) {
+                        const CmTyckBody *tb = cm_tyck_get(&tyck,
+                            (CmHirBodyId)body_index);
+                        const CmUBody *ub = cm_ubody_get(&ubodies,
+                            (CmHirBodyId)body_index);
+                        size_t expr_index;
+                        if (tb == NULL || ub == NULL
+                            || tb->status != CM_TYCK_BODY_TYPED) continue;
+                        for (expr_index = 1u;
+                                expr_index <= ub->expressions.len;
+                                ++expr_index) {
+                            const CmUExpr *expr = cm_ubody_get_expr(ub,
+                                (CmUExprId)expr_index);
+                            if (expr == NULL
+                                || (size_t)expr->kind >= 34u) continue;
+                            kind_counts[(size_t)expr->kind] += 1u;
+                        }
+                    }
+                    printf("mir-exprs");
+                    for (kind = 0u; kind < 34u; ++kind)
+                        if (kind_counts[kind] != 0u)
+                            printf(" %s=%lu", kind_names[kind],
+                                (unsigned long)kind_counts[kind]);
+                    printf("\n");
+                }
                 cm_tyck_set_destroy(&tyck);
             }
             cm_ubody_set_destroy(&ubodies);
