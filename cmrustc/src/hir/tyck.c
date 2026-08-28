@@ -3408,6 +3408,9 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                 if (declared != CM_TY_NONE && init != CM_TY_NONE
                     && !cm_tyck_coerce(env, init, declared)) {
                     cm_tyck_debug_pair(env, "let-init", init, declared);
+                    cm_tyck_debug_span(env,
+                        cm_ubody_get_expr(env->ub,
+                            stmt->data.let_stmt.initializer));
                     cm_tyck_error(env, "let initializer type mismatch");
                 }
                 cm_tyck_pat(env, stmt->data.let_stmt.pattern, pat_type);
@@ -3562,9 +3565,36 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                 break;
             }
             if (ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR) {
-                /* Index trait on ADTs: look up `index`. */
+                /* Index trait on ADTs: look up `index`; a Cow-like ADT
+                 * without one derefs first (`&Cow<str>[..]`). */
                 CmTyckFound found;
                 CmInternId method = cm_tyck_intern_text(env->state, "index", 5u);
+                if (ct->kind == CM_TY_ADT
+                    && (method == CM_INTERN_ID_NONE
+                        || !cm_tyck_lookup_assoc(env, candidate, method,
+                            &found))) {
+                    CmTyId derefed = cm_tyck_user_deref(env, candidate);
+                    const CmTy *dt = derefed == CM_TY_NONE ? NULL
+                        : cm_ty_get(arena, cm_ty_resolve(arena, derefed));
+                    if (dt != NULL && (dt->kind == CM_TY_STR
+                            || dt->kind == CM_TY_SLICE
+                            || dt->kind == CM_TY_ARRAY)) {
+                        const CmTy *it2 = cm_ty_get(arena,
+                            cm_ty_resolve(arena, index_type));
+                        if (dt->kind != CM_TY_STR && it2 != NULL
+                            && (it2->kind == CM_TY_INT
+                                || (it2->kind == CM_TY_INFER
+                                    && it2->b == CM_HIR_INFER_INTEGER))) {
+                            (void)cm_ty_unify(arena, index_type,
+                                arena->usize);
+                            result = dt->children[0];
+                        } else {
+                            result = dt->kind == CM_TY_STR ? arena->str
+                                : cm_ty_slice(arena, dt->children[0]);
+                        }
+                        break;
+                    }
+                }
                 if (method != CM_INTERN_ID_NONE
                     && cm_tyck_lookup_assoc(env, candidate, method, &found)
                     && found.item->kind == CM_HIR_ITEM_FUNCTION) {
