@@ -2098,6 +2098,11 @@ static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
     const CmTy *tb = cm_ty_get(arena, cm_ty_resolve(arena, b));
     if (ta != NULL && ta->kind == CM_TY_NEVER) return b;
     if (tb != NULL && tb->kind == CM_TY_NEVER) return a;
+    /* Two different fn items joined by a branch (sort's partition
+     * selection) decay to a common fn pointer; leniently keep the left
+     * item's signature. */
+    if (ta != NULL && tb != NULL && ta->kind == CM_TY_FN_DEF
+        && tb->kind == CM_TY_FN_DEF) return a;
     if (!cm_ty_unify(arena, a, b)) {
         /* Reference coercions: `&mut T` to `&T` is the common case. */
         if (ta != NULL && tb != NULL && ta->kind == CM_TY_REF
@@ -2260,6 +2265,22 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
      * `Box<[T], A>`, alloc's into_boxed_slice family). */
     if (a->kind == CM_TY_ARRAY && e->kind == CM_TY_SLICE)
         return cm_ty_unify(arena, a->children[0], e->children[0]);
+    /* Tuples coerce element-wise: `(&[T], &[], &[])` returned where
+     * `(&[T], &[U], &[T])` is expected needs the empty-array literals
+     * unsized against the slice elements. */
+    if (a->kind == CM_TY_TUPLE && e->kind == CM_TY_TUPLE
+        && a->count == e->count) {
+        uint32_t child;
+        int all = 1;
+        for (child = 0u; child < a->count && all; ++child) {
+            if (!cm_tyck_coerce(env, a->children[child],
+                    e->children[child])) all = 0;
+            a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+            e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+            if (a == NULL || e == NULL) return 0;
+        }
+        if (all) return 1;
+    }
     if (a->kind == CM_TY_ADT && e->kind == CM_TY_ADT
         && cm_hir_def_id_equal(a->def, e->def)
         && a->count == e->count) {
@@ -3385,8 +3406,10 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                     : init != CM_TY_NONE ? init
                     : cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
                 if (declared != CM_TY_NONE && init != CM_TY_NONE
-                    && !cm_tyck_coerce(env, init, declared))
+                    && !cm_tyck_coerce(env, init, declared)) {
+                    cm_tyck_debug_pair(env, "let-init", init, declared);
                     cm_tyck_error(env, "let initializer type mismatch");
+                }
                 cm_tyck_pat(env, stmt->data.let_stmt.pattern, pat_type);
                 if (stmt->data.let_stmt.else_block != CM_U_EXPR_NONE)
                     (void)cm_tyck_expr(env, stmt->data.let_stmt.else_block,
@@ -3560,6 +3583,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             }
         }
         if (result == CM_TY_NONE) {
+            cm_tyck_debug_pair(env, "index-base", base, index_type);
+            cm_tyck_debug_span(env, expr);
             cm_tyck_error(env, "index on unsupported type");
             result = arena->error;
         }
