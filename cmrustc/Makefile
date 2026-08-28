@@ -206,6 +206,7 @@ CODEGEN_PRODUCTION_BARRIER_SCRIPT := tests/codegen/run_production_barrier.sh
 G3_CROSS_CRATE_SCRIPT := tests/codegen/run_g3_cross_crate.sh
 UMIR_ECHO_SCRIPT := tests/codegen/run_umir_echo.sh
 UMIR_FIXTURES_SCRIPT := tests/codegen/run_umir_fixtures.sh
+UMIR_CORE_SCRIPT := tests/codegen/run_umir_core.sh
 CORE_HIR_PROBE_PROGRAM := $(BUILD_DIR)/probe_core_hir
 CORE_HIR_PROBE_SOURCE ?= /tmp/cmrustc-rust190-source/rustc-1.90.0-src/library/core/src/lib.rs
 AST_DUMP_PROGRAM := $(BUILD_DIR)/dump_ast
@@ -529,6 +530,11 @@ strict:
 
 tcc:
 	$(MAKE) BUILD_DIR=build/tcc CC="$(TCC)" CFLAGS="$(TCC_CFLAGS)" CM_REQUIRE_TCC=1 test
+
+# Core-linked u-MIR executables (slow: lowers and typechecks all of core).
+check-umir-core: $(CORE_HIR_PROBE_PROGRAM)
+	PROBE=$(abspath $(CORE_HIR_PROBE_PROGRAM)) CC="$(CC)" \
+		CMRUSTC_REQUIRE_UMIR_CORE=1 $(UMIR_CORE_SCRIPT)
 
 check-core-hir: $(CORE_HIR_PROBE_PROGRAM)
 	$(CORE_HIR_PROBE_PROGRAM) $(CORE_HIR_PROBE_SOURCE)

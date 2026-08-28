@@ -27,7 +27,7 @@ Pipeline stages and status, in execution order:
 | Inference typeck (M9-04) | two-crate residue mode | core-only run 64: **151** error nodes; two-crate (core+alloc, census26): 23,071/24,797 typed, **420** error nodes over 352,590 exprs |
 | Whole-context snapshot + multi-crate (M9-03) | **HIR/ubody acceptance met** (census26, `16e5eab2`) | alloc lowers against in-memory core with 0 errors (42,158 items); ubody 24,797/24,797; dependency imports/prelude/macros/coherence leniencies landed |
 | MIR (M9-05) | **ubody->u-MIR expression coverage complete** (census81, `ab7a3023`) | all 23,326 typed bodies emit complete u-MIR (260,137 statements, 46,280 blocks, empty opaque histogram); const eval (S7) and the 1,616 partial-tyck bodies remain |
-| C codegen + link (M9-06) | **23/23 G3 fixtures run through u-MIR** (`7a698d7f`) | u-MIR C emitter with operators, aggregates/enums as slot arrays, place-aware stores, references, loops, match dispatch, generic instance collection + trait dispatch; `run_umir_fixtures.sh` is a required gate in the gcc and tcc lanes; full-tree 200-body sample 106,134 bytes compiles |
+| C codegen + link (M9-06) | **core-linked executable green** (`27a6b8eb`) | u-MIR C emitter: 24/24 no_core fixtures (operators, aggregates/enums, stores, references, loops, match, generic instances + trait dispatch, closures) as a required gcc+tcc gate; `run_umir_core.sh` compiles `core-max-probe` (core::cmp::max + Option match) against the real 1.90.0 core, links, and runs — first program executing real core code |
 
 Key numbers trend (whole-core `--body-census`): typed 16,339 → 17,101 →
 18,196 → 19,928 → 20,323 → 20,437 → 20,663 → 20,854; error nodes 12,858
