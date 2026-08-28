@@ -1095,6 +1095,68 @@ void cm_umir_set_destroy(CmUMirSet *set)
     cm_vec_destroy(&set->bodies);
 }
 
+/* Build the u-MIR body of one closure expression: the enclosing body's
+ * locals are aliased as the environment, then a return slot and the
+ * closure's own temporaries follow. */
+static void cm_mir_ulower_closure(CmUMirSet *out, const CmHirContext *hir,
+    const CmUBodySet *bodies, const CmTyckSet *tyck, const CmUBody *ub,
+    const CmTyckBody *tb, CmHirBodyId body_id, CmUExprId closure_id,
+    CmMirULowerResult *result)
+{
+    const CmUExpr *closure = cm_ubody_get_expr(ub, closure_id);
+    CmUMirBody body;
+    CmUMirBuilder builder;
+    CmTyId return_type;
+    size_t local_index;
+    (void)tyck;
+    if (closure == NULL || closure->kind != CM_U_EXPR_CLOSURE) return;
+    memset(&body, 0, sizeof(body));
+    body.source = body_id;
+    body.closure_expr = closure_id;
+    body.env_count = (uint32_t)(1u + ub->locals.len);
+    cm_vec_init(&body.locals, sizeof(CmTyId));
+    cm_vec_init(&body.blocks, sizeof(CmUMirBlock));
+    /* Environment slots mirror the enclosing frame exactly. */
+    return_type = tb->return_type;
+    (void)cm_vec_push(&body.locals, &return_type);
+    for (local_index = 0u; local_index < ub->locals.len; ++local_index) {
+        CmTyId local_type = tb->local_types == NULL ? CM_TY_NONE
+            : tb->local_types[local_index];
+        (void)cm_vec_push(&body.locals, &local_type);
+    }
+    /* Closure return slot. */
+    return_type = tb->expr_types == NULL ? CM_TY_NONE
+        : tb->expr_types[closure->data.closure.body];
+    (void)cm_vec_push(&body.locals, &return_type);
+    memset(&builder, 0, sizeof(builder));
+    builder.hir = hir;
+    builder.ubodies = bodies;
+    builder.body = &body;
+    builder.ub = ub;
+    builder.tb = tb;
+    builder.census = result;
+    builder.current = cm_umir_new_block(&builder);
+    {
+        CmUMirLocalId root_local = cm_umir_emit_expr(&builder,
+            closure->data.closure.body);
+        if (builder.blocked == NULL)
+            cm_umir_push_operands(&builder, body.env_count,
+                CM_UMIR_RVALUE_LOCAL, closure->data.closure.body,
+                return_type, &root_local, 1u);
+    }
+    {
+        size_t seal_index;
+        for (seal_index = 0u; seal_index < body.blocks.len; ++seal_index) {
+            CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(&body.blocks,
+                seal_index);
+            if (block != NULL && block->terminator == CM_UMIR_TERMINATOR_NONE)
+                block->terminator = CM_UMIR_TERMINATOR_RETURN;
+        }
+    }
+    body.complete = builder.blocked == NULL;
+    (void)cm_vec_push(&out->bodies, &body);
+}
+
 CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
     const CmHirContext *hir, const CmUBodySet *bodies,
     const CmTyckSet *tyck)
@@ -1173,6 +1235,20 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
             result.blocks += body.blocks.len;
         }
         (void)cm_vec_push(&out->bodies, &body);
+        /* One extra body per closure expression in this body. */
+        {
+            size_t expr_index;
+            for (expr_index = 1u; expr_index <= ub->expressions.len;
+                    ++expr_index) {
+                const CmUExpr *candidate = cm_ubody_get_expr(ub,
+                    (CmUExprId)expr_index);
+                if (candidate != NULL
+                    && candidate->kind == CM_U_EXPR_CLOSURE)
+                    cm_mir_ulower_closure(out, hir, bodies, tyck, ub, tb,
+                        (CmHirBodyId)body_index, (CmUExprId)expr_index,
+                        &result);
+            }
+        }
     }
     return result;
 }

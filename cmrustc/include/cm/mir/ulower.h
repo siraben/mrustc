@@ -112,6 +112,11 @@ typedef struct CmUMirBody {
     CmVec locals;                  /* CmTyId per local (0 = return slot) */
     CmVec blocks;                  /* CmUMirBlock */
     int complete;                  /* every node emitted precisely */
+    /* Closure bodies: the first `env_count` locals alias the enclosing
+     * frame; `closure_expr` names the closure expression; the return
+     * slot is local `env_count`. */
+    CmUExprId closure_expr;
+    uint32_t env_count;
 } CmUMirBody;
 
 typedef struct CmUMirSet {
