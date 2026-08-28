@@ -2799,6 +2799,21 @@ lowers (7/7 bodies typed).  Whole-crate: alloc HIR advances past
 `task.rs` to `raw_vec/mod.rs:402` (`unsafe impl Drop` — dropck
 eyepatch impl safety vs safe trait).  Lanes + ASan green.
 
+M9-03 eighth pass (2026-08-28): `unsafe impl` of a safe trait is
+admitted in both the lowerer and the model validator (the
+dropck-eyepatch pattern `unsafe impl<#[may_dangle] T> Drop`
+requires it); a safe impl of an unsafe trait still rejects.  The
+two fail-closed fixtures asserting the old symmetric rule
+(test_model, test_lower) moved out of their rejected lists.  With
+that admitted, alloc HIR lowering proceeded past every prior
+frontier and the census timed out inside the O(items) linear
+dependency-item scan — replaced by a lazily built sorted
+(source, ast_item) index with binary search
+(`cm_lower_build_dependency_index`).  Minicore acceptance: unsafe
+impl of a safe dep trait lowers and types (8/8 bodies).  Indexed
+whole-crate census in flight; numbers in the next entry.  Lanes +
+ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

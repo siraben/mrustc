@@ -2008,8 +2008,12 @@ static int cm_hir_impl_item_payload_valid(const CmHirContext *context,
          * itemless negative headers. */
         return item->data.impl_item.safety == CM_HIR_SAFE;
     }
+    /* M9 leniency: an unsafe impl of a safe trait is admitted (the
+     * dropck-eyepatch pattern); a safe impl of an unsafe trait is not. */
     return trait_item->data.trait_item.safety
-        == item->data.impl_item.safety;
+            == item->data.impl_item.safety
+        || (trait_item->data.trait_item.safety == CM_HIR_SAFE
+            && item->data.impl_item.safety == CM_HIR_UNSAFE);
 }
 
 static int cm_hir_impl_alias_link_is_unique(const CmHirContext *context,

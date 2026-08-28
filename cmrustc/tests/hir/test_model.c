@@ -859,8 +859,8 @@ static void test_known_trait_projection_model(void)
     item.data.impl_item.trait_type.definition = struct_definition;
     assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
     item.data.impl_item.trait_type.definition = trait_definition;
-    item.data.impl_item.safety = CM_HIR_UNSAFE;
-    assert(cm_hir_add_item(&context, &item, &item_id) == CM_HIR_INVALID_ID);
+    /* An unsafe impl of a safe trait is admitted (M9 leniency for the
+     * dropck-eyepatch pattern), so it is no longer a rejection case. */
     assert(item_id == CM_HIR_ITEM_NONE && context.items.len == item_count
         && cm_arena_bytes_used(&context.storage) == arena_bytes);
     stored_definition = cm_hir_lookup_definition(&context, impl_definition);

@@ -5653,8 +5653,9 @@ static void test_monomorphic_trait_impl_entry_points(void)
             "trait T { type A; } "
             "impl T for AliasOne { type A = u8; } "
             "impl T for AliasTwo { type A = u16; }",
-        "unsafe trait T { type A; } impl T for u8 { type A = u8; }",
-        "trait T { type A; } unsafe impl T for u8 { type A = u8; }"
+        /* `unsafe impl` of a safe trait is admitted (M9 leniency for the
+         * dropck-eyepatch pattern) and is no longer a rejection case. */
+        "unsafe trait T { type A; } impl T for u8 { type A = u8; }"
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
@@ -5666,7 +5667,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_UNSUPPORTED_ITEM,
         CM_HIR_LOWER_DUPLICATE_NAME,
-        CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
@@ -5683,7 +5683,6 @@ static void test_monomorphic_trait_impl_entry_points(void)
         "duplicate associated definition",
         "duplicate exact impl candidate",
         "duplicate exact impl candidate",
-        "impl safety does not match",
         "impl safety does not match"
     };
     static const char concrete_source[] =

@@ -117,6 +117,13 @@ typedef struct CmLowerMacroRecord {
     CmHirDefId definition;
 } CmLowerMacroRecord;
 
+typedef struct CmLowerDependencyIndexEntry {
+    CmSourceId source;
+    uint32_t ast_item;
+    const CmHirItem *item;
+    uint32_t duplicate;
+} CmLowerDependencyIndexEntry;
+
 typedef struct CmLowerState {
     CmHirContext *hir;
     const CmModuleGraph *graph;
@@ -131,6 +138,12 @@ typedef struct CmLowerState {
     CmVec item_records;
     /* Heap-stable synthesized records for dependency-crate items (M9-03). */
     CmVec dependency_records; /* CmLowerItemRecord* */
+    /* Lazily built (source, ast_item) -> HIR item index over the whole
+     * context, sorted for binary search; invalidated never (dependency
+     * items are fully lowered before this crate's lowering begins). */
+    struct CmLowerDependencyIndexEntry *dependency_index;
+    size_t dependency_index_count;
+    int dependency_index_built;
     CmVec variant_records;
     CmVec macro_records;
     CmVec generic_records;
@@ -15617,8 +15630,15 @@ static int cm_lower_impl_item(CmLowerState *state,
      * associated items.  Do not infer polarity from the trait's `is_auto`
      * bit; that bit only controls auto-trait solving and dyn-trait markers.
      */
+    /*
+     * M9 leniency: an `unsafe impl` of a safe trait is admitted — the
+     * dropck-eyepatch pattern (`unsafe impl<#[may_dangle] T> Drop`)
+     * requires it.  A safe impl of an unsafe trait still rejects.
+     */
     if (!ast_item->data.impl_item.is_negative
-        && safety != hir_item->data.impl_item.safety) {
+        && safety != hir_item->data.impl_item.safety
+        && !(safety == CM_HIR_SAFE
+            && hir_item->data.impl_item.safety == CM_HIR_UNSAFE)) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "impl safety does not match trait safety");
@@ -18451,29 +18471,79 @@ static int cm_lower_macro_import_target(CmLowerState *state,
  * found by AST identity across the whole context (source ids are globally
  * unique in a shared CmSourceSet).
  */
-static const CmHirItem *cm_lower_find_dependency_item(
-    const CmLowerState *state, CmResolveItemRef declaration,
-    uint32_t *out_match_count)
+static int cm_lower_dependency_index_compare(const void *left,
+    const void *right)
 {
-    const CmHirItem *result;
-    size_t index;
-    uint32_t matches;
+    const CmLowerDependencyIndexEntry *a =
+        (const CmLowerDependencyIndexEntry *)left;
+    const CmLowerDependencyIndexEntry *b =
+        (const CmLowerDependencyIndexEntry *)right;
 
-    result = NULL;
-    matches = 0u;
+    if (a->source != b->source) return a->source < b->source ? -1 : 1;
+    if (a->ast_item != b->ast_item) return a->ast_item < b->ast_item ? -1 : 1;
+    return 0;
+}
+
+static void cm_lower_build_dependency_index(CmLowerState *state)
+{
+    size_t index;
+    size_t used = 0u;
+
+    state->dependency_index_built = 1;
+    state->dependency_index = (CmLowerDependencyIndexEntry *)
+        cm_alloc_zeroed(state->hir->items.len + 1u,
+            sizeof(*state->dependency_index));
     for (index = 0u; index < state->hir->items.len; ++index) {
         const CmHirItem *item;
 
         item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
             index);
-        if (item != NULL && item->ast_source == declaration.source
-            && item->ast_item == declaration.item) {
-            result = item;
-            matches += 1u;
+        if (item == NULL || item->ast_source == 0u) continue;
+        state->dependency_index[used].source = item->ast_source;
+        state->dependency_index[used].ast_item = item->ast_item;
+        state->dependency_index[used].item = item;
+        used += 1u;
+    }
+    qsort(state->dependency_index, used,
+        sizeof(*state->dependency_index),
+        cm_lower_dependency_index_compare);
+    for (index = 0u; index < used; ++index) {
+        size_t run = 1u;
+        while (index + run < used
+            && cm_lower_dependency_index_compare(
+                &state->dependency_index[index],
+                &state->dependency_index[index + run]) == 0) run += 1u;
+        if (run > 1u) {
+            size_t run_index;
+            for (run_index = 0u; run_index < run; ++run_index)
+                state->dependency_index[index + run_index].duplicate = 1u;
+            index += run - 1u;
         }
     }
-    if (out_match_count != NULL) *out_match_count = matches;
-    return result;
+    state->dependency_index_count = used;
+}
+
+static const CmHirItem *cm_lower_find_dependency_item(
+    const CmLowerState *state, CmResolveItemRef declaration,
+    uint32_t *out_match_count)
+{
+    CmLowerDependencyIndexEntry key;
+    const CmLowerDependencyIndexEntry *found;
+
+    if (!state->dependency_index_built)
+        cm_lower_build_dependency_index((CmLowerState *)state);
+    if (out_match_count != NULL) *out_match_count = 0u;
+    memset(&key, 0, sizeof(key));
+    key.source = declaration.source;
+    key.ast_item = declaration.item;
+    found = (const CmLowerDependencyIndexEntry *)bsearch(&key,
+        state->dependency_index, state->dependency_index_count,
+        sizeof(*state->dependency_index),
+        cm_lower_dependency_index_compare);
+    if (found == NULL) return NULL;
+    if (out_match_count != NULL)
+        *out_match_count = found->duplicate ? 2u : 1u;
+    return found->duplicate ? NULL : found->item;
 }
 
 /* Map one dependency-tagged binding into the dependency's lowered HIR. */
@@ -24109,6 +24179,7 @@ finish:
         }
     }
     cm_vec_destroy(&state.dependency_records);
+    cm_free(state.dependency_index);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }
@@ -24256,6 +24327,7 @@ finish:
         }
     }
     cm_vec_destroy(&state.dependency_records);
+    cm_free(state.dependency_index);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }
@@ -24461,6 +24533,7 @@ finish:
         }
     }
     cm_vec_destroy(&state.dependency_records);
+    cm_free(state.dependency_index);
     cm_vec_destroy(&state.item_records);
     return state.result;
 }
