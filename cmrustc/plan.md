@@ -27,7 +27,7 @@ Pipeline stages and status, in execution order:
 | Inference typeck (M9-04) | two-crate residue mode | core-only run 64: **151** error nodes; two-crate (core+alloc, census26): 23,071/24,797 typed, **420** error nodes over 352,590 exprs |
 | Whole-context snapshot + multi-crate (M9-03) | **HIR/ubody acceptance met** (census26, `16e5eab2`) | alloc lowers against in-memory core with 0 errors (42,158 items); ubody 24,797/24,797; dependency imports/prelude/macros/coherence leniencies landed |
 | MIR (M9-05) | **ubody->u-MIR expression coverage complete** (census81, `ab7a3023`) | all 23,326 typed bodies emit complete u-MIR (260,137 statements, 46,280 blocks, empty opaque histogram); const eval (S7) and the 1,616 partial-tyck bodies remain |
-| C codegen + link (M9-06) | todo | legacy G3 codegen exists for a small subset only |
+| C codegen + link (M9-06) | **first executable gate green** (`442ee29f`) | u-MIR C emitter: full-tree sample 101,075 bytes compiles; `run_umir_echo.sh` builds and runs the no_core echo fixture against its C harness |
 
 Key numbers trend (whole-core `--body-census`): typed 16,339 → 17,101 →
 18,196 → 19,928 → 20,323 → 20,437 → 20,663 → 20,854; error nodes 12,858

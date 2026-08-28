@@ -4,6 +4,8 @@
 set -eu
 : "${PROBE:=build/probe-ref6/probe_core_hir}"
 : "${CC:=gcc}"
+command -v "$CC" >/dev/null 2>&1 || { echo "umir echo executable acceptance: SKIP ($CC unavailable)"; exit 0; }
+test -x "$PROBE" || { echo "umir echo executable acceptance: SKIP (probe not built)"; exit 0; }
 test_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 fixture="$test_dir/fixtures/blanket-echo.rs"
 harness="$test_dir/fixtures/blanket-echo-harness.c"
