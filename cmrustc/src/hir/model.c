@@ -2642,7 +2642,11 @@ static int cm_hir_custom_receiver_type_valid_inner(
         return 0;
     }
     named = &type->data.named_type;
-    if (named->argument_count != 1u || named->arguments == NULL) return 0;
+    /*
+     * The wrapper's first argument must chain to Self; further arguments
+     * (e.g. a defaulted allocator in `Arc<Self, Global>`) are permitted.
+     */
+    if (named->argument_count == 0u || named->arguments == NULL) return 0;
     argument = &named->arguments[0];
     return argument->kind == CM_HIR_GENERIC_ARG_TYPE
         && cm_hir_custom_receiver_type_valid_inner(context,

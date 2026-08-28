@@ -2790,6 +2790,15 @@ HIR advances past `rc.rs` to `task.rs:93` (custom `self: Arc<Self>`
 receiver whose wrapper now carries the defaulted allocator
 argument).  Lanes + ASan green.
 
+M9-03 seventh pass (2026-08-28): custom receiver wrappers accept
+extra generic arguments beyond the Self chain (`self: Arc<Self>`
+where `Arc<Self, Global>` carries the defaulted allocator) — the
+first wrapper argument must still chain to the enclosing Self.
+Minicore acceptance: `fn wake(self: RcLike<Self>)` trait method
+lowers (7/7 bodies typed).  Whole-crate: alloc HIR advances past
+`task.rs` to `raw_vec/mod.rs:402` (`unsafe impl Drop` — dropck
+eyepatch impl safety vs safe trait).  Lanes + ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
