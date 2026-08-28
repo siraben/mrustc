@@ -1625,6 +1625,10 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     } else {
         cm_str_buf_append(&state->text, ") }");
     }
+    if (getenv("CM_BODY_EXPAND_DEBUG") != NULL
+        && memmem(state->text.data, state->text.len, "size hint", 9u) != NULL)
+        fprintf(stderr, "body-expand format_args text:\n%.*s\n",
+            (int)state->text.len, state->text.data);
     ok = cm_body_finish_generated(state, id, name, span);
 cleanup:
     cm_free(format);

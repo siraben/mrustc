@@ -703,7 +703,8 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
      * Pass 3: declaration fallbacks. */
     for (pass = 0; pass < 4; ++pass) {
         if ((pass == 0 && (passes & 1u) == 0u)
-            || (pass != 0 && (passes & 2u) == 0u)) continue;
+            || (pass == 1 && (passes & 2u) == 0u)
+            || (pass >= 2 && (passes & 4u) == 0u)) continue;
         for (index = 0u; index < env->state->impl_count; ++index) {
             const CmTyckImpl *impl = &env->state->impls[index];
             const CmHirItem *child;
@@ -773,7 +774,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     /* Trait bounds in scope: `T: Trait`, and equally
      * `Simd<T, N>: SimdUint` or `P::Searcher: Searcher` — the subject is
      * matched structurally, with its generic parameters as wildcards. */
-    if ((passes & 2u) != 0u) {
+    if ((passes & 4u) != 0u) {
         const CmHirItem *owners[2];
         int owner;
         owners[0] = env->item;
@@ -841,7 +842,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     }
     /* A projection receiver: the associated type's declared bounds
      * (`trait Pattern { type Searcher: Searcher<'a>; }`) supply methods. */
-    if ((passes & 2u) != 0u && self->kind == CM_TY_PROJECTION) {
+    if ((passes & 4u) != 0u && self->kind == CM_TY_PROJECTION) {
         const CmHirItem *associated = cm_tyck_item(env->state, self->def2);
         if (associated != NULL
             && associated->kind == CM_HIR_ITEM_TYPE_ALIAS) {
@@ -868,7 +869,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
             }
         }
     }
-    if ((passes & 2u) != 0u && self->kind == CM_TY_DYN
+    if ((passes & 4u) != 0u && self->kind == CM_TY_DYN
         && !cm_hir_def_id_is_none(self->def)) {
         CmHirDefId owner_trait;
         const CmHirItem *declared = cm_tyck_trait_method(env, self->def, name,
@@ -891,7 +892,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
 static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     CmInternId name, CmTyckFound *out)
 {
-    return cm_tyck_lookup_assoc_in(env, self_type, name, out, 3u, 0u);
+    return cm_tyck_lookup_assoc_in(env, self_type, name, out, 7u, 0u);
 }
 
 /* Is `def` one of the callable traits? */
@@ -2581,7 +2582,7 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                     CmTyckFound retry;
                     size_t undo_mark = cm_ty_undo_mark(arena);
                     if (!cm_tyck_lookup_assoc_in(env, path_self,
-                            path_name, &retry, 3u, variant)) break;
+                            path_name, &retry, 7u, variant)) break;
                     if (retry.item->kind == CM_HIR_ITEM_FUNCTION
                         && cm_tyck_method_args_compatible(env, &retry,
                             call_arg_types, call_arg_count)) {
@@ -2631,7 +2632,7 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                     CmTyckFound retry;
                     size_t undo_mark = cm_ty_undo_mark(arena);
                     if (!cm_tyck_lookup_assoc_in(env, qualified_self,
-                            qualified_name, &retry, 3u, variant)) break;
+                            qualified_name, &retry, 7u, variant)) break;
                     if (retry.item->kind == CM_HIR_ITEM_FUNCTION
                         && cm_tyck_method_args_compatible(env, &retry,
                             call_arg_types, call_arg_count)) {
@@ -2779,8 +2780,13 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         CmTyId fallback_candidate = CM_TY_NONE;
         int have_fallback = 0;
         found.item = NULL;
-        for (phase = 0u; phase < 2u && found.item == NULL; ++phase) {
-            unsigned int mask = phase == 0u ? 1u : 2u;
+        for (phase = 0u; phase < 3u && found.item == NULL; ++phase) {
+            /* Specific trait impls win across every autoderef step
+             * before any blanket impl or declaration fallback:
+             * `(&str).to_owned()` must reach `ToOwned for str` at the
+             * deref step, not `impl<T: Clone> ToOwned for T` at step
+             * zero (T := &str). */
+            unsigned int mask = phase == 0u ? 1u : (phase == 1u ? 2u : 4u);
             for (step = 0u; step < 6u; ++step) {
                 CmTyKind candidate_kind;
                 unsigned int variant;
@@ -3231,7 +3237,7 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
                 for (variant = 0u; variant < 32u; ++variant) {
                     size_t undo_mark = cm_ty_undo_mark(arena);
                     if (!cm_tyck_lookup_assoc_in(env, left, method, &found,
-                            3u, variant)) break;
+                            7u, variant)) break;
                     if (found.item->kind != CM_HIR_ITEM_FUNCTION) {
                         cm_ty_undo_to(arena, undo_mark);
                         break;
