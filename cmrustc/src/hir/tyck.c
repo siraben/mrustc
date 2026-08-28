@@ -2748,7 +2748,7 @@ static int cm_tyck_method_args_compatible(CmTyckEnv *env,
 }
 
 static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
-    CmUExprId id)
+    CmUExprId id, CmTyId expected)
 {
     CmTyArena *arena = env->state->arena;
     CmTyId receiver = cm_tyck_expr(env, expr->data.method_call.receiver,
@@ -2896,7 +2896,32 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                         break;
                     }
                     if (cm_tyck_method_args_compatible(env, &found,
-                            arg_types, arg_count)) break;
+                            arg_types, arg_count)) {
+                        /* Return-type-guided selection: `let other:
+                         * &[u8] = (&**o).as_ref();` must reach
+                         * `AsRef<[u8]>`, not the first AsRef impl. */
+                        int return_ok = 1;
+                        if (expected != CM_TY_NONE) {
+                            CmTyId probe_params[CM_TYCK_MAX_ARGS];
+                            CmTyId probe_ret = CM_TY_NONE;
+                            (void)cm_tyck_signature(env, found.item,
+                                cm_tyck_subst_of(&found.instance),
+                                probe_params, CM_TYCK_MAX_ARGS,
+                                &probe_ret);
+                            if (probe_ret != CM_TY_NONE
+                                && !cm_tyck_coerce(env, probe_ret,
+                                    expected)) return_ok = 0;
+                        }
+                        if (return_ok) break;
+                        if (!have_fallback) {
+                            fallback = found;
+                            fallback_candidate = candidate;
+                            have_fallback = 1;
+                        }
+                        cm_ty_undo_to(arena, undo_mark);
+                        found.item = NULL;
+                        continue;
+                    }
                     if (!have_fallback) {
                         fallback = found;
                         fallback_candidate = candidate;
@@ -3442,7 +3467,7 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         result = cm_tyck_call(env, expr, id, expected);
         break;
     case CM_U_EXPR_METHOD_CALL:
-        result = cm_tyck_method_call(env, expr, id);
+        result = cm_tyck_method_call(env, expr, id, expected);
         break;
     case CM_U_EXPR_FIELD: {
         CmTyId base = cm_tyck_expr(env, expr->data.field.base, CM_TY_NONE);
