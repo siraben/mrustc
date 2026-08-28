@@ -24205,6 +24205,19 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
                     item)) {
                 continue;
             }
+            /*
+             * M9 leniency: a negative impl exists precisely to carve a
+             * shape out of a positive blanket (`!Iterator for
+             * Box<[I], A>` vs `Iterator for Box<I, A>`); only an exactly
+             * equal self type is a genuine polarity conflict.
+             */
+            if (prior->data.impl_item.polarity
+                    != item->data.impl_item.polarity
+                && !cm_lower_impl_self_equal(state->hir,
+                    prior->data.impl_item.self_type,
+                    item->data.impl_item.self_type)) {
+                continue;
+            }
             cm_lower_fail(state, CM_HIR_LOWER_INVALID_IMPL, item->span,
                 CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                 CM_HIR_OK,

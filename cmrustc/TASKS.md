@@ -3011,3 +3011,11 @@ concrete type — core's `DerefPure for Cow<'_, T>` vs
 `Cow<'_, str>` / `Cow<'_, [T]>` family (borrow.rs:354 frontier).
 Minicore: the CowLike<T>/CowLike<str> impl pair lowers and types
 (17/17, 0 errors).  Lanes + ASan green.
+
+M9-03 nineteenth pass (2026-08-28): positive/negative impl
+coexistence.  A negative impl exists to carve a shape out of a
+positive blanket (`!Iterator for Box<[I], A>` vs
+`Iterator for Box<I, A>`, boxed/iter.rs:98 frontier); the polarity
+conflict now fires only for exactly equal self types.  Minicore:
+a blanket-plus-negative pair lowers and types (18/18, 0 errors).
+Lanes + ASan green.
