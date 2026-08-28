@@ -2107,6 +2107,28 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         return cm_ty_unify(arena, a->children[0], e->children[0]) || 1;
     if (a->kind == CM_TY_FN_DEF && e->kind == CM_TY_FN_PTR) return 1;
     if (a->kind == CM_TY_CLOSURE && e->kind == CM_TY_FN_PTR) return 1;
+    /* Unsize leniency (M9): `[T; N]` coerces to `[T]`, directly and
+     * argument-wise through one ADT application (`Box<[T; 1], A>` vs
+     * `Box<[T], A>`, alloc's into_boxed_slice family). */
+    if (a->kind == CM_TY_ARRAY && e->kind == CM_TY_SLICE)
+        return cm_ty_unify(arena, a->children[0], e->children[0]);
+    if (a->kind == CM_TY_ADT && e->kind == CM_TY_ADT
+        && cm_hir_def_id_equal(a->def, e->def)
+        && a->count == e->count) {
+        uint32_t child;
+        int all = 1;
+        for (child = 0u; child < a->count && all; ++child) {
+            uint32_t child_index = child;
+            CmTyId left_child = a->children[child_index];
+            CmTyId right_child = e->children[child_index];
+            if (!cm_tyck_coerce(env, left_child, right_child)) all = 0;
+            /* Re-fetch: coercion can create types and move the arena. */
+            a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+            e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+            if (a == NULL || e == NULL) return 0;
+        }
+        if (all) return 1;
+    }
     return cm_tyck_lenient_eq(env, actual, expected, 0u);
 }
 

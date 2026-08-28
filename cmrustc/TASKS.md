@@ -3055,3 +3055,13 @@ bodies; **ubody 24,797/24,797 lowered, 0 failed** (19 unresolved
 paths: avx2/neon helpers, lang shims); tyck 23,071/24,797 typed,
 **420 error nodes** over 352,590 expressions.  The loop moves to
 the cross-crate tyck residue.
+
+M9-04 two-crate pass (2026-08-28): unsize coercion in tyck.
+`cm_tyck_coerce` gains `[T; N] -> [T]` directly and argument-wise
+through one ADT application with the same definition
+(`Box<[T; 1], A>` vs `Box<[T], A>` — the dominant family in the
+alloc residue sample: 62 of ~93 alloc-side debug samples were
+sig-normalized, led by unsize shapes in boxed/convert families).
+Minicore acceptance: an array-to-slice unsize through a local
+wrapper types (21/21, 0 errors).  Lanes + ASan green; census
+re-running.
