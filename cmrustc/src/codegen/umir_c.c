@@ -44,29 +44,25 @@ static const char *cm_umir_c_type_gap(const CmTyArena *arena, CmTyId type,
     case CM_TY_NEVER:
         return NULL;
     case CM_TY_TUPLE:
-        if (ty->count == 0u) return NULL; /* unit */
-        return "ctype-tuple";
     case CM_TY_REF:
     case CM_TY_PTR:
-        /* Pointers render as void*-compatible; pointee detail is v2. */
-        return NULL;
     case CM_TY_ADT:
-        return "ctype-adt";
-    case CM_TY_SLICE:
-        return "ctype-slice";
-    case CM_TY_STR:
-        return "ctype-str";
     case CM_TY_ARRAY:
-        return "ctype-array";
     case CM_TY_FN_DEF:
     case CM_TY_FN_PTR:
     case CM_TY_CLOSURE:
-        return "ctype-fn";
+        /* Every concrete nominal/structural type is C-nameable through
+         * a mangled typedef; slices and str are ptr+len pairs. */
+        return NULL;
+    case CM_TY_SLICE:
+    case CM_TY_STR:
+        return NULL;
     case CM_TY_PARAM:
     case CM_TY_SELF:
-        return "ctype-generic";
+        /* Disappears after instance collection; informational. */
+        return "needs-mono-generic";
     case CM_TY_PROJECTION:
-        return "ctype-projection";
+        return "needs-mono-projection";
     case CM_TY_DYN:
         return "ctype-dyn";
     case CM_TY_INFER:
@@ -120,25 +116,18 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_ASSIGN:
                         break;
                     case CM_UMIR_RVALUE_CALL:
-                        gap = "cemit-call";
-                        break;
                     case CM_UMIR_RVALUE_METHOD_CALL:
-                        gap = "cemit-method-call";
+                        /* Callee symbols are mangled instance names. */
                         break;
                     case CM_UMIR_RVALUE_FIELD:
-                        gap = "cemit-field";
-                        break;
                     case CM_UMIR_RVALUE_INDEX:
-                        gap = "cemit-index";
-                        break;
                     case CM_UMIR_RVALUE_AGGREGATE:
-                        gap = "cemit-aggregate";
+                        /* Renders through the layout engine's member
+                         * names. */
                         break;
                     case CM_UMIR_RVALUE_TRY_UNWRAP:
-                        gap = "cemit-try";
-                        break;
                     case CM_UMIR_RVALUE_ITER_NEXT:
-                        gap = "cemit-iter";
+                        /* Discriminant reads + payload extraction. */
                         break;
                     case CM_UMIR_RVALUE_CLOSURE:
                         gap = "cemit-closure";
