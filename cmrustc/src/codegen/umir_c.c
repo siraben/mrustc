@@ -1448,8 +1448,49 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_append(output, "_i");
                 cm_umir_c_render_number(output, instance->index);
             }
-            cm_str_buf_append(output,
-                "() { return 0; /* stub: no body */ }\n");
+            {
+                /* Name and reason, so the census names the frontier. */
+                const CmHirItem *stub_item = cm_umir_c_item_of(hir,
+                    instance->definition);
+                const CmInternedString *stub_name = stub_item == NULL
+                    ? NULL : cm_interner_get(&hir->strings, stub_item->name);
+                const char *reason = "no u-MIR body";
+                size_t scan;
+                for (scan = 0u; scan < umir->bodies.len; ++scan) {
+                    const CmUMirBody *candidate = (const CmUMirBody *)
+                        cm_vec_at_const(&umir->bodies, scan);
+                    const CmHirBody *candidate_hir;
+                    if (candidate == NULL) continue;
+                    candidate_hir = cm_hir_get_body(hir, candidate->source);
+                    if (candidate_hir != NULL && cm_hir_def_id_equal(
+                            candidate_hir->origin.definition,
+                            instance->definition)
+                        && candidate->closure_expr
+                            == instance->closure_expr) {
+                        reason = candidate->complete ? "no u-MIR body"
+                            : "u-MIR blocked";
+                        break;
+                    }
+                }
+                if (stub_item != NULL && stub_item->kind
+                        == CM_HIR_ITEM_FUNCTION
+                    && stub_item->data.function_item.body == 0u)
+                    reason = "declaration without body";
+                cm_str_buf_append(output, "() { return 0; /* stub: ");
+                cm_str_buf_append(output, reason);
+                cm_str_buf_append(output, ": ");
+                if (stub_name != NULL)
+                    cm_str_buf_append_n(output,
+                        (const char *)stub_name->bytes, stub_name->len);
+                cm_str_buf_append(output, " */ }\n");
+                if (getenv("CMRUSTC_UMIR_DEBUG") != NULL)
+                    fprintf(stderr, "UMIR stub %.*s reason=%s def=%u:%u\n",
+                        stub_name == NULL ? 1 : (int)stub_name->len,
+                        stub_name == NULL ? "?"
+                            : (const char *)stub_name->bytes, reason,
+                        (unsigned)instance->definition.crate_id,
+                        (unsigned)instance->definition.index);
+            }
             stubs += 1u;
             continue;
         }

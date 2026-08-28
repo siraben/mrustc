@@ -30,6 +30,8 @@ for harness in "$test_dir"/core-fixtures/*-harness.c; do
         tail -3 "$out_dir/$base.probe" 2>/dev/null | grep -aE "^hir errors|^emit|error" | head -2
         head -3 "$out_dir/$base.cc" 2>/dev/null
     fi
+    grep -a "cm_umir instances" "$out_dir/$base.c" 2>/dev/null \
+        | tr -d '*/' | sed "s/^ *cm_umir/umir-core-unit $base/"
 done
 echo "umir-core total=$total pass=$pass fail=$fail"
 if test "${CMRUSTC_REQUIRE_UMIR_CORE:-0}" = 1 && test "$fail" -ne 0; then exit 1; fi
