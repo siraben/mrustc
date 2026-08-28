@@ -2823,6 +2823,22 @@ still inside alloc HIR lowering).  Minicore acceptance unchanged
 (8/8).  Lanes + ASan green; census re-running with the indexed
 cache.
 
+M9-03 tenth pass (2026-08-28): dependency macros in body
+expansion.  `CmBodyExpandOptions` accepts the dependency-macro
+artifacts; unqualified body macros fall back to
+`artifact_lookup(extern_name, name)` after every local scope
+fails, and dependency-qualified / `$crate`-generated macro paths
+(`core::write!`, `core_crate::…`) resolve through the artifacts
+before the local module walk.  Expanding a dependency macro
+substitutes `$crate` with that artifact's extern name, so
+generated paths (`core::cmp::Ordering::Equal`) resolve via the
+resolver's dependency delegation.  Minicore acceptance: 3/3
+dependency invocations expand (unqualified, qualified, `$crate`),
+9/9 bodies typed, 0 errors.  Targets the 158 alloc body-expand
+failures (debug_assert 85, panic_2021 27, debug_assert_eq 26,
+unreachable_2021 8, write 7, assert_unsafe_precondition 3,
+debug_assert_ne 2).  Lanes + ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

@@ -3,6 +3,7 @@
 #include "cm/macro.h"
 #include "cm/macro/expand.h"
 #include "cm/resolve/imports.h"
+#include "cm/resolve/dependency_macro.h"
 #include "cm/resolve/module_graph.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -33,6 +34,14 @@ typedef struct CmBodyExpandOptions {
     const CmCfgSet *cfg;
     /* Optional: resolved `use` imports supply path-scoped macro bindings. */
     const CmImportResolver *imports;
+    /*
+     * Optional dependency-crate macro artifacts (M9-03): unqualified and
+     * dependency-qualified body macros resolve through these after every
+     * local scope fails.  Expansions of a dependency macro substitute
+     * `$crate` with that artifact's extern name.
+     */
+    const struct CmDependencyMacroArtifact *const *dependency_macros;
+    size_t dependency_macro_count;
     unsigned int maximum_depth;
 } CmBodyExpandOptions;
 

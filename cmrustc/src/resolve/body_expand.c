@@ -516,7 +516,18 @@ typedef struct CmBodyMacroTarget {
     const CmAst *definition_ast;
     CmAstItemId definition_item;
     int is_builtin;
+    /* Non-NULL for a dependency-crate macro: the `$crate` substitution. */
+    const char *crate_identifier;
 } CmBodyMacroTarget;
+
+/* Resolve `name` (or a dependency-qualified segment list) through the
+ * registered dependency-macro artifacts (M9-03). */
+static int cm_body_lookup_dependency_segments(CmBodyExpandState *state,
+    const CmResolvePathSegmentView *segments, size_t segment_count,
+    int generated, CmBodyMacroTarget *out_target);
+
+static int cm_body_lookup_dependency_name(CmBodyExpandState *state,
+    const char *name, CmBodyMacroTarget *out_target);
 
 static int cm_body_target_from_declaration(CmBodyExpandState *state,
     CmResolveItemRef declaration, CmBodyMacroTarget *out_target)
@@ -536,6 +547,65 @@ static int cm_body_target_from_declaration(CmBodyExpandState *state,
 }
 
 /* Last textual-scope entry of `module` with the given name. */
+static int cm_body_lookup_dependency_segments(CmBodyExpandState *state,
+    const CmResolvePathSegmentView *segments, size_t segment_count,
+    int generated, CmBodyMacroTarget *out_target)
+{
+    size_t artifact_index;
+
+    for (artifact_index = 0u;
+         artifact_index < state->options->dependency_macro_count;
+         ++artifact_index) {
+        const CmDependencyMacroArtifact *artifact =
+            state->options->dependency_macros[artifact_index];
+        CmDependencyMacroArtifactIdentity identity;
+        CmDependencyMacroDefinition definition;
+        CmDependencyMacroStatus status;
+
+        if (artifact == NULL
+            || !cm_dependency_macro_artifact_identity(artifact, &identity))
+            continue;
+        status = generated
+            ? cm_dependency_macro_artifact_lookup_generated(artifact,
+                segments, segment_count, &definition)
+            : cm_dependency_macro_artifact_lookup(artifact, segments,
+                segment_count, &definition);
+        if (status != CM_DEPENDENCY_MACRO_OK) continue;
+        memset(out_target, 0, sizeof(*out_target));
+        out_target->definition_ast = definition.definition_ast;
+        out_target->definition_item = definition.declaration.item;
+        out_target->crate_identifier = identity.extern_name;
+        return 1;
+    }
+    return 0;
+}
+
+static int cm_body_lookup_dependency_name(CmBodyExpandState *state,
+    const char *name, CmBodyMacroTarget *out_target)
+{
+    size_t artifact_index;
+
+    for (artifact_index = 0u;
+         artifact_index < state->options->dependency_macro_count;
+         ++artifact_index) {
+        const CmDependencyMacroArtifact *artifact =
+            state->options->dependency_macros[artifact_index];
+        CmDependencyMacroArtifactIdentity identity;
+        CmResolvePathSegmentView views[2];
+
+        if (artifact == NULL
+            || !cm_dependency_macro_artifact_identity(artifact, &identity))
+            continue;
+        views[0].bytes = (const unsigned char *)identity.extern_name;
+        views[0].length = strlen(identity.extern_name);
+        views[1].bytes = (const unsigned char *)name;
+        views[1].length = strlen(name);
+        if (cm_body_lookup_dependency_segments(state, views, 2u, 0,
+                out_target)) return 1;
+    }
+    return 0;
+}
+
 static int cm_body_lookup_scope(CmBodyExpandState *state, CmModuleId module,
     const char *name, CmBodyMacroTarget *out_target)
 {
@@ -651,7 +721,7 @@ static int cm_body_lookup_unqualified(CmBodyExpandState *state,
     }
     if (cm_module_graph_get_root(state->graph, &root)
         && cm_body_lookup_namespace(state, root, name, out_target)) return 1;
-    return 0;
+    return cm_body_lookup_dependency_name(state, name, out_target);
 }
 
 /*
@@ -713,6 +783,34 @@ static int cm_body_resolve_path(CmBodyExpandState *state, const CmAst *ast,
         }
         return cm_body_lookup_unqualified(state, module, out_name,
             out_target);
+    }
+    if (path->segment_count >= 2u
+        && state->options->dependency_macro_count != 0u) {
+        /* Dependency-qualified (`core::write!`) and `$crate`-generated
+         * paths resolve through the dependency artifacts (M9-03). */
+        CmResolvePathSegmentView views[16];
+        uint32_t view_index;
+        char names[16][CM_BODY_NAME_LIMIT];
+
+        if (path->segment_count <= 16u) {
+            for (view_index = 0u; view_index < path->segment_count;
+                 ++view_index) {
+                if (!cm_body_segment_name(ast, path, view_index,
+                        names[view_index], sizeof(names[view_index])))
+                    break;
+                views[view_index].bytes =
+                    (const unsigned char *)names[view_index];
+                views[view_index].length = strlen(names[view_index]);
+            }
+            if (view_index == path->segment_count) {
+                if (cm_body_lookup_dependency_segments(state, views,
+                        (size_t)path->segment_count, 0, out_target))
+                    return 1;
+                if (cm_body_lookup_dependency_segments(state, views,
+                        (size_t)path->segment_count, 1, out_target))
+                    return 1;
+            }
+        }
     }
     if (path->absolute) {
         /* `::name!` (edition 2015 extern) or `::crate_name::...`: only the
@@ -840,7 +938,8 @@ static int cm_body_expand_rules(CmBodyExpandState *state, CmAstExprId id,
     span = expr->span;
     cm_macro_syntax_options_init(&options);
     options.edition = state->options->edition;
-    options.crate_identifier = state->options->crate_identifier;
+    options.crate_identifier = target->crate_identifier != NULL
+        ? target->crate_identifier : state->options->crate_identifier;
     /* Lenient: real core macros (`compress!`, SIMD helpers) exceed the
      * defensive defaults. */
     options.limits.max_nesting = CM_MACRO_RULES_ABSOLUTE_MAX_NESTING;

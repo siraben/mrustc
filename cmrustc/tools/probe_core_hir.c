@@ -600,6 +600,7 @@ int main(int argc, char **argv)
     const char *with_core_path = NULL;
     static CmHirLowerDependency hir_dependencies[1];
     static CmUBodyDependency body_dependencies[1];
+    static const CmDependencyMacroArtifact *expand_artifacts[1];
     require_metadata = 0;
     body_census_requested = 0;
     source_map_requested = 0;
@@ -679,6 +680,7 @@ int main(int argc, char **argv)
         artifact_list[0] = &core_macros;
         graph_options.dependency_macros = artifact_list;
         graph_options.dependency_macro_count = 1u;
+        expand_artifacts[0] = &core_macros;
         {
             CmImportResult core_import_result;
             cm_import_resolver_init(&core_imports);
@@ -789,6 +791,10 @@ int main(int argc, char **argv)
         expand_options.crate_identifier = "crate";
         expand_options.cfg = &cfg;
         expand_options.imports = &imports;
+        if (with_core_path != NULL) {
+            expand_options.dependency_macros = expand_artifacts;
+            expand_options.dependency_macro_count = 1u;
+        }
         expand_result = cm_body_expand_graph(&graph, graph_result.revision,
             &expand_options);
         printf("body-expand bodies=%lu invocations=%lu rules=%lu builtin=%lu "
