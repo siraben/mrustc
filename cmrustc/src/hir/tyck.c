@@ -2028,6 +2028,20 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             CmTyId params[CM_TYCK_MAX_ARGS];
             uint32_t index;
             uint32_t count = nested->data.function_item.parameter_count;
+            size_t scan;
+            /* Body-local fns (and body-local foreign declarations) are
+             * lowered as body_local HIR items: prefer the fn-def so calls
+             * resolve to a symbol instead of an untyped fn pointer. */
+            for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
+                const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
+                    &env->state->hir->items, scan);
+                if (cand == NULL || cand->kind != CM_HIR_ITEM_FUNCTION
+                    || cand->ast_source != res->nested_source
+                    || cand->ast_item != res->nested_item) continue;
+                return cm_tyck_fn_def(env, cand,
+                    cm_tyck_parent_item(env->state, cand), CM_TY_NONE,
+                    NULL);
+            }
             CmTyId ret;
             if (count > CM_TYCK_MAX_ARGS - 1u) count = CM_TYCK_MAX_ARGS - 1u;
             for (index = 0u; index < count; ++index)

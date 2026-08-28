@@ -59,6 +59,10 @@ typedef struct CmLowerItemRecord {
     /* Declared inside a function body: invisible to module-level name
      * resolution, but lowered normally so bodies can type its uses. */
     int body_local;
+    /* Owning function of a body-local item: sibling body-local items are
+     * visible to each other while lowering (a body-local impl of a
+     * body-local trait), never to the module. */
+    CmHirDefId body_owner;
     CmInternId inherited_abi;
     const CmExpandedItem *expanded_item;
 } CmLowerItemRecord;
@@ -156,6 +160,8 @@ typedef struct CmLowerState {
     /* Sorted (source, ast_id) -> item_records position, maintained on every
      * push, so record lookups are binary searches (was 41% of lowering). */
     CmVec item_record_index; /* CmLowerItemRecordKey */
+    /* Record currently being lowered (NULL outside item lowering). */
+    const struct CmLowerItemRecord *lowering_record;
     /* Heap-stable synthesized records for dependency-crate items (M9-03). */
     CmVec dependency_records; /* CmLowerItemRecord* */
     /* Lazily built (source, ast_item) -> HIR item index over the whole
@@ -1918,6 +1924,18 @@ static int cm_lower_reserve_expanded_items(CmLowerState *state,
     return !state->failed;
 }
 
+/* Module-level lookups skip body-local records unless the record being
+ * lowered is body-local to the same owning function. */
+static int cm_lower_record_visible(const CmLowerState *state,
+    const CmLowerItemRecord *record)
+{
+    if (!record->body_local) return 1;
+    return state->lowering_record != NULL
+        && state->lowering_record->body_local
+        && cm_hir_def_id_equal(record->body_owner,
+            state->lowering_record->body_owner);
+}
+
 static const CmLowerItemRecord *cm_lower_find_name_in_module(
     const CmLowerState *state, CmHirModuleId module, CmInternId ast_name)
 {
@@ -1930,7 +1948,7 @@ static const CmLowerItemRecord *cm_lower_find_name_in_module(
             &state->item_records, index);
         if ((cm_lower_item_namespace_mask(record->kind) & 1u) != 0u
             && record->owner_module == module
-            && !record->body_local
+            && cm_lower_record_visible(state, record)
             && cm_hir_def_id_is_none(record->parent_definition)
             && cm_lower_hir_name_matches_ast(state, record->hir_name,
                 ast_name)) {
@@ -2388,6 +2406,41 @@ static CmLowerLookupResult cm_lower_lookup_path(const CmLowerState *state,
     CmHirLowerPathUse use, const CmLowerItemRecord **out_record,
     CmHirDefId *out_module_definition)
 {
+    if (state->lowering_record != NULL && state->lowering_record->body_local
+        && path->segment_count == 1u && use != CM_HIR_LOWER_PATH_VISIBILITY) {
+        /* A body-local item naming a sibling body-local item (core's
+         * write_fmt impls its own SpecWriteFmt): module resolution cannot
+         * see either, so match by name among the same fn's items. */
+        size_t index;
+        for (index = 0u; index < state->item_records.len; ++index) {
+            const CmLowerItemRecord *record =
+                (const CmLowerItemRecord *)cm_vec_at_const(
+                    &state->item_records, index);
+            if (record == NULL || !record->body_local
+                || !cm_lower_record_visible(state, record)
+                || !cm_hir_def_id_is_none(record->parent_definition)
+                || !cm_lower_hir_name_matches_ast(state, record->hir_name,
+                    path->segments[0].name)) continue;
+            *out_module_definition = cm_hir_def_id_none();
+            if (record->kind == CM_AST_ITEM_STRUCT
+                || record->kind == CM_AST_ITEM_UNION
+                || record->kind == CM_AST_ITEM_ENUM
+                || record->kind == CM_AST_ITEM_FUNCTION
+                || record->kind == CM_AST_ITEM_CONST
+                || record->kind == CM_AST_ITEM_STATIC) {
+                *out_record = record;
+                return CM_LOWER_LOOKUP_DEFINITION;
+            }
+            if (record->kind == CM_AST_ITEM_TYPE_ALIAS) {
+                *out_record = record;
+                return CM_LOWER_LOOKUP_ALIAS;
+            }
+            if (record->kind == CM_AST_ITEM_TRAIT) {
+                *out_record = record;
+                return CM_LOWER_LOOKUP_TRAIT;
+            }
+        }
+    }
     if (state->graph == NULL) {
         return cm_lower_lookup_local_path(state, path, current_module, use,
             out_record, out_module_definition);
@@ -2479,7 +2532,7 @@ static const CmLowerItemRecord *cm_lower_named_const_length(
             name = record == NULL ? NULL
                 : cm_interner_get(&state->hir->strings, record->hir_name);
             if (record != NULL && record->owner_module == module
-                && !record->body_local
+                && cm_lower_record_visible(state, record)
                 && cm_hir_def_id_is_none(record->parent_definition)
                 && record->kind == CM_AST_ITEM_CONST && name != NULL
                 && name->len == segment.length
@@ -18224,6 +18277,11 @@ static int cm_lower_graph_apply_inner_attributes(CmLowerState *state,
  * never sees them; ubody path resolution reaches them by exact
  * (source, AST item) reference.
  */
+static int cm_lower_reserve_body_item(CmLowerState *state, const CmAst *ast,
+    CmHirModuleId owner_module, const CmLowerItemRecord *fn_record,
+    CmAstItemId item_id, CmHirDefId parent_definition,
+    CmLowerParentKind parent_kind, int is_foreign, CmInternId inherited_abi);
+
 static int cm_lower_graph_reserve_body_items(CmLowerState *state,
     const CmAst *ast, CmHirModuleId owner_module,
     const CmLowerItemRecord *fn_record, CmAstExprId body)
@@ -18238,57 +18296,111 @@ static int cm_lower_graph_reserve_body_items(CmLowerState *state,
         const CmAstStmt *stmt = cm_ast_get_stmt(ast,
             block->data.block.statements[index]);
         const CmAstItem *item;
-        CmLowerItemRecord record;
-        CmHirItemKind hir_item_kind;
-        CmHirStatus status;
-        CmSpan span;
 
         if (stmt == NULL || stmt->kind != CM_AST_STMT_ITEM) continue;
         item = cm_ast_get_item(ast, stmt->data.item_stmt.item);
         if (item == NULL) continue;
-        /* Impls and traits stay unreserved: their paths name body-local
-         * types that module-level resolution deliberately cannot see. */
+        if (item->kind == CM_AST_ITEM_EXTERN_BLOCK) {
+            /* Foreign declarations become body-local foreign fns. */
+            uint32_t child;
+            for (child = 0u; child < item->data.extern_block_item.item_count
+                    && !state->failed; ++child) {
+                const CmAstItem *foreign = cm_ast_get_item(ast,
+                    item->data.extern_block_item.items[child]);
+                if (foreign == NULL || foreign->kind != CM_AST_ITEM_FUNCTION)
+                    continue;
+                if (!cm_lower_reserve_body_item(state, ast, owner_module,
+                        fn_record, item->data.extern_block_item.items[child],
+                        cm_hir_def_id_none(), CM_LOWER_PARENT_NONE, 1,
+                        item->data.extern_block_item.abi)) return 0;
+            }
+            continue;
+        }
         if (item->kind != CM_AST_ITEM_STRUCT
             && item->kind != CM_AST_ITEM_UNION
             && item->kind != CM_AST_ITEM_ENUM
-            && item->kind != CM_AST_ITEM_FUNCTION) continue;
-        if (!cm_lower_item_kind_supported(item->kind)) continue;
-        span = cm_lower_span(state, item->span);
-        memset(&record, 0, sizeof(record));
-        record.ast = ast;
-        record.source = fn_record->source;
-        record.graph_module = fn_record->graph_module;
-        record.ast_id = stmt->data.item_stmt.item;
-        record.owner_module = owner_module;
-        record.parent_definition = cm_hir_def_id_none();
-        record.parent_kind = CM_LOWER_PARENT_NONE;
-        record.kind = item->kind;
-        record.provenance = fn_record->provenance;
-        record.effective_span = span;
-        record.body_local = 1;
-        record.hir_name = item->kind == CM_AST_ITEM_IMPL
-            ? CM_INTERN_ID_NONE
-            : cm_lower_copy_string(state, item->name, span, record.ast_id);
-        if (state->failed) return 0;
-        if (!cm_lower_hir_item_kind(item, &hir_item_kind)) continue;
-        status = cm_hir_reserve_item_definition_as(state->hir,
-            state->result.crate_id, hir_item_kind, span,
-            &record.definition);
-        if (status != CM_HIR_OK) {
-            cm_lower_fail_hir(state, span, record.ast_id, status,
-                "cannot reserve body-local item definition");
-            return 0;
-        }
-        if (!cm_lower_reserve_enum_variant_definitions(state, item,
-                &record)) return 0;
-        (void)cm_vec_push(&state->item_records, &record);
-        cm_lower_item_index_insert(state, record.source, record.ast_id,
-            (uint32_t)(state->item_records.len - 1u));
-        if (item->kind == CM_AST_ITEM_FUNCTION
-            && item->data.function_item.body != CM_AST_EXPR_NONE) {
-            if (!cm_lower_graph_reserve_body_items(state, ast,
-                    owner_module, fn_record,
-                    item->data.function_item.body)) return 0;
+            && item->kind != CM_AST_ITEM_FUNCTION
+            && item->kind != CM_AST_ITEM_TRAIT
+            && item->kind != CM_AST_ITEM_IMPL) continue;
+        if (!cm_lower_reserve_body_item(state, ast, owner_module, fn_record,
+                stmt->data.item_stmt.item, cm_hir_def_id_none(),
+                CM_LOWER_PARENT_NONE, 0, CM_INTERN_ID_NONE)) return 0;
+    }
+    return !state->failed;
+}
+
+/* Reserve one body-local item (and, for traits and impls, its members). */
+static int cm_lower_reserve_body_item(CmLowerState *state, const CmAst *ast,
+    CmHirModuleId owner_module, const CmLowerItemRecord *fn_record,
+    CmAstItemId item_id, CmHirDefId parent_definition,
+    CmLowerParentKind parent_kind, int is_foreign, CmInternId inherited_abi)
+{
+    const CmAstItem *item = cm_ast_get_item(ast, item_id);
+    CmLowerItemRecord record;
+    CmHirItemKind hir_item_kind;
+    CmHirStatus status;
+    CmSpan span;
+
+    if (item == NULL) return 1;
+    if (!cm_lower_item_kind_supported(item->kind)) return 1;
+    if (parent_kind != CM_LOWER_PARENT_NONE
+        && item->kind != CM_AST_ITEM_FUNCTION
+        && item->kind != CM_AST_ITEM_CONST
+        && item->kind != CM_AST_ITEM_TYPE_ALIAS) return 1;
+    span = cm_lower_span(state, item->span);
+    memset(&record, 0, sizeof(record));
+    record.ast = ast;
+    record.source = fn_record->source;
+    record.graph_module = fn_record->graph_module;
+    record.ast_id = item_id;
+    record.owner_module = owner_module;
+    record.parent_definition = parent_definition;
+    record.parent_kind = parent_kind;
+    record.kind = item->kind;
+    record.provenance = fn_record->provenance;
+    record.effective_span = span;
+    record.body_local = 1;
+    record.body_owner = fn_record->body_local ? fn_record->body_owner
+        : fn_record->definition;
+    record.is_foreign = is_foreign;
+    record.inherited_abi = inherited_abi;
+    record.hir_name = item->kind == CM_AST_ITEM_IMPL
+        ? CM_INTERN_ID_NONE
+        : cm_lower_copy_string(state, item->name, span, record.ast_id);
+    if (state->failed) return 0;
+    if (!cm_lower_hir_item_kind(item, &hir_item_kind)) return 1;
+    status = cm_hir_reserve_item_definition_as(state->hir,
+        state->result.crate_id, hir_item_kind, span,
+        &record.definition);
+    if (status != CM_HIR_OK) {
+        cm_lower_fail_hir(state, span, record.ast_id, status,
+            "cannot reserve body-local item definition");
+        return 0;
+    }
+    if (!cm_lower_reserve_enum_variant_definitions(state, item,
+            &record)) return 0;
+    (void)cm_vec_push(&state->item_records, &record);
+    cm_lower_item_index_insert(state, record.source, record.ast_id,
+        (uint32_t)(state->item_records.len - 1u));
+    if (item->kind == CM_AST_ITEM_FUNCTION
+        && item->data.function_item.body != CM_AST_EXPR_NONE) {
+        if (!cm_lower_graph_reserve_body_items(state, ast,
+                owner_module, fn_record,
+                item->data.function_item.body)) return 0;
+    }
+    if (item->kind == CM_AST_ITEM_TRAIT || item->kind == CM_AST_ITEM_IMPL) {
+        const CmAstItemId *children;
+        size_t child_count;
+        size_t child;
+        CmExpandedChildKind child_kind;
+        CmLowerParentKind member_parent = item->kind == CM_AST_ITEM_TRAIT
+            ? CM_LOWER_PARENT_TRAIT : CM_LOWER_PARENT_IMPL;
+        cm_lower_source_children(item, &children, &child_count,
+            &child_kind);
+        for (child = 0u; child < child_count && !state->failed; ++child) {
+            if (!cm_lower_reserve_body_item(state, ast, owner_module,
+                    fn_record, children[child], record.definition,
+                    member_parent, 0, CM_INTERN_ID_NONE)) return 0;
         }
     }
     return !state->failed;
@@ -19814,8 +19926,19 @@ static int cm_lower_records_in_phase(CmLowerState *state,
              * as before reservation. */
             int saved_failed = state->failed;
             CmHirLowerResult saved_result = state->result;
-            if (!cm_lower_one_record(state, record) || state->failed) {
+            int lowered_ok;
+            state->lowering_record = record;
+            lowered_ok = cm_lower_one_record(state, record);
+            state->lowering_record = NULL;
+            if (!lowered_ok || state->failed) {
                 size_t dead_index;
+                if (getenv("CM_LOWER_DEBUG") != NULL)
+                    fprintf(stderr, "LOWER body-local dropped def=%u:%u "
+                        "kind=%d: %s\n",
+                        (unsigned)record->definition.crate_id,
+                        (unsigned)record->definition.index,
+                        (int)record->kind,
+                        state->result.first_error.message);
                 state->failed = saved_failed;
                 state->result = saved_result;
                 for (dead_index = 0u; dead_index < state->hir->items.len;

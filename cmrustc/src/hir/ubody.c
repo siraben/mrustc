@@ -1346,6 +1346,27 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
                 cm_u_collect_body_use(state, item);
                 continue;
             }
+            if (item->kind == CM_AST_ITEM_EXTERN_BLOCK) {
+                /* A body-local `extern { fn f(); }` (core's panic_fmt
+                 * names its panic_impl this way) exposes its declarations
+                 * by name in the block. */
+                uint32_t child;
+                for (child = 0u; child < item->data.extern_block_item
+                        .item_count; ++child) {
+                    CmAstItemId child_id =
+                        item->data.extern_block_item.items[child];
+                    const CmAstItem *foreign = cm_ast_get_item(state->ast,
+                        child_id);
+                    if (foreign == NULL || foreign->name == CM_INTERN_ID_NONE
+                        || state->nested_count == CM_U_NESTED_LIMIT)
+                        continue;
+                    state->nested[state->nested_count].name =
+                        cm_u_intern_ast(state, foreign->name);
+                    state->nested[state->nested_count].item = child_id;
+                    state->nested_count += 1u;
+                }
+                continue;
+            }
             if (item->name == CM_INTERN_ID_NONE
                 || state->nested_count == CM_U_NESTED_LIMIT) continue;
             state->nested[state->nested_count].name = cm_u_intern_ast(state,

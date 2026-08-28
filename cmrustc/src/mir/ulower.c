@@ -344,6 +344,41 @@ static CmUMirLocalId cm_umir_new_local(CmUMirBuilder *builder, CmTyId type)
     return (CmUMirLocalId)(builder->body->locals.len - 1u);
 }
 
+/* Whether a by-value `self` method really takes a reference: its impl's
+ * Self is `&T` / `&mut T` (core's SpecWriteFmt for &mut W), or, for a
+ * trait declaration, some impl of the trait has such a Self. */
+static int cm_umir_self_is_reference(const CmHirContext *hir,
+    const CmHirItem *callee)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *parent;
+    size_t index;
+    if (hir == NULL || callee == NULL
+        || cm_hir_def_id_is_none(callee->parent_definition)) return 0;
+    record = cm_hir_lookup_definition(hir, callee->parent_definition);
+    parent = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(hir, record->entity.item_id);
+    if (parent == NULL) return 0;
+    if (parent->kind == CM_HIR_ITEM_IMPL) {
+        const CmHirType *self = cm_hir_get_type(hir,
+            parent->data.impl_item.self_type);
+        return self != NULL && self->kind == CM_HIR_TYPE_REFERENCE_KIND;
+    }
+    if (parent->kind != CM_HIR_ITEM_TRAIT) return 0;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, index);
+        const CmHirType *self;
+        if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
+            || !cm_hir_def_id_equal(impl->data.impl_item.trait_type.definition,
+                parent->definition)) continue;
+        self = cm_hir_get_type(hir, impl->data.impl_item.self_type);
+        if (self != NULL && self->kind == CM_HIR_TYPE_REFERENCE_KIND)
+            return 1;
+    }
+    return 0;
+}
+
 static void cm_umir_push_operands(CmUMirBuilder *builder,
     CmUMirLocalId destination, CmUMirRvalueKind kind, CmUExprId expr,
     CmTyId type, const CmUMirLocalId *operands, uint32_t operand_count)
@@ -575,7 +610,8 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         receiver_type, &receiver, 1u);
                     receiver = address;
                 } else if (kind == CM_HIR_RECEIVER_VALUE
-                    && receiver_is_ref) {
+                    && receiver_is_ref
+                    && !cm_umir_self_is_reference(builder->hir, callee)) {
                     CmUMirLocalId loaded = cm_umir_new_local(builder,
                         rt->children[0]);
                     cm_umir_push_operands(builder, loaded,
