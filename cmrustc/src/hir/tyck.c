@@ -171,6 +171,7 @@ void cm_tyck_set_destroy(CmTyckSet *set)
         cm_free(body->expr_types);
         cm_free(body->pat_types);
         cm_free(body->local_types);
+        cm_free(body->method_targets);
     }
     cm_vec_destroy(&set->storage);
     cm_vec_destroy(&set->bodies);
