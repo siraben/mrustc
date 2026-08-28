@@ -450,6 +450,13 @@ typedef struct CmHirCrate {
     CmHirModuleId root_module;
     CmSpan span;
     uint32_t next_definition_index;
+    /*
+     * Vector position of this crate's definition index 1.  Sequentially
+     * lowered crates keep their definitions contiguous, giving O(1)
+     * definition lookup; the id check in the lookup verifies the guess
+     * and falls back to a scan when interleaving broke contiguity.
+     */
+    size_t definition_base;
     CmHirAttribute *inner_attributes;
     uint32_t inner_attribute_count;
 } CmHirCrate;

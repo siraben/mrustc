@@ -383,20 +383,25 @@ const CmHirDefinition *cm_hir_lookup_definition(const CmHirContext *context,
     if (context == NULL || cm_hir_def_id_is_none(id)) {
         return NULL;
     }
-    /* A freshly lowered local crate owns the only crate arena and allocates
-     * definition indices in the same one-based order as this vector.  Keep
-     * the general scan below for multi-crate/metadata contexts, where foreign
-     * definitions may be interleaved and the index is only crate-local. */
-    if (context->crates.len == 1u
-        && (size_t)id.crate_id == context->crates.len
-        && id.index != CM_HIR_DEF_INDEX_NONE
-        && (size_t)id.index <= context->definitions.len) {
-        const CmHirDefinition *definition;
+    /* Sequentially lowered crates keep contiguous definition ranges; the
+     * per-crate base gives the position directly and the id check verifies
+     * the guess before trusting it.  Interleaved/metadata contexts fall
+     * back to the scan below. */
+    {
+        const CmHirCrate *crate_value = (const CmHirCrate *)cm_hir_get_id(
+            &context->crates, id.crate_id);
+        if (crate_value != NULL && id.index != CM_HIR_DEF_INDEX_NONE
+            && crate_value->definition_base + (size_t)id.index
+                <= context->definitions.len) {
+            const CmHirDefinition *definition;
 
-        definition = (const CmHirDefinition *)cm_vec_at_const(
-            &context->definitions, (size_t)id.index - 1u);
-        if (definition != NULL && cm_hir_def_id_equal(definition->id, id)) {
-            return definition;
+            definition = (const CmHirDefinition *)cm_vec_at_const(
+                &context->definitions,
+                crate_value->definition_base + (size_t)id.index - 1u);
+            if (definition != NULL
+                && cm_hir_def_id_equal(definition->id, id)) {
+                return definition;
+            }
         }
     }
     for (index = 0u; index < context->definitions.len; ++index) {
@@ -416,16 +421,21 @@ static CmHirDefinition *cm_hir_lookup_definition_mut(CmHirContext *context,
 {
     size_t index;
 
-    if (context->crates.len == 1u
-        && (size_t)id.crate_id == context->crates.len
-        && id.index != CM_HIR_DEF_INDEX_NONE
-        && (size_t)id.index <= context->definitions.len) {
-        CmHirDefinition *definition;
+    {
+        const CmHirCrate *crate_value = (const CmHirCrate *)cm_hir_get_id(
+            &context->crates, id.crate_id);
+        if (crate_value != NULL && id.index != CM_HIR_DEF_INDEX_NONE
+            && crate_value->definition_base + (size_t)id.index
+                <= context->definitions.len) {
+            CmHirDefinition *definition;
 
-        definition = (CmHirDefinition *)cm_vec_at(&context->definitions,
-            (size_t)id.index - 1u);
-        if (definition != NULL && cm_hir_def_id_equal(definition->id, id)) {
-            return definition;
+            definition = (CmHirDefinition *)cm_vec_at(
+                &context->definitions,
+                crate_value->definition_base + (size_t)id.index - 1u);
+            if (definition != NULL
+                && cm_hir_def_id_equal(definition->id, id)) {
+                return definition;
+            }
         }
     }
     for (index = 0u; index < context->definitions.len; ++index) {
@@ -587,6 +597,7 @@ CmHirStatus cm_hir_create_crate(CmHirContext *context, CmInternId name,
     crate_value.edition = edition;
     crate_value.span = span;
     crate_value.next_definition_index = 2u;
+    crate_value.definition_base = context->definitions.len;
     status = cm_hir_push(context, &context->crates, &crate_value, &crate_id);
     if (status != CM_HIR_OK) {
         return status;

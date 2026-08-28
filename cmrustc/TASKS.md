@@ -2887,6 +2887,18 @@ initializers recursively across ASTs (`B = 6`,
 acceptance: `[u8; 2 * BB]` and `[u8; CAP2]` lower and type (12/12
 bodies, 0 errors).  Lanes + ASan green.
 
+M9-03 fifteenth pass (2026-08-28): O(1) definition lookup.  perf on
+the alloc phase showed `cm_hir_lookup_definition` + comparators at
+~99% — the O(1) path was gated on `crates.len == 1`, so a two-crate
+context degraded every lookup to a 38k-entry scan.  `CmHirCrate`
+now records `definition_base` (the vector position of its
+definition index 1); both lookups compute the position directly
+and verify the id before trusting it, falling back to the scan
+only if contiguity broke.  **alloc HIR lowering: 2063s -> 3s**
+(core-hir stays 54s).  The frontier advances to `btree/map.rs:2354`
+(tuple parameter patterns in trait/impl methods).  Lanes + ASan
+green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
