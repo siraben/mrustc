@@ -10,6 +10,11 @@
  * at a body's first blocker so counts name bodies, not nodes.
  */
 
+/*
+ * Construction classes (v1): each expression position must map to an
+ * operand, rvalue, place, or terminator.  Kinds without a mapping yet are
+ * counted as construct-<kind> so the builder grows by measured family.
+ */
 typedef struct CmMirULowerState {
     const CmHirContext *hir;
     const CmUBody *ub;
@@ -22,6 +27,9 @@ typedef struct CmMirULowerState {
     int needs_range;
     int needs_for;
     int needs_let_condition;
+    /* v1 construction metrics. */
+    size_t statements;
+    size_t blocks;
 } CmMirULowerState;
 
 static void cm_mir_ulower_expr(CmMirULowerState *state, CmUExprId id);
@@ -80,6 +88,8 @@ static void cm_mir_ulower_expr(CmMirULowerState *state, CmUExprId id)
     switch (expr->kind) {
     case CM_U_EXPR_LITERAL:
     case CM_U_EXPR_PATH:
+        state->statements += 1u;
+        break;
     case CM_U_EXPR_CONTINUE:
         break;
     case CM_U_EXPR_BLOCK:
@@ -130,6 +140,7 @@ static void cm_mir_ulower_expr(CmMirULowerState *state, CmUExprId id)
         cm_mir_ulower_expr(state, expr->data.flow.value);
         break;
     case CM_U_EXPR_IF:
+        state->blocks += 2u;
         cm_mir_ulower_expr(state, expr->data.if_expr.condition);
         cm_mir_ulower_expr(state, expr->data.if_expr.then_expr);
         cm_mir_ulower_expr(state, expr->data.if_expr.else_expr);
@@ -243,6 +254,8 @@ CmMirULowerResult cm_mir_ulower_all(const CmHirContext *hir,
         state.ub = ub;
         state.tb = tb;
         cm_mir_ulower_expr(&state, ub->root);
+        result.statements += state.statements;
+        result.blocks += state.blocks;
         if (state.blocked == NULL) {
             result.lowered += 1u;
             if (state.needs_match)

@@ -1084,10 +1084,13 @@ int main(int argc, char **argv)
                     CmMirULowerResult ulower = cm_mir_ulower_all(&hir,
                         &ubodies, &tyck);
                     size_t ulower_class;
-                    printf("mir bodies=%lu lowered=%lu blocked=%lu\n",
+                    printf("mir bodies=%lu lowered=%lu blocked=%lu"
+                        " statements=%lu blocks=%lu\n",
                         (unsigned long)ulower.bodies,
                         (unsigned long)ulower.lowered,
-                        (unsigned long)ulower.blocked);
+                        (unsigned long)ulower.blocked,
+                        (unsigned long)ulower.statements,
+                        (unsigned long)ulower.blocks);
                     for (ulower_class = 0u;
                             ulower_class < ulower.class_count;
                             ++ulower_class)

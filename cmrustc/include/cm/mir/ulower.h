@@ -17,6 +17,8 @@ typedef struct CmMirULowerResult {
     size_t bodies;      /* mir-ready bodies attempted */
     size_t lowered;     /* full walk succeeded */
     size_t blocked;     /* walk hit an unsupported construct */
+    size_t statements;  /* v1 construction: assigns the build would emit */
+    size_t blocks;      /* v1 construction: extra basic blocks */
     struct {
         const char *reason;
         size_t count;
