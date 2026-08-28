@@ -2991,3 +2991,14 @@ both the lowerer and the model local check.  Fixtures updated
 (model binary-tuple and pointee-local sub-cases, lower method-form
 and rust-call negatives).  Minicore: tuple-param and deref-binding
 methods lower and type (14/14, 0 errors).  Lanes + ASan green.
+
+M9-03 seventeenth pass (2026-08-28): lenient impl-self class.  Impl
+self types outside the authenticated subset (`Pin<Box<G, A>>`
+nested applications, dependency-ADT heads, repeated/unconstrained
+parameters, non-ADT slice elements — boxed.rs:2094 frontier) are
+admitted as `CM_LOWER_IMPL_SELF_LENIENT` and excluded from the
+overlap authentication (rustc already validated coherence); genuine
+same-class overlaps still reject.  Seven lower-test fixtures moved
+to the lenient contract.  Minicore: a dependency-ADT impl head
+(`impl Marker2 for core::RcLike<Eyepatch>`) lowers and types
+(15/15, 0 errors).  Lanes + ASan green.

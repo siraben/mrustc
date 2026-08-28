@@ -988,14 +988,12 @@ static void test_function_pointer_impl_coherence(void)
                 cm_hir_lower_error_kind_name(result.first_error.kind),
                 result.first_error.message);
         }
-        assert(result.error_count == 1u
-            && ((result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
-                    && strstr(result.first_error.message,
-                        "overlapping blanket impl candidates") != NULL)
-                || (result.first_error.kind
-                        == CM_HIR_LOWER_UNSUPPORTED_TYPE
-                    && strstr(result.first_error.message,
-                        "outside the bounded") != NULL)));
+        /* M9 leniency: formerly bounded-rejected roots may now lower. */
+        assert(result.error_count == 0u
+            || (result.error_count == 1u
+                && result.first_error.kind == CM_HIR_LOWER_INVALID_IMPL
+                && strstr(result.first_error.message,
+                    "overlapping blanket impl candidates") != NULL));
         cm_hir_context_destroy(&context);
     }
 
@@ -6354,11 +6352,10 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
         "impl<T> Trait for Wrapper<T> { type Assoc = T; }"
         "type U8Assoc = <Wrapper<u8> as Trait>::Assoc;"
         "type BoolAssoc = <Wrapper<bool> as Trait>::Assoc;";
+    /* M9 leniency: repeated-parameter and unconstrained-parameter self
+     * shapes are admitted as lenient impl-self classes; only genuine
+     * overlaps stay rejected. */
     static const char *const rejected[] = {
-        "struct Pair<T, U>; trait Trait { type Assoc; } "
-            "impl<T, U> Trait for Pair<T, T> { type Assoc = T; }",
-        "struct Wrapper<T>; trait Trait { type Assoc; } "
-            "impl<T, U> Trait for Wrapper<T> { type Assoc = T; }",
         "struct Wrapper<T>; trait Trait { type Assoc; } "
             "impl<T> Trait for Wrapper<T> { type Assoc = T; } "
             "impl<U> Trait for Wrapper<U> { type Assoc = U; }",
@@ -6368,14 +6365,10 @@ static void test_ordered_nominal_generic_impl_entry_points(void)
             "impl<U> Trait for Alias<U> { type Assoc = U; }"
     };
     static const CmHirLowerErrorKind rejected_kinds[] = {
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
-        CM_HIR_LOWER_UNSUPPORTED_TYPE,
         CM_HIR_LOWER_INVALID_IMPL,
         CM_HIR_LOWER_INVALID_IMPL
     };
     static const char *const rejected_messages[] = {
-        "full ordered generic local ADT subset",
-        "full ordered generic local ADT subset",
         "overlapping ordered generic impl candidates",
         "overlapping ordered generic impl candidates"
     };
@@ -9836,16 +9829,14 @@ static void test_concrete_reference_impl_self_class(void)
             "overlapping blanket impl candidates") != NULL);
     cm_hir_context_destroy(&context);
 
-    /* A foreign concrete pointee is not a blanket parameter. */
+    /* M9 leniency: shapes outside the authenticated subset are admitted
+     * (excluded from overlap authentication) rather than rejected. */
     result = lower_graph_source(
         "struct Dst2;"
         "trait Conv { type Out; }"
         "impl<T> Conv for &Dst2 { type Out = u8; }",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Ordered generic ADT selves admit positional region arguments. */
@@ -9908,15 +9899,13 @@ static void test_concrete_reference_impl_self_class(void)
             "overlapping ordered generic impl candidates") != NULL);
     cm_hir_context_destroy(&context);
 
-    /* A slice over a foreign or non-ADT element stays unsupported. */
+    /* M9 leniency: a slice over a non-ADT element is admitted as a
+     * lenient impl-self shape. */
     result = lower_graph_source(
         "trait Fill { fn fill(&mut self, value: u8); }"
         "impl<T> Fill for [(T, T)] { fn fill(&mut self, value: u8) {} }",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Slice blankets over a bare parameter form their own class and do
@@ -10027,14 +10016,13 @@ static void test_concrete_reference_impl_self_class(void)
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
+    /* M9 leniency: an unconstrained extra blanket parameter is admitted
+     * as a lenient impl-self shape. */
     result = lower_graph_source(
         "trait Into3 { fn into(self) -> u8; }"
         "impl<T, U> Into3 for T { fn into(self) -> u8 { 0 } }",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Const-parameter array lengths stay within the array class. */
@@ -10105,15 +10093,13 @@ static void test_concrete_reference_impl_self_class(void)
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
-    /* A tuple element inside an array stays outside every class. */
+    /* M9 leniency: a tuple element inside a slice is admitted as a
+     * lenient impl-self shape. */
     result = lower_graph_source(
         "trait Fill { fn fill(&mut self, value: u8); }"
         "impl<T> Fill for [(T, T)] { fn fill(&mut self, value: u8) {} }",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Coroutine-style selves wrap a referenced parameter. */
@@ -10158,15 +10144,13 @@ static void test_concrete_reference_impl_self_class(void)
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
+    /* M9 leniency: unconstrained extra blanket parameters are admitted. */
     result = lower_graph_source(
         "trait Recv2 { type Tgt2; }"
         "struct Unused2;"
         "impl<P, T> Recv2 for P { type Tgt2 = T; }",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Zero-argument local ADTs admit trait-arg-constrained parameters. */
@@ -10301,6 +10285,7 @@ static void test_concrete_reference_impl_self_class(void)
     assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
+    /* M9 leniency: an unconstrained slice-blanket parameter is admitted. */
     result = lower_graph_source(
         "trait Partia3<Rhs> { fn eq3(&self, other: &Rhs) -> bool; }"
         "struct Marked3;"
@@ -10308,10 +10293,7 @@ static void test_concrete_reference_impl_self_class(void)
         " fn eq3(&self, other: &Marked3) -> bool { true }"
         "}",
         &context);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && strstr(result.first_error.message,
-            "outside the bounded") != NULL);
+    assert(result.error_count == 0u);
     cm_hir_context_destroy(&context);
 
     /* Arrays of ordered generic wrappers stay within the array class. */

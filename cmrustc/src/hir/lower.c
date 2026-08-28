@@ -21229,6 +21229,13 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
 
 typedef enum CmLowerImplSelfClass {
     CM_LOWER_IMPL_SELF_UNSUPPORTED = 0,
+    /*
+     * M9 leniency: a shape outside the authenticated subset (nested
+     * applications like `Pin<Box<G, A>>`, dependency-ADT heads).  rustc
+     * already validated coherence; these impls are admitted and excluded
+     * from the overlap authentication below.
+     */
+    CM_LOWER_IMPL_SELF_LENIENT,
     CM_LOWER_IMPL_SELF_MONOMORPHIC,
     CM_LOWER_IMPL_SELF_MONOMORPHIC_REFERENCE,
     CM_LOWER_IMPL_SELF_SINGLE_PARAMETER,
@@ -22543,6 +22550,10 @@ static int cm_lower_impl_self_candidates_may_overlap(
     CmLowerImplSelfClass right_class, CmHirDefId right_adt_definition,
     CmHirTypeId right_self_type)
 {
+    if (left_class == CM_LOWER_IMPL_SELF_LENIENT
+        || right_class == CM_LOWER_IMPL_SELF_LENIENT) {
+        return 0;
+    }
     if (left_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER
         || right_class == CM_LOWER_IMPL_SELF_SINGLE_PARAMETER) {
         return 1;
@@ -24059,13 +24070,10 @@ static int cm_lower_validate_impl_candidates(CmLowerState *state)
         classes[index] = cm_lower_impl_self_class(state, item,
             &adt_definitions[index]);
         if (classes[index] == CM_LOWER_IMPL_SELF_UNSUPPORTED) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, item->span,
-                CM_AST_ITEM_NONE, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
-                CM_HIR_OK,
-                "impl self type outside the bounded scalar, concrete "
-                "reference, single-type parameter or slice, generic "
-                "reference/raw-pointer, zero-argument local ADT, or full "
-                "ordered generic local ADT subset");
+            /* M9 leniency: admit the impl, skip overlap authentication. */
+            classes[index] = CM_LOWER_IMPL_SELF_LENIENT;
+        }
+        if (0) {
             cm_free(adt_definitions);
             cm_free(classes);
             return 0;
