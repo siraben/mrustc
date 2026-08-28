@@ -1074,6 +1074,16 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         && statement->operand_count != 0u
                         && statement->operand_overflow == 0u) {
                         uint32_t arg;
+                        if (cm_umir_c_active_program != NULL) {
+                            const CmHirBody *closure_body =
+                                cm_hir_get_body(hir,
+                                    (CmHirBodyId)callee_ty0->a);
+                            if (closure_body != NULL)
+                                (void)cm_umir_c_instance(
+                                    cm_umir_c_active_program,
+                                    closure_body->origin.definition,
+                                    (CmUExprId)callee_ty0->b, NULL, 0u);
+                        }
                         cm_str_buf_append(output, "0; { long long ");
                         cm_umir_c_render_closure_symbol(output,
                             (CmHirBodyId)callee_ty0->a,
@@ -1287,24 +1297,27 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     program.ubodies = ubodies;
     program.tyck = tyck;
     cm_str_buf_append(output, "#include <stdint.h>\n");
-    /* Roots: every complete body whose owner is a `#[no_mangle]` export,
-     * plus every non-generic complete body (kept so symbol references
-     * from the sample census stay resolvable). */
+    /* Roots: `#[no_mangle]` exports only; everything else is reached
+     * through call instances, so a core-linked program emits just what
+     * the exports need. */
     for (index = 0u; index < umir->bodies.len; ++index) {
         const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
             &umir->bodies, index);
         const CmHirBody *hir_body;
         const CmHirItem *owner;
         CmHirGenericParamId parameters[32];
-        if (body == NULL || !body->complete) continue;
+        if (body == NULL || !body->complete
+            || body->closure_expr != CM_U_EXPR_NONE) continue;
         hir_body = cm_hir_get_body(hir, body->source);
         if (hir_body == NULL) continue;
         owner = cm_umir_c_item_of(hir, hir_body->origin.definition);
-        if (owner == NULL) continue;
+        if (owner == NULL || owner->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_umir_c_item_has_attribute(hir, owner, "no_mangle"))
+            continue;
         if (cm_umir_c_collect_parameters(hir, owner, parameters, 32u)
-                != 0u) continue; /* generic: reached via instances */
+                != 0u) continue;
         (void)cm_umir_c_instance(&program, hir_body->origin.definition,
-            body->closure_expr, NULL, 0u);
+            CM_U_EXPR_NONE, NULL, 0u);
     }
     cm_umir_c_active_program = &program;
     for (index = 0u; index < program.instances.len; ++index) {
