@@ -2853,6 +2853,17 @@ walker).  The probe prints per-stage lowering seconds.  Minicore
 acceptance: recursive local `wrapref!(x)` self type lowers and
 types (10/10 bodies, 0 errors).  Lanes + ASan green.
 
+M9-03 twelfth pass (2026-08-28): perf-profiled lowering (perf on a
+live probe: `cm_lower_find_graph_declaration` 41%,
+`cm_hir_associated_equalities_valid` 24%, `cm_vec_at_const` 17%).
+The local item-record lookup now rides a sorted
+(source, ast_id) -> record-position index maintained on every
+push (binary search + neighbor scan for duplicate counting;
+insertion memmove is negligible).  The previous census timed out
+at 90 min still inside alloc HIR lowering; core-hir alone measured
+731s.  Minicore acceptance unchanged (10/10).  Lanes + ASan green;
+timed census running.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
