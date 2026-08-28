@@ -105,6 +105,7 @@ MIR_SOURCES := \
 	src/mir/dump.c
 CODEGEN_SOURCES := \
 	src/codegen/c.c \
+	src/codegen/umir_c.c \
 	src/codegen/executable_recipe.c
 LIBRARY_SOURCES := $(BASE_SOURCES) $(DRIVER_SOURCES) $(SYNTAX_SOURCES) $(MACRO_SOURCES) $(RESOLVE_SOURCES) $(HIR_SOURCES) $(MIR_SOURCES) $(CODEGEN_SOURCES)
 PROGRAM_SOURCES := $(LIBRARY_SOURCES) src/driver/main.c

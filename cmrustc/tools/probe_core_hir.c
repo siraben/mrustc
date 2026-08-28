@@ -1,5 +1,6 @@
 #include "cm/alloc.h"
 #include "cm/mir/ulower.h"
+#include "cm/codegen/umir_c.h"
 #include "cm/driver/cfg.h"
 #include "cm/hir/declaration_capture.h"
 #include "cm/hir/library.h"
@@ -1105,6 +1106,26 @@ int main(int argc, char **argv)
                                 built.classes[umir_class].reason,
                                 (unsigned long)
                                     built.classes[umir_class].count);
+                        printf("\n");
+                    }
+                    {
+                        CmUMirCEmitResult cemit = cm_umir_c_emit_dry(
+                            &umir, &tyck);
+                        size_t cemit_class;
+                        printf("cemit bodies=%lu emitted=%lu"
+                            " statements=%lu rendered=%lu\n",
+                            (unsigned long)cemit.bodies,
+                            (unsigned long)cemit.emitted,
+                            (unsigned long)cemit.statements,
+                            (unsigned long)cemit.rendered);
+                        printf("cemit-gaps");
+                        for (cemit_class = 0u;
+                                cemit_class < cemit.class_count;
+                                ++cemit_class)
+                            printf(" %s=%lu",
+                                cemit.classes[cemit_class].reason,
+                                (unsigned long)
+                                    cemit.classes[cemit_class].count);
                         printf("\n");
                     }
                     cm_umir_set_destroy(&umir);
