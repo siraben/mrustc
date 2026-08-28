@@ -1037,7 +1037,8 @@ static int cm_body_builtin_ast(CmBodyExpandState *state, CmAstExprId id,
 
 /* `assert!(cond)` / `assert!(cond, args...)`. */
 static int cm_body_builtin_assert(CmBodyExpandState *state, CmAstExprId id,
-    const char *name, const char *arguments, size_t length, CmAstSpan span)
+    const char *name, const char *arguments, size_t length, CmAstSpan span,
+    const char *prefix)
 {
     size_t starts[2];
     size_t lengths[2];
@@ -1051,7 +1052,7 @@ static int cm_body_builtin_assert(CmBodyExpandState *state, CmAstExprId id,
     cm_str_buf_append_n(&state->text, arguments + starts[0], lengths[0]);
     cm_str_buf_append(&state->text, ") { ");
     if (count == 1u) {
-        cm_str_buf_append(&state->text, state->options->crate_identifier);
+        cm_str_buf_append(&state->text, prefix);
         cm_str_buf_append(&state->text,
             "::panicking::panic(\"assertion failed: ");
         cm_body_append_escaped(&state->text, arguments + starts[0],
@@ -1073,10 +1074,10 @@ static int cm_body_builtin_assert(CmBodyExpandState *state, CmAstExprId id,
 /* `panic!`/`unreachable!` forward to the edition-specific core macro. */
 static int cm_body_builtin_forward(CmBodyExpandState *state, CmAstExprId id,
     const char *name, const char *arguments, size_t length, CmAstSpan span,
-    const char *target)
+    const char *target, const char *prefix)
 {
     cm_str_buf_clear(&state->text);
-    cm_str_buf_append(&state->text, state->options->crate_identifier);
+    cm_str_buf_append(&state->text, prefix);
     cm_str_buf_append(&state->text, "::panic::");
     cm_str_buf_append(&state->text, target);
     cm_str_buf_append(&state->text, state->options->edition
@@ -1366,7 +1367,7 @@ static void cm_body_append_count(CmStrBuf *text, const char *crate_id,
  */
 static int cm_body_builtin_format_args(CmBodyExpandState *state,
     CmAstExprId id, const char *name, const char *arguments, size_t length,
-    CmAstSpan span)
+    CmAstSpan span, const char *prefix)
 {
     size_t starts[CM_BODY_FORMAT_ARG_LIMIT + 1u];
     size_t lengths[CM_BODY_FORMAT_ARG_LIMIT + 1u];
@@ -1528,7 +1529,7 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
                 cm_str_buf_append(&state->text, "); ");
             }
         }
-        cm_str_buf_append(&state->text, state->options->crate_identifier);
+        cm_str_buf_append(&state->text, prefix);
         cm_str_buf_append(&state->text, "::fmt::Arguments::new_const(");
         cm_str_buf_append_n(&state->text, state->pieces.data,
             state->pieces.len);
@@ -1547,7 +1548,7 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     }
     cm_str_buf_append(&state->text, ") { args => ");
     if (any_placeholder_needed) cm_str_buf_append(&state->text, "unsafe { ");
-    cm_str_buf_append(&state->text, state->options->crate_identifier);
+    cm_str_buf_append(&state->text, prefix);
     cm_str_buf_append(&state->text, any_placeholder_needed
         ? "::fmt::Arguments::new_v1_formatted("
         : "::fmt::Arguments::new_v1(");
@@ -1558,7 +1559,7 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
     for (index = 0u; index < format->placeholder_count; ++index) {
         char number[32];
         int written;
-        cm_str_buf_append(&state->text, state->options->crate_identifier);
+        cm_str_buf_append(&state->text, prefix);
         cm_str_buf_append(&state->text, "::fmt::rt::Argument::");
         cm_str_buf_append(&state->text,
             format->placeholders[index].constructor);
@@ -1587,7 +1588,7 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
                 if (written <= 0 || (size_t)written >= sizeof(number))
                     goto cleanup;
                 cm_str_buf_append(&state->text,
-                    state->options->crate_identifier);
+                    prefix);
                 cm_str_buf_append(&state->text, number);
                 if (which == 0) placeholder->width = slot;
                 else placeholder->precision = slot;
@@ -1604,7 +1605,7 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
             char number[128];
             int written;
             cm_str_buf_append(&state->text,
-                state->options->crate_identifier);
+                prefix);
             written = snprintf(number, sizeof(number),
                 "::fmt::rt::Placeholder { position: %luusize, flags: %luu32, "
                 "precision: ", (unsigned long)index,
@@ -1613,11 +1614,11 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
                 goto cleanup;
             cm_str_buf_append(&state->text, number);
             cm_body_append_count(&state->text,
-                state->options->crate_identifier,
+                prefix,
                 placeholder->precision_kind, placeholder->precision);
             cm_str_buf_append(&state->text, ", width: ");
             cm_body_append_count(&state->text,
-                state->options->crate_identifier,
+                prefix,
                 placeholder->width_kind, placeholder->width);
             cm_str_buf_append(&state->text, " }, ");
         }
@@ -1825,6 +1826,14 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
      * types every formatted panic argument as unit. */
     if (resolved && !target.is_builtin && builtin == CM_BODY_BUILTIN_NONE)
         return cm_body_expand_rules(state, id, name, &target);
+    /* Builtin-generated text names core machinery (`::panicking`,
+     * `::fmt`): in a dependent crate the prefix is the dependency's
+     * extern name, not this crate's self-reference. */
+    {
+        const char *builtin_prefix = target.crate_identifier != NULL
+            ? target.crate_identifier
+            : state->options->crate_identifier;
+        (void)builtin_prefix;
     switch (builtin) {
     case CM_BODY_BUILTIN_AST:
         if (strcmp(name, "concat") == 0 || strcmp(name, "stringify") == 0) {
@@ -1841,16 +1850,16 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
         return cm_body_builtin_ast(state, id, name, span);
     case CM_BODY_BUILTIN_ASSERT:
         return cm_body_builtin_assert(state, id, name, arguments,
-            argument_length, span);
+            argument_length, span, builtin_prefix);
     case CM_BODY_BUILTIN_PANIC:
         return cm_body_builtin_forward(state, id, name, arguments,
-            argument_length, span, "panic");
+            argument_length, span, "panic", builtin_prefix);
     case CM_BODY_BUILTIN_UNREACHABLE:
         return cm_body_builtin_forward(state, id, name, arguments,
-            argument_length, span, "unreachable");
+            argument_length, span, "unreachable", builtin_prefix);
     case CM_BODY_BUILTIN_FORMAT_ARGS:
         return cm_body_builtin_format_args(state, id, name, arguments,
-            argument_length, span);
+            argument_length, span, builtin_prefix);
     case CM_BODY_BUILTIN_CFG_SELECT:
         return cm_body_builtin_cfg_select(state, id, name, arguments,
             argument_length, span);
@@ -1864,6 +1873,7 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
     case CM_BODY_BUILTIN_NONE:
     default:
         break;
+    }
     }
     cm_body_fail(state, name, span, resolved
         ? "builtin macro is not implemented"
