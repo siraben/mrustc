@@ -2,6 +2,7 @@
 #define CMRUSTC_CM_CODEGEN_UMIR_C_H
 
 #include "cm/mir/ulower.h"
+#include "cm/buf.h"
 
 /* M9-06: C emission from u-MIR, grown by census. */
 
@@ -21,5 +22,14 @@ typedef struct CmUMirCEmitResult {
 
 CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
     const CmTyckSet *tyck);
+
+/*
+ * Render one complete u-MIR body as a standalone C function into
+ * `output` (appended).  Returns 1 when every statement rendered, 0 when
+ * a construct fell back to a placeholder comment; the text is always
+ * syntactically complete either way.
+ */
+int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
+    const CmUBody *ub, const CmTyckSet *tyck, unsigned long symbol);
 
 #endif

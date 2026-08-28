@@ -1128,6 +1128,64 @@ int main(int argc, char **argv)
                                     cemit.classes[cemit_class].count);
                         printf("\n");
                     }
+                    {
+                        /* Render a sample of complete bodies and
+                         * syntax-check the emitted C. */
+                        CmStrBuf rendered;
+                        size_t sample_index;
+                        size_t sampled = 0u;
+                        size_t render_complete = 0u;
+                        cm_str_buf_init(&rendered);
+                        for (sample_index = 0u;
+                                sample_index < umir.bodies.len
+                                && sampled < 200u;
+                                ++sample_index) {
+                            const CmUMirBody *sample_body =
+                                (const CmUMirBody *)cm_vec_at_const(
+                                    &umir.bodies, sample_index);
+                            const CmUBody *sample_ub;
+                            if (sample_body == NULL
+                                || !sample_body->complete) continue;
+                            sample_ub = cm_ubody_get(&ubodies,
+                                sample_body->source);
+                            if (sample_ub == NULL) continue;
+                            if (cm_umir_c_render_body(&rendered,
+                                    sample_body, sample_ub, &tyck,
+                                    (unsigned long)sample_index))
+                                render_complete += 1u;
+                            sampled += 1u;
+                        }
+                        {
+                            FILE *render_file = fopen(
+                                "/tmp/cmrustc-crender-sample.c", "w");
+                            int compile_ok = -1;
+                            if (render_file != NULL) {
+                                (void)fwrite(rendered.data, 1u,
+                                    rendered.len, render_file);
+                                (void)fclose(render_file);
+                                {
+                                    const char *cc = getenv("CMRUSTC_CC");
+                                    char command[512];
+                                    if (cc == NULL || cc[0] == '\0')
+                                        cc = "cc";
+                                    (void)snprintf(command, sizeof(command),
+                                        "%s -std=c99 -fsyntax-only"
+                                        " /tmp/cmrustc-crender-sample.c"
+                                        " 2>/tmp/cmrustc-crender-sample.err",
+                                        cc);
+                                    compile_ok = system(command) == 0
+                                        ? 1 : 0;
+                                }
+                            }
+                            printf("crender sampled=%lu complete=%lu"
+                                " bytes=%lu compile=%d\n",
+                                (unsigned long)sampled,
+                                (unsigned long)render_complete,
+                                (unsigned long)rendered.len,
+                                compile_ok);
+                        }
+                        cm_str_buf_destroy(&rendered);
+                    }
                     cm_umir_set_destroy(&umir);
                     size_t ulower_class;
                     printf("mir bodies=%lu lowered=%lu blocked=%lu"

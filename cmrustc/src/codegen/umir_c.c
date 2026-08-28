@@ -156,3 +156,161 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
     }
     return result;
 }
+
+/* ------------------------------------------------------------------ */
+/* v1 text rendering                                                    */
+
+static void cm_umir_c_render_type(CmStrBuf *output, const CmTyArena *arena,
+    CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)arena, cm_ty_resolve((CmTyArena *)arena,
+            type));
+    /* v1: every local is one uniform integer slot so copies between
+     * locals never need casts; the layout engine refines widths and
+     * pointer-ness later. */
+    (void)ty;
+    cm_str_buf_append(output, "long long");
+}
+
+static void cm_umir_c_render_number(CmStrBuf *output, unsigned long value)
+{
+    char digits[24];
+    int length = 0;
+    if (value == 0u) { cm_str_buf_push(output, '0'); return; }
+    while (value != 0u && length < 24) {
+        digits[length++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    while (length != 0) cm_str_buf_push(output, digits[--length]);
+}
+
+static void cm_umir_c_render_local(CmStrBuf *output, CmUMirLocalId local)
+{
+    cm_str_buf_append(output, "_l");
+    cm_umir_c_render_number(output, (unsigned long)local);
+}
+
+int cm_umir_c_render_body(CmStrBuf *output, const CmUMirBody *body,
+    const CmUBody *ub, const CmTyckSet *tyck, unsigned long symbol)
+{
+    size_t block_index;
+    size_t local_index;
+    int complete = 1;
+    if (output == NULL || body == NULL || ub == NULL || tyck == NULL)
+        return 0;
+    cm_str_buf_append(output, "static void cm_u_body_");
+    cm_umir_c_render_number(output, symbol);
+    cm_str_buf_append(output, "(void)\n{\n");
+    for (local_index = 0u; local_index < body->locals.len;
+            ++local_index) {
+        const CmTyId *type = (const CmTyId *)cm_vec_at_const(
+            &body->locals, local_index);
+        cm_str_buf_append(output, "    ");
+        cm_umir_c_render_type(output, &tyck->arena,
+            type == NULL ? CM_TY_NONE : *type);
+        cm_str_buf_push(output, ' ');
+        cm_umir_c_render_local(output, (CmUMirLocalId)local_index);
+        cm_str_buf_append(output, " = 0;\n");
+    }
+    for (block_index = 0u; block_index < body->blocks.len;
+            ++block_index) {
+        const CmUMirBlock *block = (const CmUMirBlock *)cm_vec_at_const(
+            &body->blocks, block_index);
+        size_t statement_index;
+        if (block == NULL) continue;
+        cm_str_buf_append(output, "_b");
+        cm_umir_c_render_number(output, (unsigned long)block_index);
+        cm_str_buf_append(output, ": ;\n");
+        for (statement_index = 0u;
+                statement_index < block->statements.len;
+                ++statement_index) {
+            const CmUMirStatement *statement =
+                (const CmUMirStatement *)cm_vec_at_const(
+                    &block->statements, statement_index);
+            const CmUExpr *expr;
+            if (statement == NULL) continue;
+            cm_str_buf_append(output, "    ");
+            cm_umir_c_render_local(output, statement->destination);
+            cm_str_buf_append(output, " = ");
+            expr = cm_ubody_get_expr(ub, statement->expr);
+            switch (statement->kind) {
+            case CM_UMIR_RVALUE_LITERAL:
+                if (expr != NULL
+                    && expr->kind == CM_U_EXPR_LITERAL
+                    && (expr->data.literal.kind == CM_U_LITERAL_INTEGER
+                        || expr->data.literal.kind == CM_U_LITERAL_BOOL))
+                    cm_umir_c_render_number(output, (unsigned long)
+                        expr->data.literal.value_low);
+                else {
+                    cm_str_buf_append(output, "0 /* literal */");
+                    complete = 0;
+                }
+                break;
+            case CM_UMIR_RVALUE_LOCAL:
+                cm_str_buf_append(output, "0 /* path */");
+                break;
+            case CM_UMIR_RVALUE_BINARY:
+                if (statement->operand_count == 2u) {
+                    cm_str_buf_push(output, '(');
+                    cm_str_buf_append(output, "(long long)");
+                    cm_umir_c_render_local(output,
+                        statement->operands[0]);
+                    cm_str_buf_append(output, " + (long long)");
+                    cm_umir_c_render_local(output,
+                        statement->operands[1]);
+                    cm_str_buf_append(output, ") /* op */");
+                } else {
+                    cm_str_buf_append(output, "0 /* binary */");
+                    complete = 0;
+                }
+                break;
+            case CM_UMIR_RVALUE_UNARY:
+                if (statement->operand_count == 1u)
+                    cm_umir_c_render_local(output,
+                        statement->operands[0]);
+                else {
+                    cm_str_buf_append(output, "0 /* unary */");
+                    complete = 0;
+                }
+                break;
+            default:
+                cm_str_buf_append(output, "0 /* todo */");
+                complete = 0;
+                break;
+            }
+            cm_str_buf_append(output, ";\n");
+        }
+        cm_str_buf_append(output, "    ");
+        switch (block->terminator) {
+        case CM_UMIR_TERMINATOR_RETURN:
+            cm_str_buf_append(output, "return;\n");
+            break;
+        case CM_UMIR_TERMINATOR_GOTO:
+            cm_str_buf_append(output, "goto _b");
+            cm_umir_c_render_number(output,
+                (unsigned long)block->goto_target);
+            cm_str_buf_append(output, ";\n");
+            break;
+        case CM_UMIR_TERMINATOR_SWITCH_BOOL:
+        case CM_UMIR_TERMINATOR_SWITCH:
+            cm_str_buf_append(output, "if (");
+            cm_umir_c_render_local(output, block->condition);
+            cm_str_buf_append(output, ") goto _b");
+            cm_umir_c_render_number(output,
+                (unsigned long)block->true_target);
+            cm_str_buf_append(output, "; else goto _b");
+            cm_umir_c_render_number(output,
+                (unsigned long)(block->terminator
+                        == CM_UMIR_TERMINATOR_SWITCH
+                    ? block->goto_target : block->false_target));
+            cm_str_buf_append(output, ";\n");
+            break;
+        default:
+            cm_str_buf_append(output, "return;\n");
+            break;
+        }
+    }
+    cm_str_buf_append(output, "}\n");
+    return complete;
+}
