@@ -1196,10 +1196,19 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             cm_umir_c_render_local(output, block->condition);
             cm_str_buf_append(output, ")[0]) {");
             for (arm = 0u; arm < block->arm_count; ++arm) {
+                uint32_t earlier;
+                int duplicate = 0;
                 if (block->arm_discriminants[arm] < 0) {
-                    fallback = block->arm_targets[arm];
+                    if (fallback == block->goto_target)
+                        fallback = block->arm_targets[arm];
                     continue;
                 }
+                /* First entry per discriminant wins; later entries are
+                 * reached by guard fall-through. */
+                for (earlier = 0u; earlier < arm; ++earlier)
+                    if (block->arm_discriminants[earlier]
+                            == block->arm_discriminants[arm]) duplicate = 1;
+                if (duplicate) continue;
                 cm_str_buf_append(output, " case ");
                 cm_umir_c_render_number(output,
                     (unsigned long)block->arm_discriminants[arm]);

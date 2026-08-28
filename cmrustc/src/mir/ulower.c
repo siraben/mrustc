@@ -873,10 +873,16 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             expr->data.match_expr.scrutinee);
         CmUMirBlockId dispatch = builder->current;
         CmUMirBlockId join = cm_umir_new_block(builder);
-        CmUMirBlockId *targets = (CmUMirBlockId *)cm_alloc_zeroed(
-            arm_count == 0u ? 1u : arm_count, sizeof(CmUMirBlockId));
-        long *discriminants = (long *)cm_alloc_zeroed(
-            arm_count == 0u ? 1u : arm_count, sizeof(long));
+        /* Dispatch entries: one per (pattern alternative); a guarded arm
+         * gets a test block that falls through to the next entry. */
+        uint32_t capacity = arm_count == 0u ? 1u : arm_count * 4u;
+        CmUMirBlockId *targets = (CmUMirBlockId *)cm_alloc_zeroed(capacity,
+            sizeof(CmUMirBlockId));
+        long *discriminants = (long *)cm_alloc_zeroed(capacity,
+            sizeof(long));
+        uint32_t entries = 0u;
+        CmUMirBlockId previous_test = 0u;
+        int have_previous_test = 0;
         for (arm = 0u; arm < arm_count && builder->blocked == NULL; ++arm) {
             const CmUPat *pat = cm_ubody_get_pat(builder->ub,
                 expr->data.match_expr.arms[arm].pattern);
@@ -884,8 +890,37 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             CmUMirBlock *arm_current;
             CmUMirLocalId arm_value;
             long disc = -1;
-            targets[arm] = arm_block;
+            CmUExprId guard = expr->data.match_expr.arms[arm].guard;
+            /* A previous guarded arm falls through here on failure. */
+            if (have_previous_test) {
+                CmUMirBlock *test = (CmUMirBlock *)cm_vec_at(
+                    &builder->body->blocks, previous_test);
+                if (test != NULL) test->false_target = arm_block;
+                have_previous_test = 0;
+            }
             builder->current = arm_block;
+            if (pat != NULL && pat->kind == CM_U_PAT_OR) {
+                /* Each alternative dispatches to this arm. */
+                uint32_t alt;
+                for (alt = 0u; alt < pat->data.list.pattern_count
+                        && entries < capacity; ++alt) {
+                    const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+                        pat->data.list.patterns[alt]);
+                    const CmUResolution *sub_res = NULL;
+                    if (sub == NULL) continue;
+                    if (sub->kind == CM_U_PAT_PATH)
+                        sub_res = &sub->data.path.resolution;
+                    else if (sub->kind == CM_U_PAT_TUPLE_STRUCT
+                        || sub->kind == CM_U_PAT_STRUCT)
+                        sub_res = &sub->data.struct_pat.resolution;
+                    targets[entries] = arm_block;
+                    discriminants[entries] = sub_res == NULL ? -1
+                        : cm_umir_variant_index(builder->hir, sub_res);
+                    entries += 1u;
+                }
+                /* Or-pattern payload bindings are not extracted (v1). */
+                pat = NULL;
+            }
             if (pat != NULL) {
                 const CmUResolution *res = NULL;
                 if (pat->kind == CM_U_PAT_PATH) res = &pat->data.path.resolution;
@@ -933,10 +968,36 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         CM_TY_NONE, &scrutinee, 1u);
                 }
             }
-            discriminants[arm] = disc;
-            if (expr->data.match_expr.arms[arm].guard != CM_U_EXPR_NONE)
-                (void)cm_umir_emit_expr(builder,
-                    expr->data.match_expr.arms[arm].guard);
+            if (pat != NULL && entries < capacity) {
+                targets[entries] = arm_block;
+                discriminants[entries] = disc;
+                entries += 1u;
+            } else if (pat == NULL && expr->data.match_expr.arms[arm].pattern
+                    != CM_U_PAT_NONE && entries < capacity
+                    && cm_ubody_get_pat(builder->ub,
+                        expr->data.match_expr.arms[arm].pattern) == NULL) {
+                targets[entries] = arm_block;
+                discriminants[entries] = -1;
+                entries += 1u;
+            }
+            if (guard != CM_U_EXPR_NONE) {
+                /* Bindings are in place; test the guard, else fall through
+                 * to the next arm (patched when that arm is created). */
+                CmUMirLocalId guard_value = cm_umir_emit_expr(builder,
+                    guard);
+                CmUMirBlockId guard_body = cm_umir_new_block(builder);
+                CmUMirBlock *test = (CmUMirBlock *)cm_vec_at(
+                    &builder->body->blocks, builder->current);
+                if (test != NULL) {
+                    test->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                    test->condition = guard_value;
+                    test->true_target = guard_body;
+                    test->false_target = join; /* patched by next arm */
+                }
+                previous_test = builder->current;
+                have_previous_test = 1;
+                builder->current = guard_body;
+            }
             arm_value = cm_umir_emit_expr(builder,
                 expr->data.match_expr.arms[arm].body);
             cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_LOCAL,
@@ -953,7 +1014,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 dispatch_block->goto_target = join;
                 dispatch_block->arm_targets = targets;
                 dispatch_block->arm_discriminants = discriminants;
-                dispatch_block->arm_count = arm_count;
+                dispatch_block->arm_count = entries;
             } else {
                 cm_free(targets);
                 cm_free(discriminants);
