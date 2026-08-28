@@ -2781,6 +2781,15 @@ Minicore acceptance: `trait U: core::Sourcey<Item: Hash>` lowers,
 `in_place_collect.rs` to `rc.rs:2937` (ADT generic default
 structural substitution).  Lanes + ASan green.
 
+M9-03 sixth pass (2026-08-28): closed zero-argument ADT generic
+defaults (`A = Global`) reuse the declaration-owned type when
+instantiating an ADT application that omits them (`Rc<[T]>`).
+Minicore acceptance: `RcLike<T, A = Global>` instantiated as
+`RcLike<u32>` lowers and types (7/7 bodies).  Whole-crate: alloc
+HIR advances past `rc.rs` to `task.rs:93` (custom `self: Arc<Self>`
+receiver whose wrapper now carries the defaulted allocator
+argument).  Lanes + ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |

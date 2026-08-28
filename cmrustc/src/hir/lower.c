@@ -3878,6 +3878,14 @@ static int cm_lower_adt_default_argument(CmLowerState *state,
     case CM_HIR_TYPE_FLOAT_KIND:
         out_argument->data.type = parameter->default_argument.data.type;
         return 1;
+    case CM_HIR_TYPE_ADT_KIND:
+        /* A closed zero-argument ADT default such as `A = Global` needs
+         * no substitution; reuse the declaration-owned type. */
+        if (default_type->data.named_type.argument_count == 0u) {
+            out_argument->data.type = parameter->default_argument.data.type;
+            return 1;
+        }
+        break;
     default:
         break;
     }
