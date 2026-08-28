@@ -960,6 +960,8 @@ static int cm_tyck_fn_bound(CmTyckEnv *env, CmTyId callee, CmTyId *params,
     return 0;
 }
 
+static int cm_tyck_debug_fn_matches(CmTyckEnv *env);
+
 /*
  * Normalize `<Self as Trait>::Assoc`: through a matching impl's associated
  * type when the self type is concrete, or through an equality on a bound
@@ -1008,9 +1010,21 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
     self_type = cm_ty_resolve(arena, self_type);
     self = cm_ty_get(arena, self_type);
     associated = cm_tyck_item(env->state, assoc_def);
-    if (self == NULL || associated == NULL) return type;
+    if (self == NULL || associated == NULL) {
+        if (cm_tyck_debug_fn_matches(env))
+            fprintf(stderr, "TYCK norm-silent assoc=%d self=%d"
+                " tdef=(%u,%u) adef=(%u,%u)\n",
+                associated != NULL, self != NULL,
+                (unsigned)trait_def.crate_id, (unsigned)trait_def.index,
+                (unsigned)assoc_def.crate_id, (unsigned)assoc_def.index);
+        return type;
+    }
     self_kind = self->kind;
-    if (self_kind == CM_TY_INFER) return type;
+    if (self_kind == CM_TY_INFER) {
+        if (cm_tyck_debug_fn_matches(env))
+            fprintf(stderr, "TYCK norm-silent self-infer\n");
+        return type;
+    }
     if (self_kind == CM_TY_PARAM || self_kind == CM_TY_SELF) {
         const CmHirItem *owners[2];
         int owner;
@@ -1200,7 +1214,8 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
             }
         }
     }
-    if (getenv("CM_TYCK_DEBUG") != NULL && self_kind == CM_TY_ADT) {
+    if (getenv("CM_TYCK_DEBUG") != NULL
+        && (self_kind == CM_TY_ADT || cm_tyck_debug_fn_matches(env))) {
         size_t by_trait = 0u;
         size_t by_self = 0u;
         size_t no_child = 0u;
@@ -2121,6 +2136,17 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
             && ep->kind == CM_TY_SLICE)
             return cm_ty_unify(arena, ap->children[0], ep->children[0]);
         if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) return 1;
+        /* Unsize through a reference to one ADT application:
+         * `&PolymorphicIter<[T; N]>` coerces to `&PolymorphicIter<[T]>`
+         * (core's array iter unsize helpers). */
+        if (ap != NULL && ep != NULL && ap->kind == CM_TY_ADT
+            && ep->kind == CM_TY_ADT
+            && cm_hir_def_id_equal(ap->def, ep->def)
+            && cm_tyck_coerce(env, a->children[0], e->children[0]))
+            return 1;
+        a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+        e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+        if (a == NULL || e == NULL) return 0;
         if (cm_ty_unify(arena, a->children[0], e->children[0])) return 1;
         return cm_tyck_lenient_eq(env, actual, expected, 0u);
     }
