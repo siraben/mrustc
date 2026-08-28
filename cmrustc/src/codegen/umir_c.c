@@ -9,7 +9,8 @@
 static CmTyId cm_umir_c_subst(CmTyId type);
 static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     const CmHirContext *hir, const CmTyckSet *tyck, CmHirDefId def,
-    CmTyId callee_type, CmTyId receiver_type);
+    CmTyId callee_type, CmTyId receiver_type,
+    const CmUMirStatement *statement, uint32_t first_arg);
 
 /*
  * M9-06 v1: dry C-emission over u-MIR — no output buffer yet.  Every
@@ -241,7 +242,7 @@ static int cm_umir_c_render_call(CmStrBuf *output,
         return 0;
     cm_str_buf_init(&symbol);
     cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def, callee_type,
-        receiver_type);
+        receiver_type, statement, first_arg);
     cm_str_buf_append(output, "0; { long long ");
     cm_str_buf_append_n(output, symbol.data, symbol.len);
     cm_str_buf_append(output, "(); ");
@@ -340,6 +341,66 @@ static unsigned int cm_umir_c_ref_depth(const CmTyckSet *tyck, CmTyId type)
             cm_ty_resolve((CmTyArena *)&tyck->arena, ty->children[0]));
     }
     return depth;
+}
+
+/* Scalar C type for typed-width memory access (ints, bool, char); NULL
+ * for everything else, which travels in a full slot. */
+static const char *cm_umir_c_scalar_type(const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    if (ty == NULL) return NULL;
+    if (ty->kind == CM_TY_INT || ty->kind == CM_TY_BOOL
+        || ty->kind == CM_TY_CHAR)
+        return cm_umir_c_abi_type(&tyck->arena, type);
+    return NULL;
+}
+
+/* Byte size of a scalar element in memory (slots otherwise). */
+static unsigned long cm_umir_c_scalar_size(const CmTyckSet *tyck,
+    CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    if (ty == NULL) return 8ul;
+    if (ty->kind == CM_TY_BOOL) return 1ul;
+    if (ty->kind == CM_TY_CHAR) return 4ul;
+    if (ty->kind == CM_TY_INT) {
+        switch ((CmHirIntType)ty->a) {
+        case CM_HIR_INT_I8: case CM_HIR_INT_U8: return 1ul;
+        case CM_HIR_INT_I16: case CM_HIR_INT_U16: return 2ul;
+        case CM_HIR_INT_I32: case CM_HIR_INT_U32: return 4ul;
+        default: return 8ul;
+        }
+    }
+    return 8ul;
+}
+
+/* The pointee behind every reference/pointer layer. */
+static CmTyId cm_umir_c_peel(const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    unsigned int guard = 0u;
+    while (ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR)
+            && guard++ < 8u) {
+        type = ty->children[0];
+        ty = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    }
+    return type;
+}
+
+/* Unsized pointees travel as a `[data, len]` slot pair. */
+static int cm_umir_c_is_fat(const CmTyckSet *tyck, CmTyId pointee)
+{
+    const CmTy *ty = pointee == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, pointee));
+    return ty != NULL && (ty->kind == CM_TY_SLICE || ty->kind == CM_TY_STR);
 }
 
 /* `((long long *)(intptr_t)LOAD...(local))` — the slot-array base of an
@@ -474,12 +535,72 @@ static uint32_t cm_umir_c_collect_parameters(const CmHirContext *hir,
     return count;
 }
 
+/* Intrinsics whose rendering depends on the instance's type arguments. */
+static int cm_umir_c_render_typed_shim(CmStrBuf *output,
+    const CmTyckSet *tyck, const CmInternedString *name,
+    const CmUMirInstance *instance)
+{
+    CmTyId first = instance->count == 0u ? CM_TY_NONE : instance->types[0];
+    const CmTy *ft = first == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, first));
+    if (name == NULL) return 0;
+#define CM_SHIM_IS(text) (name->len == sizeof(text) - 1u \
+        && memcmp(name->bytes, text, name->len) == 0)
+    if (CM_SHIM_IS("ptr_metadata")) {
+        /* `*const [T]` / `*const str`: the pair's length; thin: unit. */
+        if (cm_umir_c_is_fat(tyck, first))
+            cm_str_buf_append(output, "(long long a) { return "
+                "((long long *)(intptr_t)*(long long *)(intptr_t)a)[1]; }");
+        else
+            cm_str_buf_append(output, "(long long a) { (void)a; return 0; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("offset") || CM_SHIM_IS("arith_offset")) {
+        /* `*const T` moves by the scalar width of T (slots otherwise). */
+        CmTyId elem = ft != NULL && (ft->kind == CM_TY_PTR
+            || ft->kind == CM_TY_REF) ? ft->children[0] : CM_TY_NONE;
+        cm_str_buf_append(output, "(long long p, long long n) "
+            "{ return p + n * ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, elem));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("ptr_offset_from") || CM_SHIM_IS("ptr_offset_from_unsigned")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return (a - b) / ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("size_of")) {
+        cm_str_buf_append(output, "() { return ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("min_align_of") || CM_SHIM_IS("align_of")) {
+        cm_str_buf_append(output, "() { return ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
+#undef CM_SHIM_IS
+    return 0;
+}
+
 /* Body-less intrinsics with a lenient C rendering: the frame is uniform
  * `long long` slots (aggregates travel as slot pointers), so bit-casts and
  * hints are identity and the divergent ones abort.  NULL when unknown. */
 static const char *cm_umir_c_intrinsic_shim(const CmInternedString *name)
 {
     static const struct { const char *name; const char *body; } table[] = {
+        { "const_eval_select", "() { return 0; }" },
+        { "assert_inhabited", "() { return 0; }" },
+        { "assert_zero_valid", "() { return 0; }" },
+        { "assert_mem_uninitialized_valid", "() { return 0; }" },
+        { "ub_checks", "() { return 0; }" },
+        { "cold_path", "() { return 0; }" },
         { "transmute", "(long long a) { return a; }" },
         { "transmute_unchecked", "(long long a) { return a; }" },
         { "likely", "(long long a) { return a; }" },
@@ -754,7 +875,8 @@ static CmTyId cm_umir_c_subst(CmTyId type)
  * the instance when the program is collecting. */
 static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     const CmHirContext *hir, const CmTyckSet *tyck, CmHirDefId def,
-    CmTyId callee_type, CmTyId receiver_type)
+    CmTyId callee_type, CmTyId receiver_type,
+    const CmUMirStatement *statement, uint32_t first_arg)
 {
     CmUMirProgram *program = cm_umir_c_active_program;
     const CmHirItem *item = cm_umir_c_item_of(hir, def);
@@ -896,6 +1018,58 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                 cm_ty_resolve((CmTyArena *)&tyck->arena, bound_self));
         }
     }
+    if (item != NULL && item->kind == CM_HIR_ITEM_FUNCTION
+        && statement != NULL && cm_umir_c_active_body != NULL
+        && statement->operand_overflow == 0u) {
+        /* Generic parameters still unbound after the callee type and impl
+         * matching (`[T]::get_unchecked<I>`: I from the argument) bind by
+         * matching the signature's parameter and return types against
+         * the call's operand and destination types. */
+        CmHirGenericParamId parameters[32];
+        uint32_t parameter_count = cm_umir_c_collect_parameters(hir, item,
+            parameters, 32u);
+        if (count < parameter_count) {
+            const CmHirFunctionSignature *sig =
+                &item->data.function_item.signature;
+            CmTyArena *arena = (CmTyArena *)&tyck->arena;
+            CmHirGenericParamId bound_params[32];
+            CmTyId bound_types[32];
+            uint32_t bound = 0u;
+            uint32_t operands = statement->operand_count - first_arg;
+            uint32_t skip = sig->parameter_count == operands ? 0u
+                : sig->parameter_count + 1u == operands ? 1u : 0xFFFFu;
+            uint32_t param;
+            if (skip != 0xFFFFu)
+                for (param = 0u; param < sig->parameter_count; ++param) {
+                    CmTyId pattern = cm_ty_from_hir(arena, hir,
+                        sig->parameters[param].type);
+                    CmTyId actual = cm_umir_c_local_type(cm_umir_c_active_body,
+                        statement->operands[first_arg + skip + param]);
+                    if (pattern == CM_TY_NONE || actual == CM_TY_NONE)
+                        continue;
+                    (void)cm_umir_c_ty_match(tyck, pattern, actual,
+                        bound_params, bound_types, &bound, 32u, 0u);
+                }
+            if (statement->type != CM_TY_NONE) {
+                CmTyId pattern = cm_ty_from_hir(arena, hir, sig->return_type);
+                if (pattern != CM_TY_NONE)
+                    (void)cm_umir_c_ty_match(tyck, pattern,
+                        cm_umir_c_subst(statement->type), bound_params,
+                        bound_types, &bound, 32u, 0u);
+            }
+            if (bound != 0u) {
+                for (param = count; param < parameter_count && param < 32u;
+                        ++param) {
+                    uint32_t scan;
+                    args[param] = cm_ty_param(arena, parameters[param]);
+                    for (scan = 0u; scan < bound; ++scan)
+                        if (bound_params[scan] == parameters[param])
+                            args[param] = bound_types[scan];
+                }
+                count = parameter_count > 32u ? 32u : parameter_count;
+            }
+        }
+    }
     if (program != NULL)
         instance = cm_umir_c_instance(program, def, CM_U_EXPR_NONE, args,
             count, bound_self);
@@ -909,6 +1083,172 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
             cm_umir_c_render_number(output, have->index);
         }
     }
+}
+
+/* `((T *)(intptr_t)PAIR[0])[i]` — element `i` of the slice/str behind
+ * `base` (a reference to a `[data, len]` pair); scalar elements are
+ * addressed at their own width, others as slots. */
+static void cm_umir_c_render_slice_element(CmStrBuf *output,
+    const CmTyckSet *tyck, const CmUMirBody *body, CmUMirLocalId base,
+    CmUMirLocalId index)
+{
+    CmTyId base_type = cm_umir_c_local_type(body, base);
+    CmTyId pointee = cm_umir_c_peel(tyck, base_type);
+    const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, pointee));
+    const char *scalar = pt != NULL && pt->kind == CM_TY_STR ? "uint8_t"
+        : pt != NULL && pt->count != 0u
+            ? cm_umir_c_scalar_type(tyck, pt->children[0]) : NULL;
+    cm_str_buf_append(output, "((");
+    cm_str_buf_append(output, scalar == NULL ? "long long" : scalar);
+    cm_str_buf_append(output, " *)(intptr_t)");
+    cm_umir_c_render_base(output, base, cm_umir_c_ref_depth(tyck, base_type));
+    cm_str_buf_append(output, "[0])[");
+    cm_umir_c_render_local(output, index);
+    cm_str_buf_push(output, ']');
+}
+
+/* `"..."` -> `_agg<d>[1] = "...", _agg<d>[2] = len, _agg<d>[0] = &_agg<d>[1]`
+ * and the destination is `&_agg<d>[0]`: a `&str` reference to a pair.
+ * Escapes shared with C pass through; `\u{..}` and raw strings are
+ * re-encoded.  Returns 0 for spellings this renderer cannot carry. */
+static int cm_umir_c_render_string_literal(CmStrBuf *output,
+    const CmUBodySet *ubodies, const CmUExpr *expr, CmUMirLocalId dest)
+{
+    const CmInternedString *text = cm_interner_get(&ubodies->strings,
+        expr->data.literal.text);
+    const unsigned char *bytes;
+    size_t len;
+    size_t start;
+    size_t end;
+    size_t index;
+    unsigned long count = 0ul;
+    int raw = 0;
+    unsigned int hashes = 0u;
+    if (text == NULL) return 0;
+    bytes = (const unsigned char *)text->bytes;
+    len = text->len;
+    start = 0u;
+    if (start < len && bytes[start] == 'r') { raw = 1; start += 1u; }
+    while (start < len && bytes[start] == '#') { hashes += 1u; start += 1u; }
+    if (start >= len || bytes[start] != '"') return 0;
+    start += 1u;
+    if (len < start + 1u + hashes) return 0;
+    end = len - 1u - hashes;
+    if (end < start || bytes[end] != '"') return 0;
+    /* Byte length and C-compatibility scan. */
+    cm_str_buf_append(output, "0; _agg");
+    cm_umir_c_render_number(output, (unsigned long)dest);
+    cm_str_buf_append(output, "[1] = (long long)(intptr_t)\"");
+    for (index = start; index < end; ++index) {
+        unsigned char c = bytes[index];
+        if (!raw && c == '\\' && index + 1u < end) {
+            unsigned char n = bytes[index + 1u];
+            if (n == 'u') {
+                /* \u{XXXX}: decode to UTF-8 octal escapes. */
+                unsigned long cp = 0ul;
+                size_t scan = index + 2u;
+                unsigned char buf[4];
+                unsigned int nbytes;
+                unsigned int b;
+                if (scan >= end || bytes[scan] != '{') return 0;
+                scan += 1u;
+                while (scan < end && bytes[scan] != '}') {
+                    unsigned char h = bytes[scan];
+                    if (h == '_') { scan += 1u; continue; }
+                    cp = cp * 16ul + (unsigned long)(h >= 'a' ? h - 'a' + 10
+                        : h >= 'A' ? h - 'A' + 10 : h - '0');
+                    scan += 1u;
+                }
+                if (cp < 0x80ul) { buf[0] = (unsigned char)cp; nbytes = 1u; }
+                else if (cp < 0x800ul) {
+                    buf[0] = (unsigned char)(0xC0u | (cp >> 6));
+                    buf[1] = (unsigned char)(0x80u | (cp & 0x3Fu));
+                    nbytes = 2u;
+                } else if (cp < 0x10000ul) {
+                    buf[0] = (unsigned char)(0xE0u | (cp >> 12));
+                    buf[1] = (unsigned char)(0x80u | ((cp >> 6) & 0x3Fu));
+                    buf[2] = (unsigned char)(0x80u | (cp & 0x3Fu));
+                    nbytes = 3u;
+                } else {
+                    buf[0] = (unsigned char)(0xF0u | (cp >> 18));
+                    buf[1] = (unsigned char)(0x80u | ((cp >> 12) & 0x3Fu));
+                    buf[2] = (unsigned char)(0x80u | ((cp >> 6) & 0x3Fu));
+                    buf[3] = (unsigned char)(0x80u | (cp & 0x3Fu));
+                    nbytes = 4u;
+                }
+                for (b = 0u; b < nbytes; ++b) {
+                    char oct[5];
+                    oct[0] = '\\';
+                    oct[1] = (char)('0' + (buf[b] >> 6));
+                    oct[2] = (char)('0' + ((buf[b] >> 3) & 7u));
+                    oct[3] = (char)('0' + (buf[b] & 7u));
+                    oct[4] = 0;
+                    cm_str_buf_append(output, oct);
+                }
+                count += nbytes;
+                index = scan;
+                continue;
+            }
+            if (n == '\n') {
+                /* Line continuation: skip the newline and leading blanks. */
+                index += 1u;
+                while (index + 1u < end && (bytes[index + 1u] == ' '
+                        || bytes[index + 1u] == '\t'
+                        || bytes[index + 1u] == '\n'
+                        || bytes[index + 1u] == '\r')) index += 1u;
+                continue;
+            }
+            if (n == 'x') {
+                if (index + 3u >= end + 0u && index + 3u > end) return 0;
+                cm_str_buf_push(output, '\\');
+                cm_str_buf_push(output, 'x');
+                cm_str_buf_push(output, (char)bytes[index + 2u]);
+                cm_str_buf_push(output, (char)bytes[index + 3u]);
+                /* Terminate the hex escape so a following hex digit does
+                 * not extend it in C. */
+                cm_str_buf_append(output, "\" \"");
+                count += 1ul;
+                index += 3u;
+                continue;
+            }
+            /* \n \t \r \0 \\ \" \' are C escapes with the same value. */
+            cm_str_buf_push(output, '\\');
+            cm_str_buf_push(output, (char)n);
+            count += 1ul;
+            index += 1u;
+            continue;
+        }
+        if (c == '"' || c == '\\') { cm_str_buf_push(output, '\\');
+            cm_str_buf_push(output, (char)c); }
+        else if (c == '\n') cm_str_buf_append(output, "\\n");
+        else if (c == '\r') cm_str_buf_append(output, "\\r");
+        else if (c == '?') cm_str_buf_append(output, "\\?");
+        else if (c < 0x20u || c >= 0x7Fu) {
+            char oct[5];
+            oct[0] = '\\';
+            oct[1] = (char)('0' + (c >> 6));
+            oct[2] = (char)('0' + ((c >> 3) & 7u));
+            oct[3] = (char)('0' + (c & 7u));
+            oct[4] = 0;
+            cm_str_buf_append(output, oct);
+        } else cm_str_buf_push(output, (char)c);
+        count += 1ul;
+    }
+    cm_str_buf_append(output, "\"; _agg");
+    cm_umir_c_render_number(output, (unsigned long)dest);
+    cm_str_buf_append(output, "[2] = ");
+    cm_umir_c_render_number(output, count);
+    cm_str_buf_append(output, "; _agg");
+    cm_umir_c_render_number(output, (unsigned long)dest);
+    cm_str_buf_append(output, "[0] = (long long)(intptr_t)&_agg");
+    cm_umir_c_render_number(output, (unsigned long)dest);
+    cm_str_buf_append(output, "[1]; ");
+    cm_umir_c_render_local(output, dest);
+    cm_str_buf_append(output, " = (long long)(intptr_t)&_agg");
+    cm_umir_c_render_number(output, (unsigned long)dest);
+    cm_str_buf_append(output, "[0]");
+    return 1;
 }
 
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
@@ -1003,13 +1343,27 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 (const CmUMirStatement *)cm_vec_at_const(
                     &block->statements, statement_index);
             unsigned long slots;
-            if (statement == NULL
-                || (statement->kind != CM_UMIR_RVALUE_AGGREGATE
-                    && statement->kind != CM_UMIR_RVALUE_VARIANT)) continue;
-            slots = (unsigned long)statement->operand_count
-                + (unsigned long)statement->operand_overflow
-                + (statement->kind == CM_UMIR_RVALUE_VARIANT ? 1u : 0u);
-            cm_str_buf_append(output, "    long long _agg");
+            if (statement == NULL) continue;
+            if (statement->kind == CM_UMIR_RVALUE_LITERAL) {
+                /* A string literal: slot 0 holds the pair address so the
+                 * `&str` local is a reference like any other. */
+                const CmUExpr *lit = cm_ubody_get_expr(ub, statement->expr);
+                if (lit == NULL || lit->kind != CM_U_EXPR_LITERAL
+                    || lit->data.literal.kind != CM_U_LITERAL_STRING)
+                    continue;
+                slots = 3ul;
+                /* Literal data is static; so is its pair, which callers
+                 * keep after this frame returns (`-> &'static str`). */
+                cm_str_buf_append(output, "    static");
+            } else if (statement->kind != CM_UMIR_RVALUE_AGGREGATE
+                    && statement->kind != CM_UMIR_RVALUE_VARIANT) {
+                continue;
+            } else
+                slots = (unsigned long)statement->operand_count
+                    + (unsigned long)statement->operand_overflow
+                    + (statement->kind == CM_UMIR_RVALUE_VARIANT ? 1u : 0u);
+            cm_str_buf_append(output, statement->kind == CM_UMIR_RVALUE_LITERAL
+                ? " long long _agg" : "    long long _agg");
             cm_umir_c_render_number(output,
                 (unsigned long)statement->destination);
             cm_str_buf_append(output, "[");
@@ -1059,7 +1413,12 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         || expr->data.literal.kind == CM_U_LITERAL_BOOL))
                     cm_umir_c_render_number(output, (unsigned long)
                         expr->data.literal.value_low);
-                else {
+                else if (expr != NULL && expr->kind == CM_U_EXPR_LITERAL
+                    && expr->data.literal.kind == CM_U_LITERAL_STRING
+                    && cm_umir_c_render_string_literal(output, ubodies,
+                        expr, statement->destination)) {
+                    /* rendered as a [data, len] pair */
+                } else {
                     cm_str_buf_append(output, "0 /* literal */");
                     complete = 0;
                 }
@@ -1230,13 +1589,26 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_append(output, "(long long)(intptr_t)&");
                 cm_umir_c_render_local(output, statement->operands[0]);
                 break;
-            case CM_UMIR_RVALUE_CAST:
+            case CM_UMIR_RVALUE_CAST: {
+                CmTyId from = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, from))
+                    && cm_umir_c_ref_depth(tyck, from) != 0u
+                    && !cm_umir_c_is_fat(tyck,
+                        cm_umir_c_peel(tyck, statement->type))) {
+                    /* `s as *const str as *const u8`: the data pointer. */
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, from));
+                    cm_str_buf_append(output, "[0]");
+                    break;
+                }
                 cm_str_buf_append(output, "(long long)(");
                 cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena,
                     statement->type));
                 cm_str_buf_push(output, ')');
                 cm_umir_c_render_local(output, statement->operands[0]);
                 break;
+            }
             case CM_UMIR_RVALUE_STORE_FIELD: {
                 long slot = -1;
                 if (expr != NULL && expr->kind == CM_U_EXPR_TUPLE_FIELD)
@@ -1260,26 +1632,59 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             }
-            case CM_UMIR_RVALUE_STORE_INDEX:
+            case CM_UMIR_RVALUE_STORE_INDEX: {
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                CmTyId pointee = cm_umir_c_peel(tyck, base_type);
                 cm_str_buf_append(output, "0; ");
-                cm_umir_c_render_base(output, statement->operands[0],
-                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
-                        statement->operands[0])));
-                cm_str_buf_push(output, '[');
-                cm_umir_c_render_local(output, statement->operands[1]);
-                cm_str_buf_append(output, "] = ");
+                if (cm_umir_c_is_fat(tyck, pointee)) {
+                    cm_umir_c_render_slice_element(output, tyck, body,
+                        statement->operands[0], statement->operands[1]);
+                    cm_str_buf_append(output, " = ");
+                } else {
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, base_type));
+                    cm_str_buf_push(output, '[');
+                    cm_umir_c_render_local(output, statement->operands[1]);
+                    cm_str_buf_append(output, "] = ");
+                }
                 cm_umir_c_render_local(output, statement->operands[2]);
                 break;
-            case CM_UMIR_RVALUE_LOAD:
-                cm_str_buf_append(output, "*(long long *)(intptr_t)");
+            }
+            case CM_UMIR_RVALUE_LOAD: {
+                /* Scalars load at their own width so byte pointers into
+                 * string data never over-read; everything else is a slot. */
+                const char *scalar = cm_umir_c_scalar_type(tyck,
+                    statement->type);
+                if (scalar != NULL) {
+                    cm_str_buf_append(output, "(long long)*(");
+                    cm_str_buf_append(output, scalar);
+                    cm_str_buf_append(output, " *)(intptr_t)");
+                } else
+                    cm_str_buf_append(output, "*(long long *)(intptr_t)");
                 cm_umir_c_render_local(output, statement->operands[0]);
                 break;
-            case CM_UMIR_RVALUE_STORE_DEREF:
-                cm_str_buf_append(output, "0; *(long long *)(intptr_t)");
-                cm_umir_c_render_local(output, statement->operands[0]);
-                cm_str_buf_append(output, " = ");
+            }
+            case CM_UMIR_RVALUE_STORE_DEREF: {
+                const char *scalar = statement->operand_count < 2u ? NULL
+                    : cm_umir_c_scalar_type(tyck, cm_umir_c_local_type(body,
+                        statement->operands[1]));
+                if (scalar != NULL) {
+                    cm_str_buf_append(output, "0; *(");
+                    cm_str_buf_append(output, scalar);
+                    cm_str_buf_append(output, " *)(intptr_t)");
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    cm_str_buf_append(output, " = (");
+                    cm_str_buf_append(output, scalar);
+                    cm_str_buf_push(output, ')');
+                } else {
+                    cm_str_buf_append(output, "0; *(long long *)(intptr_t)");
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    cm_str_buf_append(output, " = ");
+                }
                 cm_umir_c_render_local(output, statement->operands[1]);
                 break;
+            }
             case CM_UMIR_RVALUE_FIELD: {
                 long slot = -1;
                 if (statement->operand_count == 1u && expr != NULL) {
@@ -1304,14 +1709,22 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             }
-            case CM_UMIR_RVALUE_INDEX:
+            case CM_UMIR_RVALUE_INDEX: {
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, base_type))) {
+                    cm_str_buf_append(output, "(long long)");
+                    cm_umir_c_render_slice_element(output, tyck, body,
+                        statement->operands[0], statement->operands[1]);
+                    break;
+                }
                 cm_umir_c_render_base(output, statement->operands[0],
-                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
-                        statement->operands[0])));
+                    cm_umir_c_ref_depth(tyck, base_type));
                 cm_str_buf_push(output, '[');
                 cm_umir_c_render_local(output, statement->operands[1]);
                 cm_str_buf_push(output, ']');
                 break;
+            }
             case CM_UMIR_RVALUE_CLOSURE:
                 /* The closure value is its environment: this frame. */
                 cm_str_buf_append(output, "(long long)(intptr_t)");
@@ -1645,6 +2058,9 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                     && stub_item->data.function_item.body == 0u) {
                     const char *shim = cm_umir_c_intrinsic_shim(stub_name);
                     reason = "declaration without body";
+                    if (shim == NULL && cm_umir_c_render_typed_shim(output,
+                            tyck, stub_name, instance))
+                        shim = "";
                     if (shim != NULL) {
                         cm_str_buf_append(output, shim);
                         cm_str_buf_append(output, " /* shim: ");

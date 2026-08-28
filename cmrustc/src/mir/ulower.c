@@ -543,6 +543,33 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             expr->data.call.callee);
         CmUMirLocalId callee;
         if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
+            && callee_expr->data.path.resolution.kind
+                == CM_U_RESOLVED_DEFINITION
+            && cm_umir_variant_index(builder->hir,
+                &callee_expr->data.path.resolution) < 0
+            && builder->hir != NULL) {
+            /* Tuple-struct constructor called as a function (`Bytes(..)`):
+             * an aggregate of its arguments. */
+            const CmHirDefinition *record = cm_hir_lookup_definition(
+                builder->hir, callee_expr->data.path.resolution.definition);
+            const CmHirItem *item = record == NULL
+                    || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+                : cm_hir_get_item(builder->hir, record->entity.item_id);
+            if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT) {
+                for (index = 0u; index < expr->data.call.argument_count;
+                        ++index) {
+                    CmUMirLocalId argument = cm_umir_emit_expr(builder,
+                        expr->data.call.arguments[index]);
+                    if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                        operands[recorded++] = argument;
+                }
+                cm_umir_push_operands(builder, destination,
+                    CM_UMIR_RVALUE_AGGREGATE, id, type, operands,
+                    expr->data.call.argument_count);
+                break;
+            }
+        }
+        if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
             && cm_umir_variant_index(builder->hir,
                 &callee_expr->data.path.resolution) >= 0) {
             /* Tuple-variant constructor: slot[0] = discriminant. */
