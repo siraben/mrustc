@@ -2812,6 +2812,121 @@ static enum cm_edition cm_lower_syntax_edition(CmHirEdition edition)
     }
 }
 
+static const CmLowerItemRecord *cm_lower_named_const_length(
+    const CmLowerState *state, CmHirModuleId module,
+    const CmInternedString *text);
+
+/*
+ * Lenient const-length evaluation (M9): literals, +,-,*,/,<<, blocks, and
+ * single-segment const names resolved through the module scope with their
+ * initializers evaluated recursively (`[T; 2 * B]`, `CAPACITY = 2 * B - 1`).
+ */
+static int cm_lower_eval_const_length_ast(const CmLowerState *state,
+    CmHirModuleId module, const CmAst *ast, CmAstExprId expression_id,
+    size_t depth, uint64_t *out_value)
+{
+    const CmAstExpr *expression;
+    const CmInternedString *operator_name;
+    uint64_t left;
+    uint64_t right;
+    uint64_t value;
+
+    if (ast == NULL || out_value == NULL
+        || depth >= CM_LOWER_APIT_MAX_DEPTH) return 0;
+    expression = cm_ast_get_expr(ast, expression_id);
+    if (expression == NULL) return 0;
+    if (expression->attribute_count != 0u
+        || expression->attributes != NULL) return 0;
+    if (expression->kind == CM_AST_EXPR_LITERAL) {
+        return cm_lower_parse_u64(cm_ast_get_string(ast,
+            expression->data.literal.text), out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_PATH) {
+        const CmAstPath *path = cm_ast_get_path(ast,
+            expression->data.path.path);
+        const CmInternedString *name;
+        const CmLowerItemRecord *record;
+        const CmAstItem *const_item;
+
+        if (path == NULL || path->segment_count != 1u
+            || path->absolute) return 0;
+        name = cm_ast_get_string(ast, path->segments[0].name);
+        record = cm_lower_named_const_length(state, module, name);
+        if (record == NULL || record->ast == NULL) return 0;
+        const_item = cm_ast_get_item(record->ast, record->ast_id);
+        if (const_item == NULL || const_item->kind != CM_AST_ITEM_CONST
+            || const_item->data.value_item.initializer
+                == CM_AST_EXPR_NONE) return 0;
+        return cm_lower_eval_const_length_ast(state, record->owner_module,
+            record->ast, const_item->data.value_item.initializer,
+            depth + 1u, out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_BLOCK) {
+        if (expression->data.block.inner_attribute_count != 0u
+            || expression->data.block.inner_attributes != NULL
+            || expression->data.block.statement_count != 0u
+            || expression->data.block.statements != NULL
+            || expression->data.block.tail == CM_AST_EXPR_NONE
+            || expression->data.block.is_unsafe
+            || expression->data.block.is_const) return 0;
+        return cm_lower_eval_const_length_ast(state, module, ast,
+            expression->data.block.tail, depth + 1u, out_value);
+    }
+    if (expression->kind != CM_AST_EXPR_BINARY) return 0;
+    operator_name = cm_ast_get_string(ast,
+        expression->data.binary.operator_name);
+    if (!cm_lower_interned_string_is(operator_name, "+")
+        && !cm_lower_interned_string_is(operator_name, "-")
+        && !cm_lower_interned_string_is(operator_name, "<<")
+        && !cm_lower_interned_string_is(operator_name, "*")
+        && !cm_lower_interned_string_is(operator_name, "/")) return 0;
+    if (!cm_lower_eval_const_length_ast(state, module, ast,
+            expression->data.binary.left, depth + 1u, &left)
+        || !cm_lower_eval_const_length_ast(state, module, ast,
+            expression->data.binary.right, depth + 1u, &right)) return 0;
+    if (cm_lower_interned_string_is(operator_name, "+")) {
+        if (left > UINT64_MAX - right) return 0;
+        value = left + right;
+    } else if (cm_lower_interned_string_is(operator_name, "-")) {
+        if (left < right) return 0;
+        value = left - right;
+    } else if (cm_lower_interned_string_is(operator_name, "<<")) {
+        if (right >= 64u || left > (UINT64_MAX >> right)) return 0;
+        value = left << right;
+    } else if (cm_lower_interned_string_is(operator_name, "*")) {
+        if (left != 0u && right > UINT64_MAX / left) return 0;
+        value = left * right;
+    } else {
+        if (right == 0u) return 0;
+        value = left / right;
+    }
+    *out_value = value;
+    return 1;
+}
+
+static int cm_lower_eval_named_const_expression(const CmLowerState *state,
+    CmHirModuleId module, const CmInternedString *text,
+    uint64_t *out_value)
+{
+    CmAst expression_ast;
+    CmExpressionFragment fragment;
+    uint64_t value;
+    int evaluated;
+
+    if (text == NULL || out_value == NULL) return 0;
+    cm_ast_init(&expression_ast);
+    fragment = cm_parse_expression_fragment(&expression_ast,
+        (const char *)text->bytes, text->len,
+        cm_lower_syntax_edition(state->options->edition));
+    evaluated = fragment.parse.error_count == 0u
+        && cm_lower_eval_const_length_ast(state, module, &expression_ast,
+            fragment.expression, 0u, &value);
+    cm_ast_destroy(&expression_ast);
+    if (!evaluated) return 0;
+    *out_value = value;
+    return 1;
+}
+
 static int cm_lower_eval_literal_const_expression(
     const CmInternedString *text, CmHirEdition edition,
     uint64_t *out_value)
@@ -6667,6 +6782,10 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
         if (!has_literal_length) {
             has_literal_length = cm_lower_primitive_self_size_length(state,
                 owner, length_text, &length_value);
+        }
+        if (!has_literal_length) {
+            has_literal_length = cm_lower_eval_named_const_expression(state,
+                module, length_text, &length_value);
         }
         if (!has_literal_length) {
             length_generic = cm_lower_find_generic_in_scope(state, owner,

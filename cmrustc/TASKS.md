@@ -2875,6 +2875,18 @@ caller's trait-reachability check still anchors each equality.
 The diamond-ambiguity model fixture asserts the lenient contract.
 Lanes + ASan green; timed census running.
 
+M9-03 fourteenth pass (2026-08-28): with the indexes and the
+ambiguity shortcut, **core-hir 731s -> 54s** and alloc HIR lowering
+runs to completion of its frontier in 2063s (still hot; profile
+re-running).  The frontier moved to `btree/node.rs:103` —
+`[MaybeUninit<...>; 2 * B]`, a const-expression array length.  The
+literal const-expression evaluator now resolves single-segment
+const names through the module scope and evaluates their
+initializers recursively across ASTs (`B = 6`,
+`CAPACITY = 2 * B - 1`), depth-capped, overflow-checked.  Minicore
+acceptance: `[u8; 2 * BB]` and `[u8; CAP2]` lower and type (12/12
+bodies, 0 errors).  Lanes + ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
