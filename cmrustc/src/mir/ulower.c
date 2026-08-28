@@ -275,3 +275,242 @@ CmMirULowerResult cm_mir_ulower_all(const CmHirContext *hir,
     }
     return result;
 }
+
+/* ------------------------------------------------------------------ */
+/* u-MIR construction (v1)                                              */
+
+typedef struct CmUMirBuilder {
+    CmUMirBody *body;
+    const CmUBody *ub;
+    const CmTyckBody *tb;
+    CmUMirBlockId current;
+    const char *blocked;
+    unsigned int depth;
+} CmUMirBuilder;
+
+static CmUMirBlockId cm_umir_new_block(CmUMirBuilder *builder)
+{
+    CmUMirBlock block;
+    memset(&block, 0, sizeof(block));
+    cm_vec_init(&block.statements, sizeof(CmUMirStatement));
+    block.terminator = CM_UMIR_TERMINATOR_RETURN;
+    (void)cm_vec_push(&builder->body->blocks, &block);
+    return (CmUMirBlockId)(builder->body->blocks.len - 1u);
+}
+
+static CmUMirLocalId cm_umir_new_local(CmUMirBuilder *builder, CmTyId type)
+{
+    (void)cm_vec_push(&builder->body->locals, &type);
+    return (CmUMirLocalId)(builder->body->locals.len - 1u);
+}
+
+static void cm_umir_push(CmUMirBuilder *builder, CmUMirLocalId destination,
+    CmUMirRvalueKind kind, CmUExprId expr, CmTyId type)
+{
+    CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+        builder->current);
+    CmUMirStatement statement;
+    if (block == NULL) return;
+    statement.destination = destination;
+    statement.kind = kind;
+    statement.expr = expr;
+    statement.type = type;
+    (void)cm_vec_push(&block->statements, &statement);
+}
+
+static CmTyId cm_umir_expr_type(const CmUMirBuilder *builder, CmUExprId id)
+{
+    if (builder->tb->expr_types == NULL || id == CM_U_EXPR_NONE)
+        return CM_TY_NONE;
+    return builder->tb->expr_types[id];
+}
+
+/* Emit one expression as a fresh local; opaque kinds keep their type so
+ * the emitter can grow class-by-class. */
+static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
+{
+    const CmUExpr *expr;
+    CmTyId type = cm_umir_expr_type(builder, id);
+    CmUMirLocalId destination;
+    if (builder->blocked != NULL || id == CM_U_EXPR_NONE)
+        return 0u;
+    if (builder->depth > 512u) {
+        builder->blocked = "construct-depth";
+        return 0u;
+    }
+    expr = cm_ubody_get_expr(builder->ub, id);
+    destination = cm_umir_new_local(builder, type);
+    if (expr == NULL) return destination;
+    builder->depth += 1u;
+    switch (expr->kind) {
+    case CM_U_EXPR_LITERAL:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_LITERAL, id,
+            type);
+        break;
+    case CM_U_EXPR_PATH:
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
+        break;
+    case CM_U_EXPR_BINARY:
+        (void)cm_umir_emit_expr(builder, expr->data.binary.left);
+        (void)cm_umir_emit_expr(builder, expr->data.binary.right);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_BINARY, id,
+            type);
+        break;
+    case CM_U_EXPR_UNARY:
+        (void)cm_umir_emit_expr(builder, expr->data.unary.operand);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_UNARY, id, type);
+        break;
+    case CM_U_EXPR_CALL: {
+        uint32_t index;
+        (void)cm_umir_emit_expr(builder, expr->data.call.callee);
+        for (index = 0u; index < expr->data.call.argument_count; ++index)
+            (void)cm_umir_emit_expr(builder,
+                expr->data.call.arguments[index]);
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_CALL, id, type);
+        break;
+    }
+    case CM_U_EXPR_BLOCK: {
+        uint32_t index;
+        for (index = 0u; index < expr->data.block.statement_count
+                && builder->blocked == NULL; ++index) {
+            const CmUStmt *stmt = cm_ubody_get_stmt(builder->ub,
+                expr->data.block.statements[index]);
+            if (stmt == NULL) continue;
+            if (stmt->kind == CM_U_STMT_LET) {
+                if (stmt->data.let_stmt.initializer != CM_U_EXPR_NONE)
+                    (void)cm_umir_emit_expr(builder,
+                        stmt->data.let_stmt.initializer);
+                if (stmt->data.let_stmt.else_block != CM_U_EXPR_NONE)
+                    (void)cm_umir_emit_expr(builder,
+                        stmt->data.let_stmt.else_block);
+            } else if (stmt->kind == CM_U_STMT_EXPR) {
+                (void)cm_umir_emit_expr(builder,
+                    stmt->data.expr_stmt.expression);
+            }
+        }
+        if (builder->blocked == NULL
+            && expr->data.block.tail != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.block.tail);
+        break;
+    }
+    case CM_U_EXPR_IF: {
+        CmUMirLocalId condition = cm_umir_emit_expr(builder,
+            expr->data.if_expr.condition);
+        CmUMirBlockId then_block = cm_umir_new_block(builder);
+        CmUMirBlockId else_block = cm_umir_new_block(builder);
+        CmUMirBlockId join = cm_umir_new_block(builder);
+        CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+            &builder->body->blocks, builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            current->condition = condition;
+            current->true_target = then_block;
+            current->false_target = else_block;
+        }
+        builder->current = then_block;
+        (void)cm_umir_emit_expr(builder, expr->data.if_expr.then_expr);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = join;
+        }
+        builder->current = else_block;
+        if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE)
+            (void)cm_umir_emit_expr(builder, expr->data.if_expr.else_expr);
+        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+            builder->current);
+        if (current != NULL) {
+            current->terminator = CM_UMIR_TERMINATOR_GOTO;
+            current->goto_target = join;
+        }
+        builder->current = join;
+        break;
+    }
+    default:
+        /* Every other kind is representable later: emit an opaque
+         * assignment that keeps the type and source expression. */
+        cm_umir_push(builder, destination, CM_UMIR_RVALUE_OPAQUE, id,
+            type);
+        break;
+    }
+    builder->depth -= 1u;
+    return destination;
+}
+
+void cm_umir_set_init(CmUMirSet *set)
+{
+    cm_vec_init(&set->bodies, sizeof(CmUMirBody));
+}
+
+void cm_umir_set_destroy(CmUMirSet *set)
+{
+    size_t index;
+    for (index = 0u; index < set->bodies.len; ++index) {
+        CmUMirBody *body = (CmUMirBody *)cm_vec_at(&set->bodies, index);
+        size_t block_index;
+        if (body == NULL) continue;
+        for (block_index = 0u; block_index < body->blocks.len;
+                ++block_index) {
+            CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(&body->blocks,
+                block_index);
+            if (block != NULL) cm_vec_destroy(&block->statements);
+        }
+        cm_vec_destroy(&body->blocks);
+        cm_vec_destroy(&body->locals);
+    }
+    cm_vec_destroy(&set->bodies);
+}
+
+CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
+    const CmHirContext *hir, const CmUBodySet *bodies,
+    const CmTyckSet *tyck)
+{
+    CmMirULowerResult result;
+    size_t body_index;
+    memset(&result, 0, sizeof(result));
+    if (out == NULL || hir == NULL || bodies == NULL || tyck == NULL)
+        return result;
+    for (body_index = 1u; body_index <= tyck->bodies.len; ++body_index) {
+        const CmTyckBody *tb = cm_tyck_get(tyck, (CmHirBodyId)body_index);
+        const CmUBody *ub = cm_ubody_get(bodies, (CmHirBodyId)body_index);
+        CmUMirBody body;
+        CmUMirBuilder builder;
+        CmTyId return_type;
+        if (tb == NULL || ub == NULL
+            || tb->status != CM_TYCK_BODY_TYPED) continue;
+        result.bodies += 1u;
+        memset(&body, 0, sizeof(body));
+        body.source = (CmHirBodyId)body_index;
+        cm_vec_init(&body.locals, sizeof(CmTyId));
+        cm_vec_init(&body.blocks, sizeof(CmUMirBlock));
+        memset(&builder, 0, sizeof(builder));
+        builder.body = &body;
+        builder.ub = ub;
+        builder.tb = tb;
+        return_type = tb->return_type;
+        (void)cm_vec_push(&body.locals, &return_type);
+        builder.current = cm_umir_new_block(&builder);
+        (void)cm_umir_emit_expr(&builder, ub->root);
+        if (builder.blocked == NULL) {
+            body.complete = 1;
+            result.lowered += 1u;
+        } else {
+            result.blocked += 1u;
+            cm_mir_ulower_count(&result, builder.blocked);
+        }
+        {
+            size_t block_index;
+            for (block_index = 0u; block_index < body.blocks.len;
+                    ++block_index) {
+                const CmUMirBlock *block = (const CmUMirBlock *)
+                    cm_vec_at_const(&body.blocks, block_index);
+                if (block != NULL)
+                    result.statements += block->statements.len;
+            }
+            result.blocks += body.blocks.len;
+        }
+        (void)cm_vec_push(&out->bodies, &body);
+    }
+    return result;
+}

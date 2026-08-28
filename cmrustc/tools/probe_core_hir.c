@@ -1081,8 +1081,22 @@ int main(int argc, char **argv)
                     printf("\n");
                 }
                 {
+                    CmUMirSet umir;
+                    CmMirULowerResult built;
                     CmMirULowerResult ulower = cm_mir_ulower_all(&hir,
                         &ubodies, &tyck);
+                    cm_umir_set_init(&umir);
+                    built = cm_mir_ulower_build(&umir, &hir, &ubodies,
+                        &tyck);
+                    printf("umir bodies=%lu built=%lu blocked=%lu"
+                        " statements=%lu blocks=%lu locals=%lu\n",
+                        (unsigned long)built.bodies,
+                        (unsigned long)built.lowered,
+                        (unsigned long)built.blocked,
+                        (unsigned long)built.statements,
+                        (unsigned long)built.blocks,
+                        (unsigned long)0);
+                    cm_umir_set_destroy(&umir);
                     size_t ulower_class;
                     printf("mir bodies=%lu lowered=%lu blocked=%lu"
                         " statements=%lu blocks=%lu\n",
