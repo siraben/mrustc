@@ -1583,6 +1583,62 @@ static int cm_leaf_is_in_cycle(const CmImportResolverState *state,
     return 0;
 }
 
+/*
+ * A crate compiled against registered dependencies with no explicit
+ * `#[prelude_import]` uses the compiler-injected prelude: synthesize it
+ * from the first dependency's `prelude::rust_2024` module (M9-03).
+ */
+static void cm_import_inject_dependency_prelude(CmImportResolverState *state)
+{
+    size_t dependency_index;
+
+    for (dependency_index = 0u; dependency_index < state->dependencies.len;
+         ++dependency_index) {
+        const CmImportDependency *dep = (const CmImportDependency *)
+            cm_vec_at_const(&state->dependencies, dependency_index);
+        CmResolvePathSegmentView views[2];
+        CmResolvedBinding module_binding;
+        CmModuleId source_module;
+        int namespace_index;
+        int pushed = 0;
+
+        if (dep == NULL) continue;
+        views[0].bytes = (const unsigned char *)"prelude";
+        views[0].length = strlen("prelude");
+        views[1].bytes = (const unsigned char *)"rust_2024";
+        views[1].length = strlen("rust_2024");
+        if (cm_import_resolve_path_checked(dep->resolver, dep->graph,
+                dep->revision, dep->root, 0, views, 2u,
+                CM_RESOLVE_NAMESPACE_TYPE, &module_binding)
+                != CM_IMPORT_LOOKUP_OK
+            || module_binding.target_module == CM_MODULE_NONE) continue;
+        source_module = module_binding.target_module;
+        for (namespace_index = 0; namespace_index < 3; ++namespace_index) {
+            size_t binding_count = cm_import_binding_count(dep->resolver,
+                source_module, (CmResolveNamespace)namespace_index);
+            size_t index;
+            for (index = 0u; index < binding_count; ++index) {
+                CmResolvedBinding imported;
+                if (!cm_import_get_binding(dep->resolver, source_module,
+                        (CmResolveNamespace)namespace_index,
+                        (uint32_t)index, &imported)) continue;
+                if (!imported.is_public || imported.is_ambiguous) continue;
+                imported.name = cm_import_reintern_dependency_name(state,
+                    dep->resolver, imported.name);
+                if (imported.name == CM_RESOLVE_STRING_NONE) continue;
+                imported.revision = state->revision;
+                imported.module = state->root;
+                imported.dependency = cm_import_dependency_tag(state, dep);
+                imported.is_import = 1;
+                imported.is_ambiguous = 0;
+                (void)cm_vec_push(&state->prelude_bindings, &imported);
+                pushed = 1;
+            }
+        }
+        if (pushed) return;
+    }
+}
+
 static void cm_collect_prelude_bindings(CmImportResolverState *state)
 {
     CmImportLeaf *prelude_leaf;
@@ -1592,6 +1648,7 @@ static void cm_collect_prelude_bindings(CmImportResolverState *state)
 
     if (state->prelude_declaration.source == 0u
         || state->prelude_declaration.item == CM_AST_ITEM_NONE) {
+        cm_import_inject_dependency_prelude(state);
         return;
     }
     prelude_leaf = NULL;

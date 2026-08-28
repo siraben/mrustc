@@ -2758,6 +2758,18 @@ fail-closed.  Whole-crate: alloc HIR advances past `raw_vec` to
 `collections/mod.rs:172` (supertrait path unresolved).  Lanes +
 ASan green.
 
+M9-03 fourth pass (2026-08-28): dependency prelude injection.  A
+crate resolved against registered dependencies with no explicit
+`#[prelude_import]` (rustc injects it implicitly; alloc has none)
+synthesizes its prelude from the first dependency's
+`prelude::rust_2024` module — public bindings re-interned,
+dependency-tagged, pushed into the resolver's prelude table.
+Minicore acceptance: an unimported `T: Hash` bound resolves and
+types (6/6 bodies).  Whole-crate: alloc HIR advances past the
+`SpecExtend<I: IntoIterator>` supertrait to
+`in_place_collect.rs:216` (associated-type constraints).  Lanes +
+ASan green.
+
 | M9-02 | DONE | Untyped HIR lowering of every core body (all expression and pattern forms) | `probe_core_hir --body-census` at `bd0f4917`+: 22,524/22,524 bodies lower into `ubody` (321,921 expressions, 0 failures) |
 | M9-03 | ACTIVE | Whole-context HIR snapshot and multi-crate lowering | alloc and std lower against a loaded core snapshot with zero errors |
 | M9-04 | ACTIVE | Inference-based typeck over lowered bodies | all core/alloc/std bodies typed; no fabricated types (first whole-core pass: 16,339/22,524) |
