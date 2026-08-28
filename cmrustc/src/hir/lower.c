@@ -130,7 +130,9 @@ static void cm_lower_item_index_insert(struct CmLowerState *state,
 typedef struct CmLowerDependencyIndexEntry {
     CmSourceId source;
     uint32_t ast_item;
-    const CmHirItem *item;
+    /* Index into hir->items: the vec grows (and moves) while this crate
+     * lowers, so cached pointers would dangle. */
+    size_t item_index;
     uint32_t duplicate;
     /* Synthesized dependency record for this item, once created. */
     struct CmLowerItemRecord *record;
@@ -2154,7 +2156,8 @@ static int cm_lower_dependency_record(CmLowerState *state,
         *out_record = index_entry->record;
         return 1;
     }
-    item = index_entry->item;
+    item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+        index_entry->item_index);
     matches = 1u;
     (void)matches;
     if (item == NULL) return 0;
@@ -18709,9 +18712,12 @@ static void cm_lower_build_dependency_index(CmLowerState *state)
         item = (const CmHirItem *)cm_vec_at_const(&state->hir->items,
             index);
         if (item == NULL || item->ast_source == 0u) continue;
+        /* Dependency lookups must never see this crate's own items: the
+         * (source, ast_item) key spaces collide across crates. */
+        if (item->definition.crate_id == state->result.crate_id) continue;
         state->dependency_index[used].source = item->ast_source;
         state->dependency_index[used].ast_item = item->ast_item;
-        state->dependency_index[used].item = item;
+        state->dependency_index[used].item_index = index;
         used += 1u;
     }
     qsort(state->dependency_index, used,
@@ -18758,7 +18764,9 @@ static const CmHirItem *cm_lower_find_dependency_item(
     found = cm_lower_dependency_index_entry(state, declaration);
     if (out_match_count != NULL)
         *out_match_count = found == NULL ? 0u : (found->duplicate ? 2u : 1u);
-    return found == NULL || found->duplicate ? NULL : found->item;
+    return found == NULL || found->duplicate ? NULL
+        : (const CmHirItem *)cm_vec_at_const(&state->hir->items,
+            found->item_index);
 }
 
 /* Map one dependency-tagged binding into the dependency's lowered HIR. */
