@@ -1735,6 +1735,32 @@ static void cm_umir_c_render_fn_value(CmStrBuf *output,
     CmTyId receiver = trait_method && ft != NULL && ft->kind == CM_TY_FN_DEF
         && ft->count != 0u ? cm_umir_c_subst(ft->children[0]) : CM_TY_NONE;
     CmStrBuf symbol;
+    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL && trait_method) {
+        CmStrBuf text;
+        uint32_t index;
+        cm_str_buf_init(&text);
+        cm_ty_print((CmTyArena *)&tyck->arena, hir, fn_type, &text);
+        cm_str_buf_append(&text, " => ");
+        cm_ty_print((CmTyArena *)&tyck->arena, hir, receiver, &text);
+        fprintf(stderr, "UMIR fn-value %.*s active=%s count=%u [",
+            (int)text.len, text.data,
+            cm_umir_c_active_instance == NULL ? "none" : "yes",
+            cm_umir_c_active_instance == NULL ? 0u
+                : cm_umir_c_active_instance->count);
+        for (index = 0u; cm_umir_c_active_instance != NULL
+                && index < cm_umir_c_active_instance->count; ++index) {
+            CmStrBuf one;
+            cm_str_buf_init(&one);
+            cm_ty_print((CmTyArena *)&tyck->arena, hir,
+                cm_umir_c_active_instance->types[index], &one);
+            fprintf(stderr, " p%u=%.*s",
+                (unsigned)cm_umir_c_active_instance->parameters[index],
+                (int)one.len, one.data);
+            cm_str_buf_destroy(&one);
+        }
+        fprintf(stderr, " ]\n");
+        cm_str_buf_destroy(&text);
+    }
     cm_str_buf_init(&symbol);
     cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def,
         trait_method ? CM_TY_NONE : fn_type, receiver, NULL, 0u);

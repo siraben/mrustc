@@ -2184,6 +2184,25 @@ static void cm_body_walk_expr(CmBodyExpandState *state, CmAstExprId id,
         uint32_t field_count = expr->data.struct_expr.field_count;
         CmAstExprField *fields = expr->data.struct_expr.fields;
         CmAstExprId base = expr->data.struct_expr.base;
+        /* Strip cfg-inactive literal fields in place (core's
+         * `argument_new!` initializes `formatter:` twice under
+         * complementary `#[cfg]`s). */
+        if (state->options->cfg != NULL && field_count != 0u) {
+            uint32_t kept = 0u;
+            for (index = 0u; index < field_count; ++index) {
+                if (!cm_body_attributes_cfg_active(state,
+                        fields[index].attributes,
+                        fields[index].attribute_count)) continue;
+                if (kept != index) fields[kept] = fields[index];
+                kept += 1u;
+            }
+            if (kept != field_count) {
+                CmAstExpr *destination = (CmAstExpr *)cm_vec_at(
+                    &state->ast->expressions, (size_t)id - 1u);
+                destination->data.struct_expr.field_count = kept;
+                field_count = kept;
+            }
+        }
         for (index = 0u; index < field_count; ++index)
             cm_body_walk_expr(state, fields[index].value, depth);
         cm_body_walk_expr(state, base, depth);

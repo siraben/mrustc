@@ -1812,10 +1812,48 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return arena->error;
         }
         if (item->kind == CM_HIR_ITEM_FUNCTION) {
+            CmTyckInstance instance;
+            CmTyId fn_type;
             if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
                 env->out->method_targets[id] = item->definition;
-            return cm_tyck_fn_def(env, item, cm_tyck_parent_item(env->state,
-                item), CM_TY_NONE, NULL);
+            fn_type = cm_tyck_fn_def(env, item, cm_tyck_parent_item(env->state,
+                item), CM_TY_NONE, &instance);
+            /* `mk::<u32>(x)`: bind the fn's own type generics to the
+             * path's explicit arguments (the FN_DEF shares the instance's
+             * variables). */
+            {
+                const CmAstPath *path = expr->data.path.ast.path
+                        == CM_AST_PATH_NONE ? NULL
+                    : cm_ast_get_path(env->ast, expr->data.path.ast.path);
+                if (path != NULL && path->segment_count != 0u) {
+                    const CmAstPathSegment *segment =
+                        &path->segments[path->segment_count - 1u];
+                    uint32_t own = item->generic_parameter_count;
+                    uint32_t slot = instance.count >= own
+                        ? instance.count - own : 0u;
+                    uint32_t argument;
+                    for (argument = 0u; argument < segment->argument_count;
+                            ++argument) {
+                        const CmAstGenericArg *garg =
+                            &segment->arguments[argument];
+                        if (garg->kind != CM_AST_GENERIC_TYPE) continue;
+                        while (slot < instance.count) {
+                            const CmHirGenericParam *parameter =
+                                cm_hir_get_generic_param(env->state->hir,
+                                    instance.parameters[slot]);
+                            if (parameter != NULL
+                                && parameter->kind == CM_HIR_GENERIC_TYPE)
+                                break;
+                            slot += 1u;
+                        }
+                        if (slot >= instance.count) break;
+                        (void)cm_ty_unify(arena, instance.types[slot],
+                            cm_tyck_ast_type(env, garg->type));
+                        slot += 1u;
+                    }
+                }
+            }
+            return fn_type;
         }
         if (item->kind == CM_HIR_ITEM_CONST || item->kind == CM_HIR_ITEM_STATIC) {
             /* MIR emission evaluates the item's initializer body. */
