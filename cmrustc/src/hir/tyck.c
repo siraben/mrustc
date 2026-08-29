@@ -552,6 +552,56 @@ static CmTyId cm_tyck_fn_def(CmTyckEnv *env, const CmHirItem *item,
 }
 
 /* ADT type for a struct/enum/union item with fresh generics. */
+static CmTyId cm_tyck_ast_type(CmTyckEnv *env, CmAstTypeId type_id);
+
+/* `Ok::<T, !>(x)` / `Result::<T, !>::Ok(x)` / `Foo::<u8>(x)`: bind an
+ * ADT instance's type generics to the explicit arguments written on the
+ * path's last segment, or on the segment before it (the enum of a
+ * variant path).  Nothing is bound when the count disagrees. */
+static void cm_tyck_bind_path_adt_args(CmTyckEnv *env, const CmUExpr *expr,
+    CmTyckInstance *instance)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmAstPath *path = expr == NULL || expr->kind != CM_U_EXPR_PATH
+            || expr->data.path.ast.path == CM_AST_PATH_NONE ? NULL
+        : cm_ast_get_path(env->ast, expr->data.path.ast.path);
+    const CmAstPathSegment *segment = NULL;
+    uint32_t explicit_types = 0u;
+    uint32_t own_types = 0u;
+    uint32_t argument;
+    uint32_t slot = 0u;
+    if (path == NULL || path->segment_count == 0u) return;
+    segment = &path->segments[path->segment_count - 1u];
+    if (segment->argument_count == 0u && path->segment_count >= 2u)
+        segment = &path->segments[path->segment_count - 2u];
+    if (segment->argument_count == 0u) return;
+    for (argument = 0u; argument < segment->argument_count; ++argument)
+        if (segment->arguments[argument].kind == CM_AST_GENERIC_TYPE)
+            explicit_types += 1u;
+    for (argument = 0u; argument < instance->count; ++argument) {
+        const CmHirGenericParam *parameter = cm_hir_get_generic_param(
+            env->state->hir, instance->parameters[argument]);
+        if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE)
+            own_types += 1u;
+    }
+    if (explicit_types == 0u || explicit_types != own_types) return;
+    for (argument = 0u; argument < segment->argument_count; ++argument) {
+        const CmAstGenericArg *garg = &segment->arguments[argument];
+        if (garg->kind != CM_AST_GENERIC_TYPE) continue;
+        while (slot < instance->count) {
+            const CmHirGenericParam *parameter = cm_hir_get_generic_param(
+                env->state->hir, instance->parameters[slot]);
+            if (parameter != NULL && parameter->kind == CM_HIR_GENERIC_TYPE)
+                break;
+            slot += 1u;
+        }
+        if (slot >= instance->count) break;
+        (void)cm_ty_unify(arena, instance->types[slot],
+            cm_tyck_ast_type(env, garg->type));
+        slot += 1u;
+    }
+}
+
 static CmTyId cm_tyck_adt_fresh(CmTyckEnv *env, const CmHirItem *item,
     CmTyckInstance *out_instance)
 {
@@ -1169,6 +1219,34 @@ static CmTyId cm_tyck_closure_expectation(CmTyckEnv *env,
 }
 
 static int cm_tyck_debug_fn_matches(CmTyckEnv *env);
+
+/* `self.initialize(f)` inside `get_or_try_init<F: FnOnce() -> Result<T,
+ * E>, E>`: the callee's own `E` is reachable only by matching its bound
+ * on `F` against the caller's bound on the `F` it passes.  When the
+ * argument is a generic parameter with an Fn-family bound in the
+ * current item and the callee's parameter has one too, the two bound
+ * signatures unify (undone on mismatch). */
+static void cm_tyck_unify_fn_bounds(CmTyckEnv *env, const CmHirItem *callee,
+    const CmHirItem *callee_parent, const CmTySubst *subst,
+    CmTyId param_type, CmTyId actual)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *at = actual == CM_TY_NONE ? NULL
+        : cm_ty_get(arena, cm_ty_resolve(arena, actual));
+    CmTyId caller_sig;
+    CmTyId callee_sig;
+    size_t mark;
+    if (at == NULL || at->kind != CM_TY_PARAM || callee == NULL
+        || env->item == NULL || param_type == CM_TY_NONE) return;
+    caller_sig = cm_tyck_closure_expectation(env, env->item, env->parent,
+        cm_tyck_subst_of(&env->self_subst), actual);
+    if (caller_sig == CM_TY_NONE) return;
+    callee_sig = cm_tyck_closure_expectation(env, callee, callee_parent,
+        subst, param_type);
+    if (callee_sig == CM_TY_NONE) return;
+    mark = cm_ty_undo_mark(arena);
+    if (!cm_ty_unify(arena, callee_sig, caller_sig)) cm_ty_undo_to(arena, mark);
+}
 
 /* `T: DisplayInt` where `trait DisplayInt: Rem<Output = Self>`: an
  * equality on `<T as Rem>::Output` declared by a supertrait of a bound
@@ -2124,6 +2202,7 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
         if (item->kind == CM_HIR_ITEM_STRUCT) {
             CmTyckInstance instance;
             CmTyId adt = cm_tyck_adt_fresh(env, item, &instance);
+            cm_tyck_bind_path_adt_args(env, expr, &instance);
             if (item->data.aggregate_item.form == CM_HIR_AGGREGATE_UNIT)
                 return adt;
             if (item->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE) {
@@ -2153,6 +2232,7 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return arena->error;
         }
         adt = cm_tyck_adt_fresh(env, ctor.adt, &instance);
+        cm_tyck_bind_path_adt_args(env, expr, &instance);
         if (ctor.form == CM_HIR_AGGREGATE_UNIT) return adt;
         if (ctor.form == CM_HIR_AGGREGATE_TUPLE) {
             CmTyId params[CM_TYCK_MAX_ARGS];
@@ -3266,6 +3346,9 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             ? call_arg_types[index]
             : cm_tyck_expr(env, expr->data.call.arguments[index],
                 arg_expected);
+        if (known && call_item != NULL && index < count)
+            cm_tyck_unify_fn_bounds(env, call_item, call_parent,
+                cm_tyck_subst_of(&call_instance), params[index], actual);
         if (known && index < count && !cm_tyck_coerce_at(env,
                 expr->data.call.arguments[index], actual, params[index])) {
             cm_tyck_debug_pair(env, "call argument", actual, params[index]);
@@ -3883,6 +3966,9 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
             ? arg_types[index]
             : cm_tyck_expr(env, expr->data.method_call.arguments[index],
                 arg_expected);
+        if (slot < count)
+            cm_tyck_unify_fn_bounds(env, found.item, found.parent,
+                cm_tyck_subst_of(&found.instance), params[slot], actual);
         if (slot < count && !cm_tyck_coerce_at(env,
                 expr->data.method_call.arguments[index], actual,
                 params[slot]))
