@@ -19735,8 +19735,17 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                 const CmHirModule *root_module;
                 CmHirImportBinding *binding;
 
-                if (!cm_lower_string_is(state, ast_item->name, "self")
-                    || ast_item->data.extern_crate_item.alias
+                if (!cm_lower_string_is(state, ast_item->name, "self")) {
+                    /* M9: `extern crate alloc;` names a dependency the
+                     * import resolver already serves through the extern
+                     * prelude (`alloc::vec::Vec`); the item itself binds
+                     * nothing here. */
+                    hir_import->binding_count = 0u;
+                    hir_import->bindings = NULL;
+                    import_index += 1u;
+                    continue;
+                }
+                if (ast_item->data.extern_crate_item.alias
                         == CM_INTERN_ID_NONE) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
                         effective.span, effective.declaration.item,
