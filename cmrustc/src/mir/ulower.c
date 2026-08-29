@@ -670,6 +670,72 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
  * the discriminant, anything else is taken as irrefutable.  Leaves the
  * builder in the success block with the pattern bound; `*out_fail` is the
  * failure block. */
+/* Integer value of a literal pattern's spelling — decimal / `0x` / `0o` /
+ * `0b` with `_` separators and a type suffix, `true` / `false`, or a
+ * simple `'c'` — into *out; 0 for anything else (strings, floats). */
+static int cm_umir_pattern_literal_value(const CmUMirBuilder *builder,
+    const CmUPat *pat, long *out)
+{
+    const CmInternedString *text = cm_interner_get(&builder->ubodies->strings,
+        pat->data.literal.text);
+    const char *bytes;
+    size_t len;
+    size_t at = 0u;
+    int negative = 0;
+    unsigned long base = 10ul;
+    unsigned long long value = 0ull;
+    int digits = 0;
+    if (text == NULL || text->len == 0u) return 0;
+    bytes = (const char *)text->bytes;
+    len = text->len;
+    if (len == 4u && memcmp(bytes, "true", 4u) == 0) { *out = 1; return 1; }
+    if (len == 5u && memcmp(bytes, "false", 5u) == 0) { *out = 0; return 1; }
+    if (len > 1u && bytes[0] == 'b' && bytes[1] == '\'') { bytes += 1; len -= 1u; }
+    if (bytes[0] == '\'') {
+        if (len == 3u && bytes[2] == '\'') {
+            *out = (long)(unsigned char)bytes[1];
+            return 1;
+        }
+        if (len == 4u && bytes[1] == '\\' && bytes[3] == '\'') {
+            switch (bytes[2]) {
+            case 'n': *out = 10; return 1;
+            case 't': *out = 9; return 1;
+            case 'r': *out = 13; return 1;
+            case '0': *out = 0; return 1;
+            case '\\': *out = 92; return 1;
+            case '\'': *out = 39; return 1;
+            default: return 0;
+            }
+        }
+        return 0;
+    }
+    if (bytes[at] == '-') { negative = 1; at += 1u; }
+    if (at + 1u < len && bytes[at] == '0') {
+        if (bytes[at + 1u] == 'x') { base = 16ul; at += 2u; }
+        else if (bytes[at + 1u] == 'o') { base = 8ul; at += 2u; }
+        else if (bytes[at + 1u] == 'b') { base = 2ul; at += 2u; }
+    }
+    for (; at < len; ++at) {
+        char c = bytes[at];
+        unsigned long digit;
+        if (c == '_') continue;
+        if (c >= '0' && c <= '9') digit = (unsigned long)(c - '0');
+        else if (base == 16ul && c >= 'a' && c <= 'f')
+            digit = 10ul + (unsigned long)(c - 'a');
+        else if (base == 16ul && c >= 'A' && c <= 'F')
+            digit = 10ul + (unsigned long)(c - 'A');
+        else break; /* suffix (`u32`, `i8`, ...) */
+        if (digit >= base) return 0;
+        value = value * base + digit;
+        digits = 1;
+    }
+    if (!digits) return 0;
+    /* A float literal (`1.5`) is not an integer key. */
+    if (at < len && bytes[at] == '.') return 0;
+    *out = negative ? -(long)value : (long)value;
+    return 1;
+}
+
 static void cm_umir_emit_pattern_test(CmUMirBuilder *builder,
     CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
     CmUMirBlockId *out_fail)
@@ -1293,7 +1359,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             CmUMirBlockId arm_block = cm_umir_new_block(builder);
             CmUMirBlock *arm_current;
             CmUMirLocalId arm_value;
-            long disc = -1;
+            long disc = CM_UMIR_ARM_DEFAULT;
             CmUExprId guard = expr->data.match_expr.arms[arm].guard;
             /* A previous guarded arm falls through here on failure. */
             if (have_previous_test) {
@@ -1312,14 +1378,21 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         pat->data.list.patterns[alt]);
                     const CmUResolution *sub_res = NULL;
                     if (sub == NULL) continue;
+                    long sub_disc = CM_UMIR_ARM_DEFAULT;
                     if (sub->kind == CM_U_PAT_PATH)
                         sub_res = &sub->data.path.resolution;
                     else if (sub->kind == CM_U_PAT_TUPLE_STRUCT
                         || sub->kind == CM_U_PAT_STRUCT)
                         sub_res = &sub->data.struct_pat.resolution;
+                    if (sub_res != NULL) {
+                        sub_disc = cm_umir_variant_index(builder->hir, sub_res);
+                        if (sub_disc < 0) sub_disc = CM_UMIR_ARM_DEFAULT;
+                    }
+                    else if (sub->kind == CM_U_PAT_LITERAL)
+                        (void)cm_umir_pattern_literal_value(builder, sub,
+                            &sub_disc);
                     targets[entries] = arm_block;
-                    discriminants[entries] = sub_res == NULL ? -1
-                        : cm_umir_variant_index(builder->hir, sub_res);
+                    discriminants[entries] = sub_disc;
                     entries += 1u;
                 }
                 /* Or-pattern payload bindings are not extracted (v1). */
@@ -1331,8 +1404,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 else if (pat->kind == CM_U_PAT_TUPLE_STRUCT
                     || pat->kind == CM_U_PAT_STRUCT)
                     res = &pat->data.struct_pat.resolution;
-                if (res != NULL)
+                if (res != NULL) {
                     disc = cm_umir_variant_index(builder->hir, res);
+                    if (disc < 0) disc = CM_UMIR_ARM_DEFAULT;
+                } else if (pat->kind == CM_U_PAT_LITERAL)
+                    (void)cm_umir_pattern_literal_value(builder, pat, &disc);
                 if (pat->kind == CM_U_PAT_TUPLE_STRUCT) {
                     uint32_t position;
                     for (position = 0u;
@@ -1381,7 +1457,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     && cm_ubody_get_pat(builder->ub,
                         expr->data.match_expr.arms[arm].pattern) == NULL) {
                 targets[entries] = arm_block;
-                discriminants[entries] = -1;
+                discriminants[entries] = CM_UMIR_ARM_DEFAULT;
                 entries += 1u;
             }
             if (guard != CM_U_EXPR_NONE) {

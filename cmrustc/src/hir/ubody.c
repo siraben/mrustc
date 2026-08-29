@@ -876,6 +876,51 @@ static CmInternId *cm_u_segments(CmULowerState *state, const CmAstPath *path,
 /* ------------------------------------------------------------------ */
 /* Literals                                                             */
 
+/* Code point of a `'c'` / `b'c'` literal body (between the quotes):
+ * plain, `\n`-style escapes, `\x41`, `\u{1F600}`; 0 if malformed. */
+static uint64_t cm_u_decode_char(const char *body, size_t length)
+{
+    size_t at;
+    uint64_t value = 0u;
+    if (length == 0u) return 0u;
+    if (body[0] != '\\') {
+        /* UTF-8 decode of the first scalar. */
+        unsigned char lead = (unsigned char)body[0];
+        size_t extra = lead >= 0xF0u ? 3u : lead >= 0xE0u ? 2u
+            : lead >= 0xC0u ? 1u : 0u;
+        value = extra == 0u ? lead : extra == 1u ? (lead & 0x1Fu)
+            : extra == 2u ? (lead & 0x0Fu) : (lead & 0x07u);
+        for (at = 1u; at <= extra && at < length; ++at)
+            value = (value << 6) | ((unsigned char)body[at] & 0x3Fu);
+        return value;
+    }
+    if (length < 2u) return 0u;
+    switch (body[1]) {
+    case 'n': return 10u;
+    case 't': return 9u;
+    case 'r': return 13u;
+    case '0': return 0u;
+    case '\\': return 92u;
+    case '\'': return 39u;
+    case '"': return 34u;
+    case 'x':
+    case 'u': {
+        for (at = body[1] == 'u' ? 3u : 2u; at < length; ++at) {
+            char c = body[at];
+            if (c == '}') break;
+            if (c == '_') continue;
+            value <<= 4;
+            if (c >= '0' && c <= '9') value |= (uint64_t)(c - '0');
+            else if (c >= 'a' && c <= 'f') value |= (uint64_t)(10 + c - 'a');
+            else if (c >= 'A' && c <= 'F') value |= (uint64_t)(10 + c - 'A');
+            else return 0u;
+        }
+        return value;
+    }
+    default: return 0u;
+    }
+}
+
 static void cm_u_classify_literal(CmULowerState *state, CmInternId text_id,
     CmUExpr *node)
 {
@@ -906,6 +951,9 @@ static void cm_u_classify_literal(CmULowerState *state, CmInternId text_id,
     if (text[0] == 'b' && length > 1u) {
         if (text[1] == '\'') {
             node->data.literal.kind = CM_U_LITERAL_BYTE;
+            if (length >= 4u)
+                node->data.literal.value_low = cm_u_decode_char(text + 2,
+                    length - 3u);
             return;
         }
         if (text[1] == '"' || text[1] == 'r') {
@@ -919,6 +967,9 @@ static void cm_u_classify_literal(CmULowerState *state, CmInternId text_id,
     }
     if (text[0] == '\'') {
         node->data.literal.kind = CM_U_LITERAL_CHAR;
+        if (length >= 3u)
+            node->data.literal.value_low = cm_u_decode_char(text + 1,
+                length - 2u);
         return;
     }
     /* Numeric: integer unless it has a fractional/exponent part. */

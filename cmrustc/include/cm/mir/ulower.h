@@ -2,6 +2,7 @@
 #define CMRUSTC_CM_MIR_ULOWER_H
 
 #include "cm/hir/tyck.h"
+#include <limits.h>
 #include "cm/vec.h"
 
 /*
@@ -68,6 +69,8 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
+/* Dispatch entry with no key (a binding / wildcard arm). */
+#define CM_UMIR_ARM_DEFAULT LONG_MIN
 #define CM_UMIR_STATEMENT_OPERANDS 16u
 
 typedef struct CmUMirStatement {
@@ -105,7 +108,7 @@ typedef struct CmUMirBlock {
     CmUMirLocalId condition;
     /* SWITCH: arm targets with their discriminants (-1 = default). */
     CmUMirBlockId *arm_targets;
-    long *arm_discriminants;
+    long *arm_discriminants; /* CM_UMIR_ARM_DEFAULT = no key */
     uint32_t arm_count;
 } CmUMirBlock;
 

@@ -2351,7 +2351,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 if (expr != NULL
                     && expr->kind == CM_U_EXPR_LITERAL
                     && (expr->data.literal.kind == CM_U_LITERAL_INTEGER
-                        || expr->data.literal.kind == CM_U_LITERAL_BOOL))
+                        || expr->data.literal.kind == CM_U_LITERAL_BOOL
+                        || expr->data.literal.kind == CM_U_LITERAL_CHAR
+                        || expr->data.literal.kind == CM_U_LITERAL_BYTE))
                     cm_umir_c_render_number(output, (unsigned long)
                         expr->data.literal.value_low);
                 else if (expr != NULL && expr->kind == CM_U_EXPR_LITERAL
@@ -3387,13 +3389,26 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         case CM_UMIR_TERMINATOR_SWITCH: {
             uint32_t arm;
             CmUMirBlockId fallback = block->goto_target;
-            cm_str_buf_append(output, "switch ((int)((long long *)(intptr_t)");
-            cm_umir_c_render_local(output, block->condition);
-            cm_str_buf_append(output, ")[0]) {");
+            /* A scalar scrutinee (literal patterns) switches on its value;
+             * an aggregate switches on the block's discriminant slot. */
+            int scalar = cm_umir_c_active_body != NULL
+                && cm_umir_c_scalar_type(tyck, cm_umir_c_subst(
+                    cm_umir_c_local_type(cm_umir_c_active_body,
+                        block->condition))) != NULL;
+            if (scalar) {
+                cm_str_buf_append(output, "switch ((long long)");
+                cm_umir_c_render_local(output, block->condition);
+                cm_str_buf_append(output, ") {");
+            } else {
+                cm_str_buf_append(output,
+                    "switch ((int)((long long *)(intptr_t)");
+                cm_umir_c_render_local(output, block->condition);
+                cm_str_buf_append(output, ")[0]) {");
+            }
             for (arm = 0u; arm < block->arm_count; ++arm) {
                 uint32_t earlier;
                 int duplicate = 0;
-                if (block->arm_discriminants[arm] < 0) {
+                if (block->arm_discriminants[arm] == CM_UMIR_ARM_DEFAULT) {
                     if (fallback == block->goto_target)
                         fallback = block->arm_targets[arm];
                     continue;
@@ -3405,9 +3420,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             == block->arm_discriminants[arm]) duplicate = 1;
                 if (duplicate) continue;
                 cm_str_buf_append(output, " case ");
-                cm_umir_c_render_number(output,
-                    (unsigned long)block->arm_discriminants[arm]);
-                cm_str_buf_append(output, ": goto _b");
+                if (block->arm_discriminants[arm] < 0) {
+                    cm_str_buf_push(output, '-');
+                    cm_umir_c_render_number(output,
+                        (unsigned long)-block->arm_discriminants[arm]);
+                } else {
+                    cm_umir_c_render_number(output,
+                        (unsigned long)block->arm_discriminants[arm]);
+                }
+                cm_str_buf_append(output, "LL: goto _b");
                 cm_umir_c_render_number(output,
                     (unsigned long)block->arm_targets[arm]);
                 cm_str_buf_push(output, ';');
