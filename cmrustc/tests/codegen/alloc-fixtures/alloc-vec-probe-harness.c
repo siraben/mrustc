@@ -8,6 +8,10 @@ void *__rust_alloc(size_t size, size_t align) { (void)align; return malloc(size)
 void __rust_dealloc(void *ptr, size_t size, size_t align) { (void)size; (void)align; free(ptr); }
 void *__rust_realloc(void *ptr, size_t old, size_t align, size_t new_size) { (void)old; (void)align; return realloc(ptr, new_size); }
 void *__rust_alloc_zeroed(size_t size, size_t align) { (void)align; return calloc(1, size); }
+/* core's panic handler and alloc's shim marker, declared in extern blocks. */
+long long panic_impl(long long info) { (void)info; abort(); }
+unsigned char __rust_no_alloc_shim_is_unstable_v2 = 0;
+void __rust_alloc_error_handler(size_t size, size_t align) { (void)size; (void)align; abort(); }
 
 int main(void)
 {

@@ -1563,6 +1563,10 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             builder->current);
         if (current != NULL)
             current->terminator = CM_UMIR_TERMINATOR_RETURN;
+        /* Whatever follows (`{ return x; }`'s unit value, the body's
+         * final store) is unreachable: it lands in a fresh block so it
+         * cannot clobber the return slot in the sealed one. */
+        builder->current = cm_umir_new_block(builder);
         break;
     }
     case CM_U_EXPR_BLOCK: {
