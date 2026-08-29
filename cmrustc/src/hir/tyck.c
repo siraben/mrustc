@@ -1023,6 +1023,98 @@ static int cm_tyck_fn_bound(CmTyckEnv *env, CmTyId callee, CmTyId *params,
     return 0;
 }
 
+/* Like cm_tyck_fn_bound, but over `item`'s (and its parent's) predicates
+ * under `subst`: the callable bound a callee places on its own parameter
+ * (`map_err<F, O: FnOnce(E) -> F>`), as the expectation for a closure
+ * argument.  On success writes the parameter types and the return type
+ * (unit when the bound has no `Output` equality). */
+static int cm_tyck_fn_bound_of(CmTyckEnv *env, const CmHirItem *item,
+    const CmHirItem *parent, const CmTySubst *subst, CmTyId callee,
+    CmTyId *params, uint32_t limit, uint32_t *out_count, CmTyId *out_return)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmHirItem *owners[2];
+    int owner;
+    callee = cm_ty_resolve(arena, callee);
+    owners[0] = item;
+    owners[1] = parent;
+    for (owner = 0; owner < 2; ++owner) {
+        const CmHirItem *scan = owners[owner];
+        uint32_t index;
+        if (scan == NULL) continue;
+        for (index = 0u; index < scan->predicate_count; ++index) {
+            const CmHirTraitPredicate *pred = &scan->predicates[index];
+            CmTyId subject = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                env->state->hir, pred->subject), subst);
+            const CmTy *arguments;
+            if (cm_ty_resolve(arena, subject) != callee) continue;
+            if (!cm_tyck_is_fn_trait(env, pred->trait_type.definition))
+                continue;
+            *out_count = 0u;
+            *out_return = arena->unit;
+            if (pred->trait_type.argument_count != 0u
+                && pred->trait_type.arguments[0].kind
+                    == CM_HIR_GENERIC_ARG_TYPE) {
+                CmTyId tuple = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                    env->state->hir, pred->trait_type.arguments[0].data.type),
+                    subst);
+                arguments = cm_ty_get(arena, cm_ty_resolve(arena, tuple));
+                if (arguments != NULL && arguments->kind == CM_TY_TUPLE) {
+                    *out_count = arguments->count > limit ? limit
+                        : arguments->count;
+                    memcpy(params, arguments->children,
+                        *out_count * sizeof(CmTyId));
+                }
+            }
+            if (pred->equality_count != 0u)
+                *out_return = cm_ty_subst(arena, cm_ty_from_hir(arena,
+                    env->state->hir, pred->equalities[0].value), subst);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The expectation for a closure passed where the callee declares a
+ * parameter of generic type `param_type` bounded by an Fn-family trait:
+ * a FN_PTR `(params..) -> ret` built from that bound, or NONE. */
+static CmTyId cm_tyck_closure_expectation(CmTyckEnv *env,
+    const CmHirItem *item, const CmHirItem *parent, const CmTySubst *subst,
+    CmTyId param_type)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *pt = param_type == CM_TY_NONE ? NULL
+        : cm_ty_get(arena, cm_ty_resolve(arena, param_type));
+    CmTyId sig[CM_TYCK_MAX_ARGS + 1u];
+    uint32_t count = 0u;
+    CmTyId ret = CM_TY_NONE;
+    if (getenv("CM_TYCK_DEBUG") != NULL) {
+        CmStrBuf text;
+        cm_str_buf_init(&text);
+        if (pt != NULL) cm_ty_print(arena, env->state->hir, param_type, &text);
+        fprintf(stderr, "TYCK closure-expect param=%.*s kind=%d preds=%u/%u\n",
+            (int)text.len, text.data, pt == NULL ? -1 : (int)pt->kind,
+            item == NULL ? 0u : (unsigned)item->predicate_count,
+            parent == NULL ? 0u : (unsigned)parent->predicate_count);
+        cm_str_buf_destroy(&text);
+    }
+    /* The callee's parameter arrives instantiated (an inference variable
+     * standing for `O`); the bound's subject substitutes to the same. */
+    if (pt == NULL || (pt->kind != CM_TY_PARAM && pt->kind != CM_TY_INFER))
+        return CM_TY_NONE;
+    if (!cm_tyck_fn_bound_of(env, item, parent, subst, param_type, sig,
+            CM_TYCK_MAX_ARGS, &count, &ret)) {
+        if (getenv("CM_TYCK_DEBUG") != NULL)
+            fprintf(stderr, "TYCK closure-expect: no fn bound\n");
+        return CM_TY_NONE;
+    }
+    if (getenv("CM_TYCK_DEBUG") != NULL)
+        fprintf(stderr, "TYCK closure-expect: bound count=%u\n", (unsigned)count);
+    sig[count] = ret;
+    return cm_ty_with_def(arena, CM_TY_FN_PTR, cm_hir_def_id_none(), sig,
+        count + 1u);
+}
+
 static int cm_tyck_debug_fn_matches(CmTyckEnv *env);
 
 /*
@@ -2563,6 +2655,11 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
     CmTyId ret = CM_TY_NONE;
     uint32_t index;
     int known = 0;
+    /* The callee behind `params`, for closure-argument expectations. */
+    const CmHirItem *call_item = NULL;
+    const CmHirItem *call_parent = NULL;
+    CmTyckInstance call_instance; /* a copy: the sites' instances are block-scoped */
+    memset(&call_instance, 0, sizeof(call_instance));
     CmTyId call_arg_types[CM_TYCK_MAX_ARGS];
     uint32_t call_arg_count = 0u;
     (void)id;
@@ -2611,6 +2708,9 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
         }
         cm_tyck_instance_init(&instance, self_type);
         cm_tyck_instance_from_args(&instance, fn, parent, args, arg_count);
+        call_item = fn;
+        call_parent = parent;
+        call_instance = instance;
         count = cm_tyck_signature(env, fn, cm_tyck_subst_of(&instance), params,
             CM_TYCK_MAX_ARGS, &ret);
         known = 1;
@@ -2696,7 +2796,11 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             if (cm_tyck_lookup_assoc(env, callee, name, &found)
                 && found.item->kind == CM_HIR_ITEM_FUNCTION) {
                 CmTyId signature_params[CM_TYCK_MAX_ARGS];
-                uint32_t signature_count = cm_tyck_signature(env, found.item,
+                uint32_t signature_count;
+                call_item = found.item;
+                call_parent = found.parent;
+                call_instance = found.instance;
+                signature_count = cm_tyck_signature(env, found.item,
                     cm_tyck_subst_of(&found.instance), signature_params,
                     CM_TYCK_MAX_ARGS, &ret);
                 const CmTy *tuple = signature_count >= 2u
@@ -2862,10 +2966,28 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             }
         }
     }
+    if (known && expected != CM_TY_NONE && ret != CM_TY_NONE) {
+        /* As for method calls: the return type meets the expectation
+         * before deferred closure arguments are typed. */
+        size_t ret_mark = cm_ty_undo_mark(arena);
+        if (!cm_ty_unify(arena, ret, expected)) cm_ty_undo_to(arena, ret_mark);
+    }
     for (index = 0u; index < expr->data.call.argument_count; ++index) {
         CmTyId arg_expected = known && index < count ? params[index]
             : CM_TY_NONE;
-        CmTyId actual = index < call_arg_count
+        CmTyId actual;
+        if (known && call_item != NULL && arg_expected != CM_TY_NONE) {
+            const CmUExpr *arg_expr = cm_ubody_get_expr(env->ub,
+                expr->data.call.arguments[index]);
+            if (arg_expr != NULL && arg_expr->kind == CM_U_EXPR_CLOSURE) {
+                CmTyId closure_expected = cm_tyck_closure_expectation(env,
+                    call_item, call_parent, cm_tyck_subst_of(&call_instance),
+                    arg_expected);
+                if (closure_expected != CM_TY_NONE)
+                    arg_expected = closure_expected;
+            }
+        }
+        actual = index < call_arg_count
                 && call_arg_types[index] != CM_TY_NONE
             ? call_arg_types[index]
             : cm_tyck_expr(env, expr->data.call.arguments[index],
@@ -3295,13 +3417,33 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     }
     count = cm_tyck_signature(env, found.item, cm_tyck_subst_of(&found.instance), params,
         CM_TYCK_MAX_ARGS, &ret);
+    /* Return type first, tentatively: `r.map_err(|_| X.into())` fixes
+     * `map_err`'s `F` from the expected `Result<_, TryReserveError>`,
+     * which the deferred closure's `.into()` needs before it is typed.
+     * A failed unification is undone (coercions are judged later). */
+    if (expected != CM_TY_NONE && ret != CM_TY_NONE) {
+        size_t ret_mark = cm_ty_undo_mark(arena);
+        if (!cm_ty_unify(arena, ret, expected)) cm_ty_undo_to(arena, ret_mark);
+    }
     /* The declared receiver parameter, if any, is the first parameter. */
     first_arg = found.item->data.function_item.signature.receiver
         != CM_HIR_RECEIVER_NONE ? 1u : 0u;
     for (index = 0u; index < expr->data.method_call.argument_count; ++index) {
         uint32_t slot = first_arg + index;
         CmTyId arg_expected = slot < count ? params[slot] : CM_TY_NONE;
-        CmTyId actual = index < arg_count && arg_types[index] != CM_TY_NONE
+        CmTyId actual;
+        {
+            const CmUExpr *arg_expr = cm_ubody_get_expr(env->ub,
+                expr->data.method_call.arguments[index]);
+            if (arg_expr != NULL && arg_expr->kind == CM_U_EXPR_CLOSURE) {
+                CmTyId closure_expected = cm_tyck_closure_expectation(env,
+                    found.item, found.parent,
+                    cm_tyck_subst_of(&found.instance), arg_expected);
+                if (closure_expected != CM_TY_NONE)
+                    arg_expected = closure_expected;
+            }
+        }
+        actual = index < arg_count && arg_types[index] != CM_TY_NONE
             ? arg_types[index]
             : cm_tyck_expr(env, expr->data.method_call.arguments[index],
                 arg_expected);
@@ -4251,11 +4393,23 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         CmTyId ret = expr->data.closure.return_type.type == CM_AST_TYPE_NONE
             ? cm_ty_fresh(arena, CM_HIR_INFER_GENERAL)
             : cm_tyck_ast_type(env, expr->data.closure.return_type.type);
+        /* An expected `(params..) -> ret` (from the callee's Fn-family
+         * bound) types the parameters and the body's expectation:
+         * `map_err(|_| X.into())` learns `F` before `.into()` is typed. */
+        const CmTy *sig = expected == CM_TY_NONE ? NULL
+            : cm_ty_get(arena, cm_ty_resolve(arena, expected));
+        if (sig != NULL && sig->kind == CM_TY_FN_PTR && sig->count != 0u) {
+            (void)cm_ty_unify(arena, ret, sig->children[sig->count - 1u]);
+        } else {
+            sig = NULL;
+        }
         for (index = 0u; index < expr->data.closure.parameter_count; ++index) {
             const CmUClosureParam *param = &expr->data.closure.parameters[index];
             CmTyId type = param->type.type == CM_AST_TYPE_NONE
                 ? cm_ty_fresh(arena, CM_HIR_INFER_GENERAL)
                 : cm_tyck_ast_type(env, param->type.type);
+            if (sig != NULL && index + 1u < sig->count)
+                (void)cm_ty_unify(arena, type, sig->children[index]);
             cm_tyck_pat(env, param->pattern, type);
         }
         {
