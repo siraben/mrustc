@@ -30,6 +30,22 @@ impl Iterator for Counter {
     }
 }
 
+// Nested sub-patterns under a variant: `Some(&v)` (core's
+// `Option<&u8>::copied`) and `Some((a, b))`.
+fn copied(x: Option<&u32>) -> u32 {
+    match x {
+        Option::Some(&v) => v,
+        Option::None => 0,
+    }
+}
+
+fn pair_sum(x: Option<(u32, u32)>) -> u32 {
+    match x {
+        Option::Some((a, b)) => a + b,
+        Option::None => 0,
+    }
+}
+
 fn pick(x: Option<u32>) -> u32 {
     if let Option::Some(v) = x { v + 1 } else { 100 }
 }
@@ -47,5 +63,7 @@ pub extern "C" fn let_patterns(n: u32) -> u32 {
     }
     let pair = (n, 5u32);
     let (a, b) = pair;
-    total + a + b
+    let seven = 7u32;
+    total + a + b + copied(Option::Some(&seven)) * 100 + copied(Option::None)
+        + pair_sum(Option::Some((n, 1))) * 1000
 }

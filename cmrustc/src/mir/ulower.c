@@ -1422,6 +1422,23 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                                 (CmUMirLocalId)(1u + sub->data.binding.local),
                                 CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
                                 &scrutinee, 1u, 1u + position);
+                        else if (sub != NULL && sub->kind != CM_U_PAT_WILD
+                            && sub->kind != CM_U_PAT_REST) {
+                            /* `Some(&v)`, `Some((a, b))`: the payload slot
+                             * into a temp, then the nested pattern. */
+                            CmUMirLocalId payload = cm_umir_new_local(
+                                builder, builder->tb != NULL
+                                && builder->tb->pat_types != NULL
+                                ? builder->tb->pat_types[
+                                    pat->data.struct_pat.patterns[position]]
+                                : CM_TY_NONE);
+                            cm_umir_push_immediate(builder, payload,
+                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
+                                &scrutinee, 1u, 1u + position);
+                            cm_umir_bind_pattern(builder,
+                                pat->data.struct_pat.patterns[position],
+                                payload, id);
+                        }
                     }
                 } else if (pat->kind == CM_U_PAT_STRUCT) {
                     uint32_t field;
@@ -1439,6 +1456,21 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                                 (CmUMirLocalId)(1u + sub->data.binding.local),
                                 CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
                                 &scrutinee, 1u, 1u + (uint32_t)slot);
+                        else if (sub != NULL && sub->kind != CM_U_PAT_WILD
+                            && sub->kind != CM_U_PAT_REST && slot >= 0) {
+                            CmUMirLocalId payload = cm_umir_new_local(
+                                builder, builder->tb != NULL
+                                && builder->tb->pat_types != NULL
+                                ? builder->tb->pat_types[
+                                    pat->data.struct_pat.fields[field].pattern]
+                                : CM_TY_NONE);
+                            cm_umir_push_immediate(builder, payload,
+                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
+                                &scrutinee, 1u, 1u + (uint32_t)slot);
+                            cm_umir_bind_pattern(builder,
+                                pat->data.struct_pat.fields[field].pattern,
+                                payload, id);
+                        }
                     }
                 } else if (pat->kind == CM_U_PAT_BINDING
                     && pat->data.binding.local != CM_U_LOCAL_NONE) {
