@@ -27,6 +27,12 @@ typedef struct CmResolveUnit {
     CmVec item_include_depths;
     CmItemMacroItemRef *initial_scope;
     size_t initial_scope_count;
+    /* Resolutions accumulated over staging rounds: every replan starts
+     * from scratch, so a source invocation resolved earlier (`thread_local!`)
+     * and a generated qualified path (`crate::thread::local_impl::
+     * thread_local_inner`) resolved later must both be supplied. */
+    CmVec sticky_resolved;
+    CmVec sticky_paths;
     size_t parsed_item_count;
     int parse_ok;
     int plan_prepared;
@@ -137,6 +143,11 @@ typedef struct CmModuleGraphState {
     /* Extern names of `#[macro_use] extern crate X;` items (std's
      * `alloc`): X's exported macros resolve unqualified. */
     CmVec macro_use_crates;
+    /* Names of invocations deferred in the previous / current staging
+     * round (sorted later): an unchanged multiset with no shrinking
+     * pending set means the round made no progress. */
+    CmVec previous_deferred_names;
+    CmVec deferred_names;
     CmVec units;
     CmVec errors;
     CmSourceSet *building_sources;
@@ -315,11 +326,15 @@ static void cm_graph_state_init(CmModuleGraphState *state)
     cm_vec_init(&state->external_macros,
         sizeof(CmResolveExternalMacro));
     cm_vec_init(&state->macro_use_crates, 64u);
+    cm_vec_init(&state->previous_deferred_names, 1u);
+    cm_vec_init(&state->deferred_names, 1u);
     cm_vec_init(&state->external_macro_imports,
         sizeof(CmResolveExternalMacroImport));
     cm_vec_init(&state->units, sizeof(CmResolveUnit));
     cm_vec_init(&state->errors, sizeof(CmResolveError));
 }
+
+static void cm_unit_clear_sticky(CmResolveUnit *unit);
 
 static void cm_graph_state_destroy(CmModuleGraphState *state)
 {
@@ -333,6 +348,9 @@ static void cm_graph_state_destroy(CmModuleGraphState *state)
         if (unit != NULL) {
             cm_item_macro_plan_destroy(&unit->plan);
             cm_free(unit->initial_scope);
+            cm_unit_clear_sticky(unit);
+            cm_vec_destroy(&unit->sticky_paths);
+            cm_vec_destroy(&unit->sticky_resolved);
             cm_vec_destroy(&unit->item_include_depths);
             cm_vec_destroy(&unit->item_sources);
             cm_ast_destroy(&unit->ast);
@@ -341,6 +359,8 @@ static void cm_graph_state_destroy(CmModuleGraphState *state)
     cm_vec_destroy(&state->errors);
     cm_vec_destroy(&state->units);
     cm_vec_destroy(&state->macro_use_crates);
+    cm_vec_destroy(&state->previous_deferred_names);
+    cm_vec_destroy(&state->deferred_names);
     cm_vec_destroy(&state->external_macro_imports);
     cm_vec_destroy(&state->external_macros);
     cm_vec_destroy(&state->external_ast_owners);
@@ -1122,10 +1142,30 @@ static int cm_prepare_unit_plan(CmModuleGraphState *state,
     return 1;
 }
 
+static void cm_unit_clear_sticky(CmResolveUnit *unit)
+{
+    size_t index;
+
+    for (index = 0u; index < unit->sticky_paths.len; ++index) {
+        CmItemMacroResolvedGeneratedPath *entry =
+            (CmItemMacroResolvedGeneratedPath *)cm_vec_at(
+                &unit->sticky_paths, index);
+        if (entry != NULL) cm_free((void *)entry->segments);
+    }
+    cm_vec_destroy(&unit->sticky_paths);
+    cm_vec_destroy(&unit->sticky_resolved);
+    cm_vec_init(&unit->sticky_resolved,
+        sizeof(CmItemMacroResolvedInvocation));
+    cm_vec_init(&unit->sticky_paths,
+        sizeof(CmItemMacroResolvedGeneratedPath));
+}
+
 static int cm_replan_unit_with_resolved(CmModuleGraphState *state,
     CmResolveUnitId unit_id,
     const CmItemMacroResolvedInvocation *resolved,
-    size_t resolved_count)
+    size_t resolved_count,
+    const CmItemMacroResolvedGeneratedPath *generated_paths,
+    size_t generated_path_count)
 {
     CmResolveUnit *unit;
     CmItemMacroScopeSeed *seeds;
@@ -1181,6 +1221,8 @@ static int cm_replan_unit_with_resolved(CmModuleGraphState *state,
             cm_resolve_generated_dependency_macro;
         plan_options.resolve_generated_path_context = state;
     }
+    plan_options.resolved_generated_paths = generated_paths;
+    plan_options.resolved_generated_path_count = generated_path_count;
     plan_options.defer_source_invocations = 1;
     plan_result = cm_plan_item_macros(&active, &unit->ast, &plan_options,
         &unit->plan);
@@ -1241,6 +1283,8 @@ static CmResolveUnitId cm_add_unit(CmModuleGraphState *state,
     cm_ast_init(&unit.ast);
     cm_item_macro_plan_init(&unit.plan);
     cm_vec_init(&unit.item_sources, sizeof(CmSourceId));
+    cm_vec_init(&unit.sticky_resolved, sizeof(CmItemMacroResolvedInvocation));
+    cm_vec_init(&unit.sticky_paths, sizeof(CmItemMacroResolvedGeneratedPath));
     cm_vec_init(&unit.item_include_depths, sizeof(uint32_t));
     parse_result = cm_parse_crate(&unit.ast, (const char *)file->bytes,
         file->length, state->options.edition);
@@ -1797,7 +1841,9 @@ static CmAstVisibilityKind cm_struct_constructor_visibility(
     if (item == NULL) return CM_AST_VIS_INHERITED;
     if (item->visibility.kind == CM_AST_VIS_PUBLIC) {
         visibility = CM_AST_VIS_PUBLIC;
-    } else if (item->visibility.kind == CM_AST_VIS_CRATE) {
+    } else if (item->visibility.kind == CM_AST_VIS_CRATE
+        || item->visibility.kind == CM_AST_VIS_SUPER
+        || item->visibility.kind == CM_AST_VIS_RESTRICTED) {
         visibility = CM_AST_VIS_CRATE;
     } else {
         visibility = CM_AST_VIS_INHERITED;
@@ -2020,7 +2066,7 @@ static int cm_record_macro_declarations(CmModuleGraphState *state,
         CmSourceId source;
 
         declaration = &unit->plan.declarations[index];
-        if (declaration->container_item != container_item) continue;
+            if (declaration->container_item != container_item) continue;
         item = cm_ast_get_item(&unit->ast, declaration->item_id);
         source = cm_unit_item_source(unit, declaration->item_id);
         if (item == NULL || item->kind != CM_AST_ITEM_MACRO
@@ -2832,11 +2878,19 @@ static CmImportLookupStatus cm_resolve_pending_qualified(
         segments, path->segment_count, CM_RESOLVE_NAMESPACE_MACRO,
         &binding);
     cm_free(segments);
+    /* `$crate::sys::thread_local::local_pointer!` (std) names a
+     * `pub(crate) macro`: crate-visible is enough within the crate. */
     if (status != CM_IMPORT_LOOKUP_OK
         || binding.item_kind != CM_AST_ITEM_MACRO
-        || !binding.is_public
+        || binding.dependency != 0u
+        || (!binding.is_public && !binding.is_crate_visible)
         || binding.declaration.source == 0u
         || binding.declaration.item == CM_AST_ITEM_NONE) {
+        if (getenv("CM_IMPORT_DEBUG") != NULL)
+            fprintf(stderr, "IMPORT qualified-macro status=%d kind=%d "
+                "public=%d crate=%d source=%u\n", (int)status,
+                (int)binding.item_kind, binding.is_public,
+                binding.is_crate_visible, (unsigned)binding.declaration.source);
         return status == CM_IMPORT_LOOKUP_OK
             ? CM_IMPORT_LOOKUP_INVALID : status;
     }
@@ -3130,13 +3184,193 @@ static int cm_graph_other_units_have_pending(
     return 0;
 }
 
+static int cm_generated_paths_equal(
+    const CmItemMacroResolvedGeneratedPath *a,
+    const CmItemMacroResolvedGeneratedPath *b)
+{
+    size_t index;
+
+    if (a->segment_count != b->segment_count) return 0;
+    for (index = 0u; index < a->segment_count; ++index) {
+        if (a->segments[index].length != b->segments[index].length
+            || memcmp(a->segments[index].bytes, b->segments[index].bytes,
+                a->segments[index].length) != 0) return 0;
+    }
+    return 1;
+}
+
+/* Fold this round's resolutions into the unit's accumulated set. A
+ * merged path entry's segment array moves to the unit (the round entry
+ * is emptied); a duplicate's array is freed here. */
+static void cm_unit_merge_sticky(CmResolveUnit *unit, const CmVec *resolved,
+    CmVec *resolved_paths)
+{
+    size_t index;
+    size_t existing;
+
+    for (index = 0u; index < resolved->len; ++index) {
+        const CmItemMacroResolvedInvocation *value =
+            (const CmItemMacroResolvedInvocation *)cm_vec_at_const(
+                resolved, index);
+        int duplicate = 0;
+        for (existing = 0u; value != NULL
+                && existing < unit->sticky_resolved.len; ++existing) {
+            CmItemMacroResolvedInvocation *have =
+                (CmItemMacroResolvedInvocation *)cm_vec_at(
+                    &unit->sticky_resolved, existing);
+            if (have != NULL && have->invocation.owner
+                    == value->invocation.owner
+                && have->invocation.item == value->invocation.item) {
+                *have = *value;
+                duplicate = 1;
+                break;
+            }
+        }
+        if (value != NULL && !duplicate)
+            (void)cm_vec_push(&unit->sticky_resolved, value);
+    }
+    for (index = 0u; index < resolved_paths->len; ++index) {
+        CmItemMacroResolvedGeneratedPath *entry =
+            (CmItemMacroResolvedGeneratedPath *)cm_vec_at(resolved_paths,
+                index);
+        int duplicate = 0;
+        for (existing = 0u; entry != NULL
+                && existing < unit->sticky_paths.len; ++existing) {
+            CmItemMacroResolvedGeneratedPath *have =
+                (CmItemMacroResolvedGeneratedPath *)cm_vec_at(
+                    &unit->sticky_paths, existing);
+            if (have != NULL && cm_generated_paths_equal(have, entry)) {
+                have->definition = entry->definition;
+                have->definition_ast = entry->definition_ast;
+                have->crate_identifier = entry->crate_identifier;
+                duplicate = 1;
+                break;
+            }
+        }
+        if (entry == NULL) continue;
+        if (duplicate) {
+            cm_free((void *)entry->segments);
+        } else {
+            (void)cm_vec_push(&unit->sticky_paths, entry);
+        }
+        entry->segments = NULL;
+        entry->segment_count = 0u;
+    }
+}
+
+/* Sticky entries borrow unit ASTs, and `state->units` relocates when a
+ * round appends generated units: re-derive every local definition's AST
+ * pointer from its owning source before a replan. Returns 0 when an
+ * owner vanished. */
+static int cm_unit_refresh_sticky_asts(CmModuleGraphState *state,
+    CmResolveUnit *unit)
+{
+    size_t index;
+
+    for (index = 0u; index < unit->sticky_resolved.len; ++index) {
+        CmItemMacroResolvedInvocation *entry =
+            (CmItemMacroResolvedInvocation *)cm_vec_at(
+                &unit->sticky_resolved, index);
+        const CmResolveUnit *owner;
+        if (entry == NULL
+            || entry->definition.owner > (CmItemMacroAstOwner)UINT32_MAX)
+            continue;
+        owner = cm_get_unit_const(state, cm_find_unit(state,
+            (CmSourceId)entry->definition.owner));
+        if (owner == NULL) return 0;
+        entry->definition_ast = &owner->ast;
+    }
+    for (index = 0u; index < unit->sticky_paths.len; ++index) {
+        CmItemMacroResolvedGeneratedPath *entry =
+            (CmItemMacroResolvedGeneratedPath *)cm_vec_at(
+                &unit->sticky_paths, index);
+        const CmResolveUnit *owner;
+        if (entry == NULL
+            || entry->definition.owner > (CmItemMacroAstOwner)UINT32_MAX)
+            continue;
+        owner = cm_get_unit_const(state, cm_find_unit(state,
+            (CmSourceId)entry->definition.owner));
+        if (owner == NULL) return 0;
+        entry->definition_ast = &owner->ast;
+    }
+    return 1;
+}
+
+/* Path-keyed resolution for a generated qualified invocation: the
+ * planner applies it to every generated invocation spelling that path,
+ * across replans. Segment bytes borrow the unit AST. */
+static void cm_graph_record_generated_path(const CmResolveUnit *unit,
+    const CmItemMacroPendingInvocation *pending,
+    const CmItemMacroResolvedInvocation *value, CmVec *resolved_paths)
+{
+    const CmAstItem *item;
+    const CmAstPath *path;
+    CmItemMacroPathSegment *segments;
+    CmItemMacroResolvedGeneratedPath entry;
+    size_t index;
+    size_t existing;
+
+    item = cm_ast_get_item(&unit->ast, pending->invocation.item);
+    if (item == NULL || item->kind != CM_AST_ITEM_MACRO) return;
+    path = cm_ast_get_path(&unit->ast, item->data.macro_item.path);
+    if (path == NULL || path->absolute || path->segment_count < 2u) return;
+    segments = (CmItemMacroPathSegment *)cm_alloc_zeroed(
+        path->segment_count, sizeof(*segments));
+    for (index = 0u; index < path->segment_count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(&unit->ast,
+            path->segments[index].name);
+        if (name == NULL || path->segments[index].argument_count != 0u) {
+            cm_free(segments);
+            return;
+        }
+        segments[index].bytes = name->bytes;
+        segments[index].length = name->len;
+    }
+    for (existing = 0u; existing < resolved_paths->len; ++existing) {
+        const CmItemMacroResolvedGeneratedPath *other =
+            (const CmItemMacroResolvedGeneratedPath *)cm_vec_at_const(
+                resolved_paths, existing);
+        int same = other != NULL
+            && other->segment_count == path->segment_count;
+        for (index = 0u; same && index < path->segment_count; ++index) {
+            same = other->segments[index].length == segments[index].length
+                && memcmp(other->segments[index].bytes,
+                    segments[index].bytes, segments[index].length) == 0;
+        }
+        if (same) {
+            cm_free(segments);
+            return;
+        }
+    }
+    memset(&entry, 0, sizeof(entry));
+    entry.segments = segments;
+    entry.segment_count = path->segment_count;
+    entry.definition = value->definition;
+    entry.definition_ast = value->definition_ast;
+    entry.crate_identifier = NULL;
+    (void)cm_vec_push(resolved_paths, &entry);
+    if (getenv("CM_MACRO_DEBUG") != NULL)
+        fprintf(stderr, "MACRO generated-path segs=%lu def=%lu:%u\n",
+            (unsigned long)entry.segment_count,
+            (unsigned long)entry.definition.owner,
+            (unsigned)entry.definition.item);
+}
+
 static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
     int *out_spliced_include)
 {
     size_t unit_index;
     int progress = 0;
     size_t pending_before;
-    size_t units_before;
+
+    /* Rotate the deferred-name signature: the current round's names are
+     * compared with the previous round's at the end. */
+    {
+        CmVec swap = state->previous_deferred_names;
+        state->previous_deferred_names = state->deferred_names;
+        state->deferred_names = swap;
+        state->deferred_names.len = 0u;
+    }
     int deferred_any = 0;
     int deferred_saved = 0;
     CmSourceId deferred_source = 0u;
@@ -3151,6 +3385,10 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
     for (unit_index = 0u; unit_index < state->units.len; ++unit_index) {
         CmResolveUnit *unit;
         CmVec resolved;
+        /* Generated qualified invocations (`$crate::thread::local_impl::
+         * thread_local_inner!` from std's thread_local!) are regenerated
+         * by every replan, so their resolutions are keyed by path. */
+        CmVec resolved_paths;
         CmVec authenticated_includes;
         CmImportResolver imports;
         CmModuleGraph graph_view;
@@ -3163,7 +3401,7 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
         unit = (CmResolveUnit *)cm_vec_at(&state->units, unit_index);
         if (unit == NULL || !unit->plan_ok
             || unit->plan.pending_invocation_count == 0u) continue;
-        /* A unit whose module is still deferred (the root has a generated
+            /* A unit whose module is still deferred (the root has a generated
          * pending invocation — libc's `prelude!()` — so non-macro_use
          * modules are not built yet) has no scope to resolve against:
          * its generated invocations wait for the round that builds it. */
@@ -3171,6 +3409,8 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                 (CmResolveUnitId)(unit_index + 1u), CM_AST_ITEM_NONE)
                 == NULL) continue;
         cm_vec_init(&resolved, sizeof(CmItemMacroResolvedInvocation));
+        cm_vec_init(&resolved_paths,
+            sizeof(CmItemMacroResolvedGeneratedPath));
         cm_vec_init(&authenticated_includes,
             sizeof(CmItemMacroPendingInvocation));
         memset(&imports, 0, sizeof(imports));
@@ -3182,9 +3422,7 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
         for (pending_index = 0u;
                 pending_index < unit->plan.pending_invocation_count;
                 ++pending_index) {
-            if (unit->plan.pending_invocations[pending_index].is_qualified
-                && !unit->plan.pending_invocations[pending_index]
-                    .is_generated) {
+            if (unit->plan.pending_invocations[pending_index].is_qualified) {
                 cm_import_resolver_init(&imports);
                 imports_initialized = 1;
                 import_result = cm_import_resolve(&imports, &graph_view,
@@ -3249,8 +3487,10 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                 pending->container_item);
             has_name = cm_pending_invocation_name(unit, pending, &name);
             entry = NULL;
-            if (pending->is_qualified) {
-                if (!pending->is_generated && imports_ready
+                    if (pending->is_qualified) {
+                /* Generated invocations too: `thread_local!` expands to
+                 * `$crate::thread::local_impl::thread_local_inner!`. */
+                if (imports_ready
                     && cm_resolve_pending_qualified(&imports,
                         &graph_view, module, unit, pending,
                         &qualified_entry) == CM_IMPORT_LOOKUP_OK) {
@@ -3311,7 +3551,7 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             definition_unit_id = entry == NULL ? 0u : cm_find_unit(state,
                 entry->declaration.source);
             definition_unit = cm_get_unit_const(state, definition_unit_id);
-            if (!has_dependency_definition && pending->is_qualified
+                    if (!has_dependency_definition && pending->is_qualified
                 && (entry == NULL || definition_unit == NULL)
                 && state->options.dependency_macro_count != 0u) {
                 CmDependencyMacroDefinition qualified_definition;
@@ -3410,7 +3650,12 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             if (!has_dependency_definition
                 && (entry == NULL || definition_unit == NULL)
                 && (state->defer_non_macro_use_modules
-                    || cm_graph_other_units_have_pending(state, unit_index))) {
+                    || cm_graph_other_units_have_pending(state, unit_index)
+                    || progress)) {
+                /* `progress`: an earlier unit this round expanded (std's
+                 * sys unit expands its cfg_if! whole; the generated
+                 * `mod native { pub macro local_pointer }` is only built
+                 * after the round), so the name may exist next round. */
                 /* The name may come from an expansion or a module the
                  * next round builds (std's `use crate::sys::thread_local::
                  * local_pointer` reaches a cfg_if!-generated re-export):
@@ -3447,6 +3692,15 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                         state->defer_non_macro_use_modules,
                         cm_graph_other_units_have_pending(state, unit_index),
                         (const void *)entry, (const void *)definition_unit);
+                }
+                {
+                    const CmInternedString *dn = name == CM_INTERN_ID_NONE
+                        ? NULL : cm_ast_get_string(&unit->ast, name);
+                    size_t byte;
+                    for (byte = 0u; dn != NULL && byte < dn->len; ++byte)
+                        (void)cm_vec_push(&state->deferred_names,
+                            &dn->bytes[byte]);
+                    (void)cm_vec_push(&state->deferred_names, "\n");
                 }
                 deferred_any = 1;
                 continue;
@@ -3612,9 +3866,24 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                 (void)cm_vec_push(&authenticated_includes, pending);
                 continue;
             }
-            if (pending->is_generated) {
-                if (pending->container_item != CM_AST_ITEM_NONE
-                    || module == NULL || module->info.is_inline
+            if (pending->is_generated && pending->is_qualified) {
+                /* A scope seed cannot serve a qualified path: certify the
+                 * path itself for the replan. */
+                memset(&value, 0, sizeof(value));
+                value.invocation = pending->invocation;
+                value.definition.owner =
+                    (CmItemMacroAstOwner)entry->declaration.source;
+                value.definition.item = entry->declaration.item;
+                value.definition_ast = &definition_unit->ast;
+                cm_graph_record_generated_path(unit, pending, &value,
+                    &resolved_paths);
+                continue;
+            }
+                    if (pending->is_generated) {
+                /* The seed scopes the whole unit, so an inline-module
+                 * container (a fixture's `mod user { cfg_if! { ..
+                 * thread_local! .. } }`) is served the same way. */
+                if (module == NULL
                     || !cm_unit_add_initial_scope(unit,
                         (CmItemMacroItemRef) {
                             (CmItemMacroAstOwner)
@@ -3646,10 +3915,12 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             value.builtin = cm_exact_declaration_builtin_kind(state,
                 definition_unit, entry->declaration);
             (void)cm_vec_push(&resolved, &value);
+                    if (pending->is_generated && pending->is_qualified)
+                cm_graph_record_generated_path(unit, pending, &value,
+                    &resolved_paths);
         }
         if (imports_initialized) cm_import_resolver_destroy(&imports);
         pending_before = unit->plan.pending_invocation_count;
-        units_before = state->units.len;
         if (authenticated_includes.len != 0u) progress = 1;
         if (ok && authenticated_includes.len != 0u) {
             size_t include_index;
@@ -3671,31 +3942,63 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
         } else if (ok) {
             const CmResolveUnit *replanned;
 
-            ok = cm_replan_unit_with_resolved(state,
+            cm_unit_merge_sticky(unit, &resolved, &resolved_paths);
+            if (!cm_unit_refresh_sticky_asts(state, unit)) ok = 0;
+            if (ok) ok = cm_replan_unit_with_resolved(state,
                 (CmResolveUnitId)(unit_index + 1u),
-                (const CmItemMacroResolvedInvocation *)resolved.data,
-                resolved.len);
+                (const CmItemMacroResolvedInvocation *)
+                    unit->sticky_resolved.data,
+                unit->sticky_resolved.len,
+                (const CmItemMacroResolvedGeneratedPath *)
+                    unit->sticky_paths.data,
+                unit->sticky_paths.len);
             /* A unit is re-planned from scratch: only a shrinking pending
              * set (or new units) is progress, not re-resolving the same
              * invocations while a deferred one waits. */
             replanned = cm_get_unit_const(state,
                 (CmResolveUnitId)(unit_index + 1u));
-            if (ok && ((replanned != NULL
-                        && replanned->plan.pending_invocation_count
-                            < pending_before)
-                    || state->units.len > units_before))
+            /* New units alone are not progress: a unit holding a
+             * deferred invocation re-expands its other invocations every
+             * round, regenerating units (std's thread_local plumbing
+             * looped to the round limit that way). */
+            if (ok && replanned != NULL
+                && replanned->plan.pending_invocation_count < pending_before)
                 progress = 1;
         }
         cm_vec_destroy(&authenticated_includes);
         cm_vec_destroy(&resolved);
+        {
+            /* Segment arrays not merged into the unit were freed by the
+             * merge; merged ones live with the unit. */
+            size_t path_index;
+            for (path_index = 0u; path_index < resolved_paths.len;
+                 ++path_index) {
+                CmItemMacroResolvedGeneratedPath *entry =
+                    (CmItemMacroResolvedGeneratedPath *)cm_vec_at(
+                        &resolved_paths, path_index);
+                if (entry != NULL && entry->segments != NULL)
+                    cm_free((void *)entry->segments);
+            }
+            cm_vec_destroy(&resolved_paths);
+        }
         if (!ok) return 0;
         if (*out_spliced_include) return 1;
     }
     if (deferred_any && !progress) {
-        cm_graph_add_error(state, CM_RESOLVE_ERROR_ITEM_MACRO,
-            deferred_source, deferred_start, deferred_end, deferred_path,
-            deferred_kind, deferred_detail, 0u, 0u);
-        return 0;
+        /* A changed set of deferred names (one resolved while another
+         * appeared from its expansion) is still progress. */
+        int same = state->deferred_names.len
+                == state->previous_deferred_names.len
+            && (state->deferred_names.len == 0u
+                || memcmp(state->deferred_names.data,
+                    state->previous_deferred_names.data,
+                    state->deferred_names.len) == 0);
+        if (same) {
+            cm_graph_add_error(state, CM_RESOLVE_ERROR_ITEM_MACRO,
+                deferred_source, deferred_start, deferred_end, deferred_path,
+                deferred_kind, deferred_detail, 0u, 0u);
+            return 0;
+        }
     }
     return 1;
 }
@@ -3750,6 +4053,7 @@ static void cm_graph_reset_unit_plans(CmModuleGraphState *state)
         cm_free(unit->initial_scope);
         unit->initial_scope = NULL;
         unit->initial_scope_count = 0u;
+        cm_unit_clear_sticky(unit);
         unit->plan_prepared = 0;
         unit->plan_ok = 0;
         unit->active = 0;

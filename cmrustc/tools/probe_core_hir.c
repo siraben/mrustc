@@ -603,10 +603,24 @@ int main(int argc, char **argv)
     const char *with_core_path = NULL;
     const char *emit_umir_c_path = NULL;
     const char *target_crate_name = NULL;
+#define PROBE_MAX_CFGS 16u
+#define PROBE_MAX_DEP_CFGS 32u
+    CmCfgEntry extra_cfgs[PROBE_MAX_CFGS];
+    CmCfgEntry all_cfgs[PROBE_MAX_CFGS + 64u];
+    size_t extra_cfg_count = 0u;
+    /* `--dep-cfg NAME KEY[=VALUE]`: cfgs for one dependency only (std
+     * builds hashbrown with `feature = "rustc-dep-of-std"`). */
+    const char *dep_cfg_names[PROBE_MAX_DEP_CFGS];
+    CmCfgEntry dep_cfg_entries[PROBE_MAX_DEP_CFGS];
+    size_t dep_cfg_count = 0u;
+
     /* Dependency chain (`--with-dep NAME PATH`, in order; `--with-core
      * PATH` is `--with-dep core PATH`): each crate is built against the
      * ones before it, the target against all of them. */
     enum { PROBE_MAX_DEPS = 16 };
+    static CmCfgSet dep_cfgs[PROBE_MAX_DEPS];
+    static CmCfgEntry dep_cfg_all[PROBE_MAX_DEPS][PROBE_MAX_CFGS
+        + PROBE_MAX_DEP_CFGS + 64u];
     const char *dep_names[PROBE_MAX_DEPS];
     const char *dep_paths[PROBE_MAX_DEPS];
     uint32_t dep_count = 0u;
@@ -652,6 +666,35 @@ int main(int argc, char **argv)
                     && argument_index + 1 < argc) {
                 target_crate_name = argv[argument_index + 1];
                 ++argument_index;
+            } else if (strcmp(argv[argument_index], "--dep-cfg") == 0
+                    && argument_index + 2 < argc
+                    && dep_cfg_count < PROBE_MAX_DEP_CFGS) {
+                char *spec = argv[argument_index + 2];
+                char *eq = strchr(spec, '=');
+                dep_cfg_names[dep_cfg_count] = argv[argument_index + 1];
+                dep_cfg_entries[dep_cfg_count].name = spec;
+                dep_cfg_entries[dep_cfg_count].value = NULL;
+                if (eq != NULL) {
+                    *eq = '\0';
+                    dep_cfg_entries[dep_cfg_count].value = eq + 1;
+                }
+                dep_cfg_count += 1u;
+                argument_index += 2;
+            } else if (strcmp(argv[argument_index], "--cfg") == 0
+                    && argument_index + 1 < argc
+                    && extra_cfg_count < PROBE_MAX_CFGS) {
+                /* `--cfg backtrace_in_libstd` / `--cfg feature=x`: a
+                 * word or key=value cfg beyond the target's own. */
+                char *spec = argv[argument_index + 1];
+                char *eq = strchr(spec, '=');
+                extra_cfgs[extra_cfg_count].name = spec;
+                extra_cfgs[extra_cfg_count].value = NULL;
+                if (eq != NULL) {
+                    *eq = '\0';
+                    extra_cfgs[extra_cfg_count].value = eq + 1;
+                }
+                extra_cfg_count += 1u;
+                ++argument_index;
             } else if (strcmp(argv[argument_index], "--emit-umir-c") == 0
                     && argument_index + 1 < argc) {
                 emit_umir_c_path = argv[argument_index + 1];
@@ -682,6 +725,17 @@ int main(int argc, char **argv)
         fputs("core HIR probe setup failed\n", stderr);
         goto cleanup;
     }
+    if (extra_cfg_count != 0u) {
+        size_t base = cfg.environment.entry_count;
+        size_t index;
+        if (base > 64u) base = 64u;
+        for (index = 0u; index < base; ++index)
+            all_cfgs[index] = cfg.environment.entries[index];
+        for (index = 0u; index < extra_cfg_count; ++index)
+            all_cfgs[base + index] = extra_cfgs[index];
+        cfg.environment.entries = all_cfgs;
+        cfg.environment.entry_count = base + extra_cfg_count;
+    }
     cm_module_graph_options_init(&graph_options);
     graph_options.cfg = &cfg;
     graph_options.edition = CM_EDITION_2024;
@@ -704,8 +758,23 @@ int main(int argc, char **argv)
                     dep_name);
                 goto cleanup;
             }
+            /* This dependency's cfg set: the target's entries, the root's
+             * extra ones, and its own `--dep-cfg` entries. */
+            {
+                size_t base = cfg.environment.entry_count;
+                size_t index;
+                size_t total = 0u;
+                dep_cfgs[dep] = cfg;
+                for (index = 0u; index < base; ++index)
+                    dep_cfg_all[dep][total++] = cfg.environment.entries[index];
+                for (index = 0u; index < dep_cfg_count; ++index)
+                    if (strcmp(dep_cfg_names[index], dep_name) == 0)
+                        dep_cfg_all[dep][total++] = dep_cfg_entries[index];
+                dep_cfgs[dep].environment.entries = dep_cfg_all[dep];
+                dep_cfgs[dep].environment.entry_count = total;
+            }
             cm_module_graph_options_init(&dep_options);
-            dep_options.cfg = &cfg;
+            dep_options.cfg = &dep_cfgs[dep];
             dep_options.edition = CM_EDITION_2024;
             dep_options.dependency_macros = expand_artifacts;
             dep_options.dependency_macro_count = dep;
@@ -747,7 +816,7 @@ int main(int argc, char **argv)
                 cm_body_expand_options_init(&dep_expand_options);
                 dep_expand_options.edition = CM_EDITION_2024;
                 dep_expand_options.crate_identifier = "crate";
-                dep_expand_options.cfg = &cfg;
+                dep_expand_options.cfg = &dep_cfgs[dep];
                 dep_expand_options.imports = &dep_imports[dep];
                 dep_expand_options.dependency_macros = expand_artifacts;
                 dep_expand_options.dependency_macro_count = dep;
@@ -923,11 +992,24 @@ int main(int argc, char **argv)
             for (class_index = 0u;
                     class_index < expand_result.failure_class_count;
                     ++class_index)
-                printf("body-expand failure macro=%s count=%lu reason=%s\n",
+            {
+                CmResolveModuleInfo failure_module;
+                const CmSourceFile *failure_file = NULL;
+                if (cm_module_graph_get_module(&graph,
+                        expand_result.failure_classes[class_index].module,
+                        &failure_module))
+                    failure_file = cm_source_get(&sources,
+                        failure_module.source);
+                printf("body-expand failure macro=%s count=%lu reason=%s "
+                    "source=%s start=%lu\n",
                     expand_result.failure_classes[class_index].macro_name,
                     (unsigned long)
                         expand_result.failure_classes[class_index].count,
-                    expand_result.failure_classes[class_index].reason);
+                    expand_result.failure_classes[class_index].reason,
+                    failure_file == NULL ? "?" : failure_file->path,
+                    (unsigned long)
+                        expand_result.failure_classes[class_index].start);
+            }
         }
     }
     cm_hir_lower_options_init(&lower_options);

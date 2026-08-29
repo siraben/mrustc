@@ -5792,7 +5792,6 @@ static void test_preflight_rejections(void)
         "unsafe extern \"C\" { type Bounded: Sized; }\n",
         "unsafe extern \"C\" { type Alias = u8; }\n",
         "unsafe extern \"C\" { pub(crate) type Restricted; }\n",
-        "static mut SOURCE: u8 = 1;\n",
         "trait Values {} struct Number; impl Values for Number { const VALUE: u8 = 1; }\n"
     };
     static const CmCfgEntry enabled[] = {
@@ -8007,6 +8006,17 @@ static void test_cross_trait_projection_default_prebinding(void)
         cm_hir_lower_options_init(&options);
         result = lower_module_graph(&hir, &graph, graph_result.revision,
             &map, &options);
+        if (!(graph_result.error_count == 0u
+                && result.error_count == 1u
+                && result.first_error.kind == rejected_kinds[index]
+                && hir_is_empty(&hir) && cm_hir_module_map_count(&map) == 0u))
+            fprintf(stderr, "projection-default %lu: graph=%lu errors=%lu "
+                "kind=%d empty=%d map=%lu msg=%s\n", (unsigned long)index,
+                (unsigned long)graph_result.error_count,
+                (unsigned long)result.error_count,
+                (int)result.first_error.kind, hir_is_empty(&hir),
+                (unsigned long)cm_hir_module_map_count(&map),
+                result.first_error.message);
         check(graph_result.error_count == 0u
             && result.error_count == 1u
             && result.first_error.kind == rejected_kinds[index]

@@ -65,6 +65,10 @@ typedef struct CmBodyExpandResult {
         char macro_name[64];
         char reason[128];
         size_t count;
+        /* First occurrence: the module whose body failed and the span
+         * start within its unit (the probe prints the source path). */
+        CmModuleId module;
+        uint32_t start;
     } failure_classes[CM_BODY_EXPAND_FAILURE_CLASSES];
     size_t failure_class_count;
 } CmBodyExpandResult;

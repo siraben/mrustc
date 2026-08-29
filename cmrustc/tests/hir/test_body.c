@@ -4164,7 +4164,7 @@ static void test_graph_u32_add_oom_is_transactional(void)
     fixture_destroy(&fixture);
 }
 
-static void expect_graph_mutable_static_body_rejected(const char *source)
+static void expect_graph_mutable_static_body_accepted(const char *source)
 {
     CmSourceSet sources;
     CmSourceId source_id;
@@ -4200,12 +4200,10 @@ static void expect_graph_mutable_static_body_rejected(const char *source)
     lower_options.crate_name = "value_body";
     lower_result = cm_hir_lower_module_graph(&hir, &graph,
         graph_result.revision, &imports, &map, &lower_options);
-    assert(lower_result.error_count == 1u
-        && lower_result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
-        && hir.crates.len == 0u && hir.modules.len == 0u
-        && hir.items.len == 0u && hir.bodies.len == 0u
-        && hir.expressions.len == 0u
-        && cm_hir_module_map_count(&map) == 0u);
+    /* `static mut THREAD_INFO: BTreeMap<..> = ..` (std): a mutable static
+     * lowers like an immutable one; writes store through its slot. */
+    assert(lower_result.error_count == 0u
+        && hir.items.len == 1u && hir.bodies.len == 1u);
     cm_hir_module_map_destroy(&map);
     cm_hir_context_destroy(&hir);
     cm_import_resolver_destroy(&imports);
@@ -4546,7 +4544,7 @@ int main(void)
     test_binary_model_ownership_and_copy();
     test_graph_u32_add_oom_is_transactional();
     test_owned_local_and_instantiated_call_model();
-    expect_graph_mutable_static_body_rejected(
+    expect_graph_mutable_static_body_accepted(
         "static mut VALUE: i32 = 7i32;");
     puts("hir-body: ok");
     return 0;

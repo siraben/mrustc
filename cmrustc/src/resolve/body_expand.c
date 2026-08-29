@@ -25,9 +25,20 @@
 #define CM_BODY_LOCAL_MACRO_LIMIT 256u
 #define CM_BODY_NAME_LIMIT 128u
 
+#define CM_BODY_EXPANSION_MODULES 64u
+
+struct CmBodyMacroTarget;
+
 typedef struct CmBodyLocalMacro {
     char name[CM_BODY_NAME_LIMIT];
     CmAstItemId item;
+    /* A block-local `use path::name;` of a macro: the resolved target
+     * (item is NONE). */
+    int has_target;
+    const struct CmAst *target_ast;
+    CmAstItemId target_item;
+    const char *target_crate_identifier;
+    CmModuleId target_module;
 } CmBodyLocalMacro;
 
 typedef struct CmBodyExpandState {
@@ -37,6 +48,11 @@ typedef struct CmBodyExpandState {
     CmBodyExpandResult result;
     CmAst *ast;
     CmModuleId module;
+    /* Definition module of the expansion whose output is being walked at
+     * each depth: `syscall!` (std's weak.rs) expands to `weak!(..)`, in
+     * scope at weak.rs, not at the invoking module. */
+    CmModuleId expansion_modules[CM_BODY_EXPANSION_MODULES];
+    unsigned int depth;
     CmBodyLocalMacro locals[CM_BODY_LOCAL_MACRO_LIMIT];
     size_t local_count;
     CmStrBuf text;
@@ -94,6 +110,8 @@ static void cm_body_fail(CmBodyExpandState *state, const char *name,
             name == NULL ? "?" : name, 63u);
         strncpy(state->result.failure_classes[index].reason, reason, 127u);
         state->result.failure_classes[index].count = 1u;
+        state->result.failure_classes[index].module = state->module;
+        state->result.failure_classes[index].start = span.start;
         state->result.failure_class_count += 1u;
     }
     if (state->result.first_failure_reason[0] != '\0') return;
@@ -518,6 +536,9 @@ typedef struct CmBodyMacroTarget {
     int is_builtin;
     /* Non-NULL for a dependency-crate macro: the `$crate` substitution. */
     const char *crate_identifier;
+    /* Local declaration: the module that owns it (NONE otherwise). Names
+     * inside its expansion resolve there too (mixed-site hygiene). */
+    CmModuleId definition_module;
 } CmBodyMacroTarget;
 
 /* Resolve `name` (or a dependency-qualified segment list) through the
@@ -543,6 +564,7 @@ static int cm_body_target_from_declaration(CmBodyExpandState *state,
     if (!cm_module_graph_borrow_item_ast(state->graph, record.owner_module,
             record.declaration, &out_target->definition_ast)) return 0;
     out_target->definition_item = record.declaration.item;
+    out_target->definition_module = record.owner_module;
     return 1;
 }
 
@@ -687,8 +709,42 @@ static int cm_body_lookup_imports(CmBodyExpandState *state, CmModuleId module,
                 CM_RESOLVE_NAMESPACE_MACRO, index, &binding)) continue;
         if (!cm_import_copy_string(state->options->imports, binding.name,
                 text, sizeof(text))) continue;
-        if (strcmp(text, name) == 0 && binding.declaration.item
-                != CM_AST_ITEM_NONE)
+        if (strcmp(text, name) != 0) continue;
+        if (binding.dependency != 0u) {
+            /* `use core::ptr::addr_of_mut;` (backtrace-rs): a dependency
+             * macro brought in by a `use` leaf is certified through the
+             * dependency-macro artifacts by its local name. */
+            size_t artifact_index;
+            CmResolvePathSegmentView local_name;
+            local_name.bytes = (const unsigned char *)name;
+            local_name.length = strlen(name);
+            for (artifact_index = 0u;
+                 artifact_index < state->options->dependency_macro_count;
+                 ++artifact_index) {
+                const CmDependencyMacroArtifact *artifact =
+                    state->options->dependency_macros[artifact_index];
+                CmDependencyMacroArtifactIdentity identity;
+                CmDependencyMacroImport import;
+                if (artifact == NULL
+                    || !cm_dependency_macro_artifact_identity(artifact,
+                        &identity)) continue;
+                if (cm_dependency_macro_artifact_resolve_import(artifact,
+                        state->graph, state->revision, module, &local_name,
+                        &import) != CM_DEPENDENCY_MACRO_OK) continue;
+                memset(out_target, 0, sizeof(*out_target));
+                out_target->definition_ast = import.definition.definition_ast;
+                out_target->definition_item =
+                    import.definition.declaration.item;
+                out_target->crate_identifier = identity.extern_name;
+                return 1;
+            }
+            /* A `#[macro_export]`ed dependency macro (`core::addr_of_mut`)
+             * is reachable as `<crate>::<name>` at the crate root. */
+            if (cm_body_lookup_dependency_name(state, name, out_target))
+                return 1;
+            continue;
+        }
+        if (binding.declaration.item != CM_AST_ITEM_NONE)
             return cm_body_target_from_declaration(state,
                 binding.declaration, out_target);
     }
@@ -721,6 +777,21 @@ static int cm_body_lookup_unqualified(CmBodyExpandState *state,
     }
     if (cm_module_graph_get_root(state->graph, &root)
         && cm_body_lookup_namespace(state, root, name, out_target)) return 1;
+    {
+        /* Enclosing expansions' definition modules, innermost first. */
+        unsigned int level = state->depth;
+        while (level != 0u) {
+            CmModuleId site = level < CM_BODY_EXPANSION_MODULES
+                ? state->expansion_modules[level] : CM_MODULE_NONE;
+            level -= 1u;
+            if (site == CM_MODULE_NONE || site == module) continue;
+            if (cm_body_lookup_scope(state, site, name, out_target)) return 1;
+            if (cm_body_lookup_imports(state, site, name, out_target))
+                return 1;
+            if (cm_body_lookup_namespace(state, site, name, out_target))
+                return 1;
+        }
+    }
     return cm_body_lookup_dependency_name(state, name, out_target);
 }
 
@@ -776,6 +847,17 @@ static int cm_body_resolve_path(CmBodyExpandState *state, const CmAst *ast,
             index -= 1u;
             if (strcmp(state->locals[index].name, out_name) == 0) {
                 memset(out_target, 0, sizeof(*out_target));
+                if (state->locals[index].has_target) {
+                    out_target->definition_ast =
+                        state->locals[index].target_ast;
+                    out_target->definition_item =
+                        state->locals[index].target_item;
+                    out_target->crate_identifier =
+                        state->locals[index].target_crate_identifier;
+                    out_target->definition_module =
+                        state->locals[index].target_module;
+                    return 1;
+                }
                 out_target->definition_ast = state->ast;
                 out_target->definition_item = state->locals[index].item;
                 return 1;
@@ -845,7 +927,10 @@ static int cm_body_resolve_path(CmBodyExpandState *state, const CmAst *ast,
         } else if (segment == 0u && !path->absolute) {
             if (!cm_body_module_by_name(state, module, name, &module))
                 return 0;
-        } else if (!cm_body_child_module(state, module, name, &module)) {
+        } else if (!cm_body_child_module(state, module, name, &module)
+            /* `crate::sys::weak` where sys does `pub use pal::unix::*`
+             * (std): a glob-imported module is an import binding. */
+            && !cm_body_module_by_name(state, module, name, &module)) {
             return 0;
         }
     }
@@ -1009,6 +1094,24 @@ static int cm_body_finish_generated(CmBodyExpandState *state, CmAstExprId id,
     return 1;
 }
 
+/* `env!("STD_ENV_ARCH")` (std's env.rs): build-time variables come from
+ * the process environment (the std chain exports STD_ENV_ARCH). */
+static const char *cm_body_env_lookup(void *context, const char *name,
+    size_t name_length, size_t *value_length)
+{
+    char buffer[128];
+    const char *value;
+    (void)context;
+    if (name == NULL || name_length == 0u || name_length >= sizeof(buffer))
+        return NULL;
+    memcpy(buffer, name, name_length);
+    buffer[name_length] = '\0';
+    value = getenv(buffer);
+    if (value == NULL) return NULL;
+    if (value_length != NULL) *value_length = strlen(value);
+    return value;
+}
+
 static int cm_body_builtin_ast(CmBodyExpandState *state, CmAstExprId id,
     const char *name, CmAstSpan span)
 {
@@ -1019,6 +1122,7 @@ static int cm_body_builtin_ast(CmBodyExpandState *state, CmAstExprId id,
     context.module_path = "";
     context.cfg = state->options->cfg == NULL ? NULL
         : &state->options->cfg->environment;
+    context.env_lookup = cm_body_env_lookup;
     result = cm_builtin_ast_expand_expression(state->ast, id, &context,
         state->options->edition);
     if (result.expanded_expression == CM_AST_EXPR_NONE) {
@@ -1838,12 +1942,18 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
         return 0;
     }
     memset(&target, 0, sizeof(target));
+    state->depth = depth;
     {
         clock_t started = state->debug ? clock() : 0;
         resolved = cm_body_resolve_path(state, state->ast, path, name,
             sizeof(name), &target);
         if (state->debug) state->ticks_lookup += clock() - started;
     }
+    /* The expansion's output is walked at depth + 1: names in it may
+     * resolve at the macro's definition module. */
+    if (depth + 1u < CM_BODY_EXPANSION_MODULES)
+        state->expansion_modules[depth + 1u] = resolved
+            ? target.definition_module : CM_MODULE_NONE;
     builtin = cm_body_builtin_by_name(name);
     /* Builtins win over resolved macro declarations: a dependency's
      * `format_args!` resolves to core's `#[rustc_builtin_macro]` stub
@@ -2238,6 +2348,177 @@ static void cm_body_walk_expr(CmBodyExpandState *state, CmAstExprId id,
     }
 }
 
+static int cm_body_lookup_namespace(CmBodyExpandState *state,
+    CmModuleId module, const char *name, CmBodyMacroTarget *out_target);
+static int cm_body_lookup_imports(CmBodyExpandState *state, CmModuleId module,
+    const char *name, CmBodyMacroTarget *out_target);
+static int cm_body_lookup_unqualified(CmBodyExpandState *state,
+    CmModuleId module, const char *name, CmBodyMacroTarget *out_target);
+static int cm_body_module_by_name(CmBodyExpandState *state,
+    CmModuleId current, const char *name, CmModuleId *out_module);
+static int cm_body_child_module(CmBodyExpandState *state, CmModuleId parent,
+    const char *name, CmModuleId *out_child);
+static int cm_body_lookup_dependency_segments(CmBodyExpandState *state,
+    const CmResolvePathSegmentView *segments, size_t segment_count,
+    int generated, CmBodyMacroTarget *out_target);
+
+/* Resolve `names[0]::..::names[count-1]` (a `use` leaf's path) to a
+ * macro target with the same walk as cm_body_resolve_path. */
+static int cm_body_resolve_text_path(CmBodyExpandState *state,
+    const char *const *names, size_t count, int absolute,
+    CmBodyMacroTarget *out_target)
+{
+    CmModuleId module = state->module;
+    size_t segment = 0u;
+    const char *leaf;
+
+    if (count == 0u || count > 16u) return 0;
+    leaf = names[count - 1u];
+    if (count >= 2u && state->options->dependency_macro_count != 0u) {
+        CmResolvePathSegmentView views[16];
+        size_t index;
+        for (index = 0u; index < count; ++index) {
+            views[index].bytes = (const unsigned char *)names[index];
+            views[index].length = strlen(names[index]);
+        }
+        if (cm_body_lookup_dependency_segments(state, views, count, 0,
+                out_target)) return 1;
+        if (cm_body_lookup_dependency_segments(state, views, count, 1,
+                out_target)) return 1;
+    }
+    if (absolute) {
+        if (!cm_module_graph_get_root(state->graph, &module)) return 0;
+        if (count >= 2u && (strcmp(names[0], "core") == 0
+                || strcmp(names[0], "crate") == 0)) segment = 1u;
+    }
+    for (; segment + 1u < count; ++segment) {
+        const char *name = names[segment];
+        if (segment == 0u && !absolute
+            && (strcmp(name, "crate") == 0 || strcmp(name, "$crate") == 0)) {
+            if (!cm_module_graph_get_root(state->graph, &module)) return 0;
+        } else if (strcmp(name, "self") == 0) {
+            continue;
+        } else if (strcmp(name, "super") == 0) {
+            CmResolveModuleInfo info;
+            if (!cm_module_graph_get_module(state->graph, module, &info))
+                return 0;
+            module = info.parent;
+        } else if (segment == 0u && !absolute) {
+            if (!cm_body_module_by_name(state, module, name, &module))
+                return 0;
+        } else if (!cm_body_child_module(state, module, name, &module)
+            && !cm_body_module_by_name(state, module, name, &module)) {
+            return 0;
+        }
+    }
+    if (cm_body_lookup_namespace(state, module, leaf, out_target)) return 1;
+    if (cm_body_lookup_imports(state, module, leaf, out_target)) return 1;
+    return count == 1u
+        && cm_body_lookup_unqualified(state, module, leaf, out_target);
+}
+
+static void cm_body_push_use_alias(CmBodyExpandState *state,
+    const char *name, const CmBodyMacroTarget *target)
+{
+    CmBodyLocalMacro *local;
+    size_t length = strlen(name);
+    if (state->local_count == CM_BODY_LOCAL_MACRO_LIMIT
+        || length == 0u || length >= CM_BODY_NAME_LIMIT) return;
+    local = &state->locals[state->local_count];
+    memset(local, 0, sizeof(*local));
+    memcpy(local->name, name, length);
+    local->name[length] = '\0';
+    local->item = CM_AST_ITEM_NONE;
+    local->has_target = 1;
+    local->target_ast = target->definition_ast;
+    local->target_item = target->definition_item;
+    local->target_crate_identifier = target->crate_identifier;
+    local->target_module = target->definition_module;
+    state->local_count += 1u;
+}
+
+/* `use crate::sys::weak::dlsym;` inside a body (std's stack_overflow):
+ * each leaf naming a macro becomes a block-local alias. Single leaves,
+ * `{a, b as c}` lists and `as` aliases; globs and nested lists are
+ * skipped. */
+static void cm_body_register_use_macros(CmBodyExpandState *state,
+    const CmAstItem *item)
+{
+    const char *text;
+    size_t length;
+    char buffer[512];
+    char *cursor;
+    char *prefix_end;
+    const char *names[16];
+    size_t prefix_count = 0u;
+    int absolute = 0;
+    char *leaves;
+
+    if (!cm_body_intern_text(state->ast, item->data.use_item.tree, &text,
+            &length) || length == 0u || length >= sizeof(buffer)) return;
+    memcpy(buffer, text, length);
+    buffer[length] = '\0';
+    /* Strip whitespace. */
+    {
+        char *read = buffer, *write = buffer;
+        while (*read) { if (!cm_body_is_space(*read)) *write++ = *read; read++; }
+        *write = '\0';
+    }
+    cursor = buffer;
+    if (cursor[0] == ':' && cursor[1] == ':') { absolute = 1; cursor += 2; }
+    if (strchr(cursor, '*') != NULL) return;
+    leaves = strchr(cursor, '{');
+    if (leaves != NULL) {
+        /* prefix::{leaves} — the prefix is everything before `::{`. */
+        char *close = strchr(leaves, '}');
+        if (close == NULL || strchr(leaves + 1, '{') != NULL) return;
+        *close = '\0';
+        prefix_end = leaves;
+        if (prefix_end >= cursor + 2 && prefix_end[-1] == ':'
+            && prefix_end[-2] == ':') prefix_end -= 2;
+        *prefix_end = '\0';
+        leaves += 1;
+    } else {
+        /* a::b::c [as d] — the last segment is the leaf. */
+        char *last = strrchr(cursor, ':');
+        if (last != NULL && last > cursor && last[-1] == ':') {
+            last[-1] = '\0';
+            leaves = last + 1;
+        } else {
+            leaves = cursor;
+            cursor = NULL;
+        }
+    }
+    if (cursor != NULL && cursor[0] != '\0') {
+        char *segment = cursor;
+        while (segment != NULL && prefix_count < 15u) {
+            char *next = strstr(segment, "::");
+            if (next != NULL) { *next = '\0'; next += 2; }
+            names[prefix_count++] = segment;
+            segment = next;
+        }
+    }
+    while (leaves != NULL && *leaves != '\0') {
+        char *comma = strchr(leaves, ',');
+        char *as;
+        const char *alias;
+        CmBodyMacroTarget target;
+        if (comma != NULL) *comma = '\0';
+        as = strstr(leaves, "as");
+        alias = leaves;
+        if (as != NULL && as != leaves) { *as = '\0'; alias = as + 2; }
+        if (leaves[0] != '\0' && strcmp(leaves, "self") != 0
+            && alias[0] != '_' && prefix_count + 1u <= 16u) {
+            names[prefix_count] = leaves;
+            memset(&target, 0, sizeof(target));
+            if (cm_body_resolve_text_path(state, names, prefix_count + 1u,
+                    absolute, &target))
+                cm_body_push_use_alias(state, alias, &target);
+        }
+        leaves = comma == NULL ? NULL : comma + 1;
+    }
+}
+
 static void cm_body_register_local_macro(CmBodyExpandState *state,
     const CmAstItem *item, CmAstItemId id)
 {
@@ -2246,6 +2527,8 @@ static void cm_body_register_local_macro(CmBodyExpandState *state,
     if (state->local_count == CM_BODY_LOCAL_MACRO_LIMIT
         || !cm_body_intern_text(state->ast, item->name, &text, &length)
         || length == 0u || length >= CM_BODY_NAME_LIMIT) return;
+    memset(&state->locals[state->local_count], 0,
+        sizeof(state->locals[state->local_count]));
     memcpy(state->locals[state->local_count].name, text, length);
     state->locals[state->local_count].name[length] = '\0';
     state->locals[state->local_count].item = id;
@@ -2397,6 +2680,9 @@ static void cm_body_walk_item(CmBodyExpandState *state, CmAstItemId id,
     case CM_AST_ITEM_MACRO:
         if (item->data.macro_item.form != CM_AST_MACRO_INVOCATION)
             cm_body_register_local_macro(state, item, id);
+        break;
+    case CM_AST_ITEM_USE:
+        cm_body_register_use_macros(state, item);
         break;
     default:
         break;
