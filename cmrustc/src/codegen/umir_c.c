@@ -7,6 +7,9 @@
 #include "cm/alloc.h"
 
 static CmTyId cm_umir_c_subst(CmTyId type);
+/* HIR of the unit being rendered (transparent-wrapper lookups). */
+static const CmHirContext *cm_umir_c_hir = NULL;
+
 static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     const CmHirContext *hir, const CmTyckSet *tyck, CmHirDefId def,
     CmTyId callee_type, CmTyId receiver_type,
@@ -345,9 +348,15 @@ static unsigned int cm_umir_c_ref_depth(const CmTyckSet *tyck, CmTyId type)
 
 /* Scalar C type for typed-width memory access (ints, bool, char); NULL
  * for everything else, which travels in a full slot. */
+static CmTyId cm_umir_c_representation(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type);
+
 static const char *cm_umir_c_scalar_type(const CmTyckSet *tyck, CmTyId type)
 {
-    const CmTy *ty = type == CM_TY_NONE ? NULL
+    const CmTy *ty;
+    if (cm_umir_c_hir != NULL && type != CM_TY_NONE)
+        type = cm_umir_c_representation(cm_umir_c_hir, tyck, type);
+    ty = type == CM_TY_NONE ? NULL
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
     if (ty == NULL) return NULL;
@@ -361,7 +370,10 @@ static const char *cm_umir_c_scalar_type(const CmTyckSet *tyck, CmTyId type)
 static unsigned long cm_umir_c_scalar_size(const CmTyckSet *tyck,
     CmTyId type)
 {
-    const CmTy *ty = type == CM_TY_NONE ? NULL
+    const CmTy *ty;
+    if (cm_umir_c_hir != NULL && type != CM_TY_NONE)
+        type = cm_umir_c_representation(cm_umir_c_hir, tyck, type);
+    ty = type == CM_TY_NONE ? NULL
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
     if (ty == NULL) return 8ul;
@@ -420,10 +432,38 @@ static unsigned long cm_umir_c_array_len(const CmTyckSet *tyck, CmTyId type)
     return (unsigned long)len->lo;
 }
 
-/* A struct with exactly one field is transparent: its value is the
- * field's value (NonNull<T> is its pointer, Wrapping<T> its integer), so
- * the bit-casts core performs between a newtype and its field agree. */
-static int cm_umir_c_transparent_struct(const CmHirContext *hir,
+/* Zero-sized: `()`, a fieldless struct (PhantomData), an empty array. */
+static int cm_umir_c_is_zst(const CmHirContext *hir, const CmTyckSet *tyck,
+    CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    if (ty == NULL) return 0;
+    if (ty->kind == CM_TY_TUPLE && ty->count == 0u) return 1;
+    if (ty->kind == CM_TY_ARRAY && cm_umir_c_array_len(tyck, type) == 0ul
+        && ty->count >= 2u) {
+        const CmTy *len = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, ty->children[1]));
+        return len != NULL && len->kind == CM_TY_CONST;
+    }
+    if (ty->kind == CM_TY_ADT) {
+        const CmHirDefinition *record = cm_hir_lookup_definition(hir, ty->def);
+        const CmHirItem *item = record == NULL
+                || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+            : cm_hir_get_item(hir, record->entity.item_id);
+        return item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+            && item->data.aggregate_item.field_count == 0u;
+    }
+    return 0;
+}
+
+/* A struct or union with exactly one non-zero-sized field is
+ * transparent: its value is that field's value (NonNull<T> is its
+ * pointer, MaybeUninit<T> / ManuallyDrop<T> are T), so the bit-casts
+ * core performs between a wrapper and its field agree.  Returns the
+ * representative field's index, or -1. */
+static long cm_umir_c_transparent_field(const CmHirContext *hir,
     const CmTyckSet *tyck, CmTyId type)
 {
     const CmTy *ty = type == CM_TY_NONE ? NULL
@@ -431,12 +471,59 @@ static int cm_umir_c_transparent_struct(const CmHirContext *hir,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
     const CmHirDefinition *record;
     const CmHirItem *item;
-    if (ty == NULL || ty->kind != CM_TY_ADT) return 0;
+    uint32_t index;
+    long representative = -1;
+    if (ty == NULL || ty->kind != CM_TY_ADT) return -1;
     record = cm_hir_lookup_definition(hir, ty->def);
-    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return 0;
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return -1;
     item = cm_hir_get_item(hir, record->entity.item_id);
-    return item != NULL && item->kind == CM_HIR_ITEM_STRUCT
-        && item->data.aggregate_item.field_count == 1u;
+    if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+            && item->kind != CM_HIR_ITEM_UNION)) return -1;
+    if (item->data.aggregate_item.field_count == 1u) return 0;
+    for (index = 0u; index < item->data.aggregate_item.field_count; ++index) {
+        CmTyId field_type = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+            item->data.aggregate_item.fields[index].type);
+        if (cm_umir_c_is_zst(hir, tyck, field_type)) continue;
+        if (representative >= 0) return -1;
+        representative = (long)index;
+    }
+    return representative;
+}
+
+
+/* The representation type behind transparent wrappers. */
+static CmTyId cm_umir_c_representation(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type)
+{
+    unsigned int guard = 0u;
+    while (guard++ < 8u) {
+        long field = cm_umir_c_transparent_field(hir, tyck, type);
+        const CmTy *ty;
+        const CmHirDefinition *record;
+        const CmHirItem *item;
+        if (field < 0) return type;
+        ty = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+        record = cm_hir_lookup_definition(hir, ty->def);
+        item = cm_hir_get_item(hir, record->entity.item_id);
+        {
+            CmTySubst subst;
+            CmHirGenericParamId params[32];
+            uint32_t count = item->generic_parameter_count > 32u ? 32u
+                : item->generic_parameter_count;
+            uint32_t index;
+            CmTyId raw = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+                item->data.aggregate_item.fields[field].type);
+            for (index = 0u; index < count; ++index)
+                params[index] = item->generic_parameter_start + index;
+            subst.parameters = params;
+            subst.types = ty->children;
+            subst.count = count < ty->count ? count : ty->count;
+            subst.self_type = CM_TY_NONE;
+            type = cm_ty_subst((CmTyArena *)&tyck->arena, raw, &subst);
+        }
+    }
+    return type;
 }
 
 /* The value behind `depth` reference layers of `local`. */
@@ -1092,9 +1179,129 @@ static int cm_umir_c_ty_match(const CmTyckSet *tyck, CmTyId pattern,
 }
 
 /* Resolve a trait-method declaration to the impl method for `self`. */
+static const CmUMirBody *cm_umir_c_active_body;
+static CmTyId cm_umir_c_local_type(const CmUMirBody *body, CmUMirLocalId local);
+
+/* Whether `method`'s parameter types (with impl generics bound so far)
+ * accept the call's operand types: distinguishes `impl SliceIndex<[T]>`
+ * from `impl SliceIndex<str>` for the same Self. */
+static int cm_umir_c_method_accepts(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmHirItem *method,
+    const CmUMirStatement *statement, uint32_t first_arg,
+    CmHirGenericParamId *bound_params, CmTyId *bound_types, uint32_t *bound)
+{
+    const CmHirFunctionSignature *sig = &method->data.function_item.signature;
+    uint32_t operands;
+    uint32_t skip;
+    uint32_t param;
+    if (statement == NULL || cm_umir_c_active_body == NULL
+        || statement->operand_overflow != 0u
+        || statement->operand_count < first_arg) return 1;
+    operands = statement->operand_count - first_arg;
+    skip = sig->parameter_count == operands ? 0u
+        : sig->parameter_count + 1u == operands ? 1u : 0xFFFFu;
+    if (skip == 0xFFFFu) return 1;
+    for (param = 0u; param < sig->parameter_count; ++param) {
+        CmTyId pattern = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+            sig->parameters[param].type);
+        CmTyId actual = cm_umir_c_local_type(cm_umir_c_active_body,
+            statement->operands[first_arg + skip + param]);
+        const CmTy *pt;
+        const CmTy *at;
+        if (pattern == CM_TY_NONE || actual == CM_TY_NONE) continue;
+        pt = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, pattern));
+        at = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, actual));
+        /* Only shape-level disagreement rejects (a `Self`, projection,
+         * or infer on either side is accepted). */
+        if (pt == NULL || at == NULL || pt->kind == CM_TY_SELF
+            || pt->kind == CM_TY_PROJECTION || at->kind == CM_TY_INFER
+            || at->kind == CM_TY_PARAM || at->kind == CM_TY_PROJECTION)
+            continue;
+        if (!cm_umir_c_ty_match(tyck, pattern, actual, bound_params,
+                bound_types, bound, 32u, 0u)) {
+            /* Reference/pointer flavor differences are tolerated. */
+            const CmTy *pp = pt;
+            const CmTy *ap = at;
+            /* Peeled independently: an autoref'd receiver carries one
+             * fewer reference layer than its `&mut Self` parameter. */
+            while (pp != NULL
+                && (pp->kind == CM_TY_REF || pp->kind == CM_TY_PTR))
+                pp = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, pp->children[0]));
+            while (ap != NULL
+                && (ap->kind == CM_TY_REF || ap->kind == CM_TY_PTR))
+                ap = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, ap->children[0]));
+            if (pp != NULL && ap != NULL && pp->kind != ap->kind
+                && pp->kind != CM_TY_PARAM && pp->kind != CM_TY_SELF
+                && pp->kind != CM_TY_PROJECTION && ap->kind != CM_TY_PARAM
+                && ap->kind != CM_TY_INFER) {
+                if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                    CmStrBuf text;
+                    cm_str_buf_init(&text);
+                    cm_ty_print((CmTyArena *)&tyck->arena, hir, pattern,
+                        &text);
+                    cm_str_buf_append(&text, " vs ");
+                    cm_ty_print((CmTyArena *)&tyck->arena, hir, actual,
+                        &text);
+                    fprintf(stderr, "UMIR reject param=%u %.*s\n",
+                        (unsigned)param, (int)text.len, text.data);
+                    cm_str_buf_destroy(&text);
+                }
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* `declaration`'s method inside `impl`, if its parameters accept the
+ * call; binds the impl's generics positionally into out_types. */
+static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmHirItem *impl,
+    const CmHirItem *declaration, const CmUMirStatement *statement,
+    uint32_t first_arg, CmHirGenericParamId *bound_params,
+    CmTyId *bound_types, uint32_t *bound, CmTyId *out_types,
+    uint32_t *out_count)
+{
+    size_t child;
+    for (child = 0u; child < hir->items.len; ++child) {
+        const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, child);
+        if (method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_hir_def_id_equal(method->parent_definition,
+                impl->definition)
+            || method->name != declaration->name) continue;
+        if (!cm_umir_c_method_accepts(hir, tyck, method, statement,
+                first_arg, bound_params, bound_types, bound))
+            return cm_hir_def_id_none();
+        if (out_types != NULL && out_count != NULL) {
+            /* Positional over the impl's parameters; an unbound one keeps
+             * itself (identity substitution). */
+            uint32_t param;
+            uint32_t limit = impl->generic_parameter_count > 32u
+                ? 32u : impl->generic_parameter_count;
+            for (param = 0u; param < limit; ++param) {
+                CmHirGenericParamId id = impl->generic_parameter_start + param;
+                uint32_t scan;
+                out_types[param] = cm_ty_param((CmTyArena *)&tyck->arena, id);
+                for (scan = 0u; scan < *bound; ++scan)
+                    if (bound_params[scan] == id)
+                        out_types[param] = bound_types[scan];
+            }
+            *out_count = limit;
+        }
+        return method->definition;
+    }
+    return cm_hir_def_id_none();
+}
+
 static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
     const CmTyckSet *tyck, const CmHirItem *declaration, CmTyId self,
-    CmTyId *out_types, uint32_t *out_count)
+    CmTyId *out_types, uint32_t *out_count,
+    const CmUMirStatement *statement, uint32_t first_arg)
 {
     const CmHirItem *trait_item;
     size_t index;
@@ -1110,7 +1317,6 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
         const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
             &hir->items, index);
         CmTyId impl_self;
-        size_t child;
         if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
             || !cm_hir_def_id_equal(
                 impl->data.impl_item.trait_type.definition,
@@ -1145,33 +1351,11 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
             }
             continue;
         }
-        for (child = 0u; child < hir->items.len; ++child) {
-            const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
-                &hir->items, child);
-            if (method != NULL && method->kind == CM_HIR_ITEM_FUNCTION
-                && cm_hir_def_id_equal(method->parent_definition,
-                    impl->definition)
-                && method->name == declaration->name) {
-                if (out_types != NULL && out_count != NULL) {
-                    /* Positional over the impl's parameters; an unbound
-                     * one keeps itself (identity substitution). */
-                    uint32_t param;
-                    uint32_t limit = impl->generic_parameter_count > 32u
-                        ? 32u : impl->generic_parameter_count;
-                    for (param = 0u; param < limit; ++param) {
-                        CmHirGenericParamId id =
-                            impl->generic_parameter_start + param;
-                        uint32_t scan;
-                        out_types[param] = cm_ty_param(
-                            (CmTyArena *)&tyck->arena, id);
-                        for (scan = 0u; scan < bound; ++scan)
-                            if (bound_params[scan] == id)
-                                out_types[param] = bound_types[scan];
-                    }
-                    *out_count = limit;
-                }
-                return method->definition;
-            }
+        {
+            CmHirDefId found = cm_umir_c_impl_method(hir, tyck, impl,
+                declaration, statement, first_arg, bound_params,
+                bound_types, &bound, out_types, out_count);
+            if (!cm_hir_def_id_is_none(found)) return found;
         }
     }
     {
@@ -1202,7 +1386,6 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
                 const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
                     &hir->items, index);
                 const CmTy *impl_ty;
-                size_t child;
                 if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
                     || !cm_hir_def_id_equal(
                         impl->data.impl_item.trait_type.definition,
@@ -1212,14 +1395,17 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
                         cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
                             impl->data.impl_item.self_type)));
                 if (impl_ty == NULL || impl_ty->kind != CM_TY_INT) continue;
-                for (child = 0u; child < hir->items.len; ++child) {
-                    const CmHirItem *method = (const CmHirItem *)
-                        cm_vec_at_const(&hir->items, child);
-                    if (method != NULL && method->kind == CM_HIR_ITEM_FUNCTION
-                        && cm_hir_def_id_equal(method->parent_definition,
-                            impl->definition)
-                        && method->name == declaration->name)
-                        return method->definition;
+                {
+                    /* The same parameter filter as the exact scan: the
+                     * `usize` impls of `SliceIndex<ByteStr>` and
+                     * `SliceIndex<[T]>` differ only in their `slice`. */
+                    CmHirGenericParamId fb_params[32];
+                    CmTyId fb_types[32];
+                    uint32_t fb_bound = 0u;
+                    CmHirDefId found = cm_umir_c_impl_method(hir, tyck,
+                        impl, declaration, statement, first_arg, fb_params,
+                        fb_types, &fb_bound, out_types, out_count);
+                    if (!cm_hir_def_id_is_none(found)) return found;
                 }
             }
         }
@@ -1336,7 +1522,7 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                     self = self_ty->children[0];
             }
             resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
-                self, bound_types, &bound_count);
+                self, bound_types, &bound_count, statement, first_arg);
             {
                 /* Lenient fallback: peel every reference layer. */
                 const CmTy *self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
@@ -1348,7 +1534,8 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                     self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
                         cm_ty_resolve((CmTyArena *)&tyck->arena, self));
                     resolved = cm_umir_c_resolve_impl_method(hir, tyck,
-                        item, self, bound_types, &bound_count);
+                        item, self, bound_types, &bound_count, statement,
+                        first_arg);
                 }
             }
             if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
@@ -1927,6 +2114,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     /* Definition: one frame array of uniform slots; parameters arrive
      * as p<i>.  Closure bodies take the enclosing frame as `env`. */
     cm_umir_c_active_body = body;
+    cm_umir_c_hir = hir;
     cm_str_buf_append(output, "long long ");
     if (body->closure_expr != CM_U_EXPR_NONE) {
         const CmUExpr *closure = cm_ubody_get_expr(ub, body->closure_expr);
@@ -2291,9 +2479,19 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     /* `(long long)(OP (abi)local)` — balanced by
                      * construction. */
                     if (expr->data.unary.op == CM_U_UNARY_DEREF) {
-                        /* Load through the reference. */
-                        cm_str_buf_append(output,
-                            "*(long long *)(intptr_t)");
+                        /* Load through the reference at the pointee's
+                         * scalar width (packed arrays store elements at
+                         * their own width). */
+                        const char *scalar = cm_umir_c_scalar_type(tyck,
+                            cm_umir_c_subst(statement->type));
+                        if (scalar != NULL) {
+                            cm_str_buf_append(output, "(long long)*(");
+                            cm_str_buf_append(output, scalar);
+                            cm_str_buf_append(output, " *)(intptr_t)");
+                        } else {
+                            cm_str_buf_append(output,
+                                "*(long long *)(intptr_t)");
+                        }
                         cm_umir_c_render_local(output,
                             statement->operands[0]);
                     } else {
@@ -2324,10 +2522,29 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 const CmTy *at = agg_type == CM_TY_NONE ? NULL
                     : cm_ty_get((CmTyArena *)&tyck->arena,
                         cm_ty_resolve((CmTyArena *)&tyck->arena, agg_type));
-                if (statement->operand_count == 1u
-                    && statement->operand_overflow == 0u
-                    && cm_umir_c_transparent_struct(hir, tyck, agg_type)) {
-                    cm_umir_c_render_local(output, statement->operands[0]);
+                if (statement->operand_overflow == 0u
+                    && cm_umir_c_transparent_field(hir, tyck, agg_type) >= 0) {
+                    /* The representative field's operand is the value; a
+                     * literal that only names zero-sized fields is 0. */
+                    long representative = cm_umir_c_transparent_field(hir,
+                        tyck, agg_type);
+                    uint32_t member;
+                    int rendered = 0;
+                    for (member = 0u; member < statement->operand_count; ++member) {
+                        long slot = (long)member;
+                        if (expr != NULL && expr->kind == CM_U_EXPR_STRUCT
+                            && member < expr->data.struct_expr.field_count)
+                            slot = cm_umir_c_field_index(hir, tyck, ubodies,
+                                statement->type,
+                                expr->data.struct_expr.fields[member].name);
+                        if (slot == representative) {
+                            cm_umir_c_render_local(output,
+                                statement->operands[member]);
+                            rendered = 1;
+                            break;
+                        }
+                    }
+                    if (!rendered) cm_str_buf_append(output, "0");
                     break;
                 }
                 if (at != NULL && at->kind == CM_TY_ARRAY) {
@@ -2535,11 +2752,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 CmTyId base_type = cm_umir_c_local_type(body,
                     statement->operands[0]);
                 unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
-                if (cm_umir_c_transparent_struct(hir, tyck,
-                        cm_umir_c_peel(tyck, base_type))) {
-                    cm_umir_c_render_loaded(output, statement->operands[0],
-                        depth);
-                    break;
+                {
+                    long representative = cm_umir_c_transparent_field(hir,
+                        tyck, cm_umir_c_peel(tyck, base_type));
+                    if (representative >= 0) {
+                        if ((unsigned long)representative
+                                == (unsigned long)statement->immediate)
+                            cm_umir_c_render_loaded(output,
+                                statement->operands[0], depth);
+                        else
+                            cm_str_buf_append(output, "0");
+                        break;
+                    }
                 }
                 cm_umir_c_render_base(output, statement->operands[0], depth);
                 cm_str_buf_push(output, '[');
@@ -2566,6 +2790,24 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_append(output, "[0]");
                     break;
                 }
+                {
+                    /* `&arr as *const [T; N] as *const T`: the element
+                     * pointer is the array block the reference points at. */
+                    const CmTy *fp = cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena,
+                            cm_umir_c_peel(tyck, from)));
+                    const CmTy *tp = cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena,
+                            cm_umir_c_peel(tyck, to)));
+                    if (fp != NULL && fp->kind == CM_TY_ARRAY
+                        && cm_umir_c_ref_depth(tyck, from) != 0u
+                        && cm_umir_c_ref_depth(tyck, to) != 0u
+                        && (tp == NULL || tp->kind != CM_TY_ARRAY)) {
+                        cm_umir_c_render_loaded(output, statement->operands[0],
+                            cm_umir_c_ref_depth(tyck, from));
+                        break;
+                    }
+                }
                 cm_str_buf_append(output, "(long long)(");
                 cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena,
                     to));
@@ -2586,15 +2828,21 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         statement->operands[0]);
                     unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
                     cm_str_buf_append(output, "0; ");
-                    if (cm_umir_c_transparent_struct(hir, tyck,
-                            cm_umir_c_peel(tyck, base_type))) {
-                        /* The field is the value: assign the referent (or
-                         * the local itself by value). */
-                        cm_umir_c_render_loaded(output, statement->operands[0],
-                            depth);
-                        cm_str_buf_append(output, " = ");
-                        cm_umir_c_render_local(output, statement->operands[1]);
-                        break;
+                    {
+                        long representative = cm_umir_c_transparent_field(hir,
+                            tyck, cm_umir_c_peel(tyck, base_type));
+                        if (representative >= 0) {
+                            /* The field is the value: assign the referent
+                             * (or the local itself); a zero-sized field
+                             * store is a no-op. */
+                            if (representative != slot) break;
+                            cm_umir_c_render_loaded(output,
+                                statement->operands[0], depth);
+                            cm_str_buf_append(output, " = ");
+                            cm_umir_c_render_local(output,
+                                statement->operands[1]);
+                            break;
+                        }
                     }
                     cm_umir_c_render_base(output, statement->operands[0],
                         depth);
@@ -2644,6 +2892,16 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                  * string data never over-read; everything else is a slot. */
                 const char *scalar = cm_umir_c_scalar_type(tyck,
                     cm_umir_c_subst(statement->type));
+                if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                    CmStrBuf text;
+                    cm_str_buf_init(&text);
+                    cm_ty_print((CmTyArena *)&tyck->arena, hir,
+                        cm_umir_c_subst(statement->type), &text);
+                    fprintf(stderr, "UMIR load-type %.*s scalar=%s\n",
+                        (int)text.len, text.data,
+                        scalar == NULL ? "-" : scalar);
+                    cm_str_buf_destroy(&text);
+                }
                 if (scalar != NULL) {
                     cm_str_buf_append(output, "(long long)*(");
                     cm_str_buf_append(output, scalar);
@@ -2688,11 +2946,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     CmTyId base_type = cm_umir_c_local_type(body,
                         statement->operands[0]);
                     unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
-                    if (cm_umir_c_transparent_struct(hir, tyck,
-                            cm_umir_c_peel(tyck, base_type))) {
-                        cm_umir_c_render_loaded(output, statement->operands[0],
-                            depth);
-                        break;
+                    {
+                        long representative = cm_umir_c_transparent_field(hir,
+                            tyck, cm_umir_c_peel(tyck, base_type));
+                        if (representative >= 0) {
+                            /* A zero-sized field reads 0. */
+                            if (representative == slot)
+                                cm_umir_c_render_loaded(output,
+                                    statement->operands[0], depth);
+                            else
+                                cm_str_buf_append(output, "0");
+                            break;
+                        }
                     }
                     cm_umir_c_render_base(output, statement->operands[0],
                         depth);
@@ -3215,6 +3480,7 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     memset(&program, 0, sizeof(program));
     cm_vec_init(&program.instances, sizeof(CmUMirInstance));
     cm_vec_init(&program.vtables, sizeof(CmUMirVtable));
+    cm_umir_c_hir = hir;
     program.hir = hir;
     program.umir = umir;
     program.ubodies = ubodies;
