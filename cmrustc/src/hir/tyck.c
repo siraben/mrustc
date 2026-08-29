@@ -899,6 +899,27 @@ static int cm_tyck_lookup_assoc(CmTyckEnv *env, CmTyId self_type,
     return cm_tyck_lookup_assoc_in(env, self_type, name, out, 7u, 0u);
 }
 
+/* Associated lookup where a generic self (`T`, `Self`, a projection)
+ * must not pick an impl that merely unifies with the parameter: prefer
+ * the trait declaration, which emission resolves per instance. */
+static int cm_tyck_lookup_assoc_generic(CmTyckEnv *env, CmTyId self_type,
+    CmInternId name, CmTyckFound *found)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *st = cm_ty_get(arena, cm_ty_resolve(arena, self_type));
+    if (st != NULL && (st->kind == CM_TY_PARAM || st->kind == CM_TY_SELF
+            || st->kind == CM_TY_PROJECTION)) {
+        CmTyckFound decl;
+        if (cm_tyck_lookup_assoc_in(env, self_type, name, &decl, 4u, 0u)
+            && decl.item != NULL && decl.parent != NULL
+            && decl.parent->kind == CM_HIR_ITEM_TRAIT) {
+            *found = decl;
+            return 1;
+        }
+    }
+    return cm_tyck_lookup_assoc(env, self_type, name, found);
+}
+
 /* Is `def` one of the callable traits? */
 static int cm_tyck_is_fn_trait(CmTyckEnv *env, CmHirDefId def)
 {
@@ -2034,7 +2055,7 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             /* `Self` / `Type` alone in value position: unit struct. */
             return self_type;
         }
-        if (cm_tyck_lookup_assoc(env, self_type, last, &found)) {
+        if (cm_tyck_lookup_assoc_generic(env, self_type, last, &found)) {
             if (found.item->kind == CM_HIR_ITEM_FUNCTION) {
                 if (env->out->method_targets != NULL
                     && id != CM_U_EXPR_NONE)
@@ -3550,7 +3571,10 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                     text->bytes, text->len);
         }
         if (name != CM_INTERN_ID_NONE
-            && cm_tyck_lookup_assoc(env, self_type, name, &found)) {
+            && cm_tyck_lookup_assoc_generic(env, self_type, name, &found)) {
+            if (found.item->kind == CM_HIR_ITEM_FUNCTION
+                && env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
+                env->out->method_targets[id] = found.item->definition;
             if (found.item->kind == CM_HIR_ITEM_FUNCTION
                 && found.parent != NULL
                 && found.parent->kind == CM_HIR_ITEM_TRAIT) {
