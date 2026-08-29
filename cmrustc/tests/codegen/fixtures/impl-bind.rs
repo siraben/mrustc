@@ -24,7 +24,9 @@ impl<T> Index<[T]> for Skip {
 }
 
 fn tail<T, I: Index<[T]>>(s: &[T], i: I) -> *const u8 {
-    i.at(s as *const [T])
+    // `&[T]` coerces to the `*const [T]` parameter: the impl's `T` must
+    // still bind through the reference/pointer flavor difference.
+    i.at(s)
 }
 
 #[no_mangle]

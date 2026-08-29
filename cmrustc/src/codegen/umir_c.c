@@ -1261,19 +1261,30 @@ static int cm_umir_c_method_accepts(const CmHirContext *hir,
             continue;
         if (!cm_umir_c_ty_match(tyck, pattern, actual, bound_params,
                 bound_types, bound, 32u, 0u)) {
-            /* Reference/pointer flavor differences are tolerated. */
+            /* Reference/pointer flavor differences are tolerated: peel
+             * both sides (independently — an autoref'd receiver carries
+             * one fewer layer than its `&mut Self` parameter, `&[T]`
+             * coerces to a `*const [T]` parameter) and match the
+             * pointees so the impl's own parameters still bind. */
+            CmTyId pp_id = pattern;
+            CmTyId ap_id = actual;
             const CmTy *pp = pt;
             const CmTy *ap = at;
-            /* Peeled independently: an autoref'd receiver carries one
-             * fewer reference layer than its `&mut Self` parameter. */
             while (pp != NULL
-                && (pp->kind == CM_TY_REF || pp->kind == CM_TY_PTR))
+                && (pp->kind == CM_TY_REF || pp->kind == CM_TY_PTR)) {
+                pp_id = pp->children[0];
                 pp = cm_ty_get((CmTyArena *)&tyck->arena,
-                    cm_ty_resolve((CmTyArena *)&tyck->arena, pp->children[0]));
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, pp_id));
+            }
             while (ap != NULL
-                && (ap->kind == CM_TY_REF || ap->kind == CM_TY_PTR))
+                && (ap->kind == CM_TY_REF || ap->kind == CM_TY_PTR)) {
+                ap_id = ap->children[0];
                 ap = cm_ty_get((CmTyArena *)&tyck->arena,
-                    cm_ty_resolve((CmTyArena *)&tyck->arena, ap->children[0]));
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, ap_id));
+            }
+            if (pp != NULL && ap != NULL && pp->kind == ap->kind)
+                (void)cm_umir_c_ty_match(tyck, pp_id, ap_id, bound_params,
+                    bound_types, bound, 32u, 0u);
             if (pp != NULL && ap != NULL && pp->kind != ap->kind
                 && pp->kind != CM_TY_PARAM && pp->kind != CM_TY_SELF
                 && pp->kind != CM_TY_PROJECTION && ap->kind != CM_TY_PARAM
