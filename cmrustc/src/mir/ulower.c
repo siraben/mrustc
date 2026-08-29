@@ -801,20 +801,21 @@ static uint32_t cm_umir_slice_pattern_shape(const CmUMirBuilder *builder,
     for (index = 0u; index < pat->data.list.pattern_count; ++index) {
         const CmUPat *sub = cm_ubody_get_pat(builder->ub,
             pat->data.list.patterns[index]);
-        int is_rest = (pat->data.list.has_rest
-                && index == pat->data.list.rest_index)
-            || (sub != NULL && (sub->kind == CM_U_PAT_REST
-                || (sub->kind == CM_U_PAT_BINDING
-                    && cm_ubody_get_pat(builder->ub,
-                        sub->data.binding.subpattern) != NULL
-                    && cm_ubody_get_pat(builder->ub,
-                        sub->data.binding.subpattern)->kind
-                        == CM_U_PAT_REST)));
+        /* A bare `..` is not in the list: `rest_index` counts the
+         * elements before it.  A `rest @ ..` node is. */
+        int is_rest = sub != NULL && (sub->kind == CM_U_PAT_REST
+            || (sub->kind == CM_U_PAT_BINDING
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern) != NULL
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern)->kind == CM_U_PAT_REST));
+        int bare_rest_before = pat->data.list.has_rest
+            && index >= pat->data.list.rest_index;
         if (is_rest) {
             seen_rest = 1;
             continue;
         }
-        if (seen_rest) *after_rest += 1u;
+        if (seen_rest || bare_rest_before) *after_rest += 1u;
         else before += 1u;
     }
     *has_rest = seen_rest || pat->data.list.has_rest;
@@ -881,8 +882,10 @@ static void cm_umir_variant_check(CmUMirBuilder *builder,
  * literal / nested tests (loaded through the address when needed). */
 static CmUMirLocalId cm_umir_slice_pattern_element(CmUMirBuilder *builder,
     CmUPatId pat_id, CmUPatId sub_id, CmUMirLocalId value, uint32_t index,
-    CmUExprId id, CmUMirLocalId *out_value)
+    uint32_t from_end, CmUExprId id, CmUMirLocalId *out_value)
 {
+    /* `from_end` k > 0: element `len - k` (`[.., last]`), carried as the
+     * index rvalue's immediate; the index operand is then unused. */
     CmUMirLocalId ops[2];
     CmUMirLocalId idx = cm_umir_literal_local(builder, (long)index);
     CmTyId sub_type = builder->tb != NULL && builder->tb->pat_types != NULL
@@ -895,8 +898,8 @@ static CmUMirLocalId cm_umir_slice_pattern_element(CmUMirBuilder *builder,
         const CmTy *st = sub_type == CM_TY_NONE || builder->tyck == NULL
             ? NULL : cm_ty_get((CmTyArena *)&builder->tyck->arena,
                 cm_ty_resolve((CmTyArena *)&builder->tyck->arena, sub_type));
-        cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
-            sub_type, ops, 2u);
+        cm_umir_push_immediate(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
+            sub_type, ops, 2u, from_end);
         loaded = cm_umir_new_local(builder, st != NULL
             && (st->kind == CM_TY_REF || st->kind == CM_TY_PTR)
             ? st->children[0] : CM_TY_NONE);
@@ -907,11 +910,82 @@ static CmUMirLocalId cm_umir_slice_pattern_element(CmUMirBuilder *builder,
         return address;
     } else {
         CmUMirLocalId element = cm_umir_new_local(builder, sub_type);
-        cm_umir_push_operands(builder, element, CM_UMIR_RVALUE_INDEX, id,
-            sub_type, ops, 2u);
+        cm_umir_push_immediate(builder, element, CM_UMIR_RVALUE_INDEX, id,
+            sub_type, ops, 2u, from_end);
         *out_value = element;
         return element;
     }
+}
+
+/* Elements after a slice pattern's rest (`[.., a, b]`): each is `len - k`
+ * for k counting from the end; `visit` receives the sub-pattern and its
+ * element (address behind a reference) plus its loaded value. */
+typedef void (*CmUMirSliceTailVisit)(CmUMirBuilder *builder, CmUPatId sub,
+    CmUMirLocalId element, CmUMirLocalId element_value, CmUExprId id,
+    void *context);
+
+static void cm_umir_slice_pattern_tail(CmUMirBuilder *builder,
+    CmUPatId pat_id, const CmUPat *pat, CmUMirLocalId value, uint32_t after,
+    CmUExprId id, CmUMirSliceTailVisit visit, void *context)
+{
+    uint32_t index;
+    uint32_t seen_rest = 0u;
+    uint32_t tail_position = 0u;
+    if (after == 0u) return;
+    for (index = 0u; index < pat->data.list.pattern_count; ++index) {
+        const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+            pat->data.list.patterns[index]);
+        int is_rest = sub != NULL && (sub->kind == CM_U_PAT_REST
+            || (sub->kind == CM_U_PAT_BINDING
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern) != NULL
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern)->kind == CM_U_PAT_REST));
+        if (is_rest) { seen_rest = 1u; continue; }
+        if (pat->data.list.has_rest && index >= pat->data.list.rest_index)
+            seen_rest = 1u;
+        if (!seen_rest || sub == NULL) continue;
+        if (sub->kind != CM_U_PAT_WILD) {
+            CmUMirLocalId element_value;
+            CmUMirLocalId element = cm_umir_slice_pattern_element(builder,
+                pat_id, pat->data.list.patterns[index], value, 0u,
+                after - tail_position, id, &element_value);
+            visit(builder, pat->data.list.patterns[index], element,
+                element_value, id, context);
+        }
+        tail_position += 1u;
+    }
+}
+
+static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
+    CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
+    CmUMirPatternFails *fails, unsigned int depth);
+static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
+    CmUMirLocalId value, CmUExprId id);
+
+typedef struct CmUMirSliceTailCheck {
+    CmUMirPatternFails *fails;
+    unsigned int depth;
+} CmUMirSliceTailCheck;
+
+static void cm_umir_slice_tail_check(CmUMirBuilder *builder, CmUPatId sub,
+    CmUMirLocalId element, CmUMirLocalId element_value, CmUExprId id,
+    void *context)
+{
+    CmUMirSliceTailCheck *tail = (CmUMirSliceTailCheck *)context;
+    const CmUPat *sp = cm_ubody_get_pat(builder->ub, sub);
+    cm_umir_emit_pattern_checks(builder, sub,
+        sp != NULL && sp->kind == CM_U_PAT_BINDING ? element : element_value,
+        id, tail->fails, tail->depth + 1u);
+}
+
+static void cm_umir_slice_tail_bind(CmUMirBuilder *builder, CmUPatId sub,
+    CmUMirLocalId element, CmUMirLocalId element_value, CmUExprId id,
+    void *context)
+{
+    (void)element_value;
+    (void)context;
+    cm_umir_bind_pattern(builder, sub, element, id);
 }
 
 static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
@@ -1045,13 +1119,20 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                  * pattern tests the element's value. */
                 CmUMirLocalId element = cm_umir_slice_pattern_element(
                     builder, pat_id, pat->data.list.patterns[sub], value,
-                    position, id, &element_value);
+                    position, 0u, id, &element_value);
                 cm_umir_emit_pattern_checks(builder,
                     pat->data.list.patterns[sub],
                     sp->kind == CM_U_PAT_BINDING ? element : element_value,
                     id, fails, depth + 1u);
             }
             position += 1u;
+        }
+        {
+            CmUMirSliceTailCheck tail;
+            tail.fails = fails;
+            tail.depth = depth;
+            cm_umir_slice_pattern_tail(builder, pat_id, pat, value, after, id,
+                cm_umir_slice_tail_check, &tail);
         }
         break;
     }
@@ -1269,13 +1350,15 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
                 break;
             if (sub->kind != CM_U_PAT_WILD) {
                 element = cm_umir_slice_pattern_element(builder, pat_id,
-                    pat->data.list.patterns[index], value, position, id,
+                    pat->data.list.patterns[index], value, position, 0u, id,
                     &element_value);
                 cm_umir_bind_pattern(builder, pat->data.list.patterns[index],
                     element, id);
             }
             position += 1u;
         }
+        cm_umir_slice_pattern_tail(builder, pat_id, pat, value, after, id,
+            cm_umir_slice_tail_bind, NULL);
         break;
     }
     case CM_U_PAT_TUPLE_STRUCT: {
@@ -1446,6 +1529,21 @@ static void cm_umir_emit_pattern_test(CmUMirBuilder *builder,
         current->goto_target = success;
     }
     builder->current = success;
+    /* Beyond the variant: a slice's length (`if let [.., last] = xs`),
+     * literals, ranges and nested variants are refutable too -- the
+     * match arm machinery tests them, each failure edge landing in
+     * `fail`. */
+    if (cm_umir_pattern_needs_test(builder, pat, disc >= 0 ? 0 : 1)) {
+        CmUMirPatternFails fails;
+        uint32_t pending;
+        fails.count = 0u;
+        cm_umir_emit_pattern_checks(builder, pat_id, value, id, &fails, 0u);
+        for (pending = 0u; pending < fails.count; ++pending) {
+            CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, fails.blocks[pending]);
+            if (block != NULL) block->false_target = fail;
+        }
+    }
     cm_umir_bind_pattern(builder, pat_id, value, id);
     *out_fail = fail;
 }
@@ -1607,6 +1705,23 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         uint32_t recorded = 0u;
         CmUMirLocalId receiver = cm_umir_place(builder,
             expr->data.method_call.receiver);
+        /* A receiver produced by a call (`self.inner.borrow_mut()
+         * .write_all(buf)`, `self.lock().write_fmt(args)`) is a
+         * temporary: when the callee borrows it (`&self` / `&mut self`)
+         * it dies at the end of this call and its drop glue runs (a
+         * RefCell borrow flag, a lock's owner). */
+        CmUMirLocalId receiver_temp = 0u;
+        CmTyId receiver_temp_type = CM_TY_NONE;
+        {
+            const CmUExpr *recv = cm_ubody_get_expr(builder->ub,
+                expr->data.method_call.receiver);
+            if (recv != NULL && (recv->kind == CM_U_EXPR_CALL
+                    || recv->kind == CM_U_EXPR_METHOD_CALL)) {
+                receiver_temp = receiver;
+                receiver_temp_type = cm_umir_expr_type(builder,
+                    expr->data.method_call.receiver);
+            }
+        }
         /* Receiver adjustment: `&self` callees take the receiver's
          * address, by-value callees load through a reference.  A local
          * receiver is its own slot so autoref aliases the variable. */
@@ -1792,6 +1907,32 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         cm_umir_push_operands(builder, destination,
             CM_UMIR_RVALUE_METHOD_CALL, id, type, operands,
             1u + expr->data.method_call.argument_count);
+        if (receiver_temp != 0u && builder->tb->method_targets != NULL
+            && builder->hir != NULL) {
+            const CmHirDefinition *record = cm_hir_lookup_definition(
+                builder->hir, builder->tb->method_targets[id]);
+            const CmHirItem *callee = record == NULL
+                    || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+                : cm_hir_get_item(builder->hir, record->entity.item_id);
+            CmHirReceiverKind kind = callee == NULL
+                    || callee->kind != CM_HIR_ITEM_FUNCTION
+                ? CM_HIR_RECEIVER_NONE
+                : callee->data.function_item.signature.receiver;
+            const CmTy *tt = receiver_temp_type == CM_TY_NONE
+                    || builder->tyck == NULL ? NULL
+                : cm_ty_get((CmTyArena *)&builder->tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&builder->tyck->arena,
+                        receiver_temp_type));
+            if ((kind == CM_HIR_RECEIVER_REF_SHARED
+                    || kind == CM_HIR_RECEIVER_REF_MUTABLE)
+                && tt != NULL && tt->kind == CM_TY_ADT) {
+                CmUMirLocalId dropped = cm_umir_new_local(builder,
+                    CM_TY_NONE);
+                cm_umir_push_operands(builder, dropped, CM_UMIR_RVALUE_DROP,
+                    expr->data.method_call.receiver, receiver_temp_type,
+                    &receiver_temp, 1u);
+            }
+        }
         break;
     }
     case CM_U_EXPR_REF: {

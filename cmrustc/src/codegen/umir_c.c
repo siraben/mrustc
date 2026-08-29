@@ -147,6 +147,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_SLICE_LEN:
                     case CM_UMIR_RVALUE_STATIC_ADDR:
                     case CM_UMIR_RVALUE_SUBSLICE:
+                    case CM_UMIR_RVALUE_DROP:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
@@ -2944,6 +2945,138 @@ static CmHirDefId cm_umir_c_deref_fn(const CmHirContext *hir, int mutable)
     return cm_hir_def_id_none();
 }
 
+/* `Drop::drop`'s declaration, by name (like `cm_umir_c_deref_fn`). */
+static CmHirDefId cm_umir_c_drop_fn(const CmHirContext *hir)
+{
+    size_t index;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, index);
+        const CmInternedString *name;
+        const CmHirItem *parent;
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || cm_hir_def_id_is_none(item->parent_definition)) continue;
+        name = cm_interner_get(&hir->strings, item->name);
+        if (name == NULL || name->len != 4u
+            || memcmp(name->bytes, "drop", 4u) != 0) continue;
+        parent = cm_umir_c_item_of(hir, item->parent_definition);
+        if (parent == NULL || parent->kind != CM_HIR_ITEM_TRAIT) continue;
+        name = cm_interner_get(&hir->strings, parent->name);
+        if (name != NULL && name->len == 4u
+            && memcmp(name->bytes, "Drop", 4u) == 0)
+            return item->definition;
+    }
+    return cm_hir_def_id_none();
+}
+
+/* The `impl Drop for T` method for `type`, or none. */
+static CmHirDefId cm_umir_c_drop_impl(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmHirDefId drop_decl, CmTyId type)
+{
+    const CmHirItem *decl = cm_hir_def_id_is_none(drop_decl) ? NULL
+        : cm_umir_c_item_of(hir, drop_decl);
+    if (decl == NULL) return cm_hir_def_id_none();
+    return cm_umir_c_resolve_impl_method(hir, tyck, decl, type, NULL, NULL,
+        NULL, 0u);
+}
+
+/* Drop glue reaches: a `Drop` impl on the type, or one inside a struct's
+ * fields (a RefMut's BorrowRefMut).  Enums and pointers are not walked. */
+static int cm_umir_c_type_needs_drop(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmHirDefId drop_decl, CmTyId type,
+    unsigned int depth)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    uint32_t index;
+    if (ty == NULL || ty->kind != CM_TY_ADT || depth > 6u) return 0;
+    if (!cm_hir_def_id_is_none(cm_umir_c_drop_impl(hir, tyck, drop_decl,
+            type))) return 1;
+    record = cm_hir_lookup_definition(hir, ty->def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return 0;
+    item = cm_hir_get_item(hir, record->entity.item_id);
+    if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT) return 0;
+    for (index = 0u; index < item->data.aggregate_item.field_count; ++index) {
+        CmTyId field_type = cm_umir_c_transparent_inner(hir, tyck, type,
+            (long)index);
+        if (cm_umir_c_type_needs_drop(hir, tyck, drop_decl, field_type,
+                depth + 1u)) return 1;
+        item = cm_hir_get_item(hir, record->entity.item_id);
+    }
+    return 0;
+}
+
+/* Emit drop glue for the value whose slot address is `address` (a C
+ * expression yielding `long long`): the type's own `Drop::drop`, then
+ * each struct field's glue (field i is the block's slot i, a transparent
+ * wrapper's field the value itself). */
+static void cm_umir_c_render_drop(CmStrBuf *output, const CmHirContext *hir,
+    const CmTyckSet *tyck, CmHirDefId drop_decl, CmTyId type,
+    const char *address, size_t address_len, unsigned int depth)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    uint32_t index;
+    long representative;
+    if (ty == NULL || ty->kind != CM_TY_ADT || depth > 6u) return;
+    if (!cm_hir_def_id_is_none(cm_umir_c_drop_impl(hir, tyck, drop_decl,
+            type))) {
+        CmStrBuf symbol;
+        cm_str_buf_init(&symbol);
+        cm_umir_c_render_callee_symbol(&symbol, hir, tyck, drop_decl,
+            CM_TY_NONE, type, NULL, 0u);
+        cm_str_buf_append(output, "{ long long ");
+        cm_str_buf_append_n(output, symbol.data, symbol.len);
+        cm_str_buf_append(output, "(); ");
+        cm_str_buf_append_n(output, symbol.data, symbol.len);
+        cm_str_buf_push(output, '(');
+        cm_str_buf_append_n(output, address, address_len);
+        cm_str_buf_append(output, "); } ");
+        cm_str_buf_destroy(&symbol);
+    }
+    ty = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    record = cm_hir_lookup_definition(hir, ty->def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return;
+    item = cm_hir_get_item(hir, record->entity.item_id);
+    if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT) return;
+    representative = cm_umir_c_transparent_field(hir, tyck, type);
+    for (index = 0u; index < item->data.aggregate_item.field_count; ++index) {
+        CmTyId field_type = cm_umir_c_transparent_inner(hir, tyck, type,
+            (long)index);
+        CmStrBuf field_address;
+        if (!cm_umir_c_type_needs_drop(hir, tyck, drop_decl, field_type,
+                depth + 1u)) {
+            item = cm_hir_get_item(hir, record->entity.item_id);
+            continue;
+        }
+        cm_str_buf_init(&field_address);
+        if (representative >= 0) {
+            if ((long)index == representative)
+                cm_str_buf_append_n(&field_address, address, address_len);
+        } else {
+            cm_str_buf_append(&field_address,
+                "(long long)(intptr_t)&((long long *)(intptr_t)"
+                "*(long long *)(intptr_t)");
+            cm_str_buf_append_n(&field_address, address, address_len);
+            cm_str_buf_append(&field_address, ")[");
+            cm_umir_c_render_number(&field_address, (unsigned long)index);
+            cm_str_buf_push(&field_address, ']');
+        }
+        if (field_address.len != 0u)
+            cm_umir_c_render_drop(output, hir, tyck, drop_decl, field_type,
+                field_address.data, field_address.len, depth + 1u);
+        cm_str_buf_destroy(&field_address);
+        item = cm_hir_get_item(hir, record->entity.item_id);
+    }
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck)
@@ -3911,18 +4044,52 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             }
             case CM_UMIR_RVALUE_INDEX:
             case CM_UMIR_RVALUE_REF_INDEX: {
-                /* REF_INDEX: the element's address instead of its value. */
+                /* REF_INDEX: the element's address instead of its value.
+                 * An immediate k > 0 indexes from the end (`len - k`, a
+                 * slice pattern's `[.., last]`). */
                 CmTyId base_type = cm_umir_c_local_type(body,
                     statement->operands[0]);
-                const char *elem = cm_umir_c_array_elem_scalar(tyck,
-                    cm_umir_c_peel(tyck, base_type));
+                CmTyId pointee = cm_umir_c_peel(tyck, base_type);
+                const char *elem = cm_umir_c_array_elem_scalar(tyck, pointee);
                 const char *prefix = statement->kind
                     == CM_UMIR_RVALUE_REF_INDEX ? "(long long)(intptr_t)&"
                     : "(long long)";
-                if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, base_type))) {
+                int fat = cm_umir_c_is_fat(tyck, pointee);
+                CmStrBuf index;
+                cm_str_buf_init(&index);
+                if (statement->immediate != 0u) {
+                    cm_str_buf_append(&index, "(");
+                    if (fat) {
+                        cm_umir_c_render_base(&index, statement->operands[0],
+                            cm_umir_c_ref_depth(tyck, base_type));
+                        cm_str_buf_append(&index, "[1]");
+                    } else
+                        cm_umir_c_render_number(&index,
+                            cm_umir_c_array_len(tyck, pointee));
+                    cm_str_buf_append(&index, " - ");
+                    cm_umir_c_render_number(&index,
+                        (unsigned long)statement->immediate);
+                    cm_str_buf_append(&index, ")");
+                } else
+                    cm_umir_c_render_local(&index, statement->operands[1]);
+                if (fat) {
+                    const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena, pointee));
+                    const char *scalar = pt != NULL && pt->kind == CM_TY_STR
+                        ? "uint8_t" : pt != NULL && pt->count != 0u
+                            ? cm_umir_c_scalar_type(tyck, pt->children[0])
+                            : NULL;
                     cm_str_buf_append(output, prefix);
-                    cm_umir_c_render_slice_element(output, tyck, body,
-                        statement->operands[0], statement->operands[1]);
+                    cm_str_buf_append(output, "((");
+                    cm_str_buf_append(output, scalar == NULL ? "long long"
+                        : scalar);
+                    cm_str_buf_append(output, " *)(intptr_t)");
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, base_type));
+                    cm_str_buf_append(output, "[0])[");
+                    cm_str_buf_append_n(output, index.data, index.len);
+                    cm_str_buf_push(output, ']');
+                    cm_str_buf_destroy(&index);
                     break;
                 }
                 if (elem != NULL) {
@@ -3933,8 +4100,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_umir_c_render_base(output, statement->operands[0],
                         cm_umir_c_ref_depth(tyck, base_type));
                     cm_str_buf_append(output, ")[");
-                    cm_umir_c_render_local(output, statement->operands[1]);
+                    cm_str_buf_append_n(output, index.data, index.len);
                     cm_str_buf_push(output, ']');
+                    cm_str_buf_destroy(&index);
                     break;
                 }
                 if (statement->kind == CM_UMIR_RVALUE_REF_INDEX)
@@ -3942,8 +4110,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_umir_c_render_base(output, statement->operands[0],
                     cm_umir_c_ref_depth(tyck, base_type));
                 cm_str_buf_push(output, '[');
-                cm_umir_c_render_local(output, statement->operands[1]);
+                cm_str_buf_append_n(output, index.data, index.len);
                 cm_str_buf_push(output, ']');
+                cm_str_buf_destroy(&index);
                 break;
             }
             case CM_UMIR_RVALUE_CONST_PATTERN: {
@@ -4299,6 +4468,23 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_umir_c_render_symbol(output,
                     path_expr->data.path.resolution.definition);
                 cm_str_buf_append(output, "_addr(); }");
+                break;
+            }
+            case CM_UMIR_RVALUE_DROP: {
+                /* The temporary's drop glue; `&mut self` is its slot. */
+                CmHirDefId drop_decl = cm_umir_c_drop_fn(hir);
+                CmTyId dropped_type = cm_umir_c_subst(statement->type);
+                CmStrBuf address;
+                cm_str_buf_init(&address);
+                cm_str_buf_append(&address, "(long long)(intptr_t)&");
+                cm_umir_c_render_local(&address, statement->operands[0]);
+                cm_str_buf_append(output, "0; ");
+                if (!cm_hir_def_id_is_none(drop_decl)
+                    && cm_umir_c_type_needs_drop(hir, tyck, drop_decl,
+                        dropped_type, 0u))
+                    cm_umir_c_render_drop(output, hir, tyck, drop_decl,
+                        dropped_type, address.data, address.len, 0u);
+                cm_str_buf_destroy(&address);
                 break;
             }
             case CM_UMIR_RVALUE_SUBSLICE: {
@@ -5054,7 +5240,19 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                         continue;
                     }
                 }
-                cm_str_buf_append(output, "() { return 0; /* stub: ");
+                {
+                    /* A `-> !` stub (core's do_panic) must not return
+                     * into its caller as if the panic had not happened. */
+                    const CmHirType *ret = stub_item != NULL
+                            && stub_item->kind == CM_HIR_ITEM_FUNCTION
+                        ? cm_hir_get_type(hir, stub_item->data.function_item
+                            .signature.return_type) : NULL;
+                    if (ret != NULL && ret->kind == CM_HIR_TYPE_NEVER_KIND)
+                        cm_str_buf_append(output, "() { abort(); return 0;"
+                            " /* stub (never): ");
+                    else
+                        cm_str_buf_append(output, "() { return 0; /* stub: ");
+                }
                 cm_str_buf_append(output, reason);
                 cm_str_buf_append(output, ": ");
                 if (stub_name != NULL)
