@@ -2221,6 +2221,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         if (builder->census != NULL && (size_t)expr->kind < 34u)
             cm_mir_ulower_count(builder->census,
                 cm_umir_opaque_names[(size_t)expr->kind]);
+        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL)
+            fprintf(stderr, "UMIR opaque body=%lu expr=%lu kind=%d (%s)\n",
+                (unsigned long)builder->body->source, (unsigned long)id,
+                (int)expr->kind, (size_t)expr->kind < 34u
+                    ? cm_umir_opaque_names[(size_t)expr->kind] : "?");
         break;
     }
     if (builder->tb != NULL && builder->tb->unsize_targets != NULL

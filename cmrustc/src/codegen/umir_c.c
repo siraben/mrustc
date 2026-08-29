@@ -928,6 +928,14 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         cm_str_buf_append(output, "() { return 0; }");
         return 1;
     }
+    if (CM_SHIM_IS("box_new")) {
+        /* `Box::new(x)` (1.90's intrinsic): a heap cell holding the value
+         * — a scalar in the cell, an aggregate's block pointer in it — so
+         * the box reads like every other pointer to a `T` slot. */
+        cm_str_buf_append(output, "(long long v) { long long *b = "
+            "(long long *)malloc(8); *b = v; return (long long)(intptr_t)b; }");
+        return 1;
+    }
     if (CM_SHIM_IS("size_of_val") || CM_SHIM_IS("min_align_of_val")) {
         cm_str_buf_append(output, "(long long p) { (void)p; return ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
@@ -1380,6 +1388,8 @@ static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
     return cm_hir_def_id_none();
 }
 
+static CmUMirProgram *cm_umir_c_active_program;
+
 static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
     const CmTyckSet *tyck, const CmHirItem *declaration, CmTyId self,
     CmTyId *out_types, uint32_t *out_count,
@@ -1389,6 +1399,9 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
     size_t index;
     int blanket_pass;
     CmTyId self_resolved = cm_ty_resolve((CmTyArena *)&tyck->arena, self);
+    CmHirDefId bodiless = cm_hir_def_id_none();
+    CmTyId bodiless_types[32];
+    uint32_t bodiless_count = 0u;
     if (out_count != NULL) *out_count = 0u;
     if (declaration == NULL
         || cm_hir_def_id_is_none(declaration->parent_definition))
@@ -1450,8 +1463,35 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
             CmHirDefId found = cm_umir_c_impl_method(hir, tyck, impl,
                 declaration, statement, first_arg, bound_params,
                 bound_types, &bound, out_types, out_count);
-            if (!cm_hir_def_id_is_none(found)) return found;
+            if (!cm_hir_def_id_is_none(found)) {
+                /* Bounds are not modelled: `impl<T: Clone> ConvertVec for
+                 * T` and `impl<T: Copy> ConvertVec for T` both accept
+                 * `u8`.  An accepting method without a u-MIR body (a
+                 * partial default) yields to a later one that has a
+                 * body; it stays the fallback. */
+                const CmUMirProgram *program = cm_umir_c_active_program;
+                if (program == NULL || program->umir == NULL
+                    || cm_umir_c_umir_body(program->umir, hir, found,
+                        CM_U_EXPR_NONE) != NULL)
+                    return found;
+                if (cm_hir_def_id_is_none(bodiless)) {
+                    bodiless = found;
+                    if (out_types != NULL && out_count != NULL) {
+                        memcpy(bodiless_types, out_types,
+                            *out_count * sizeof(CmTyId));
+                        bodiless_count = *out_count;
+                    }
+                }
+            }
         }
+    }
+    if (!cm_hir_def_id_is_none(bodiless)) {
+        if (out_types != NULL && out_count != NULL) {
+            memcpy(out_types, bodiless_types,
+                bodiless_count * sizeof(CmTyId));
+            *out_count = bodiless_count;
+        }
+        return bodiless;
     }
     {
         /* Integer-width leniency: an index inferred as the default `i32`

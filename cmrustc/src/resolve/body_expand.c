@@ -1858,6 +1858,31 @@ static int cm_body_expand_macro(CmBodyExpandState *state, CmAstExprId id,
         const char *builtin_prefix = target.crate_identifier != NULL
             ? target.crate_identifier
             : state->options->crate_identifier;
+        /* The machinery a builtin names lives in core: an invocation
+         * reached through another crate's re-export (alloc's `format!`
+         * expands to `$crate::__export::format_args!`) or one whose path
+         * did not resolve must still spell `core::fmt::rt::...`, never
+         * `alloc::...` or this crate's own name. */
+        if (builtin != CM_BODY_BUILTIN_NONE) {
+            size_t artifact_index;
+            for (artifact_index = 0u;
+                    artifact_index < state->options->dependency_macro_count;
+                    ++artifact_index) {
+                const CmDependencyMacroArtifact *artifact =
+                    state->options->dependency_macros[artifact_index];
+                CmDependencyMacroArtifactIdentity identity;
+                if (artifact == NULL
+                    || !cm_dependency_macro_artifact_identity(artifact,
+                        &identity)) continue;
+                if ((identity.crate_identifier != NULL
+                        && strcmp(identity.crate_identifier, "core") == 0)
+                    || (identity.extern_name != NULL
+                        && strcmp(identity.extern_name, "core") == 0)) {
+                    builtin_prefix = identity.extern_name;
+                    break;
+                }
+            }
+        }
         (void)builtin_prefix;
     switch (builtin) {
     case CM_BODY_BUILTIN_AST:

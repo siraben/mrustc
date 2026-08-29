@@ -1754,6 +1754,14 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
             state->body->retained_macros += 1u;
         } else {
             node.kind = CM_U_EXPR_UNSUPPORTED;
+            if (getenv("CMRUSTC_UBODY_DEBUG") != NULL) {
+                const CmInternedString *text = last == CM_INTERN_ID_NONE
+                    ? NULL : cm_ast_get_string(state->ast, last);
+                fprintf(stderr, "UBODY unexpanded macro %.*s! segments=%u\n",
+                    text == NULL ? 1 : (int)text->len,
+                    text == NULL ? "?" : (const char *)text->bytes,
+                    path == NULL ? 0u : (unsigned)path->segment_count);
+            }
             cm_u_fail(state, "unexpanded macro invocation in body");
         }
         break;
