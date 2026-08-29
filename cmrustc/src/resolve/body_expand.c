@@ -489,8 +489,7 @@ static CmBodyBuiltin cm_body_builtin_by_name(const char *name)
     static const char *const unsupported[] = {
         "include_str", "include",
         "include_bytes", "compile_error", "concat_idents", "trace_macros",
-        "log_syntax", "global_asm", "naked_asm", "const_format_args_nl",
-        "format_args_nl", "type_ascribe"
+        "log_syntax", "global_asm", "naked_asm", "type_ascribe"
     };
     size_t index;
     for (index = 0u; index < sizeof(ast_builtins) / sizeof(ast_builtins[0]);
@@ -500,7 +499,10 @@ static CmBodyBuiltin cm_body_builtin_by_name(const char *name)
     if (strcmp(name, "panic") == 0) return CM_BODY_BUILTIN_PANIC;
     if (strcmp(name, "unreachable") == 0) return CM_BODY_BUILTIN_UNREACHABLE;
     if (strcmp(name, "format_args") == 0
-        || strcmp(name, "const_format_args") == 0)
+        || strcmp(name, "const_format_args") == 0
+        /* std's println!/eprintln!: format_args with a trailing newline. */
+        || strcmp(name, "format_args_nl") == 0
+        || strcmp(name, "const_format_args_nl") == 0)
         return CM_BODY_BUILTIN_FORMAT_ARGS;
     if (strcmp(name, "asm") == 0) return CM_BODY_BUILTIN_ASM;
     if (strcmp(name, "cfg_select") == 0) return CM_BODY_BUILTIN_CFG_SELECT;
@@ -693,6 +695,108 @@ static int cm_body_child_module(CmBodyExpandState *state, CmModuleId parent,
     return 0;
 }
 
+/* The `use` tree text of `import_declaration` in `module`, resolved
+ * as dependency segments for the leaf named `name`: `use core::ptr::
+ * addr_of_mut;` -> [core, ptr, addr_of_mut]; `use core::ptr::{a, b as
+ * c}` -> the prefix plus the leaf named. */
+static int cm_body_lookup_dependency_import_tree(CmBodyExpandState *state,
+    CmModuleId module, CmResolveItemRef import_declaration,
+    const char *name, CmBodyMacroTarget *out_target)
+{
+    CmResolveModuleInfo info;
+    uint32_t index;
+
+    if (!cm_module_graph_get_module(state->graph, module, &info)) return 0;
+    for (index = 0u; index < info.import_count; ++index) {
+        CmResolveImport import;
+        char buffer[512];
+        char *cursor;
+        char *brace;
+        const char *names[16];
+        size_t count = 0u;
+        CmResolvePathSegmentView views[16];
+        size_t view;
+        size_t length;
+
+        if (!cm_module_graph_get_import(state->graph, module, index,
+                &import)) return 0;
+        if (import.declaration.source != import_declaration.source
+            || import.declaration.item != import_declaration.item) continue;
+        length = cm_module_graph_string_length(state->graph, import.tree);
+        if (length == 0u || length >= sizeof(buffer)
+            || !cm_module_graph_copy_string(state->graph, import.tree,
+                buffer, sizeof(buffer))) return 0;
+        {
+            char *read = buffer, *write = buffer;
+            while (*read) { if (!cm_body_is_space(*read)) *write++ = *read; read++; }
+            *write = '\0';
+        }
+        cursor = buffer;
+        if (cursor[0] == ':' && cursor[1] == ':') cursor += 2;
+        brace = strchr(cursor, '{');
+        if (brace != NULL) {
+            /* prefix::{..}: the prefix segments, then the leaf's own name
+             * (an alias `x as name` still names x in the dependency). */
+            char *entry;
+            char *close = strchr(brace, '}');
+            const char *leaf = NULL;
+            if (close == NULL) return 0;
+            *close = '\0';
+            entry = brace + 1;
+            while (entry != NULL && *entry != '\0') {
+                char *comma = strchr(entry, ',');
+                char *as;
+                if (comma != NULL) *comma = '\0';
+                as = strstr(entry, "as");
+                if (as != NULL && as != entry && strcmp(as + 2, name) == 0) {
+                    *as = '\0';
+                    leaf = entry;
+                    break;
+                }
+                if (strcmp(entry, name) == 0) { leaf = entry; break; }
+                entry = comma == NULL ? NULL : comma + 1;
+            }
+            if (leaf == NULL) return 0;
+            if (brace >= cursor + 2 && brace[-1] == ':' && brace[-2] == ':')
+                brace[-2] = '\0';
+            else
+                return 0;
+            {
+                char *segment = cursor;
+                while (segment != NULL && count < 15u) {
+                    char *next = strstr(segment, "::");
+                    if (next != NULL) { *next = '\0'; next += 2; }
+                    names[count++] = segment;
+                    segment = next;
+                }
+            }
+            names[count++] = leaf;
+        } else {
+            char *as = strstr(cursor, "as");
+            char *segment;
+            if (as != NULL && as != cursor && strcmp(as + 2, name) == 0)
+                *as = '\0';
+            segment = cursor;
+            while (segment != NULL && count < 16u) {
+                char *next = strstr(segment, "::");
+                if (next != NULL) { *next = '\0'; next += 2; }
+                names[count++] = segment;
+                segment = next;
+            }
+        }
+        if (count < 2u) return 0;
+        for (view = 0u; view < count; ++view) {
+            views[view].bytes = (const unsigned char *)names[view];
+            views[view].length = strlen(names[view]);
+        }
+        if (cm_body_lookup_dependency_segments(state, views, count, 0,
+                out_target)) return 1;
+        return cm_body_lookup_dependency_segments(state, views, count, 1,
+            out_target);
+    }
+    return 0;
+}
+
 /* `use` bindings of `module` in the macro namespace. */
 static int cm_body_lookup_imports(CmBodyExpandState *state, CmModuleId module,
     const char *name, CmBodyMacroTarget *out_target)
@@ -738,9 +842,14 @@ static int cm_body_lookup_imports(CmBodyExpandState *state, CmModuleId module,
                 out_target->crate_identifier = identity.extern_name;
                 return 1;
             }
-            /* A `#[macro_export]`ed dependency macro (`core::addr_of_mut`)
-             * is reachable as `<crate>::<name>` at the crate root. */
+            /* A `#[macro_export]`ed dependency macro is reachable as
+             * `<crate>::<name>` at the crate root; a `pub macro` in a
+             * module (`use core::ptr::addr_of_mut;`) by the `use`
+             * leaf's own path. */
             if (cm_body_lookup_dependency_name(state, name, out_target))
+                return 1;
+            if (cm_body_lookup_dependency_import_tree(state, module,
+                    binding.import_declaration, name, out_target))
                 return 1;
             continue;
         }
@@ -1519,6 +1628,17 @@ static int cm_body_builtin_format_args(CmBodyExpandState *state,
         cm_body_fail(state, name, span,
             "format string is not a literal expression");
         return 0;
+    }
+    {
+        size_t name_length = strlen(name);
+        if (name_length >= 3u && strcmp(name + name_length - 3u, "_nl") == 0
+            && state->scratch.len >= 2u
+            && state->scratch.data[state->scratch.len - 1u] == '"') {
+            /* `format_args_nl!("..")`: the literal gains a trailing `\n`
+             * (written as the escape, like a source string). */
+            state->scratch.len -= 1u;
+            cm_str_buf_append(&state->scratch, "\\n\"");
+        }
     }
     format = (CmBodyFormatState *)cm_alloc_zeroed(1u, sizeof(*format));
     /* scratch holds `"..."`; keep it alive while pieces are built. */

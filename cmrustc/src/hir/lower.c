@@ -7414,6 +7414,18 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
             return CM_HIR_TYPE_NONE;
         }
         owner_record = cm_lower_find_record_by_definition(state, owner);
+        if (owner_record != NULL
+            && owner_record->kind == CM_AST_ITEM_TYPE_ALIAS) {
+            /* `type LazyResolve = impl FnOnce() -> Capture + ..;` (std's
+             * backtrace.rs, defined by a `#[define_opaque]` fn): lenient —
+             * the alias is an inference type, unified with the hidden
+             * type where a value of it is built or used. */
+            memset(&type, 0, sizeof(type));
+            type.kind = CM_HIR_TYPE_INFER_KIND;
+            type.span = span;
+            type.data.infer_type.kind = CM_HIR_INFER_GENERAL;
+            return cm_lower_add_type(state, &type, ast_type_id);
+        }
         if (owner_record == NULL
             || owner_record->kind != CM_AST_ITEM_FUNCTION) {
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
@@ -9215,9 +9227,16 @@ static int cm_lower_validate_default_type(CmLowerState *state,
                     &type->data.dyn_trait_type.principal_trait, owner,
                     parameter_index, span, item_id, ast_type_id,
                     binder_lifetime_count, depth))
-            || !cm_lower_validate_default_region(state,
-                &type->data.dyn_trait_type.region, owner, parameter_index,
-                span, item_id, ast_type_id, binder_lifetime_count)) return 0;
+            /* `Report<E = Box<dyn Error>>` (std's error.rs): an elided
+             * object lifetime (inferred or erased) defaults to `'static`;
+             * an explicit one is validated like any region. */
+            || (type->data.dyn_trait_type.region.kind != CM_HIR_REGION_INFER
+                && type->data.dyn_trait_type.region.kind
+                    != CM_HIR_REGION_ERASED
+                && !cm_lower_validate_default_region(state,
+                    &type->data.dyn_trait_type.region, owner,
+                    parameter_index, span, item_id, ast_type_id,
+                    binder_lifetime_count))) return 0;
         for (index = 0u;
              index < type->data.dyn_trait_type.auto_trait_count; ++index) {
             if (!cm_lower_validate_default_named(state,
@@ -10023,6 +10042,27 @@ static CmHirField *cm_lower_fields(CmLowerState *state,
     return fields;
 }
 
+/* A destructuring parameter pattern: the HIR signature binds a synthetic
+ * by-value name (unique by the pattern's offset); the u-body lowers the
+ * pattern itself against that parameter. */
+static int cm_lower_synthetic_parameter(CmLowerState *state,
+    const CmAstPattern *pattern, CmInternId *out_name,
+    CmHirMutability *out_mutability, CmSpan *out_span,
+    CmHirBindingKind *out_binding_kind,
+    CmHirParameterBindingMode *out_binding_mode)
+{
+    char name[48];
+    snprintf(name, sizeof(name), "__pat_%lu",
+        (unsigned long)pattern->span.start);
+    *out_name = cm_interner_intern(&state->hir->strings,
+        (const unsigned char *)name, strlen(name));
+    *out_mutability = CM_HIR_IMMUTABLE;
+    *out_span = cm_lower_span(state, pattern->span);
+    *out_binding_kind = CM_HIR_BINDING_NAMED;
+    *out_binding_mode = CM_HIR_PARAMETER_BINDING_MOVE;
+    return !state->failed;
+}
+
 static int cm_lower_pattern_binding(CmLowerState *state,
     CmAstPatternId pattern_id, CmSpan item_span, CmAstItemId ast_item_id,
     CmInternId *out_name, CmHirMutability *out_mutability, CmSpan *out_span,
@@ -10055,12 +10095,12 @@ static int cm_lower_pattern_binding(CmLowerState *state,
             || binding->data.binding.subpattern != CM_AST_PATTERN_NONE
             || binding->data.binding.is_ref
             || binding->data.binding.is_mutable) {
-            cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
-                cm_lower_span(state, pattern->span), ast_item_id,
-                CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-                "function reference parameter supports only `&binding`"
-                " with an immutable binding");
-            return 0;
+            /* `&(k, v): &'a (K, V)` (hashbrown's extend_one): the
+             * signature keeps a synthetic by-value parameter; the u-body
+             * lowers the full pattern against it. */
+            return cm_lower_synthetic_parameter(state, pattern, out_name,
+                out_mutability, out_span, out_binding_kind,
+                out_binding_mode);
         }
         *out_name = cm_lower_copy_string(state, binding->data.binding.name,
             cm_lower_span(state, binding->span), ast_item_id);
@@ -10072,11 +10112,9 @@ static int cm_lower_pattern_binding(CmLowerState *state,
     }
     if (pattern->kind != CM_AST_PATTERN_BINDING
         || pattern->data.binding.subpattern != CM_AST_PATTERN_NONE) {
-        cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
-            cm_lower_span(state, pattern->span), ast_item_id,
-            CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-            "function parameter patterns require typed pattern HIR");
-        return 0;
+        /* `(a, b): (u32, u32)` and other destructuring parameters. */
+        return cm_lower_synthetic_parameter(state, pattern, out_name,
+            out_mutability, out_span, out_binding_kind, out_binding_mode);
     }
     *out_name = cm_lower_copy_string(state, pattern->data.binding.name,
         cm_lower_span(state, pattern->span), ast_item_id);
@@ -10289,6 +10327,30 @@ static int cm_lower_newtype_parameter_pattern(CmLowerState *state,
     out_local->parameter_index = parameter_index;
     out_local->parameter_binding_index = 0u;
     *out_has_local = 1;
+    return 1;
+}
+
+/* The bounded tuple-parameter lowering takes exactly two plain immutable
+ * move bindings (`(k, v): (K, V)`); every other tuple pattern (nested,
+ * `..`, `ref`/`mut`/`_` elements, other arities) is a synthetic
+ * parameter destructured by the u-body. */
+static int cm_lower_tuple_parameter_is_simple(const CmLowerState *state,
+    const CmAstPattern *pattern)
+{
+    uint32_t index;
+    if (pattern == NULL || pattern->kind != CM_AST_PATTERN_TUPLE
+        || pattern->data.list.has_rest
+        || pattern->data.list.pattern_count == 0u
+        || pattern->data.list.pattern_count
+            > CM_HIR_TUPLE_PARAMETER_BINDING_COUNT) return 0;
+    for (index = 0u; index < pattern->data.list.pattern_count; ++index) {
+        const CmAstPattern *element = cm_ast_get_pattern(state->ast,
+            pattern->data.list.patterns[index]);
+        if (element == NULL || element->kind != CM_AST_PATTERN_BINDING
+            || element->data.binding.subpattern != CM_AST_PATTERN_NONE
+            || element->data.binding.is_ref
+            || element->data.binding.is_mutable) return 0;
+    }
     return 1;
 }
 
@@ -11728,7 +11790,23 @@ static int cm_lower_function_item(CmLowerState *state,
                 continue;
             }
             if (ast_pattern != NULL
-                && ast_pattern->kind == CM_AST_PATTERN_TUPLE) {
+                && ast_pattern->kind == CM_AST_PATTERN_TUPLE
+                && cm_lower_tuple_parameter_is_simple(state, ast_pattern)
+                && !record->is_foreign
+                && function->body != CM_AST_EXPR_NONE
+                /* The bounded tuple lowering (typed per-binding locals)
+                 * covers two bindings, or one for a unary rust-call impl
+                 * method; other tuple shapes are synthetic parameters
+                 * the u-body destructures. */
+                && ((record->parent_kind == CM_LOWER_PARENT_IMPL
+                        && index == 1u && function->parameter_count == 2u
+                        && receiver != CM_HIR_RECEIVER_NONE
+                        && function->abi != CM_INTERN_ID_NONE
+                        && cm_lower_string_is(state, function->abi,
+                            "rust-call"))
+                    ? ast_pattern->data.list.pattern_count == 1u
+                    : ast_pattern->data.list.pattern_count
+                        == CM_HIR_TUPLE_PARAMETER_BINDING_COUNT)) {
                 int is_binary_free_function;
                 int is_unary_rust_call_impl_method;
                 uint32_t tuple_binding_count;
@@ -11744,18 +11822,6 @@ static int cm_lower_function_item(CmLowerState *state,
                         "rust-call");
                 (void)is_binary_free_function;
                 (void)is_unary_rust_call_impl_method;
-                /* M9 leniency: any bodyful, non-foreign function may
-                 * destructure a tuple parameter (alloc's
-                 * `extend_one(&mut self, (k, v): (K, V))`). */
-                if (record->is_foreign
-                    || function->body == CM_AST_EXPR_NONE) {
-                    cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
-                        cm_lower_span(state, ast_pattern->span), ast_item_id,
-                        CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
-                        "tuple parameter patterns require bodyful free "
-                        "functions");
-                    break;
-                }
                 if (!cm_lower_tuple_parameter_pattern(state,
                         function->parameters[index].pattern, span,
                         ast_item_id, index, &parameters[index],
@@ -18239,9 +18305,11 @@ static int cm_lower_graph_preflight(CmLowerState *state,
                     (unsigned int)item->kind);
                 break;
             }
+            /* `static mut THREAD_INFO: BTreeMap<..> = BTreeMap::new();`
+             * (std's stack_overflow thread_info): a mutable static is a
+             * cached slot like any other; writes go through its address. */
             if (item->kind == CM_AST_ITEM_STATIC
-                && (item->data.value_item.is_mutable
-                    || item->data.value_item.type == CM_AST_TYPE_NONE
+                && (item->data.value_item.type == CM_AST_TYPE_NONE
                     || !item->data.value_item.has_value
                     || item->data.value_item.initializer
                         == CM_AST_EXPR_NONE)) {
@@ -18832,6 +18900,28 @@ static int cm_lower_graph_reserve_body_items(CmLowerState *state,
                         fn_record, item->data.extern_block_item.items[child],
                         cm_hir_def_id_none(), CM_LOWER_PARENT_NONE, 1,
                         item->data.extern_block_item.abi)) return 0;
+            }
+            continue;
+        }
+        if (item->kind == CM_AST_ITEM_MODULE) {
+            /* A body-local `mod sigpipe { pub const .. }` (std's unix
+             * `init`): its items become body-local items of the fn; the
+             * body names them `sigpipe::DEFAULT`. */
+            uint32_t child;
+            for (child = 0u; child < item->data.module_item.item_count
+                    && !state->failed; ++child) {
+                const CmAstItem *member = cm_ast_get_item(ast,
+                    item->data.module_item.items[child]);
+                if (member == NULL || (member->kind != CM_AST_ITEM_FUNCTION
+                        && member->kind != CM_AST_ITEM_CONST
+                        && member->kind != CM_AST_ITEM_STATIC
+                        && member->kind != CM_AST_ITEM_STRUCT
+                        && member->kind != CM_AST_ITEM_UNION
+                        && member->kind != CM_AST_ITEM_ENUM)) continue;
+                if (!cm_lower_reserve_body_item(state, ast, owner_module,
+                        fn_record, item->data.module_item.items[child],
+                        cm_hir_def_id_none(), CM_LOWER_PARENT_NONE, 0,
+                        CM_INTERN_ID_NONE)) return 0;
             }
             continue;
         }
@@ -20477,11 +20567,17 @@ static int cm_lower_records_in_phase(CmLowerState *state,
             &state->item_records, index);
         if (record == NULL) return 0;
         if (!cm_lower_record_in_phase(record, phase)) continue;
-        if (record->body_local) {
+        if (record->body_local
+            || (record->kind == CM_AST_ITEM_CONST
+                && cm_lower_anonymous_const(record->ast,
+                    cm_ast_get_item(record->ast, record->ast_id)))) {
             /* Fail-soft: a body-local item whose types cannot be
              * resolved at module scope (body-local `use`, cross-scope
              * names) is dropped, not fatal — bodies then see it exactly
-             * as before reservation. */
+             * as before reservation.  Likewise an anonymous `const _`
+             * (std's `static_assert!(@usize_eq: size_of::<Repr>(), 8)`
+             * expands to `const _: [(); size_of::<Repr>()] = [(); 8]`):
+             * an assertion nothing can name. */
             int saved_failed = state->failed;
             CmHirLowerResult saved_result = state->result;
             int lowered_ok;
@@ -21835,6 +21931,94 @@ static int cm_lower_inherited_member_consistent(CmLowerState *state,
     return 1;
 }
 
+/* Order-independent specialization check over the item records: does a
+ * blanket impl (self type a bare generic parameter) of a trait with this
+ * name carry a `default fn`/`default type` member of the declaration's
+ * name?  std's `impl SizeHint for Empty` (io/util.rs) specializes
+ * `impl<T: ?Sized> SizeHint for T` declared later in io/mod.rs, before
+ * that impl's members are lowered. */
+static int cm_lower_specialization_member_in_records(CmLowerState *state,
+    const CmHirItem *impl_item, const CmHirItem *declaration)
+{
+    const CmHirItem *trait_item;
+    size_t index;
+
+    trait_item = cm_hir_get_item(state->hir, cm_hir_lookup_definition(
+        state->hir, impl_item->data.impl_item.trait_type.definition)
+            == NULL ? CM_HIR_ITEM_NONE
+        : cm_hir_lookup_definition(state->hir,
+            impl_item->data.impl_item.trait_type.definition)->entity.item_id);
+    if (trait_item == NULL) return 0;
+    for (index = 0u; index < state->item_records.len; ++index) {
+        const CmLowerItemRecord *record;
+        const CmAstItem *item;
+        const CmAstType *self_type;
+        const CmAstType *trait_type;
+        const CmAstPath *self_path;
+        const CmAstPath *trait_path;
+        uint32_t child;
+        uint32_t generic;
+        int blanket;
+
+        record = (const CmLowerItemRecord *)cm_vec_at_const(
+            &state->item_records, index);
+        if (record == NULL || record->kind != CM_AST_ITEM_IMPL) continue;
+        item = cm_ast_get_item(record->ast, record->ast_id);
+        if (item == NULL || item->kind != CM_AST_ITEM_IMPL
+            || item->data.impl_item.is_negative) continue;
+        trait_type = item->data.impl_item.trait_type == CM_AST_TYPE_NONE
+            ? NULL : cm_ast_get_type(record->ast,
+                item->data.impl_item.trait_type);
+        trait_path = trait_type == NULL || trait_type->kind != CM_AST_TYPE_PATH
+            ? NULL : cm_ast_get_path(record->ast, trait_type->path);
+        if (trait_path == NULL || trait_path->segment_count == 0u) continue;
+        {
+            const CmInternedString *have = cm_ast_get_string(record->ast,
+                trait_path->segments[trait_path->segment_count - 1u].name);
+            const CmInternedString *want = cm_interner_get(
+                &state->hir->strings, trait_item->name);
+                if (have == NULL || want == NULL || have->len != want->len
+                || memcmp(have->bytes, want->bytes, have->len) != 0)
+                continue;
+        }
+        self_type = cm_ast_get_type(record->ast,
+            item->data.impl_item.self_type);
+        self_path = self_type == NULL || self_type->kind != CM_AST_TYPE_PATH
+            ? NULL : cm_ast_get_path(record->ast, self_type->path);
+        blanket = 0;
+        for (generic = 0u; self_path != NULL
+                && self_path->segment_count == 1u
+                && generic < item->generic_parameter_count; ++generic) {
+            if (item->generic_parameters[generic].kind == CM_AST_PARAM_TYPE
+                && item->generic_parameters[generic].name
+                    == self_path->segments[0].name) {
+                blanket = 1;
+                break;
+            }
+        }
+        if (!blanket) continue;
+        for (child = 0u; child < item->data.impl_item.item_count; ++child) {
+            const CmAstItem *member = cm_ast_get_item(record->ast,
+                item->data.impl_item.items[child]);
+                if (member == NULL || !member->is_default) continue;
+            if ((declaration->kind == CM_HIR_ITEM_FUNCTION
+                    && member->kind == CM_AST_ITEM_FUNCTION)
+                || (declaration->kind == CM_HIR_ITEM_TYPE_ALIAS
+                    && member->kind == CM_AST_ITEM_TYPE_ALIAS)) {
+                /* The member's name lives in its own unit's interner. */
+                const CmInternedString *have = cm_ast_get_string(
+                    record->ast, member->name);
+                const CmInternedString *want = cm_interner_get(
+                    &state->hir->strings, declaration->name);
+                if (have != NULL && want != NULL && have->len == want->len
+                    && memcmp(have->bytes, want->bytes, have->len) == 0)
+                    return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static uint32_t cm_lower_count_inherited_specialization_members(
     CmLowerState *state, const CmHirItem *impl_item,
     const CmHirItem *declaration)
@@ -21989,8 +22173,10 @@ static int cm_lower_validate_impl_completeness(CmLowerState *state)
                     == CM_HIR_IMPL_POSITIVE
                 && ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS)
                     || !declaration->data.function_item.has_default_body)
-                && cm_lower_count_inherited_specialization_members(state,
-                    impl_item, declaration) == 1u) {
+                && (cm_lower_count_inherited_specialization_members(state,
+                        impl_item, declaration) == 1u
+                    || cm_lower_specialization_member_in_records(state,
+                        impl_item, declaration))) {
                 continue;
             }
             if ((declaration->kind == CM_HIR_ITEM_TYPE_ALIAS

@@ -246,7 +246,10 @@ CmDependencyMacroStatus cm_dependency_macro_artifact_lookup(
         || cm_module_graph_get_macro_declaration(state->graph,
             state->revision, binding.declaration, &declaration)
                 != CM_RESOLVE_VIEW_OK
-        || declaration.form != CM_AST_MACRO_RULES_DEFINITION
+        || (declaration.form != CM_AST_MACRO_RULES_DEFINITION
+            /* `pub macro addr_of_mut` (core::ptr): a decl macro 2.0 item
+             * is certified like macro_rules!. */
+            && declaration.form != CM_AST_MACRO_DECLARATIVE_DEFINITION)
         || declaration.is_generated
         || !cm_module_graph_borrow_ast(state->graph,
             declaration.owner_module, &definition_ast)
