@@ -4262,7 +4262,30 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             CmTyId body = cm_tyck_expr(env, expr->data.closure.body, ret);
             (void)cm_tyck_coerce(env, body, ret);
         }
-        result = cm_ty_closure(arena, (uint32_t)env->ub->hir_body, id);
+        {
+            /* The closure type carries its enclosing scope (Self, then the
+             * parent's and the item's generic parameters) so instance
+             * substitution reaches the closure body's own types. */
+            CmTyId scope[66];
+            uint32_t scope_count = 0u;
+            uint32_t g;
+            scope[scope_count++] = env->self_type != CM_TY_NONE
+                ? env->self_type
+                : cm_ty_with_def(arena, CM_TY_SELF, cm_hir_def_id_none(),
+                    NULL, 0u);
+            if (env->parent != NULL)
+                for (g = 0u; g < env->parent->generic_parameter_count
+                        && scope_count < 66u; ++g)
+                    scope[scope_count++] = cm_ty_param(arena,
+                        env->parent->generic_parameter_start + g);
+            if (env->item != NULL)
+                for (g = 0u; g < env->item->generic_parameter_count
+                        && scope_count < 66u; ++g)
+                    scope[scope_count++] = cm_ty_param(arena,
+                        env->item->generic_parameter_start + g);
+            result = cm_ty_closure_with(arena, (uint32_t)env->ub->hir_body,
+                id, scope, scope_count);
+        }
         break;
     }
     case CM_U_EXPR_TUPLE: {

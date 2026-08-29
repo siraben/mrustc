@@ -121,6 +121,12 @@ CmTyId cm_ty_projection(CmTyArena *arena, CmTyId self, CmHirDefId trait,
     CmHirDefId associated, const CmTyId *assoc_args,
     uint32_t assoc_arg_count);
 CmTyId cm_ty_closure(CmTyArena *arena, uint32_t body, uint32_t expression);
+/* A closure type carrying its enclosing scope: children[0] is the
+ * enclosing Self (a SELF-kind type when there is none), then the
+ * enclosing item's generic parameters (parent's first), so an instance
+ * substitution reaches the closure body. */
+CmTyId cm_ty_closure_with(CmTyArena *arena, uint32_t body,
+    uint32_t expression, const CmTyId *children, uint32_t count);
 
 /* Fresh inference variable of the given kind. */
 CmTyId cm_ty_fresh(CmTyArena *arena, CmHirInferenceKind kind);

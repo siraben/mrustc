@@ -220,12 +220,16 @@ static void cm_umir_c_render_local(CmStrBuf *output, CmUMirLocalId local)
 }
 
 static void cm_umir_c_render_closure_symbol(CmStrBuf *output,
-    CmHirBodyId body, CmUExprId expr)
+    CmHirBodyId body, CmUExprId expr, long instance)
 {
     cm_str_buf_append(output, "cm_u_closure_");
     cm_umir_c_render_number(output, (unsigned long)body);
     cm_str_buf_push(output, '_');
     cm_umir_c_render_number(output, (unsigned long)expr);
+    if (instance >= 0) {
+        cm_str_buf_append(output, "_i");
+        cm_umir_c_render_number(output, (unsigned long)instance);
+    }
 }
 
 static void cm_umir_c_render_symbol(CmStrBuf *output, CmHirDefId def)
@@ -2282,7 +2286,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         uint32_t closure_params = closure == NULL ? 0u
             : closure->data.closure.parameter_count;
         cm_umir_c_render_closure_symbol(output, body->source,
-            body->closure_expr);
+            body->closure_expr, cm_umir_c_active_instance == NULL ? -1
+                : (long)cm_umir_c_active_instance->index);
         cm_str_buf_append(output, "(long long *env");
         for (param = 0u; param < closure_params; ++param) {
             cm_str_buf_append(output, ", long long p");
@@ -3273,28 +3278,46 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         && statement->operand_count != 0u
                         && statement->operand_overflow == 0u) {
                         uint32_t arg;
+                        long closure_instance = -1;
                         if (cm_umir_c_active_program != NULL) {
+                            /* The closure body is instanced on its
+                             * enclosing scope (children[0] = Self or a
+                             * bare SELF, then the generic arguments). */
                             const CmHirBody *closure_body =
                                 cm_hir_get_body(hir,
                                     (CmHirBodyId)callee_ty0->a);
+                            CmTyId closure_self = CM_TY_NONE;
+                            const CmTyId *closure_args = NULL;
+                            uint32_t closure_arg_count = 0u;
+                            if (callee_ty0->count != 0u) {
+                                const CmTy *self_child = cm_ty_get(
+                                    (CmTyArena *)&tyck->arena,
+                                    cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                        callee_ty0->children[0]));
+                                if (self_child != NULL
+                                    && self_child->kind != CM_TY_SELF)
+                                    closure_self = callee_ty0->children[0];
+                                closure_args = callee_ty0->children + 1;
+                                closure_arg_count = callee_ty0->count - 1u;
+                            }
                             if (closure_body != NULL)
-                                (void)cm_umir_c_instance(
+                                closure_instance = cm_umir_c_instance(
                                     cm_umir_c_active_program,
                                     closure_body->origin.definition,
-                                    (CmUExprId)callee_ty0->b, NULL, 0u,
-                                    CM_TY_NONE);
+                                    (CmUExprId)callee_ty0->b, closure_args,
+                                    closure_arg_count, closure_self);
                         }
                         cm_str_buf_append(output, "0; { long long ");
                         cm_umir_c_render_closure_symbol(output,
                             (CmHirBodyId)callee_ty0->a,
-                            (CmUExprId)callee_ty0->b);
+                            (CmUExprId)callee_ty0->b, closure_instance);
                         cm_str_buf_append(output, "(); ");
                         cm_umir_c_render_local(output,
                             statement->destination);
                         cm_str_buf_append(output, " = ");
                         cm_umir_c_render_closure_symbol(output,
                             (CmHirBodyId)callee_ty0->a,
-                            (CmUExprId)callee_ty0->b);
+                            (CmUExprId)callee_ty0->b, closure_instance);
                         cm_str_buf_append(output,
                             "((long long *)(intptr_t)");
                         cm_umir_c_render_local(output,

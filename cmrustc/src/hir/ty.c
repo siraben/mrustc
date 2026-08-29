@@ -252,6 +252,19 @@ CmTyId cm_ty_closure(CmTyArena *arena, uint32_t body, uint32_t expression)
     return cm_ty_simple(arena, CM_TY_CLOSURE, body, expression);
 }
 
+CmTyId cm_ty_closure_with(CmTyArena *arena, uint32_t body,
+    uint32_t expression, const CmTyId *children, uint32_t count)
+{
+    CmTy ty;
+    memset(&ty, 0, sizeof(ty));
+    ty.kind = CM_TY_CLOSURE;
+    ty.a = body;
+    ty.b = expression;
+    ty.children = (CmTyId *)children;
+    ty.count = count;
+    return cm_ty_make(arena, &ty);
+}
+
 /* ------------------------------------------------------------------ */
 /* Inference variables                                                  */
 
