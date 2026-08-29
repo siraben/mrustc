@@ -1763,6 +1763,22 @@ static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
 }
 
 static CmUMirProgram *cm_umir_c_active_program;
+/* The crate compiled last: its `fn main` is the program's entry. */
+static CmHirCrateId cm_umir_c_root_crate;
+
+/* A parameterless, parentless `fn main` of the root crate. */
+static int cm_umir_c_is_root_main(const CmHirContext *hir,
+    const CmHirItem *owner, CmHirDefId def)
+{
+    const CmInternedString *name = owner == NULL ? NULL
+        : cm_interner_get(&hir->strings, owner->name);
+    return name != NULL && name->len == 4u
+        && memcmp(name->bytes, "main", 4u) == 0
+        && owner->kind == CM_HIR_ITEM_FUNCTION
+        && cm_hir_def_id_is_none(owner->parent_definition)
+        && owner->data.function_item.signature.parameter_count == 0u
+        && def.crate_id == cm_umir_c_root_crate;
+}
 
 /* The program instance of closure type `ct` (its body instanced on the
  * enclosing scope: children[0] = Self or a bare SELF, then the generic
@@ -5037,6 +5053,14 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         cm_str_buf_append(output, ");\n}\n");
     }
     cm_umir_c_active_body = NULL;
+    /* The root crate's `fn main`: the C entry point calls it (std's
+     * runtime setup -- lang_start -- is skipped for now). */
+    if (body->closure_expr == CM_U_EXPR_NONE && owner != NULL
+        && cm_umir_c_is_root_main(hir, owner, def)) {
+        cm_str_buf_append(output, "int main(void)\n{\n    ");
+        cm_umir_c_render_symbol(output, def);
+        cm_str_buf_append(output, "();\n    return 0;\n}\n");
+    }
     /* `#[no_mangle]` exports: an ABI-typed wrapper with the item name. */
     if (body->closure_expr == CM_U_EXPR_NONE && owner != NULL
         && owner->kind == CM_HIR_ITEM_FUNCTION
@@ -5114,9 +5138,20 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         "void *calloc(unsigned long, unsigned long);\n"
         "void *memmove(void *, const void *, unsigned long);\n"
         "void *memset(void *, int, unsigned long);\n");
-    /* Roots: `#[no_mangle]` exports only; everything else is reached
-     * through call instances, so a core-linked program emits just what
-     * the exports need. */
+    /* Roots: `#[no_mangle]` exports, and the root crate's `fn main`
+     * (the crate compiled last has the highest crate id); everything
+     * else is reached through call instances, so a core-linked program
+     * emits just what the exports need. */
+    cm_umir_c_root_crate = 0u;
+    for (index = 0u; index < umir->bodies.len; ++index) {
+        const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
+            &umir->bodies, index);
+        const CmHirBody *hir_body = body == NULL ? NULL
+            : cm_hir_get_body(hir, body->source);
+        if (hir_body != NULL
+            && hir_body->origin.definition.crate_id > cm_umir_c_root_crate)
+            cm_umir_c_root_crate = hir_body->origin.definition.crate_id;
+    }
     for (index = 0u; index < umir->bodies.len; ++index) {
         const CmUMirBody *body = (const CmUMirBody *)cm_vec_at_const(
             &umir->bodies, index);
@@ -5128,8 +5163,25 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         hir_body = cm_hir_get_body(hir, body->source);
         if (hir_body == NULL) continue;
         owner = cm_umir_c_item_of(hir, hir_body->origin.definition);
+        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL && owner != NULL) {
+            const CmInternedString *dbg_name = cm_interner_get(&hir->strings,
+                owner->name);
+            if (dbg_name != NULL && dbg_name->len == 4u
+                && memcmp(dbg_name->bytes, "main", 4u) == 0)
+                fprintf(stderr, "UMIR root-main candidate crate=%u root=%u "
+                    "kind=%d params=%u parent=%d complete=%d\n",
+                    (unsigned)hir_body->origin.definition.crate_id,
+                    (unsigned)cm_umir_c_root_crate, (int)owner->kind,
+                    owner->kind == CM_HIR_ITEM_FUNCTION
+                        ? (unsigned)owner->data.function_item.signature
+                            .parameter_count : 99u,
+                    !cm_hir_def_id_is_none(owner->parent_definition),
+                    body->complete);
+        }
         if (owner == NULL || owner->kind != CM_HIR_ITEM_FUNCTION
-            || !cm_umir_c_item_has_attribute(hir, owner, "no_mangle"))
+            || (!cm_umir_c_item_has_attribute(hir, owner, "no_mangle")
+                && !cm_umir_c_is_root_main(hir, owner,
+                    hir_body->origin.definition)))
             continue;
         if (cm_umir_c_collect_parameters(hir, owner, parameters, 32u)
                 != 0u) continue;
