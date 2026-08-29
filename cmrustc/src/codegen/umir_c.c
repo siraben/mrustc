@@ -1272,11 +1272,14 @@ static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
     for (child = 0u; child < hir->items.len; ++child) {
         const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
             &hir->items, child);
-        if (method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
+        if (method == NULL || method->kind != declaration->kind
+            || (method->kind != CM_HIR_ITEM_FUNCTION
+                && method->kind != CM_HIR_ITEM_CONST)
             || !cm_hir_def_id_equal(method->parent_definition,
                 impl->definition)
             || method->name != declaration->name) continue;
-        if (!cm_umir_c_method_accepts(hir, tyck, method, statement,
+        if (method->kind == CM_HIR_ITEM_FUNCTION
+            && !cm_umir_c_method_accepts(hir, tyck, method, statement,
                 first_arg, bound_params, bound_types, bound))
             return cm_hir_def_id_none();
         if (out_types != NULL && out_count != NULL) {
@@ -2397,9 +2400,29 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         && (value_item->kind == CM_HIR_ITEM_CONST
                             || value_item->kind == CM_HIR_ITEM_STATIC)) {
                         CmStrBuf symbol;
+                        /* A trait's associated const resolves through
+                         * the path's Self (`Self::BASE` in an instance,
+                         * `T::BASE`, `<Ty>::BASE`) to the impl's item. */
+                        CmTyId const_self = CM_TY_NONE;
+                        if (expr != NULL && expr->kind == CM_U_EXPR_PATH) {
+                            const CmUResolution *pr =
+                                &expr->data.path.resolution;
+                            if (pr->kind == CM_U_RESOLVED_SELF_TYPE)
+                                const_self = cm_umir_c_subst(cm_ty_with_def(
+                                    (CmTyArena *)&tyck->arena, CM_TY_SELF,
+                                    value_item->parent_definition, NULL, 0u));
+                            else if (pr->kind == CM_U_RESOLVED_GENERIC_PARAM)
+                                const_self = cm_umir_c_subst(cm_ty_param(
+                                    (CmTyArena *)&tyck->arena,
+                                    pr->generic_parameter));
+                            else if (pr->kind == CM_U_RESOLVED_TYPE_ASSOC)
+                                const_self = cm_umir_c_subst(cm_ty_with_def(
+                                    (CmTyArena *)&tyck->arena, CM_TY_ADT,
+                                    pr->definition, NULL, 0u));
+                        }
                         cm_str_buf_init(&symbol);
                         cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
-                            value_def, CM_TY_NONE, CM_TY_NONE, NULL, 0u);
+                            value_def, CM_TY_NONE, const_self, NULL, 0u);
                         cm_str_buf_append(output, "0; { long long ");
                         cm_str_buf_append_n(output, symbol.data, symbol.len);
                         cm_str_buf_append(output, "(); ");
