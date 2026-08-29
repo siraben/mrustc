@@ -2001,6 +2001,19 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                 if (env->out->method_targets != NULL
                     && id != CM_U_EXPR_NONE)
                     env->out->method_targets[id] = found.item->definition;
+                if (found.parent != NULL
+                    && found.parent->kind == CM_HIR_ITEM_TRAIT) {
+                    /* Trait method FN_DEF: first slot is Self. */
+                    CmTyId args[CM_TYCK_MAX_ARGS];
+                    uint32_t index;
+                    args[0] = self_type;
+                    for (index = 0u; index < found.instance.count
+                            && index + 1u < CM_TYCK_MAX_ARGS; ++index)
+                        args[index + 1u] = found.instance.types[index];
+                    return cm_ty_with_def(arena, CM_TY_FN_DEF,
+                        found.item->definition, args,
+                        found.instance.count + 1u);
+                }
                 return cm_ty_with_def(arena, CM_TY_FN_DEF,
                     found.item->definition, found.instance.types,
                     found.instance.count);
@@ -3500,7 +3513,20 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         }
         if (name != CM_INTERN_ID_NONE
             && cm_tyck_lookup_assoc(env, self_type, name, &found)) {
-            if (found.item->kind == CM_HIR_ITEM_FUNCTION)
+            if (found.item->kind == CM_HIR_ITEM_FUNCTION
+                && found.parent != NULL
+                && found.parent->kind == CM_HIR_ITEM_TRAIT) {
+                /* Trait method FN_DEF: first slot is Self. */
+                CmTyId args[CM_TYCK_MAX_ARGS];
+                uint32_t arg_index;
+                args[0] = self_type;
+                for (arg_index = 0u; arg_index < found.instance.count
+                        && arg_index + 1u < CM_TYCK_MAX_ARGS; ++arg_index)
+                    args[arg_index + 1u] = found.instance.types[arg_index];
+                result = cm_ty_with_def(arena, CM_TY_FN_DEF,
+                    found.item->definition, args,
+                    found.instance.count + 1u);
+            } else if (found.item->kind == CM_HIR_ITEM_FUNCTION)
                 result = cm_ty_with_def(arena, CM_TY_FN_DEF,
                     found.item->definition, found.instance.types,
                     found.instance.count);

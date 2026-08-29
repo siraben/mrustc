@@ -2082,6 +2082,24 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             break;
                         }
                     }
+                    {
+                        /* Any other item path tyck typed as a fn item
+                         * (`Display::fmt`, `<T as Tr>::f`): a fn value. */
+                        const CmTyckBody *ftb = cm_tyck_get(tyck,
+                            body->source);
+                        const CmTy *fty = ftb == NULL || ftb->expr_types == NULL
+                            ? NULL
+                            : cm_ty_get((CmTyArena *)&tyck->arena,
+                                cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                    cm_umir_c_subst(
+                                        ftb->expr_types[statement->expr])));
+                        if (fty != NULL && fty->kind == CM_TY_FN_DEF
+                            && cm_umir_c_item_of(hir, fty->def) != NULL) {
+                            cm_umir_c_render_fn_value(output, hir, tyck, body,
+                                statement, fty->def);
+                            break;
+                        }
+                    }
                     cm_str_buf_append(output, "0 /* item path */");
                     complete = 0;
                 }

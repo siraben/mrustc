@@ -13,6 +13,28 @@ struct Op {
     tag: u32,
 }
 
+trait Show {
+    fn show(&self, k: u32) -> u32;
+}
+
+impl Show for u32 {
+    fn show(&self, k: u32) -> u32 {
+        *self * k
+    }
+}
+
+struct Shower {
+    g: fn(&u32, u32) -> u32,
+}
+
+fn via_trait<T: Show>(x: &T, k: u32) -> u32 {
+    let s = Shower { g: unsafe { transmute(<T as Show>::show as fn(&T, u32) -> u32) } };
+    (s.g)(x, k)
+}
+
+#[rustc_intrinsic]
+pub unsafe fn transmute<A, B>(a: A) -> B;
+
 fn apply(op: &Op, v: u32) -> u32 {
     (op.f)(v) + op.tag
 }
@@ -30,5 +52,5 @@ pub extern "C" fn fn_pointer(v: u32) -> u32 {
         }
         helper(v)
     };
-    apply(&op, v) + sum5(1, 2, 3, 4, 5) + nested
+    apply(&op, v) + sum5(1, 2, 3, 4, 5) + nested + via_trait(&v, 3)
 }
