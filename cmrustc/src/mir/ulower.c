@@ -809,7 +809,17 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     &callee_expr->data.path.resolution));
             break;
         }
-        callee = cm_umir_emit_expr(builder, expr->data.call.callee);
+        if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
+            && callee_expr->data.path.resolution.kind
+                != CM_U_RESOLVED_LOCAL) {
+            /* An item path as callee is resolved by the call itself; its
+             * operand slot is a placeholder, never a fn value. */
+            callee = cm_umir_new_local(builder,
+                cm_umir_expr_type(builder, expr->data.call.callee));
+            cm_umir_push_immediate(builder, callee, CM_UMIR_RVALUE_LITERAL,
+                id, CM_TY_NONE, NULL, 0u, 0u);
+        } else
+            callee = cm_umir_emit_expr(builder, expr->data.call.callee);
         if (recorded < CM_UMIR_STATEMENT_OPERANDS)
             operands[recorded++] = callee;
         for (index = 0u; index < expr->data.call.argument_count; ++index) {
