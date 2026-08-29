@@ -134,6 +134,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                         break;
                     case CM_UMIR_RVALUE_FIELD:
                     case CM_UMIR_RVALUE_INDEX:
+                    case CM_UMIR_RVALUE_REF_INDEX:
                     case CM_UMIR_RVALUE_AGGREGATE:
                         /* Renders through the layout engine's member
                          * names. */
@@ -3067,19 +3068,25 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             }
-            case CM_UMIR_RVALUE_INDEX: {
+            case CM_UMIR_RVALUE_INDEX:
+            case CM_UMIR_RVALUE_REF_INDEX: {
+                /* REF_INDEX: the element's address instead of its value. */
                 CmTyId base_type = cm_umir_c_local_type(body,
                     statement->operands[0]);
                 const char *elem = cm_umir_c_array_elem_scalar(tyck,
                     cm_umir_c_peel(tyck, base_type));
+                const char *prefix = statement->kind
+                    == CM_UMIR_RVALUE_REF_INDEX ? "(long long)(intptr_t)&"
+                    : "(long long)";
                 if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, base_type))) {
-                    cm_str_buf_append(output, "(long long)");
+                    cm_str_buf_append(output, prefix);
                     cm_umir_c_render_slice_element(output, tyck, body,
                         statement->operands[0], statement->operands[1]);
                     break;
                 }
                 if (elem != NULL) {
-                    cm_str_buf_append(output, "(long long)((");
+                    cm_str_buf_append(output, prefix);
+                    cm_str_buf_append(output, "((");
                     cm_str_buf_append(output, elem);
                     cm_str_buf_append(output, " *)(intptr_t)");
                     cm_umir_c_render_base(output, statement->operands[0],
@@ -3089,6 +3096,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_push(output, ']');
                     break;
                 }
+                if (statement->kind == CM_UMIR_RVALUE_REF_INDEX)
+                    cm_str_buf_append(output, "(long long)(intptr_t)&");
                 cm_umir_c_render_base(output, statement->operands[0],
                     cm_umir_c_ref_depth(tyck, base_type));
                 cm_str_buf_push(output, '[');

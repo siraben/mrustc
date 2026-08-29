@@ -496,6 +496,25 @@ static CmUMirLocalId cm_umir_place(CmUMirBuilder *builder, CmUExprId id)
     return cm_umir_emit_expr(builder, id);
 }
 
+/* The address of an index place `base[i]` as a local (element address
+ * at the element's width), or ((CmUMirLocalId)0u) when `id` is not an
+ * index expression.  A borrowed / autoref'd element must alias the
+ * array, not a loaded copy (`buf[curr].write(d)`, `&mut bytes[i]`). */
+static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
+    CmTyId type)
+{
+    const CmUExpr *expr = cm_ubody_get_expr(builder->ub, id);
+    CmUMirLocalId operands[2];
+    CmUMirLocalId address;
+    if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u; /* slot 0 is the return slot: never an address */
+    operands[0] = cm_umir_place(builder, expr->data.index.base);
+    operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
+    address = cm_umir_new_local(builder, type);
+    cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
+        type, operands, 2u);
+    return address;
+}
+
 /* Whether `type` is core's `Option` (by item name), else Result-like. */
 static int cm_umir_type_is_option(const CmUMirBuilder *builder, CmTyId type)
 {
@@ -931,11 +950,15 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 if ((kind == CM_HIR_RECEIVER_REF_SHARED
                         || kind == CM_HIR_RECEIVER_REF_MUTABLE)
                     && !receiver_is_ref) {
-                    CmUMirLocalId address = cm_umir_new_local(builder,
-                        receiver_type);
-                    cm_umir_push_operands(builder, address,
-                        CM_UMIR_RVALUE_REF, expr->data.method_call.receiver,
-                        receiver_type, &receiver, 1u);
+                    CmUMirLocalId address = cm_umir_address_of(builder,
+                        expr->data.method_call.receiver, receiver_type);
+                    if (address == ((CmUMirLocalId)0u)) {
+                        address = cm_umir_new_local(builder, receiver_type);
+                        cm_umir_push_operands(builder, address,
+                            CM_UMIR_RVALUE_REF,
+                            expr->data.method_call.receiver, receiver_type,
+                            &receiver, 1u);
+                    }
                     receiver = address;
                 } else if (kind == CM_HIR_RECEIVER_VALUE
                     && receiver_is_ref
@@ -977,6 +1000,20 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             cm_umir_push_operands(builder, destination,
                 CM_UMIR_RVALUE_LOCAL, id, type, &pointer, 1u);
             break;
+        }
+        {
+            const CmUExpr *place = cm_ubody_get_expr(builder->ub,
+                expr->data.ref.operand);
+            if (place != NULL && place->kind == CM_U_EXPR_INDEX) {
+                CmUMirLocalId index_operands[2];
+                index_operands[0] = cm_umir_place(builder,
+                    place->data.index.base);
+                index_operands[1] = cm_umir_emit_expr(builder,
+                    place->data.index.index);
+                cm_umir_push_operands(builder, destination,
+                    CM_UMIR_RVALUE_REF_INDEX, id, type, index_operands, 2u);
+                break;
+            }
         }
         operand = cm_umir_place(builder, expr->data.ref.operand);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_REF,
