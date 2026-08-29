@@ -208,10 +208,12 @@ static void test_structural_import_model(void)
         (unsigned int)CM_HIR_IMPORT_EXTERN_CRATE + 1u);
     assert(cm_hir_set_module_imports(&context, invalid_module_id,
         imports, 1u) == CM_HIR_INVALID_ARGUMENT);
+    /* M9: a dependency's `extern crate NAME;` lowers to an extern-crate
+     * import with no binding (the extern prelude serves the name), so 0
+     * bindings are valid; more than one still is not. */
     imports[0] = root->imports[0];
     imports[0].kind = CM_HIR_IMPORT_EXTERN_CRATE;
-    imports[0].binding_count = 0u;
-    imports[0].bindings = NULL;
+    imports[0].binding_count = 2u;
     assert(cm_hir_set_module_imports(&context, invalid_module_id,
         imports, 1u) == CM_HIR_INVALID_ARGUMENT);
     imports[0] = root->imports[0];

@@ -859,7 +859,7 @@ CmHirStatus cm_hir_set_module_imports(CmHirContext *context,
             || !cm_hir_attributes_valid(context, import_value->attributes,
                 import_value->attribute_count)
             || (import_value->kind == CM_HIR_IMPORT_EXTERN_CRATE
-                && import_value->binding_count != 1u)
+                && import_value->binding_count > 1u)
             || (import_value->binding_count != 0u
                 && import_value->bindings == NULL)) {
             return CM_HIR_INVALID_ARGUMENT;
