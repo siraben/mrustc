@@ -3005,11 +3005,16 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     for (param = 0u; body->closure_expr == CM_U_EXPR_NONE
             && param < ub->parameter_count; ++param) {
         const CmUPat *pat = cm_ubody_get_pat(ub, ub->parameters[param]);
-        if (pat == NULL || pat->kind != CM_U_PAT_BINDING
-            || pat->data.binding.local == CM_U_LOCAL_NONE) continue;
+        CmUMirLocalId receiver = (CmUMirLocalId)0u;
+        if (pat != NULL && pat->kind == CM_U_PAT_BINDING
+            && pat->data.binding.local != CM_U_LOCAL_NONE)
+            receiver = (CmUMirLocalId)(1u + pat->data.binding.local);
+        else if (param < body->closure_param_count)
+            /* A destructuring parameter's receiver local. */
+            receiver = body->closure_param_locals[param];
+        if (receiver == (CmUMirLocalId)0u) continue;
         cm_str_buf_append(output, "    ");
-        cm_umir_c_render_local(output,
-            (CmUMirLocalId)(1u + pat->data.binding.local));
+        cm_umir_c_render_local(output, receiver);
         cm_str_buf_append(output, " = p");
         cm_umir_c_render_number(output, (unsigned long)param);
         cm_str_buf_append(output, ";\n");

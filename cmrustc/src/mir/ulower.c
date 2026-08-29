@@ -1818,6 +1818,22 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             cm_umir_push_operands(builder, destination,
                 CM_UMIR_RVALUE_STORE_DEREF, expr->data.assign.target,
                 type, operands, 2u);
+        } else if (target != NULL && target->kind == CM_U_EXPR_PATH
+                && target->data.path.resolution.kind
+                    == CM_U_RESOLVED_DEFINITION) {
+            /* `COUNTER = v` on a `static mut` (std's THREAD_INFO): store
+             * through the static's own slot address. */
+            CmUMirLocalId operands[2];
+            CmUMirLocalId address = cm_umir_new_local(builder,
+                cm_umir_expr_type(builder, expr->data.assign.target));
+            cm_umir_push(builder, address, CM_UMIR_RVALUE_STATIC_ADDR,
+                expr->data.assign.target,
+                cm_umir_expr_type(builder, expr->data.assign.target));
+            operands[0] = address;
+            operands[1] = value;
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_STORE_DEREF, expr->data.assign.target,
+                type, operands, 2u);
         } else {
             CmUMirLocalId operands[2];
             operands[0] = value;
@@ -2679,6 +2695,26 @@ CmMirULowerResult cm_mir_ulower_build(CmUMirSet *out,
             }
         }
         builder.current = cm_umir_new_block(&builder);
+        {
+            /* `fn extend_one(&mut self, &(k, v): &(K, V))` (hashbrown):
+             * a destructuring parameter arrives in a receiver local that
+             * the pattern binder takes apart, as closure parameters do. */
+            uint32_t param;
+            body.closure_param_count = ub->parameter_count > 16u ? 16u
+                : ub->parameter_count;
+            for (param = 0u; param < body.closure_param_count; ++param) {
+                CmUPatId pat_id = ub->parameters[param];
+                const CmUPat *pat = cm_ubody_get_pat(ub, pat_id);
+                CmUMirLocalId receiver;
+                body.closure_param_locals[param] = (CmUMirLocalId)0u;
+                if (pat == NULL || pat->kind == CM_U_PAT_BINDING
+                    || pat->kind == CM_U_PAT_WILD) continue;
+                receiver = cm_umir_new_local(&builder, tb->pat_types != NULL
+                    ? tb->pat_types[pat_id] : CM_TY_NONE);
+                body.closure_param_locals[param] = receiver;
+                cm_umir_bind_pattern(&builder, pat_id, receiver, ub->root);
+            }
+        }
         {
             CmUMirLocalId root_local = cm_umir_emit_expr(&builder,
                 ub->root);
