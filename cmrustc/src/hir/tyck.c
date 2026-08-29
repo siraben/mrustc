@@ -2523,7 +2523,36 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             }
             return cm_tyck_ast_type(env, nested->data.value_item.type);
         }
-        /* Nested structs/enums have no HIR definition to name yet. */
+        if (nested->kind == CM_AST_ITEM_STRUCT
+            || nested->kind == CM_AST_ITEM_ENUM
+            || nested->kind == CM_AST_ITEM_UNION) {
+            /* Body-local structs and enums are body_local HIR items:
+             * `Guard::new(..)` (std's BufWriter::flush_buf, with its own
+             * impl blocks) is an associated path on the item, a bare
+             * `Guard(..)` its constructor. */
+            size_t scan;
+            for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
+                const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
+                    &env->state->hir->items, scan);
+                if (cand == NULL || (cand->kind != CM_HIR_ITEM_STRUCT
+                        && cand->kind != CM_HIR_ITEM_ENUM
+                        && cand->kind != CM_HIR_ITEM_UNION)
+                    || cand->ast_source != res->nested_source
+                    || cand->ast_item != res->nested_item) continue;
+                {
+                    CmUResolution alias;
+                    CmUExpr fake = *expr;
+                    memset(&alias, 0, sizeof(alias));
+                    alias.kind = res->rest_from
+                            < expr->data.path.segment_count
+                        ? CM_U_RESOLVED_TYPE_ASSOC : CM_U_RESOLVED_DEFINITION;
+                    alias.definition = cand->definition;
+                    fake.data.path.resolution = alias;
+                    return cm_tyck_path_type(env, &fake, id);
+                }
+            }
+        }
+        /* Nested items without a HIR definition to name. */
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
     }
     case CM_U_RESOLVED_UNRESOLVED:
@@ -2585,7 +2614,46 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected);
 static int cm_tyck_coerce_at(CmTyckEnv *env, CmUExprId site, CmTyId actual,
     CmTyId expected)
 {
+    CmTyArena *arena = env->state->arena;
+    const CmUExpr *site_expr = site == CM_U_EXPR_NONE ? NULL
+        : cm_ubody_get_expr(env->ub, site);
     int ok;
+    unsigned int guard = 0u;
+    /* A block's value is its tail: `{ (self, &[], &[]) }` as an `if`
+     * branch coerces where the tuple is written. */
+    while (site_expr != NULL && site_expr->kind == CM_U_EXPR_BLOCK
+            && site_expr->data.block.tail != CM_U_EXPR_NONE && guard++ < 8u) {
+        site = site_expr->data.block.tail;
+        site_expr = cm_ubody_get_expr(env->ub, site);
+    }
+    /* `(self, &[], &[])` where `(&[T], &[U], &[T])` is expected: each
+     * element coerces at its own expression, so an element's unsize is
+     * recorded against that element, never the tuple. */
+    if (site_expr != NULL && site_expr->kind == CM_U_EXPR_TUPLE) {
+        const CmTy *at = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+        const CmTy *et = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+        if (at != NULL && et != NULL && at->kind == CM_TY_TUPLE
+            && et->kind == CM_TY_TUPLE && at->count == et->count
+            && at->count == site_expr->data.list.element_count) {
+            uint32_t index;
+            int all = 1;
+            for (index = 0u; index < site_expr->data.list.element_count;
+                    ++index) {
+                CmTyId left;
+                CmTyId right;
+                at = cm_ty_get(arena, cm_ty_resolve(arena, actual));
+                et = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+                if (at == NULL || et == NULL || index >= at->count
+                    || index >= et->count) { all = 0; break; }
+                left = at->children[index];
+                right = et->children[index];
+                if (!cm_tyck_coerce_at(env,
+                        site_expr->data.list.elements[index], left, right))
+                    all = 0;
+            }
+            return all;
+        }
+    }
     env->coerce_site = site;
     ok = cm_tyck_coerce(env, actual, expected);
     env->coerce_site = CM_U_EXPR_NONE;
@@ -2674,6 +2742,19 @@ static int cm_tyck_is_fn_ptr(CmTyckEnv *env, CmTyId expected)
     const CmTy *ty = expected == CM_TY_NONE ? NULL
         : cm_ty_get(arena, cm_ty_resolve(arena, expected));
     return ty != NULL && ty->kind == CM_TY_FN_PTR;
+}
+
+/* An `if` / `match` whose branches coerce to the expectation each on
+ * their own (rustc's rule) rather than joining: fn pointers (closures
+ * never join) and tuples (`(self, &[], &[])` against `(&[T], &[U],
+ * &[T])`: the empty arrays unsize per element). */
+static int cm_tyck_branches_coerce(CmTyckEnv *env, CmTyId expected)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *ty = expected == CM_TY_NONE ? NULL
+        : cm_ty_get(arena, cm_ty_resolve(arena, expected));
+    return ty != NULL && (ty->kind == CM_TY_FN_PTR
+        || ty->kind == CM_TY_TUPLE);
 }
 
 static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
@@ -2802,8 +2883,12 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
             && ep->kind == CM_TY_SLICE) {
             int ok = cm_ty_unify(arena, ap->children[0], ep->children[0]);
             if (ok && env->coerce_site != CM_U_EXPR_NONE
-                && env->out != NULL && env->out->unsize_targets != NULL)
+                && env->out != NULL && env->out->unsize_targets != NULL) {
                 env->out->unsize_targets[env->coerce_site] = expected;
+                if (getenv("CM_TYCK_DEBUG") != NULL)
+                    fprintf(stderr, "TYCK unsize-record site=%lu\n",
+                        (unsigned long)env->coerce_site);
+            }
             return ok;
         }
         if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) {
@@ -2901,13 +2986,18 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         && a->count == e->count) {
         uint32_t child;
         int all = 1;
+        /* An element's unsize is not the tuple's (a tuple expression
+         * coerces per element in cm_tyck_coerce_at). */
+        CmUExprId site = env->coerce_site;
+        env->coerce_site = CM_U_EXPR_NONE;
         for (child = 0u; child < a->count && all; ++child) {
             if (!cm_tyck_coerce(env, a->children[child],
                     e->children[child])) all = 0;
             a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
             e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
-            if (a == NULL || e == NULL) return 0;
+            if (a == NULL || e == NULL) { env->coerce_site = site; return 0; }
         }
+        env->coerce_site = site;
         if (all) return 1;
     }
     if (a->kind == CM_TY_ADT && e->kind == CM_TY_ADT
@@ -4935,8 +5025,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE) {
             CmTyId else_type = cm_tyck_expr(env, expr->data.if_expr.else_expr,
                 expected != CM_TY_NONE ? expected : then_type);
-            if (cm_tyck_is_fn_ptr(env, expected)) {
-                /* Each branch coerces to the fn pointer on its own
+            if (cm_tyck_branches_coerce(env, expected)) {
+                /* Each branch coerces to the expectation on its own
                  * (thread_local!'s `if needs_drop { |init| .. } else
                  * { |init| .. }`): two closures never join. */
                 (void)cm_tyck_coerce_at(env, expr->data.if_expr.then_expr,
@@ -4964,7 +5054,7 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                 (void)cm_tyck_expr(env, arm->guard, arena->boolean);
             body = cm_tyck_expr(env, arm->body,
                 expected != CM_TY_NONE ? expected : joined);
-            if (cm_tyck_is_fn_ptr(env, expected)) {
+            if (cm_tyck_branches_coerce(env, expected)) {
                 (void)cm_tyck_coerce_at(env, arm->body, body, expected);
                 joined = expected;
                 continue;
@@ -5457,9 +5547,9 @@ static void cm_tyck_pat(CmTyckEnv *env, CmUPatId id, CmTyId expected)
         for (index = 0u; index < pat->data.list.pattern_count; ++index) {
             const CmUPat *sub = cm_ubody_get_pat(env->ub,
                 pat->data.list.patterns[index]);
-            int is_rest = (pat->data.list.has_rest
-                    && index == pat->data.list.rest_index)
-                || (sub != NULL && (sub->kind == CM_U_PAT_REST
+            /* A bare `..` is not in the list (`rest_index` counts the
+             * elements before it); only a `rest @ ..` node is the rest. */
+            int is_rest = (sub != NULL && (sub->kind == CM_U_PAT_REST
                     || (sub->kind == CM_U_PAT_BINDING
                         && cm_ubody_get_pat(env->ub,
                             sub->data.binding.subpattern) != NULL

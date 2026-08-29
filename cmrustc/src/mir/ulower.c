@@ -549,6 +549,90 @@ static uint32_t cm_umir_range_form(CmUMirBuilder *builder, CmUExprId index)
     return 0u;
 }
 
+static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
+    CmTyId type);
+
+/* `v[i]` / `v[a..]` on a Vec-like ADT: the elements live behind its
+ * `Deref` (`Vec<T>` -> `[T]`, `String` -> `str`), so the base derefs
+ * first -- `Deref::deref(&base)` -- and the slice is indexed.  Returns
+ * the `&[T]` local, or 0 when the base is not such an ADT. */
+static CmUMirLocalId cm_umir_index_deref_base(CmUMirBuilder *builder,
+    CmUExprId base_id, CmUExprId index_id, CmUMirLocalId base_local)
+{
+    CmTyArena *arena;
+    CmTyId base_type = cm_umir_expr_type(builder, base_id);
+    CmTyId element_type = cm_umir_expr_type(builder, index_id);
+    const CmTy *bt;
+    CmTyId pointee;
+    int is_ref = 0;
+    if (builder->tyck == NULL || builder->hir == NULL
+        || base_type == CM_TY_NONE) return 0u;
+    arena = (CmTyArena *)&builder->tyck->arena;
+    bt = cm_ty_get(arena, cm_ty_resolve(arena, base_type));
+    pointee = base_type;
+    while (bt != NULL && (bt->kind == CM_TY_REF || bt->kind == CM_TY_PTR)
+            && bt->count != 0u) {
+        is_ref = 1;
+        pointee = bt->children[0];
+        bt = cm_ty_get(arena, cm_ty_resolve(arena, pointee));
+    }
+    if (bt == NULL || bt->kind != CM_TY_ADT) return 0u;
+    {
+        const CmHirDefinition *record = cm_hir_lookup_definition(
+            builder->hir, bt->def);
+        const CmHirItem *item = record == NULL
+                || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+            : cm_hir_get_item(builder->hir, record->entity.item_id);
+        const CmInternedString *name = item == NULL ? NULL
+            : cm_interner_get(&builder->hir->strings, item->name);
+        /* Box<[T]> derefs built in; its value is the slice reference. */
+        if (name != NULL && name->len == 3u
+            && memcmp(name->bytes, "Box", 3u) == 0) return 0u;
+    }
+    {
+        /* The deref target: the element's slice, or the result's slice
+         * when the index is a range (the result is the subslice). */
+        const CmTy *et = element_type == CM_TY_NONE ? NULL
+            : cm_ty_get(arena, cm_ty_resolve(arena, element_type));
+        CmTyId target = et != NULL && (et->kind == CM_TY_SLICE
+                || et->kind == CM_TY_STR) ? element_type
+            : cm_ty_slice(arena, element_type);
+        CmTyId target_ref = cm_ty_ref(arena, target, 0);
+        CmUMirLocalId borrowed;
+        CmUMirLocalId derefed;
+        if (is_ref) {
+            /* `&&Vec<T>`: load down to one reference layer. */
+            const CmTy *layer = cm_ty_get(arena, cm_ty_resolve(arena,
+                base_type));
+            borrowed = base_local;
+            while (layer != NULL && (layer->kind == CM_TY_REF
+                    || layer->kind == CM_TY_PTR) && layer->count != 0u) {
+                const CmTy *inner = cm_ty_get(arena, cm_ty_resolve(arena,
+                    layer->children[0]));
+                CmUMirLocalId loaded;
+                if (inner == NULL || (inner->kind != CM_TY_REF
+                        && inner->kind != CM_TY_PTR)) break;
+                loaded = cm_umir_new_local(builder, layer->children[0]);
+                cm_umir_push_operands(builder, loaded, CM_UMIR_RVALUE_LOAD,
+                    base_id, layer->children[0], &borrowed, 1u);
+                borrowed = loaded;
+                layer = inner;
+            }
+        } else {
+            borrowed = cm_umir_address_of(builder, base_id, base_type);
+            if (borrowed == 0u) {
+                borrowed = cm_umir_new_local(builder, base_type);
+                cm_umir_push_operands(builder, borrowed, CM_UMIR_RVALUE_REF,
+                    base_id, base_type, &base_local, 1u);
+            }
+        }
+        derefed = cm_umir_new_local(builder, target_ref);
+        cm_umir_push_immediate(builder, derefed, CM_UMIR_RVALUE_DEREF_CALL,
+            base_id, target_ref, &borrowed, 1u, 0u);
+        return derefed;
+    }
+}
+
 /* The address of an index place `base[i]` as a local (element address
  * at the element's width), or ((CmUMirLocalId)0u) when `id` is not an
  * index expression.  A borrowed / autoref'd element must alias the
@@ -592,9 +676,13 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
     if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u;
     {
         uint32_t form = cm_umir_range_form(builder, expr->data.index.index);
+        CmUMirLocalId base_place = cm_umir_place(builder, expr->data.index.base);
+        CmUMirLocalId derefed = cm_umir_index_deref_base(builder,
+            expr->data.index.base, id, base_place);
+        if (derefed != 0u) base_place = derefed;
         if (form != 0u) {
             /* `&text[offset..]`: the subslice's own [data, len] pair. */
-            operands[0] = cm_umir_place(builder, expr->data.index.base);
+            operands[0] = base_place;
             operands[1] = form == 4u ? operands[0]
                 : cm_umir_emit_expr(builder, expr->data.index.index);
             address = cm_umir_new_local(builder, type);
@@ -602,8 +690,8 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
                 id, type, operands, form == 4u ? 1u : 2u, form);
             return address;
         }
+        operands[0] = base_place;
     }
-    operands[0] = cm_umir_place(builder, expr->data.index.base);
     operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
     address = cm_umir_new_local(builder, type);
     cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
@@ -1656,6 +1744,36 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             }
         }
         if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
+            && callee_expr->data.path.resolution.kind
+                == CM_U_RESOLVED_SELF_TYPE
+            && builder->hir != NULL && builder->tyck != NULL) {
+            /* `Self(v)` in a tuple struct's impl (std's `FileDesc::
+             * from_raw_fd`): the call's own type is the struct. */
+            CmTyArena *arena = (CmTyArena *)&builder->tyck->arena;
+            const CmTy *ct = type == CM_TY_NONE ? NULL
+                : cm_ty_get(arena, cm_ty_resolve(arena, type));
+            const CmHirDefinition *record = ct == NULL
+                    || ct->kind != CM_TY_ADT ? NULL
+                : cm_hir_lookup_definition(builder->hir, ct->def);
+            const CmHirItem *item = record == NULL
+                    || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+                : cm_hir_get_item(builder->hir, record->entity.item_id);
+            if (item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+                && item->data.aggregate_item.form == CM_HIR_AGGREGATE_TUPLE) {
+                for (index = 0u; index < expr->data.call.argument_count;
+                        ++index) {
+                    CmUMirLocalId argument = cm_umir_emit_expr(builder,
+                        expr->data.call.arguments[index]);
+                    if (recorded < CM_UMIR_STATEMENT_OPERANDS)
+                        operands[recorded++] = argument;
+                }
+                cm_umir_push_operands(builder, destination,
+                    CM_UMIR_RVALUE_AGGREGATE, id, type, operands,
+                    expr->data.call.argument_count);
+                break;
+            }
+        }
+        if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
             && cm_umir_variant_index(builder->hir,
                 &callee_expr->data.path.resolution) >= 0) {
             /* Tuple-variant constructor: slot[0] = discriminant. */
@@ -1971,8 +2089,13 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 CmUMirLocalId index_operands[2];
                 uint32_t form = cm_umir_range_form(builder,
                     place->data.index.index);
+                CmUMirLocalId derefed_base;
                 index_operands[0] = cm_umir_place(builder,
                     place->data.index.base);
+                derefed_base = cm_umir_index_deref_base(builder,
+                    place->data.index.base, expr->data.ref.operand,
+                    index_operands[0]);
+                if (derefed_base != 0u) index_operands[0] = derefed_base;
                 if (form != 0u) {
                     /* `&xs[a..b]`: the subslice's [data, len] pair. */
                     index_operands[1] = form == 4u ? index_operands[0]
@@ -2284,10 +2407,15 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     case CM_U_EXPR_INDEX: {
         CmUMirLocalId operands[2];
         uint32_t form = cm_umir_range_form(builder, expr->data.index.index);
+        CmUMirLocalId base_value;
+        CmUMirLocalId derefed;
         if (form != 0u) {
             /* A range index is an unsized place: its value travels as
              * the subslice's [data, len] pair, like a reference to it. */
             operands[0] = cm_umir_place(builder, expr->data.index.base);
+            derefed = cm_umir_index_deref_base(builder,
+                expr->data.index.base, id, operands[0]);
+            if (derefed != 0u) operands[0] = derefed;
             operands[1] = form == 4u ? operands[0]
                 : cm_umir_emit_expr(builder, expr->data.index.index);
             cm_umir_push_immediate(builder, destination,
@@ -2295,7 +2423,10 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 form == 4u ? 1u : 2u, form);
             break;
         }
-        operands[0] = cm_umir_emit_expr(builder, expr->data.index.base);
+        base_value = cm_umir_emit_expr(builder, expr->data.index.base);
+        derefed = cm_umir_index_deref_base(builder, expr->data.index.base,
+            id, base_value);
+        operands[0] = derefed != 0u ? derefed : base_value;
         operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_INDEX,
             id, type, operands, 2u);
