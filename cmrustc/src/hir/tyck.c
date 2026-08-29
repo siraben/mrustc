@@ -957,6 +957,56 @@ static int cm_tyck_lookup_assoc_generic(CmTyckEnv *env, CmTyId self_type,
     return cm_tyck_lookup_assoc(env, self_type, name, found);
 }
 
+/* A type-relative path (`Outer::from`) hides the trait's arguments:
+ * when several impls of the same trait fit `self_type` (`From<&mut T>`
+ * and `From<NonNull<T>>` for `Unique<T>`), the first in item order is
+ * only a guess.  Retarget `found` at the trait declaration, which
+ * emission resolves per instance from the argument types. */
+static void cm_tyck_prefer_declaration_if_ambiguous(CmTyckEnv *env,
+    CmTyId self_type, CmInternId name, CmTyckFound *found)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTyckImpl *chosen = NULL;
+    size_t index;
+    unsigned int fits = 0u;
+    if (found->item == NULL || found->parent == NULL
+        || found->parent->kind != CM_HIR_ITEM_IMPL
+        || found->via_trait_declaration) return;
+    for (index = 0u; index < env->state->impl_count; ++index)
+        if (env->state->impls[index].item == found->parent) {
+            chosen = &env->state->impls[index];
+            break;
+        }
+    if (chosen == NULL || !chosen->has_trait) return;
+    for (index = 0u; index < env->state->impl_count && fits < 2u; ++index) {
+        const CmTyckImpl *impl = &env->state->impls[index];
+        if (!impl->has_trait
+            || !cm_hir_def_id_equal(impl->trait_def, chosen->trait_def)
+            || !cm_tyck_matches(env, impl->self_pattern, self_type)) continue;
+        if (impl != chosen && cm_tyck_child_named(env->state,
+                impl->item->definition, name, (CmHirItemKind)-1) == NULL)
+            continue;
+        ++fits;
+    }
+    if (fits < 2u) return;
+    {
+        CmHirDefId owner_trait;
+        const CmHirItem *declared = cm_tyck_trait_method(env,
+            chosen->trait_def, name, 0u, &owner_trait);
+        if (declared == NULL || declared->kind != CM_HIR_ITEM_FUNCTION)
+            return;
+        memset(found, 0, sizeof(*found));
+        cm_tyck_instance_init(&found->instance, self_type);
+        cm_tyck_instance_fresh(env, &found->instance,
+            cm_tyck_item(env->state, owner_trait));
+        cm_tyck_instance_fresh(env, &found->instance, declared);
+        found->item = declared;
+        found->parent = cm_tyck_item(env->state, owner_trait);
+        found->self_type = cm_ty_resolve(arena, self_type);
+        found->via_trait_declaration = 1;
+    }
+}
+
 /* Is `def` one of the callable traits? */
 static int cm_tyck_is_fn_trait(CmTyckEnv *env, CmHirDefId def)
 {
@@ -2185,6 +2235,9 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return self_type;
         }
         if (cm_tyck_lookup_assoc_generic(env, self_type, last, &found)) {
+            if (found.item->kind == CM_HIR_ITEM_FUNCTION)
+                cm_tyck_prefer_declaration_if_ambiguous(env, self_type,
+                    last, &found);
             if (found.item->kind == CM_HIR_ITEM_FUNCTION) {
                 if (env->out->method_targets != NULL
                     && id != CM_U_EXPR_NONE)

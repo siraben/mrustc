@@ -1277,17 +1277,37 @@ static int cm_umir_c_method_accepts(const CmHirContext *hir,
             CmTyId ap_id = actual;
             const CmTy *pp = pt;
             const CmTy *ap = at;
+            uint32_t pattern_layers = 0u;
+            uint32_t actual_layers = 0u;
+            int is_receiver = param == 0u
+                && sig->receiver != CM_HIR_RECEIVER_NONE;
             while (pp != NULL
                 && (pp->kind == CM_TY_REF || pp->kind == CM_TY_PTR)) {
                 pp_id = pp->children[0];
                 pp = cm_ty_get((CmTyArena *)&tyck->arena,
                     cm_ty_resolve((CmTyArena *)&tyck->arena, pp_id));
+                ++pattern_layers;
             }
             while (ap != NULL
                 && (ap->kind == CM_TY_REF || ap->kind == CM_TY_PTR)) {
                 ap_id = ap->children[0];
                 ap = cm_ty_get((CmTyArena *)&tyck->arena,
                     cm_ty_resolve((CmTyArena *)&tyck->arena, ap_id));
+                ++actual_layers;
+            }
+            /* Only a receiver is auto-referenced: an ordinary argument
+             * never gains a layer, so a `&mut T` parameter does not accept
+             * a bare `Inner<T>` (that impl is a sibling, not this one —
+             * `Unique<T>: From<&mut T>` calls `Self::from(NonNull<T>)`). */
+            if (!is_receiver && pattern_layers > actual_layers
+                && ap != NULL && ap->kind != CM_TY_PARAM
+                && ap->kind != CM_TY_INFER && ap->kind != CM_TY_PROJECTION
+                && ap->kind != CM_TY_SELF) {
+                if (getenv("CMRUSTC_UMIR_DEBUG") != NULL)
+                    fprintf(stderr, "UMIR reject param=%u layers %u>%u\n",
+                        (unsigned)param, (unsigned)pattern_layers,
+                        (unsigned)actual_layers);
+                return 0;
             }
             if (pp != NULL && ap != NULL && pp->kind == ap->kind)
                 (void)cm_umir_c_ty_match(tyck, pp_id, ap_id, bound_params,
