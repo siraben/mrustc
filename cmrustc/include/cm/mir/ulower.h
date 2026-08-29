@@ -68,6 +68,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_UNSIZE,        /* &T -> &dyn Trait: [data, vtable] */
     CM_UMIR_RVALUE_REF_INDEX,     /* &operands[0][operands[1]] (element address) */
     CM_UMIR_RVALUE_RANGE_TEST,    /* operands[1] <= operands[0] <= operands[2] */
+    CM_UMIR_RVALUE_REF_FIELD,     /* &operands[0].field(expr) (field address) */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

@@ -527,7 +527,19 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
     const CmUExpr *expr = cm_ubody_get_expr(builder->ub, id);
     CmUMirLocalId operands[2];
     CmUMirLocalId address;
-    if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u; /* slot 0 is the return slot: never an address */
+    if (expr != NULL && (expr->kind == CM_U_EXPR_FIELD
+            || expr->kind == CM_U_EXPR_TUPLE_FIELD)) {
+        /* `&mut self.start`: the field's slot address (the field
+         * expression carries the name for the emitter). */
+        operands[0] = cm_umir_place(builder, expr->kind == CM_U_EXPR_FIELD
+            ? expr->data.field.base : expr->data.tuple_field.base);
+        address = cm_umir_new_local(builder, type);
+        cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_FIELD,
+            id, type, operands, 1u);
+        return address;
+    }
+    /* Slot 0 is the return slot: never an address. */
+    if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u;
     operands[0] = cm_umir_place(builder, expr->data.index.base);
     operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
     address = cm_umir_new_local(builder, type);
@@ -1146,6 +1158,16 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         {
             const CmUExpr *place = cm_ubody_get_expr(builder->ub,
                 expr->data.ref.operand);
+            if (place != NULL && (place->kind == CM_U_EXPR_FIELD
+                    || place->kind == CM_U_EXPR_TUPLE_FIELD)) {
+                CmUMirLocalId field_base = cm_umir_place(builder,
+                    place->kind == CM_U_EXPR_FIELD ? place->data.field.base
+                    : place->data.tuple_field.base);
+                cm_umir_push_operands(builder, destination,
+                    CM_UMIR_RVALUE_REF_FIELD, expr->data.ref.operand, type,
+                    &field_base, 1u);
+                break;
+            }
             if (place != NULL && place->kind == CM_U_EXPR_INDEX) {
                 CmUMirLocalId index_operands[2];
                 index_operands[0] = cm_umir_place(builder,

@@ -133,6 +133,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                         /* Callee symbols are mangled instance names. */
                         break;
                     case CM_UMIR_RVALUE_FIELD:
+                    case CM_UMIR_RVALUE_REF_FIELD:
                     case CM_UMIR_RVALUE_INDEX:
                     case CM_UMIR_RVALUE_REF_INDEX:
                     case CM_UMIR_RVALUE_RANGE_TEST:
@@ -3103,8 +3104,13 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_umir_c_render_local(output, statement->operands[1]);
                 break;
             }
-            case CM_UMIR_RVALUE_FIELD: {
+            case CM_UMIR_RVALUE_FIELD:
+            case CM_UMIR_RVALUE_REF_FIELD: {
+                /* REF_FIELD: the field slot's address instead of its
+                 * value (a transparent wrapper's field is the value: its
+                 * address is the base's). */
                 long slot = -1;
+                int want_address = statement->kind == CM_UMIR_RVALUE_REF_FIELD;
                 if (statement->operand_count == 1u && expr != NULL) {
                     if (expr->kind == CM_U_EXPR_TUPLE_FIELD)
                         slot = (long)expr->data.tuple_field.index;
@@ -3123,14 +3129,20 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             tyck, cm_umir_c_peel(tyck, base_type));
                         if (representative >= 0) {
                             /* A zero-sized field reads 0. */
-                            if (representative == slot)
+                            if (representative == slot) {
+                                if (want_address)
+                                    cm_str_buf_append(output,
+                                        "(long long)(intptr_t)&");
                                 cm_umir_c_render_loaded(output,
                                     statement->operands[0], depth);
-                            else
+                            } else {
                                 cm_str_buf_append(output, "0");
+                            }
                             break;
                         }
                     }
+                    if (want_address)
+                        cm_str_buf_append(output, "(long long)(intptr_t)&");
                     cm_umir_c_render_base(output, statement->operands[0],
                         depth);
                     cm_str_buf_push(output, '[');

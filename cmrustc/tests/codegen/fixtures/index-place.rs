@@ -25,6 +25,25 @@ impl Byte {
     }
 }
 
+// A borrowed field aliases the field (core's `mem::replace(&mut
+// self.start, n)` in `Range::spec_next`, and `self.cell.set(..)`).
+struct Pair {
+    start: u32,
+    cell: Cell,
+}
+
+fn replace(dest: &mut u32, value: u32) -> u32 {
+    let old = *dest;
+    *dest = value;
+    old
+}
+
+fn advance(p: &mut Pair) -> u32 {
+    let old = replace(&mut p.start, p.start + 5);
+    p.cell.set(old + 1);
+    old
+}
+
 #[no_mangle]
 pub extern "C" fn index_place(k: u32) -> u32 {
     let mut cells = [Cell { v: 0 }, Cell { v: 0 }, Cell { v: 0 }];
@@ -37,6 +56,10 @@ pub extern "C" fn index_place(k: u32) -> u32 {
     *p = 1;
     let mut packed = [Byte { b: 0 }, Byte { b: 0 }];
     packed[1].put(k as u8 + 1);
+    let mut pair = Pair { start: k, cell: Cell { v: 0 } };
+    let first = advance(&mut pair);
+    let second = advance(&mut pair);
     cells[1].v + bytes[2] as u32 * 10 + bytes[0] as u32 * 100
         + packed[1].b as u32 * 1000
+        + (first + second + pair.start + pair.cell.v) * 100000
 }
