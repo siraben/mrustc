@@ -29,6 +29,16 @@ fn count<const N: usize>(a: &[u32; N]) -> u32 {
     s.len() as u32 + s[0]
 }
 
+// A pointer *to* a fat reference is thin: casting it to `*const ()` and
+// back must keep the reference intact (core's `Argument::new` does
+// `NonNull::from_ref(x).cast()` with `x: &&str`).
+fn through_unit(s: &[u32]) -> u32 {
+    let p: *const &[u32] = &s;
+    let q = p as *const ();
+    let back: &[u32] = unsafe { *(q as *const &[u32]) };
+    back[1] + back.len() as u32
+}
+
 #[no_mangle]
 pub extern "C" fn array_slice(k: u32) -> u32 {
     let a = [1u32, 2, 3, k];
@@ -36,5 +46,5 @@ pub extern "C" fn array_slice(k: u32) -> u32 {
     let mut c = [0u8; 4];
     c[1] = 9;
     c[3] = c[1] + 1;
-    sum(&a) + a[2] + sum(&b) + c[3] as u32 + count(&a)
+    sum(&a) + a[2] + sum(&b) + c[3] as u32 + count(&a) + through_unit(&a)
 }

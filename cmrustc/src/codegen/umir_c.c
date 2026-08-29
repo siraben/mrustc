@@ -2801,8 +2801,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 CmTyId from = cm_umir_c_local_type(body,
                     statement->operands[0]);
                 CmTyId to = cm_umir_c_subst(statement->type);
+                /* Only a direct `*const str` / `&[T]` is a fat pointer:
+                 * `*const &str as *const ()` (Argument::new's
+                 * `NonNull::from_ref(x).cast()`) is thin on both sides. */
                 if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, from))
-                    && cm_umir_c_ref_depth(tyck, from) != 0u
+                    && cm_umir_c_ref_depth(tyck, from) == 1u
                     && !cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, to))) {
                     /* `s as *const str as *const u8`: the data pointer. */
                     cm_umir_c_render_base(output, statement->operands[0],
@@ -2820,7 +2823,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         cm_ty_resolve((CmTyArena *)&tyck->arena,
                             cm_umir_c_peel(tyck, to)));
                     if (fp != NULL && fp->kind == CM_TY_ARRAY
-                        && cm_umir_c_ref_depth(tyck, from) != 0u
+                        && cm_umir_c_ref_depth(tyck, from) == 1u
                         && cm_umir_c_ref_depth(tyck, to) != 0u
                         && (tp == NULL || tp->kind != CM_TY_ARRAY)) {
                         cm_umir_c_render_loaded(output, statement->operands[0],
