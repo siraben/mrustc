@@ -480,6 +480,214 @@ static CmTyId cm_umir_expr_type(const CmUMirBuilder *builder, CmUExprId id)
 
 /* Emit one expression as a fresh local; opaque kinds keep their type so
  * the emitter can grow class-by-class. */
+static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id);
+
+/* Whether `type` is core's `Option` (by item name), else Result-like. */
+static int cm_umir_type_is_option(const CmUMirBuilder *builder, CmTyId type)
+{
+    const CmTy *ty;
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    const CmInternedString *name;
+    if (builder->tyck == NULL || builder->hir == NULL || type == CM_TY_NONE)
+        return 0;
+    ty = cm_ty_get((CmTyArena *)&builder->tyck->arena,
+        cm_ty_resolve((CmTyArena *)&builder->tyck->arena, type));
+    if (ty == NULL || ty->kind != CM_TY_ADT) return 0;
+    record = cm_hir_lookup_definition(builder->hir, ty->def);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(builder->hir, record->entity.item_id);
+    name = item == NULL ? NULL
+        : cm_interner_get(&builder->hir->strings, item->name);
+    return name != NULL && name->len == 6u
+        && memcmp(name->bytes, "Option", 6u) == 0;
+}
+
+/* Discriminant a pattern selects (variant patterns), else -1. */
+static long cm_umir_pattern_discriminant(const CmUMirBuilder *builder,
+    const CmUPat *pat)
+{
+    const CmUResolution *res = NULL;
+    if (pat == NULL) return -1;
+    if (pat->kind == CM_U_PAT_PATH) res = &pat->data.path.resolution;
+    else if (pat->kind == CM_U_PAT_TUPLE_STRUCT
+        || pat->kind == CM_U_PAT_STRUCT)
+        res = &pat->data.struct_pat.resolution;
+    if (res == NULL) return -1;
+    return cm_umir_variant_index(builder->hir, res);
+}
+
+/* Field index of `name` in the struct behind a DEFINITION resolution. */
+static long cm_umir_struct_field_index(const CmUMirBuilder *builder,
+    const CmUResolution *res, CmInternId name)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    const CmInternedString *wanted;
+    uint32_t index;
+    if (res->kind != CM_U_RESOLVED_DEFINITION || builder->hir == NULL)
+        return -1;
+    record = cm_hir_lookup_definition(builder->hir, res->definition);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return -1;
+    item = cm_hir_get_item(builder->hir, record->entity.item_id);
+    if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+            && item->kind != CM_HIR_ITEM_UNION)) return -1;
+    wanted = cm_interner_get(&builder->ubodies->strings, name);
+    if (wanted == NULL) return -1;
+    for (index = 0u; index < item->data.aggregate_item.field_count; ++index) {
+        const CmInternedString *have = cm_interner_get(&builder->hir->strings,
+            item->data.aggregate_item.fields[index].name);
+        if (have != NULL && have->len == wanted->len
+            && memcmp(have->bytes, wanted->bytes, have->len) == 0)
+            return (long)index;
+    }
+    return -1;
+}
+
+/* Bind the locals of `pat_id` from `value` (a scrutinee known to match):
+ * bindings copy, tuple/variant/struct patterns read their slots
+ * (variants: slot 0 is the discriminant), `&p` loads through. */
+static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
+    CmUMirLocalId value, CmUExprId id)
+{
+    const CmUPat *pat = cm_ubody_get_pat(builder->ub, pat_id);
+    CmTyId pat_type = builder->tb != NULL && builder->tb->pat_types != NULL
+        ? builder->tb->pat_types[pat_id] : CM_TY_NONE;
+    uint32_t index;
+    if (pat == NULL) return;
+    switch (pat->kind) {
+    case CM_U_PAT_BINDING:
+        if (pat->data.binding.local != CM_U_LOCAL_NONE)
+            cm_umir_push_operands(builder,
+                (CmUMirLocalId)(1u + pat->data.binding.local),
+                CM_UMIR_RVALUE_LOCAL, id, pat_type, &value, 1u);
+        if (pat->data.binding.subpattern != CM_U_PAT_NONE)
+            cm_umir_bind_pattern(builder, pat->data.binding.subpattern,
+                value, id);
+        break;
+    case CM_U_PAT_TUPLE:
+        for (index = 0u; index < pat->data.list.pattern_count; ++index) {
+            const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+                pat->data.list.patterns[index]);
+            CmUMirLocalId slot;
+            if (sub == NULL || sub->kind == CM_U_PAT_WILD
+                || sub->kind == CM_U_PAT_REST) continue;
+            slot = cm_umir_new_local(builder, builder->tb != NULL
+                && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[pat->data.list.patterns[index]]
+                : CM_TY_NONE);
+            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u, index);
+            cm_umir_bind_pattern(builder, pat->data.list.patterns[index],
+                slot, id);
+        }
+        break;
+    case CM_U_PAT_TUPLE_STRUCT: {
+        int variant = cm_umir_variant_index(builder->hir,
+            &pat->data.struct_pat.resolution) >= 0;
+        for (index = 0u; index < pat->data.struct_pat.pattern_count;
+                ++index) {
+            const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+                pat->data.struct_pat.patterns[index]);
+            CmUMirLocalId slot;
+            if (sub == NULL || sub->kind == CM_U_PAT_WILD
+                || sub->kind == CM_U_PAT_REST) continue;
+            slot = cm_umir_new_local(builder, builder->tb != NULL
+                && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[pat->data.struct_pat.patterns[index]]
+                : CM_TY_NONE);
+            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u, (variant ? 1u : 0u) + index);
+            cm_umir_bind_pattern(builder,
+                pat->data.struct_pat.patterns[index], slot, id);
+        }
+        break;
+    }
+    case CM_U_PAT_STRUCT: {
+        int variant = cm_umir_variant_index(builder->hir,
+            &pat->data.struct_pat.resolution) >= 0;
+        for (index = 0u; index < pat->data.struct_pat.field_count; ++index) {
+            const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+                pat->data.struct_pat.fields[index].pattern);
+            long slot_index = variant
+                ? cm_umir_variant_field_index(builder->hir, builder->ubodies,
+                    &pat->data.struct_pat.resolution,
+                    pat->data.struct_pat.fields[index].name)
+                : cm_umir_struct_field_index(builder,
+                    &pat->data.struct_pat.resolution,
+                    pat->data.struct_pat.fields[index].name);
+            CmUMirLocalId slot;
+            if (sub == NULL || sub->kind == CM_U_PAT_WILD || slot_index < 0)
+                continue;
+            slot = cm_umir_new_local(builder, builder->tb != NULL
+                && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[
+                    pat->data.struct_pat.fields[index].pattern]
+                : CM_TY_NONE);
+            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u,
+                (variant ? 1u : 0u) + (uint32_t)slot_index);
+            cm_umir_bind_pattern(builder,
+                pat->data.struct_pat.fields[index].pattern, slot, id);
+        }
+        break;
+    }
+    case CM_U_PAT_REF: {
+        const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+            pat->data.ref.pattern);
+        CmUMirLocalId loaded;
+        if (sub == NULL || sub->kind == CM_U_PAT_WILD) break;
+        loaded = cm_umir_new_local(builder, builder->tb != NULL
+            && builder->tb->pat_types != NULL
+            ? builder->tb->pat_types[pat->data.ref.pattern] : CM_TY_NONE);
+        cm_umir_push_operands(builder, loaded, CM_UMIR_RVALUE_LOAD, id,
+            builder->tb != NULL && builder->tb->pat_types != NULL
+            ? builder->tb->pat_types[pat->data.ref.pattern] : CM_TY_NONE,
+            &value, 1u);
+        cm_umir_bind_pattern(builder, pat->data.ref.pattern, loaded, id);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* Branch on whether `value` matches `pat`: a variant pattern switches on
+ * the discriminant, anything else is taken as irrefutable.  Leaves the
+ * builder in the success block with the pattern bound; `*out_fail` is the
+ * failure block. */
+static void cm_umir_emit_pattern_test(CmUMirBuilder *builder,
+    CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
+    CmUMirBlockId *out_fail)
+{
+    const CmUPat *pat = cm_ubody_get_pat(builder->ub, pat_id);
+    long disc = cm_umir_pattern_discriminant(builder, pat);
+    CmUMirBlockId success = cm_umir_new_block(builder);
+    CmUMirBlockId fail = cm_umir_new_block(builder);
+    CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+        builder->current);
+    if (current != NULL && disc >= 0) {
+        CmUMirBlockId *targets = (CmUMirBlockId *)cm_alloc_zeroed(1u,
+            sizeof(*targets));
+        long *discriminants = (long *)cm_alloc_zeroed(1u,
+            sizeof(*discriminants));
+        targets[0] = success;
+        discriminants[0] = disc;
+        current->terminator = CM_UMIR_TERMINATOR_SWITCH;
+        current->condition = value;
+        current->goto_target = fail;
+        current->arm_targets = targets;
+        current->arm_discriminants = discriminants;
+        current->arm_count = 1u;
+    } else if (current != NULL) {
+        current->terminator = CM_UMIR_TERMINATOR_GOTO;
+        current->goto_target = success;
+    }
+    builder->current = success;
+    cm_umir_bind_pattern(builder, pat_id, value, id);
+    *out_fail = fail;
+}
+
 static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
 {
     const CmUExpr *expr;
@@ -824,21 +1032,28 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 if (stmt->data.let_stmt.initializer != CM_U_EXPR_NONE)
                     init_local = cm_umir_emit_expr(builder,
                         stmt->data.let_stmt.initializer);
-                if (pat != NULL && pat->kind == CM_U_PAT_BINDING
-                    && pat->data.binding.local != CM_U_LOCAL_NONE
+                if (pat != NULL
                     && stmt->data.let_stmt.initializer != CM_U_EXPR_NONE) {
-                    CmUMirLocalId bound = (CmUMirLocalId)(1u
-                        + pat->data.binding.local);
-                    cm_umir_push_operands(builder, bound,
-                        CM_UMIR_RVALUE_LOCAL,
-                        stmt->data.let_stmt.initializer,
-                        cm_umir_expr_type(builder,
-                            stmt->data.let_stmt.initializer),
-                        &init_local, 1u);
+                    if (stmt->data.let_stmt.else_block != CM_U_EXPR_NONE) {
+                        /* `let PAT = e else { diverge }`: the failure
+                         * block runs the else body. */
+                        CmUMirBlockId fail;
+                        CmUMirBlockId join = cm_umir_new_block(builder);
+                        cm_umir_emit_pattern_test(builder,
+                            stmt->data.let_stmt.pattern, init_local,
+                            stmt->data.let_stmt.initializer, &fail);
+                        cm_umir_seal_goto(builder, join);
+                        builder->current = fail;
+                        (void)cm_umir_emit_expr(builder,
+                            stmt->data.let_stmt.else_block);
+                        cm_umir_seal_goto(builder, join);
+                        builder->current = join;
+                    } else {
+                        cm_umir_bind_pattern(builder,
+                            stmt->data.let_stmt.pattern, init_local,
+                            stmt->data.let_stmt.initializer);
+                    }
                 }
-                if (stmt->data.let_stmt.else_block != CM_U_EXPR_NONE)
-                    (void)cm_umir_emit_expr(builder,
-                        stmt->data.let_stmt.else_block);
             } else if (stmt->kind == CM_U_STMT_EXPR) {
                 (void)cm_umir_emit_expr(builder,
                     stmt->data.expr_stmt.expression);
@@ -863,7 +1078,16 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         CmUMirBlockId join = cm_umir_new_block(builder);
         CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
             &builder->body->blocks, builder->current);
-        if (current != NULL) {
+        if (expr->data.if_expr.pattern != CM_U_PAT_NONE) {
+            /* `if let PAT = e`: match test with the pattern bound in the
+             * then-block; failure runs the else. */
+            CmUMirBlockId fail;
+            cm_umir_emit_pattern_test(builder, expr->data.if_expr.pattern,
+                condition, id, &fail);
+            cm_umir_seal_goto(builder, then_block);
+            builder->current = fail;
+            cm_umir_seal_goto(builder, else_block);
+        } else if (current != NULL) {
             current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
             current->condition = condition;
             current->true_target = then_block;
@@ -954,13 +1178,23 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         builder->current = header;
         condition = cm_umir_emit_expr(builder,
             expr->data.while_expr.condition);
-        current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-            builder->current);
-        if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
-            current->condition = condition;
-            current->true_target = body_block;
-            current->false_target = exit_block;
+        if (expr->data.while_expr.pattern != CM_U_PAT_NONE) {
+            /* `while let PAT = e`: match test; failure exits. */
+            CmUMirBlockId fail;
+            cm_umir_emit_pattern_test(builder, expr->data.while_expr.pattern,
+                condition, id, &fail);
+            cm_umir_seal_goto(builder, body_block);
+            builder->current = fail;
+            cm_umir_seal_goto(builder, exit_block);
+        } else {
+            current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                builder->current);
+            if (current != NULL) {
+                current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                current->condition = condition;
+                current->true_target = body_block;
+                current->false_target = exit_block;
+            }
         }
         if (builder->loop_depth < 64u) {
             builder->loop_headers[builder->loop_depth] = header;
@@ -1158,14 +1392,32 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
             &builder->body->blocks, builder->current);
         if (current != NULL) {
-            current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+            /* `Option`: None (0) returns; `Result`: Err (1) returns. */
+            CmUMirBlockId *targets = (CmUMirBlockId *)cm_alloc_zeroed(1u,
+                sizeof(*targets));
+            long *discriminants = (long *)cm_alloc_zeroed(1u,
+                sizeof(*discriminants));
+            targets[0] = return_block;
+            discriminants[0] = cm_umir_type_is_option(builder,
+                cm_umir_expr_type(builder, expr->data.try_expr.operand))
+                ? 0 : 1;
+            current->terminator = CM_UMIR_TERMINATOR_SWITCH;
             current->condition = operand;
-            current->true_target = return_block;
-            current->false_target = continue_block;
+            current->goto_target = continue_block;
+            current->arm_targets = targets;
+            current->arm_discriminants = discriminants;
+            current->arm_count = 1u;
         }
         {
             CmUMirBlock *ret = (CmUMirBlock *)cm_vec_at(
                 &builder->body->blocks, return_block);
+            builder->current = return_block;
+            /* The propagated value: the operand itself (From conversion
+             * of the error is identity in the slot model). */
+            cm_umir_push_operands(builder, 0u, CM_UMIR_RVALUE_LOCAL, id,
+                CM_TY_NONE, &operand, 1u);
+            ret = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                return_block);
             if (ret != NULL)
                 ret->terminator = CM_UMIR_TERMINATOR_RETURN;
         }
@@ -1174,11 +1426,31 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             CM_UMIR_RVALUE_TRY_UNWRAP, id, type, &operand, 1u);
         break;
     }
+    case CM_U_EXPR_LET: {
+        /* `let PAT = e` as a condition: 1 with the pattern bound when the
+         * value matches, else 0. */
+        CmUMirLocalId scrutinee = cm_umir_emit_expr(builder,
+            expr->data.let_expr.initializer);
+        CmUMirBlockId fail;
+        CmUMirBlockId join = cm_umir_new_block(builder);
+        cm_umir_emit_pattern_test(builder, expr->data.let_expr.pattern,
+            scrutinee, id, &fail);
+        cm_umir_push_immediate(builder, destination, CM_UMIR_RVALUE_LITERAL,
+            id, type, NULL, 0u, 1u);
+        cm_umir_seal_goto(builder, join);
+        builder->current = fail;
+        cm_umir_push_immediate(builder, destination, CM_UMIR_RVALUE_LITERAL,
+            id, type, NULL, 0u, 0u);
+        cm_umir_seal_goto(builder, join);
+        builder->current = join;
+        break;
+    }
     case CM_U_EXPR_FOR: {
         CmUMirBlockId header;
         CmUMirBlockId body_block;
         CmUMirBlockId exit_block;
         CmUMirLocalId element;
+        CmUMirLocalId item;
         CmUMirLocalId iterable = cm_umir_emit_expr(builder,
             expr->data.for_expr.iterable);
         header = cm_umir_new_block(builder);
@@ -1186,19 +1458,37 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         exit_block = cm_umir_new_block(builder);
         cm_umir_seal_goto(builder, header);
         builder->current = header;
-        element = cm_umir_new_local(builder, type);
+        /* `Iterator::next(&mut iterable)` yields an Option: `Some` (slot 0
+         * = 1) continues with the payload bound to the loop pattern. */
+        element = cm_umir_new_local(builder, CM_TY_NONE);
         cm_umir_push_operands(builder, element, CM_UMIR_RVALUE_ITER_NEXT,
             id, type, &iterable, 1u);
         {
             CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
                 &builder->body->blocks, builder->current);
             if (current != NULL) {
-                current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                CmUMirBlockId *targets = (CmUMirBlockId *)cm_alloc_zeroed(1u,
+                    sizeof(*targets));
+                long *discriminants = (long *)cm_alloc_zeroed(1u,
+                    sizeof(*discriminants));
+                targets[0] = body_block;
+                discriminants[0] = 1;
+                current->terminator = CM_UMIR_TERMINATOR_SWITCH;
                 current->condition = element;
-                current->true_target = body_block;
-                current->false_target = exit_block;
+                current->goto_target = exit_block;
+                current->arm_targets = targets;
+                current->arm_discriminants = discriminants;
+                current->arm_count = 1u;
             }
         }
+        builder->current = body_block;
+        item = cm_umir_new_local(builder, builder->tb != NULL
+            && builder->tb->pat_types != NULL
+            ? builder->tb->pat_types[expr->data.for_expr.pattern]
+            : CM_TY_NONE);
+        cm_umir_push_immediate(builder, item, CM_UMIR_RVALUE_SLOT, id,
+            CM_TY_NONE, &element, 1u, 1u);
+        cm_umir_bind_pattern(builder, expr->data.for_expr.pattern, item, id);
         if (builder->loop_depth < 64u) {
             builder->loop_headers[builder->loop_depth] = header;
             builder->loop_exits[builder->loop_depth] = exit_block;

@@ -1429,6 +1429,31 @@ static int cm_umir_c_render_string_literal(CmStrBuf *output,
     return 1;
 }
 
+/* `Iterator::next`: the fn `next` declared by the trait named
+ * `Iterator` (core's, or a no_core program's own). */
+static CmHirDefId cm_umir_c_iterator_next(const CmHirContext *hir)
+{
+    size_t index;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, index);
+        const CmInternedString *name;
+        const CmHirItem *parent;
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || cm_hir_def_id_is_none(item->parent_definition)) continue;
+        name = cm_interner_get(&hir->strings, item->name);
+        if (name == NULL || name->len != 4u
+            || memcmp(name->bytes, "next", 4u) != 0) continue;
+        parent = cm_umir_c_item_of(hir, item->parent_definition);
+        if (parent == NULL || parent->kind != CM_HIR_ITEM_TRAIT) continue;
+        name = cm_interner_get(&hir->strings, parent->name);
+        if (name != NULL && name->len == 8u
+            && memcmp(name->bytes, "Iterator", 8u) == 0)
+            return item->definition;
+    }
+    return cm_hir_def_id_none();
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck)
@@ -1546,6 +1571,27 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             }
         }
     }
+    if (getenv("CMRUSTC_UMIR_TRACE") != NULL
+        && body->closure_expr == CM_U_EXPR_NONE) {
+        /* Runtime trace: symbol and parameters on entry. */
+        const CmInternedString *owner_name = owner == NULL ? NULL
+            : cm_interner_get(&hir->strings, owner->name);
+        cm_str_buf_append(output, "    fprintf(stderr, \"enter ");
+        cm_umir_c_render_symbol(output, def);
+        if (owner_name != NULL) {
+            cm_str_buf_push(output, ' ');
+            cm_str_buf_append_n(output, (const char *)owner_name->bytes,
+                owner_name->len);
+        }
+        for (param = 0u; param < ub->parameter_count; ++param)
+            cm_str_buf_append(output, " %lld");
+        cm_str_buf_append(output, "\\n\"");
+        for (param = 0u; param < ub->parameter_count; ++param) {
+            cm_str_buf_append(output, ", p");
+            cm_umir_c_render_number(output, (unsigned long)param);
+        }
+        cm_str_buf_append(output, ");\n");
+    }
     (void)local_index;
     /* Aggregates live as function-scope slot arrays (M9 leniency: an
      * aggregate value is a pointer to its declared-order field slots). */
@@ -1648,6 +1694,10 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     && cm_umir_c_render_string_literal(output, ubodies,
                         expr, statement->destination)) {
                     /* rendered as a [data, len] pair */
+                } else if (expr == NULL || expr->kind != CM_U_EXPR_LITERAL) {
+                    /* Synthetic constant (pattern-test results). */
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->immediate);
                 } else {
                     cm_str_buf_append(output, "0 /* literal */");
                     complete = 0;
@@ -2251,6 +2301,42 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 break;
             }
+            case CM_UMIR_RVALUE_TRY_UNWRAP:
+                /* The `Some`/`Ok` payload (slot 1) of a matched value. */
+                cm_str_buf_append(output, "((long long *)(intptr_t)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                cm_str_buf_append(output, ")[1]");
+                break;
+            case CM_UMIR_RVALUE_ITER_NEXT: {
+                /* `Iterator::next(&mut iterable)`: resolve the impl for
+                 * the iterable's type; the argument is the slot address. */
+                CmHirDefId next_def = cm_umir_c_iterator_next(hir);
+                CmTyId iter_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                if (cm_hir_def_id_is_none(next_def) || iter_type == CM_TY_NONE
+                    || statement->operand_count != 1u) {
+                    cm_str_buf_append(output, "0 /* iter-next */");
+                    complete = 0;
+                    break;
+                }
+                {
+                    CmStrBuf symbol;
+                    cm_str_buf_init(&symbol);
+                    cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
+                        next_def, CM_TY_NONE, iter_type, NULL, 0u);
+                    cm_str_buf_append(output, "0; { long long ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "(); ");
+                    cm_umir_c_render_local(output, statement->destination);
+                    cm_str_buf_append(output, " = ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "((long long)(intptr_t)&");
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    cm_str_buf_append(output, "); }");
+                    cm_str_buf_destroy(&symbol);
+                }
+                break;
+            }
             case CM_UMIR_RVALUE_UNSIZE: {
                 /* `&T -> &dyn Trait`: slot 1 the reference, slot 2 the
                  * vtable; the destination references the pair. */
@@ -2535,6 +2621,8 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     program.umir = umir;
     program.ubodies = ubodies;
     program.tyck = tyck;
+    if (getenv("CMRUSTC_UMIR_TRACE") != NULL)
+        cm_str_buf_append(output, "#include <stdio.h>\n");
     cm_str_buf_append(output, "#include <stdint.h>\nvoid abort(void);\n"
         "void *malloc(unsigned long);\n"
         "void *calloc(unsigned long, unsigned long);\n");
