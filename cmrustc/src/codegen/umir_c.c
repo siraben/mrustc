@@ -1581,6 +1581,66 @@ static int cm_umir_c_render_string_literal(CmStrBuf *output,
     return 1;
 }
 
+/* `a == b` / `a + b` on non-scalar operands: call the operator method
+ * tyck resolved (`PartialEq::eq(&a, &b)`, `Add::add(a, b)`); `&self`
+ * operators take both operands by reference.  Returns 0 to fall back to
+ * the C operator (scalars, pointers to scalars, unresolved). */
+static int cm_umir_c_render_operator_call(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck, const CmUMirBody *body,
+    const CmUMirStatement *statement)
+{
+    const CmTyckBody *tb = cm_tyck_get(tyck, body->source);
+    CmHirDefId def = tb == NULL || tb->method_targets == NULL
+        ? cm_hir_def_id_none() : tb->method_targets[statement->expr];
+    const CmHirItem *item = cm_hir_def_id_is_none(def) ? NULL
+        : cm_umir_c_item_of(hir, def);
+    CmTyId left = cm_umir_c_local_type(body, statement->operands[0]);
+    const CmTy *lt = left == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, left));
+    CmStrBuf symbol;
+    int by_reference;
+    uint32_t arg;
+    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION || lt == NULL)
+        return 0;
+    if (lt->kind == CM_TY_INT || lt->kind == CM_TY_BOOL
+        || lt->kind == CM_TY_CHAR || lt->kind == CM_TY_FLOAT
+        || lt->kind == CM_TY_PTR || lt->kind == CM_TY_FN_PTR
+        || lt->kind == CM_TY_FN_DEF || lt->kind == CM_TY_PARAM)
+        return 0;
+    if (lt->kind == CM_TY_REF) {
+        const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, lt->children[0]));
+        if (pt == NULL || pt->kind == CM_TY_INT || pt->kind == CM_TY_BOOL
+            || pt->kind == CM_TY_CHAR || pt->kind == CM_TY_FLOAT
+            || pt->kind == CM_TY_PTR || pt->kind == CM_TY_PARAM
+            || pt->kind == CM_TY_STR || pt->kind == CM_TY_SLICE)
+            return 0;
+    }
+    by_reference = item->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_SHARED
+        || item->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_REF_MUTABLE;
+    cm_str_buf_init(&symbol);
+    cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def, CM_TY_NONE,
+        left, statement, 0u);
+    cm_str_buf_append(output, "0; { long long ");
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
+    cm_str_buf_append(output, "(); ");
+    cm_umir_c_render_local(output, statement->destination);
+    cm_str_buf_append(output, " = ");
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
+    cm_str_buf_push(output, '(');
+    for (arg = 0u; arg < 2u; ++arg) {
+        if (arg != 0u) cm_str_buf_append(output, ", ");
+        if (by_reference) cm_str_buf_append(output, "(long long)(intptr_t)&");
+        cm_umir_c_render_local(output, statement->operands[arg]);
+    }
+    cm_str_buf_append(output, "); }");
+    cm_str_buf_destroy(&symbol);
+    return 1;
+}
+
 /* `Iterator::next`: the fn `next` declared by the trait named
  * `Iterator` (core's, or a no_core program's own). */
 static CmHirDefId cm_umir_c_iterator_next(const CmHirContext *hir)
@@ -1913,6 +1973,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 break;
             case CM_UMIR_RVALUE_BINARY:
                 if (statement->operand_count == 2u && expr != NULL
+                    && expr->kind == CM_U_EXPR_BINARY
+                    && cm_umir_c_render_operator_call(output, hir, tyck,
+                        body, statement)) {
+                    /* Non-scalar operands: the operator trait method. */
+                } else if (statement->operand_count == 2u && expr != NULL
                     && (expr->kind == CM_U_EXPR_BINARY
                         || expr->kind == CM_U_EXPR_ASSIGN_OP)) {
                     /* Operands compute at their own ABI width so

@@ -3294,7 +3294,8 @@ static CmTyId cm_tyck_struct_literal(CmTyckEnv *env, const CmUExpr *expr)
     return adt;
 }
 
-static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expected)
+static CmTyId cm_tyck_binary(CmTyckEnv *env, CmUExprId id,
+    const CmUExpr *expr, CmTyId expected)
 {
     CmTyArena *arena = env->state->arena;
     CmUBinaryOp op = expr->data.binary.op;
@@ -3340,8 +3341,32 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
         }
     }
     if (comparison) {
-        /* PartialEq/PartialOrd on anything: bool. */
+        /* PartialEq/PartialOrd on anything: bool.  Non-scalar operands
+         * record the trait method so MIR emission calls it. */
         (void)cm_ty_unify(arena, left, right);
+        if (lt != NULL && lt->kind != CM_TY_INT && lt->kind != CM_TY_BOOL
+            && lt->kind != CM_TY_CHAR && lt->kind != CM_TY_FLOAT
+            && lt->kind != CM_TY_PTR && lt->kind != CM_TY_INFER
+            && lt->kind != CM_TY_PARAM && lt->kind != CM_TY_SELF
+            && lt->kind != CM_TY_PROJECTION
+            && env->out->method_targets != NULL && id != CM_U_EXPR_NONE) {
+            static const char *const cmp_names[] = { "eq", "ne", "lt", "le",
+                "gt", "ge" };
+            unsigned int slot = (unsigned int)op - (unsigned int)CM_U_BINARY_EQ;
+            if (slot < 6u) {
+                CmInternId method = cm_tyck_intern_text(env->state,
+                    cmp_names[slot], strlen(cmp_names[slot]));
+                CmTyckFound found;
+                size_t undo_mark = cm_ty_undo_mark(arena);
+                if (method != CM_INTERN_ID_NONE
+                    && cm_tyck_lookup_assoc_in(env, left, method, &found, 7u,
+                        0u)
+                    && found.item != NULL
+                    && found.item->kind == CM_HIR_ITEM_FUNCTION)
+                    env->out->method_targets[id] = found.item->definition;
+                cm_ty_undo_to(arena, undo_mark);
+            }
+        }
         return arena->boolean;
     }
     /* Operator traits on ADTs (Add::add ...): resolved through the trait
@@ -3391,6 +3416,11 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, const CmUExpr *expr, CmTyId expecte
                 uint32_t count = cm_tyck_signature(env, found.item,
                     cm_tyck_subst_of(&found.instance), params, CM_TYCK_MAX_ARGS, &ret);
                 if (count >= 2u) (void)cm_tyck_coerce(env, right, params[1]);
+                /* MIR emission calls the operator method for non-scalar
+                 * operands (`NonNull == NonNull` is PartialEq::eq). */
+                if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE
+                    && found.item != NULL)
+                    env->out->method_targets[id] = found.item->definition;
                 if (getenv("CM_TYCK_DEBUG") != NULL) {
                     const CmTy *rt = cm_ty_get(arena,
                         cm_ty_resolve(arena, ret));
@@ -3800,7 +3830,7 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         break;
     }
     case CM_U_EXPR_BINARY:
-        result = cm_tyck_binary(env, expr, expected);
+        result = cm_tyck_binary(env, id, expr, expected);
         break;
     case CM_U_EXPR_ASSIGN:
     case CM_U_EXPR_ASSIGN_OP: {
