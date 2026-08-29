@@ -146,6 +146,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_DEREF_CALL:
                     case CM_UMIR_RVALUE_SLICE_LEN:
                     case CM_UMIR_RVALUE_STATIC_ADDR:
+                    case CM_UMIR_RVALUE_SUBSLICE:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
@@ -3152,7 +3153,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 /* Literal data is static; so is its pair, which callers
                  * keep after this frame returns (`-> &'static str`). */
                 cm_str_buf_append(output, "    static");
-            } else if (statement->kind == CM_UMIR_RVALUE_UNSIZE) {
+            } else if (statement->kind == CM_UMIR_RVALUE_UNSIZE
+                    || statement->kind == CM_UMIR_RVALUE_SUBSLICE) {
                 slots = 3ul;
             } else if (statement->kind != CM_UMIR_RVALUE_AGGREGATE
                     && statement->kind != CM_UMIR_RVALUE_VARIANT) {
@@ -4297,6 +4299,102 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_umir_c_render_symbol(output,
                     path_expr->data.path.resolution.definition);
                 cm_str_buf_append(output, "_addr(); }");
+                break;
+            }
+            case CM_UMIR_RVALUE_SUBSLICE: {
+                /* `text[offset..]`: a fresh [data, len] pair over the
+                 * base's elements (scalar elements at their own width,
+                 * others as slots), like an unsize but offset. */
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                CmTyId pointee = cm_umir_c_peel(tyck, base_type);
+                const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, pointee));
+                unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                int fat = cm_umir_c_is_fat(tyck, pointee);
+                const char *scalar = pt != NULL && pt->kind == CM_TY_STR
+                    ? "uint8_t" : pt != NULL && pt->count != 0u
+                        && (pt->kind == CM_TY_SLICE || pt->kind == CM_TY_ARRAY)
+                    ? cm_umir_c_scalar_type(tyck, pt->children[0]) : NULL;
+                unsigned long form = (unsigned long)statement->immediate;
+                CmStrBuf start;
+                CmStrBuf end;
+                if (!fat && (pt == NULL || pt->kind != CM_TY_ARRAY)) {
+                    cm_str_buf_append(output, "0 /* subslice */");
+                    complete = 0;
+                    break;
+                }
+                cm_str_buf_init(&start);
+                cm_str_buf_init(&end);
+                /* start / end by range form. */
+                if (form == 1ul || form == 3ul || form == 5ul) {
+                    if (form == 1ul)
+                        cm_umir_c_render_local(&start, statement->operands[1]);
+                    else {
+                        cm_str_buf_append(&start, "((long long *)(intptr_t)");
+                        cm_umir_c_render_local(&start, statement->operands[1]);
+                        cm_str_buf_append(&start, ")[0]");
+                    }
+                } else
+                    cm_str_buf_append(&start, "0");
+                if (form == 1ul || form == 4ul) {
+                    if (fat) {
+                        cm_umir_c_render_base(&end, statement->operands[0],
+                            depth);
+                        cm_str_buf_append(&end, "[1]");
+                    } else
+                        cm_umir_c_render_number(&end,
+                            cm_umir_c_array_len(tyck, pointee));
+                } else if (form == 2ul || form == 6ul) {
+                    cm_umir_c_render_local(&end, statement->operands[1]);
+                    if (form == 6ul) cm_str_buf_append(&end, " + 1");
+                } else {
+                    cm_str_buf_append(&end, "((long long *)(intptr_t)");
+                    cm_umir_c_render_local(&end, statement->operands[1]);
+                    cm_str_buf_append(&end, ")[1]");
+                    if (form == 5ul) cm_str_buf_append(&end, " + 1");
+                }
+                cm_str_buf_append(output, "0; _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, " = (long long *)malloc(24); _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[1] = (long long)(intptr_t)((");
+                cm_str_buf_append(output, scalar == NULL ? "long long"
+                    : scalar);
+                cm_str_buf_append(output, " *)(intptr_t)");
+                if (fat) {
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        depth);
+                    cm_str_buf_append(output, "[0]");
+                } else {
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        depth);
+                }
+                cm_str_buf_append(output, " + ");
+                cm_str_buf_append_n(output, start.data, start.len);
+                cm_str_buf_append(output, "); _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[2] = (");
+                cm_str_buf_append_n(output, end.data, end.len);
+                cm_str_buf_append(output, ") - (");
+                cm_str_buf_append_n(output, start.data, start.len);
+                cm_str_buf_append(output, "); _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[0] = (long long)(intptr_t)&_agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[1]; ");
+                cm_umir_c_render_local(output, statement->destination);
+                cm_str_buf_append(output, " = (long long)(intptr_t)&_agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, "[0]");
+                cm_str_buf_destroy(&start);
+                cm_str_buf_destroy(&end);
                 break;
             }
             case CM_UMIR_RVALUE_SLICE_LEN: {

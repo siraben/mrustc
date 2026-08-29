@@ -517,6 +517,38 @@ static CmUMirLocalId cm_umir_place(CmUMirBuilder *builder, CmUExprId id)
     return cm_umir_emit_expr(builder, id);
 }
 
+/* `base[a..b]` / `base[a..]` / `base[..b]` / `base[..]` / `base[a..=b]` /
+ * `base[..=b]`: the range form of an index expression's index, from its
+ * type (core's `ops::Range*` structs), or 0 for an element index. */
+static uint32_t cm_umir_range_form(CmUMirBuilder *builder, CmUExprId index)
+{
+    CmTyId type = cm_umir_expr_type(builder, index);
+    const CmTy *ty;
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    const CmInternedString *name;
+    if (builder->tyck == NULL || builder->hir == NULL || type == CM_TY_NONE)
+        return 0u;
+    ty = cm_ty_get((CmTyArena *)&builder->tyck->arena,
+        cm_ty_resolve((CmTyArena *)&builder->tyck->arena, type));
+    if (ty == NULL || ty->kind != CM_TY_ADT) return 0u;
+    record = cm_hir_lookup_definition(builder->hir, ty->def);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(builder->hir, record->entity.item_id);
+    name = item == NULL ? NULL
+        : cm_interner_get(&builder->hir->strings, item->name);
+    if (name == NULL) return 0u;
+    if (name->len == 9u && memcmp(name->bytes, "RangeFrom", 9u) == 0) return 1u;
+    if (name->len == 7u && memcmp(name->bytes, "RangeTo", 7u) == 0) return 2u;
+    if (name->len == 5u && memcmp(name->bytes, "Range", 5u) == 0) return 3u;
+    if (name->len == 9u && memcmp(name->bytes, "RangeFull", 9u) == 0) return 4u;
+    if (name->len == 14u && memcmp(name->bytes, "RangeInclusive", 14u) == 0)
+        return 5u;
+    if (name->len == 16u && memcmp(name->bytes, "RangeToInclusive", 16u) == 0)
+        return 6u;
+    return 0u;
+}
+
 /* The address of an index place `base[i]` as a local (element address
  * at the element's width), or ((CmUMirLocalId)0u) when `id` is not an
  * index expression.  A borrowed / autoref'd element must alias the
@@ -558,6 +590,19 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
     }
     /* Slot 0 is the return slot: never an address. */
     if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u;
+    {
+        uint32_t form = cm_umir_range_form(builder, expr->data.index.index);
+        if (form != 0u) {
+            /* `&text[offset..]`: the subslice's own [data, len] pair. */
+            operands[0] = cm_umir_place(builder, expr->data.index.base);
+            operands[1] = form == 4u ? operands[0]
+                : cm_umir_emit_expr(builder, expr->data.index.index);
+            address = cm_umir_new_local(builder, type);
+            cm_umir_push_immediate(builder, address, CM_UMIR_RVALUE_SUBSLICE,
+                id, type, operands, form == 4u ? 1u : 2u, form);
+            return address;
+        }
+    }
     operands[0] = cm_umir_place(builder, expr->data.index.base);
     operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
     address = cm_umir_new_local(builder, type);
@@ -1783,8 +1828,19 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             }
             if (place != NULL && place->kind == CM_U_EXPR_INDEX) {
                 CmUMirLocalId index_operands[2];
+                uint32_t form = cm_umir_range_form(builder,
+                    place->data.index.index);
                 index_operands[0] = cm_umir_place(builder,
                     place->data.index.base);
+                if (form != 0u) {
+                    /* `&xs[a..b]`: the subslice's [data, len] pair. */
+                    index_operands[1] = form == 4u ? index_operands[0]
+                        : cm_umir_emit_expr(builder, place->data.index.index);
+                    cm_umir_push_immediate(builder, destination,
+                        CM_UMIR_RVALUE_SUBSLICE, expr->data.ref.operand, type,
+                        index_operands, form == 4u ? 1u : 2u, form);
+                    break;
+                }
                 index_operands[1] = cm_umir_emit_expr(builder,
                     place->data.index.index);
                 cm_umir_push_operands(builder, destination,
@@ -2086,6 +2142,18 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     }
     case CM_U_EXPR_INDEX: {
         CmUMirLocalId operands[2];
+        uint32_t form = cm_umir_range_form(builder, expr->data.index.index);
+        if (form != 0u) {
+            /* A range index is an unsized place: its value travels as
+             * the subslice's [data, len] pair, like a reference to it. */
+            operands[0] = cm_umir_place(builder, expr->data.index.base);
+            operands[1] = form == 4u ? operands[0]
+                : cm_umir_emit_expr(builder, expr->data.index.index);
+            cm_umir_push_immediate(builder, destination,
+                CM_UMIR_RVALUE_SUBSLICE, id, type, operands,
+                form == 4u ? 1u : 2u, form);
+            break;
+        }
         operands[0] = cm_umir_emit_expr(builder, expr->data.index.base);
         operands[1] = cm_umir_emit_expr(builder, expr->data.index.index);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_INDEX,
