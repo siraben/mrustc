@@ -193,6 +193,8 @@ static void cm_umir_c_render_number(CmStrBuf *output, unsigned long value)
 }
 
 static const CmUMirBody *cm_umir_c_active_body = NULL;
+/* Set while rendering a vtable: the receiver type is the exact Self. */
+static int cm_umir_c_exact_self = 0;
 
 /* Locals live in one frame array so closures can alias it as their
  * environment: `_l[i]` for the frame, `env[i]` for an enclosing frame's
@@ -1509,7 +1511,16 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
             uint32_t bound_count = 0u;
             CmHirReceiverKind receiver =
                 item->data.function_item.signature.receiver;
-            {
+            resolved = cm_hir_def_id_none();
+            if (cm_umir_c_exact_self) {
+                /* A vtable's concrete type is exact: `&mut Buffer: Write`
+                 * is the forwarding `impl Write for &mut W`, not
+                 * `Buffer`'s own impl (that one expects `&mut Buffer`,
+                 * not `&mut &mut Buffer`, as its data pointer). */
+                resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
+                    self, bound_types, &bound_count, statement, first_arg);
+            }
+            if (cm_hir_def_id_is_none(resolved)) {
                 /* `&self` / `&mut self` receivers: the impl's self type
                  * is the referent, one layer down; a by-value `self`
                  * keeps the receiver type (impls for `&mut W` exist). */
@@ -1520,9 +1531,9 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                     && (receiver == CM_HIR_RECEIVER_REF_SHARED
                         || receiver == CM_HIR_RECEIVER_REF_MUTABLE))
                     self = self_ty->children[0];
+                resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
+                    self, bound_types, &bound_count, statement, first_arg);
             }
-            resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
-                self, bound_types, &bound_count, statement, first_arg);
             {
                 /* Lenient fallback: peel every reference layer. */
                 const CmTy *self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
@@ -3635,8 +3646,10 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                 || !cm_hir_def_id_equal(method->parent_definition,
                     vt->trait_def)) continue;
             cm_str_buf_init(&symbol);
+            cm_umir_c_exact_self = 1;
             cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
                 method->definition, CM_TY_NONE, vt->type, NULL, 0u);
+            cm_umir_c_exact_self = 0;
             cm_str_buf_append(&protos, "long long ");
             cm_str_buf_append_n(&protos, symbol.data, symbol.len);
             cm_str_buf_append(&protos, "();\n");
