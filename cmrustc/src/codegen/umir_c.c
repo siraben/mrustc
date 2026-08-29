@@ -607,6 +607,35 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         cm_str_buf_append(output, "; }");
         return 1;
     }
+    if (CM_SHIM_IS("aggregate_raw_ptr")) {
+        /* (data, metadata) -> pointer: a fat pointee gets a pair block
+         * referenced like every other fat value; thin is the data. */
+        const CmTy *pointee = ft != NULL && (ft->kind == CM_TY_PTR
+                || ft->kind == CM_TY_REF)
+            ? cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, ft->children[0]))
+            : NULL;
+        if (pointee != NULL && (pointee->kind == CM_TY_SLICE
+                || pointee->kind == CM_TY_STR || pointee->kind == CM_TY_DYN))
+            cm_str_buf_append(output, "(long long d, long long m) "
+                "{ long long *b = (long long *)malloc(24); b[1] = d; "
+                "b[2] = m; b[0] = (long long)(intptr_t)&b[1]; "
+                "return (long long)(intptr_t)&b[0]; }");
+        else
+            cm_str_buf_append(output, "(long long d, long long m) "
+                "{ (void)m; return d; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("slice_get_unchecked")) {
+        /* <ItemPtr, SlicePtr, T>(slice, index): element address at the
+         * element's width (slots for non-scalars). */
+        CmTyId elem = instance->count >= 3u ? instance->types[2] : CM_TY_NONE;
+        cm_str_buf_append(output, "(long long s, long long i) { return "
+            "((long long *)(intptr_t)*(long long *)(intptr_t)s)[0] + i * ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, elem));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
     if (CM_SHIM_IS("size_of")) {
         cm_str_buf_append(output, "() { return ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
