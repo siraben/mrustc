@@ -2586,6 +2586,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                                 const_self = cm_umir_c_subst(cm_ty_with_def(
                                     (CmTyArena *)&tyck->arena, CM_TY_ADT,
                                     pr->definition, NULL, 0u));
+                        } else if (expr != NULL
+                            && expr->kind == CM_U_EXPR_QUALIFIED_PATH
+                            && ptb->path_self_types != NULL
+                            && ptb->path_self_types[statement->expr]
+                                != CM_TY_NONE) {
+                            /* `<T>::C` / `<T as Tr>::C`: tyck recorded the
+                             * written Self (`<usize>::MAX` in `isize::MAX`). */
+                            const_self = cm_umir_c_subst(
+                                ptb->path_self_types[statement->expr]);
                         }
                         cm_str_buf_init(&symbol);
                         cm_umir_c_render_callee_symbol(&symbol, hir, tyck,

@@ -33,6 +33,10 @@ typedef struct CmTyckBody {
      * target reference type (none elsewhere); MIR emission builds the
      * [data, vtable] pair there. */
     CmTyId *unsize_targets;
+    /* The written Self of a qualified path (`<T>::C`, `<T as Tr>::C`)
+     * whose target is an associated item: emission substitutes it per
+     * instance to reach the impl's item (none elsewhere). */
+    CmTyId *path_self_types;
     CmTyId return_type;
     uint32_t unresolved_nodes;
     uint32_t error_nodes;

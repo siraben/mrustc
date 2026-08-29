@@ -1,3 +1,6 @@
+#include <stdlib.h>
+/* core declares `extern "Rust" { fn panic_impl(..) }`; foreign fns forward to the host. */
+long long panic_impl(long long info) { (void)info; abort(); }
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

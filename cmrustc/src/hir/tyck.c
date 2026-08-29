@@ -175,6 +175,7 @@ void cm_tyck_set_destroy(CmTyckSet *set)
         cm_free(body->local_types);
         cm_free(body->method_targets);
         cm_free(body->unsize_targets);
+        cm_free(body->path_self_types);
     }
     cm_vec_destroy(&set->storage);
     cm_vec_destroy(&set->bodies);
@@ -2915,8 +2916,27 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
          * argument types, like qualified paths. */
         uint32_t argument;
         int compatible = 1;
-        for (argument = 0u; argument < call_arg_count && argument < count;
-                ++argument) {
+        unsigned int first_variant = 1u;
+        /* A declaration callee (the path was ambiguous between impls,
+         * see cm_tyck_prefer_declaration_if_ambiguous) has the trait's
+         * fresh generics as parameters, compatible with anything: pick
+         * the impl by the argument shapes for typing, so the impl's own
+         * generics bind (`Unique::from(ptr.cast())` gives `cast`'s
+         * `U = T`).  Emission still resolves the declaration per
+         * instance. */
+        if (call_parent != NULL && call_parent->kind == CM_HIR_ITEM_TRAIT
+            && ct != NULL && ct->kind == CM_TY_FN_DEF && ct->count != 0u) {
+            const CmTy *st = cm_ty_get(arena, cm_ty_resolve(arena,
+                ct->children[0]));
+            if (st != NULL && st->kind != CM_TY_PARAM
+                && st->kind != CM_TY_SELF && st->kind != CM_TY_PROJECTION
+                && st->kind != CM_TY_INFER) {
+                compatible = 0;
+                first_variant = 0u;
+            }
+        }
+        for (argument = 0u; compatible && argument < call_arg_count
+                && argument < count; ++argument) {
             if (call_arg_types[argument] == CM_TY_NONE) continue;
             if (!cm_tyck_matches(env, params[argument],
                     call_arg_types[argument])
@@ -2946,7 +2966,7 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             }
             if (path_self != CM_TY_NONE) {
                 unsigned int variant;
-                for (variant = 1u; variant < 32u; ++variant) {
+                for (variant = first_variant; variant < 32u; ++variant) {
                     CmTyckFound retry;
                     size_t undo_mark = cm_ty_undo_mark(arena);
                     if (!cm_tyck_lookup_assoc_in(env, path_self,
@@ -3863,13 +3883,28 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                         cm_tyck_item(env->state, owner), self_type, NULL);
                     break;
                 }
+                if (declared != NULL && declared->kind == CM_HIR_ITEM_CONST) {
+                    /* `<T as Tr>::C`: the declaration, resolved through
+                     * the written Self at emission. */
+                    if (env->out->method_targets != NULL
+                        && id != CM_U_EXPR_NONE) {
+                        env->out->method_targets[id] = declared->definition;
+                        env->out->path_self_types[id] = self_type;
+                    }
+                    result = cm_ty_from_hir(arena, env->state->hir,
+                        declared->data.value_item.type);
+                    break;
+                }
             }
         }
         if (name != CM_INTERN_ID_NONE
             && cm_tyck_lookup_assoc_generic(env, self_type, name, &found)) {
-            if (found.item->kind == CM_HIR_ITEM_FUNCTION
-                && env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
+            if ((found.item->kind == CM_HIR_ITEM_FUNCTION
+                    || found.item->kind == CM_HIR_ITEM_CONST)
+                && env->out->method_targets != NULL && id != CM_U_EXPR_NONE) {
                 env->out->method_targets[id] = found.item->definition;
+                env->out->path_self_types[id] = self_type;
+            }
             if (found.item->kind == CM_HIR_ITEM_FUNCTION
                 && found.parent != NULL
                 && found.parent->kind == CM_HIR_ITEM_TRAIT) {
@@ -4925,6 +4960,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     out->method_targets = (CmHirDefId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmHirDefId));
     out->unsize_targets = (CmTyId *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(CmTyId));
+    out->path_self_types = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     item = cm_tyck_item(state, hir_body->origin.definition);
     env.item = item;
