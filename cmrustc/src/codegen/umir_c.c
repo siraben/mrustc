@@ -529,6 +529,9 @@ static int cm_umir_c_is_zst(const CmHirContext *hir, const CmTyckSet *tyck,
     return 0;
 }
 
+static CmTyId cm_umir_c_transparent_inner(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type, long field);
+
 /* A struct or union with exactly one non-zero-sized field is
  * transparent: its value is that field's value (NonNull<T> is its
  * pointer, MaybeUninit<T> / ManuallyDrop<T> are T), so the bit-casts
@@ -552,9 +555,21 @@ static long cm_umir_c_transparent_field(const CmHirContext *hir,
             && item->kind != CM_HIR_ITEM_UNION)) return -1;
     if (item->data.aggregate_item.field_count == 1u) return 0;
     for (index = 0u; index < item->data.aggregate_item.field_count; ++index) {
-        CmTyId field_type = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
-            item->data.aggregate_item.fields[index].type);
-        if (cm_umir_c_is_zst(hir, tyck, field_type)) continue;
+        /* The field's type under the ADT's arguments: `Box<T, A>`'s
+         * `alloc: A` is zero-sized exactly when `A` is (`Global`). */
+        CmTyId field_type = cm_umir_c_transparent_inner(hir, tyck, type,
+            (long)index);
+        int zst = cm_umir_c_is_zst(hir, tyck, field_type);
+        if (getenv("CMRUSTC_UMIR_DEBUG_REP") != NULL) {
+            CmStrBuf text;
+            cm_str_buf_init(&text);
+            cm_ty_print((CmTyArena *)&tyck->arena, hir, field_type, &text);
+            fprintf(stderr, "UMIR rep field %u %.*s zst=%d\n",
+                (unsigned)index, (int)text.len, text.data, zst);
+            cm_str_buf_destroy(&text);
+        }
+        item = cm_hir_get_item(hir, record->entity.item_id);
+        if (zst) continue;
         if (representative >= 0) return -1;
         representative = (long)index;
     }
@@ -4016,11 +4031,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         long representative = cm_umir_c_transparent_field(hir,
                             tyck, carrier);
                         if (representative >= 0) {
-                            /* A zero-sized field reads 0. */
+                            /* A zero-sized field reads 0; its address
+                             * is the base's (`ptr::read(&b.1)` on a
+                             * Box's Global allocator dereferences it). */
                             if (representative == slot) {
                                 if (want_address)
                                     cm_str_buf_append(output,
                                         "(long long)(intptr_t)&");
+                                cm_umir_c_render_loaded(output,
+                                    statement->operands[0], depth);
+                            } else if (want_address) {
+                                cm_str_buf_append(output,
+                                    "(long long)(intptr_t)&");
                                 cm_umir_c_render_loaded(output,
                                     statement->operands[0], depth);
                             } else {
@@ -4755,6 +4777,23 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     break;
                 }
                 if (vt < 0) {
+                    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                        CmStrBuf text;
+                        cm_str_buf_init(&text);
+                        cm_ty_print((CmTyArena *)&tyck->arena, hir,
+                            cm_umir_c_subst(statement->type), &text);
+                        cm_str_buf_append(&text, " rep ");
+                        cm_ty_print((CmTyArena *)&tyck->arena, hir, target,
+                            &text);
+                        cm_str_buf_append(&text, " from ");
+                        if (source != CM_TY_NONE)
+                            cm_ty_print((CmTyArena *)&tyck->arena, hir,
+                                source, &text);
+                        fprintf(stderr, "UMIR unsize-miss %.*s dt=%d\n",
+                            (int)text.len, text.data,
+                            dt == NULL ? -1 : (int)dt->kind);
+                        cm_str_buf_destroy(&text);
+                    }
                     cm_umir_c_render_local(output, statement->operands[0]);
                     cm_str_buf_append(output, " /* unsize */");
                     if (cm_umir_c_active_program != NULL) complete = 0;

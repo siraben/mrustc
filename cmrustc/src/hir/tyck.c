@@ -2735,15 +2735,6 @@ static uint32_t cm_tyck_fn_def_signature(CmTyckEnv *env, const CmTy *ct,
         limit, ret);
 }
 
-/* `expected` resolves to a fn pointer type. */
-static int cm_tyck_is_fn_ptr(CmTyckEnv *env, CmTyId expected)
-{
-    CmTyArena *arena = env->state->arena;
-    const CmTy *ty = expected == CM_TY_NONE ? NULL
-        : cm_ty_get(arena, cm_ty_resolve(arena, expected));
-    return ty != NULL && ty->kind == CM_TY_FN_PTR;
-}
-
 /* An `if` / `match` whose branches coerce to the expectation each on
  * their own (rustc's rule) rather than joining: fn pointers (closures
  * never join) and tuples (`(self, &[], &[])` against `(&[T], &[U],
