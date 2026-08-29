@@ -569,81 +569,145 @@ static int cm_umir_pattern_is_const(const CmUMirBuilder *builder,
         || item->kind == CM_HIR_ITEM_STATIC);
 }
 
-/* Whether a match-arm pattern needs value tests rather than a switch
- * key: a range, a binding over such a subpattern, or an or-pattern with
- * any such alternative. */
+/* Whether a match-arm pattern is refutable beyond a top-level dispatch
+ * key: ranges, const paths, and — nested under a variant, tuple, or
+ * reference — literals and variant paths (`Some(Alignment::Right)`). */
 static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
-    const CmUPat *pat)
+    const CmUPat *pat, int nested)
 {
     uint32_t alt;
     if (pat == NULL) return 0;
     switch (pat->kind) {
     case CM_U_PAT_RANGE: return 1;
-    case CM_U_PAT_PATH: return cm_umir_pattern_is_const(builder, pat);
+    case CM_U_PAT_LITERAL: return nested;
+    case CM_U_PAT_PATH:
+        if (cm_umir_pattern_is_const(builder, pat)) return 1;
+        return nested && cm_umir_variant_index(builder->hir,
+            &pat->data.path.resolution) >= 0;
     case CM_U_PAT_BINDING:
         return pat->data.binding.subpattern != CM_U_PAT_NONE
             && cm_umir_pattern_needs_test(builder,
-                cm_ubody_get_pat(builder->ub, pat->data.binding.subpattern));
+                cm_ubody_get_pat(builder->ub, pat->data.binding.subpattern),
+                nested);
+    case CM_U_PAT_REF:
+        return cm_umir_pattern_needs_test(builder,
+            cm_ubody_get_pat(builder->ub, pat->data.ref.pattern), 1);
     case CM_U_PAT_OR:
         for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
             if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
-                    builder->ub, pat->data.list.patterns[alt]))) return 1;
+                    builder->ub, pat->data.list.patterns[alt]), nested))
+                return 1;
+        return 0;
+    case CM_U_PAT_TUPLE:
+        for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
+            if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
+                    builder->ub, pat->data.list.patterns[alt]), 1))
+                return 1;
+        return 0;
+    case CM_U_PAT_TUPLE_STRUCT:
+        if (nested && cm_umir_variant_index(builder->hir,
+                &pat->data.struct_pat.resolution) >= 0) return 1;
+        for (alt = 0u; alt < pat->data.struct_pat.pattern_count; ++alt)
+            if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
+                    builder->ub, pat->data.struct_pat.patterns[alt]), 1))
+                return 1;
+        return 0;
+    case CM_U_PAT_STRUCT:
+        if (nested && cm_umir_variant_index(builder->hir,
+                &pat->data.struct_pat.resolution) >= 0) return 1;
+        for (alt = 0u; alt < pat->data.struct_pat.field_count; ++alt)
+            if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
+                    builder->ub, pat->data.struct_pat.fields[alt].pattern),
+                    1))
+                return 1;
         return 0;
     default: return 0;
     }
 }
 
-/* Inclusive [lo, hi] tests an arm pattern imposes on the scrutinee
- * (any one passing selects the arm); binds `x @ ..` names to `value`. */
-static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
-    const CmUPat *pat, CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
-    long *lo, long *hi, CmUMirLocalId *const_local, uint32_t *count,
-    uint32_t capacity)
+/* Failure edges of a pattern check awaiting their target (the next
+ * arm, or the next or-alternative). */
+typedef struct CmUMirPatternFails {
+    CmUMirBlockId blocks[64];
+    uint32_t count;
+} CmUMirPatternFails;
+
+/* `flag ? continue : fail` — splits the current block on `flag`; the
+ * false edge is recorded for patching; emission continues in the new
+ * true block. */
+static void cm_umir_split_on(CmUMirBuilder *builder, CmUMirLocalId flag,
+    CmUMirPatternFails *fails)
 {
-    uint32_t alt;
-    if (pat == NULL || *count >= capacity) return;
+    CmUMirBlockId next = cm_umir_new_block(builder);
+    CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+        builder->current);
+    if (block != NULL) {
+        block->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+        block->condition = flag;
+        block->true_target = next;
+        block->false_target = next; /* patched */
+    }
+    if (fails->count < 64u) fails->blocks[fails->count++] = builder->current;
+    builder->current = next;
+}
+
+static CmUMirLocalId cm_umir_literal_local(CmUMirBuilder *builder, long v)
+{
+    CmUMirLocalId local = cm_umir_new_local(builder, CM_TY_NONE);
+    cm_umir_push_immediate(builder, local, CM_UMIR_RVALUE_LITERAL,
+        CM_U_EXPR_NONE, CM_TY_NONE, NULL, 0u,
+        v < 0 ? 0u : v > (long)0xFFFFFFFFl ? 0xFFFFFFFFu : (uint32_t)v);
+    return local;
+}
+
+static void cm_umir_range_check(CmUMirBuilder *builder, CmUMirLocalId value,
+    CmUMirLocalId lo, CmUMirLocalId hi, CmUExprId id,
+    CmUMirPatternFails *fails)
+{
+    CmUMirLocalId ops[3];
+    CmUMirLocalId flag = cm_umir_new_local(builder, CM_TY_NONE);
+    ops[0] = value;
+    ops[1] = lo;
+    ops[2] = hi;
+    cm_umir_push_operands(builder, flag, CM_UMIR_RVALUE_RANGE_TEST, id,
+        CM_TY_NONE, ops, 3u);
+    cm_umir_split_on(builder, flag, fails);
+}
+
+/* The discriminant of the block `value` names must equal `index`. */
+static void cm_umir_variant_check(CmUMirBuilder *builder,
+    CmUMirLocalId value, long index, CmUExprId id, CmUMirPatternFails *fails)
+{
+    CmUMirLocalId disc = cm_umir_new_local(builder, CM_TY_NONE);
+    CmUMirLocalId key;
+    cm_umir_push_immediate(builder, disc, CM_UMIR_RVALUE_SLOT, id,
+        CM_TY_NONE, &value, 1u, 0u);
+    key = cm_umir_literal_local(builder, index);
+    cm_umir_range_check(builder, disc, key, key, id, fails);
+}
+
+/* Emits the refutable checks (and bindings) of `pat` against `value`
+ * from the current block; success continues in the current block, each
+ * failure edge lands in `fails`.  Nested patterns are conjunctions; an
+ * or-pattern's alternatives are tried in order.  Payload slots are read
+ * only after their variant test passed. */
+static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
+    CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
+    CmUMirPatternFails *fails, unsigned int depth)
+{
+    const CmUPat *pat = cm_ubody_get_pat(builder->ub, pat_id);
+    uint32_t sub;
+    if (pat == NULL || depth > 16u) return;
     switch (pat->kind) {
-    case CM_U_PAT_PATH:
-        if (cm_umir_pattern_is_const(builder, pat)) {
-            /* The constant's value, compared as a one-point range. */
-            CmUMirLocalId c = cm_umir_new_local(builder, CM_TY_NONE);
-            CmUMirBlock *block;
-            CmUMirStatement *statement;
-            cm_umir_push_operands(builder, c, CM_UMIR_RVALUE_CONST_PATTERN,
-                CM_U_EXPR_NONE, CM_TY_NONE, NULL, 0u);
-            block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-                builder->current);
-            statement = block == NULL || block->statements.len == 0u ? NULL
-                : (CmUMirStatement *)cm_vec_at(&block->statements,
-                    block->statements.len - 1u);
-            if (statement != NULL) statement->pattern = pat_id;
-            lo[*count] = 0;
-            hi[*count] = 0;
-            const_local[*count] = c;
-            *count += 1u;
-        }
-        break;
     case CM_U_PAT_RANGE: {
         const CmUPat *start = cm_ubody_get_pat(builder->ub,
             pat->data.range.start);
         const CmUPat *end = cm_ubody_get_pat(builder->ub,
             pat->data.range.end);
         long low = 0;
-        long high = LONG_MAX;
-        if (getenv("CM_UMIR_RANGE_DEBUG") != NULL) {
-            const CmInternedString *st = start == NULL
-                    || start->kind != CM_U_PAT_LITERAL ? NULL
-                : cm_interner_get(&builder->ubodies->strings,
-                    start->data.literal.text);
-            fprintf(stderr, "RANGE start kind=%d text=%.*s end kind=%d\n",
-                start == NULL ? -1 : (int)start->kind,
-                st == NULL ? 1 : (int)st->len,
-                st == NULL ? "?" : (const char *)st->bytes,
-                end == NULL ? -1 : (int)end->kind);
-        }
-        /* `x @ lo..=hi` may arrive as `(x @ lo)..=hi`: bind and use the
-         * binding's subpattern as the bound. */
+        long high = (long)0xFFFFFFFFl;
         if (start != NULL && start->kind == CM_U_PAT_BINDING) {
+            /* `x @ lo..=hi` parsed as `(x @ lo)..=hi`. */
             if (start->data.binding.local != CM_U_LOCAL_NONE)
                 cm_umir_push_operands(builder,
                     (CmUMirLocalId)(1u + start->data.binding.local),
@@ -658,19 +722,36 @@ static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
             && cm_umir_pattern_literal_value(builder, end, &high)
             && !pat->data.range.is_inclusive)
             high -= 1;
-        lo[*count] = low;
-        hi[*count] = high;
-        const_local[*count] = (CmUMirLocalId)0u;
-        *count += 1u;
+        cm_umir_range_check(builder, value, cm_umir_literal_local(builder,
+            low), cm_umir_literal_local(builder, high), id, fails);
         break;
     }
     case CM_U_PAT_LITERAL: {
         long v = 0;
         if (cm_umir_pattern_literal_value(builder, pat, &v)) {
-            lo[*count] = v;
-            hi[*count] = v;
-            const_local[*count] = (CmUMirLocalId)0u;
-            *count += 1u;
+            CmUMirLocalId key = cm_umir_literal_local(builder, v);
+            cm_umir_range_check(builder, value, key, key, id, fails);
+        }
+        break;
+    }
+    case CM_U_PAT_PATH: {
+        long index = cm_umir_variant_index(builder->hir,
+            &pat->data.path.resolution);
+        if (index >= 0) {
+            cm_umir_variant_check(builder, value, index, id, fails);
+        } else if (cm_umir_pattern_is_const(builder, pat)) {
+            CmUMirLocalId c = cm_umir_new_local(builder, CM_TY_NONE);
+            CmUMirBlock *block;
+            CmUMirStatement *statement;
+            cm_umir_push_operands(builder, c, CM_UMIR_RVALUE_CONST_PATTERN,
+                CM_U_EXPR_NONE, CM_TY_NONE, NULL, 0u);
+            block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                builder->current);
+            statement = block == NULL || block->statements.len == 0u ? NULL
+                : (CmUMirStatement *)cm_vec_at(&block->statements,
+                    block->statements.len - 1u);
+            if (statement != NULL) statement->pattern = pat_id;
+            cm_umir_range_check(builder, value, c, c, id, fails);
         }
         break;
     }
@@ -680,18 +761,114 @@ static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
                 (CmUMirLocalId)(1u + pat->data.binding.local),
                 CM_UMIR_RVALUE_LOCAL, id, CM_TY_NONE, &value, 1u);
         if (pat->data.binding.subpattern != CM_U_PAT_NONE)
-            cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
-                builder->ub, pat->data.binding.subpattern),
-                pat->data.binding.subpattern, value, id, lo, hi,
-                const_local, count, capacity);
+            cm_umir_emit_pattern_checks(builder,
+                pat->data.binding.subpattern, value, id, fails, depth + 1u);
         break;
-    case CM_U_PAT_OR:
-        for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
-            cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
-                builder->ub, pat->data.list.patterns[alt]),
-                pat->data.list.patterns[alt], value, id, lo, hi,
-                const_local, count, capacity);
+    case CM_U_PAT_REF: {
+        CmUMirLocalId loaded = cm_umir_new_local(builder, builder->tb != NULL
+            && builder->tb->pat_types != NULL
+            ? builder->tb->pat_types[pat->data.ref.pattern] : CM_TY_NONE);
+        cm_umir_push_operands(builder, loaded, CM_UMIR_RVALUE_LOAD, id,
+            builder->tb != NULL && builder->tb->pat_types != NULL
+            ? builder->tb->pat_types[pat->data.ref.pattern] : CM_TY_NONE,
+            &value, 1u);
+        cm_umir_emit_pattern_checks(builder, pat->data.ref.pattern, loaded,
+            id, fails, depth + 1u);
         break;
+    }
+    case CM_U_PAT_TUPLE:
+        for (sub = 0u; sub < pat->data.list.pattern_count; ++sub) {
+            CmUMirLocalId payload = cm_umir_new_local(builder,
+                builder->tb != NULL && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[pat->data.list.patterns[sub]]
+                : CM_TY_NONE);
+            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u, sub);
+            cm_umir_emit_pattern_checks(builder,
+                pat->data.list.patterns[sub], payload, id, fails, depth + 1u);
+        }
+        break;
+    case CM_U_PAT_TUPLE_STRUCT: {
+        long index = cm_umir_variant_index(builder->hir,
+            &pat->data.struct_pat.resolution);
+        uint32_t base = index >= 0 ? 1u : 0u;
+        if (index >= 0)
+            cm_umir_variant_check(builder, value, index, id, fails);
+        for (sub = 0u; sub < pat->data.struct_pat.pattern_count; ++sub) {
+            const CmUPat *sp = cm_ubody_get_pat(builder->ub,
+                pat->data.struct_pat.patterns[sub]);
+            CmUMirLocalId payload;
+            if (sp == NULL || sp->kind == CM_U_PAT_WILD
+                || sp->kind == CM_U_PAT_REST) continue;
+            payload = cm_umir_new_local(builder, builder->tb != NULL
+                && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[pat->data.struct_pat.patterns[sub]]
+                : CM_TY_NONE);
+            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u, base + sub);
+            cm_umir_emit_pattern_checks(builder,
+                pat->data.struct_pat.patterns[sub], payload, id, fails,
+                depth + 1u);
+        }
+        break;
+    }
+    case CM_U_PAT_STRUCT: {
+        long index = cm_umir_variant_index(builder->hir,
+            &pat->data.struct_pat.resolution);
+        if (index >= 0)
+            cm_umir_variant_check(builder, value, index, id, fails);
+        for (sub = 0u; sub < pat->data.struct_pat.field_count; ++sub) {
+            const CmUPat *sp = cm_ubody_get_pat(builder->ub,
+                pat->data.struct_pat.fields[sub].pattern);
+            long slot;
+            CmUMirLocalId payload;
+            if (sp == NULL || sp->kind == CM_U_PAT_WILD) continue;
+            slot = index >= 0
+                ? cm_umir_variant_field_index(builder->hir, builder->ubodies,
+                    &pat->data.struct_pat.resolution,
+                    pat->data.struct_pat.fields[sub].name)
+                : -1;
+            if (slot < 0) continue;
+            payload = cm_umir_new_local(builder, builder->tb != NULL
+                && builder->tb->pat_types != NULL
+                ? builder->tb->pat_types[
+                    pat->data.struct_pat.fields[sub].pattern] : CM_TY_NONE);
+            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+                CM_TY_NONE, &value, 1u, 1u + (uint32_t)slot);
+            cm_umir_emit_pattern_checks(builder,
+                pat->data.struct_pat.fields[sub].pattern, payload, id, fails,
+                depth + 1u);
+        }
+        break;
+    }
+    case CM_U_PAT_OR: {
+        /* Alternatives in order: an alternative's failures go to the
+         * next alternative; the last one's to the caller's fails. */
+        CmUMirBlockId success = cm_umir_new_block(builder);
+        for (sub = 0u; sub < pat->data.list.pattern_count; ++sub) {
+            CmUMirPatternFails local;
+            uint32_t pending;
+            local.count = 0u;
+            cm_umir_emit_pattern_checks(builder,
+                pat->data.list.patterns[sub], value, id, &local, depth + 1u);
+            cm_umir_seal_goto(builder, success);
+            if (sub + 1u < pat->data.list.pattern_count) {
+                CmUMirBlockId next_alt = cm_umir_new_block(builder);
+                for (pending = 0u; pending < local.count; ++pending) {
+                    CmUMirBlock *block = (CmUMirBlock *)cm_vec_at(
+                        &builder->body->blocks, local.blocks[pending]);
+                    if (block != NULL) block->false_target = next_alt;
+                }
+                builder->current = next_alt;
+            } else {
+                for (pending = 0u; pending < local.count
+                        && fails->count < 64u; ++pending)
+                    fails->blocks[fails->count++] = local.blocks[pending];
+            }
+        }
+        builder->current = success;
+        break;
+    }
     default:
         break;
     }
@@ -1620,65 +1797,32 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 pending_count = 0u;
             }
             builder->current = arm_block;
-            if (pat != NULL && cm_umir_pattern_needs_test(builder, pat)) {
-                /* Range arms: no key; a chain of tests, any passing one
-                 * enters the arm, the last failure falls to the next arm. */
-                long lo[16];
-                long hi[16];
-                CmUMirLocalId const_local[16];
-                uint32_t test_count = 0u;
-                uint32_t test;
-                CmUMirBlockId body_entry = cm_umir_new_block(builder);
-                cm_umir_collect_range_tests(builder, pat,
-                    expr->data.match_expr.arms[arm].pattern, scrutinee, id,
-                    lo, hi, const_local, &test_count, 16u);
-                for (test = 0u; test < test_count; ++test) {
-                    CmUMirLocalId ops[3];
-                    CmUMirLocalId flag = cm_umir_new_local(builder,
-                        CM_TY_NONE);
-                    CmUMirBlockId next = test + 1u < test_count
-                        ? cm_umir_new_block(builder) : join;
-                    CmUMirBlock *block;
-                    ops[0] = scrutinee;
-                    if (const_local[test] != (CmUMirLocalId)0u) {
-                        ops[1] = const_local[test];
-                        ops[2] = const_local[test];
-                    } else {
-                        ops[1] = cm_umir_new_local(builder, CM_TY_NONE);
-                        cm_umir_push_immediate(builder, ops[1],
-                            CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE,
-                            CM_TY_NONE, NULL, 0u, (uint32_t)lo[test]);
-                        ops[2] = cm_umir_new_local(builder, CM_TY_NONE);
-                        cm_umir_push_immediate(builder, ops[2],
-                            CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE,
-                            CM_TY_NONE, NULL, 0u,
-                            hi[test] > (long)0xFFFFFFFFl
-                                ? 0xFFFFFFFFu : (uint32_t)hi[test]);
-                    }
-                    cm_umir_push_operands(builder, flag,
-                        CM_UMIR_RVALUE_RANGE_TEST, id, CM_TY_NONE, ops, 3u);
-                    block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
-                        builder->current);
-                    if (block != NULL) {
-                        block->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
-                        block->condition = flag;
-                        block->true_target = body_entry;
-                        block->false_target = next;
-                    }
-                    if (test + 1u == test_count && pending_count < 64u)
-                        pending_tests[pending_count++] = builder->current;
-                    builder->current = next;
+            if (pat != NULL && cm_umir_pattern_needs_test(builder, pat, 0)) {
+                /* Refutable beyond a key: the outer variant (if any) is
+                 * the dispatch key, the rest are tests whose failures
+                 * fall to the next arm. */
+                CmUMirPatternFails fails;
+                uint32_t pending;
+                long key = CM_UMIR_ARM_DEFAULT;
+                fails.count = 0u;
+                if (pat->kind == CM_U_PAT_TUPLE_STRUCT
+                    || pat->kind == CM_U_PAT_STRUCT) {
+                    long index = cm_umir_variant_index(builder->hir,
+                        &pat->data.struct_pat.resolution);
+                    if (index >= 0) key = index;
                 }
-                if (test_count == 0u) cm_umir_seal_goto(builder, body_entry);
-                builder->current = body_entry;
+                cm_umir_emit_pattern_checks(builder,
+                    expr->data.match_expr.arms[arm].pattern, scrutinee, id,
+                    &fails, 0u);
+                for (pending = 0u; pending < fails.count
+                        && pending_count < 64u; ++pending)
+                    pending_tests[pending_count++] = fails.blocks[pending];
                 if (entries < capacity) {
                     targets[entries] = arm_block;
-                    discriminants[entries] = CM_UMIR_ARM_DEFAULT;
+                    discriminants[entries] = key;
                     entries += 1u;
                 }
                 pat = NULL;
-                /* The arm's own pattern id stays set: skip the null-pattern
-                 * entry below by marking it handled. */
                 expr_arm_tested = 1;
             }
             if (pat != NULL && pat->kind == CM_U_PAT_OR) {

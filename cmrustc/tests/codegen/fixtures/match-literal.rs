@@ -67,10 +67,36 @@ fn align(f: u32) -> u32 {
     }
 }
 
+// Nested variant / literal sub-patterns are conjunctive tests under the
+// outer key (core's `FormattingOptions::align`: `match align {
+// Some(Alignment::Left) => .., Some(Alignment::Right) => .., .. }`).
+enum Align { Left, Right, Center }
+enum Opt<T> { None, Some(T) }
+
+fn align_bits(a: Opt<Align>) -> u32 {
+    match a {
+        Opt::Some(Align::Left) => 1,
+        Opt::Some(Align::Right) => 2,
+        Opt::Some(Align::Center) => 3,
+        Opt::None => 4,
+    }
+}
+
+fn nested(o: Opt<u32>) -> u32 {
+    match o {
+        Opt::Some(3) => 30,
+        Opt::Some(x @ 10..=20) => x,
+        Opt::Some(_) => 1,
+        Opt::None => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn match_literal(which: u32) -> u32 {
     classify(which) + sign(which as i32 - 1) + flag(which > 1) + letter(b'a' + which as u8)
         + bucket(b'a' + which as u8) * 1000 + bucket(b'0' + (which % 10) as u8) * 100000
         + bucket(b'x') + bucket(250)
         + align(which << 29) * 10000000
+        + align_bits(match which { 0 => Opt::Some(Align::Left), 1 => Opt::Some(Align::Right), 2 => Opt::Some(Align::Center), _ => Opt::None }) * 100000000
+        + nested(Opt::Some(which + 1)) * 2
 }
