@@ -1179,14 +1179,22 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     case CM_U_EXPR_QUALIFIED_PATH:
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_LOCAL, id, type);
         break;
-    case CM_U_EXPR_RANGE:
+    case CM_U_EXPR_RANGE: {
+        /* `a..b` is `Range { start, end }` (`a..` / `..b` are the
+         * one-field RangeFrom / RangeTo, transparent); an inclusive
+         * range's trailing `exhausted` field starts zeroed. */
+        CmUMirLocalId operands[2];
+        uint32_t count = 0u;
         if (expr->data.range.start != CM_U_EXPR_NONE)
-            (void)cm_umir_emit_expr(builder, expr->data.range.start);
+            operands[count++] = cm_umir_emit_expr(builder,
+                expr->data.range.start);
         if (expr->data.range.end != CM_U_EXPR_NONE)
-            (void)cm_umir_emit_expr(builder, expr->data.range.end);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
-            type);
+            operands[count++] = cm_umir_emit_expr(builder,
+                expr->data.range.end);
+        cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_AGGREGATE,
+            id, type, operands, count);
         break;
+    }
     case CM_U_EXPR_ARRAY_REPEAT: {
         /* `[v; N]`: the value is the single operand; N comes from the
          * array type at emission. */

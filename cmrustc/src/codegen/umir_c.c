@@ -2421,13 +2421,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_destroy(&count_text);
                     break;
                 }
+                /* Zeroed: fields a literal omits (RangeInclusive's
+                 * `exhausted`) read 0. */
                 cm_str_buf_append(output, "0; _agg");
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->destination);
-                cm_str_buf_append(output, " = (long long *)malloc(");
-                cm_umir_c_render_number(output, 8ul * (unsigned long)
-                    (slot_count + statement->operand_overflow + 1u));
-                cm_str_buf_append(output, "); ");
+                cm_str_buf_append(output, " = (long long *)calloc(");
+                cm_umir_c_render_number(output, (unsigned long)
+                    (slot_count + statement->operand_overflow + 2u));
+                cm_str_buf_append(output, ", 8); ");
                 for (field = 0u; field < slot_count && mapped; ++field) {
                     long slot = (long)field;
                     if (expr != NULL && expr->kind == CM_U_EXPR_STRUCT
@@ -2487,11 +2489,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_append(output, "0; _agg");
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->destination);
-                cm_str_buf_append(output, " = (long long *)malloc(");
-                cm_umir_c_render_number(output, 8ul * (unsigned long)
+                cm_str_buf_append(output, " = (long long *)calloc(");
+                cm_umir_c_render_number(output, (unsigned long)
                     (statement->operand_count + statement->operand_overflow
                         + 2u));
-                cm_str_buf_append(output, "); _agg");
+                cm_str_buf_append(output, ", 8); _agg");
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->destination);
                 cm_str_buf_append(output, "[0] = ");
