@@ -1749,16 +1749,18 @@ static int cm_leaf_is_in_cycle(const CmImportResolverState *state,
 /*
  * A crate compiled against registered dependencies with no explicit
  * `#[prelude_import]` uses the compiler-injected prelude: synthesize it
- * from the first dependency's `prelude::rust_2024` module (M9-03).
+ * from the outermost dependency's `prelude::rust_2024` module -- the
+ * one registered last (std over alloc over core), as rustc injects the
+ * facade's prelude (M9-03; std's `String` and `Vec` for a `fn main`).
  */
 static void cm_import_inject_dependency_prelude(CmImportResolverState *state)
 {
     size_t dependency_index;
 
-    for (dependency_index = 0u; dependency_index < state->dependencies.len;
-         ++dependency_index) {
+    for (dependency_index = state->dependencies.len; dependency_index > 0u;
+         --dependency_index) {
         const CmImportDependency *dep = (const CmImportDependency *)
-            cm_vec_at_const(&state->dependencies, dependency_index);
+            cm_vec_at_const(&state->dependencies, dependency_index - 1u);
         CmResolvePathSegmentView views[2];
         CmResolvedBinding module_binding;
         CmModuleId source_module;
