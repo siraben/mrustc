@@ -602,9 +602,22 @@ int main(int argc, char **argv)
     int source_map_requested;
     const char *with_core_path = NULL;
     const char *emit_umir_c_path = NULL;
-    static CmHirLowerDependency hir_dependencies[1];
-    static CmUBodyDependency body_dependencies[1];
-    static const CmDependencyMacroArtifact *expand_artifacts[1];
+    const char *target_crate_name = NULL;
+    /* Dependency chain (`--with-dep NAME PATH`, in order; `--with-core
+     * PATH` is `--with-dep core PATH`): each crate is built against the
+     * ones before it, the target against all of them. */
+    enum { PROBE_MAX_DEPS = 4 };
+    const char *dep_names[PROBE_MAX_DEPS];
+    const char *dep_paths[PROBE_MAX_DEPS];
+    uint32_t dep_count = 0u;
+    static CmModuleGraph dep_graphs[PROBE_MAX_DEPS];
+    static CmDependencyMacroArtifact dep_macros[PROBE_MAX_DEPS];
+    static CmImportResolver dep_imports[PROBE_MAX_DEPS];
+    static CmHirModuleMap dep_hir_modules[PROBE_MAX_DEPS];
+    static CmModuleGraphRevision dep_revisions[PROBE_MAX_DEPS];
+    static CmHirLowerDependency hir_dependencies[PROBE_MAX_DEPS];
+    static CmUBodyDependency body_dependencies[PROBE_MAX_DEPS];
+    static const CmDependencyMacroArtifact *expand_artifacts[PROBE_MAX_DEPS];
     require_metadata = 0;
     body_census_requested = 0;
     source_map_requested = 0;
@@ -620,8 +633,24 @@ int main(int argc, char **argv)
             } else if (strcmp(argv[argument_index], "--source-map") == 0) {
                 source_map_requested = 1;
             } else if (strcmp(argv[argument_index], "--with-core") == 0
-                    && argument_index + 1 < argc) {
+                    && argument_index + 1 < argc
+                    && dep_count < PROBE_MAX_DEPS) {
                 with_core_path = argv[argument_index + 1];
+                dep_names[dep_count] = "core";
+                dep_paths[dep_count] = argv[argument_index + 1];
+                dep_count += 1u;
+                ++argument_index;
+            } else if (strcmp(argv[argument_index], "--with-dep") == 0
+                    && argument_index + 2 < argc
+                    && dep_count < PROBE_MAX_DEPS) {
+                with_core_path = argv[argument_index + 2];
+                dep_names[dep_count] = argv[argument_index + 1];
+                dep_paths[dep_count] = argv[argument_index + 2];
+                dep_count += 1u;
+                argument_index += 2;
+            } else if (strcmp(argv[argument_index], "--crate-name") == 0
+                    && argument_index + 1 < argc) {
+                target_crate_name = argv[argument_index + 1];
                 ++argument_index;
             } else if (strcmp(argv[argument_index], "--emit-umir-c") == 0
                     && argument_index + 1 < argc) {
@@ -634,7 +663,9 @@ int main(int argc, char **argv)
         }
         if (bad_arguments) {
             fprintf(stderr, "usage: %s /path/to/lib.rs [--require-metadata] "
-                "[--body-census] [--source-map] [--with-core core-lib.rs]\n",
+                "[--body-census] [--source-map] [--with-core core-lib.rs] "
+                "[--with-dep NAME lib.rs]... [--crate-name NAME] "
+                "[--emit-umir-c out.c]\n",
                 argc == 0 ? "probe_core_hir" : argv[0]);
             return 2;
         }
@@ -654,115 +685,132 @@ int main(int argc, char **argv)
     cm_module_graph_options_init(&graph_options);
     graph_options.cfg = &cfg;
     graph_options.edition = CM_EDITION_2024;
-    if (with_core_path != NULL) {
-        /* M9-03: build the dependency crate first (shared source set so
-         * source ids stay globally unique), then register its macros. */
-        static CmModuleGraph core_graph;
-        static CmDependencyMacroArtifact core_macros;
-        static CmImportResolver core_imports;
-        static const CmDependencyMacroArtifact *artifact_list[1];
-        CmSourceId core_root;
-        CmModuleGraphOptions core_options;
-        CmModuleGraphResult core_result;
-        CmDependencyMacroArtifactResult artifact_result;
-        cm_module_graph_init(&core_graph);
-        cm_dependency_macro_artifact_init(&core_macros);
-        if (cm_source_load_file(&sources, with_core_path, &core_root)
-                != CM_SOURCE_OK) {
-            fputs("with-core: cannot load core root\n", stderr);
-            goto cleanup;
-        }
-        cm_module_graph_options_init(&core_options);
-        core_options.cfg = &cfg;
-        core_options.edition = CM_EDITION_2024;
-        core_result = cm_module_graph_build(&core_graph, &sources,
-            core_root, &core_options);
-        printf("core-graph errors=%lu modules=%lu\n",
-            (unsigned long)core_result.error_count,
-            (unsigned long)cm_module_graph_module_count(&core_graph));
-        if (core_result.error_count != 0u) goto cleanup;
-        artifact_result = cm_dependency_macro_artifact_build(&core_macros,
-            &core_graph, core_result.revision, "core", "core_crate");
-        printf("core-artifact status=%d import_errors=%lu\n",
-            (int)artifact_result.status,
-            (unsigned long)artifact_result.import_error_count);
-        artifact_list[0] = &core_macros;
-        graph_options.dependency_macros = artifact_list;
-        graph_options.dependency_macro_count = 1u;
-        expand_artifacts[0] = &core_macros;
-        {
-            CmImportResult core_import_result;
-            cm_import_resolver_init(&core_imports);
-            core_import_result = cm_import_resolve(&core_imports,
-                &core_graph, core_result.revision);
-            printf("core-imports errors=%lu\n",
-                (unsigned long)core_import_result.error_count);
-            (void)cm_import_resolver_add_dependency(&imports, "core",
-                &core_imports, &core_graph, core_result.revision);
-        }
-        if (body_census_requested) {
-            /* M9-03: core bodies need expression-macro expansion too;
-             * with-core previously expanded only the target graph. */
-            CmBodyExpandOptions core_expand_options;
-            CmBodyExpandResult core_expand_result;
-
-            cm_body_expand_options_init(&core_expand_options);
-            core_expand_options.edition = CM_EDITION_2024;
-            core_expand_options.crate_identifier = "crate";
-            core_expand_options.cfg = &cfg;
-            core_expand_options.imports = &core_imports;
-            core_expand_result = cm_body_expand_graph(&core_graph,
-                core_result.revision, &core_expand_options);
-            printf("core-body-expand bodies=%lu invocations=%lu "
-                "failed=%lu\n",
-                (unsigned long)core_expand_result.bodies,
-                (unsigned long)core_expand_result.invocations,
-                (unsigned long)core_expand_result.failed);
-        }
-        {
-            static CmHirModuleMap core_hir_modules;
-            CmHirLowerOptions core_lower_options;
-            CmHirLowerResult core_lower_result;
-            cm_hir_module_map_init(&core_hir_modules);
-            cm_hir_lower_options_init(&core_lower_options);
-            core_lower_options.crate_name = "core";
-            core_lower_options.source = core_root;
-            core_lower_options.edition = CM_HIR_EDITION_2024;
-            core_lower_options.pointer_bits = target->pointer_bits;
-            {
-                clock_t core_lower_started = clock();
-                core_lower_result = cm_hir_lower_module_graph(&hir,
-                    &core_graph, core_result.revision, &core_imports,
-                    &core_hir_modules, &core_lower_options);
-                printf("core-hir errors=%lu items=%lu seconds=%lu\n",
-                    (unsigned long)core_lower_result.error_count,
-                    (unsigned long)core_lower_result.lowered_item_count,
-                    (unsigned long)((clock() - core_lower_started)
-                        / CLOCKS_PER_SEC));
-            }
-            if (core_lower_result.error_count != 0u) {
-                const CmSourceFile *cerr_source = cm_source_get(&sources,
-                    core_lower_result.first_error.span.source);
-                printf("core-hir first-error kind=%s source=%s line=%lu"
-                    " item=%u span=%lu..%lu message=%s\n",
-                    cm_hir_lower_error_kind_name(
-                        core_lower_result.first_error.kind),
-                    cerr_source == NULL ? "<none>" : cerr_source->path,
-                    (unsigned long)source_line(cerr_source,
-                        (size_t)core_lower_result.first_error.span.start),
-                    (unsigned int)core_lower_result.first_error.item,
-                    (unsigned long)core_lower_result.first_error.span.start,
-                    (unsigned long)core_lower_result.first_error.span.end,
-                    core_lower_result.first_error.message);
+    {
+        uint32_t dep;
+        for (dep = 0u; dep < dep_count; ++dep) {
+            /* M9-03: build each dependency crate (shared source set so
+             * source ids stay globally unique) against the earlier ones,
+             * then register its macros, imports and HIR for the next. */
+            const char *dep_name = dep_names[dep];
+            CmSourceId dep_root;
+            CmModuleGraphOptions dep_options;
+            CmModuleGraphResult dep_result;
+            CmDependencyMacroArtifactResult artifact_result;
+            cm_module_graph_init(&dep_graphs[dep]);
+            cm_dependency_macro_artifact_init(&dep_macros[dep]);
+            if (cm_source_load_file(&sources, dep_paths[dep], &dep_root)
+                    != CM_SOURCE_OK) {
+                fprintf(stderr, "with-dep %s: cannot load crate root\n",
+                    dep_name);
                 goto cleanup;
             }
-            hir_dependencies[0].graph = &core_graph;
-            hir_dependencies[0].revision = core_result.revision;
-            hir_dependencies[0].module_map = &core_hir_modules;
-            body_dependencies[0].graph = &core_graph;
-            body_dependencies[0].revision = core_result.revision;
-            body_dependencies[0].imports = &core_imports;
-            body_dependencies[0].modules = &core_hir_modules;
+            cm_module_graph_options_init(&dep_options);
+            dep_options.cfg = &cfg;
+            dep_options.edition = CM_EDITION_2024;
+            dep_options.dependency_macros = expand_artifacts;
+            dep_options.dependency_macro_count = dep;
+            dep_result = cm_module_graph_build(&dep_graphs[dep], &sources,
+                dep_root, &dep_options);
+            dep_revisions[dep] = dep_result.revision;
+            printf("%s-graph errors=%lu modules=%lu\n", dep_name,
+                (unsigned long)dep_result.error_count,
+                (unsigned long)cm_module_graph_module_count(
+                    &dep_graphs[dep]));
+            if (dep_result.error_count != 0u) goto cleanup;
+            artifact_result = cm_dependency_macro_artifact_build(
+                &dep_macros[dep], &dep_graphs[dep], dep_result.revision,
+                dep_name, dep == 0u ? "core_crate" : dep_name);
+            printf("%s-artifact status=%d import_errors=%lu\n", dep_name,
+                (int)artifact_result.status,
+                (unsigned long)artifact_result.import_error_count);
+            expand_artifacts[dep] = &dep_macros[dep];
+            {
+                CmImportResult dep_import_result;
+                uint32_t earlier;
+                cm_import_resolver_init(&dep_imports[dep]);
+                for (earlier = 0u; earlier < dep; ++earlier)
+                    (void)cm_import_resolver_add_dependency(&dep_imports[dep],
+                        dep_names[earlier], &dep_imports[earlier],
+                        &dep_graphs[earlier], dep_revisions[earlier]);
+                dep_import_result = cm_import_resolve(&dep_imports[dep],
+                    &dep_graphs[dep], dep_result.revision);
+                printf("%s-imports errors=%lu\n", dep_name,
+                    (unsigned long)dep_import_result.error_count);
+                (void)cm_import_resolver_add_dependency(&imports, dep_name,
+                    &dep_imports[dep], &dep_graphs[dep], dep_result.revision);
+            }
+            if (body_census_requested) {
+                /* M9-03: dependency bodies need expression-macro expansion
+                 * too. */
+                CmBodyExpandOptions dep_expand_options;
+                CmBodyExpandResult dep_expand_result;
+                cm_body_expand_options_init(&dep_expand_options);
+                dep_expand_options.edition = CM_EDITION_2024;
+                dep_expand_options.crate_identifier = "crate";
+                dep_expand_options.cfg = &cfg;
+                dep_expand_options.imports = &dep_imports[dep];
+                dep_expand_options.dependency_macros = expand_artifacts;
+                dep_expand_options.dependency_macro_count = dep;
+                dep_expand_result = cm_body_expand_graph(&dep_graphs[dep],
+                    dep_result.revision, &dep_expand_options);
+                printf("%s-body-expand bodies=%lu invocations=%lu "
+                    "failed=%lu\n", dep_name,
+                    (unsigned long)dep_expand_result.bodies,
+                    (unsigned long)dep_expand_result.invocations,
+                    (unsigned long)dep_expand_result.failed);
+            }
+            {
+                CmHirLowerOptions dep_lower_options;
+                CmHirLowerResult dep_lower_result;
+                cm_hir_module_map_init(&dep_hir_modules[dep]);
+                cm_hir_lower_options_init(&dep_lower_options);
+                dep_lower_options.crate_name = dep_name;
+                dep_lower_options.source = dep_root;
+                dep_lower_options.edition = CM_HIR_EDITION_2024;
+                dep_lower_options.pointer_bits = target->pointer_bits;
+                dep_lower_options.dependencies = hir_dependencies;
+                dep_lower_options.dependency_count = dep;
+                {
+                    clock_t dep_lower_started = clock();
+                    dep_lower_result = cm_hir_lower_module_graph(&hir,
+                        &dep_graphs[dep], dep_result.revision,
+                        &dep_imports[dep], &dep_hir_modules[dep],
+                        &dep_lower_options);
+                    printf("%s-hir errors=%lu items=%lu seconds=%lu\n",
+                        dep_name,
+                        (unsigned long)dep_lower_result.error_count,
+                        (unsigned long)dep_lower_result.lowered_item_count,
+                        (unsigned long)((clock() - dep_lower_started)
+                            / CLOCKS_PER_SEC));
+                }
+                if (dep_lower_result.error_count != 0u) {
+                    const CmSourceFile *cerr_source = cm_source_get(&sources,
+                        dep_lower_result.first_error.span.source);
+                    printf("%s-hir first-error kind=%s source=%s line=%lu"
+                        " item=%u span=%lu..%lu message=%s\n", dep_name,
+                        cm_hir_lower_error_kind_name(
+                            dep_lower_result.first_error.kind),
+                        cerr_source == NULL ? "<none>" : cerr_source->path,
+                        (unsigned long)source_line(cerr_source,
+                            (size_t)dep_lower_result.first_error.span.start),
+                        (unsigned int)dep_lower_result.first_error.item,
+                        (unsigned long)dep_lower_result.first_error.span.start,
+                        (unsigned long)dep_lower_result.first_error.span.end,
+                        dep_lower_result.first_error.message);
+                    goto cleanup;
+                }
+                hir_dependencies[dep].graph = &dep_graphs[dep];
+                hir_dependencies[dep].revision = dep_result.revision;
+                hir_dependencies[dep].module_map = &dep_hir_modules[dep];
+                body_dependencies[dep].graph = &dep_graphs[dep];
+                body_dependencies[dep].revision = dep_result.revision;
+                body_dependencies[dep].imports = &dep_imports[dep];
+                body_dependencies[dep].modules = &dep_hir_modules[dep];
+            }
+        }
+        if (dep_count != 0u) {
+            graph_options.dependency_macros = expand_artifacts;
+            graph_options.dependency_macro_count = dep_count;
         }
     }
     graph_result = cm_module_graph_build(&graph, &sources, root,
@@ -833,9 +881,9 @@ int main(int argc, char **argv)
         expand_options.crate_identifier = "crate";
         expand_options.cfg = &cfg;
         expand_options.imports = &imports;
-        if (with_core_path != NULL) {
+        if (dep_count != 0u) {
             expand_options.dependency_macros = expand_artifacts;
-            expand_options.dependency_macro_count = 1u;
+            expand_options.dependency_macro_count = dep_count;
         }
         expand_result = cm_body_expand_graph(&graph, graph_result.revision,
             &expand_options);
@@ -866,11 +914,15 @@ int main(int argc, char **argv)
         }
     }
     cm_hir_lower_options_init(&lower_options);
-    lower_options.crate_name = with_core_path != NULL ? "alloc" : "core";
+    /* The target's name: explicit, else the historical defaults (`core`
+     * alone; `alloc` on top of core; `std` on top of alloc). */
+    lower_options.crate_name = target_crate_name != NULL ? target_crate_name
+        : dep_count == 0u ? "core"
+        : strcmp(dep_names[dep_count - 1u], "core") == 0 ? "alloc" : "std";
     lower_options.source = root;
-    if (with_core_path != NULL) {
+    if (dep_count != 0u) {
         lower_options.dependencies = hir_dependencies;
-        lower_options.dependency_count = 1u;
+        lower_options.dependency_count = dep_count;
     }
     lower_options.edition = CM_HIR_EDITION_2024;
     lower_options.pointer_bits = target->pointer_bits;
@@ -936,8 +988,7 @@ int main(int argc, char **argv)
             cm_ubody_set_init(&ubodies);
             ubody_result = cm_ubody_lower_all(&ubodies, &hir, &graph,
                 graph_result.revision, &imports, &modules,
-                with_core_path != NULL ? body_dependencies : NULL,
-                with_core_path != NULL ? 1u : 0u);
+                dep_count != 0u ? body_dependencies : NULL, dep_count);
             printf("ubody bodies=%lu lowered=%lu no_source=%lu failed=%lu "
                 "expressions=%lu unresolved_paths=%lu nested_items=%lu "
                 "retained_macros=%lu\n",
@@ -961,8 +1012,7 @@ int main(int argc, char **argv)
                 cm_tyck_set_init(&tyck);
                 tyck_result = cm_tyck_all(&tyck, &hir, &ubodies, &graph,
                     graph_result.revision, &imports, &modules,
-                with_core_path != NULL ? body_dependencies : NULL,
-                with_core_path != NULL ? 1u : 0u);
+                dep_count != 0u ? body_dependencies : NULL, dep_count);
                 printf("tyck bodies=%lu typed=%lu partial=%lu skipped=%lu "
                     "expressions=%lu unresolved_nodes=%lu error_nodes=%lu\n",
                     (unsigned long)tyck_result.bodies,

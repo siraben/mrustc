@@ -271,10 +271,10 @@ static void cm_derive_debug_body(CmStrBuf *out, const CmAst *ast,
 static void cm_derive_debug(CmStrBuf *out, const CmAst *ast,
     const CmAstItem *item)
 {
-    cm_derive_open_impl(out, ast, item, "::core::fmt::Debug",
-        "::core::fmt::Debug");
-    cm_str_buf_append(out, "    fn fmt(&self, f: &mut ::core::fmt::Formatter"
-        "<'_>) -> ::core::fmt::Result {\n        match *self {\n");
+    cm_derive_open_impl(out, ast, item, "core::fmt::Debug",
+        "core::fmt::Debug");
+    cm_str_buf_append(out, "    fn fmt(&self, f: &mut core::fmt::Formatter"
+        "<'_>) -> core::fmt::Result {\n        match *self {\n");
     if (item->kind == CM_AST_ITEM_STRUCT) {
         CmDeriveShape shape;
         cm_derive_shape_of_item(item, &shape);
@@ -314,7 +314,7 @@ static void cm_derive_clone_construct(CmStrBuf *out, const CmAst *ast,
         cm_str_buf_push(out, '(');
         for (index = 0u; index < shape->count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
-            cm_str_buf_append(out, "::core::clone::Clone::clone(&__p");
+            cm_str_buf_append(out, "core::clone::Clone::clone(&__p");
             cm_str_buf_append_ulong(out, (unsigned long)index);
             cm_str_buf_push(out, ')');
         }
@@ -324,7 +324,7 @@ static void cm_derive_clone_construct(CmStrBuf *out, const CmAst *ast,
         for (index = 0u; index < shape->count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
             cm_derive_append_intern(out, ast, shape->fields[index].name);
-            cm_str_buf_append(out, ": ::core::clone::Clone::clone(&__p");
+            cm_str_buf_append(out, ": core::clone::Clone::clone(&__p");
             cm_str_buf_append_ulong(out, (unsigned long)index);
             cm_str_buf_push(out, ')');
         }
@@ -335,8 +335,8 @@ static void cm_derive_clone_construct(CmStrBuf *out, const CmAst *ast,
 static void cm_derive_clone(CmStrBuf *out, const CmAst *ast,
     const CmAstItem *item)
 {
-    cm_derive_open_impl(out, ast, item, "::core::clone::Clone",
-        "::core::clone::Clone");
+    cm_derive_open_impl(out, ast, item, "core::clone::Clone",
+        "core::clone::Clone");
     cm_str_buf_append(out, "    fn clone(&self) -> Self {\n"
         "        match *self {\n");
     if (item->kind == CM_AST_ITEM_STRUCT) {
@@ -375,8 +375,8 @@ static void cm_derive_marker(CmStrBuf *out, const CmAst *ast,
 static void cm_derive_partial_eq(CmStrBuf *out, const CmAst *ast,
     const CmAstItem *item)
 {
-    cm_derive_open_impl(out, ast, item, "::core::cmp::PartialEq",
-        "::core::cmp::PartialEq");
+    cm_derive_open_impl(out, ast, item, "core::cmp::PartialEq",
+        "core::cmp::PartialEq");
     cm_str_buf_append(out, "    fn eq(&self, other: &Self) -> bool {\n");
     if (item->kind == CM_AST_ITEM_STRUCT) {
         CmDeriveShape shape;
@@ -427,15 +427,15 @@ static void cm_derive_default(CmStrBuf *out, const CmAst *ast,
     uint32_t index;
     if (item->kind != CM_AST_ITEM_STRUCT) return; /* enums need #[default] */
     cm_derive_shape_of_item(item, &shape);
-    cm_derive_open_impl(out, ast, item, "::core::default::Default",
-        "::core::default::Default");
+    cm_derive_open_impl(out, ast, item, "core::default::Default",
+        "core::default::Default");
     cm_str_buf_append(out, "    fn default() -> Self {\n        ");
     cm_derive_append_intern(out, ast, item->name);
     if (shape.form == CM_AST_FIELDS_TUPLE) {
         cm_str_buf_push(out, '(');
         for (index = 0u; index < shape.count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
-            cm_str_buf_append(out, "::core::default::Default::default()");
+            cm_str_buf_append(out, "core::default::Default::default()");
         }
         cm_str_buf_push(out, ')');
     } else if (shape.form == CM_AST_FIELDS_NAMED) {
@@ -443,7 +443,7 @@ static void cm_derive_default(CmStrBuf *out, const CmAst *ast,
         for (index = 0u; index < shape.count; ++index) {
             if (index != 0u) cm_str_buf_append(out, ", ");
             cm_derive_append_intern(out, ast, shape.fields[index].name);
-            cm_str_buf_append(out, ": ::core::default::Default::default()");
+            cm_str_buf_append(out, ": core::default::Default::default()");
         }
         cm_str_buf_append(out, " }");
     }
@@ -537,13 +537,13 @@ size_t cm_derive_expand(CmAst *ast, enum cm_edition edition,
             cm_derive_clone(&text, ast, item); any = 1;
         }
         if (cm_derive_item_lists(ast, item, "Copy")) {
-            cm_derive_marker(&text, ast, item, "::core::marker::Copy"); any = 1;
+            cm_derive_marker(&text, ast, item, "core::marker::Copy"); any = 1;
         }
         if (cm_derive_item_lists(ast, item, "PartialEq")) {
             cm_derive_partial_eq(&text, ast, item); any = 1;
         }
         if (cm_derive_item_lists(ast, item, "Eq")) {
-            cm_derive_marker(&text, ast, item, "::core::cmp::Eq"); any = 1;
+            cm_derive_marker(&text, ast, item, "core::cmp::Eq"); any = 1;
         }
         if (cm_derive_item_lists(ast, item, "Default")
             && item->kind == CM_AST_ITEM_STRUCT) {
