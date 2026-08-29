@@ -1041,7 +1041,19 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     }
     case CM_U_EXPR_RETURN: {
         CmUMirBlock *current;
-        (void)cm_umir_emit_expr(builder, expr->data.flow.value);
+        /* The value lands in the body's return slot (slot 0; a closure
+         * body's is the slot after its captured environment). */
+        CmUMirLocalId return_slot = builder->body->closure_expr
+                != CM_U_EXPR_NONE
+            ? (CmUMirLocalId)builder->body->env_count : 0u;
+        if (expr->data.flow.value != CM_U_EXPR_NONE) {
+            CmUMirLocalId value = cm_umir_emit_expr(builder,
+                expr->data.flow.value);
+            cm_umir_push_operands(builder, return_slot, CM_UMIR_RVALUE_LOCAL,
+                expr->data.flow.value,
+                cm_umir_expr_type(builder, expr->data.flow.value), &value,
+                1u);
+        }
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL)
@@ -1444,8 +1456,10 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             builder->current = return_block;
             /* The propagated value: the operand itself (From conversion
              * of the error is identity in the slot model). */
-            cm_umir_push_operands(builder, 0u, CM_UMIR_RVALUE_LOCAL, id,
-                CM_TY_NONE, &operand, 1u);
+            cm_umir_push_operands(builder,
+                builder->body->closure_expr != CM_U_EXPR_NONE
+                    ? (CmUMirLocalId)builder->body->env_count : 0u,
+                CM_UMIR_RVALUE_LOCAL, id, CM_TY_NONE, &operand, 1u);
             ret = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
                 return_block);
             if (ret != NULL)
