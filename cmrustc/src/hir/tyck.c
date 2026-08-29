@@ -2178,8 +2178,24 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return cm_ty_fn_ptr(arena, params, count, ret, 0);
         }
         if (nested->kind == CM_AST_ITEM_CONST
-            || nested->kind == CM_AST_ITEM_STATIC)
+            || nested->kind == CM_AST_ITEM_STATIC) {
+            /* Body-local consts are lowered as body_local HIR items:
+             * record the item so MIR emission evaluates its initializer
+             * (core's `const MAX_DEC_N` inside `impl_Display!`). */
+            size_t scan;
+            for (scan = 0u; scan < env->state->hir->items.len; ++scan) {
+                const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
+                    &env->state->hir->items, scan);
+                if (cand == NULL || (cand->kind != CM_HIR_ITEM_CONST
+                        && cand->kind != CM_HIR_ITEM_STATIC)
+                    || cand->ast_source != res->nested_source
+                    || cand->ast_item != res->nested_item) continue;
+                if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
+                    env->out->method_targets[id] = cand->definition;
+                break;
+            }
             return cm_tyck_ast_type(env, nested->data.value_item.type);
+        }
         /* Nested structs/enums have no HIR definition to name yet. */
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);
     }
@@ -4788,6 +4804,38 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     cm_free(env.pending);
     cm_ty_apply_defaults(arena);
 
+    /* Projections that became normalizable only after inference are
+     * stored normalized: MIR lowering reads these types directly (a
+     * `<Iter as Iterator>::Item` receiver is `&T`, not a bare value). */
+    for (node = 1u; node <= ub->expressions.len; ++node) {
+        CmTyId type = out->expr_types[node];
+        const CmTy *ty = type == CM_TY_NONE ? NULL
+            : cm_ty_get(arena, cm_ty_resolve(arena, type));
+        if (ty != NULL && ty->kind == CM_TY_PROJECTION) {
+            CmTyId normalized = cm_tyck_normalize(&env, type, 0u);
+            if (normalized != type) out->expr_types[node] = normalized;
+        }
+    }
+    for (node = 1u; out->pat_types != NULL && node <= ub->patterns.len;
+            ++node) {
+        CmTyId type = out->pat_types[node];
+        const CmTy *ty = type == CM_TY_NONE ? NULL
+            : cm_ty_get(arena, cm_ty_resolve(arena, type));
+        if (ty != NULL && ty->kind == CM_TY_PROJECTION) {
+            CmTyId normalized = cm_tyck_normalize(&env, type, 0u);
+            if (normalized != type) out->pat_types[node] = normalized;
+        }
+    }
+    for (node = 0u; out->local_types != NULL && node < ub->locals.len;
+            ++node) {
+        CmTyId type = out->local_types[node];
+        const CmTy *ty = type == CM_TY_NONE ? NULL
+            : cm_ty_get(arena, cm_ty_resolve(arena, type));
+        if (ty != NULL && ty->kind == CM_TY_PROJECTION) {
+            CmTyId normalized = cm_tyck_normalize(&env, type, 0u);
+            if (normalized != type) out->local_types[node] = normalized;
+        }
+    }
     /* Census. */
     for (node = 1u; node <= ub->expressions.len; ++node) {
         CmTyId type = out->expr_types[node];

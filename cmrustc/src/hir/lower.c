@@ -18382,7 +18382,9 @@ static int cm_lower_graph_reserve_body_items(CmLowerState *state,
             && item->kind != CM_AST_ITEM_ENUM
             && item->kind != CM_AST_ITEM_FUNCTION
             && item->kind != CM_AST_ITEM_TRAIT
-            && item->kind != CM_AST_ITEM_IMPL) continue;
+            && item->kind != CM_AST_ITEM_IMPL
+            && item->kind != CM_AST_ITEM_CONST
+            && item->kind != CM_AST_ITEM_STATIC) continue;
         if (!cm_lower_reserve_body_item(state, ast, owner_module, fn_record,
                 stmt->data.item_stmt.item, cm_hir_def_id_none(),
                 CM_LOWER_PARENT_NONE, 0, CM_INTERN_ID_NONE)) return 0;
