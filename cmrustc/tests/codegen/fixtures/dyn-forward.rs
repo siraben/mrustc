@@ -41,9 +41,22 @@ fn through<W: Write + ?Sized>(mut w: &mut W, b: u8) {
     emit(&mut w, b);
 }
 
+// A method path on `T = &mut Buffer` is the forwarding impl too (core's
+// `Argument::new_display::<&str>` stores `<&str as Display>::fmt`).
+fn by_path<T: Write + ?Sized>(x: &mut T, b: u8) {
+    let f = T::write_byte;
+    f(x, b);
+}
+
+fn through_path<W: Write + ?Sized>(mut w: &mut W, b: u8) {
+    by_path(&mut w, b);
+}
+
 #[no_mangle]
 pub extern "C" fn dyn_forward(b: u32) -> u32 {
     let mut buffer = Buffer { bytes: [0u8; 8], len: 0 };
     through(&mut buffer, b as u8);
+    through_path(&mut buffer, b as u8 + 5);
     buffer.len as u32 * 100 + buffer.bytes[0] as u32 + buffer.bytes[1] as u32
+        + buffer.bytes[2] as u32
 }

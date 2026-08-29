@@ -1500,19 +1500,24 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
              * bound. */
             CmTyId self = cm_umir_c_subst(receiver_type);
             CmHirDefId resolved;
+            int exact_self = cm_umir_c_exact_self;
             if (self == CM_TY_NONE && callee_type != CM_TY_NONE) {
                 const CmTy *ct = cm_ty_get((CmTyArena *)&tyck->arena,
                     cm_ty_resolve((CmTyArena *)&tyck->arena,
                         cm_umir_c_subst(callee_type)));
-                if (ct != NULL && ct->kind == CM_TY_FN_DEF && ct->count != 0u)
+                if (ct != NULL && ct->kind == CM_TY_FN_DEF && ct->count != 0u) {
+                    /* A path's Self (`T::method` with `T = &mut Buffer`)
+                     * is exact, like a vtable's concrete type. */
                     self = cm_umir_c_subst(ct->children[0]);
+                    exact_self = 1;
+                }
             }
             CmTyId bound_types[32];
             uint32_t bound_count = 0u;
             CmHirReceiverKind receiver =
                 item->data.function_item.signature.receiver;
             resolved = cm_hir_def_id_none();
-            if (cm_umir_c_exact_self) {
+            if (exact_self) {
                 /* A vtable's concrete type is exact: `&mut Buffer: Write`
                  * is the forwarding `impl Write for &mut W`, not
                  * `Buffer`'s own impl (that one expects `&mut Buffer`,
@@ -2062,8 +2067,12 @@ static void cm_umir_c_render_fn_value(CmStrBuf *output,
         cm_str_buf_destroy(&text);
     }
     cm_str_buf_init(&symbol);
+    /* A path names Self exactly: `<&str as Display>::fmt` is the
+     * forwarding `impl Display for &T`, not `str`'s own impl. */
+    cm_umir_c_exact_self = trait_method;
     cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def,
         trait_method ? CM_TY_NONE : fn_type, receiver, NULL, 0u);
+    cm_umir_c_exact_self = 0;
     cm_str_buf_append(output, "0; { long long ");
     cm_str_buf_append_n(output, symbol.data, symbol.len);
     cm_str_buf_append(output, "(); ");
