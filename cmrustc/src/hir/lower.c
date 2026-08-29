@@ -17073,10 +17073,18 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
                 || item->kind == CM_AST_ITEM_ENUM
                 || item->kind == CM_AST_ITEM_TYPE_ALIAS
                 || item->kind == CM_AST_ITEM_CONST
-                || (item->kind == CM_AST_ITEM_MODULE
-                    && item->data.module_item.is_inline)
+                /* inline or out-of-line: the graph has built the module
+                 * either way (libc's `cfg_if! { mod unix; }`) */
+                || item->kind == CM_AST_ITEM_MODULE
                 || item->kind == CM_AST_ITEM_TRAIT
-                || item->kind == CM_AST_ITEM_IMPL)
+                || item->kind == CM_AST_ITEM_IMPL
+                /* libc's `cfg_if!` bodies: re-exports, statics, extern
+                 * blocks and macro definitions are ordinary items once
+                 * the graph has planned them. */
+                || item->kind == CM_AST_ITEM_USE
+                || item->kind == CM_AST_ITEM_STATIC
+                || item->kind == CM_AST_ITEM_EXTERN_BLOCK
+                || item->kind == CM_AST_ITEM_MACRO)
             : (item->kind == CM_AST_ITEM_TYPE_ALIAS
                 || item->kind == CM_AST_ITEM_FUNCTION
                 || (parent_kind == CM_LOWER_PARENT_IMPL

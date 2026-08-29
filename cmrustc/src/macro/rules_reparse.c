@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <stdio.h>
 #include "cm/macro/rules_reparse.h"
 
 #include "cm/syntax/token_tree.h"
@@ -162,6 +164,10 @@ static CmMacroReparseResult cm_cfg_select_reparse_selected(
         options->item_context);
     result.reparse = fragment.parse;
     if (fragment.parse.error_count != 0u) {
+        if (getenv("CM_MACRO_DEBUG") != NULL)
+            fprintf(stderr, "MACRO reparse (cfg_select) failed: %s\n--- text ---\n%.*s\n--- end ---\n",
+                fragment.parse.first_error.message, (int)length,
+                source + start);
         cm_reparse_error(&result, CM_MACRO_SYNTAX_ERROR,
             CM_MACRO_REPARSE_STAGE_PARSE,
             CM_MACRO_REPARSE_DIAG_GENERATED_SYNTAX,
@@ -456,6 +462,10 @@ CmMacroReparseResult cm_macro_rules_reparse_items(
         effective_options.item_context);
     result.reparse = fragment.parse;
     if (fragment.parse.error_count != 0u) {
+        if (getenv("CM_MACRO_DEBUG") != NULL)
+            fprintf(stderr, "MACRO reparse (items) failed: %s\n--- text ---\n%.*s\n--- end ---\n",
+                fragment.parse.first_error.message, (int)source.len,
+                cm_str_buf_c_str(&source));
         cm_reparse_error(&result, CM_MACRO_SYNTAX_ERROR,
             CM_MACRO_REPARSE_STAGE_PARSE,
             CM_MACRO_REPARSE_DIAG_GENERATED_SYNTAX,

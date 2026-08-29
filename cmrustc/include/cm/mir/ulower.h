@@ -72,6 +72,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_CONST_PATTERN, /* value of the const a path pattern names */
     CM_UMIR_RVALUE_DEREF_CALL,    /* Deref::deref(operands[0]); immediate 1: deref_mut */
     CM_UMIR_RVALUE_SLICE_LEN,     /* length of the slice / array operands[0] (through references) */
+    CM_UMIR_RVALUE_STATIC_ADDR,   /* address of the static item the path expr names */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

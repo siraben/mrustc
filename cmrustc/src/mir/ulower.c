@@ -538,6 +538,24 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
             id, type, operands, 1u);
         return address;
     }
+    if (expr != NULL && expr->kind == CM_U_EXPR_PATH
+        && expr->data.path.resolution.kind == CM_U_RESOLVED_DEFINITION
+        && builder->hir != NULL) {
+        /* `&STATIC` / `STATIC.method()`: the static's own storage, not
+         * the address of a copy of its value (a transparent `AtomicU32`
+         * is its scalar; writes must land in the static). */
+        const CmHirDefinition *record = cm_hir_lookup_definition(
+            builder->hir, expr->data.path.resolution.definition);
+        const CmHirItem *item = record == NULL
+                || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+            : cm_hir_get_item(builder->hir, record->entity.item_id);
+        if (item != NULL && item->kind == CM_HIR_ITEM_STATIC) {
+            address = cm_umir_new_local(builder, type);
+            cm_umir_push(builder, address, CM_UMIR_RVALUE_STATIC_ADDR, id,
+                type);
+            return address;
+        }
+    }
     /* Slot 0 is the return slot: never an address. */
     if (expr == NULL || expr->kind != CM_U_EXPR_INDEX) return (CmUMirLocalId)0u;
     operands[0] = cm_umir_place(builder, expr->data.index.base);
@@ -1352,14 +1370,28 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_LITERAL, id,
             type);
         break;
-    case CM_U_EXPR_PATH:
-        if (expr->data.path.resolution.kind == CM_U_RESOLVED_VARIANT
-            && cm_umir_variant_index(builder->hir,
-                &expr->data.path.resolution) >= 0) {
+    case CM_U_EXPR_PATH: {
+        CmUResolution resolution = expr->data.path.resolution;
+        if (resolution.kind == CM_U_RESOLVED_TYPE_ASSOC
+            && builder->tb != NULL && builder->tb->method_targets != NULL
+            && builder->hir != NULL
+            && !cm_hir_def_id_is_none(builder->tb->method_targets[id])) {
+            /* `Enum::Variant` through an import or alias: tyck recorded
+             * the variant the tail names. */
+            const CmHirDefinition *record = cm_hir_lookup_definition(
+                builder->hir, builder->tb->method_targets[id]);
+            if (record != NULL
+                && record->kind == CM_HIR_DEFINITION_ENUM_VARIANT) {
+                memset(&resolution, 0, sizeof(resolution));
+                resolution.kind = CM_U_RESOLVED_VARIANT;
+                resolution.definition = builder->tb->method_targets[id];
+            }
+        }
+        if (resolution.kind == CM_U_RESOLVED_VARIANT
+            && cm_umir_variant_index(builder->hir, &resolution) >= 0) {
             cm_umir_push_immediate(builder, destination,
                 CM_UMIR_RVALUE_VARIANT, id, type, NULL, 0u,
-                (uint32_t)cm_umir_variant_index(builder->hir,
-                    &expr->data.path.resolution));
+                (uint32_t)cm_umir_variant_index(builder->hir, &resolution));
         } else if (expr->data.path.resolution.kind == CM_U_RESOLVED_LOCAL
             && expr->data.path.resolution.local != CM_U_LOCAL_NONE) {
             /* Body locals occupy slots 1..n after the return slot. */
@@ -1372,6 +1404,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 type);
         }
         break;
+    }
     case CM_U_EXPR_BINARY: {
         CmUMirLocalId operands[2];
         operands[0] = cm_umir_emit_expr(builder, expr->data.binary.left);
@@ -1695,6 +1728,22 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 cm_umir_push_operands(builder, destination,
                     CM_UMIR_RVALUE_REF_INDEX, id, type, index_operands, 2u);
                 break;
+            }
+            if (place != NULL && place->kind == CM_U_EXPR_PATH
+                && place->data.path.resolution.kind
+                    == CM_U_RESOLVED_DEFINITION && builder->hir != NULL) {
+                /* `&STATIC`: the static's storage. */
+                const CmHirDefinition *record = cm_hir_lookup_definition(
+                    builder->hir, place->data.path.resolution.definition);
+                const CmHirItem *item = record == NULL
+                        || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+                    : cm_hir_get_item(builder->hir, record->entity.item_id);
+                if (item != NULL && item->kind == CM_HIR_ITEM_STATIC) {
+                    cm_umir_push(builder, destination,
+                        CM_UMIR_RVALUE_STATIC_ADDR, expr->data.ref.operand,
+                        type);
+                    break;
+                }
             }
         }
         operand = cm_umir_place(builder, expr->data.ref.operand);

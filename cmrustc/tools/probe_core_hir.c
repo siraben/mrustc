@@ -837,24 +837,41 @@ int main(int argc, char **argv)
                 error_detail);
         }
     }
-    printf("graph errors=%lu imports=%lu sources=%lu modules=%lu\n",
+    printf("graph errors=%lu imports=%lu sources=%lu modules=%lu"
+        " stored=%lu root=%lu\n",
         (unsigned long)graph_result.error_count,
         (unsigned long)import_result.error_count,
         (unsigned long)sources.length,
-        (unsigned long)cm_module_graph_module_count(&graph));
+        (unsigned long)cm_module_graph_module_count(&graph),
+        (unsigned long)cm_module_graph_error_count(&graph),
+        (unsigned long)graph_result.root);
     if (graph_result.error_count != 0u) {
         uint32_t error_index;
         for (error_index = 0u; error_index < 20u; ++error_index) {
             CmResolveError resolve_error;
             const CmSourceFile *error_file;
-            if (!cm_module_graph_get_error(&graph, error_index,
-                    &resolve_error)) break;
+            int got = cm_module_graph_get_error(&graph, error_index,
+                &resolve_error);
+            fprintf(stderr, "graph-error-probe index=%u got=%d kind=%d\n",
+                (unsigned)error_index, got, got ? (int)resolve_error.kind : -1);
+            if (!got) break;
             error_file = cm_source_get(&sources, resolve_error.span.source);
-            printf("graph-error kind=%s source=%s line=%lu column=%lu\n",
-                cm_resolve_error_kind_name(resolve_error.kind),
-                error_file == NULL ? "<none>" : error_file->path,
-                (unsigned long)resolve_error.line,
-                (unsigned long)resolve_error.column);
+            {
+                char detail_a[160];
+                char detail_b[400];
+                detail_a[0] = '\0';
+                detail_b[0] = '\0';
+                (void)cm_module_graph_copy_string(&graph,
+                    resolve_error.detail_a, detail_a, sizeof(detail_a));
+                (void)cm_module_graph_copy_string(&graph,
+                    resolve_error.detail_b, detail_b, sizeof(detail_b));
+                printf("graph-error kind=%s source=%s line=%lu column=%lu"
+                    " detail=%s: %s\n",
+                    cm_resolve_error_kind_name(resolve_error.kind),
+                    error_file == NULL ? "<none>" : error_file->path,
+                    (unsigned long)resolve_error.line,
+                    (unsigned long)resolve_error.column, detail_a, detail_b);
+            }
         }
     }
     if (graph_result.error_count != 0u || import_result.error_count != 0u) {

@@ -950,15 +950,9 @@ static int cm_validate_generated_plan(CmModuleGraphState *state,
         item = cm_ast_get_item(&unit->ast, nodes[index].item_id);
         if (item == NULL) return 0;
         detail = NULL;
-        if (nodes[index].is_generated && item->kind == CM_AST_ITEM_USE) {
-            detail = "generated use items are not supported";
-        } else if (nodes[index].is_generated
+        if (nodes[index].is_generated
             && item->kind == CM_AST_ITEM_EXTERN_CRATE) {
             detail = "generated extern crate items are not supported";
-        } else if (nodes[index].is_generated
-            && item->kind == CM_AST_ITEM_MODULE
-            && !item->data.module_item.is_inline) {
-            detail = "generated external modules are not supported";
         }
         if (detail != NULL) {
             CmAstSpan anchor;

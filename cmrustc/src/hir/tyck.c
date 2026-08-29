@@ -2159,6 +2159,12 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                         alias.kind = CM_U_RESOLVED_VARIANT;
                         alias.definition = v->definition;
                         fake.data.path.resolution = alias;
+                        /* Lowering sees the original TYPE_ASSOC path: the
+                         * variant it names is recorded for it (a
+                         * dependency enum's `Ordering::SeqCst`). */
+                        if (env->out->method_targets != NULL
+                            && id != CM_U_EXPR_NONE)
+                            env->out->method_targets[id] = v->definition;
                         return cm_tyck_path_type(env, &fake, id);
                     }
                 }
@@ -2219,6 +2225,10 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                                         last)) {
                                     CmUResolution alias;
                                     CmUExpr fake = *expr;
+                                    if (env->out->method_targets != NULL
+                                        && id != CM_U_EXPR_NONE)
+                                        env->out->method_targets[id] =
+                                            v->definition;
                                     memset(&alias, 0, sizeof(alias));
                                     alias.kind = CM_U_RESOLVED_VARIANT;
                                     alias.definition = v->definition;

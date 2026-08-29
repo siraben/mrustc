@@ -145,6 +145,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_ITER_NEXT:
                     case CM_UMIR_RVALUE_DEREF_CALL:
                     case CM_UMIR_RVALUE_SLICE_LEN:
+                    case CM_UMIR_RVALUE_STATIC_ADDR:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
@@ -928,6 +929,80 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
     if (CM_SHIM_IS("needs_drop")) {
         cm_str_buf_append(output, "() { return 0; }");
         return 1;
+    }
+    if (CM_SHIM_IS("atomic_load") || CM_SHIM_IS("atomic_store")
+        || CM_SHIM_IS("atomic_xchg") || CM_SHIM_IS("atomic_xadd")
+        || CM_SHIM_IS("atomic_xsub") || CM_SHIM_IS("atomic_and")
+        || CM_SHIM_IS("atomic_or") || CM_SHIM_IS("atomic_xor")
+        || CM_SHIM_IS("atomic_nand") || CM_SHIM_IS("atomic_max")
+        || CM_SHIM_IS("atomic_min") || CM_SHIM_IS("atomic_umax")
+        || CM_SHIM_IS("atomic_umin") || CM_SHIM_IS("atomic_cxchg")
+        || CM_SHIM_IS("atomic_cxchgweak") || CM_SHIM_IS("atomic_fence")
+        || CM_SHIM_IS("atomic_singlethreadfence")) {
+        /* Single-threaded C99: the ordering is irrelevant, every
+         * read-modify-write is a plain load / store at T's width. */
+        const char *scalar = cm_umir_c_scalar_type(tyck, first);
+        const char *ty = scalar == NULL ? "long long" : scalar;
+        if (CM_SHIM_IS("atomic_fence")
+            || CM_SHIM_IS("atomic_singlethreadfence")) {
+            cm_str_buf_append(output, "() { return 0; }");
+            return 1;
+        }
+        if (CM_SHIM_IS("atomic_load")) {
+            cm_str_buf_append(output, "(long long p) { return (long long)*(");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *)(intptr_t)p; }");
+            return 1;
+        }
+        if (CM_SHIM_IS("atomic_store")) {
+            cm_str_buf_append(output, "(long long p, long long v) { *(");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *)(intptr_t)p = (");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, ")v; return 0; }");
+            return 1;
+        }
+        if (CM_SHIM_IS("atomic_cxchg") || CM_SHIM_IS("atomic_cxchgweak")) {
+            /* (old, swapped): a two-slot block like the overflow shims. */
+            cm_str_buf_append(output, "(long long p, long long old, long long"
+                " v) { long long *t = (long long *)malloc(16); ");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *a = (");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *)(intptr_t)p; t[0] = (long long)*a;"
+                " t[1] = *a == (");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, ")old; if (t[1]) *a = (");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, ")v; return (long long)(intptr_t)t; }");
+            return 1;
+        }
+        {
+            const char *op = CM_SHIM_IS("atomic_xchg") ? "(T)v"
+                : CM_SHIM_IS("atomic_xadd") ? "(T)(o + v)"
+                : CM_SHIM_IS("atomic_xsub") ? "(T)(o - v)"
+                : CM_SHIM_IS("atomic_and") ? "(T)(o & v)"
+                : CM_SHIM_IS("atomic_or") ? "(T)(o | v)"
+                : CM_SHIM_IS("atomic_xor") ? "(T)(o ^ v)"
+                : CM_SHIM_IS("atomic_nand") ? "(T)~(o & v)"
+                : CM_SHIM_IS("atomic_max") || CM_SHIM_IS("atomic_umax")
+                    ? "(T)(o > (T)v ? o : (T)v)"
+                : "(T)(o < (T)v ? o : (T)v)";
+            const char *scan;
+            cm_str_buf_append(output, "(long long p, long long v) { ");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *a = (");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " *)(intptr_t)p; ");
+            cm_str_buf_append(output, ty);
+            cm_str_buf_append(output, " o = *a; *a = ");
+            for (scan = op; *scan != 0; ++scan) {
+                if (*scan == 'T') cm_str_buf_append(output, ty);
+                else cm_str_buf_push(output, *scan);
+            }
+            cm_str_buf_append(output, "; return (long long)o; }");
+            return 1;
+        }
     }
     if (CM_SHIM_IS("box_new")) {
         /* `Box::new(x)` (1.90's intrinsic): a heap cell holding the value
@@ -2515,7 +2590,34 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             cm_str_buf_append(output, ";\n");
         }
     } else {
+        int is_static = owner != NULL && owner->kind == CM_HIR_ITEM_STATIC;
+        if (is_static) {
+            /* A `static` is one place: its initializer runs once and the
+             * value (an aggregate's block pointer, or the scalar) is
+             * cached, so every use shares it — `static COUNTER:
+             * AtomicU32` keeps its count.  The body itself renders as
+             * `<symbol>_init`; this wrapper fronts it. */
+            /* (the `long long ` before this branch prefixes the
+             * prototype) */
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "_init(void);\nlong long ");
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "_addr(void);\nlong long ");
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "(void) { return *(long long *)"
+                "(intptr_t)");
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "_addr(); }\nlong long ");
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "_addr(void) { static long long"
+                " cm_slot; static int cm_ready; if (!cm_ready) {"
+                " cm_ready = 1; cm_slot = ");
+            cm_umir_c_render_symbol(output, def);
+            cm_str_buf_append(output, "_init(); } return (long long)"
+                "(intptr_t)&cm_slot; }\nlong long ");
+        }
         cm_umir_c_render_symbol(output, def);
+        if (is_static) cm_str_buf_append(output, "_init");
         if (cm_umir_c_active_instance != NULL
             && (cm_umir_c_active_instance->count != 0u
                 || cm_umir_c_active_instance->self_type != CM_TY_NONE)) {
@@ -3687,6 +3789,28 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_append(output, "); }");
                     cm_str_buf_destroy(&symbol);
                 }
+                break;
+            }
+            case CM_UMIR_RVALUE_STATIC_ADDR: {
+                /* The static's storage slot (its wrapper's cache). */
+                const CmUExpr *path_expr = statement->expr == CM_U_EXPR_NONE
+                    ? NULL : cm_ubody_get_expr(ub, statement->expr);
+                if (path_expr == NULL || path_expr->kind != CM_U_EXPR_PATH
+                    || path_expr->data.path.resolution.kind
+                        != CM_U_RESOLVED_DEFINITION) {
+                    cm_str_buf_append(output, "0 /* static-addr */");
+                    complete = 0;
+                    break;
+                }
+                cm_str_buf_append(output, "0; { long long ");
+                cm_umir_c_render_symbol(output,
+                    path_expr->data.path.resolution.definition);
+                cm_str_buf_append(output, "_addr(); ");
+                cm_umir_c_render_local(output, statement->destination);
+                cm_str_buf_append(output, " = ");
+                cm_umir_c_render_symbol(output,
+                    path_expr->data.path.resolution.definition);
+                cm_str_buf_append(output, "_addr(); }");
                 break;
             }
             case CM_UMIR_RVALUE_SLICE_LEN: {

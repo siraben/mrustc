@@ -231,6 +231,47 @@ static int cm_rules_input_token_text(CmRulesMatchState *state,
             text, length) == 0;
 }
 
+/* Extent of an `item` fragment starting at `input`: attribute prefixes
+ * (`#` + `[..]`), then everything through the first top-level `;` or
+ * brace group (a `;` right after the group, `const _: () = {..};`, is
+ * part of it).  Without this a trailing `$($it:item)*` would take one
+ * token per item (libc's `cfg_if!` re-emits `#[cfg] mod #[cfg] x ;`). */
+static size_t cm_rules_item_extent(const CmRulesMatchState *state,
+    cm_tt_id input, size_t available)
+{
+    const struct cm_tt_node *node = cm_token_tree_node(state->input_tree,
+        input);
+    size_t count = 0u;
+    while (node != NULL && count + 1u < available
+        && node->kind == CM_TT_NODE_TOKEN
+        && node->data.token.kind == CM_TOKEN_POUND) {
+        const struct cm_tt_node *group = cm_token_tree_node(
+            state->input_tree, node->next_sibling);
+        if (group == NULL || group->kind != CM_TT_NODE_GROUP
+            || group->data.group.delimiter != CM_TT_DELIMITER_BRACKET)
+            break;
+        count += 2u;
+        node = cm_token_tree_node(state->input_tree, group->next_sibling);
+    }
+    while (node != NULL && count < available) {
+        count += 1u;
+        if (node->kind == CM_TT_NODE_TOKEN
+            && node->data.token.kind == CM_TOKEN_SEMICOLON) return count;
+        if (node->kind == CM_TT_NODE_GROUP
+            && node->data.group.delimiter == CM_TT_DELIMITER_BRACE) {
+            const struct cm_tt_node *next = cm_token_tree_node(
+                state->input_tree, node->next_sibling);
+            if (next != NULL && count < available
+                && next->kind == CM_TT_NODE_TOKEN
+                && next->data.token.kind == CM_TOKEN_SEMICOLON)
+                count += 1u;
+            return count;
+        }
+        node = cm_token_tree_node(state->input_tree, node->next_sibling);
+    }
+    return available;
+}
+
 static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
     CmMacroFragmentKind fragment, cm_tt_id input,
     size_t *minimum, size_t *maximum)
@@ -290,11 +331,15 @@ static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
             }
         }
         return 1;
+    case CM_MACRO_FRAGMENT_ITEM:
+        if (node == NULL) return 0;
+        *minimum = cm_rules_item_extent(state, input, available);
+        if (*minimum == 0u) *minimum = 1u;
+        return 1;
     case CM_MACRO_FRAGMENT_EXPR:
     case CM_MACRO_FRAGMENT_TY:
     case CM_MACRO_FRAGMENT_PAT:
     case CM_MACRO_FRAGMENT_PATH:
-    case CM_MACRO_FRAGMENT_ITEM:
     case CM_MACRO_FRAGMENT_META:
         return node != NULL;
     }

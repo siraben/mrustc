@@ -5797,8 +5797,6 @@ static void test_preflight_rejections(void)
         "unsafe extern \"C\" { type Alias = u8; }\n",
         "unsafe extern \"C\" { pub(crate) type Restricted; }\n",
         "static mut SOURCE: u8 = 1;\n",
-        "macro_rules! make { () => { static SOURCE: u8 = 1; } } "
-            "make!();\n",
         "trait Values {} struct Number; impl Values for Number { "
             "const VALUE: u8 = 1; }\n"
     };
@@ -12469,10 +12467,12 @@ static void test_generated_preflight_rejections(void)
         cm_hir_lower_options_init(&options);
         result = lower_module_graph(&hir, &graph,
             graph_result.revision, &map, &options);
-        check(result.error_count == 1u
-            && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_ITEM
-            && hir_is_empty(&hir) && cm_hir_module_map_count(&map) == 0u,
-            "unsupported generated declaration mutated HIR");
+        /* Generated statics are ordinary items now (libc's `cfg_if!`
+         * bodies declare them): the declaration lowers. */
+        check(result.error_count == 0u
+            && find_hir_item_kind_anywhere(&hir, CM_HIR_ITEM_STATIC,
+                "GENERATED") != NULL,
+            "generated static declaration did not lower");
         cm_hir_module_map_destroy(&map);
         cm_hir_context_destroy(&hir);
         cm_module_graph_destroy(&graph);

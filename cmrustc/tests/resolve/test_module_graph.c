@@ -2635,9 +2635,7 @@ cleanup:
 static int test_generated_rejections(void)
 {
     static const char *sources_text[] = {
-        "macro_rules! bad { () => { use crate::Thing; } } bad!();",
-        "macro_rules! bad { () => { extern crate core; } } bad!();",
-        "macro_rules! bad { () => { mod external; } } bad!();"
+        "macro_rules! bad { () => { extern crate core; } } bad!();"
     };
     size_t index;
     int ok;
@@ -2672,6 +2670,68 @@ static int test_generated_rejections(void)
             && error.span.source == root
             && error.span.end > error.span.start && error.detail_a != 0u,
             "unsupported generated topology/import was not rejected");
+        cm_module_graph_destroy(&graph);
+        cm_source_set_destroy(&sources);
+    }
+    {
+        /* A generated out-of-line `mod` (libc's `cfg_if! { mod unix; }`)
+         * goes through the file loader: with no file behind it the
+         * failure is the module's, not "unsupported generated item". */
+        static const char *external =
+            "macro_rules! m { () => { mod external; } } m!();";
+        CmSourceSet sources;
+        CmSourceId root;
+        CmModuleGraph graph;
+        CmModuleGraphOptions options;
+        CmCfgSet cfg;
+        CmModuleGraphResult result;
+        CmResolveError error;
+        cm_source_set_init(&sources);
+        cm_module_graph_init(&graph);
+        cm_cfg_set_init(&cfg);
+        cm_module_graph_options_init(&options);
+        options.cfg = &cfg;
+        ok &= check(cm_source_add_memory(&sources,
+            "tests/resolve/fixtures/generated-external/lib.rs",
+            (const unsigned char *)external, strlen(external), &root)
+                == CM_SOURCE_OK, "failed to add generated external source");
+        result = cm_module_graph_build(&graph, &sources, root, &options);
+        ok &= check(result.error_count != 0u
+            && cm_module_graph_get_error(&graph, 0u, &error)
+            && error.kind != CM_RESOLVE_ERROR_UNSUPPORTED_GENERATED_ITEM,
+            "generated external module was rejected as unsupported");
+        cm_module_graph_destroy(&graph);
+        cm_source_set_destroy(&sources);
+    }
+    {
+        /* A generated `use` (libc's `cfg_if!` re-exports) is an import
+         * like any other. */
+        static const char *accepted =
+            "struct Thing; macro_rules! ok { () => { pub use crate::Thing; } } ok!();";
+        CmSourceSet sources;
+        CmSourceId root;
+        CmModuleGraph graph;
+        CmModuleGraphOptions options;
+        CmCfgSet cfg;
+        CmModuleGraphResult result;
+        cm_source_set_init(&sources);
+        cm_module_graph_init(&graph);
+        cm_cfg_set_init(&cfg);
+        cm_module_graph_options_init(&options);
+        options.cfg = &cfg;
+        ok &= check(cm_source_add_memory(&sources,
+            "tests/resolve/fixtures/generated-accept/lib.rs",
+            (const unsigned char *)accepted, strlen(accepted), &root)
+                == CM_SOURCE_OK, "failed to add generated use source");
+        result = cm_module_graph_build(&graph, &sources, root, &options);
+        if (result.error_count != 0u) {
+            CmResolveError error;
+            if (cm_module_graph_get_error(&graph, 0u, &error))
+                printf("test-module-graph: generated use error kind=%s\n",
+                    cm_resolve_error_kind_name(error.kind));
+        }
+        ok &= check(result.error_count == 0u,
+            "generated use item was rejected");
         cm_module_graph_destroy(&graph);
         cm_source_set_destroy(&sources);
     }
