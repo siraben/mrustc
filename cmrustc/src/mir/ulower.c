@@ -349,6 +349,25 @@ static CmUMirLocalId cm_umir_new_local(CmUMirBuilder *builder, CmTyId type)
 /* Whether a by-value `self` method really takes a reference: its impl's
  * Self is `&T` / `&mut T` (core's SpecWriteFmt for &mut W), or, for a
  * trait declaration, some impl of the trait has such a Self. */
+/* Whether `callee`'s impl is for a slice or `str` (an array receiver
+ * must unsize to reach it: `buf.len()` on `[T; N]`). */
+static int cm_umir_self_is_slice(const CmHirContext *hir,
+    const CmHirItem *callee)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *parent;
+    const CmHirType *self;
+    if (hir == NULL || callee == NULL
+        || cm_hir_def_id_is_none(callee->parent_definition)) return 0;
+    record = cm_hir_lookup_definition(hir, callee->parent_definition);
+    parent = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(hir, record->entity.item_id);
+    if (parent == NULL || parent->kind != CM_HIR_ITEM_IMPL) return 0;
+    self = cm_hir_get_type(hir, parent->data.impl_item.self_type);
+    return self != NULL && (self->kind == CM_HIR_TYPE_SLICE_KIND
+        || self->kind == CM_HIR_TYPE_STR_KIND);
+}
+
 static int cm_umir_self_is_reference(const CmHirContext *hir,
     const CmHirItem *callee)
 {
@@ -1067,6 +1086,22 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                             &receiver, 1u);
                     }
                     receiver = address;
+                    if (rt != NULL && rt->kind == CM_TY_ARRAY
+                        && cm_umir_self_is_slice(builder->hir, callee)) {
+                        /* `[T; N]` receiver of a `[T]` method: the
+                         * reference unsizes to a `&[T]` pair. */
+                        CmTyArena *arena = (CmTyArena *)&builder->tyck->arena;
+                        CmTyId target = cm_ty_ref(arena,
+                            cm_ty_slice(arena, rt->children[0]),
+                            kind == CM_HIR_RECEIVER_REF_MUTABLE);
+                        CmUMirLocalId fat = cm_umir_new_local(builder,
+                            target);
+                        cm_umir_push_operands(builder, fat,
+                            CM_UMIR_RVALUE_UNSIZE,
+                            expr->data.method_call.receiver, target,
+                            &receiver, 1u);
+                        receiver = fat;
+                    }
                 } else if (kind == CM_HIR_RECEIVER_VALUE
                     && receiver_is_ref
                     && !cm_umir_self_is_reference(builder->hir, callee)) {

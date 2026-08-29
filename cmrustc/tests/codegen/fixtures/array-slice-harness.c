@@ -5,7 +5,7 @@ uint32_t array_slice(uint32_t k);
 int main(void)
 {
     /* (6+k) + 3 + 3k + 10 + 5 + (2 + 4) */
-    if (array_slice(0) != 30) return 1;
-    if (array_slice(5) != 50) return 2;
+    if (array_slice(0) != 30 + 4000 + 40000) return 1;
+    if (array_slice(5) != 50 + 4000 + 40000) return 2;
     return 0;
 }

@@ -46,5 +46,8 @@ pub extern "C" fn array_slice(k: u32) -> u32 {
     let mut c = [0u8; 4];
     c[1] = 9;
     c[3] = c[1] + 1;
-    sum(&a) + a[2] + sum(&b) + c[3] as u32 + count(&a) + through_unit(&a)
+    // A slice method called directly on an array autorefs *and* unsizes
+    // (core's `let mut curr = buf.len()` on `[MaybeUninit<u8>; N]`).
+    let direct = a.len() as u32 * 1000 + c.len() as u32 * 10000;
+    sum(&a) + a[2] + sum(&b) + c[3] as u32 + count(&a) + through_unit(&a) + direct
 }
