@@ -2248,6 +2248,25 @@ static void cm_mir_ulower_closure(CmUMirSet *out, const CmHirContext *hir,
     builder.census = result;
     builder.current = cm_umir_new_block(&builder);
     {
+        /* `|(layout, _pad)| ..`: a destructuring parameter arrives in a
+         * receiver local that the pattern binder then takes apart. */
+        uint32_t param;
+        body.closure_param_count = closure->data.closure.parameter_count > 16u
+            ? 16u : closure->data.closure.parameter_count;
+        for (param = 0u; param < body.closure_param_count; ++param) {
+            CmUPatId pat_id = closure->data.closure.parameters[param].pattern;
+            const CmUPat *pat = cm_ubody_get_pat(ub, pat_id);
+            CmUMirLocalId receiver;
+            body.closure_param_locals[param] = (CmUMirLocalId)0u;
+            if (pat == NULL || pat->kind == CM_U_PAT_BINDING
+                || pat->kind == CM_U_PAT_WILD) continue;
+            receiver = cm_umir_new_local(&builder, tb->pat_types != NULL
+                ? tb->pat_types[pat_id] : CM_TY_NONE);
+            body.closure_param_locals[param] = receiver;
+            cm_umir_bind_pattern(&builder, pat_id, receiver, closure_id);
+        }
+    }
+    {
         CmUMirLocalId root_local = cm_umir_emit_expr(&builder,
             closure->data.closure.body);
         if (builder.blocked == NULL)

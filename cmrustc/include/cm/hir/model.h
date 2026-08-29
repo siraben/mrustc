@@ -694,6 +694,8 @@ typedef struct CmHirItem {
         struct {
             CmHirFunctionSignature signature;
             CmHirBodyId body;
+            /* Declared in an extern block: the host supplies the symbol. */
+            int is_foreign;
             /*
              * A trait declaration promises a default body even when the
              * body itself is unavailable (for example, declaration-only

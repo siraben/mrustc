@@ -2301,11 +2301,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             const CmUPat *pat = closure == NULL ? NULL
                 : cm_ubody_get_pat(ub,
                     closure->data.closure.parameters[param].pattern);
-            if (pat == NULL || pat->kind != CM_U_PAT_BINDING
-                || pat->data.binding.local == CM_U_LOCAL_NONE) continue;
+            CmUMirLocalId receiver = (CmUMirLocalId)0u;
+            if (pat != NULL && pat->kind == CM_U_PAT_BINDING
+                && pat->data.binding.local != CM_U_LOCAL_NONE)
+                receiver = (CmUMirLocalId)(1u + pat->data.binding.local);
+            else if (param < body->closure_param_count)
+                receiver = body->closure_param_locals[param];
+            if (receiver == (CmUMirLocalId)0u) continue;
             cm_str_buf_append(output, "    ");
-            cm_umir_c_render_local(output,
-                (CmUMirLocalId)(1u + pat->data.binding.local));
+            cm_umir_c_render_local(output, receiver);
             cm_str_buf_append(output, " = p");
             cm_umir_c_render_number(output, (unsigned long)param);
             cm_str_buf_append(output, ";\n");
@@ -3856,6 +3860,39 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                             : "u-MIR blocked";
                         break;
                     }
+                }
+                if (stub_item != NULL && stub_item->kind
+                        == CM_HIR_ITEM_FUNCTION
+                    && stub_item->data.function_item.body == 0u
+                    && stub_item->data.function_item.is_foreign) {
+                    /* An extern-block declaration forwards to the host's
+                     * symbol of that name (`__rust_alloc`, `host_add`):
+                     * `(p0..) { long long NAME(); return NAME(p0..); }`. */
+                    uint32_t params = stub_item->data.function_item
+                        .signature.parameter_count;
+                    uint32_t fp;
+                    cm_str_buf_push(output, '(');
+                    for (fp = 0u; fp < params; ++fp) {
+                        if (fp != 0u) cm_str_buf_append(output, ", ");
+                        cm_str_buf_append(output, "long long p");
+                        cm_umir_c_render_number(output, (unsigned long)fp);
+                    }
+                    if (params == 0u) cm_str_buf_append(output, "void");
+                    cm_str_buf_append(output, ") { long long ");
+                    cm_str_buf_append_n(output,
+                        (const char *)stub_name->bytes, stub_name->len);
+                    cm_str_buf_append(output, "(); return (long long)");
+                    cm_str_buf_append_n(output,
+                        (const char *)stub_name->bytes, stub_name->len);
+                    cm_str_buf_push(output, '(');
+                    for (fp = 0u; fp < params; ++fp) {
+                        if (fp != 0u) cm_str_buf_append(output, ", ");
+                        cm_str_buf_push(output, 'p');
+                        cm_umir_c_render_number(output, (unsigned long)fp);
+                    }
+                    cm_str_buf_append(output, "); } /* foreign */\n");
+                    shims += 1u;
+                    continue;
                 }
                 if (stub_item != NULL && stub_item->kind
                         == CM_HIR_ITEM_FUNCTION

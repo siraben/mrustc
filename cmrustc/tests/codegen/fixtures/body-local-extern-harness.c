@@ -1,4 +1,8 @@
 #include <stdint.h>
+#include <stdlib.h>
+
+/* The extern-block declaration forwards to this host symbol. */
+long long host_abort(long long info) { (void)info; abort(); }
 
 uint32_t body_local_extern(uint32_t code);
 

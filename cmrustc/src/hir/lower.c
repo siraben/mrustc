@@ -11542,6 +11542,7 @@ static int cm_lower_function_item(CmLowerState *state,
         }
     }
     hir_item->kind = CM_HIR_ITEM_FUNCTION;
+    hir_item->data.function_item.is_foreign = record->is_foreign;
     hir_item->data.function_item.signature.parameters = parameters;
     hir_item->data.function_item.signature.parameter_count =
         function->parameter_count;

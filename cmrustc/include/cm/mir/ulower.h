@@ -127,6 +127,10 @@ typedef struct CmUMirBody {
      * frame; `closure_expr` names the closure expression; the return
      * slot is local `env_count`. */
     CmUExprId closure_expr;
+    /* Closure parameters with destructuring patterns: the local that
+     * receives `p<i>` before the pattern binds (0 = a plain binding). */
+    CmUMirLocalId closure_param_locals[16];
+    uint32_t closure_param_count;
     uint32_t env_count;
 } CmUMirBody;
 
