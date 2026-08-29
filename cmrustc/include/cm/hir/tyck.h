@@ -42,6 +42,12 @@ typedef struct CmTyckBody {
      * lowering calls `Deref::deref` / `DerefMut::deref_mut` on the
      * receiver first (none elsewhere). */
     CmTyId *receiver_derefs;
+    /* 1 + the autoderef step at which a METHOD_CALL's method was found
+     * (0 = not recorded): step 0 on a reference receiver means the impl
+     * is for the reference itself and `&self` autorefs it (`impl
+     * SpecToString for &str` on a `&str`); each further step peels one
+     * layer. */
+    uint8_t *receiver_steps;
     CmTyId return_type;
     uint32_t unresolved_nodes;
     uint32_t error_nodes;

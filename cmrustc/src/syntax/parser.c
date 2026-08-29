@@ -1580,8 +1580,14 @@ static int cm_parser_starts_local_item(const CmParser *parser)
         const struct cm_token *next;
 
         next = cm_parser_token_at(parser, position + 1u);
+        /* `const unsafe fn` / `const async fn` / `const extern "C" fn`
+         * nested in a body (core's `align_offset` keeps a `const unsafe
+         * fn mod_inv`) are items, not a `const { .. }` block. */
         return cm_parser_ordinary_identifier(next)
-            || (next != NULL && next->keyword == CM_KW_FN);
+            || (next != NULL && (next->keyword == CM_KW_FN
+                || next->keyword == CM_KW_UNSAFE
+                || next->keyword == CM_KW_ASYNC
+                || next->keyword == CM_KW_EXTERN));
     }
     if (token->keyword == CM_KW_ASYNC
         || token->keyword == CM_KW_UNSAFE) {

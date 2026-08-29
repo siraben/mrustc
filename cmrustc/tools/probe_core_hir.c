@@ -606,7 +606,7 @@ int main(int argc, char **argv)
     /* Dependency chain (`--with-dep NAME PATH`, in order; `--with-core
      * PATH` is `--with-dep core PATH`): each crate is built against the
      * ones before it, the target against all of them. */
-    enum { PROBE_MAX_DEPS = 4 };
+    enum { PROBE_MAX_DEPS = 16 };
     const char *dep_names[PROBE_MAX_DEPS];
     const char *dep_paths[PROBE_MAX_DEPS];
     uint32_t dep_count = 0u;

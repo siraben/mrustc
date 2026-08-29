@@ -2440,7 +2440,9 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                  * registered dependency (`core::hint::must_use` in a
                  * crate with no `use core::...`): delegate by the raw
                  * segment. */
-                const CmImportDependency *dep = index == 0u && !absolute
+                /* `::core::x` (an absolute 2018 path) names the extern
+                 * crate as well. */
+                const CmImportDependency *dep = index == 0u
                     ? cm_import_find_dependency_view(state, &segments[0])
                     : NULL;
                 if (dep != NULL) {
@@ -2484,7 +2486,7 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                 ambiguous = 1;
             }
             if (ambiguous) return CM_IMPORT_LOOKUP_AMBIGUOUS;
-            if (prelude_binding == NULL && index == 0u && !absolute
+            if (prelude_binding == NULL && index == 0u
                 && (scope_binding == NULL
                     /* `#![no_std]`'s implicit `extern crate core` (and an
                      * explicit one) binds the name to an extern-crate item
@@ -2532,6 +2534,28 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                     out_binding->dependency =
                         cm_import_dependency_tag(state, dep);
                 }
+                return dep_status;
+            }
+            if (scope_binding == NULL && prelude_binding != NULL
+                && prelude_binding->dependency != 0u
+                && prelude_binding->target_module != CM_MODULE_NONE
+                && (size_t)prelude_binding->dependency
+                    <= state->dependencies.len) {
+                /* A module reached through the injected dependency
+                 * prelude (`core` itself, or a re-exported module): its
+                 * target lives in that crate's graph, so the rest of the
+                 * path resolves there (M9-03). */
+                const CmImportDependency *dep = (const CmImportDependency *)
+                    cm_vec_at_const(&state->dependencies,
+                        (size_t)prelude_binding->dependency - 1u);
+                CmImportLookupStatus dep_status;
+                dep_status = cm_import_resolve_path(dep->resolver,
+                    prelude_binding->target_module, 0,
+                    segments + index + 1u, segment_count - index - 1u,
+                    namespace_kind, out_binding);
+                if (dep_status == CM_IMPORT_LOOKUP_OK)
+                    out_binding->dependency =
+                        cm_import_dependency_tag(state, dep);
                 return dep_status;
             }
             if (scope_binding != NULL

@@ -574,6 +574,9 @@ static int cm_umir_pattern_is_const(const CmUMirBuilder *builder,
 /* Whether a match-arm pattern is refutable beyond a top-level dispatch
  * key: ranges, const paths, and — nested under a variant, tuple, or
  * reference — literals and variant paths (`Some(Alignment::Right)`). */
+static uint32_t cm_umir_slice_pattern_shape(const CmUMirBuilder *builder,
+    const CmUPat *pat, int *has_rest, uint32_t *after_rest);
+
 static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
     const CmUPat *pat, int nested)
 {
@@ -606,6 +609,20 @@ static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
                     builder->ub, pat->data.list.patterns[alt]), 1))
                 return 1;
         return 0;
+    case CM_U_PAT_SLICE: {
+        /* `[]`, `[s]`, `[a, ..]` test the length; only `[..]` is
+         * irrefutable. */
+        int has_rest;
+        uint32_t after;
+        uint32_t before = cm_umir_slice_pattern_shape(builder, pat,
+            &has_rest, &after);
+        if (!has_rest || before != 0u || after != 0u) return 1;
+        for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
+            if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
+                    builder->ub, pat->data.list.patterns[alt]), 1))
+                return 1;
+        return 0;
+    }
     case CM_U_PAT_TUPLE_STRUCT:
         if (nested && cm_umir_variant_index(builder->hir,
                 &pat->data.struct_pat.resolution) >= 0) return 1;
@@ -653,6 +670,53 @@ static void cm_umir_split_on(CmUMirBuilder *builder, CmUMirLocalId flag,
     builder->current = next;
 }
 
+/* Slice pattern shape: the fixed elements before the `..` (and whether a
+ * rest exists).  Elements after the rest and `rest @ ..` bindings are not
+ * lowered yet (the length test still covers them). */
+static uint32_t cm_umir_slice_pattern_shape(const CmUMirBuilder *builder,
+    const CmUPat *pat, int *has_rest, uint32_t *after_rest)
+{
+    uint32_t index;
+    uint32_t before = 0u;
+    int seen_rest = 0;
+    *after_rest = 0u;
+    for (index = 0u; index < pat->data.list.pattern_count; ++index) {
+        const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+            pat->data.list.patterns[index]);
+        int is_rest = (pat->data.list.has_rest
+                && index == pat->data.list.rest_index)
+            || (sub != NULL && (sub->kind == CM_U_PAT_REST
+                || (sub->kind == CM_U_PAT_BINDING
+                    && cm_ubody_get_pat(builder->ub,
+                        sub->data.binding.subpattern) != NULL
+                    && cm_ubody_get_pat(builder->ub,
+                        sub->data.binding.subpattern)->kind
+                        == CM_U_PAT_REST)));
+        if (is_rest) {
+            seen_rest = 1;
+            continue;
+        }
+        if (seen_rest) *after_rest += 1u;
+        else before += 1u;
+    }
+    *has_rest = seen_rest || pat->data.list.has_rest;
+    return before;
+}
+
+/* Whether a slice pattern's scrutinee sits behind a reference (match
+ * ergonomics: element bindings are references to the elements). */
+static int cm_umir_slice_pattern_behind_ref(const CmUMirBuilder *builder,
+    CmUPatId pat_id)
+{
+    const CmTy *ty;
+    if (builder->tb == NULL || builder->tb->pat_types == NULL
+        || builder->tyck == NULL) return 0;
+    ty = cm_ty_get((CmTyArena *)&builder->tyck->arena,
+        cm_ty_resolve((CmTyArena *)&builder->tyck->arena,
+            builder->tb->pat_types[pat_id]));
+    return ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR);
+}
+
 static CmUMirLocalId cm_umir_literal_local(CmUMirBuilder *builder, long v)
 {
     CmUMirLocalId local = cm_umir_new_local(builder, CM_TY_NONE);
@@ -693,6 +757,45 @@ static void cm_umir_variant_check(CmUMirBuilder *builder,
  * failure edge lands in `fails`.  Nested patterns are conjunctions; an
  * or-pattern's alternatives are tried in order.  Payload slots are read
  * only after their variant test passed. */
+/* Element `index` of the slice/array `value` for a slice pattern: its
+ * address when the scrutinee is behind a reference (bindings are `&T`),
+ * else the element itself.  `*out_value` receives the element value for
+ * literal / nested tests (loaded through the address when needed). */
+static CmUMirLocalId cm_umir_slice_pattern_element(CmUMirBuilder *builder,
+    CmUPatId pat_id, CmUPatId sub_id, CmUMirLocalId value, uint32_t index,
+    CmUExprId id, CmUMirLocalId *out_value)
+{
+    CmUMirLocalId ops[2];
+    CmUMirLocalId idx = cm_umir_literal_local(builder, (long)index);
+    CmTyId sub_type = builder->tb != NULL && builder->tb->pat_types != NULL
+        ? builder->tb->pat_types[sub_id] : CM_TY_NONE;
+    ops[0] = value;
+    ops[1] = idx;
+    if (cm_umir_slice_pattern_behind_ref(builder, pat_id)) {
+        CmUMirLocalId address = cm_umir_new_local(builder, sub_type);
+        CmUMirLocalId loaded;
+        const CmTy *st = sub_type == CM_TY_NONE || builder->tyck == NULL
+            ? NULL : cm_ty_get((CmTyArena *)&builder->tyck->arena,
+                cm_ty_resolve((CmTyArena *)&builder->tyck->arena, sub_type));
+        cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
+            sub_type, ops, 2u);
+        loaded = cm_umir_new_local(builder, st != NULL
+            && (st->kind == CM_TY_REF || st->kind == CM_TY_PTR)
+            ? st->children[0] : CM_TY_NONE);
+        cm_umir_push_operands(builder, loaded, CM_UMIR_RVALUE_LOAD, id,
+            st != NULL && (st->kind == CM_TY_REF || st->kind == CM_TY_PTR)
+            ? st->children[0] : CM_TY_NONE, &address, 1u);
+        *out_value = loaded;
+        return address;
+    } else {
+        CmUMirLocalId element = cm_umir_new_local(builder, sub_type);
+        cm_umir_push_operands(builder, element, CM_UMIR_RVALUE_INDEX, id,
+            sub_type, ops, 2u);
+        *out_value = element;
+        return element;
+    }
+}
+
 static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
     CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
     CmUMirPatternFails *fails, unsigned int depth)
@@ -790,6 +893,50 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                 pat->data.list.patterns[sub], payload, id, fails, depth + 1u);
         }
         break;
+    case CM_U_PAT_SLICE: {
+        /* Length first (`len == n`, or `len >= n` with a rest), then
+         * each fixed element before the rest. */
+        int has_rest;
+        uint32_t after;
+        uint32_t before = cm_umir_slice_pattern_shape(builder, pat,
+            &has_rest, &after);
+        CmUMirLocalId len = cm_umir_new_local(builder, CM_TY_NONE);
+        CmUMirLocalId lo = cm_umir_literal_local(builder,
+            (long)(before + after));
+        CmUMirLocalId hi = has_rest
+            ? cm_umir_literal_local(builder, 0x7FFFFFFFl) : lo;
+        uint32_t position = 0u;
+        cm_umir_push_operands(builder, len, CM_UMIR_RVALUE_SLICE_LEN, id,
+            CM_TY_NONE, &value, 1u);
+        cm_umir_range_check(builder, len, lo, hi, id, fails);
+        for (sub = 0u; sub < pat->data.list.pattern_count
+                && position < before; ++sub) {
+            const CmUPat *sp = cm_ubody_get_pat(builder->ub,
+                pat->data.list.patterns[sub]);
+            CmUMirLocalId element_value;
+            if (sp == NULL || sp->kind == CM_U_PAT_REST) break;
+            if (sp->kind == CM_U_PAT_BINDING
+                && cm_ubody_get_pat(builder->ub,
+                    sp->data.binding.subpattern) != NULL
+                && cm_ubody_get_pat(builder->ub,
+                    sp->data.binding.subpattern)->kind == CM_U_PAT_REST)
+                break;
+            if (sp->kind != CM_U_PAT_WILD) {
+                /* The checks walk also binds: a binding takes the element
+                 * (its address behind a reference), a literal or nested
+                 * pattern tests the element's value. */
+                CmUMirLocalId element = cm_umir_slice_pattern_element(
+                    builder, pat_id, pat->data.list.patterns[sub], value,
+                    position, id, &element_value);
+                cm_umir_emit_pattern_checks(builder,
+                    pat->data.list.patterns[sub],
+                    sp->kind == CM_U_PAT_BINDING ? element : element_value,
+                    id, fails, depth + 1u);
+            }
+            position += 1u;
+        }
+        break;
+    }
     case CM_U_PAT_TUPLE_STRUCT: {
         long index = cm_umir_variant_index(builder->hir,
             &pat->data.struct_pat.resolution);
@@ -979,6 +1126,40 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
                 slot, id);
         }
         break;
+    case CM_U_PAT_SLICE: {
+        /* Fixed elements before the rest bind to the element (its
+         * address behind a reference); `rest @ ..` and elements after
+         * the rest are not bound yet. */
+        int has_rest;
+        uint32_t after;
+        uint32_t before = cm_umir_slice_pattern_shape(builder, pat,
+            &has_rest, &after);
+        uint32_t position = 0u;
+        (void)has_rest;
+        for (index = 0u; index < pat->data.list.pattern_count
+                && position < before; ++index) {
+            const CmUPat *sub = cm_ubody_get_pat(builder->ub,
+                pat->data.list.patterns[index]);
+            CmUMirLocalId element;
+            CmUMirLocalId element_value;
+            if (sub == NULL || sub->kind == CM_U_PAT_REST) break;
+            if (sub->kind == CM_U_PAT_BINDING
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern) != NULL
+                && cm_ubody_get_pat(builder->ub,
+                    sub->data.binding.subpattern)->kind == CM_U_PAT_REST)
+                break;
+            if (sub->kind != CM_U_PAT_WILD) {
+                element = cm_umir_slice_pattern_element(builder, pat_id,
+                    pat->data.list.patterns[index], value, position, id,
+                    &element_value);
+                cm_umir_bind_pattern(builder, pat->data.list.patterns[index],
+                    element, id);
+            }
+            position += 1u;
+        }
+        break;
+    }
     case CM_U_PAT_TUPLE_STRUCT: {
         int variant = cm_umir_variant_index(builder->hir,
             &pat->data.struct_pat.resolution) >= 0;
@@ -1308,6 +1489,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         receiver_type));
             int receiver_is_ref = rt != NULL
                 && (rt->kind == CM_TY_REF || rt->kind == CM_TY_PTR);
+            int adjusted = 0;
             if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION
                 && builder->tb->receiver_derefs != NULL
                 && builder->tb->receiver_derefs[id] != CM_TY_NONE) {
@@ -1362,8 +1544,63 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 receiver_type = target_ref;
                 rt = cm_ty_get(arena, cm_ty_resolve(arena, target_ref));
                 receiver_is_ref = 1;
+            } else if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION
+                && builder->tb->receiver_steps != NULL
+                && builder->tb->receiver_steps[id] != 0u
+                && !(rt != NULL && rt->kind == CM_TY_ARRAY)) {
+                /* tyck found the method after `steps` autoderefs of the
+                 * receiver: a `&self` callee takes the address of the
+                 * place reached by `steps` (autoref at step 0 even for a
+                 * reference receiver — `impl SpecToString for &str` on a
+                 * `&str`); a by-value `self` takes the value there. */
+                unsigned int steps = builder->tb->receiver_steps[id] - 1u;
+                CmHirReceiverKind kind =
+                    callee->data.function_item.signature.receiver;
+                CmTyArena *arena = (CmTyArena *)&builder->tyck->arena;
+                unsigned int loads = kind == CM_HIR_RECEIVER_VALUE ? steps
+                    : (kind == CM_HIR_RECEIVER_REF_SHARED
+                        || kind == CM_HIR_RECEIVER_REF_MUTABLE)
+                        ? (steps == 0u ? 0u : steps - 1u) : 0u;
+                unsigned int index_load;
+                const CmTy *layer = rt;
+                if (kind == CM_HIR_RECEIVER_REF_SHARED
+                    || kind == CM_HIR_RECEIVER_REF_MUTABLE
+                    || kind == CM_HIR_RECEIVER_VALUE) {
+                    for (index_load = 0u; index_load < loads; ++index_load) {
+                        CmUMirLocalId loaded;
+                        if (layer == NULL || (layer->kind != CM_TY_REF
+                                && layer->kind != CM_TY_PTR)) break;
+                        loaded = cm_umir_new_local(builder,
+                            layer->children[0]);
+                        cm_umir_push_operands(builder, loaded,
+                            CM_UMIR_RVALUE_LOAD,
+                            expr->data.method_call.receiver,
+                            layer->children[0], &receiver, 1u);
+                        receiver = loaded;
+                        receiver_type = layer->children[0];
+                        layer = cm_ty_get(arena, cm_ty_resolve(arena,
+                            layer->children[0]));
+                    }
+                    if ((kind == CM_HIR_RECEIVER_REF_SHARED
+                            || kind == CM_HIR_RECEIVER_REF_MUTABLE)
+                        && steps == 0u) {
+                        CmUMirLocalId address = cm_umir_address_of(builder,
+                            expr->data.method_call.receiver, receiver_type);
+                        if (address == ((CmUMirLocalId)0u)) {
+                            address = cm_umir_new_local(builder,
+                                receiver_type);
+                            cm_umir_push_operands(builder, address,
+                                CM_UMIR_RVALUE_REF,
+                                expr->data.method_call.receiver,
+                                receiver_type, &receiver, 1u);
+                        }
+                        receiver = address;
+                    }
+                    adjusted = 1;
+                }
             }
-            if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION) {
+            if (!adjusted && callee != NULL
+                && callee->kind == CM_HIR_ITEM_FUNCTION) {
                 CmHirReceiverKind kind =
                     callee->data.function_item.signature.receiver;
                 if ((kind == CM_HIR_RECEIVER_REF_SHARED

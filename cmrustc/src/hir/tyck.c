@@ -177,6 +177,7 @@ void cm_tyck_set_destroy(CmTyckSet *set)
         cm_free(body->unsize_targets);
         cm_free(body->path_self_types);
         cm_free(body->receiver_derefs);
+        cm_free(body->receiver_steps);
     }
     cm_vec_destroy(&set->storage);
     cm_vec_destroy(&set->bodies);
@@ -3168,6 +3169,72 @@ static int cm_tyck_candidate_loose(CmTyckEnv *env, const CmTyckFound *found,
     return 0;
 }
 
+/* rustc probes by value before autoref: with a receiver `&T` (or `&mut
+ * T`), a `&self` method of `T` — whose self type is the receiver itself —
+ * beats a `&self` method of `&T` that would need `&&T`.  `out.write_byte(b)`
+ * on `&mut dyn Write` is the object's method, not `impl Write for &mut W`;
+ * `s.to_string()` on `&str` is `<str as ToString>`, not `<&str as ..>`.
+ * On success `found`/`candidate` name the pointee's method (the
+ * reference candidate's bindings are undone first). */
+static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
+    CmTyId *candidate, unsigned int mask, const CmTyId *arg_types,
+    uint32_t arg_count, size_t undo_mark, CmTyckFound *found)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *ct = cm_ty_get(arena, cm_ty_resolve(arena, *candidate));
+    CmHirReceiverKind receiver;
+    CmTyId pointee;
+    CmTyckFound alt;
+    size_t probe_mark;
+    if (ct == NULL || (ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR)
+        || ct->count == 0u || found->item == NULL
+        || found->item->kind != CM_HIR_ITEM_FUNCTION) return 0;
+    receiver = found->item->data.function_item.signature.receiver;
+    if (receiver != CM_HIR_RECEIVER_REF_SHARED
+        && receiver != CM_HIR_RECEIVER_REF_MUTABLE) return 0;
+    pointee = cm_tyck_normalize(env, ct->children[0], 0u);
+    /* rustc's by-value candidates at a step span every impl kind: a
+     * specific `impl Spec for &Item` at the reference must not hide the
+     * blanket impl that covers `Item` itself. */
+    if ((mask & 8u) == 0u) mask = 7u;
+    probe_mark = cm_ty_undo_mark(arena);
+    if (cm_tyck_debug_fn_matches(env)) {
+        int looked = cm_tyck_lookup_assoc_in(env, pointee,
+            expr->data.method_call.name, &alt, mask, 0u);
+        fprintf(stderr, "TYCK prefer-pointee mask=%u looked=%d kind=%d"
+            " recv=%d compat=%d\n", mask, looked,
+            looked && alt.item != NULL ? (int)alt.item->kind : -1,
+            looked && alt.item != NULL
+                && alt.item->kind == CM_HIR_ITEM_FUNCTION
+                ? (int)alt.item->data.function_item.signature.receiver : -1,
+            looked && alt.item != NULL
+                && alt.item->kind == CM_HIR_ITEM_FUNCTION
+                ? cm_tyck_method_args_compatible(env, &alt, arg_types,
+                    arg_count) : -1);
+        cm_ty_undo_to(arena, probe_mark);
+    }
+    if (cm_tyck_lookup_assoc_in(env, pointee, expr->data.method_call.name,
+            &alt, mask, 0u)
+        && alt.item != NULL && alt.item->kind == CM_HIR_ITEM_FUNCTION
+        && (alt.item->data.function_item.signature.receiver
+                == CM_HIR_RECEIVER_REF_SHARED
+            || alt.item->data.function_item.signature.receiver
+                == CM_HIR_RECEIVER_REF_MUTABLE)
+        && cm_tyck_method_args_compatible(env, &alt, arg_types, arg_count)) {
+        cm_ty_undo_to(arena, undo_mark);
+        if (cm_tyck_lookup_assoc_in(env, pointee,
+                expr->data.method_call.name, &alt, mask, 0u)
+            && alt.item != NULL) {
+            *found = alt;
+            *candidate = pointee;
+            return 1;
+        }
+        return 0;
+    }
+    cm_ty_undo_to(arena, probe_mark);
+    return 0;
+}
+
 static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     CmUExprId id, CmTyId expected)
 {
@@ -3234,6 +3301,9 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
          * must not capture `Clone::clone`. */
         int generic_receiver = 0;
         CmTyId deref_target = CM_TY_NONE;
+        unsigned int found_step = 0u;
+        unsigned int fallback_step = 0u;
+        int step_set = 0;
         {
             /* Through the reference layers, normalized: a projection that
              * resolves to a concrete type (`<usize as SliceIndex<[T]>>::
@@ -3372,7 +3442,15 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                             cm_ty_undo_to(arena, probe_mark);
                         }
                         if (return_ok && !cm_tyck_candidate_loose(env,
-                                &found, arg_types, arg_count)) break;
+                                &found, arg_types, arg_count)) {
+                            if (cm_tyck_prefer_pointee(env, expr, &candidate,
+                                    mask, arg_types, arg_count, undo_mark,
+                                    &found)) {
+                                found_step = step + 1u;
+                                step_set = 1;
+                            }
+                            break;
+                        }
                         if (return_ok) {
                             if (!have_loose) {
                                 loose_variant = variant;
@@ -3385,6 +3463,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                         if (!have_fallback) {
                             fallback = found;
                             fallback_candidate = candidate;
+                        fallback_step = step;
                             have_fallback = 1;
                         }
                         cm_ty_undo_to(arena, undo_mark);
@@ -3394,6 +3473,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                     if (!have_fallback) {
                         fallback = found;
                         fallback_candidate = candidate;
+                        fallback_step = step;
                         have_fallback = 1;
                     }
                     /* Undo the rejected candidate's receiver bindings. */
@@ -3410,7 +3490,10 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                         found.item = NULL;
                 }
                 have_loose = 0;
-                if (found.item != NULL) break;
+                if (found.item != NULL) {
+                    if (!step_set) found_step = step;
+                    break;
+                }
                 candidate_kind = cm_ty_get(arena, candidate)->kind;
                 if (candidate_kind == CM_TY_ARRAY) {
                     /* Unsize `[T; N]` to `[T]` for slice methods. */
@@ -3420,6 +3503,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                             expr->data.method_call.name, &found, mask, 0u)
                         && found.item->kind == CM_HIR_ITEM_FUNCTION) {
                         candidate = slice;
+                        found_step = step;
                         break;
                     }
                     found.item = NULL;
@@ -3456,7 +3540,10 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                             }
                         }
                     }
-                    if (found.item != NULL) break;
+                    if (found.item != NULL) {
+                        found_step = step;
+                        break;
+                    }
                     candidate = CM_TY_NONE;
                     break;
                 }
@@ -3465,12 +3552,20 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         if (found.item == NULL && have_fallback) {
             found = fallback;
             candidate = fallback_candidate;
+            found_step = fallback_step;
         }
         if (found.item == NULL) candidate = CM_TY_NONE;
         if (found.item != NULL && deref_target != CM_TY_NONE
             && candidate == deref_target && env->out->receiver_derefs != NULL
             && id != CM_U_EXPR_NONE)
             env->out->receiver_derefs[id] = deref_target;
+        if (found.item != NULL && env->out->receiver_steps != NULL
+            && id != CM_U_EXPR_NONE && found_step < 250u) {
+            env->out->receiver_steps[id] = (uint8_t)(found_step + 1u);
+            if (cm_tyck_debug_fn_matches(env))
+                fprintf(stderr, "TYCK receiver-steps expr=%lu steps=%u\n",
+                    (unsigned long)id, found_step + 1u);
+        }
     }
     if (found.item != NULL && env->out->method_targets != NULL
         && id != CM_U_EXPR_NONE)
@@ -4347,7 +4442,25 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
     }
     case CM_U_EXPR_CAST: {
         CmTyId target = cm_tyck_ast_type(env, expr->data.cast.type.type);
-        (void)cm_tyck_expr(env, expr->data.cast.value, CM_TY_NONE);
+        CmTyId source = cm_tyck_expr(env, expr->data.cast.value, CM_TY_NONE);
+        /* `self as *mut _ as *mut T` (core's `MaybeUninit::as_mut_ptr`):
+         * a pointer cast whose pointee is left to inference takes the
+         * pointee of the reference or pointer being cast. */
+        {
+            const CmTy *tt = cm_ty_get(arena, cm_ty_resolve(arena, target));
+            const CmTy *st = source == CM_TY_NONE ? NULL
+                : cm_ty_get(arena, cm_ty_resolve(arena, source));
+            if (tt != NULL && st != NULL
+                && (tt->kind == CM_TY_PTR || tt->kind == CM_TY_REF)
+                && (st->kind == CM_TY_PTR || st->kind == CM_TY_REF)
+                && tt->count != 0u && st->count != 0u) {
+                const CmTy *pointee = cm_ty_get(arena, cm_ty_resolve(arena,
+                    tt->children[0]));
+                if (pointee != NULL && pointee->kind == CM_TY_INFER)
+                    (void)cm_ty_unify(arena, tt->children[0],
+                        st->children[0]);
+            }
+        }
         result = target;
         break;
     }
@@ -5028,6 +5141,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->receiver_derefs = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
+    out->receiver_steps = (uint8_t *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(uint8_t));
     item = cm_tyck_item(state, hir_body->origin.definition);
     env.item = item;
     env.parent = cm_tyck_parent_item(state, item);

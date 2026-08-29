@@ -144,6 +144,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_TRY_UNWRAP:
                     case CM_UMIR_RVALUE_ITER_NEXT:
                     case CM_UMIR_RVALUE_DEREF_CALL:
+                    case CM_UMIR_RVALUE_SLICE_LEN:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
@@ -1607,6 +1608,21 @@ static CmTyId cm_umir_c_subst(CmTyId type)
         type, &subst);
 }
 
+/* 1 + the autoderef step tyck found a METHOD_CALL's method at (0 when
+ * unknown).  Lowering shapes the receiver operand from it: at step 0 the
+ * operand is an autoref whose local keeps the referent's type (so it
+ * reads as Self already); at a later step it is the reference reached
+ * there, i.e. `&Self`. */
+static unsigned int cm_umir_c_receiver_steps(const CmTyckSet *tyck,
+    const CmUMirStatement *statement)
+{
+    const CmTyckBody *tb = statement == NULL || cm_umir_c_active_body == NULL
+        ? NULL : cm_tyck_get(tyck, cm_umir_c_active_body->source);
+    if (tb == NULL || tb->receiver_steps == NULL
+        || statement->expr == CM_U_EXPR_NONE) return 0u;
+    return tb->receiver_steps[statement->expr];
+}
+
 /* Symbol for a callee reached with FN_DEF type `callee_type`: registers
  * the instance when the program is collecting. */
 static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
@@ -1644,6 +1660,26 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
             CmTyId probe_types[32];
             uint32_t probe_bound = 0u;
             int fits;
+            CmHirReceiverKind callee_receiver = item->kind
+                    == CM_HIR_ITEM_FUNCTION
+                ? item->data.function_item.signature.receiver
+                : CM_HIR_RECEIVER_NONE;
+            unsigned int steps = cm_umir_c_receiver_steps(tyck, statement);
+            /* A `&self` / `&mut self` callee reached at a later autoderef
+             * step got the reference itself as operand, i.e. `&Self`:
+             * Self is one layer down, before a bare `T` pattern gets the
+             * chance to swallow the reference.  (At step 0 the autoref
+             * local already carries Self; unknown keeps the lenient
+             * peel-while-mismatched walk below.) */
+            if ((callee_receiver == CM_HIR_RECEIVER_REF_SHARED
+                    || callee_receiver == CM_HIR_RECEIVER_REF_MUTABLE)
+                && steps >= 2u
+                && self_ty != NULL && (self_ty->kind == CM_TY_REF
+                    || self_ty->kind == CM_TY_PTR)) {
+                self = self_ty->children[0];
+                self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, self));
+            }
             while (self_ty != NULL && (self_ty->kind == CM_TY_REF
                     || self_ty->kind == CM_TY_PTR)
                 && !cm_umir_c_ty_match(tyck, impl_self, self, probe_params,
@@ -1660,10 +1696,12 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                 cm_ty_print((CmTyArena *)&tyck->arena, hir, impl_self, &text);
                 cm_str_buf_append(&text, " vs ");
                 cm_ty_print((CmTyArena *)&tyck->arena, hir, self, &text);
-                fprintf(stderr, "UMIR impl-callee %.*s %.*s\n",
+                fprintf(stderr, "UMIR impl-callee %.*s %.*s steps=%u expr=%lu\n",
                     (int)cm_interner_get(&hir->strings, item->name)->len,
                     (const char *)cm_interner_get(&hir->strings,
-                        item->name)->bytes, (int)text.len, text.data);
+                        item->name)->bytes, (int)text.len, text.data,
+                    steps, statement == NULL ? 0ul
+                        : (unsigned long)statement->expr);
                 cm_str_buf_destroy(&text);
             }
             fits = self_ty == NULL || self_ty->kind == CM_TY_PARAM
@@ -1740,7 +1778,10 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                 if (self_ty != NULL && (self_ty->kind == CM_TY_REF
                         || self_ty->kind == CM_TY_PTR)
                     && (receiver == CM_HIR_RECEIVER_REF_SHARED
-                        || receiver == CM_HIR_RECEIVER_REF_MUTABLE))
+                        || receiver == CM_HIR_RECEIVER_REF_MUTABLE)
+                    /* not at autoderef step 0: that operand is an autoref
+                     * local already typed as Self */
+                    && cm_umir_c_receiver_steps(tyck, statement) != 1u)
                     self = self_ty->children[0];
                 resolved = cm_umir_c_resolve_impl_method(hir, tyck, item,
                     self, bound_types, &bound_count, statement, first_arg);
@@ -1822,7 +1863,23 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                 uint32_t bound = 0u;
                 const CmTy *self_ty = cm_ty_get(arena,
                     cm_ty_resolve(arena, self));
-                int matched = cm_umir_c_ty_match(tyck, impl_self, self,
+                CmHirReceiverKind direct_receiver = item->kind
+                        == CM_HIR_ITEM_FUNCTION
+                    ? item->data.function_item.signature.receiver
+                    : CM_HIR_RECEIVER_NONE;
+                int matched;
+                /* A `&self` callee reached at a later autoderef step has
+                 * `&Self` as operand: Self is one layer down (a bare `T`
+                 * pattern would otherwise bind the reference itself). */
+                if ((direct_receiver == CM_HIR_RECEIVER_REF_SHARED
+                        || direct_receiver == CM_HIR_RECEIVER_REF_MUTABLE)
+                    && cm_umir_c_receiver_steps(tyck, statement) >= 2u
+                    && self_ty != NULL && (self_ty->kind == CM_TY_REF
+                        || self_ty->kind == CM_TY_PTR)) {
+                    self = self_ty->children[0];
+                    self_ty = cm_ty_get(arena, cm_ty_resolve(arena, self));
+                }
+                matched = cm_umir_c_ty_match(tyck, impl_self, self,
                     bound_params, bound_types, &bound, 32u, 0u);
                 while (!matched && self_ty != NULL
                     && (self_ty->kind == CM_TY_REF
@@ -1852,6 +1909,11 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
             }
         }
     }
+    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL && item != NULL)
+        fprintf(stderr, "UMIR pre-fn %.*s count=%u callee_type=%d active_body=%d\n",
+            (int)cm_interner_get(&hir->strings, item->name)->len,
+            (const char *)cm_interner_get(&hir->strings, item->name)->bytes,
+            count, callee_type != CM_TY_NONE, cm_umir_c_active_body != NULL);
     fn_ty = callee_type == CM_TY_NONE ? NULL
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena,
@@ -1871,7 +1933,8 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
     {
         /* Receiver-derived Self: strip the reference layers a method
          * receiver carries. */
-        const CmTy *self_ty = bound_self == CM_TY_NONE ? NULL
+        const CmTy *self_ty = bound_self == CM_TY_NONE
+                || cm_umir_c_receiver_steps(tyck, statement) == 1u ? NULL
             : cm_ty_get((CmTyArena *)&tyck->arena,
                 cm_ty_resolve((CmTyArena *)&tyck->arena, bound_self));
         while (self_ty != NULL && (self_ty->kind == CM_TY_REF
@@ -1929,9 +1992,42 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                         statement->operands[first_arg + skip + param]);
                     if (pattern == CM_TY_NONE || actual == CM_TY_NONE)
                         continue;
+                    if (param == 0u && skip == 0u
+                        && (sig->receiver == CM_HIR_RECEIVER_REF_SHARED
+                            || sig->receiver == CM_HIR_RECEIVER_REF_MUTABLE)
+                        && cm_umir_c_receiver_steps(tyck, statement) >= 2u) {
+                        /* The receiver parameter's written type is Self
+                         * (its kind carries the `&`); an operand reached
+                         * at a later autoderef step is `&Self`. */
+                        const CmTy *at = cm_ty_get(arena,
+                            cm_ty_resolve(arena, actual));
+                        if (at != NULL && (at->kind == CM_TY_REF
+                                || at->kind == CM_TY_PTR))
+                            actual = at->children[0];
+                    }
                     (void)cm_umir_c_ty_match(tyck, pattern, actual,
                         bound_params, bound_types, &bound, 32u, 0u);
                 }
+            if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                CmStrBuf text;
+                cm_str_buf_init(&text);
+                if (sig->parameter_count != 0u && skip != 0xFFFFu) {
+                    cm_ty_print(arena, hir, cm_ty_from_hir(arena, hir,
+                        sig->parameters[0].type), &text);
+                    cm_str_buf_append(&text, " vs ");
+                    cm_ty_print(arena, hir, cm_umir_c_local_type(
+                        cm_umir_c_active_body,
+                        statement->operands[first_arg + skip]), &text);
+                }
+                fprintf(stderr, "UMIR bind %.*s sigparams=%u operands=%u"
+                    " skip=%u bound=%u count=%u params=%u recv=%d %.*s\n",
+                    (int)cm_interner_get(&hir->strings, item->name)->len,
+                    (const char *)cm_interner_get(&hir->strings,
+                        item->name)->bytes, sig->parameter_count, operands,
+                    skip, bound, count, parameter_count, (int)sig->receiver,
+                    (int)text.len, text.data);
+                cm_str_buf_destroy(&text);
+            }
             if (statement->type != CM_TY_NONE) {
                 CmTyId pattern = cm_ty_from_hir(arena, hir, sig->return_type);
                 if (pattern != CM_TY_NONE)
@@ -1953,6 +2049,20 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                     count = parameter_count > 32u ? 32u : parameter_count;
             }
         }
+    }
+    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL && item != NULL) {
+        CmStrBuf text;
+        uint32_t show;
+        cm_str_buf_init(&text);
+        for (show = 0u; show < count; ++show) {
+            if (show != 0u) cm_str_buf_append(&text, ", ");
+            cm_ty_print((CmTyArena *)&tyck->arena, hir, args[show], &text);
+        }
+        fprintf(stderr, "UMIR register %.*s count=%u [%.*s] bound_self=%d\n",
+            (int)cm_interner_get(&hir->strings, item->name)->len,
+            (const char *)cm_interner_get(&hir->strings, item->name)->bytes,
+            count, (int)text.len, text.data, bound_self != CM_TY_NONE);
+        cm_str_buf_destroy(&text);
     }
     if (program != NULL)
         instance = cm_umir_c_instance(program, def, CM_U_EXPR_NONE, args,
@@ -3474,6 +3584,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         cm_ty_resolve((CmTyArena *)&tyck->arena,
                             cm_umir_c_local_type(body,
                                 statement->operands[0])));
+                    if (pt != NULL && pt->kind == CM_TY_FN_DEF) {
+                        /* A fn item held in a local (`f` with `F: FnOnce`
+                         * instantiated by `ToOwned::to_owned` in core's
+                         * `Option::map_or_else`): a direct call to that
+                         * item's instance; the value itself carries no
+                         * data. */
+                        if (cm_umir_c_render_call(output, hir, tyck,
+                                statement, pt->def, 1u,
+                                cm_umir_c_local_type(body,
+                                    statement->operands[0]), CM_TY_NONE))
+                            break;
+                    }
                     if (pt != NULL && pt->kind == CM_TY_FN_PTR) {
                         uint32_t arg;
                         cm_str_buf_append(output,
@@ -3564,6 +3686,27 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_umir_c_render_local(output, statement->operands[0]);
                     cm_str_buf_append(output, "); }");
                     cm_str_buf_destroy(&symbol);
+                }
+                break;
+            }
+            case CM_UMIR_RVALUE_SLICE_LEN: {
+                /* Length of a slice/str (the pair's second slot, through
+                 * the reference layers) or of an array (its type). */
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                CmTyId pointee = cm_umir_c_peel(tyck, base_type);
+                const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, pointee));
+                if (cm_umir_c_is_fat(tyck, pointee)) {
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, base_type));
+                    cm_str_buf_append(output, "[1]");
+                } else if (pt != NULL && pt->kind == CM_TY_ARRAY) {
+                    cm_umir_c_render_number(output,
+                        cm_umir_c_array_len(tyck, pointee));
+                } else {
+                    cm_str_buf_append(output, "0 /* slice-len */");
+                    complete = 0;
                 }
                 break;
             }
