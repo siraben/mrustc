@@ -420,6 +420,35 @@ static unsigned long cm_umir_c_array_len(const CmTyckSet *tyck, CmTyId type)
     return (unsigned long)len->lo;
 }
 
+/* A struct with exactly one field is transparent: its value is the
+ * field's value (NonNull<T> is its pointer, Wrapping<T> its integer), so
+ * the bit-casts core performs between a newtype and its field agree. */
+static int cm_umir_c_transparent_struct(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    if (ty == NULL || ty->kind != CM_TY_ADT) return 0;
+    record = cm_hir_lookup_definition(hir, ty->def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return 0;
+    item = cm_hir_get_item(hir, record->entity.item_id);
+    return item != NULL && item->kind == CM_HIR_ITEM_STRUCT
+        && item->data.aggregate_item.field_count == 1u;
+}
+
+/* The value behind `depth` reference layers of `local`. */
+static void cm_umir_c_render_loaded(CmStrBuf *output, CmUMirLocalId local,
+    unsigned int depth)
+{
+    unsigned int index;
+    for (index = 0u; index < depth; ++index)
+        cm_str_buf_append(output, "*(long long *)(intptr_t)");
+    cm_umir_c_render_local(output, local);
+}
+
 /* Unsized pointees travel as a `[data, len]` slot pair. */
 static int cm_umir_c_is_fat(const CmTyckSet *tyck, CmTyId pointee)
 {
@@ -2052,6 +2081,12 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 const CmTy *at = agg_type == CM_TY_NONE ? NULL
                     : cm_ty_get((CmTyArena *)&tyck->arena,
                         cm_ty_resolve((CmTyArena *)&tyck->arena, agg_type));
+                if (statement->operand_count == 1u
+                    && statement->operand_overflow == 0u
+                    && cm_umir_c_transparent_struct(hir, tyck, agg_type)) {
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    break;
+                }
                 if (at != NULL && at->kind == CM_TY_ARRAY) {
                     /* Arrays pack scalar elements at their width so slices
                      * made from them index consistently; other elements
@@ -2240,15 +2275,23 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     (unsigned long)statement->destination);
                 break;
             }
-            case CM_UMIR_RVALUE_SLOT:
-                cm_umir_c_render_base(output, statement->operands[0],
-                    cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(body,
-                        statement->operands[0])));
+            case CM_UMIR_RVALUE_SLOT: {
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                if (cm_umir_c_transparent_struct(hir, tyck,
+                        cm_umir_c_peel(tyck, base_type))) {
+                    cm_umir_c_render_loaded(output, statement->operands[0],
+                        depth);
+                    break;
+                }
+                cm_umir_c_render_base(output, statement->operands[0], depth);
                 cm_str_buf_push(output, '[');
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->immediate);
                 cm_str_buf_push(output, ']');
                 break;
+            }
             case CM_UMIR_RVALUE_REF:
                 /* A reference is the address of the referent's slot. */
                 cm_str_buf_append(output, "(long long)(intptr_t)&");
@@ -2283,10 +2326,22 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         cm_umir_c_local_type(body, statement->operands[0]),
                         expr->data.field.name);
                 if (slot >= 0) {
+                    CmTyId base_type = cm_umir_c_local_type(body,
+                        statement->operands[0]);
+                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
                     cm_str_buf_append(output, "0; ");
+                    if (cm_umir_c_transparent_struct(hir, tyck,
+                            cm_umir_c_peel(tyck, base_type))) {
+                        /* The field is the value: assign the referent (or
+                         * the local itself by value). */
+                        cm_umir_c_render_loaded(output, statement->operands[0],
+                            depth);
+                        cm_str_buf_append(output, " = ");
+                        cm_umir_c_render_local(output, statement->operands[1]);
+                        break;
+                    }
                     cm_umir_c_render_base(output, statement->operands[0],
-                        cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(
-                            body, statement->operands[0])));
+                        depth);
                     cm_str_buf_push(output, '[');
                     cm_umir_c_render_number(output, (unsigned long)slot);
                     cm_str_buf_append(output, "] = ");
@@ -2374,9 +2429,17 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             expr->data.field.name);
                 }
                 if (slot >= 0) {
+                    CmTyId base_type = cm_umir_c_local_type(body,
+                        statement->operands[0]);
+                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                    if (cm_umir_c_transparent_struct(hir, tyck,
+                            cm_umir_c_peel(tyck, base_type))) {
+                        cm_umir_c_render_loaded(output, statement->operands[0],
+                            depth);
+                        break;
+                    }
                     cm_umir_c_render_base(output, statement->operands[0],
-                        cm_umir_c_ref_depth(tyck, cm_umir_c_local_type(
-                            body, statement->operands[0])));
+                        depth);
                     cm_str_buf_push(output, '[');
                     cm_umir_c_render_number(output, (unsigned long)slot);
                     cm_str_buf_push(output, ']');

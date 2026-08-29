@@ -484,6 +484,18 @@ static CmTyId cm_umir_expr_type(const CmUMirBuilder *builder, CmUExprId id)
  * the emitter can grow class-by-class. */
 static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id);
 
+/* The place an expression denotes when it is a body local (its own slot,
+ * so a reference to it aliases the variable), else its value. */
+static CmUMirLocalId cm_umir_place(CmUMirBuilder *builder, CmUExprId id)
+{
+    const CmUExpr *expr = cm_ubody_get_expr(builder->ub, id);
+    if (expr != NULL && expr->kind == CM_U_EXPR_PATH
+        && expr->data.path.resolution.kind == CM_U_RESOLVED_LOCAL
+        && expr->data.path.resolution.local != CM_U_LOCAL_NONE)
+        return (CmUMirLocalId)(1u + expr->data.path.resolution.local);
+    return cm_umir_emit_expr(builder, id);
+}
+
 /* Whether `type` is core's `Option` (by item name), else Result-like. */
 static int cm_umir_type_is_option(const CmUMirBuilder *builder, CmTyId type)
 {
@@ -815,10 +827,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         uint32_t index;
         CmUMirLocalId operands[CM_UMIR_STATEMENT_OPERANDS];
         uint32_t recorded = 0u;
-        CmUMirLocalId receiver = cm_umir_emit_expr(builder,
+        CmUMirLocalId receiver = cm_umir_place(builder,
             expr->data.method_call.receiver);
         /* Receiver adjustment: `&self` callees take the receiver's
-         * address, by-value callees load through a reference. */
+         * address, by-value callees load through a reference.  A local
+         * receiver is its own slot so autoref aliases the variable. */
         if (builder->tb->method_targets != NULL && builder->tyck != NULL
             && builder->hir != NULL) {
             const CmHirDefinition *record = cm_hir_lookup_definition(
@@ -873,7 +886,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         break;
     }
     case CM_U_EXPR_REF: {
-        CmUMirLocalId operand = cm_umir_emit_expr(builder,
+        CmUMirLocalId operand = cm_umir_place(builder,
             expr->data.ref.operand);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_REF,
             id, type, &operand, 1u);
@@ -918,7 +931,9 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         } else if (target != NULL && (target->kind == CM_U_EXPR_FIELD
                 || target->kind == CM_U_EXPR_TUPLE_FIELD)) {
             CmUMirLocalId operands[2];
-            operands[0] = cm_umir_emit_expr(builder,
+            /* The base is a place: a local's own slot (a transparent
+             * newtype's field is the local itself). */
+            operands[0] = cm_umir_place(builder,
                 target->kind == CM_U_EXPR_FIELD ? target->data.field.base
                     : target->data.tuple_field.base);
             operands[1] = value;
@@ -927,7 +942,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 type, operands, 2u);
         } else if (target != NULL && target->kind == CM_U_EXPR_INDEX) {
             CmUMirLocalId operands[3];
-            operands[0] = cm_umir_emit_expr(builder,
+            operands[0] = cm_umir_place(builder,
                 target->data.index.base);
             operands[1] = cm_umir_emit_expr(builder,
                 target->data.index.index);
