@@ -40,6 +40,87 @@ fn lookup_bytes<I: Index<Bytes>>(b: &Bytes, i: I) -> I::Out {
     i.get(b)
 }
 
+// A method bound through a supertrait on a parameter (`T: Step`, with
+// `Step: Dup`) may be recorded against whichever impl tyck saw first
+// (an array impl); the emitter must re-resolve it for the concrete
+// receiver (core's `self.start.clone()` in `Range::spec_next`).
+trait Dup {
+    fn dup(&self) -> Self;
+}
+
+impl<T: Dup + Copy, const N: usize> Dup for [T; N] {
+    fn dup(&self) -> Self {
+        *self
+    }
+}
+
+impl Dup for u32 {
+    fn dup(&self) -> u32 {
+        *self + 1
+    }
+}
+
+trait Step: Dup {
+    fn forward(self) -> Self;
+}
+
+impl Step for u32 {
+    fn forward(self) -> u32 {
+        self + 10
+    }
+}
+
+trait Trusted: Step + Copy {}
+impl Trusted for u32 {}
+
+// A blanket impl over a bare `T` with a same-named method, not in scope
+// at the call (core's `impl<T: Clone> SpecArrayClone for T { fn clone }`):
+// a receiver typed by a parameter must resolve `dup` through its bounds.
+mod hidden {
+    pub trait Other {
+        fn dup(&self) -> u32;
+    }
+    impl<T: super::Dup> Other for T {
+        fn dup(&self) -> u32 {
+            7777
+        }
+    }
+}
+
+fn stepper<T: Trusted>(start: T) -> T {
+    let old = start.dup();
+    old.forward()
+}
+
+// The receiver as a field of a generic struct inside an impl whose bound
+// carries the supertrait chain (core's `Range<T>::spec_next`).
+struct Span<A> {
+    start: A,
+    end: A,
+}
+
+trait SpanImpl {
+    fn bump(&mut self) -> u32;
+}
+
+impl<T: Trusted + Into32> SpanImpl for Span<T> {
+    fn bump(&mut self) -> u32 {
+        let old = self.start.dup();
+        self.start = old.forward();
+        self.start.to32() + self.end.to32()
+    }
+}
+
+trait Into32 {
+    fn to32(&self) -> u32;
+}
+
+impl Into32 for u32 {
+    fn to32(&self) -> u32 {
+        *self
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn trait_args(i: u32) -> u32 {
     let table: [u32; 4] = [10, 20, 30, 40];
@@ -47,9 +128,12 @@ pub extern "C" fn trait_args(i: u32) -> u32 {
     let idx = i as usize;
     // An index that is only a literal: rustc infers `usize` from the
     // `Index<[T]>` bound; the call must still select the `[T]` impl.
+    let mut sp = Span { start: i, end: 2 };
+    let bumped = sp.bump();
     let mut plain = 0;
     if i > 100 {
         plain = 1;
     }
     lookup(&table, idx) + lookup_bytes(&b, idx) + lookup(&table, plain)
+        + stepper(i) * 10000 + bumped * 1000000
 }

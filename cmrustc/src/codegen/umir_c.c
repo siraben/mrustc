@@ -1547,6 +1547,79 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
         && !cm_hir_def_id_is_none(item->parent_definition)) {
         const CmHirItem *parent = cm_umir_c_item_of(hir,
             item->parent_definition);
+        if (parent != NULL && parent->kind == CM_HIR_ITEM_IMPL
+            && !cm_hir_def_id_is_none(
+                parent->data.impl_item.trait_type.definition)
+            && receiver_type != CM_TY_NONE) {
+            /* tyck may record an impl's method for a receiver typed by a
+             * parameter (`self.start.clone()` with `T: Step`, bound to
+             * `Clone` through a supertrait, landed on `[T; N]`'s impl).
+             * If the impl's Self does not fit the concrete receiver,
+             * re-resolve through the trait's declaration. */
+            CmTyId self = cm_umir_c_subst(receiver_type);
+            const CmTy *self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, self));
+            CmTyId impl_self = cm_ty_from_hir((CmTyArena *)&tyck->arena,
+                hir, parent->data.impl_item.self_type);
+            CmHirGenericParamId probe_params[32];
+            CmTyId probe_types[32];
+            uint32_t probe_bound = 0u;
+            int fits;
+            while (self_ty != NULL && (self_ty->kind == CM_TY_REF
+                    || self_ty->kind == CM_TY_PTR)
+                && !cm_umir_c_ty_match(tyck, impl_self, self, probe_params,
+                    probe_types, &probe_bound, 32u, 0u)) {
+                probe_bound = 0u;
+                self = self_ty->children[0];
+                self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena, self));
+            }
+            probe_bound = 0u;
+            if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                CmStrBuf text;
+                cm_str_buf_init(&text);
+                cm_ty_print((CmTyArena *)&tyck->arena, hir, impl_self, &text);
+                cm_str_buf_append(&text, " vs ");
+                cm_ty_print((CmTyArena *)&tyck->arena, hir, self, &text);
+                fprintf(stderr, "UMIR impl-callee %.*s %.*s\n",
+                    (int)cm_interner_get(&hir->strings, item->name)->len,
+                    (const char *)cm_interner_get(&hir->strings,
+                        item->name)->bytes, (int)text.len, text.data);
+                cm_str_buf_destroy(&text);
+            }
+            fits = self_ty == NULL || self_ty->kind == CM_TY_PARAM
+                || self_ty->kind == CM_TY_INFER
+                || self_ty->kind == CM_TY_PROJECTION
+                || self_ty->kind == CM_TY_SELF
+                || cm_umir_c_ty_match(tyck, impl_self, self, probe_params,
+                    probe_types, &probe_bound, 32u, 0u);
+            if (!fits) {
+                const CmHirItem *trait_item = cm_umir_c_item_of(hir,
+                    parent->data.impl_item.trait_type.definition);
+                size_t scan;
+                for (scan = 0u; trait_item != NULL
+                        && scan < hir->items.len; ++scan) {
+                    const CmHirItem *decl = (const CmHirItem *)
+                        cm_vec_at_const(&hir->items, scan);
+                    if (decl != NULL && decl->kind == CM_HIR_ITEM_FUNCTION
+                        && cm_hir_def_id_equal(decl->parent_definition,
+                            trait_item->definition)
+                        && decl->name == item->name) {
+                        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL)
+                            fprintf(stderr, "UMIR impl-reroute %.*s\n",
+                                (int)cm_interner_get(&hir->strings,
+                                    item->name)->len,
+                                (const char *)cm_interner_get(&hir->strings,
+                                    item->name)->bytes);
+                        item = decl;
+                        def = decl->definition;
+                        parent = trait_item;
+                        callee_type = CM_TY_NONE;
+                        break;
+                    }
+                }
+            }
+        }
         if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
             /* Declaration: resolve against the substituted receiver (a
              * qualified `<T as Tr>::f(..)` carries Self in the FN_DEF's

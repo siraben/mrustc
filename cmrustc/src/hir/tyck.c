@@ -738,10 +738,14 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
      * self) trait impls with the item — `impl<T: Clone>
      * SpecArrayClone for T` must not shadow a type's own impl.
      * Pass 3: declaration fallbacks. */
+    /* Mask bit 8: declarations only (pass 3 and the bound / `Self` /
+     * dyn scans below) without the blanket-impl pass — a parameter
+     * receiver's bounds must beat `impl<T: Clone> SpecArrayClone for T`. */
     for (pass = 0; pass < 4; ++pass) {
         if ((pass == 0 && (passes & 1u) == 0u)
             || (pass == 1 && (passes & 2u) == 0u)
-            || (pass >= 2 && (passes & 4u) == 0u)) continue;
+            || (pass == 2 && (passes & 4u) == 0u)
+            || (pass == 3 && (passes & 12u) == 0u)) continue;
         for (index = 0u; index < env->state->impl_count; ++index) {
             const CmTyckImpl *impl = &env->state->impls[index];
             const CmHirItem *child;
@@ -811,7 +815,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     /* Trait bounds in scope: `T: Trait`, and equally
      * `Simd<T, N>: SimdUint` or `P::Searcher: Searcher` — the subject is
      * matched structurally, with its generic parameters as wildcards. */
-    if ((passes & 4u) != 0u) {
+    if ((passes & 12u) != 0u) {
         const CmHirItem *owners[2];
         int owner;
         owners[0] = env->item;
@@ -879,7 +883,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
     }
     /* A projection receiver: the associated type's declared bounds
      * (`trait Pattern { type Searcher: Searcher<'a>; }`) supply methods. */
-    if ((passes & 4u) != 0u && self->kind == CM_TY_PROJECTION) {
+    if ((passes & 12u) != 0u && self->kind == CM_TY_PROJECTION) {
         const CmHirItem *associated = cm_tyck_item(env->state, self->def2);
         if (associated != NULL
             && associated->kind == CM_HIR_ITEM_TYPE_ALIAS) {
@@ -906,7 +910,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
             }
         }
     }
-    if ((passes & 4u) != 0u && self->kind == CM_TY_DYN
+    if ((passes & 12u) != 0u && self->kind == CM_TY_DYN
         && !cm_hir_def_id_is_none(self->def)) {
         CmHirDefId owner_trait;
         const CmHirItem *declared = cm_tyck_trait_method(env, self->def, name,
@@ -943,7 +947,7 @@ static int cm_tyck_lookup_assoc_generic(CmTyckEnv *env, CmTyId self_type,
     if (st != NULL && (st->kind == CM_TY_PARAM || st->kind == CM_TY_SELF
             || st->kind == CM_TY_PROJECTION)) {
         CmTyckFound decl;
-        if (cm_tyck_lookup_assoc_in(env, self_type, name, &decl, 4u, 0u)
+        if (cm_tyck_lookup_assoc_in(env, self_type, name, &decl, 8u, 0u)
             && decl.item != NULL && decl.parent != NULL
             && decl.parent->kind == CM_HIR_ITEM_TRAIT) {
             *found = decl;
@@ -2992,13 +2996,29 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         CmTyId fallback_candidate = CM_TY_NONE;
         int have_fallback = 0;
         found.item = NULL;
+        /* A receiver typed by a parameter (`self.start` with `T:
+         * TrustedStep`) resolves through its bounds' declarations first:
+         * a blanket `impl<T: Clone> SpecArrayClone for T { fn clone }`
+         * must not capture `Clone::clone`. */
+        int generic_receiver = 0;
+        {
+            const CmTy *rt = cm_ty_get(arena, cm_ty_resolve(arena, receiver));
+            unsigned int guard = 0u;
+            while (rt != NULL && (rt->kind == CM_TY_REF
+                    || rt->kind == CM_TY_PTR) && guard++ < 4u)
+                rt = cm_ty_get(arena, cm_ty_resolve(arena, rt->children[0]));
+            generic_receiver = rt != NULL && (rt->kind == CM_TY_PARAM
+                || rt->kind == CM_TY_SELF || rt->kind == CM_TY_PROJECTION);
+        }
         for (phase = 0u; phase < 3u && found.item == NULL; ++phase) {
             /* Specific trait impls win across every autoderef step
              * before any blanket impl or declaration fallback:
              * `(&str).to_owned()` must reach `ToOwned for str` at the
              * deref step, not `impl<T: Clone> ToOwned for T` at step
              * zero (T := &str). */
-            unsigned int mask = phase == 0u ? 1u : (phase == 1u ? 2u : 4u);
+            unsigned int mask = generic_receiver
+                ? (phase == 0u ? 8u : (phase == 1u ? 1u : 6u))
+                : (phase == 0u ? 1u : (phase == 1u ? 2u : 4u));
             for (step = 0u; step < 6u; ++step) {
                 CmTyKind candidate_kind;
                 unsigned int variant;
