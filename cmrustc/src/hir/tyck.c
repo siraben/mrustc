@@ -1764,6 +1764,31 @@ static CmTyId cm_tyck_ast_path_type(CmTyckEnv *env, CmAstPathId path_id)
                         (CmHirIntType)(index - CM_HIR_PRIMITIVE_I8));
                 }
             }
+        /* A body-local `type Chunk = usize;` (core's memrchr): module
+         * resolution never sees it; the body's own item statements do. */
+        if (env->ub != NULL) {
+            const CmHirBody *hir_body = cm_hir_get_body(env->state->hir,
+                env->ub->hir_body);
+            size_t stmt_index;
+            for (stmt_index = 1u; hir_body != NULL
+                    && stmt_index <= env->ub->statements.len; ++stmt_index) {
+                const CmUStmt *stmt = cm_ubody_get_stmt(env->ub,
+                    (CmUStmtId)stmt_index);
+                const CmAstItem *local;
+                const CmInternedString *local_name;
+                if (stmt == NULL || stmt->kind != CM_U_STMT_ITEM
+                    || stmt->data.item_stmt.source != hir_body->source)
+                    continue;
+                local = cm_ast_get_item(env->ast, stmt->data.item_stmt.item);
+                if (local == NULL || local->kind != CM_AST_ITEM_TYPE_ALIAS
+                    || local->data.value_item.type == CM_AST_TYPE_NONE)
+                    continue;
+                local_name = cm_ast_get_string(env->ast, local->name);
+                if (local_name != NULL && local_name->len == name->len
+                    && memcmp(local_name->bytes, name->bytes, name->len) == 0)
+                    return cm_tyck_ast_type(env, local->data.value_item.type);
+            }
+        }
         owners[0] = env->item;
         owners[1] = env->parent;
         for (owner = 0; owner < 2; ++owner) {
@@ -3107,6 +3132,10 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
                 if (ct != NULL && ct->kind == CM_TY_DYN
                     && ct->a < ct->count) {
                     ret = ct->children[ct->a];
+                    known = 1;
+                } else if (ct != NULL && ct->kind == CM_TY_DYN) {
+                    /* `dyn FnMut(A)` without `-> R`: Output is `()`. */
+                    ret = arena->unit;
                     known = 1;
                 }
             }

@@ -22,9 +22,18 @@ fn run(f: &mut dyn FnMut(u32) -> u32, x: u32) -> u32 {
     y + f(y)
 }
 
+// `dyn FnMut(A)` without `-> R` binds `Output = ()` implicitly (the
+// futex Once's `f: &mut dyn FnMut(&OnceState)`).
+fn each(f: &mut dyn FnMut(u32), n: u32) {
+    f(n);
+    f(n + 1);
+}
+
 #[no_mangle]
 pub extern "C" fn dyn_fn_output(x: u32) -> u32 {
     let mut total = 0;
     let r = run(&mut |v| { total = total + v; v * 2 }, x);
-    r + total
+    let mut seen = 0;
+    each(&mut |v| { seen = seen + v; }, x);
+    r + total + seen
 }
