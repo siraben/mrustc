@@ -2483,6 +2483,90 @@ static int cm_tyck_coerce_at(CmTyckEnv *env, CmUExprId site, CmTyId actual,
     return ok;
 }
 
+/* The expression is a closure, or an `if` / `match` / block whose value
+ * position is one (thread_local!'s `const { if needs_drop::<T>() {
+ * |init| .. } else { |init| .. } }`): typing it without the callee's
+ * expectation would leave the closure's parameters unknown. */
+static int cm_tyck_yields_closure(CmTyckEnv *env, CmUExprId id,
+    unsigned int depth)
+{
+    const CmUExpr *expr = id == CM_U_EXPR_NONE ? NULL
+        : cm_ubody_get_expr(env->ub, id);
+    uint32_t index;
+    if (expr == NULL || depth > 8u) return 0;
+    switch (expr->kind) {
+    case CM_U_EXPR_CLOSURE:
+        return 1;
+    case CM_U_EXPR_BLOCK:
+        return expr->data.block.tail != CM_U_EXPR_NONE
+            && cm_tyck_yields_closure(env, expr->data.block.tail, depth + 1u);
+    case CM_U_EXPR_IF:
+        return cm_tyck_yields_closure(env, expr->data.if_expr.then_expr,
+                depth + 1u)
+            || cm_tyck_yields_closure(env, expr->data.if_expr.else_expr,
+                depth + 1u);
+    case CM_U_EXPR_MATCH:
+        for (index = 0u; index < expr->data.match_expr.arm_count; ++index)
+            if (cm_tyck_yields_closure(env,
+                    expr->data.match_expr.arms[index].body, depth + 1u))
+                return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t cm_tyck_signature(CmTyckEnv *env, const CmHirItem *item,
+    const CmTySubst *subst, CmTyId *params, uint32_t limit, CmTyId *ret);
+
+/* The parameter and return types of a FN_DEF type `ct` under its own
+ * generic arguments (a trait method's first slot is Self, an impl
+ * method's Self comes from the impl's arguments); 0 params when the
+ * item is unknown. */
+static uint32_t cm_tyck_fn_def_signature(CmTyckEnv *env, const CmTy *ct,
+    CmTyId *params, uint32_t limit, CmTyId *ret)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmHirItem *fn = cm_tyck_item(env->state, ct->def);
+    const CmHirItem *parent = fn == NULL ? NULL
+        : cm_tyck_parent_item(env->state, fn);
+    CmTyckInstance instance;
+    CmTyId self_type = CM_TY_NONE;
+    CmTyId args[32];
+    uint32_t arg_count = ct->count > 32u ? 32u : ct->count;
+    const CmTyId *arg_view = args;
+    memcpy(args, ct->children, arg_count * sizeof(*args));
+    *ret = CM_TY_NONE;
+    if (fn == NULL || fn->kind != CM_HIR_ITEM_FUNCTION) return 0u;
+    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT
+        && arg_count != 0u) {
+        self_type = args[0];
+        arg_view += 1;
+        arg_count -= 1u;
+    } else if (parent != NULL && parent->kind == CM_HIR_ITEM_IMPL) {
+        CmTyckInstance impl_instance;
+        cm_tyck_instance_init(&impl_instance, CM_TY_NONE);
+        cm_tyck_instance_from_args(&impl_instance, NULL, parent, arg_view,
+            arg_count);
+        self_type = cm_ty_subst(arena, cm_ty_from_hir(arena,
+            env->state->hir, parent->data.impl_item.self_type),
+            cm_tyck_subst_of(&impl_instance));
+    }
+    cm_tyck_instance_init(&instance, self_type);
+    cm_tyck_instance_from_args(&instance, fn, parent, arg_view, arg_count);
+    return cm_tyck_signature(env, fn, cm_tyck_subst_of(&instance), params,
+        limit, ret);
+}
+
+/* `expected` resolves to a fn pointer type. */
+static int cm_tyck_is_fn_ptr(CmTyckEnv *env, CmTyId expected)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *ty = expected == CM_TY_NONE ? NULL
+        : cm_ty_get(arena, cm_ty_resolve(arena, expected));
+    return ty != NULL && ty->kind == CM_TY_FN_PTR;
+}
+
 static CmTyId cm_tyck_join(CmTyckEnv *env, CmTyId a, CmTyId b)
 {
     CmTyArena *arena = env->state->arena;
@@ -2624,9 +2708,15 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
          * (core's array iter unsize helpers). */
         if (ap != NULL && ep != NULL && ap->kind == CM_TY_ADT
             && ep->kind == CM_TY_ADT
-            && cm_hir_def_id_equal(ap->def, ep->def)
-            && cm_tyck_coerce(env, a->children[0], e->children[0]))
-            return 1;
+            && cm_hir_def_id_equal(ap->def, ep->def)) {
+            /* The pointee's own unsize is not the reference's. */
+            CmUExprId site = env->coerce_site;
+            int ok;
+            env->coerce_site = CM_U_EXPR_NONE;
+            ok = cm_tyck_coerce(env, a->children[0], e->children[0]);
+            env->coerce_site = site;
+            if (ok) return 1;
+        }
         a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
         e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
         if (a == NULL || e == NULL) return 0;
@@ -2660,8 +2750,36 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
             (void)cm_ty_unify(arena, a->children[0], e->children[0]);
         return 1;
     }
-    if (a->kind == CM_TY_FN_DEF && e->kind == CM_TY_FN_PTR) return 1;
-    if (a->kind == CM_TY_CLOSURE && e->kind == CM_TY_FN_PTR) return 1;
+    if (a->kind == CM_TY_FN_DEF && e->kind == CM_TY_FN_PTR) {
+        /* The fn item's signature meets the pointer's: `print_to(args,
+         * stdout, ..)` with `global_s: fn() -> T` learns `T = Stdout`
+         * from `stdout`'s return type. */
+        CmTyId params[CM_TYCK_MAX_ARGS];
+        CmTyId ret = CM_TY_NONE;
+        uint32_t count = cm_tyck_fn_def_signature(env, a, params,
+            CM_TYCK_MAX_ARGS, &ret);
+        uint32_t index;
+        e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+        if (e == NULL || e->kind != CM_TY_FN_PTR) return 1;
+        if (e->count != 0u && count + 1u == e->count) {
+            for (index = 0u; index < count; ++index) {
+                (void)cm_ty_unify(arena, params[index], e->children[index]);
+                e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
+                if (e == NULL || e->kind != CM_TY_FN_PTR) return 1;
+            }
+            if (ret != CM_TY_NONE)
+                (void)cm_ty_unify(arena, ret, e->children[e->count - 1u]);
+        }
+        return 1;
+    }
+    if (a->kind == CM_TY_CLOSURE && e->kind == CM_TY_FN_PTR) {
+        /* A capture-free closure as a fn pointer (thread_local!'s
+         * `LocalKey::new(|init| ..)`): emission takes its thunk. */
+        if (env->coerce_site != CM_U_EXPR_NONE && env->out != NULL
+            && env->out->unsize_targets != NULL)
+            env->out->unsize_targets[env->coerce_site] = expected;
+        return 1;
+    }
     /* Unsize leniency (M9): `[T; N]` coerces to `[T]`, directly and
      * argument-wise through one ADT application (`Box<[T; 1], A>` vs
      * `Box<[T], A>`, alloc's into_boxed_slice family). */
@@ -2688,17 +2806,31 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         && a->count == e->count) {
         uint32_t child;
         int all = 1;
+        int unsized = 0;
         for (child = 0u; child < a->count && all; ++child) {
             uint32_t child_index = child;
             CmTyId left_child = a->children[child_index];
             CmTyId right_child = e->children[child_index];
+            const CmTy *lc = cm_ty_get(arena, cm_ty_resolve(arena,
+                left_child));
+            const CmTy *rc = cm_ty_get(arena, cm_ty_resolve(arena,
+                right_child));
+            if (lc != NULL && rc != NULL && lc->kind == CM_TY_ARRAY
+                && rc->kind == CM_TY_SLICE) unsized = 1;
             if (!cm_tyck_coerce(env, left_child, right_child)) all = 0;
             /* Re-fetch: coercion can create types and move the arena. */
             a = cm_ty_get(arena, cm_ty_resolve(arena, actual));
             e = cm_ty_get(arena, cm_ty_resolve(arena, expected));
             if (a == NULL || e == NULL) return 0;
         }
-        if (all) return 1;
+        if (all) {
+            /* `Box<[T; N]>` passed where `Box<[T]>` is expected (vec!'s
+             * `into_vec(box_new([..]))`): the box itself unsizes. */
+            if (unsized && env->coerce_site != CM_U_EXPR_NONE
+                && env->out != NULL && env->out->unsize_targets != NULL)
+                env->out->unsize_targets[env->coerce_site] = expected;
+            return 1;
+        }
     }
     return cm_tyck_lenient_eq(env, actual, expected, 0u);
 }
@@ -2796,7 +2928,8 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             const CmUExpr *arg_expr = cm_ubody_get_expr(env->ub,
                 expr->data.call.arguments[argument]);
             CmTyId typed = CM_TY_NONE;
-            if (arg_expr == NULL || arg_expr->kind != CM_U_EXPR_CLOSURE)
+            if (arg_expr == NULL || !cm_tyck_yields_closure(env,
+                    expr->data.call.arguments[argument], 0u))
                 typed = cm_tyck_expr(env,
                     expr->data.call.arguments[argument], CM_TY_NONE);
             if (argument < CM_TYCK_MAX_ARGS)
@@ -3286,6 +3419,12 @@ static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
                 == CM_HIR_RECEIVER_REF_SHARED
             || alt.item->data.function_item.signature.receiver
                 == CM_HIR_RECEIVER_REF_MUTABLE)
+        /* A `&mut self` method of T is out of reach behind a shared
+         * `&T`: `(&*self).write_fmt(args)` in `impl Write for Stdout`
+         * is `<&Stdout as Write>::write_fmt`, not itself. */
+        && !(alt.item->data.function_item.signature.receiver
+                == CM_HIR_RECEIVER_REF_MUTABLE
+            && ct->kind == CM_TY_REF && ct->a == 0u)
         && cm_tyck_method_args_compatible(env, &alt, arg_types, arg_count)) {
         cm_ty_undo_to(arena, undo_mark);
         if (cm_tyck_lookup_assoc_in(env, pointee,
@@ -4646,7 +4785,18 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         if (expr->data.if_expr.else_expr != CM_U_EXPR_NONE) {
             CmTyId else_type = cm_tyck_expr(env, expr->data.if_expr.else_expr,
                 expected != CM_TY_NONE ? expected : then_type);
-            result = cm_tyck_join(env, then_type, else_type);
+            if (cm_tyck_is_fn_ptr(env, expected)) {
+                /* Each branch coerces to the fn pointer on its own
+                 * (thread_local!'s `if needs_drop { |init| .. } else
+                 * { |init| .. }`): two closures never join. */
+                (void)cm_tyck_coerce_at(env, expr->data.if_expr.then_expr,
+                    then_type, expected);
+                (void)cm_tyck_coerce_at(env, expr->data.if_expr.else_expr,
+                    else_type, expected);
+                result = expected;
+            } else {
+                result = cm_tyck_join(env, then_type, else_type);
+            }
         } else {
             result = arena->unit;
         }
@@ -4664,6 +4814,11 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                 (void)cm_tyck_expr(env, arm->guard, arena->boolean);
             body = cm_tyck_expr(env, arm->body,
                 expected != CM_TY_NONE ? expected : joined);
+            if (cm_tyck_is_fn_ptr(env, expected)) {
+                (void)cm_tyck_coerce_at(env, arm->body, body, expected);
+                joined = expected;
+                continue;
+            }
             joined = joined == CM_TY_NONE ? body
                 : cm_tyck_join(env, joined, body);
         }

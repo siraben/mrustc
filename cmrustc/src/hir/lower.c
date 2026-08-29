@@ -18851,6 +18851,64 @@ static int cm_lower_reserve_items_in_expr(CmLowerState *state,
     case CM_AST_EXPR_CLOSURE:
         return cm_lower_reserve_items_in_expr(state, ast, owner_module,
             fn_record, expr->data.closure.body);
+    /* Value positions carry blocks and closures too: thread_local!'s
+     * `LocalKey::new(const { if .. { |init| { static VAL .. } } .. })`
+     * declares its storage inside a call argument. */
+    case CM_AST_EXPR_CALL:
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, expr->data.call.callee)) return 0;
+        for (index = 0u; index < expr->data.call.argument_count; ++index)
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, expr->data.call.arguments[index])) return 0;
+        return 1;
+    case CM_AST_EXPR_METHOD_CALL:
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, expr->data.method_call.receiver)) return 0;
+        for (index = 0u; index < expr->data.method_call.argument_count;
+                ++index)
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, expr->data.method_call.arguments[index]))
+                return 0;
+        return 1;
+    case CM_AST_EXPR_FIELD:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.field.base);
+    case CM_AST_EXPR_TUPLE_FIELD:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.tuple_field.base);
+    case CM_AST_EXPR_INDEX:
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, expr->data.index.base)) return 0;
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.index.index);
+    case CM_AST_EXPR_UNARY:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.unary.operand);
+    case CM_AST_EXPR_RAW_REFERENCE:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.raw_reference.operand);
+    case CM_AST_EXPR_BINARY:
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, expr->data.binary.left)) return 0;
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.binary.right);
+    case CM_AST_EXPR_CAST:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.cast.value);
+    case CM_AST_EXPR_TRY:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.try_expr.operand);
+    case CM_AST_EXPR_RETURN:
+    case CM_AST_EXPR_BREAK:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.flow.value);
+    case CM_AST_EXPR_TUPLE:
+    case CM_AST_EXPR_ARRAY:
+        for (index = 0u; index < expr->data.list.element_count; ++index)
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, expr->data.list.elements[index])) return 0;
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.list.repeat_value);
     default:
         return 1;
     }
@@ -19000,6 +19058,13 @@ static int cm_lower_reserve_body_item(CmLowerState *state, const CmAst *ast,
         if (!cm_lower_graph_reserve_body_items(state, ast,
                 owner_module, fn_record,
                 item->data.function_item.body)) return 0;
+    }
+    if ((item->kind == CM_AST_ITEM_CONST || item->kind == CM_AST_ITEM_STATIC)
+        && item->data.value_item.initializer != CM_AST_EXPR_NONE) {
+        /* A static's initializer declares items too (thread_local!'s
+         * `|init| { static VAL: .. = ..; VAL.get(init, __init) }`). */
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, item->data.value_item.initializer)) return 0;
     }
     if (item->kind == CM_AST_ITEM_TRAIT || item->kind == CM_AST_ITEM_IMPL) {
         const CmAstItemId *children;
@@ -19286,6 +19351,17 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
         CmLowerItemRecord fn_copy = *pushed;
         if (!cm_lower_graph_reserve_body_items(state, ast, owner_module,
                 &fn_copy, item->data.function_item.body)) return 0;
+    }
+    if ((item->kind == CM_AST_ITEM_CONST || item->kind == CM_AST_ITEM_STATIC)
+        && item->data.value_item.initializer != CM_AST_EXPR_NONE) {
+        /* A static's initializer declares items too (thread_local!'s
+         * `|init| { static VAL: .. = ..; VAL.get(init, __init) }`). */
+        const CmLowerItemRecord *pushed =
+            (const CmLowerItemRecord *)cm_vec_at_const(
+                &state->item_records, state->item_records.len - 1u);
+        CmLowerItemRecord value_copy = *pushed;
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                &value_copy, item->data.value_item.initializer)) return 0;
     }
     for (index = 0u; index < effective->child_count && !state->failed;
          ++index) {

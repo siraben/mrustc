@@ -566,6 +566,61 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
     return address;
 }
 
+/* `*wrapper` on an ADT with a `Deref` impl (`**b` on a
+ * `ManuallyDrop<Box<T>>`, `*guard`): borrow the operand's place and call
+ * `Deref::deref` (`deref_mut` when `mutable`), giving the reference the
+ * deref then loads through.  Returns local 0 when the operand is not
+ * such an ADT -- a reference, pointer, or `Box`, whose deref is built in
+ * (its own `Deref` impl is `&**self`). */
+static CmUMirLocalId cm_umir_emit_user_deref(CmUMirBuilder *builder,
+    CmUExprId deref_id, int mutable)
+{
+    const CmUExpr *deref = cm_ubody_get_expr(builder->ub, deref_id);
+    CmTyArena *arena;
+    CmTyId operand_type;
+    CmTyId pointee;
+    const CmTy *ot;
+    if (deref == NULL || deref->kind != CM_U_EXPR_UNARY
+        || deref->data.unary.op != CM_U_UNARY_DEREF
+        || builder->tyck == NULL || builder->hir == NULL) return 0u;
+    arena = (CmTyArena *)&builder->tyck->arena;
+    operand_type = cm_umir_expr_type(builder, deref->data.unary.operand);
+    pointee = cm_umir_expr_type(builder, deref_id);
+    if (operand_type == CM_TY_NONE || pointee == CM_TY_NONE) return 0u;
+    ot = cm_ty_get(arena, cm_ty_resolve(arena, operand_type));
+    if (ot == NULL || ot->kind != CM_TY_ADT) return 0u;
+    {
+        const CmHirDefinition *record = cm_hir_lookup_definition(
+            builder->hir, ot->def);
+        const CmHirItem *item = record == NULL
+                || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+            : cm_hir_get_item(builder->hir, record->entity.item_id);
+        const CmInternedString *name = item == NULL ? NULL
+            : cm_interner_get(&builder->hir->strings, item->name);
+        if (name == NULL) return 0u;
+        if (name->len == 3u && memcmp(name->bytes, "Box", 3u) == 0)
+            return 0u;
+    }
+    {
+        CmUMirLocalId place = cm_umir_place(builder,
+            deref->data.unary.operand);
+        CmUMirLocalId borrowed = cm_umir_address_of(builder,
+            deref->data.unary.operand, operand_type);
+        CmTyId target_ref = cm_ty_ref(arena, pointee, mutable);
+        CmUMirLocalId derefed;
+        if (borrowed == 0u) {
+            borrowed = cm_umir_new_local(builder, operand_type);
+            cm_umir_push_operands(builder, borrowed, CM_UMIR_RVALUE_REF,
+                deref->data.unary.operand, operand_type, &place, 1u);
+        }
+        derefed = cm_umir_new_local(builder, target_ref);
+        cm_umir_push_immediate(builder, derefed, CM_UMIR_RVALUE_DEREF_CALL,
+            deref->data.unary.operand, target_ref, &borrowed, 1u,
+            mutable ? 1u : 0u);
+        return derefed;
+    }
+}
+
 static int cm_umir_pattern_literal_value(const CmUMirBuilder *builder,
     const CmUPat *pat, long *out);
 static long cm_umir_struct_field_index(const CmUMirBuilder *builder,
@@ -1414,8 +1469,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         break;
     }
     case CM_U_EXPR_UNARY: {
-        CmUMirLocalId operand = cm_umir_emit_expr(builder,
-            expr->data.unary.operand);
+        CmUMirLocalId operand = 0u;
+        if (expr->data.unary.op == CM_U_UNARY_DEREF)
+            operand = cm_umir_emit_user_deref(builder, id, 0);
+        if (operand == 0u)
+            operand = cm_umir_emit_expr(builder, expr->data.unary.operand);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_UNARY,
             id, type, &operand, 1u);
         break;
@@ -1699,9 +1757,13 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             && inner->data.unary.op == CM_U_UNARY_DEREF) {
             /* A reborrow `&*p` / `&mut *p` / `&raw const *p` is the
              * pointer itself (references and raw pointers share their
-             * representation), never the address of a loaded copy. */
-            CmUMirLocalId pointer = cm_umir_emit_expr(builder,
-                inner->data.unary.operand);
+             * representation), never the address of a loaded copy; on a
+             * `Deref` ADT it is what `deref` returns. */
+            CmUMirLocalId pointer = cm_umir_emit_user_deref(builder,
+                expr->data.ref.operand, expr->data.ref.is_mutable);
+            if (pointer == 0u)
+                pointer = cm_umir_emit_expr(builder,
+                    inner->data.unary.operand);
             cm_umir_push_operands(builder, destination,
                 CM_UMIR_RVALUE_LOCAL, id, type, &pointer, 1u);
             break;

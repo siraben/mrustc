@@ -31,6 +31,13 @@ typedef struct CmUNestedItem {
     CmInternId module;
 } CmUNestedItem;
 
+typedef struct CmUNestedScope {
+    CmSourceId source;
+    CmAstItemId item;
+    const CmUNestedItem *items;
+    size_t count;
+} CmUNestedScope;
+
 #define CM_U_NESTED_LIMIT 512u
 #define CM_U_BODY_USE_LIMIT 128u
 #define CM_U_USE_SEG_LIMIT 16u
@@ -81,6 +88,10 @@ typedef struct CmULowerState {
     /* source -> AST for every graph module. */
     CmUSourceAst *source_asts;
     size_t source_ast_count;
+    /* The nested items visible where a body-local item was declared
+     * (CmUNestedScope): its own body sees them too (thread_local!'s
+     * `{ const __INIT: T = ..; .. |_| { static VAL: T = __INIT; .. } }`). */
+    CmVec nested_scopes;
     /* Per-body state. */
     CmUBody *body;
     const CmAst *ast;
@@ -1539,6 +1550,24 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
             state->nested[state->nested_count].module = CM_INTERN_ID_NONE;
             state->nested_count += 1u;
         }
+        if (state->nested_count > saved_nested) {
+            /* Snapshot the table for the items this block declares: each
+             * one's own body is lowered later, starting from it. */
+            CmUNestedItem *items = (CmUNestedItem *)cm_u_alloc(state,
+                state->nested_count, sizeof(*items));
+            size_t registered;
+            memcpy(items, state->nested,
+                state->nested_count * sizeof(*items));
+            for (registered = saved_nested; registered < state->nested_count;
+                    ++registered) {
+                CmUNestedScope scope;
+                scope.source = state->source;
+                scope.item = state->nested[registered].item;
+                scope.items = items;
+                scope.count = state->nested_count;
+                (void)cm_vec_push(&state->nested_scopes, &scope);
+            }
+        }
         for (index = 0u; index < count; ++index)
             ids[index] = cm_u_lower_stmt(state,
                 expr->data.block.statements[index]);
@@ -1993,6 +2022,23 @@ static void cm_u_lower_body(CmULowerState *state, CmHirBodyId body_id,
     }
     root = hir_body->source_expression_id;
     ast_item = cm_u_find_ast_item(ast, root, &ast_item_id);
+    if (ast_item != NULL) {
+        /* A body-local item's body starts with the nested items visible
+         * at its declaration. */
+        size_t scope_index;
+        for (scope_index = state->nested_scopes.len; scope_index > 0u;
+                --scope_index) {
+            const CmUNestedScope *scope = (const CmUNestedScope *)
+                cm_vec_at_const(&state->nested_scopes, scope_index - 1u);
+            if (scope == NULL || scope->source != state->source
+                || scope->item != ast_item_id) continue;
+            state->nested_count = scope->count > CM_U_NESTED_LIMIT
+                ? CM_U_NESTED_LIMIT : scope->count;
+            memcpy(state->nested, scope->items,
+                state->nested_count * sizeof(*state->nested));
+            break;
+        }
+    }
     if (ast_item != NULL && ast_item->kind == CM_AST_ITEM_FUNCTION) {
         uint32_t count = ast_item->data.function_item.parameter_count;
         out->parameters = (CmUPatId *)cm_u_alloc(state, count,
@@ -2055,6 +2101,7 @@ CmUBodyLowerResult cm_ubody_lower_all(CmUBodySet *set,
     state->local_modules = modules;
     state->dependencies = dependencies;
     state->dependency_count = dependency_count;
+    cm_vec_init(&state->nested_scopes, sizeof(CmUNestedScope));
     cm_u_build_item_keys(state);
     cm_u_build_source_asts(state);
     cm_vec_clear(&set->bodies);
@@ -2086,6 +2133,7 @@ CmUBodyLowerResult cm_ubody_lower_all(CmUBodySet *set,
         result.retained_macros += body.retained_macros;
         cm_vec_push(&set->bodies, &body);
     }
+    cm_vec_destroy(&state->nested_scopes);
     cm_free(state->source_asts);
     cm_free(state->item_keys);
     cm_free(state);
