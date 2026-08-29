@@ -11,6 +11,6 @@ int main(void)
     if (str_byte(0, 1) != 'e') return 3;
     if (str_byte(1, 1) != '\t') return 4;
     if (str_byte(1, 4) != 0xC3 || str_byte(1, 5) != 0xA9) return 5;
-    if (ctor_call(35) != 42) return 6;
+    if (ctor_call(35) != 42 + 1000 + 100 + 30000) return 6;
     return 0;
 }

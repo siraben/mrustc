@@ -1600,10 +1600,12 @@ static int cm_umir_c_render_string_literal(CmStrBuf *output,
     unsigned long count = 0ul;
     int raw = 0;
     unsigned int hashes = 0u;
+    int byte_string = expr->data.literal.kind == CM_U_LITERAL_BYTE_STRING;
     if (text == NULL) return 0;
     bytes = (const unsigned char *)text->bytes;
     len = text->len;
     start = 0u;
+    if (start < len && bytes[start] == 'b') { start += 1u; byte_string = 1; }
     if (start < len && bytes[start] == 'r') { raw = 1; start += 1u; }
     while (start < len && bytes[start] == '#') { hashes += 1u; start += 1u; }
     if (start >= len || bytes[start] != '"') return 0;
@@ -1612,9 +1614,17 @@ static int cm_umir_c_render_string_literal(CmStrBuf *output,
     end = len - 1u - hashes;
     if (end < start || bytes[end] != '"') return 0;
     /* Byte length and C-compatibility scan. */
-    cm_str_buf_append(output, "0; _agg");
-    cm_umir_c_render_number(output, (unsigned long)dest);
-    cm_str_buf_append(output, "[1] = (long long)(intptr_t)\"");
+    cm_str_buf_append(output, "0; ");
+    if (byte_string) {
+        /* memmove the bytes behind the header. */
+        cm_str_buf_append(output, "memmove((char *)&_agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[2], \"");
+    } else {
+        cm_str_buf_append(output, "_agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[1] = (long long)(intptr_t)\"");
+    }
     for (index = start; index < end; ++index) {
         unsigned char c = bytes[index];
         if (!raw && c == '\\' && index + 1u < end) {
@@ -1709,6 +1719,26 @@ static int cm_umir_c_render_string_literal(CmStrBuf *output,
             cm_str_buf_append(output, oct);
         } else cm_str_buf_push(output, (char)c);
         count += 1ul;
+    }
+    if (byte_string) {
+        /* `&[u8; N]`: slot 1 = header (N), bytes at slot 2..; the array
+         * block is &slot[2] and slot 0 references it. */
+        cm_str_buf_append(output, "\", ");
+        cm_umir_c_render_number(output, count);
+        cm_str_buf_append(output, "); _agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[1] = ");
+        cm_umir_c_render_number(output, count);
+        cm_str_buf_append(output, "; _agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[0] = (long long)(intptr_t)&_agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[2]; ");
+        cm_umir_c_render_local(output, dest);
+        cm_str_buf_append(output, " = (long long)(intptr_t)&_agg");
+        cm_umir_c_render_number(output, (unsigned long)dest);
+        cm_str_buf_append(output, "[0]");
+        return 1;
     }
     cm_str_buf_append(output, "\"; _agg");
     cm_umir_c_render_number(output, (unsigned long)dest);
@@ -2031,9 +2061,19 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                  * `&str` local is a reference like any other. */
                 const CmUExpr *lit = cm_ubody_get_expr(ub, statement->expr);
                 if (lit == NULL || lit->kind != CM_U_EXPR_LITERAL
-                    || lit->data.literal.kind != CM_U_LITERAL_STRING)
+                    || (lit->data.literal.kind != CM_U_LITERAL_STRING
+                        && lit->data.literal.kind != CM_U_LITERAL_BYTE_STRING))
                     continue;
-                slots = 3ul;
+                if (lit->data.literal.kind == CM_U_LITERAL_BYTE_STRING) {
+                    /* `b"..."` is a `&[u8; N]`: slot 0 references the
+                     * block, slot 1 is the block's length header, the
+                     * bytes follow (the spelling bounds the length). */
+                    const CmInternedString *text = cm_interner_get(
+                        &ubodies->strings, lit->data.literal.text);
+                    slots = 2ul + ((text == NULL ? 0ul : text->len) + 7ul) / 8ul
+                        + 1ul;
+                } else
+                    slots = 3ul;
                 /* Literal data is static; so is its pair, which callers
                  * keep after this frame returns (`-> &'static str`). */
                 cm_str_buf_append(output, "    static");
@@ -2107,10 +2147,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_umir_c_render_number(output, (unsigned long)
                         expr->data.literal.value_low);
                 else if (expr != NULL && expr->kind == CM_U_EXPR_LITERAL
-                    && expr->data.literal.kind == CM_U_LITERAL_STRING
+                    && (expr->data.literal.kind == CM_U_LITERAL_STRING
+                        || expr->data.literal.kind == CM_U_LITERAL_BYTE_STRING)
                     && cm_umir_c_render_string_literal(output, ubodies,
                         expr, statement->destination)) {
-                    /* rendered as a [data, len] pair */
+                    /* rendered as a [data, len] pair (or a byte block) */
                 } else if (expr == NULL || expr->kind != CM_U_EXPR_LITERAL) {
                     /* Synthetic constant (pattern-test results). */
                     cm_umir_c_render_number(output,

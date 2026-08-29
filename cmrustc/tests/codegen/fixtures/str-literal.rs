@@ -26,10 +26,21 @@ pub extern "C" fn str_byte(sel: u32, i: usize) -> u8 {
     unsafe { *offset(p, i as isize) }
 }
 
+const LUT: &[u8; 4] = b"ab\x01d";
+
+fn lut(i: usize) -> u32 {
+    LUT[i] as u32
+}
+
+fn bytes_len() -> usize {
+    let s: &[u8] = b"xyz";
+    unsafe { ptr_metadata(s) }
+}
+
 struct Wrap(u32, u32);
 
 #[no_mangle]
 pub extern "C" fn ctor_call(v: u32) -> u32 {
     let w = Wrap(v, 7);
-    w.0 + w.1
+    w.0 + w.1 + lut(2) * 1000 + lut(3) + bytes_len() as u32 * 10000
 }
