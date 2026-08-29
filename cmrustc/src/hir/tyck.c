@@ -4300,6 +4300,17 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             }
             result = cm_tyck_tuple_field_type(env, candidate,
                 expr->data.tuple_field.index, &found);
+            if (!found && ct->kind == CM_TY_ADT) {
+                /* `b.1` on `ManuallyDrop<Box<T, A>>` (alloc's
+                 * into_raw_with_allocator): user Deref to the tuple
+                 * struct, as named fields already do. */
+                CmTyId derefed = cm_tyck_user_deref(env, candidate);
+                if (derefed != CM_TY_NONE) {
+                    result = cm_tyck_tuple_field_type(env, derefed,
+                        expr->data.tuple_field.index, &found);
+                    if (found) break;
+                }
+            }
             if (!found && ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR)
                 break;
         }

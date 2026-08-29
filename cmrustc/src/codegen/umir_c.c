@@ -523,6 +523,30 @@ static long cm_umir_c_transparent_field(const CmHirContext *hir,
 }
 
 
+/* The (substituted) type of transparent wrapper `type`'s field `field`. */
+static CmTyId cm_umir_c_transparent_inner(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type, long field)
+{
+    const CmTy *ty = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record = cm_hir_lookup_definition(hir, ty->def);
+    const CmHirItem *item = cm_hir_get_item(hir, record->entity.item_id);
+    CmTySubst subst;
+    CmHirGenericParamId params[32];
+    uint32_t count = item->generic_parameter_count > 32u ? 32u
+        : item->generic_parameter_count;
+    uint32_t index;
+    CmTyId raw = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+        item->data.aggregate_item.fields[field].type);
+    for (index = 0u; index < count; ++index)
+        params[index] = item->generic_parameter_start + index;
+    subst.parameters = params;
+    subst.types = ty->children;
+    subst.count = count < ty->count ? count : ty->count;
+    subst.self_type = CM_TY_NONE;
+    return cm_ty_subst((CmTyArena *)&tyck->arena, raw, &subst);
+}
+
 /* The representation type behind transparent wrappers. */
 static CmTyId cm_umir_c_representation(const CmHirContext *hir,
     const CmTyckSet *tyck, CmTyId type)
@@ -530,32 +554,74 @@ static CmTyId cm_umir_c_representation(const CmHirContext *hir,
     unsigned int guard = 0u;
     while (guard++ < 8u) {
         long field = cm_umir_c_transparent_field(hir, tyck, type);
-        const CmTy *ty;
-        const CmHirDefinition *record;
-        const CmHirItem *item;
         if (field < 0) return type;
-        ty = cm_ty_get((CmTyArena *)&tyck->arena,
-            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
-        record = cm_hir_lookup_definition(hir, ty->def);
-        item = cm_hir_get_item(hir, record->entity.item_id);
-        {
-            CmTySubst subst;
-            CmHirGenericParamId params[32];
-            uint32_t count = item->generic_parameter_count > 32u ? 32u
-                : item->generic_parameter_count;
-            uint32_t index;
-            CmTyId raw = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
-                item->data.aggregate_item.fields[field].type);
-            for (index = 0u; index < count; ++index)
-                params[index] = item->generic_parameter_start + index;
-            subst.parameters = params;
-            subst.types = ty->children;
-            subst.count = count < ty->count ? count : ty->count;
-            subst.self_type = CM_TY_NONE;
-            type = cm_ty_subst((CmTyArena *)&tyck->arena, raw, &subst);
-        }
+        type = cm_umir_c_transparent_inner(hir, tyck, type, field);
     }
     return type;
+}
+
+static long cm_umir_c_field_index(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmUBodySet *ubodies, CmTyId type,
+    CmInternId name);
+
+/* Positional field count of the tuple struct behind `type`; 0 for a
+ * unit or named-field struct or union (no `.N` of its own), -1 when
+ * `type` is not an aggregate at all. */
+static long cm_umir_c_aggregate_field_count(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    if (ty == NULL || ty->kind != CM_TY_ADT) return -1;
+    record = cm_hir_lookup_definition(hir, ty->def);
+    if (record == NULL || record->kind != CM_HIR_DEFINITION_ITEM) return -1;
+    item = cm_hir_get_item(hir, record->entity.item_id);
+    if (item == NULL || (item->kind != CM_HIR_ITEM_STRUCT
+            && item->kind != CM_HIR_ITEM_UNION)) return -1;
+    if (item->data.aggregate_item.form != CM_HIR_AGGREGATE_TUPLE) return 0;
+    return (long)item->data.aggregate_item.field_count;
+}
+
+/* The aggregate a field access `expr` on a value of `type` reads: the
+ * peeled type itself, or -- when the field is not one of its own --
+ * the transparent wrapper's field type it derefs to (`b.1` on a
+ * `ManuallyDrop<Box<T, A>>` is Box's allocator: the wrapper's value is
+ * the field's, so the slot is read from the same block).  Sets `*slot`
+ * to the field's index, -1 when unknown. */
+static CmTyId cm_umir_c_field_carrier(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmUBodySet *ubodies, CmTyId type,
+    const CmUExpr *expr, long *slot)
+{
+    CmTyId peeled = cm_umir_c_peel(tyck, type);
+    CmTyId current = peeled;
+    unsigned int guard = 0u;
+    *slot = -1;
+    while (guard++ < 8u) {
+        long found = -1;
+        long representative;
+        if (expr->kind == CM_U_EXPR_TUPLE_FIELD) {
+            long count = cm_umir_c_aggregate_field_count(hir, tyck, current);
+            found = (long)expr->data.tuple_field.index;
+            if (count >= 0 && found >= count) found = -1;
+        } else if (expr->kind == CM_U_EXPR_FIELD) {
+            found = cm_umir_c_field_index(hir, tyck, ubodies, current,
+                expr->data.field.name);
+        }
+        if (found >= 0) {
+            *slot = found;
+            return current;
+        }
+        representative = cm_umir_c_transparent_field(hir, tyck, current);
+        if (representative < 0) break;
+        current = cm_umir_c_transparent_inner(hir, tyck, current,
+            representative);
+    }
+    if (expr->kind == CM_U_EXPR_TUPLE_FIELD)
+        *slot = (long)expr->data.tuple_field.index;
+    return peeled;
 }
 
 /* The value behind `depth` reference layers of `local`. */
@@ -3567,12 +3633,12 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             }
             case CM_UMIR_RVALUE_STORE_FIELD: {
                 long slot = -1;
-                if (expr != NULL && expr->kind == CM_U_EXPR_TUPLE_FIELD)
-                    slot = (long)expr->data.tuple_field.index;
-                else if (expr != NULL && expr->kind == CM_U_EXPR_FIELD)
-                    slot = cm_umir_c_field_index(hir, tyck, ubodies,
+                CmTyId carrier = CM_TY_NONE;
+                if (expr != NULL && (expr->kind == CM_U_EXPR_TUPLE_FIELD
+                        || expr->kind == CM_U_EXPR_FIELD))
+                    carrier = cm_umir_c_field_carrier(hir, tyck, ubodies,
                         cm_umir_c_local_type(body, statement->operands[0]),
-                        expr->data.field.name);
+                        expr, &slot);
                 if (slot >= 0) {
                     CmTyId base_type = cm_umir_c_local_type(body,
                         statement->operands[0]);
@@ -3580,7 +3646,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_append(output, "0; ");
                     {
                         long representative = cm_umir_c_transparent_field(hir,
-                            tyck, cm_umir_c_peel(tyck, base_type));
+                            tyck, carrier);
                         if (representative >= 0) {
                             /* The field is the value: assign the referent
                              * (or the local itself); a zero-sized field
@@ -3687,23 +3753,21 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                  * value (a transparent wrapper's field is the value: its
                  * address is the base's). */
                 long slot = -1;
+                CmTyId carrier = CM_TY_NONE;
                 int want_address = statement->kind == CM_UMIR_RVALUE_REF_FIELD;
-                if (statement->operand_count == 1u && expr != NULL) {
-                    if (expr->kind == CM_U_EXPR_TUPLE_FIELD)
-                        slot = (long)expr->data.tuple_field.index;
-                    else if (expr->kind == CM_U_EXPR_FIELD)
-                        slot = cm_umir_c_field_index(hir, tyck, ubodies,
-                            cm_umir_c_local_type(body,
-                                statement->operands[0]),
-                            expr->data.field.name);
-                }
+                if (statement->operand_count == 1u && expr != NULL
+                    && (expr->kind == CM_U_EXPR_TUPLE_FIELD
+                        || expr->kind == CM_U_EXPR_FIELD))
+                    carrier = cm_umir_c_field_carrier(hir, tyck, ubodies,
+                        cm_umir_c_local_type(body, statement->operands[0]),
+                        expr, &slot);
                 if (slot >= 0) {
                     CmTyId base_type = cm_umir_c_local_type(body,
                         statement->operands[0]);
                     unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
                     {
                         long representative = cm_umir_c_transparent_field(hir,
-                            tyck, cm_umir_c_peel(tyck, base_type));
+                            tyck, carrier);
                         if (representative >= 0) {
                             /* A zero-sized field reads 0. */
                             if (representative == slot) {
