@@ -1,6 +1,8 @@
 #include "cm/mir/ulower.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "cm/hir/model.h"
 #include "cm/alloc.h"
 
@@ -513,6 +515,111 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
     cm_umir_push_operands(builder, address, CM_UMIR_RVALUE_REF_INDEX, id,
         type, operands, 2u);
     return address;
+}
+
+static int cm_umir_pattern_literal_value(const CmUMirBuilder *builder,
+    const CmUPat *pat, long *out);
+
+/* Whether a match-arm pattern needs value tests rather than a switch
+ * key: a range, a binding over such a subpattern, or an or-pattern with
+ * any such alternative. */
+static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
+    const CmUPat *pat)
+{
+    uint32_t alt;
+    if (pat == NULL) return 0;
+    switch (pat->kind) {
+    case CM_U_PAT_RANGE: return 1;
+    case CM_U_PAT_BINDING:
+        return pat->data.binding.subpattern != CM_U_PAT_NONE
+            && cm_umir_pattern_needs_test(builder,
+                cm_ubody_get_pat(builder->ub, pat->data.binding.subpattern));
+    case CM_U_PAT_OR:
+        for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
+            if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
+                    builder->ub, pat->data.list.patterns[alt]))) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
+/* Inclusive [lo, hi] tests an arm pattern imposes on the scrutinee
+ * (any one passing selects the arm); binds `x @ ..` names to `value`. */
+static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
+    const CmUPat *pat, CmUMirLocalId value, CmUExprId id, long *lo,
+    long *hi, uint32_t *count, uint32_t capacity)
+{
+    uint32_t alt;
+    if (pat == NULL || *count >= capacity) return;
+    switch (pat->kind) {
+    case CM_U_PAT_RANGE: {
+        const CmUPat *start = cm_ubody_get_pat(builder->ub,
+            pat->data.range.start);
+        const CmUPat *end = cm_ubody_get_pat(builder->ub,
+            pat->data.range.end);
+        long low = 0;
+        long high = LONG_MAX;
+        if (getenv("CM_UMIR_RANGE_DEBUG") != NULL) {
+            const CmInternedString *st = start == NULL
+                    || start->kind != CM_U_PAT_LITERAL ? NULL
+                : cm_interner_get(&builder->ubodies->strings,
+                    start->data.literal.text);
+            fprintf(stderr, "RANGE start kind=%d text=%.*s end kind=%d\n",
+                start == NULL ? -1 : (int)start->kind,
+                st == NULL ? 1 : (int)st->len,
+                st == NULL ? "?" : (const char *)st->bytes,
+                end == NULL ? -1 : (int)end->kind);
+        }
+        /* `x @ lo..=hi` may arrive as `(x @ lo)..=hi`: bind and use the
+         * binding's subpattern as the bound. */
+        if (start != NULL && start->kind == CM_U_PAT_BINDING) {
+            if (start->data.binding.local != CM_U_LOCAL_NONE)
+                cm_umir_push_operands(builder,
+                    (CmUMirLocalId)(1u + start->data.binding.local),
+                    CM_UMIR_RVALUE_LOCAL, id, CM_TY_NONE, &value, 1u);
+            start = start->data.binding.subpattern == CM_U_PAT_NONE ? NULL
+                : cm_ubody_get_pat(builder->ub,
+                    start->data.binding.subpattern);
+        }
+        if (start != NULL && start->kind == CM_U_PAT_LITERAL)
+            (void)cm_umir_pattern_literal_value(builder, start, &low);
+        if (end != NULL && end->kind == CM_U_PAT_LITERAL
+            && cm_umir_pattern_literal_value(builder, end, &high)
+            && !pat->data.range.is_inclusive)
+            high -= 1;
+        lo[*count] = low;
+        hi[*count] = high;
+        *count += 1u;
+        break;
+    }
+    case CM_U_PAT_LITERAL: {
+        long v = 0;
+        if (cm_umir_pattern_literal_value(builder, pat, &v)) {
+            lo[*count] = v;
+            hi[*count] = v;
+            *count += 1u;
+        }
+        break;
+    }
+    case CM_U_PAT_BINDING:
+        if (pat->data.binding.local != CM_U_LOCAL_NONE)
+            cm_umir_push_operands(builder,
+                (CmUMirLocalId)(1u + pat->data.binding.local),
+                CM_UMIR_RVALUE_LOCAL, id, CM_TY_NONE, &value, 1u);
+        if (pat->data.binding.subpattern != CM_U_PAT_NONE)
+            cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
+                builder->ub, pat->data.binding.subpattern), value, id, lo,
+                hi, count, capacity);
+        break;
+    case CM_U_PAT_OR:
+        for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
+            cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
+                builder->ub, pat->data.list.patterns[alt]), value, id, lo,
+                hi, count, capacity);
+        break;
+    default:
+        break;
+    }
 }
 
 /* Whether `type` is core's `Option` (by item name), else Result-like. */
@@ -1388,8 +1495,10 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         long *discriminants = (long *)cm_alloc_zeroed(capacity,
             sizeof(long));
         uint32_t entries = 0u;
-        CmUMirBlockId previous_test = 0u;
-        int have_previous_test = 0;
+        /* Test blocks (guards, range tests) whose false edge is the next
+         * arm; patched when that arm is created. */
+        CmUMirBlockId pending_tests[64];
+        uint32_t pending_count = 0u;
         for (arm = 0u; arm < arm_count && builder->blocked == NULL; ++arm) {
             const CmUPat *pat = cm_ubody_get_pat(builder->ub,
                 expr->data.match_expr.arms[arm].pattern);
@@ -1397,15 +1506,72 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             CmUMirBlock *arm_current;
             CmUMirLocalId arm_value;
             long disc = CM_UMIR_ARM_DEFAULT;
+            int expr_arm_tested = 0;
             CmUExprId guard = expr->data.match_expr.arms[arm].guard;
-            /* A previous guarded arm falls through here on failure. */
-            if (have_previous_test) {
-                CmUMirBlock *test = (CmUMirBlock *)cm_vec_at(
-                    &builder->body->blocks, previous_test);
-                if (test != NULL) test->false_target = arm_block;
-                have_previous_test = 0;
+            /* Previous tested arms fall through here on failure. */
+            {
+                uint32_t pending;
+                for (pending = 0u; pending < pending_count; ++pending) {
+                    CmUMirBlock *test = (CmUMirBlock *)cm_vec_at(
+                        &builder->body->blocks, pending_tests[pending]);
+                    if (test != NULL) test->false_target = arm_block;
+                }
+                pending_count = 0u;
             }
             builder->current = arm_block;
+            if (pat != NULL && cm_umir_pattern_needs_test(builder, pat)) {
+                /* Range arms: no key; a chain of tests, any passing one
+                 * enters the arm, the last failure falls to the next arm. */
+                long lo[16];
+                long hi[16];
+                uint32_t test_count = 0u;
+                uint32_t test;
+                CmUMirBlockId body_entry = cm_umir_new_block(builder);
+                cm_umir_collect_range_tests(builder, pat, scrutinee, id, lo,
+                    hi, &test_count, 16u);
+                for (test = 0u; test < test_count; ++test) {
+                    CmUMirLocalId ops[3];
+                    CmUMirLocalId flag = cm_umir_new_local(builder,
+                        CM_TY_NONE);
+                    CmUMirBlockId next = test + 1u < test_count
+                        ? cm_umir_new_block(builder) : join;
+                    CmUMirBlock *block;
+                    ops[0] = scrutinee;
+                    ops[1] = cm_umir_new_local(builder, CM_TY_NONE);
+                    cm_umir_push_immediate(builder, ops[1],
+                        CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE, CM_TY_NONE,
+                        NULL, 0u, (uint32_t)lo[test]);
+                    ops[2] = cm_umir_new_local(builder, CM_TY_NONE);
+                    cm_umir_push_immediate(builder, ops[2],
+                        CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE, CM_TY_NONE,
+                        NULL, 0u, hi[test] > (long)0xFFFFFFFFl
+                            ? 0xFFFFFFFFu : (uint32_t)hi[test]);
+                    cm_umir_push_operands(builder, flag,
+                        CM_UMIR_RVALUE_RANGE_TEST, id, CM_TY_NONE, ops, 3u);
+                    block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                        builder->current);
+                    if (block != NULL) {
+                        block->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                        block->condition = flag;
+                        block->true_target = body_entry;
+                        block->false_target = next;
+                    }
+                    if (test + 1u == test_count && pending_count < 64u)
+                        pending_tests[pending_count++] = builder->current;
+                    builder->current = next;
+                }
+                if (test_count == 0u) cm_umir_seal_goto(builder, body_entry);
+                builder->current = body_entry;
+                if (entries < capacity) {
+                    targets[entries] = arm_block;
+                    discriminants[entries] = CM_UMIR_ARM_DEFAULT;
+                    entries += 1u;
+                }
+                pat = NULL;
+                /* The arm's own pattern id stays set: skip the null-pattern
+                 * entry below by marking it handled. */
+                expr_arm_tested = 1;
+            }
             if (pat != NULL && pat->kind == CM_U_PAT_OR) {
                 /* Each alternative dispatches to this arm. */
                 uint32_t alt;
@@ -1521,7 +1687,8 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 targets[entries] = arm_block;
                 discriminants[entries] = disc;
                 entries += 1u;
-            } else if (pat == NULL && expr->data.match_expr.arms[arm].pattern
+            } else if (!expr_arm_tested && pat == NULL
+                    && expr->data.match_expr.arms[arm].pattern
                     != CM_U_PAT_NONE && entries < capacity
                     && cm_ubody_get_pat(builder->ub,
                         expr->data.match_expr.arms[arm].pattern) == NULL) {
@@ -1543,8 +1710,8 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     test->true_target = guard_body;
                     test->false_target = join; /* patched by next arm */
                 }
-                previous_test = builder->current;
-                have_previous_test = 1;
+                if (pending_count < 64u)
+                    pending_tests[pending_count++] = builder->current;
                 builder->current = guard_body;
             }
             arm_value = cm_umir_emit_expr(builder,

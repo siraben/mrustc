@@ -135,6 +135,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_FIELD:
                     case CM_UMIR_RVALUE_INDEX:
                     case CM_UMIR_RVALUE_REF_INDEX:
+                    case CM_UMIR_RVALUE_RANGE_TEST:
                     case CM_UMIR_RVALUE_AGGREGATE:
                         /* Renders through the layout engine's member
                          * names. */
@@ -3105,6 +3106,18 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_push(output, ']');
                 break;
             }
+            case CM_UMIR_RVALUE_RANGE_TEST:
+                /* lo <= v <= hi on the slot value (signed, 32-bit bounds). */
+                cm_str_buf_append(output, "(long long)((long long)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                cm_str_buf_append(output, " >= (long long)");
+                cm_umir_c_render_local(output, statement->operands[1]);
+                cm_str_buf_append(output, " && (long long)");
+                cm_umir_c_render_local(output, statement->operands[0]);
+                cm_str_buf_append(output, " <= (long long)");
+                cm_umir_c_render_local(output, statement->operands[2]);
+                cm_str_buf_push(output, ')');
+                break;
             case CM_UMIR_RVALUE_CLOSURE:
                 /* The closure value is its environment: this frame. */
                 cm_str_buf_append(output, "(long long)(intptr_t)");

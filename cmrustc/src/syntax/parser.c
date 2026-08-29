@@ -1142,6 +1142,7 @@ static CmAstSpan cm_parser_span_from(CmParser *parser,
 
 static CmAstPatternId cm_parser_parse_pattern(CmParser *parser);
 static CmAstPatternId cm_parser_parse_pattern_atom(CmParser *parser);
+static CmAstPatternId cm_parser_parse_range_pattern(CmParser *parser);
 static CmAstExprId cm_parser_parse_expression(CmParser *parser);
 static CmAstExprId cm_parser_parse_expression_bp(CmParser *parser,
     unsigned int minimum_precedence);
@@ -1194,9 +1195,13 @@ static CmAstPatternId cm_parser_parse_pattern_atom(CmParser *parser)
         pattern.data.binding.is_mutable = binding_mut;
         pattern.data.binding.name = cm_parser_parse_name(parser,
             "expected binding name");
+        /* `x @ lo..=hi`: the subpattern includes a range; `x @ ..` is
+         * the rest pattern. */
         if (cm_parser_eat(parser, CM_TOKEN_AT))
-            pattern.data.binding.subpattern = cm_parser_parse_pattern_atom(
-                parser);
+            pattern.data.binding.subpattern =
+                cm_parser_kind(parser) == CM_TOKEN_DOT_DOT
+                ? cm_parser_parse_pattern_atom(parser)
+                : cm_parser_parse_range_pattern(parser);
         pattern.span = cm_parser_span_from(parser, first);
         return cm_ast_add_pattern(parser->ast, &pattern);
     }
@@ -1398,7 +1403,9 @@ static CmAstPatternId cm_parser_parse_pattern_atom(CmParser *parser)
             pattern.data.binding.name = path->segments[0].name;
             if (cm_parser_eat(parser, CM_TOKEN_AT))
                 pattern.data.binding.subpattern =
-                    cm_parser_parse_pattern_atom(parser);
+                    cm_parser_kind(parser) == CM_TOKEN_DOT_DOT
+                    ? cm_parser_parse_pattern_atom(parser)
+                    : cm_parser_parse_range_pattern(parser);
         } else {
             pattern.kind = CM_AST_PATTERN_PATH;
             pattern.data.path.path = path_id;
