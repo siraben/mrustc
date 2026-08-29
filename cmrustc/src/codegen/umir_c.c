@@ -246,6 +246,9 @@ static void cm_umir_c_render_symbol(CmStrBuf *output, CmHirDefId def)
 /* `{ long long sym(); _dest = sym(args...); }` — the block-scope
  * prototype keeps every call site self-contained for the syntax check;
  * definitions are linked once instances are collected. */
+static const CmHirItem *cm_umir_c_item_of(const CmHirContext *hir,
+    CmHirDefId definition);
+
 static int cm_umir_c_render_call(CmStrBuf *output,
     const CmHirContext *hir, const CmTyckSet *tyck,
     const CmUMirStatement *statement, CmHirDefId def, uint32_t first_arg,
@@ -258,6 +261,23 @@ static int cm_umir_c_render_call(CmStrBuf *output,
     cm_str_buf_init(&symbol);
     cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def, callee_type,
         receiver_type, statement, first_arg);
+    {
+        /* A C-variadic extern declaration cannot be forwarded through the
+         * foreign shim (C99 has no way to re-pass `...`): call the host
+         * symbol directly with every argument. */
+        const CmHirItem *callee_item = cm_umir_c_item_of(hir, def);
+        if (callee_item != NULL && callee_item->kind == CM_HIR_ITEM_FUNCTION
+            && callee_item->data.function_item.body == 0u
+            && callee_item->data.function_item.is_foreign
+            && callee_item->data.function_item.signature.is_variadic) {
+            const CmInternedString *host = cm_interner_get(&hir->strings,
+                callee_item->name);
+            cm_str_buf_destroy(&symbol);
+            cm_str_buf_init(&symbol);
+            cm_str_buf_append_n(&symbol, (const char *)host->bytes,
+                host->len);
+        }
+    }
     cm_str_buf_append(output, "0; { long long ");
     cm_str_buf_append_n(output, symbol.data, symbol.len);
     cm_str_buf_append(output, "(); ");

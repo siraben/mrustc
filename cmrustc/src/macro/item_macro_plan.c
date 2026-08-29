@@ -3,6 +3,8 @@
 #include "cm/alloc.h"
 #include "cm/vec.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CM_PLAN_MACROS_NONE 0
@@ -1490,6 +1492,15 @@ static int cm_plan_expand_invocation(CmItemMacroPlanContext *context,
         generated_count, &expand_options, &active_generated);
     context->result.cfg = expand;
     if (expand.status != CM_MACRO_OK) {
+        if (getenv("CM_MACRO_DEBUG") != NULL) {
+            fprintf(stderr, "MACRO generated-item cfg failed status=%d "
+                "code=%d message=%s cfg=%s\n", (int)expand.status,
+                (int)expand.diagnostic.code,
+                expand.diagnostic.message == NULL ? "(none)"
+                    : expand.diagnostic.message,
+                expand.diagnostic.cfg_diagnostic.message == NULL ? "(none)"
+                    : expand.diagnostic.cfg_diagnostic.message);
+        }
         cm_plan_error(context, expand.status,
             CM_ITEM_MACRO_PLAN_STAGE_CFG,
             CM_ITEM_MACRO_PLAN_DIAG_CFG,

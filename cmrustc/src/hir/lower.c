@@ -11561,6 +11561,8 @@ static int cm_lower_function_item(CmLowerState *state,
         ? CM_HIR_UNSAFE : CM_HIR_SAFE;
     hir_item->data.function_item.signature.is_const = function->is_const;
     hir_item->data.function_item.signature.is_async = function->is_async;
+    hir_item->data.function_item.signature.is_variadic =
+        function->is_variadic;
     hir_item->data.function_item.has_default_body =
         record->parent_kind == CM_LOWER_PARENT_TRAIT
             && function->body != CM_AST_EXPR_NONE;
@@ -17000,7 +17002,8 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
             || item->generic_parameter_count != 0u
             || cm_lower_item_has_where_clause(item)
             || item->is_default
-            || !item->data.extern_block_item.is_unsafe
+            /* `extern "C" { .. }` without `unsafe` is edition-2021 syntax
+             * (libc, hashbrown); the block is retained either way. */
             || (!cm_lower_string_is(state,
                     item->data.extern_block_item.abi, "C")
                 && !cm_lower_string_is(state,

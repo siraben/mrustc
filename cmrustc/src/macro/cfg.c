@@ -42,11 +42,39 @@ static int cm_cfg_slice_equal(const char *left, size_t left_length,
         && memcmp(left, right, left_length) == 0;
 }
 
+/* Whitespace and comments: a `#[cfg(all(.., // FIXME .. \n ..))]` written
+ * over several lines (libc's primitives, hashbrown's group selection) keeps
+ * its line comments in the predicate text. */
 static void cm_cfg_skip_space(CmCfgParser *parser)
 {
-    while (parser->position < parser->length
-        && cm_cfg_is_space(parser->text[parser->position])) {
-        parser->position += 1;
+    for (;;) {
+        while (parser->position < parser->length
+            && cm_cfg_is_space(parser->text[parser->position])) {
+            parser->position += 1;
+        }
+        if (parser->position + 1u < parser->length
+            && parser->text[parser->position] == '/'
+            && parser->text[parser->position + 1u] == '/') {
+            while (parser->position < parser->length
+                && parser->text[parser->position] != '\n') {
+                parser->position += 1;
+            }
+            continue;
+        }
+        if (parser->position + 1u < parser->length
+            && parser->text[parser->position] == '/'
+            && parser->text[parser->position + 1u] == '*') {
+            parser->position += 2u;
+            while (parser->position + 1u < parser->length
+                && !(parser->text[parser->position] == '*'
+                    && parser->text[parser->position + 1u] == '/')) {
+                parser->position += 1;
+            }
+            parser->position = parser->position + 2u > parser->length
+                ? parser->length : parser->position + 2u;
+            continue;
+        }
+        return;
     }
 }
 

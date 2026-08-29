@@ -335,6 +335,11 @@ static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
         if (node == NULL) return 0;
         *minimum = cm_rules_item_extent(state, input, available);
         if (*minimum == 0u) *minimum = 1u;
+        /* An item ends at its first top-level `;` or brace group: pinning
+         * the maximum keeps `$($it:item)*` followed by a failing tail (an
+         * else-less cfg_if! tried against the `.. } else ..` rule first)
+         * from backtracking through every partition of the items. */
+        if (*minimum < available) *maximum = *minimum;
         return 1;
     case CM_MACRO_FRAGMENT_EXPR:
     case CM_MACRO_FRAGMENT_TY:

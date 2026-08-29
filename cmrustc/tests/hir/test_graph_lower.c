@@ -5786,7 +5786,6 @@ static void test_method_completeness_is_transactional(void)
 static void test_preflight_rejections(void)
 {
     static const char *const rejected_sources[] = {
-        "extern \"C\" { fn foreign(); }\n",
         "unsafe extern \"system\" { safe fn foreign(); }\n",
         "#[link(name = \"native\")] unsafe extern \"C\" { "
             "fn foreign(); }\n",

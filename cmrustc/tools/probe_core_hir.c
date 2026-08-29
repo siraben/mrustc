@@ -852,19 +852,19 @@ int main(int argc, char **argv)
             const CmSourceFile *error_file;
             int got = cm_module_graph_get_error(&graph, error_index,
                 &resolve_error);
-            fprintf(stderr, "graph-error-probe index=%u got=%d kind=%d\n",
-                (unsigned)error_index, got, got ? (int)resolve_error.kind : -1);
             if (!got) break;
             error_file = cm_source_get(&sources, resolve_error.span.source);
             {
-                char detail_a[160];
-                char detail_b[400];
+                static char detail_a[1024];
+                static char detail_b[4096];
                 detail_a[0] = '\0';
                 detail_b[0] = '\0';
                 (void)cm_module_graph_copy_string(&graph,
                     resolve_error.detail_a, detail_a, sizeof(detail_a));
                 (void)cm_module_graph_copy_string(&graph,
                     resolve_error.detail_b, detail_b, sizeof(detail_b));
+                detail_a[sizeof(detail_a) - 1u] = '\0';
+                detail_b[sizeof(detail_b) - 1u] = '\0';
                 printf("graph-error kind=%s source=%s line=%lu column=%lu"
                     " detail=%s: %s\n",
                     cm_resolve_error_kind_name(resolve_error.kind),

@@ -72,6 +72,11 @@ static void test_target_features(void)
     expect_value(&environment, "empty-all", "all()", 1);
     expect_value(&environment, "empty-any", "any()", 0);
     expect_value(&environment, "trailing-comma", "all(unix,)", 1);
+    expect_value(&environment, "line-comment",
+        "all(\n    unix, // FIXME(ctest): comment inside the predicate\n"
+        "    not(windows),\n)", 1);
+    expect_value(&environment, "block-comment",
+        "any(/* first */ windows, /* second */ unix)", 1);
 }
 
 static void test_cfg_attr_decision(void)

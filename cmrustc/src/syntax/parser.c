@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+static int cm_parser_ordinary_identifier(const struct cm_token *token);
+
 typedef struct CmParser {
     CmAst *ast;
     const char *source;
@@ -1035,6 +1037,7 @@ static CmAstTypeId cm_parser_parse_type(CmParser *parser)
         cm_parser_parse_trait_type_bounds(parser, &type);
     } else if (cm_parser_keyword(parser, CM_KW_FOR)
         || cm_parser_keyword(parser, CM_KW_UNSAFE)
+        || cm_parser_keyword(parser, CM_KW_EXTERN)
         || cm_parser_keyword(parser, CM_KW_FN)) {
         CmVec parameters;
 
@@ -1043,6 +1046,11 @@ static CmAstTypeId cm_parser_parse_type(CmParser *parser)
             cm_parser_parse_lifetime_binder(parser, &type.binder);
         }
         type.is_unsafe = cm_parser_eat_keyword(parser, CM_KW_UNSAFE);
+        /* `extern "C" fn(..)` (libc's callback types): the ABI string is
+         * optional after `extern`. */
+        if (cm_parser_eat_keyword(parser, CM_KW_EXTERN)
+            && cm_parser_kind(parser) == CM_TOKEN_STRING)
+            cm_parser_bump(parser);
         (void)cm_parser_expect_keyword(parser, CM_KW_FN,
             "expected 'fn' in function pointer type");
         cm_vec_init(&parameters, sizeof(CmAstTypeId));
@@ -1052,6 +1060,18 @@ static CmAstTypeId cm_parser_parse_type(CmParser *parser)
                cm_parser_kind(parser) != CM_TOKEN_EOF) {
             CmAstTypeId parameter;
 
+            /* `fn(arg1: *mut c_void)`: a parameter name is allowed (and
+             * ignored) in a fn pointer type; `...` ends a variadic list. */
+            if (cm_parser_kind(parser) == CM_TOKEN_DOT_DOT_DOT) {
+                cm_parser_bump(parser);
+                break;
+            }
+            if (cm_parser_ordinary_identifier(cm_parser_token(parser))
+                && cm_parser_next_token(parser) != NULL
+                && cm_parser_next_token(parser)->kind == CM_TOKEN_COLON) {
+                cm_parser_bump(parser);
+                cm_parser_bump(parser);
+            }
             parameter = cm_parser_parse_type(parser);
             (void)cm_vec_push(&parameters, &parameter);
             if (!cm_parser_eat(parser, CM_TOKEN_COMMA)) {
@@ -1576,6 +1596,13 @@ static int cm_parser_starts_local_item(const CmParser *parser)
         || token->keyword == CM_KW_TRAIT
         || token->keyword == CM_KW_UNION
         || token->keyword == CM_KW_USE) return 1;
+    if (token->keyword == CM_KW_TYPE) {
+        /* `type HM = HashMap<i32, i32>;` inside a body (hashbrown's tests
+         * modules) is an item; `type` never starts an expression. */
+        const struct cm_token *next = cm_parser_token_at(parser,
+            position + 1u);
+        return cm_parser_ordinary_identifier(next);
+    }
     if (token->keyword == CM_KW_CONST) {
         const struct cm_token *next;
 
@@ -1595,6 +1622,11 @@ static int cm_parser_starts_local_item(const CmParser *parser)
 
         next = cm_parser_token_at(parser, position + 1u);
         if (next != NULL && next->keyword == CM_KW_FN) return 1;
+        /* `unsafe impl Allocator for MyAlloc { .. }` / `unsafe trait ..`
+         * nested in a body (hashbrown's raw-table tests). */
+        if (token->keyword == CM_KW_UNSAFE && next != NULL
+            && (next->keyword == CM_KW_IMPL
+                || next->keyword == CM_KW_TRAIT)) return 1;
         if (token->keyword == CM_KW_UNSAFE && next != NULL
             && next->keyword == CM_KW_EXTERN) {
             position += 2u;
@@ -1603,7 +1635,8 @@ static int cm_parser_starts_local_item(const CmParser *parser)
                 position += 1u;
                 token = cm_parser_token_at(parser, position);
             }
-            return token != NULL && token->kind == CM_TOKEN_LBRACE;
+            return token != NULL && (token->kind == CM_TOKEN_LBRACE
+                || token->keyword == CM_KW_FN);
         }
         return 0;
     }
@@ -2067,6 +2100,15 @@ static CmAstExprId cm_parser_parse_prefix(CmParser *parser,
         cm_parser_bump(parser);
         (void)cm_parser_expect(parser, CM_TOKEN_COLON,
             "expected ':' after loop label");
+        if (cm_parser_keyword(parser, CM_KW_FOR)
+            || cm_parser_keyword(parser, CM_KW_WHILE)
+            || cm_parser_kind(parser) == CM_TOKEN_LBRACE) {
+            /* `'outer: for ..` / `'a: while ..` / `'b: { .. }`: the label
+             * is accepted and dropped (the loop parses normally); a
+             * `break 'outer` inside then targets the innermost loop —
+             * exact only when the labelled loop is that loop. */
+            return cm_parser_parse_prefix(parser, allow_struct_literal);
+        }
         (void)cm_parser_expect_keyword(parser, CM_KW_LOOP,
             "expected 'loop' after loop label");
         expression.data.loop_expr.body = cm_parser_parse_block(parser);
@@ -2595,7 +2637,8 @@ static CmAstExprId cm_parser_parse_block_mode(CmParser *parser,
                     && item->kind != CM_AST_ITEM_STRUCT
                     && item->kind != CM_AST_ITEM_TRAIT
                     && item->kind != CM_AST_ITEM_USE
-                    && item->kind != CM_AST_ITEM_UNION)) {
+                    && item->kind != CM_AST_ITEM_UNION
+                    && item->kind != CM_AST_ITEM_TYPE_ALIAS)) {
                 cm_parser_error(parser,
                     "expected supported item in block statement");
             }
@@ -3983,6 +4026,12 @@ static CmAstItemId cm_parser_parse_function(CmParser *parser,
            cm_parser_kind(parser) != CM_TOKEN_EOF) {
         CmAstFunctionParam parameter;
 
+        if (cm_parser_kind(parser) == CM_TOKEN_DOT_DOT_DOT) {
+            /* `fn printf(fmt: *const c_char, ...)`: a C-variadic tail. */
+            cm_parser_bump(parser);
+            item.data.function_item.is_variadic = 1;
+            break;
+        }
         memset(&parameter, 0, sizeof(parameter));
         if (cm_parser_kind(parser) == CM_TOKEN_AMP
             && cm_parser_next_token(parser) != NULL

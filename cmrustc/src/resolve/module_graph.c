@@ -2424,6 +2424,29 @@ static int cm_build_module_macro_scope(CmModuleGraphState *state,
     return ok;
 }
 
+/* The effective-item record declared by `declaration`, searching nested
+ * generated children as well. */
+static const CmResolveEffectiveItemRecord *cm_find_effective_by_declaration(
+    const CmResolveEffectiveItemRecord *items, uint32_t count,
+    CmResolveItemRef declaration)
+{
+    uint32_t index;
+
+    if (items == NULL) return NULL;
+    for (index = 0u; index < count; ++index) {
+        const CmResolveEffectiveItemRecord *found;
+
+        if (items[index].item.declaration.source == declaration.source
+            && items[index].item.declaration.item == declaration.item) {
+            return &items[index];
+        }
+        found = cm_find_effective_by_declaration(items[index].children,
+            items[index].item.child_count, declaration);
+        if (found != NULL) return found;
+    }
+    return NULL;
+}
+
 static int cm_propagate_inherited_macro_histories(
     CmModuleGraphState *state)
 {
@@ -2436,6 +2459,8 @@ static int cm_propagate_inherited_macro_histories(
         const CmAstItem *declaration;
         CmVec merged;
         size_t history_index;
+        CmSourceId anchor_source;
+        uint32_t anchor_start;
 
         child = (CmResolveModuleNode *)cm_vec_at(&state->modules, index);
         if (child == NULL || child->info.parent == CM_MODULE_NONE) continue;
@@ -2445,6 +2470,24 @@ static int cm_propagate_inherited_macro_histories(
         declaration = parent_unit == NULL ? NULL : cm_ast_get_item(
             &parent_unit->ast, child->info.declaration.item);
         if (parent == NULL || declaration == NULL) return 0;
+        /* A macro-generated `mod x;` (libc's `cfg_if! { .. mod primitives;
+         * .. }`) sits at its source invocation's anchor, not at the
+         * synthetic reparse offset its AST item carries. */
+        anchor_source = child->info.declaration.source;
+        anchor_start = declaration->span.start;
+        if ((size_t)child->info.declaration.item
+                > parent_unit->parsed_item_count) {
+            const CmResolveEffectiveItemRecord *record;
+
+            record = cm_find_effective_by_declaration(
+                parent->effective_items, parent->info.effective_item_count,
+                child->info.declaration);
+            if (record != NULL && record->item.is_generated
+                && record->item.span.source != 0u) {
+                anchor_source = record->item.span.source;
+                anchor_start = record->item.span.start;
+            }
+        }
         cm_vec_init(&merged, sizeof(CmResolveMacroScopeEntry));
         for (history_index = 0u;
                 history_index < parent->macro_scope_history_count;
@@ -2452,10 +2495,8 @@ static int cm_propagate_inherited_macro_histories(
             CmResolveMacroScopeEntry inherited;
 
             inherited = parent->macro_scope_history[history_index];
-            if (inherited.introduction_span.source
-                    != child->info.declaration.source
-                || inherited.introduction_span.end
-                    > declaration->span.start) continue;
+            if (inherited.introduction_span.source != anchor_source
+                || inherited.introduction_span.end > anchor_start) continue;
             inherited.introduction_span.source = child->info.source;
             inherited.introduction_span.start = 0u;
             inherited.introduction_span.end = 0u;
@@ -2540,6 +2581,28 @@ static const CmResolveModuleNode *cm_pending_owner_module(
         }
     }
     return NULL;
+}
+
+/* "<reason>: <name>" for a macro invocation without a binding; the name
+ * is what a reader needs to find the missing definition. */
+static const char *cm_graph_missing_macro_detail(
+    const CmModuleGraphState *state, const CmResolveUnit *unit,
+    CmInternId name, int is_qualified)
+{
+    static char buffer[256];
+    const CmInternedString *text;
+    const char *reason;
+
+    (void)state;
+    reason = is_qualified ? "no unique public local-crate macro binding"
+        : "no declaration-ordered macro binding";
+    text = name == CM_INTERN_ID_NONE || is_qualified ? NULL
+        : cm_ast_get_string(&unit->ast, name);
+    if (text == NULL) return reason;
+    snprintf(buffer, sizeof(buffer), "%s: %.*s", reason,
+        (int)(text->len > 200u ? 200u : text->len),
+        (const char *)text->bytes);
+    return buffer;
 }
 
 static const CmResolveMacroScopeEntry *cm_resolve_pending_from_scope(
@@ -2942,11 +3005,9 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                         ? cm_graph_intern_c_str(state,
                             cm_dependency_macro_status_name(
                                 dependency_status))
-                        : (pending->is_qualified
-                        ? cm_graph_intern_c_str(state,
-                            "no unique public local-crate macro binding")
                         : cm_graph_intern_c_str(state,
-                            "no declaration-ordered macro binding")),
+                            cm_graph_missing_macro_detail(state, unit,
+                                name, pending->is_qualified)),
                     0u, 0u);
                 ok = 0;
                 continue;

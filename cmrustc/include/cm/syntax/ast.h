@@ -546,6 +546,7 @@ typedef struct CmAstFunction {
     CmAstExprId body;
     int is_const;
     int is_async;
+    int is_variadic;    /* `fn f(a: T, ...)` (foreign declarations) */
     int is_safe;
     int is_unsafe;
 } CmAstFunction;
