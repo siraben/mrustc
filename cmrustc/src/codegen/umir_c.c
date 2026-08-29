@@ -599,9 +599,28 @@ static uint32_t cm_umir_c_collect_parameters(const CmHirContext *hir,
 }
 
 /* Intrinsics whose rendering depends on the instance's type arguments. */
+static const CmHirItem *cm_umir_c_item_of(const CmHirContext *hir,
+    CmHirDefId def);
+
+/* Whether `type` is core's `Option` (by item name). */
+static int cm_umir_c_is_option(const CmHirContext *hir, const CmTyckSet *tyck,
+    CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirItem *item;
+    const CmInternedString *name;
+    if (ty == NULL || ty->kind != CM_TY_ADT) return 0;
+    item = cm_umir_c_item_of(hir, ty->def);
+    name = item == NULL ? NULL : cm_interner_get(&hir->strings, item->name);
+    return name != NULL && name->len == 6u
+        && memcmp(name->bytes, "Option", 6u) == 0;
+}
+
 static int cm_umir_c_render_typed_shim(CmStrBuf *output,
-    const CmTyckSet *tyck, const CmInternedString *name,
-    const CmUMirInstance *instance)
+    const CmHirContext *hir, const CmTyckSet *tyck,
+    const CmInternedString *name, const CmUMirInstance *instance)
 {
     CmTyId first = instance->count == 0u ? CM_TY_NONE : instance->types[0];
     const CmTy *ft = first == CM_TY_NONE ? NULL
@@ -610,6 +629,25 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
     if (name == NULL) return 0;
 #define CM_SHIM_IS(text) (name->len == sizeof(text) - 1u \
         && memcmp(name->bytes, text, name->len) == 0)
+    if (CM_SHIM_IS("transmute") || CM_SHIM_IS("transmute_unchecked")) {
+        /* Niche layouts: core transmutes an integer/pointer straight to
+         * `Option<NonZero<T>>` / `Option<&T>` (0 = None) and back; our
+         * Option is a block, so build or unwrap one.  Otherwise the bit
+         * pattern is the value itself. */
+        CmTyId to = instance->count >= 2u ? instance->types[1] : CM_TY_NONE;
+        int from_option = cm_umir_c_is_option(hir, tyck, first);
+        int to_option = cm_umir_c_is_option(hir, tyck, to);
+        if (to_option && !from_option)
+            cm_str_buf_append(output, "(long long a) { long long *b = "
+                "(long long *)malloc(16); if (a == 0) { b[0] = 0; } else "
+                "{ b[0] = 1; b[1] = a; } return (long long)(intptr_t)b; }");
+        else if (from_option && !to_option)
+            cm_str_buf_append(output, "(long long a) { long long *b = "
+                "(long long *)(intptr_t)a; return b[0] == 0 ? 0 : b[1]; }");
+        else
+            cm_str_buf_append(output, "(long long a) { return a; }");
+        return 1;
+    }
     if (CM_SHIM_IS("ptr_metadata")) {
         /* `*const [T]` / `*const str`: the pair's length; thin: unit. */
         if (cm_umir_c_is_fat(tyck, first))
@@ -861,8 +899,6 @@ static const char *cm_umir_c_intrinsic_shim(const CmInternedString *name)
         { "assert_mem_uninitialized_valid", "() { return 0; }" },
         { "ub_checks", "() { return 0; }" },
         { "cold_path", "() { return 0; }" },
-        { "transmute", "(long long a) { return a; }" },
-        { "transmute_unchecked", "(long long a) { return a; }" },
         { "likely", "(long long a) { return a; }" },
         { "unlikely", "(long long a) { return a; }" },
         { "black_box", "(long long a) { return a; }" },
@@ -3208,7 +3244,7 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                     const char *shim = cm_umir_c_intrinsic_shim(stub_name);
                     reason = "declaration without body";
                     if (shim == NULL && cm_umir_c_render_typed_shim(output,
-                            tyck, stub_name, instance))
+                            hir, tyck, stub_name, instance))
                         shim = "";
                     if (shim != NULL) {
                         cm_str_buf_append(output, shim);
