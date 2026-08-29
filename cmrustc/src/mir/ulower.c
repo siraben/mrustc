@@ -551,6 +551,24 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
 static int cm_umir_pattern_literal_value(const CmUMirBuilder *builder,
     const CmUPat *pat, long *out);
 
+/* Whether a path pattern names a const/static item (`flags::ALIGN_LEFT
+ * =>`): such an arm is a value test against the constant. */
+static int cm_umir_pattern_is_const(const CmUMirBuilder *builder,
+    const CmUPat *pat)
+{
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    if (pat == NULL || pat->kind != CM_U_PAT_PATH || builder->hir == NULL
+        || pat->data.path.resolution.kind != CM_U_RESOLVED_DEFINITION)
+        return 0;
+    record = cm_hir_lookup_definition(builder->hir,
+        pat->data.path.resolution.definition);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(builder->hir, record->entity.item_id);
+    return item != NULL && (item->kind == CM_HIR_ITEM_CONST
+        || item->kind == CM_HIR_ITEM_STATIC);
+}
+
 /* Whether a match-arm pattern needs value tests rather than a switch
  * key: a range, a binding over such a subpattern, or an or-pattern with
  * any such alternative. */
@@ -561,6 +579,7 @@ static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
     if (pat == NULL) return 0;
     switch (pat->kind) {
     case CM_U_PAT_RANGE: return 1;
+    case CM_U_PAT_PATH: return cm_umir_pattern_is_const(builder, pat);
     case CM_U_PAT_BINDING:
         return pat->data.binding.subpattern != CM_U_PAT_NONE
             && cm_umir_pattern_needs_test(builder,
@@ -577,12 +596,33 @@ static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
 /* Inclusive [lo, hi] tests an arm pattern imposes on the scrutinee
  * (any one passing selects the arm); binds `x @ ..` names to `value`. */
 static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
-    const CmUPat *pat, CmUMirLocalId value, CmUExprId id, long *lo,
-    long *hi, uint32_t *count, uint32_t capacity)
+    const CmUPat *pat, CmUPatId pat_id, CmUMirLocalId value, CmUExprId id,
+    long *lo, long *hi, CmUMirLocalId *const_local, uint32_t *count,
+    uint32_t capacity)
 {
     uint32_t alt;
     if (pat == NULL || *count >= capacity) return;
     switch (pat->kind) {
+    case CM_U_PAT_PATH:
+        if (cm_umir_pattern_is_const(builder, pat)) {
+            /* The constant's value, compared as a one-point range. */
+            CmUMirLocalId c = cm_umir_new_local(builder, CM_TY_NONE);
+            CmUMirBlock *block;
+            CmUMirStatement *statement;
+            cm_umir_push_operands(builder, c, CM_UMIR_RVALUE_CONST_PATTERN,
+                CM_U_EXPR_NONE, CM_TY_NONE, NULL, 0u);
+            block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
+                builder->current);
+            statement = block == NULL || block->statements.len == 0u ? NULL
+                : (CmUMirStatement *)cm_vec_at(&block->statements,
+                    block->statements.len - 1u);
+            if (statement != NULL) statement->pattern = pat_id;
+            lo[*count] = 0;
+            hi[*count] = 0;
+            const_local[*count] = c;
+            *count += 1u;
+        }
+        break;
     case CM_U_PAT_RANGE: {
         const CmUPat *start = cm_ubody_get_pat(builder->ub,
             pat->data.range.start);
@@ -620,6 +660,7 @@ static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
             high -= 1;
         lo[*count] = low;
         hi[*count] = high;
+        const_local[*count] = (CmUMirLocalId)0u;
         *count += 1u;
         break;
     }
@@ -628,6 +669,7 @@ static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
         if (cm_umir_pattern_literal_value(builder, pat, &v)) {
             lo[*count] = v;
             hi[*count] = v;
+            const_local[*count] = (CmUMirLocalId)0u;
             *count += 1u;
         }
         break;
@@ -639,14 +681,16 @@ static void cm_umir_collect_range_tests(CmUMirBuilder *builder,
                 CM_UMIR_RVALUE_LOCAL, id, CM_TY_NONE, &value, 1u);
         if (pat->data.binding.subpattern != CM_U_PAT_NONE)
             cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
-                builder->ub, pat->data.binding.subpattern), value, id, lo,
-                hi, count, capacity);
+                builder->ub, pat->data.binding.subpattern),
+                pat->data.binding.subpattern, value, id, lo, hi,
+                const_local, count, capacity);
         break;
     case CM_U_PAT_OR:
         for (alt = 0u; alt < pat->data.list.pattern_count; ++alt)
             cm_umir_collect_range_tests(builder, cm_ubody_get_pat(
-                builder->ub, pat->data.list.patterns[alt]), value, id, lo,
-                hi, count, capacity);
+                builder->ub, pat->data.list.patterns[alt]),
+                pat->data.list.patterns[alt], value, id, lo, hi,
+                const_local, count, capacity);
         break;
     default:
         break;
@@ -1581,11 +1625,13 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                  * enters the arm, the last failure falls to the next arm. */
                 long lo[16];
                 long hi[16];
+                CmUMirLocalId const_local[16];
                 uint32_t test_count = 0u;
                 uint32_t test;
                 CmUMirBlockId body_entry = cm_umir_new_block(builder);
-                cm_umir_collect_range_tests(builder, pat, scrutinee, id, lo,
-                    hi, &test_count, 16u);
+                cm_umir_collect_range_tests(builder, pat,
+                    expr->data.match_expr.arms[arm].pattern, scrutinee, id,
+                    lo, hi, const_local, &test_count, 16u);
                 for (test = 0u; test < test_count; ++test) {
                     CmUMirLocalId ops[3];
                     CmUMirLocalId flag = cm_umir_new_local(builder,
@@ -1594,15 +1640,21 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         ? cm_umir_new_block(builder) : join;
                     CmUMirBlock *block;
                     ops[0] = scrutinee;
-                    ops[1] = cm_umir_new_local(builder, CM_TY_NONE);
-                    cm_umir_push_immediate(builder, ops[1],
-                        CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE, CM_TY_NONE,
-                        NULL, 0u, (uint32_t)lo[test]);
-                    ops[2] = cm_umir_new_local(builder, CM_TY_NONE);
-                    cm_umir_push_immediate(builder, ops[2],
-                        CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE, CM_TY_NONE,
-                        NULL, 0u, hi[test] > (long)0xFFFFFFFFl
-                            ? 0xFFFFFFFFu : (uint32_t)hi[test]);
+                    if (const_local[test] != (CmUMirLocalId)0u) {
+                        ops[1] = const_local[test];
+                        ops[2] = const_local[test];
+                    } else {
+                        ops[1] = cm_umir_new_local(builder, CM_TY_NONE);
+                        cm_umir_push_immediate(builder, ops[1],
+                            CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE,
+                            CM_TY_NONE, NULL, 0u, (uint32_t)lo[test]);
+                        ops[2] = cm_umir_new_local(builder, CM_TY_NONE);
+                        cm_umir_push_immediate(builder, ops[2],
+                            CM_UMIR_RVALUE_LITERAL, CM_U_EXPR_NONE,
+                            CM_TY_NONE, NULL, 0u,
+                            hi[test] > (long)0xFFFFFFFFl
+                                ? 0xFFFFFFFFu : (uint32_t)hi[test]);
+                    }
                     cm_umir_push_operands(builder, flag,
                         CM_UMIR_RVALUE_RANGE_TEST, id, CM_TY_NONE, ops, 3u);
                     block = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,

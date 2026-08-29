@@ -162,6 +162,32 @@ fn run_show<I: Pick<[Arg], Out = Arg>>(args: &[Arg], i: I) -> u32 {
     value.show()
 }
 
+// A blanket impl over a bare parameter with an unsatisfied bound
+// (core's `impl<F: FnPtr> Debug for F`) precedes the concrete impl in
+// item order; the concrete impl must win for `bool`.
+trait FnLike {}
+
+trait Dbg2 {
+    fn d(&self) -> u32;
+}
+
+impl<F: FnLike> Dbg2 for F {
+    fn d(&self) -> u32 {
+        9999
+    }
+}
+
+impl Dbg2 for bool {
+    fn d(&self) -> u32 {
+        if *self { 7 } else { 8 }
+    }
+}
+
+fn via2<T: Dbg2>(x: &T) -> u32 {
+    let f: fn(&T) -> u32 = <T as Dbg2>::d;
+    f(x) + x.d()
+}
+
 #[no_mangle]
 pub extern "C" fn trait_args(i: u32) -> u32 {
     let table: [u32; 4] = [10, 20, 30, 40];
@@ -178,4 +204,5 @@ pub extern "C" fn trait_args(i: u32) -> u32 {
     lookup(&table, idx) + lookup_bytes(&b, idx) + lookup(&table, plain)
         + stepper(i) * 10000 + bumped * 1000000
         + run_show(&[Arg { n: 3 }, Arg { n: i + 1 }], 1usize) * 100000000
+        + via2(&(i > 1)) * 10
 }

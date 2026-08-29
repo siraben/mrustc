@@ -69,6 +69,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_REF_INDEX,     /* &operands[0][operands[1]] (element address) */
     CM_UMIR_RVALUE_RANGE_TEST,    /* operands[1] <= operands[0] <= operands[2] */
     CM_UMIR_RVALUE_REF_FIELD,     /* &operands[0].field(expr) (field address) */
+    CM_UMIR_RVALUE_CONST_PATTERN, /* value of the const a path pattern names */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
@@ -89,6 +90,8 @@ typedef struct CmUMirStatement {
     uint32_t operand_overflow;
     /* VARIANT: discriminant index; SLOT: slot index. */
     uint32_t immediate;
+    /* CONST_PATTERN: the path pattern naming the constant. */
+    CmUPatId pattern;
 } CmUMirStatement;
 
 typedef enum CmUMirTerminatorKind {

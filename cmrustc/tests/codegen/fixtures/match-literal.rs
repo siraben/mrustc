@@ -48,9 +48,29 @@ fn bucket(c: u8) -> u32 {
     }
 }
 
+// Const paths as match patterns are value tests against the constant
+// (core's `FormattingOptions::get_align`: `match flags & ALIGN_BITS {
+// ALIGN_LEFT => .., ALIGN_RIGHT => .., .. }`).
+mod flags {
+    pub const ALIGN_BITS: u32 = 3 << 29;
+    pub const ALIGN_LEFT: u32 = 0 << 29;
+    pub const ALIGN_RIGHT: u32 = 1 << 29;
+    pub const ALIGN_CENTER: u32 = 2 << 29;
+}
+
+fn align(f: u32) -> u32 {
+    match f & flags::ALIGN_BITS {
+        flags::ALIGN_LEFT => 1,
+        flags::ALIGN_RIGHT => 2,
+        flags::ALIGN_CENTER => 3,
+        _ => 4,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn match_literal(which: u32) -> u32 {
     classify(which) + sign(which as i32 - 1) + flag(which > 1) + letter(b'a' + which as u8)
         + bucket(b'a' + which as u8) * 1000 + bucket(b'0' + (which % 10) as u8) * 100000
         + bucket(b'x') + bucket(250)
+        + align(which << 29) * 10000000
 }

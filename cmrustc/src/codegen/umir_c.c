@@ -1362,6 +1362,7 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
 {
     const CmHirItem *trait_item;
     size_t index;
+    int blanket_pass;
     CmTyId self_resolved = cm_ty_resolve((CmTyArena *)&tyck->arena, self);
     if (out_count != NULL) *out_count = 0u;
     if (declaration == NULL
@@ -1370,6 +1371,10 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
     trait_item = cm_umir_c_item_of(hir, declaration->parent_definition);
     if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT)
         return cm_hir_def_id_none();
+    /* Specific impls before blanket ones (self a bare parameter, bounds
+     * unchecked here): `impl<F: FnPtr> Debug for F` precedes `impl Debug
+     * for bool` in item order and would otherwise capture `bool`. */
+    for (blanket_pass = 0; blanket_pass < 2; ++blanket_pass)
     for (index = 0u; index < hir->items.len; ++index) {
         const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
             &hir->items, index);
@@ -1383,6 +1388,14 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
         uint32_t bound = 0u;
         impl_self = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
             impl->data.impl_item.self_type);
+        {
+            const CmTy *pattern = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, impl_self));
+            int is_blanket = pattern != NULL
+                && (pattern->kind == CM_TY_PARAM
+                    || pattern->kind == CM_TY_SELF);
+            if (is_blanket != (blanket_pass == 1)) continue;
+        }
         if (!cm_umir_c_ty_match(tyck, impl_self, self_resolved,
                 bound_params, bound_types, &bound, 32u, 0u)) {
             if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
@@ -3189,6 +3202,38 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_push(output, '[');
                 cm_umir_c_render_local(output, statement->operands[1]);
                 cm_str_buf_push(output, ']');
+                break;
+            }
+            case CM_UMIR_RVALUE_CONST_PATTERN: {
+                /* The constant a path pattern names: its initializer. */
+                const CmUBody *pat_body = cm_ubody_get(ubodies, body->source);
+                const CmUPat *pat = statement->pattern == CM_U_PAT_NONE
+                    || pat_body == NULL ? NULL
+                    : cm_ubody_get_pat(pat_body, statement->pattern);
+                const CmHirItem *const_item = pat == NULL
+                        || pat->kind != CM_U_PAT_PATH ? NULL
+                    : cm_umir_c_item_of(hir,
+                        pat->data.path.resolution.definition);
+                if (const_item != NULL && (const_item->kind
+                        == CM_HIR_ITEM_CONST
+                        || const_item->kind == CM_HIR_ITEM_STATIC)) {
+                    CmStrBuf symbol;
+                    cm_str_buf_init(&symbol);
+                    cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
+                        const_item->definition, CM_TY_NONE, CM_TY_NONE,
+                        NULL, 0u);
+                    cm_str_buf_append(output, "0; { long long ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "(); ");
+                    cm_umir_c_render_local(output, statement->destination);
+                    cm_str_buf_append(output, " = ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "(); }");
+                    cm_str_buf_destroy(&symbol);
+                } else {
+                    cm_str_buf_append(output, "0 /* const pattern */");
+                    complete = 0;
+                }
                 break;
             }
             case CM_UMIR_RVALUE_RANGE_TEST:
