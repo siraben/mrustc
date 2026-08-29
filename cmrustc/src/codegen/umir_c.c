@@ -2300,10 +2300,10 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             case CM_UMIR_RVALUE_CAST: {
                 CmTyId from = cm_umir_c_local_type(body,
                     statement->operands[0]);
+                CmTyId to = cm_umir_c_subst(statement->type);
                 if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, from))
                     && cm_umir_c_ref_depth(tyck, from) != 0u
-                    && !cm_umir_c_is_fat(tyck,
-                        cm_umir_c_peel(tyck, statement->type))) {
+                    && !cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, to))) {
                     /* `s as *const str as *const u8`: the data pointer. */
                     cm_umir_c_render_base(output, statement->operands[0],
                         cm_umir_c_ref_depth(tyck, from));
@@ -2312,7 +2312,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 }
                 cm_str_buf_append(output, "(long long)(");
                 cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena,
-                    statement->type));
+                    to));
                 cm_str_buf_push(output, ')');
                 cm_umir_c_render_local(output, statement->operands[0]);
                 break;
@@ -2387,7 +2387,7 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 /* Scalars load at their own width so byte pointers into
                  * string data never over-read; everything else is a slot. */
                 const char *scalar = cm_umir_c_scalar_type(tyck,
-                    statement->type);
+                    cm_umir_c_subst(statement->type));
                 if (scalar != NULL) {
                     cm_str_buf_append(output, "(long long)*(");
                     cm_str_buf_append(output, scalar);
