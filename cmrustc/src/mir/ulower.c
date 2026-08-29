@@ -909,12 +909,16 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
             type);
         break;
-    case CM_U_EXPR_ARRAY_REPEAT:
-        (void)cm_umir_emit_expr(builder, expr->data.repeat.value);
-        (void)cm_umir_emit_expr(builder, expr->data.repeat.length);
-        cm_umir_push(builder, destination, CM_UMIR_RVALUE_AGGREGATE, id,
-            type);
+    case CM_U_EXPR_ARRAY_REPEAT: {
+        /* `[v; N]`: the value is the single operand; N comes from the
+         * array type at emission. */
+        CmUMirLocalId operands[2];
+        operands[0] = cm_umir_emit_expr(builder, expr->data.repeat.value);
+        operands[1] = cm_umir_emit_expr(builder, expr->data.repeat.length);
+        cm_umir_push_operands(builder, destination,
+            CM_UMIR_RVALUE_AGGREGATE, id, type, operands, 2u);
         break;
+    }
     case CM_U_EXPR_LOOP: {
         CmUMirBlockId header = cm_umir_new_block(builder);
         CmUMirBlockId exit_block = cm_umir_new_block(builder);

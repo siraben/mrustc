@@ -1817,9 +1817,13 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
             return cm_tyck_fn_def(env, item, cm_tyck_parent_item(env->state,
                 item), CM_TY_NONE, NULL);
         }
-        if (item->kind == CM_HIR_ITEM_CONST || item->kind == CM_HIR_ITEM_STATIC)
+        if (item->kind == CM_HIR_ITEM_CONST || item->kind == CM_HIR_ITEM_STATIC) {
+            /* MIR emission evaluates the item's initializer body. */
+            if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
+                env->out->method_targets[id] = item->definition;
             return cm_ty_from_hir(arena, env->state->hir,
                 item->data.value_item.type);
+        }
         if (item->kind == CM_HIR_ITEM_STRUCT) {
             CmTyckInstance instance;
             CmTyId adt = cm_tyck_adt_fresh(env, item, &instance);
@@ -2001,10 +2005,14 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                     found.item->definition, found.instance.types,
                     found.instance.count);
             }
-            if (found.item->kind == CM_HIR_ITEM_CONST)
+            if (found.item->kind == CM_HIR_ITEM_CONST) {
+                if (env->out->method_targets != NULL
+                    && id != CM_U_EXPR_NONE)
+                    env->out->method_targets[id] = found.item->definition;
                 return cm_ty_subst(arena, cm_ty_from_hir(arena,
                     env->state->hir, found.item->data.value_item.type),
                     cm_tyck_subst_of(&found.instance));
+            }
             cm_tyck_error(env, "associated item is not a value");
             return arena->error;
         }
@@ -2259,8 +2267,13 @@ static int cm_tyck_coerce(CmTyckEnv *env, CmTyId actual, CmTyId expected)
         const CmTy *ep = cm_ty_get(arena, cm_ty_resolve(arena,
             e->children[0]));
         if (ap != NULL && ep != NULL && ap->kind == CM_TY_ARRAY
-            && ep->kind == CM_TY_SLICE)
-            return cm_ty_unify(arena, ap->children[0], ep->children[0]);
+            && ep->kind == CM_TY_SLICE) {
+            int ok = cm_ty_unify(arena, ap->children[0], ep->children[0]);
+            if (ok && env->coerce_site != CM_U_EXPR_NONE
+                && env->out != NULL && env->out->unsize_targets != NULL)
+                env->out->unsize_targets[env->coerce_site] = expected;
+            return ok;
+        }
         if (ap != NULL && ep != NULL && ep->kind == CM_TY_DYN) {
             if (ap->kind != CM_TY_DYN && env->coerce_site != CM_U_EXPR_NONE
                 && env->out != NULL && env->out->unsize_targets != NULL)
@@ -4071,9 +4084,20 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             et != NULL && et->kind == CM_TY_ARRAY ? et->children[0]
             : CM_TY_NONE);
         (void)cm_tyck_expr(env, expr->data.repeat.length, arena->usize);
-        result = cm_ty_array(arena, element, et != NULL
-            && et->kind == CM_TY_ARRAY ? et->children[1]
-            : arena->const_unknown);
+        {
+            /* `[v; 3]`: a literal length is a known constant. */
+            const CmUExpr *len_expr = cm_ubody_get_expr(env->ub,
+                expr->data.repeat.length);
+            CmTyId length = et != NULL && et->kind == CM_TY_ARRAY
+                ? et->children[1] : arena->const_unknown;
+            if (length == arena->const_unknown && len_expr != NULL
+                && len_expr->kind == CM_U_EXPR_LITERAL
+                && len_expr->data.literal.kind == CM_U_LITERAL_INTEGER)
+                length = cm_ty_const_value(arena,
+                    len_expr->data.literal.value_low,
+                    len_expr->data.literal.value_high);
+            result = cm_ty_array(arena, element, length);
+        }
         break;
     }
     case CM_U_EXPR_STRUCT:
@@ -4597,7 +4621,26 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
             continue;
         }
         if (ty->kind == CM_TY_ERROR) continue; /* counted as error nodes */
-        if (cm_ty_has_infer(arena, type)) out->unresolved_nodes += 1u;
+        /* A callee path whose fn item keeps an unconstrained generic
+         * argument (bound only through an associated-type equality, as in
+         * `slice_get_unchecked<ItemPtr: ChangePointee<[T], Pointee = T>>`)
+         * is complete for emission: the call's result type is unified and
+         * MIR binds generics from operands. */
+        if (ty->kind == CM_TY_FN_DEF) continue;
+        if (cm_ty_has_infer(arena, type)) {
+            out->unresolved_nodes += 1u;
+            if (getenv("CM_TYCK_DEBUG") != NULL) {
+                const CmUExpr *ue = cm_ubody_get_expr(ub, (CmUExprId)node);
+                CmStrBuf text;
+                cm_str_buf_init(&text);
+                cm_ty_print(arena, env.state->hir, type, &text);
+                fprintf(stderr, "TYCK unresolved-node kind=%d type=%.*s\n",
+                    ue == NULL ? -1 : (int)ue->kind, (int)text.len,
+                    text.data);
+                cm_str_buf_destroy(&text);
+                if (ue != NULL) cm_tyck_debug_span(&env, ue);
+            }
+        }
     }
     out->status = out->unresolved_nodes == 0u && out->error_nodes == 0u
         ? CM_TYCK_BODY_TYPED : CM_TYCK_BODY_PARTIAL;

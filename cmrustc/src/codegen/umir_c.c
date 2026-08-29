@@ -394,6 +394,32 @@ static CmTyId cm_umir_c_peel(const CmTyckSet *tyck, CmTyId type)
     return type;
 }
 
+/* Scalar C type of an array's elements (NULL for slot elements or
+ * non-arrays). */
+static const char *cm_umir_c_array_elem_scalar(const CmTyckSet *tyck,
+    CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    if (ty == NULL || ty->kind != CM_TY_ARRAY || ty->count == 0u) return NULL;
+    return cm_umir_c_scalar_type(tyck, ty->children[0]);
+}
+
+/* Element count of an array type (0 when not a concrete constant). */
+static unsigned long cm_umir_c_array_len(const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmTy *len;
+    if (ty == NULL || ty->kind != CM_TY_ARRAY || ty->count < 2u) return 0ul;
+    len = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, ty->children[1]));
+    if (len == NULL || len->kind != CM_TY_CONST) return 0ul;
+    return (unsigned long)len->lo;
+}
+
 /* Unsized pointees travel as a `[data, len]` slot pair. */
 static int cm_umir_c_is_fat(const CmTyckSet *tyck, CmTyId pointee)
 {
@@ -1438,6 +1464,16 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             cm_umir_c_render_number(output,
                 cm_umir_c_active_instance->index);
         }
+        if (owner != NULL) {
+            const CmInternedString *owner_name = cm_interner_get(
+                &hir->strings, owner->name);
+            if (owner_name != NULL) {
+                cm_str_buf_append(output, " /* ");
+                cm_str_buf_append_n(output,
+                    (const char *)owner_name->bytes, owner_name->len);
+                cm_str_buf_append(output, " */");
+            }
+        }
         cm_str_buf_push(output, '(');
         if (ub->parameter_count == 0u) cm_str_buf_append(output, "void");
         for (param = 0u; param < ub->parameter_count; ++param) {
@@ -1445,10 +1481,41 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             cm_str_buf_append(output, "long long p");
             cm_umir_c_render_number(output, (unsigned long)param);
         }
-        cm_str_buf_append(output, ")\n{\n    long long _l[");
-        cm_umir_c_render_number(output, (unsigned long)
-            (body->locals.len + 1u));
-        cm_str_buf_append(output, "] = {0};\n");
+        {
+            /* A frame captured by a closure may outlive the call (returned
+             * or stored iterators): such frames live on the heap. */
+            int captured = 0;
+            size_t scan_block;
+            for (scan_block = 0u; scan_block < body->blocks.len && !captured;
+                    ++scan_block) {
+                const CmUMirBlock *scan = (const CmUMirBlock *)
+                    cm_vec_at_const(&body->blocks, scan_block);
+                size_t scan_statement;
+                if (scan == NULL) continue;
+                for (scan_statement = 0u;
+                        scan_statement < scan->statements.len;
+                        ++scan_statement) {
+                    const CmUMirStatement *st = (const CmUMirStatement *)
+                        cm_vec_at_const(&scan->statements, scan_statement);
+                    if (st != NULL && st->kind == CM_UMIR_RVALUE_CLOSURE) {
+                        captured = 1;
+                        break;
+                    }
+                }
+            }
+            if (captured) {
+                cm_str_buf_append(output,
+                    ")\n{\n    long long *_l = (long long *)calloc(");
+                cm_umir_c_render_number(output, (unsigned long)
+                    (body->locals.len + 1u));
+                cm_str_buf_append(output, ", 8);\n");
+            } else {
+                cm_str_buf_append(output, ")\n{\n    long long _l[");
+                cm_umir_c_render_number(output, (unsigned long)
+                    (body->locals.len + 1u));
+                cm_str_buf_append(output, "] = {0};\n");
+            }
+        }
     }
     (void)local_index;
     /* Aggregates live as function-scope slot arrays (M9 leniency: an
@@ -1487,8 +1554,17 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 slots = (unsigned long)statement->operand_count
                     + (unsigned long)statement->operand_overflow
                     + (statement->kind == CM_UMIR_RVALUE_VARIANT ? 1u : 0u);
-            cm_str_buf_append(output, statement->kind == CM_UMIR_RVALUE_LITERAL
-                ? " long long _agg" : "    long long _agg");
+            if (statement->kind != CM_UMIR_RVALUE_LITERAL) {
+                /* Aggregates outlive their constructing frame (returned
+                 * by value, stored through references): heap blocks,
+                 * allocated at the construction statement. */
+                cm_str_buf_append(output, "    long long *_agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, ";\n");
+                continue;
+            }
+            cm_str_buf_append(output, " long long _agg");
             cm_umir_c_render_number(output,
                 (unsigned long)statement->destination);
             cm_str_buf_append(output, "[");
@@ -1553,6 +1629,53 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_umir_c_render_local(output,
                         statement->operands[0]);
                 else {
+                    /* An item used as a value: a const/static evaluates
+                     * its initializer body (tyck recorded the item), a
+                     * unit struct is an empty block; fn items stay
+                     * symbolic (callee operands never read them). */
+                    const CmTyckBody *ptb = cm_tyck_get(tyck, body->source);
+                    CmHirDefId value_def = ptb == NULL
+                            || ptb->method_targets == NULL
+                        ? cm_hir_def_id_none()
+                        : ptb->method_targets[statement->expr];
+                    const CmHirItem *value_item = cm_hir_def_id_is_none(
+                        value_def) ? NULL : cm_umir_c_item_of(hir, value_def);
+                    if (value_item != NULL
+                        && (value_item->kind == CM_HIR_ITEM_CONST
+                            || value_item->kind == CM_HIR_ITEM_STATIC)) {
+                        CmStrBuf symbol;
+                        cm_str_buf_init(&symbol);
+                        cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
+                            value_def, CM_TY_NONE, CM_TY_NONE, NULL, 0u);
+                        cm_str_buf_append(output, "0; { long long ");
+                        cm_str_buf_append_n(output, symbol.data, symbol.len);
+                        cm_str_buf_append(output, "(); ");
+                        cm_umir_c_render_local(output,
+                            statement->destination);
+                        cm_str_buf_append(output, " = ");
+                        cm_str_buf_append_n(output, symbol.data, symbol.len);
+                        cm_str_buf_append(output, "(); }");
+                        cm_str_buf_destroy(&symbol);
+                        break;
+                    }
+                    if (value_item == NULL && expr != NULL
+                        && expr->kind == CM_U_EXPR_PATH
+                        && expr->data.path.resolution.kind
+                            == CM_U_RESOLVED_DEFINITION) {
+                        const CmHirItem *path_item = cm_umir_c_item_of(hir,
+                            expr->data.path.resolution.definition);
+                        if (path_item != NULL
+                            && path_item->kind == CM_HIR_ITEM_STRUCT) {
+                            cm_str_buf_append(output,
+                                "(long long)(intptr_t)malloc(8)");
+                            break;
+                        }
+                        if (path_item != NULL
+                            && path_item->kind == CM_HIR_ITEM_FUNCTION) {
+                            cm_str_buf_append(output, "0 /* fn item */");
+                            break;
+                        }
+                    }
                     cm_str_buf_append(output, "0 /* item path */");
                     complete = 0;
                 }
@@ -1629,7 +1752,97 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 uint32_t field;
                 uint32_t slot_count = statement->operand_count;
                 int mapped = statement->operand_overflow == 0u;
-                cm_str_buf_append(output, "0; ");
+                CmTyId agg_type = cm_umir_c_subst(statement->type);
+                const CmTy *at = agg_type == CM_TY_NONE ? NULL
+                    : cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena, agg_type));
+                if (at != NULL && at->kind == CM_TY_ARRAY) {
+                    /* Arrays pack scalar elements at their width so slices
+                     * made from them index consistently; other elements
+                     * are slots.  `[v; N]` fills N copies. */
+                    const char *elem = cm_umir_c_scalar_type(tyck,
+                        at->children[0]);
+                    unsigned long esize = elem == NULL ? 8ul
+                        : cm_umir_c_scalar_size(tyck, at->children[0]);
+                    int repeat = expr != NULL
+                        && expr->kind == CM_U_EXPR_ARRAY_REPEAT;
+                    unsigned long n = repeat
+                        ? cm_umir_c_array_len(tyck, agg_type)
+                        : (unsigned long)slot_count
+                            + (unsigned long)statement->operand_overflow;
+                    /* Repeat count: the type's constant, else the length
+                     * operand at run time. */
+                    CmStrBuf count_text;
+                    cm_str_buf_init(&count_text);
+                    if (repeat && n == 0ul && statement->operand_count == 2u)
+                        cm_umir_c_render_local(&count_text,
+                            statement->operands[1]);
+                    else
+                        cm_umir_c_render_number(&count_text, n);
+                    cm_str_buf_append(output, "0; _agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, " = (long long *)malloc((");
+                    cm_str_buf_append_n(output, count_text.data,
+                        count_text.len);
+                    cm_str_buf_append(output, " + 1) * ");
+                    cm_umir_c_render_number(output, esize);
+                    cm_str_buf_append(output, "); ");
+                    if (repeat && statement->operand_count >= 1u) {
+                        cm_str_buf_append(output,
+                            "{ unsigned long _k; for (_k = 0; _k < ");
+                        cm_str_buf_append_n(output, count_text.data,
+                            count_text.len);
+                        cm_str_buf_append(output, "; ++_k) ((");
+                        cm_str_buf_append(output,
+                            elem == NULL ? "long long" : elem);
+                        cm_str_buf_append(output, " *)_agg");
+                        cm_umir_c_render_number(output,
+                            (unsigned long)statement->destination);
+                        cm_str_buf_append(output, ")[_k] = (");
+                        cm_str_buf_append(output,
+                            elem == NULL ? "long long" : elem);
+                        cm_str_buf_push(output, ')');
+                        cm_umir_c_render_local(output,
+                            statement->operands[0]);
+                        cm_str_buf_append(output, "; } ");
+                    } else if (mapped) {
+                        for (field = 0u; field < slot_count; ++field) {
+                            cm_str_buf_append(output, "((");
+                            cm_str_buf_append(output,
+                                elem == NULL ? "long long" : elem);
+                            cm_str_buf_append(output, " *)_agg");
+                            cm_umir_c_render_number(output,
+                                (unsigned long)statement->destination);
+                            cm_str_buf_append(output, ")[");
+                            cm_umir_c_render_number(output,
+                                (unsigned long)field);
+                            cm_str_buf_append(output, "] = (");
+                            cm_str_buf_append(output,
+                                elem == NULL ? "long long" : elem);
+                            cm_str_buf_push(output, ')');
+                            cm_umir_c_render_local(output,
+                                statement->operands[field]);
+                            cm_str_buf_append(output, "; ");
+                        }
+                    } else {
+                        cm_str_buf_append(output, "/* array */");
+                        complete = 0;
+                    }
+                    cm_umir_c_render_local(output, statement->destination);
+                    cm_str_buf_append(output, " = (long long)(intptr_t)_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_destroy(&count_text);
+                    break;
+                }
+                cm_str_buf_append(output, "0; _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, " = (long long *)malloc(");
+                cm_umir_c_render_number(output, 8ul * (unsigned long)
+                    (slot_count + statement->operand_overflow + 1u));
+                cm_str_buf_append(output, "); ");
                 for (field = 0u; field < slot_count && mapped; ++field) {
                     long slot = (long)field;
                     if (expr != NULL && expr->kind == CM_U_EXPR_STRUCT
@@ -1638,6 +1851,30 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             statement->type,
                             expr->data.struct_expr.fields[field].name);
                         if (slot < 0) { mapped = 0; break; }
+                        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                            uint32_t earlier;
+                            for (earlier = 0u; earlier < field; ++earlier)
+                                if (cm_umir_c_field_index(hir, tyck, ubodies,
+                                        statement->type,
+                                        expr->data.struct_expr.fields[earlier]
+                                            .name) == slot) {
+                                    const CmInternedString *fname =
+                                        cm_interner_get(&ubodies->strings,
+                                            expr->data.struct_expr
+                                                .fields[field].name);
+                                    CmStrBuf text;
+                                    cm_str_buf_init(&text);
+                                    cm_ty_print((CmTyArena *)&tyck->arena,
+                                        hir, statement->type, &text);
+                                    fprintf(stderr, "UMIR dup-field %.*s "
+                                        "slot=%ld in %.*s\n",
+                                        fname == NULL ? 1 : (int)fname->len,
+                                        fname == NULL ? "?"
+                                            : (const char *)fname->bytes,
+                                        slot, (int)text.len, text.data);
+                                    cm_str_buf_destroy(&text);
+                                }
+                        }
                     }
                     cm_str_buf_append(output, "_agg");
                     cm_umir_c_render_number(output,
@@ -1663,6 +1900,13 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 uint32_t field;
                 int mapped = statement->operand_overflow == 0u;
                 cm_str_buf_append(output, "0; _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, " = (long long *)malloc(");
+                cm_umir_c_render_number(output, 8ul * (unsigned long)
+                    (statement->operand_count + statement->operand_overflow
+                        + 2u));
+                cm_str_buf_append(output, "); _agg");
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->destination);
                 cm_str_buf_append(output, "[0] = ");
@@ -1761,11 +2005,23 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 CmTyId base_type = cm_umir_c_local_type(body,
                     statement->operands[0]);
                 CmTyId pointee = cm_umir_c_peel(tyck, base_type);
+                const char *elem = cm_umir_c_array_elem_scalar(tyck, pointee);
                 cm_str_buf_append(output, "0; ");
                 if (cm_umir_c_is_fat(tyck, pointee)) {
                     cm_umir_c_render_slice_element(output, tyck, body,
                         statement->operands[0], statement->operands[1]);
                     cm_str_buf_append(output, " = ");
+                } else if (elem != NULL) {
+                    cm_str_buf_append(output, "((");
+                    cm_str_buf_append(output, elem);
+                    cm_str_buf_append(output, " *)(intptr_t)");
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, base_type));
+                    cm_str_buf_append(output, ")[");
+                    cm_umir_c_render_local(output, statement->operands[1]);
+                    cm_str_buf_append(output, "] = (");
+                    cm_str_buf_append(output, elem);
+                    cm_str_buf_push(output, ')');
                 } else {
                     cm_umir_c_render_base(output, statement->operands[0],
                         cm_umir_c_ref_depth(tyck, base_type));
@@ -1837,10 +2093,23 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             case CM_UMIR_RVALUE_INDEX: {
                 CmTyId base_type = cm_umir_c_local_type(body,
                     statement->operands[0]);
+                const char *elem = cm_umir_c_array_elem_scalar(tyck,
+                    cm_umir_c_peel(tyck, base_type));
                 if (cm_umir_c_is_fat(tyck, cm_umir_c_peel(tyck, base_type))) {
                     cm_str_buf_append(output, "(long long)");
                     cm_umir_c_render_slice_element(output, tyck, body,
                         statement->operands[0], statement->operands[1]);
+                    break;
+                }
+                if (elem != NULL) {
+                    cm_str_buf_append(output, "(long long)((");
+                    cm_str_buf_append(output, elem);
+                    cm_str_buf_append(output, " *)(intptr_t)");
+                    cm_umir_c_render_base(output, statement->operands[0],
+                        cm_umir_c_ref_depth(tyck, base_type));
+                    cm_str_buf_append(output, ")[");
+                    cm_umir_c_render_local(output, statement->operands[1]);
+                    cm_str_buf_push(output, ']');
                     break;
                 }
                 cm_umir_c_render_base(output, statement->operands[0],
@@ -1972,6 +2241,39 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         || concrete == CM_TY_NONE ? -1
                     : cm_umir_c_vtable(cm_umir_c_active_program, dt->def,
                         concrete);
+                if (dt != NULL && dt->kind == CM_TY_SLICE) {
+                    /* `&[T; N] -> &[T]`: the pair is [element block, N];
+                     * the block is what the array reference points at. */
+                    cm_str_buf_append(output, "0; _agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output,
+                        " = (long long *)malloc(24); _agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, "[1] = *(long long *)(intptr_t)");
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    cm_str_buf_append(output, "; _agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, "[2] = ");
+                    cm_umir_c_render_number(output,
+                        cm_umir_c_array_len(tyck, concrete));
+                    cm_str_buf_append(output, "; _agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output,
+                        "[0] = (long long)(intptr_t)&_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, "[1]; ");
+                    cm_umir_c_render_local(output, statement->destination);
+                    cm_str_buf_append(output, " = (long long)(intptr_t)&_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, "[0]");
+                    break;
+                }
                 if (vt < 0) {
                     cm_umir_c_render_local(output, statement->operands[0]);
                     cm_str_buf_append(output, " /* unsize */");
@@ -1979,6 +2281,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     break;
                 }
                 cm_str_buf_append(output, "0; _agg");
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->destination);
+                cm_str_buf_append(output, " = (long long *)malloc(24); _agg");
                 cm_umir_c_render_number(output,
                     (unsigned long)statement->destination);
                 cm_str_buf_append(output, "[1] = ");
@@ -2201,7 +2506,9 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     program.umir = umir;
     program.ubodies = ubodies;
     program.tyck = tyck;
-    cm_str_buf_append(output, "#include <stdint.h>\nvoid abort(void);\n");
+    cm_str_buf_append(output, "#include <stdint.h>\nvoid abort(void);\n"
+        "void *malloc(unsigned long);\n"
+        "void *calloc(unsigned long, unsigned long);\n");
     /* Roots: `#[no_mangle]` exports only; everything else is reached
      * through call instances, so a core-linked program emits just what
      * the exports need. */
