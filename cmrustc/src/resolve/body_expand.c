@@ -1973,18 +1973,22 @@ static int cm_body_expr_cfg_active(CmBodyExpandState *state, CmAstExprId id)
 static void cm_body_walk_stmt(CmBodyExpandState *state, CmAstStmtId id,
     unsigned int depth)
 {
-    const CmAstStmt *stmt = cm_ast_get_stmt(state->ast, id);
-    if (stmt == NULL) return;
-    switch (stmt->kind) {
+    const CmAstStmt *found = cm_ast_get_stmt(state->ast, id);
+    CmAstStmt stmt;
+    if (found == NULL) return;
+    /* Copy: walking the initializer may expand a macro and reallocate
+     * the statement vector. */
+    stmt = *found;
+    switch (stmt.kind) {
     case CM_AST_STMT_LET:
-        cm_body_walk_expr(state, stmt->data.let_stmt.initializer, depth);
-        cm_body_walk_expr(state, stmt->data.let_stmt.else_block, depth);
+        cm_body_walk_expr(state, stmt.data.let_stmt.initializer, depth);
+        cm_body_walk_expr(state, stmt.data.let_stmt.else_block, depth);
         break;
     case CM_AST_STMT_EXPR:
-        cm_body_walk_expr(state, stmt->data.expr_stmt.expression, depth);
+        cm_body_walk_expr(state, stmt.data.expr_stmt.expression, depth);
         break;
     case CM_AST_STMT_ITEM:
-        cm_body_walk_item(state, stmt->data.item_stmt.item, depth);
+        cm_body_walk_item(state, stmt.data.item_stmt.item, depth);
         break;
     }
 }

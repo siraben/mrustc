@@ -886,8 +886,21 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         break;
     }
     case CM_U_EXPR_REF: {
-        CmUMirLocalId operand = cm_umir_place(builder,
+        const CmUExpr *inner = cm_ubody_get_expr(builder->ub,
             expr->data.ref.operand);
+        CmUMirLocalId operand;
+        if (inner != NULL && inner->kind == CM_U_EXPR_UNARY
+            && inner->data.unary.op == CM_U_UNARY_DEREF) {
+            /* A reborrow `&*p` / `&mut *p` / `&raw const *p` is the
+             * pointer itself (references and raw pointers share their
+             * representation), never the address of a loaded copy. */
+            CmUMirLocalId pointer = cm_umir_emit_expr(builder,
+                inner->data.unary.operand);
+            cm_umir_push_operands(builder, destination,
+                CM_UMIR_RVALUE_LOCAL, id, type, &pointer, 1u);
+            break;
+        }
+        operand = cm_umir_place(builder, expr->data.ref.operand);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_REF,
             id, type, &operand, 1u);
         break;

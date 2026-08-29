@@ -789,6 +789,50 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         cm_str_buf_append(output, "; }");
         return 1;
     }
+    if (CM_SHIM_IS("add_with_overflow") || CM_SHIM_IS("sub_with_overflow")
+        || CM_SHIM_IS("mul_with_overflow")) {
+        /* (T, bool) as a two-slot block; overflow judged at the scalar
+         * width (unsigned when the type is unsigned). */
+        const CmTy *it = ft;
+        int is_signed = it != NULL && it->kind == CM_TY_INT
+            && ((CmHirIntType)it->a == CM_HIR_INT_I8
+                || (CmHirIntType)it->a == CM_HIR_INT_I16
+                || (CmHirIntType)it->a == CM_HIR_INT_I32
+                || (CmHirIntType)it->a == CM_HIR_INT_I64
+                || (CmHirIntType)it->a == CM_HIR_INT_ISIZE);
+        unsigned long bits = 8ul * cm_umir_c_scalar_size(tyck, first);
+        const char *op = CM_SHIM_IS("add_with_overflow") ? "+"
+            : CM_SHIM_IS("sub_with_overflow") ? "-" : "*";
+        char text[640];
+        (void)snprintf(text, sizeof text,
+            "(long long a, long long b) { long long *t = (long long *)"
+            "malloc(16); unsigned long long m = %lu == 64 ? ~0ull : "
+            "((1ull << %lu) - 1); unsigned long long ua = (unsigned long long)"
+            "a & m, ub = (unsigned long long)b & m; unsigned long long r = "
+            "(ua %s ub) & m; t[0] = (long long)r; ",
+            bits, bits, op);
+        cm_str_buf_append(output, text);
+        if (is_signed)
+            (void)snprintf(text, sizeof text,
+                "{ long long sa = (long long)(ua << (64 - %lu)) >> (64 - %lu);"
+                " long long sb = (long long)(ub << (64 - %lu)) >> (64 - %lu);"
+                " long long wide = sa %s sb; long long back = (long long)"
+                "(((unsigned long long)wide & m) << (64 - %lu)) >> (64 - %lu);"
+                " t[1] = wide != back; } return (long long)(intptr_t)t; }",
+                bits, bits, bits, bits, op, bits, bits);
+        else if (CM_SHIM_IS("sub_with_overflow"))
+            (void)snprintf(text, sizeof text,
+                "t[1] = ua < ub; return (long long)(intptr_t)t; }");
+        else if (CM_SHIM_IS("add_with_overflow"))
+            (void)snprintf(text, sizeof text,
+                "t[1] = r < ua; return (long long)(intptr_t)t; }");
+        else
+            (void)snprintf(text, sizeof text,
+                "t[1] = ua != 0 && (r / ua) != ub; "
+                "return (long long)(intptr_t)t; }");
+        cm_str_buf_append(output, text);
+        return 1;
+    }
     if (CM_SHIM_IS("size_of")) {
         cm_str_buf_append(output, "() { return ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
@@ -1670,6 +1714,40 @@ static int cm_umir_c_render_operator_call(CmStrBuf *output,
     return 1;
 }
 
+/* A fn item used as a value: the address of its instance symbol (a
+ * trait method path takes Self from the FN_DEF's first argument). */
+static void cm_umir_c_render_fn_value(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck, const CmUMirBody *body,
+    const CmUMirStatement *statement, CmHirDefId def)
+{
+    const CmTyckBody *tb = cm_tyck_get(tyck, body->source);
+    const CmHirItem *item = cm_umir_c_item_of(hir, def);
+    const CmHirItem *parent = item == NULL
+            || cm_hir_def_id_is_none(item->parent_definition) ? NULL
+        : cm_umir_c_item_of(hir, item->parent_definition);
+    CmTyId fn_type = tb == NULL || tb->expr_types == NULL ? CM_TY_NONE
+        : tb->expr_types[statement->expr];
+    const CmTy *ft = fn_type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                cm_umir_c_subst(fn_type)));
+    int trait_method = parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT;
+    CmTyId receiver = trait_method && ft != NULL && ft->kind == CM_TY_FN_DEF
+        && ft->count != 0u ? cm_umir_c_subst(ft->children[0]) : CM_TY_NONE;
+    CmStrBuf symbol;
+    cm_str_buf_init(&symbol);
+    cm_umir_c_render_callee_symbol(&symbol, hir, tyck, def,
+        trait_method ? CM_TY_NONE : fn_type, receiver, NULL, 0u);
+    cm_str_buf_append(output, "0; { long long ");
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
+    cm_str_buf_append(output, "(); ");
+    cm_umir_c_render_local(output, statement->destination);
+    cm_str_buf_append(output, " = (long long)(intptr_t)&");
+    cm_str_buf_append_n(output, symbol.data, symbol.len);
+    cm_str_buf_append(output, "; }");
+    cm_str_buf_destroy(&symbol);
+}
+
 /* `Iterator::next`: the fn `next` declared by the trait named
  * `Iterator` (core's, or a no_core program's own). */
 static CmHirDefId cm_umir_c_iterator_next(const CmHirContext *hir)
@@ -1961,6 +2039,12 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     const CmHirItem *value_item = cm_hir_def_id_is_none(
                         value_def) ? NULL : cm_umir_c_item_of(hir, value_def);
                     if (value_item != NULL
+                        && value_item->kind == CM_HIR_ITEM_FUNCTION) {
+                        cm_umir_c_render_fn_value(output, hir, tyck, body,
+                            statement, value_def);
+                        break;
+                    }
+                    if (value_item != NULL
                         && (value_item->kind == CM_HIR_ITEM_CONST
                             || value_item->kind == CM_HIR_ITEM_STATIC)) {
                         CmStrBuf symbol;
@@ -1992,7 +2076,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         }
                         if (path_item != NULL
                             && path_item->kind == CM_HIR_ITEM_FUNCTION) {
-                            cm_str_buf_append(output, "0 /* fn item */");
+                            cm_umir_c_render_fn_value(output, hir, tyck,
+                                body, statement,
+                                expr->data.path.resolution.definition);
                             break;
                         }
                     }
@@ -2569,6 +2655,33 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             callee_def = callee_ty->def;
                     }
                 }
+                if (cm_hir_def_id_is_none(callee_def)
+                    && statement->operand_count != 0u
+                    && statement->operand_overflow == 0u) {
+                    /* A fn-pointer value (`(self.formatter)(ptr, f)`):
+                     * call through it. */
+                    const CmTy *pt = cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena,
+                            cm_umir_c_local_type(body,
+                                statement->operands[0])));
+                    if (pt != NULL && pt->kind == CM_TY_FN_PTR) {
+                        uint32_t arg;
+                        cm_str_buf_append(output,
+                            "0; { long long (*_fp)() = (long long (*)())"
+                            "(intptr_t)");
+                        cm_umir_c_render_local(output, statement->operands[0]);
+                        cm_str_buf_append(output, "; ");
+                        cm_umir_c_render_local(output, statement->destination);
+                        cm_str_buf_append(output, " = _fp(");
+                        for (arg = 1u; arg < statement->operand_count; ++arg) {
+                            if (arg != 1u) cm_str_buf_append(output, ", ");
+                            cm_umir_c_render_local(output,
+                                statement->operands[arg]);
+                        }
+                        cm_str_buf_append(output, "); }");
+                        break;
+                    }
+                }
                 if (!cm_umir_c_render_call(output, hir, tyck, statement,
                         callee_def, 1u,
                         expr != NULL && expr->kind == CM_U_EXPR_CALL
@@ -2578,6 +2691,33 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         CM_TY_NONE)) {
                     cm_str_buf_append(output, "0 /* call */");
                     complete = 0;
+                    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+                        CmStrBuf text;
+                        cm_str_buf_init(&text);
+                        if (tb != NULL && tb->expr_types != NULL
+                            && expr != NULL && expr->kind == CM_U_EXPR_CALL)
+                            cm_ty_print((CmTyArena *)&tyck->arena, hir,
+                                tb->expr_types[expr->data.call.callee],
+                                &text);
+                        {
+                            const CmInternedString *on = owner == NULL
+                                ? NULL : cm_interner_get(&hir->strings,
+                                    owner->name);
+                            fprintf(stderr, "UMIR call-miss in=%.*s ",
+                                on == NULL ? 1 : (int)on->len,
+                                on == NULL ? "?" : (const char *)on->bytes);
+                        }
+                        fprintf(stderr, "UMIR call-miss callee-kind=%d "
+                            "res=%d def=%u:%u type=%.*s\n",
+                            callee == NULL ? -1 : (int)callee->kind,
+                            callee == NULL
+                                || callee->kind != CM_U_EXPR_PATH ? -1
+                                : (int)callee->data.path.resolution.kind,
+                            (unsigned)callee_def.crate_id,
+                            (unsigned)callee_def.index, (int)text.len,
+                            text.data);
+                        cm_str_buf_destroy(&text);
+                    }
                 }
                 break;
             }
@@ -3018,9 +3158,15 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
             stubs += 1u;
             continue;
         }
-        cm_umir_c_active_instance = instance;
-        (void)cm_umir_c_render_body(output, hir, body, ubodies, ub, tyck);
-        cm_umir_c_active_instance = NULL;
+        {
+            /* Render from a copy: registering instances while the body
+             * renders reallocates the vec (the copy's types/parameters
+             * arrays are separately owned and stay valid). */
+            CmUMirInstance active_copy = *instance;
+            cm_umir_c_active_instance = &active_copy;
+            (void)cm_umir_c_render_body(output, hir, body, ubodies, ub, tyck);
+            cm_umir_c_active_instance = NULL;
+        }
         /* Rendering may have appended instances; the vec may have moved,
          * so re-fetch by index on the next iteration. */
         rendered += 1u;

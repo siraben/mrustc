@@ -18284,6 +18284,54 @@ static int cm_lower_reserve_body_item(CmLowerState *state, const CmAst *ast,
 
 static int cm_lower_graph_reserve_body_items(CmLowerState *state,
     const CmAst *ast, CmHirModuleId owner_module,
+    const CmLowerItemRecord *fn_record, CmAstExprId body);
+
+/* Items may be declared in any nested block of a body (`unsafe { fn
+ * precondition_check(..) {..} .. }` from core's assert macros): descend
+ * through block-bearing expressions to reserve them. */
+static int cm_lower_reserve_items_in_expr(CmLowerState *state,
+    const CmAst *ast, CmHirModuleId owner_module,
+    const CmLowerItemRecord *fn_record, CmAstExprId id)
+{
+    const CmAstExpr *expr = id == CM_AST_EXPR_NONE ? NULL
+        : cm_ast_get_expr(ast, id);
+    uint32_t index;
+    if (expr == NULL) return 1;
+    switch (expr->kind) {
+    case CM_AST_EXPR_BLOCK:
+    case CM_AST_EXPR_TRY_BLOCK:
+        return cm_lower_graph_reserve_body_items(state, ast, owner_module,
+            fn_record, id);
+    case CM_AST_EXPR_IF:
+        if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                fn_record, expr->data.if_expr.then_expr)) return 0;
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.if_expr.else_expr);
+    case CM_AST_EXPR_MATCH:
+        for (index = 0u; index < expr->data.match_expr.arm_count; ++index)
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, expr->data.match_expr.arms[index].body))
+                return 0;
+        return 1;
+    case CM_AST_EXPR_LOOP:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.loop_expr.body);
+    case CM_AST_EXPR_WHILE:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.while_expr.body);
+    case CM_AST_EXPR_FOR:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.for_expr.body);
+    case CM_AST_EXPR_CLOSURE:
+        return cm_lower_reserve_items_in_expr(state, ast, owner_module,
+            fn_record, expr->data.closure.body);
+    default:
+        return 1;
+    }
+}
+
+static int cm_lower_graph_reserve_body_items(CmLowerState *state,
+    const CmAst *ast, CmHirModuleId owner_module,
     const CmLowerItemRecord *fn_record, CmAstExprId body)
 {
     const CmAstExpr *block = cm_ast_get_expr(ast, body);
@@ -18297,7 +18345,20 @@ static int cm_lower_graph_reserve_body_items(CmLowerState *state,
             block->data.block.statements[index]);
         const CmAstItem *item;
 
-        if (stmt == NULL || stmt->kind != CM_AST_STMT_ITEM) continue;
+        if (stmt == NULL) continue;
+        if (stmt->kind == CM_AST_STMT_EXPR) {
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, stmt->data.expr_stmt.expression)) return 0;
+            continue;
+        }
+        if (stmt->kind == CM_AST_STMT_LET) {
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, stmt->data.let_stmt.initializer)) return 0;
+            if (!cm_lower_reserve_items_in_expr(state, ast, owner_module,
+                    fn_record, stmt->data.let_stmt.else_block)) return 0;
+            continue;
+        }
+        if (stmt->kind != CM_AST_STMT_ITEM) continue;
         item = cm_ast_get_item(ast, stmt->data.item_stmt.item);
         if (item == NULL) continue;
         if (item->kind == CM_AST_ITEM_EXTERN_BLOCK) {
@@ -18326,6 +18387,8 @@ static int cm_lower_graph_reserve_body_items(CmLowerState *state,
                 stmt->data.item_stmt.item, cm_hir_def_id_none(),
                 CM_LOWER_PARENT_NONE, 0, CM_INTERN_ID_NONE)) return 0;
     }
+    if (!state->failed && !cm_lower_reserve_items_in_expr(state, ast,
+            owner_module, fn_record, block->data.block.tail)) return 0;
     return !state->failed;
 }
 

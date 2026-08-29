@@ -68,7 +68,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 
-#define CM_UMIR_STATEMENT_OPERANDS 4u
+#define CM_UMIR_STATEMENT_OPERANDS 16u
 
 typedef struct CmUMirStatement {
     CmUMirLocalId destination;

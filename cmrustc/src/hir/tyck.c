@@ -4079,6 +4079,8 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
     }
     case CM_U_EXPR_TUPLE: {
         CmTyId elements[CM_TYCK_MAX_ARGS];
+        CmTyId expected_elements[CM_TYCK_MAX_ARGS];
+        uint32_t expected_count = 0u;
         const CmTy *et = expected == CM_TY_NONE ? NULL
             : cm_ty_get(arena, cm_ty_resolve(arena, expected));
         uint32_t count = expr->data.list.element_count;
@@ -4087,11 +4089,19 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
             result = arena->error;
             break;
         }
+        /* Copy the expected element types: typing an element can grow
+         * the arena and move `et`. */
+        if (et != NULL && et->kind == CM_TY_TUPLE) {
+            expected_count = et->count > CM_TYCK_MAX_ARGS ? CM_TYCK_MAX_ARGS
+                : et->count;
+            memcpy(expected_elements, et->children,
+                expected_count * sizeof(CmTyId));
+        }
         for (index = 0u; index < count; ++index)
             elements[index] = cm_tyck_expr(env,
                 expr->data.list.elements[index],
-                et != NULL && et->kind == CM_TY_TUPLE && index < et->count
-                    ? et->children[index] : CM_TY_NONE);
+                index < expected_count ? expected_elements[index]
+                    : CM_TY_NONE);
         result = cm_ty_tuple(arena, elements, count);
         break;
     }
