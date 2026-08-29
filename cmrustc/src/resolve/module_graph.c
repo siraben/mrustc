@@ -1,4 +1,5 @@
 #include "cm/resolve/module_graph.h"
+#include "cm/resolve/derive_expand.h"
 
 #include "cm/alloc.h"
 #include "cm/arena.h"
@@ -139,6 +140,8 @@ typedef struct CmModuleGraphState {
     CmModuleGraphOptions options;
     int defer_non_macro_use_modules;
     size_t authenticated_include_files;
+    /* Builtin derives may name `::core` (set once for the crate). */
+    int derive_core_reachable;
     size_t authenticated_include_bytes;
     CmModuleGraphRevision revision;
     int revision_exhausted;
@@ -1240,6 +1243,17 @@ static CmResolveUnitId cm_add_unit(CmModuleGraphState *state,
     parse_result = cm_parse_crate(&unit.ast, (const char *)file->bytes,
         file->length, state->options.edition);
     unit.parse_ok = parse_result.error_count == 0u;
+    /* Builtin derives: synthesized impls join the unit's items. */
+    if (unit.parse_ok) {
+        /* Crate-wide: a dependency provides `::core`, or the root unit
+         * (parsed first) declares `extern crate self as core`. */
+        if (!state->derive_core_reachable
+            && cm_derive_unit_aliases_core(&unit.ast))
+            state->derive_core_reachable = 1;
+        (void)cm_derive_expand(&unit.ast, state->options.edition,
+            state->options.dependency_macro_count != 0u
+                || state->derive_core_reachable);
+    }
     unit.parsed_item_count = unit.ast.items.len;
     if (unit.parse_ok) {
         size_t item_index;

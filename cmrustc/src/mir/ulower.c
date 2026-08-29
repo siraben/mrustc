@@ -550,6 +550,8 @@ static CmUMirLocalId cm_umir_address_of(CmUMirBuilder *builder, CmUExprId id,
 
 static int cm_umir_pattern_literal_value(const CmUMirBuilder *builder,
     const CmUPat *pat, long *out);
+static long cm_umir_struct_field_index(const CmUMirBuilder *builder,
+    const CmUResolution *res, CmInternId name);
 
 /* Whether a path pattern names a const/static item (`flags::ALIGN_LEFT
  * =>`): such an arm is a value test against the constant. */
@@ -827,14 +829,17 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                 ? cm_umir_variant_field_index(builder->hir, builder->ubodies,
                     &pat->data.struct_pat.resolution,
                     pat->data.struct_pat.fields[sub].name)
-                : -1;
+                : cm_umir_struct_field_index(builder,
+                    &pat->data.struct_pat.resolution,
+                    pat->data.struct_pat.fields[sub].name);
             if (slot < 0) continue;
             payload = cm_umir_new_local(builder, builder->tb != NULL
                 && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[
                     pat->data.struct_pat.fields[sub].pattern] : CM_TY_NONE);
             cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
-                CM_TY_NONE, &value, 1u, 1u + (uint32_t)slot);
+                CM_TY_NONE, &value, 1u,
+                (index >= 0 ? 1u : 0u) + (uint32_t)slot);
             cm_umir_emit_pattern_checks(builder,
                 pat->data.struct_pat.fields[sub].pattern, payload, id, fails,
                 depth + 1u);
@@ -1865,7 +1870,15 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     if (disc < 0) disc = CM_UMIR_ARM_DEFAULT;
                 } else if (pat->kind == CM_U_PAT_LITERAL)
                     (void)cm_umir_pattern_literal_value(builder, pat, &disc);
-                if (pat->kind == CM_U_PAT_TUPLE_STRUCT) {
+                if ((pat->kind == CM_U_PAT_TUPLE_STRUCT
+                        || pat->kind == CM_U_PAT_STRUCT)
+                    && disc == CM_UMIR_ARM_DEFAULT) {
+                    /* A plain struct pattern (`Pt { x, y } =>`): the
+                     * irrefutable binder handles its field slots. */
+                    cm_umir_bind_pattern(builder,
+                        expr->data.match_expr.arms[arm].pattern, scrutinee,
+                        id);
+                } else if (pat->kind == CM_U_PAT_TUPLE_STRUCT) {
                     uint32_t position;
                     for (position = 0u;
                             position < pat->data.struct_pat.pattern_count;

@@ -46,6 +46,19 @@ fn pair_sum(x: Option<(u32, u32)>) -> u32 {
     }
 }
 
+// A plain struct pattern as a match arm binds its fields (derived
+// `Clone`: `match *self { Pt { x: __p0, y: __p1 } => .. }`).
+struct Pt {
+    x: u32,
+    y: u32,
+}
+
+fn unpack(p: &Pt) -> u32 {
+    match *p {
+        Pt { x: a, y: b } => a * 10 + b,
+    }
+}
+
 fn pick(x: Option<u32>) -> u32 {
     if let Option::Some(v) = x { v + 1 } else { 100 }
 }
@@ -66,4 +79,5 @@ pub extern "C" fn let_patterns(n: u32) -> u32 {
     let seven = 7u32;
     total + a + b + copied(Option::Some(&seven)) * 100 + copied(Option::None)
         + pair_sum(Option::Some((n, 1))) * 1000
+        + unpack(&Pt { x: n, y: 3 }) * 10000
 }

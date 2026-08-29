@@ -56,6 +56,7 @@ MACRO_SOURCES := \
 RESOLVE_SOURCES := \
 	src/resolve/body_expand.c \
 	src/resolve/dependency_macro.c \
+	src/resolve/derive_expand.c \
 	src/resolve/module_graph.c \
 	src/resolve/imports.c
 HIR_SOURCES := \
