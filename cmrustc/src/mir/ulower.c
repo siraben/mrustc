@@ -362,7 +362,8 @@ static int cm_umir_self_is_reference(const CmHirContext *hir,
     if (parent->kind == CM_HIR_ITEM_IMPL) {
         const CmHirType *self = cm_hir_get_type(hir,
             parent->data.impl_item.self_type);
-        return self != NULL && self->kind == CM_HIR_TYPE_REFERENCE_KIND;
+        return self != NULL && (self->kind == CM_HIR_TYPE_REFERENCE_KIND
+            || self->kind == CM_HIR_TYPE_RAW_POINTER_KIND);
     }
     if (parent->kind != CM_HIR_ITEM_TRAIT) return 0;
     for (index = 0u; index < hir->items.len; ++index) {
@@ -373,7 +374,8 @@ static int cm_umir_self_is_reference(const CmHirContext *hir,
             || !cm_hir_def_id_equal(impl->data.impl_item.trait_type.definition,
                 parent->definition)) continue;
         self = cm_hir_get_type(hir, impl->data.impl_item.self_type);
-        if (self != NULL && self->kind == CM_HIR_TYPE_REFERENCE_KIND)
+        if (self != NULL && (self->kind == CM_HIR_TYPE_REFERENCE_KIND
+                || self->kind == CM_HIR_TYPE_RAW_POINTER_KIND))
             return 1;
     }
     return 0;
