@@ -1355,6 +1355,10 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
      * bodies to Option.  Leave it symbolic; coercion treats unresolved
      * projections leniently. */
     if (self_kind == CM_TY_PROJECTION) return type;
+    /* `<dyn FnMut(A) -> R as FnOnce>::Output` is the object's binding. */
+    if (self_kind == CM_TY_DYN && self->a < self->count
+        && cm_hir_def_id_equal(self->def2, assoc_def))
+        return self->children[self->a];
     if (self_kind == CM_TY_PARAM || self_kind == CM_TY_SELF) {
         const CmHirItem *owners[2];
         int owner;
@@ -3019,6 +3023,19 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             ? CM_TYCK_MAX_ARGS : expr->data.call.argument_count;
     }
     ct = cm_ty_get(arena, cm_ty_resolve(arena, callee));
+    /* A callee autoderefs: `f(x)` with `f: &mut dyn FnMut(A) -> R` (the
+     * futex Once's `f(&f_state)`) or `f: &F` calls the referent. */
+    while (ct != NULL && (ct->kind == CM_TY_REF || ct->kind == CM_TY_PTR)
+            && ct->count != 0u) {
+        const CmTy *inner = cm_ty_get(arena, cm_ty_resolve(arena,
+            ct->children[0]));
+        if (inner == NULL || (inner->kind != CM_TY_DYN
+                && inner->kind != CM_TY_CLOSURE && inner->kind != CM_TY_FN_PTR
+                && inner->kind != CM_TY_FN_DEF && inner->kind != CM_TY_PARAM
+                && inner->kind != CM_TY_REF)) break;
+        callee = ct->children[0];
+        ct = inner;
+    }
     if (ct != NULL && ct->kind == CM_TY_FN_DEF) {
         const CmHirItem *fn = cm_tyck_item(env->state, ct->def);
         const CmHirItem *parent = cm_tyck_parent_item(env->state, fn);
@@ -3075,7 +3092,25 @@ static CmTyId cm_tyck_call(CmTyckEnv *env, const CmUExpr *expr,
             CM_TYCK_MAX_ARGS, &count, &ret)) {
         known = 1;
     } else if (ct != NULL && ct->kind == CM_TY_DYN) {
-        /* `dyn Fn(..) -> R` objects: arguments are typed loosely. */
+        /* `dyn Fn(A, B) -> R`: the principal's first argument is the
+         * parameter tuple and the object's `Output` binding the result
+         * (the futex Once's `f(&f_state)`); without a binding the
+         * arguments are typed loosely. */
+        if (ct->a != 0u && ct->count != 0u) {
+            const CmTy *tuple = cm_ty_get(arena, cm_ty_resolve(arena,
+                ct->children[0]));
+            if (tuple != NULL && tuple->kind == CM_TY_TUPLE) {
+                count = tuple->count > CM_TYCK_MAX_ARGS ? CM_TYCK_MAX_ARGS
+                    : tuple->count;
+                memcpy(params, tuple->children, count * sizeof(CmTyId));
+                ct = cm_ty_get(arena, cm_ty_resolve(arena, callee));
+                if (ct != NULL && ct->kind == CM_TY_DYN
+                    && ct->a < ct->count) {
+                    ret = ct->children[ct->a];
+                    known = 1;
+                }
+            }
+        }
     } else if (ct != NULL) {
         CmTyckFound found;
         CmInternId call_name = cm_tyck_intern_text(env->state, "call", 4u);

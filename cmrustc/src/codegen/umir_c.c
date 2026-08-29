@@ -1747,6 +1747,75 @@ static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
 
 static CmUMirProgram *cm_umir_c_active_program;
 
+/* The program instance of closure type `ct` (its body instanced on the
+ * enclosing scope: children[0] = Self or a bare SELF, then the generic
+ * arguments), or -1 without a program. */
+static long cm_umir_c_closure_instance_of(const CmHirContext *hir,
+    const CmTyckSet *tyck, const CmTy *ct)
+{
+    const CmHirBody *closure_body;
+    CmTyId closure_self = CM_TY_NONE;
+    const CmTyId *closure_args = NULL;
+    uint32_t closure_arg_count = 0u;
+    if (cm_umir_c_active_program == NULL || ct == NULL
+        || ct->kind != CM_TY_CLOSURE) return -1;
+    closure_body = cm_hir_get_body(hir, (CmHirBodyId)ct->a);
+    if (closure_body == NULL) return -1;
+    if (ct->count != 0u) {
+        const CmTy *self_child = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, ct->children[0]));
+        if (self_child != NULL && self_child->kind != CM_TY_SELF)
+            closure_self = ct->children[0];
+        closure_args = ct->children + 1;
+        closure_arg_count = ct->count - 1u;
+    }
+    return cm_umir_c_instance(cm_umir_c_active_program,
+        closure_body->origin.definition, (CmUExprId)ct->b, closure_args,
+        closure_arg_count, closure_self);
+}
+
+/* `call` / `call_mut` / `call_once`: the Fn-family method a closure's
+ * vtable entry or a `dyn Fn*` call dispatches to. */
+static int cm_umir_c_is_fn_call_method(const CmHirContext *hir,
+    const CmHirItem *method)
+{
+    const CmInternedString *name = method == NULL ? NULL
+        : cm_interner_get(&hir->strings, method->name);
+    if (name == NULL) return 0;
+    return (name->len == 4u && memcmp(name->bytes, "call", 4u) == 0)
+        || (name->len == 8u && memcmp(name->bytes, "call_mut", 8u) == 0)
+        || (name->len == 9u && memcmp(name->bytes, "call_once", 9u) == 0);
+}
+
+#define CM_UMIR_C_MAX_TRAIT_CLOSURE 64u
+static size_t cm_umir_c_trait_closure(const CmHirContext *hir,
+    CmHirDefId trait_def, CmHirDefId *out, size_t count);
+
+/* The Fn-family method declared by trait `principal` (or a supertrait),
+ * for dispatching a call on `dyn principal`; none when it has none. */
+static CmHirDefId cm_umir_c_dyn_call_method(const CmHirContext *hir,
+    CmHirDefId principal)
+{
+    CmHirDefId closure[CM_UMIR_C_MAX_TRAIT_CLOSURE];
+    size_t closure_count = cm_umir_c_trait_closure(hir, principal, closure,
+        0u);
+    size_t closure_index;
+    for (closure_index = 0u; closure_index < closure_count;
+            ++closure_index) {
+        size_t scan;
+        for (scan = 0u; scan < hir->items.len; ++scan) {
+            const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, scan);
+            if (method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
+                || !cm_hir_def_id_equal(method->parent_definition,
+                    closure[closure_index])) continue;
+            if (cm_umir_c_is_fn_call_method(hir, method))
+                return method->definition;
+        }
+    }
+    return cm_hir_def_id_none();
+}
+
 static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
     const CmTyckSet *tyck, const CmHirItem *declaration, CmTyId self,
     CmTyId *out_types, uint32_t *out_count,
@@ -1931,7 +2000,6 @@ static long cm_umir_c_vtable(CmUMirProgram *program, CmHirDefId trait_def,
  * supertraits first, in declaration order, then P — so `dyn FnMut(A) ->
  * R` dispatches `FnOnce::call_once` and `dyn Sub<Out = T>` a `Base`
  * method through one table.  Returns the number of traits written. */
-#define CM_UMIR_C_MAX_TRAIT_CLOSURE 64u
 static size_t cm_umir_c_trait_closure(const CmHirContext *hir,
     CmHirDefId trait_def, CmHirDefId *out, size_t count)
 {
@@ -3940,6 +4008,66 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             cm_ty_resolve((CmTyArena *)&tyck->arena,
                                 cm_umir_c_subst(ctb0->expr_types[
                                     expr->data.call.callee])));
+                    {
+                        /* `f(x)` with `f: &mut dyn FnMut(A) -> R`: the
+                         * arguments travel as one tuple block through the
+                         * pair's vtable at the principal's `call*` slot. */
+                        CmTyId callee_local_type = statement->operand_count
+                                == 0u ? CM_TY_NONE
+                            : cm_umir_c_local_type(body,
+                                statement->operands[0]);
+                        const CmTy *dyn_ty = callee_local_type == CM_TY_NONE
+                            ? NULL : cm_ty_get((CmTyArena *)&tyck->arena,
+                                cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                    cm_umir_c_peel(tyck, callee_local_type)));
+                        if (dyn_ty != NULL && dyn_ty->kind == CM_TY_DYN
+                            && statement->operand_overflow == 0u) {
+                            CmHirDefId method = cm_umir_c_dyn_call_method(
+                                hir, dyn_ty->def);
+                            long slot = cm_hir_def_id_is_none(method) ? -1
+                                : cm_umir_c_trait_method_index(hir,
+                                    dyn_ty->def, method);
+                            unsigned int depth = cm_umir_c_ref_depth(tyck,
+                                callee_local_type);
+                            uint32_t arg;
+                            if (slot >= 0) {
+                                cm_str_buf_append(output,
+                                    "0; { long long (**_vt)() = "
+                                    "(long long (**)())(intptr_t)");
+                                cm_umir_c_render_base(output,
+                                    statement->operands[0], depth);
+                                cm_str_buf_append(output,
+                                    "[1]; long long *_targs = (long long *)"
+                                    "calloc(");
+                                cm_umir_c_render_number(output,
+                                    (unsigned long)(statement->operand_count
+                                        > 1u ? statement->operand_count - 1u
+                                        : 1u));
+                                cm_str_buf_append(output, ", 8); ");
+                                for (arg = 1u; arg < statement->operand_count;
+                                        ++arg) {
+                                    cm_str_buf_append(output, "_targs[");
+                                    cm_umir_c_render_number(output,
+                                        (unsigned long)(arg - 1u));
+                                    cm_str_buf_append(output, "] = ");
+                                    cm_umir_c_render_local(output,
+                                        statement->operands[arg]);
+                                    cm_str_buf_append(output, "; ");
+                                }
+                                cm_umir_c_render_local(output,
+                                    statement->destination);
+                                cm_str_buf_append(output, " = _vt[");
+                                cm_umir_c_render_number(output,
+                                    (unsigned long)slot);
+                                cm_str_buf_append(output, "](");
+                                cm_umir_c_render_base(output,
+                                    statement->operands[0], depth);
+                                cm_str_buf_append(output,
+                                    "[0], (long long)(intptr_t)_targs); }");
+                                break;
+                            }
+                        }
+                    }
                     if (callee_ty0 != NULL
                         && callee_ty0->kind == CM_TY_CLOSURE
                         && statement->operand_count != 0u
@@ -4562,6 +4690,28 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             cm_umir_c_render_number(output, (unsigned long)param);
         }
         cm_str_buf_append(output, ");\n}\n");
+        /* The vtable form (`&mut closure` as `&mut dyn FnMut(A) -> R`):
+         * `self` is the object's data pointer -- the address of the slot
+         * holding the closure value, its environment -- and the
+         * arguments arrive as one tuple block. */
+        cm_str_buf_append(output, "long long ");
+        cm_umir_c_render_closure_symbol(output, body->source,
+            body->closure_expr, cm_umir_c_active_instance == NULL ? -1
+                : (long)cm_umir_c_active_instance->index);
+        cm_str_buf_append(output, "_vt(long long self_ref, long long args)"
+            "\n{\n    long long *env = (long long *)(intptr_t)"
+            "*(long long *)(intptr_t)self_ref;\n    (void)args;\n"
+            "    return ");
+        cm_umir_c_render_closure_symbol(output, body->source,
+            body->closure_expr, cm_umir_c_active_instance == NULL ? -1
+                : (long)cm_umir_c_active_instance->index);
+        cm_str_buf_append(output, "(env");
+        for (param = 0u; param < closure_params; ++param) {
+            cm_str_buf_append(output, ", ((long long *)(intptr_t)args)[");
+            cm_umir_c_render_number(output, (unsigned long)param);
+            cm_str_buf_push(output, ']');
+        }
+        cm_str_buf_append(output, ");\n}\n");
     }
     cm_umir_c_active_body = NULL;
     /* `#[no_mangle]` exports: an ABI-typed wrapper with the item name. */
@@ -4863,10 +5013,28 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                 || !cm_hir_def_id_equal(method->parent_definition,
                     closure[closure_index])) continue;
             cm_str_buf_init(&symbol);
-            cm_umir_c_exact_self = 1;
-            cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
-                method->definition, CM_TY_NONE, vt->type, NULL, 0u);
-            cm_umir_c_exact_self = 0;
+            {
+                /* A closure's Fn-family entries are its `_vt` thunk. */
+                const CmTy *concrete = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena,
+                        cm_umir_c_subst(vt->type)));
+                if (concrete != NULL && concrete->kind == CM_TY_CLOSURE
+                    && cm_umir_c_is_fn_call_method(hir, method)) {
+                    long closure_instance = cm_umir_c_closure_instance_of(
+                        hir, tyck, concrete);
+                    cm_umir_c_render_closure_symbol(&symbol,
+                        (CmHirBodyId)concrete->a, (CmUExprId)concrete->b,
+                        closure_instance);
+                    cm_str_buf_append(&symbol, "_vt");
+                    vt = (const CmUMirVtable *)cm_vec_at_const(
+                        &program.vtables, vtables_done);
+                } else {
+                    cm_umir_c_exact_self = 1;
+                    cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
+                        method->definition, CM_TY_NONE, vt->type, NULL, 0u);
+                    cm_umir_c_exact_self = 0;
+                }
+            }
             cm_str_buf_append(&protos, "long long ");
             cm_str_buf_append_n(&protos, symbol.data, symbol.len);
             cm_str_buf_append(&protos, "();\n");

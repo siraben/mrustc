@@ -193,6 +193,21 @@ CmTyId cm_ty_fn_ptr(CmTyArena *arena, const CmTyId *params, uint32_t count,
     return id;
 }
 
+CmTyId cm_ty_dyn(CmTyArena *arena, CmHirDefId principal,
+    const CmTyId *args, uint32_t count, uint32_t principal_count,
+    CmHirDefId assoc_def)
+{
+    CmTy ty;
+    memset(&ty, 0, sizeof(ty));
+    ty.kind = CM_TY_DYN;
+    ty.def = principal;
+    ty.def2 = assoc_def;
+    ty.a = principal_count;
+    ty.children = (CmTyId *)args;
+    ty.count = count;
+    return cm_ty_make(arena, &ty);
+}
+
 CmTyId cm_ty_with_def(CmTyArena *arena, CmTyKind kind, CmHirDefId def,
     const CmTyId *args, uint32_t count)
 {
@@ -733,7 +748,11 @@ CmTyId cm_ty_from_hir(CmTyArena *arena, const CmHirContext *hir,
     }
     case CM_HIR_TYPE_DYN_TRAIT_KIND: {
         CmHirDefId def;
+        CmHirDefId assoc_def;
+        uint32_t principal_count;
+        uint32_t equality;
         memset(&def, 0, sizeof(def));
+        memset(&assoc_def, 0, sizeof(assoc_def));
         if (ty->data.dyn_trait_type.has_principal) {
             def = ty->data.dyn_trait_type.principal_trait.definition;
             count = cm_ty_args_from_hir(arena, hir,
@@ -743,7 +762,20 @@ CmTyId cm_ty_from_hir(CmTyArena *arena, const CmHirContext *hir,
         } else {
             count = 0u;
         }
-        return cm_ty_with_def(arena, CM_TY_DYN, def, args, count);
+        principal_count = count;
+        /* `dyn FnMut(A) -> R` binds `Output = R`: the equalities' values
+         * follow the principal's arguments (`a` = their start, `def2` =
+         * the first bound associated type). */
+        for (equality = 0u; equality < ty->data.dyn_trait_type.equality_count
+                && count < 64u; ++equality) {
+            const CmHirAssociatedTypeEquality *eq =
+                &ty->data.dyn_trait_type.equalities[equality];
+            CmTyId value = cm_ty_from_hir(arena, hir, eq->value);
+            ty = cm_hir_get_type(hir, type);
+            if (equality == 0u) assoc_def = eq->associated_type;
+            args[count++] = value;
+        }
+        return cm_ty_dyn(arena, def, args, count, principal_count, assoc_def);
     }
     case CM_HIR_TYPE_OPAQUE_KIND:
         return cm_ty_fresh(arena, CM_HIR_INFER_GENERAL);

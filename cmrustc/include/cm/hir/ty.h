@@ -110,6 +110,12 @@ CmTyId cm_ty_array(CmTyArena *arena, CmTyId element, CmTyId length);
 CmTyId cm_ty_slice(CmTyArena *arena, CmTyId element);
 CmTyId cm_ty_fn_ptr(CmTyArena *arena, const CmTyId *params, uint32_t count,
     CmTyId return_type, int is_unsafe);
+/* A trait object: principal `principal` with `principal_count` arguments,
+ * followed by the values of its associated-type bindings (`assoc_def` the
+ * first bound associated type, none when unbound). */
+CmTyId cm_ty_dyn(CmTyArena *arena, CmHirDefId principal,
+    const CmTyId *args, uint32_t count, uint32_t principal_count,
+    CmHirDefId assoc_def);
 CmTyId cm_ty_with_def(CmTyArena *arena, CmTyKind kind, CmHirDefId def,
     const CmTyId *args, uint32_t count);
 CmTyId cm_ty_param(CmTyArena *arena, CmHirGenericParamId parameter);
