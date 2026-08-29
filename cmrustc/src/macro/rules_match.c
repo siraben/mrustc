@@ -272,6 +272,62 @@ static size_t cm_rules_item_extent(const CmRulesMatchState *state,
     return available;
 }
 
+/* A `meta` fragment is `SimplePath ( '=' expr | DelimTokenTree )?`; its
+ * extent is deterministic, so it is computed once rather than searched
+ * (searching every extent makes `$( $m:meta , )*` followed by a failing
+ * tail explore 2^n partitions — cfg_if!'s `@__items` recursion). */
+static int cm_rules_token_is_ident_like(CmRulesMatchState *state,
+    const struct cm_tt_node *node)
+{
+    unsigned char first;
+
+    if (node == NULL || node->kind != CM_TT_NODE_TOKEN
+        || node->data.token.length == 0u
+        || !cm_rules_input_range_valid(state, node->data.token.start,
+            node->data.token.length)) {
+        return 0;
+    }
+    first = (unsigned char)state->input_source[node->data.token.start];
+    return first == '_' || (first >= 'a' && first <= 'z')
+        || (first >= 'A' && first <= 'Z');
+}
+
+static size_t cm_rules_meta_extent(CmRulesMatchState *state,
+    cm_tt_id input)
+{
+    const struct cm_tt_node *node;
+    const struct cm_tt_node *next;
+    size_t count;
+
+    node = cm_token_tree_node(state->input_tree, input);
+    if (!cm_rules_token_is_ident_like(state, node)) {
+        return 0;
+    }
+    count = 1;
+    node = cm_token_tree_node(state->input_tree, node->next_sibling);
+    while (cm_rules_input_token_text(state, node, "::")) {
+        next = cm_token_tree_node(state->input_tree, node->next_sibling);
+        if (!cm_rules_token_is_ident_like(state, next)) {
+            break;
+        }
+        count += 2;
+        node = cm_token_tree_node(state->input_tree, next->next_sibling);
+    }
+    if (node != NULL && node->kind == CM_TT_NODE_GROUP) {
+        return count + 1;
+    }
+    if (cm_rules_input_token_text(state, node, "=")) {
+        count += 1;
+        node = cm_token_tree_node(state->input_tree, node->next_sibling);
+        while (node != NULL && !cm_rules_input_token_text(state, node, ",")
+            && !cm_rules_input_token_text(state, node, ";")) {
+            count += 1;
+            node = cm_token_tree_node(state->input_tree, node->next_sibling);
+        }
+    }
+    return count;
+}
+
 static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
     CmMacroFragmentKind fragment, cm_tt_id input,
     size_t *minimum, size_t *maximum)
@@ -331,6 +387,11 @@ static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
             }
         }
         return 1;
+    case CM_MACRO_FRAGMENT_META:
+        *minimum = cm_rules_meta_extent(state, input);
+        if (*minimum == 0u) return 0;
+        *maximum = *minimum;
+        return 1;
     case CM_MACRO_FRAGMENT_ITEM:
         if (node == NULL) return 0;
         *minimum = cm_rules_item_extent(state, input, available);
@@ -345,7 +406,6 @@ static int cm_rules_fragment_fixed_length(CmRulesMatchState *state,
     case CM_MACRO_FRAGMENT_TY:
     case CM_MACRO_FRAGMENT_PAT:
     case CM_MACRO_FRAGMENT_PATH:
-    case CM_MACRO_FRAGMENT_META:
         return node != NULL;
     }
     return 0;
