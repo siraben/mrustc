@@ -3002,11 +3002,22 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
          * must not capture `Clone::clone`. */
         int generic_receiver = 0;
         {
-            const CmTy *rt = cm_ty_get(arena, cm_ty_resolve(arena, receiver));
+            /* Through the reference layers, normalized: a projection that
+             * resolves to a concrete type (`<usize as SliceIndex<[T]>>::
+             * Output` = `Argument`) is not a generic receiver. */
+            CmTyId peeled = cm_ty_resolve(arena, receiver);
+            const CmTy *rt = cm_ty_get(arena, peeled);
             unsigned int guard = 0u;
             while (rt != NULL && (rt->kind == CM_TY_REF
-                    || rt->kind == CM_TY_PTR) && guard++ < 4u)
-                rt = cm_ty_get(arena, cm_ty_resolve(arena, rt->children[0]));
+                    || rt->kind == CM_TY_PTR) && guard++ < 4u) {
+                peeled = cm_ty_resolve(arena, rt->children[0]);
+                rt = cm_ty_get(arena, peeled);
+            }
+            if (rt != NULL && rt->kind == CM_TY_PROJECTION) {
+                peeled = cm_ty_resolve(arena,
+                    cm_tyck_normalize(env, peeled, 0u));
+                rt = cm_ty_get(arena, peeled);
+            }
             generic_receiver = rt != NULL && (rt->kind == CM_TY_PARAM
                 || rt->kind == CM_TY_SELF || rt->kind == CM_TY_PROJECTION);
         }

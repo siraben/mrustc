@@ -121,6 +121,47 @@ impl Into32 for u32 {
     }
 }
 
+// A receiver typed by a projection that normalizes to a concrete type
+// (`<usize as Index<[T]>>::Out` = `Arg`) reaches the inherent method,
+// not a blanket `impl<T> Show for &T` (core's `value.fmt(fmt)` in
+// `fmt::run`, with `value: &<usize as SliceIndex<[Argument]>>::Output`).
+struct Arg {
+    n: u32,
+}
+
+impl Arg {
+    fn show(&self) -> u32 {
+        self.n * 2
+    }
+}
+
+trait Show {
+    fn show(&self) -> u32;
+}
+
+impl<T> Show for &T {
+    fn show(&self) -> u32 {
+        4242
+    }
+}
+
+trait Pick<S: ?Sized> {
+    type Out;
+    fn pick(self, s: &S) -> &Self::Out;
+}
+
+impl Pick<[Arg]> for usize {
+    type Out = Arg;
+    fn pick(self, s: &[Arg]) -> &Arg {
+        &s[self]
+    }
+}
+
+fn run_show<I: Pick<[Arg], Out = Arg>>(args: &[Arg], i: I) -> u32 {
+    let value = i.pick(args);
+    value.show()
+}
+
 #[no_mangle]
 pub extern "C" fn trait_args(i: u32) -> u32 {
     let table: [u32; 4] = [10, 20, 30, 40];
@@ -136,4 +177,5 @@ pub extern "C" fn trait_args(i: u32) -> u32 {
     }
     lookup(&table, idx) + lookup_bytes(&b, idx) + lookup(&table, plain)
         + stepper(i) * 10000 + bumped * 1000000
+        + run_show(&[Arg { n: 3 }, Arg { n: i + 1 }], 1usize) * 100000000
 }
