@@ -9,6 +9,8 @@
 
 #define CM_PLAN_MACROS_NONE 0
 #define CM_PLAN_MACROS_ALL 1
+/* Extern-block children: expansions reparse in the foreign context. */
+#define CM_PLAN_MACROS_EXTERN 3
 #define CM_PLAN_MACROS_INVOCATIONS_ONLY 2
 
 typedef struct CmPlanInputItem {
@@ -1150,13 +1152,18 @@ static int cm_plan_process_children(CmItemMacroPlanContext *context,
     }
     cm_plan_clone_scope(&child_scope, scope);
     cm_vec_init(&children, sizeof(CmItemMacroPlanNode));
+    /* An extern block's children are root-style items (std's cmath.rs
+     * wraps its declarations in `cfg_if::cfg_if!`), so item macros
+     * expand there like in a module and attach to the block. */
     allow_child_macros = item->kind == CM_AST_ITEM_MODULE
         ? CM_PLAN_MACROS_ALL
+        : (item->kind == CM_AST_ITEM_EXTERN_BLOCK ? CM_PLAN_MACROS_EXTERN
         : (item->kind == CM_AST_ITEM_IMPL
-            ? CM_PLAN_MACROS_INVOCATIONS_ONLY : CM_PLAN_MACROS_NONE);
+            ? CM_PLAN_MACROS_INVOCATIONS_ONLY : CM_PLAN_MACROS_NONE));
     if (!cm_plan_process_sequence(context, child_inputs, child_count,
         &child_scope, nesting + 1u, expansion_depth, allow_child_macros,
         item->kind == CM_AST_ITEM_MODULE
+            || item->kind == CM_AST_ITEM_EXTERN_BLOCK
             ? input->item_id : container_item,
         &children)) {
         cm_plan_destroy_node_vector(&children);
@@ -1399,8 +1406,9 @@ static int cm_plan_expand_invocation(CmItemMacroPlanContext *context,
         && definition_item_node->attribute_count == 0u
         && definition_item_node->span.end <= item->span.start
         && !qualified && !inputs[index].is_generated
-        && allow_macros == CM_PLAN_MACROS_ALL
-        && item->data.macro_item.delimiter == CM_AST_DELIMITER_PAREN;
+        && allow_macros == CM_PLAN_MACROS_ALL;
+    /* `macro cfg_unordered(..) { .. }` is invoked with braces in std's
+     * env_consts.rs: any delimiter is fine for a paren-parameter macro. */
     if (binding->kind != CM_PLAN_BINDING_RULES && !local_parameterized
         && resolved_builtin != CM_ITEM_MACRO_RESOLVED_BUILTIN_CFG_SELECT) {
         context->result.definition = binding->definition;
@@ -1432,7 +1440,9 @@ static int cm_plan_expand_invocation(CmItemMacroPlanContext *context,
     reparse_options = context->options->reparse;
     reparse_options.item_context = allow_macros
             == CM_PLAN_MACROS_INVOCATIONS_ONLY
-        ? CM_ITEM_LIST_FRAGMENT_IMPL : CM_ITEM_LIST_FRAGMENT_ROOT;
+        ? CM_ITEM_LIST_FRAGMENT_IMPL
+        : (allow_macros == CM_PLAN_MACROS_EXTERN
+            ? CM_ITEM_LIST_FRAGMENT_EXTERN : CM_ITEM_LIST_FRAGMENT_ROOT);
     reparse_options.expansion.crate_identifier = binding->crate_identifier;
     if (resolved_builtin == CM_ITEM_MACRO_RESOLVED_BUILTIN_CFG_SELECT) {
         reparse = cm_cfg_select_reparse_items(context->ast,
@@ -1446,6 +1456,14 @@ static int cm_plan_expand_invocation(CmItemMacroPlanContext *context,
     context->result.reparse = reparse;
     context->result.definition = definition;
     if (reparse.status != CM_MACRO_OK) {
+        if (getenv("CM_MACRO_DEBUG") != NULL) {
+            const CmInternedString *macro_text = name == CM_INTERN_ID_NONE
+                ? NULL : cm_ast_get_string(context->ast, name);
+            fprintf(stderr, "MACRO reparse failed macro=%.*s: %s\n",
+                macro_text == NULL ? 1 : (int)macro_text->len,
+                macro_text == NULL ? "?" : (const char *)macro_text->bytes,
+                reparse.message == NULL ? "?" : reparse.message);
+        }
         cm_plan_error(context, reparse.status,
             CM_ITEM_MACRO_PLAN_STAGE_REPARSE,
             CM_ITEM_MACRO_PLAN_DIAG_REPARSE,

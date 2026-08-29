@@ -997,12 +997,16 @@ static int test_generated_crate_visible_glob_imports(void)
         && imported.is_import && !imported.is_public
         && imported.is_crate_visible,
         "pub(crate) glob did not retain crate-wide reachability");
-    ok &= check(!find_binding(&resolver, public_glob,
-            CM_RESOLVE_NAMESPACE_TYPE, "i16x8", NULL)
+    /* A public glob carries a crate-visible item at crate visibility
+     * (std_detect's `pub use x86::*;` + `pub(crate) enum Feature`), never
+     * as a public re-export. */
+    ok &= check(find_binding(&resolver, public_glob,
+            CM_RESOLVE_NAMESPACE_TYPE, "i16x8", &public_binding)
+        && !public_binding.is_public && public_binding.is_crate_visible
         && find_binding(&resolver, public_glob,
             CM_RESOLVE_NAMESPACE_TYPE, "Public", &public_binding)
         && public_binding.is_public && public_binding.is_reexport,
-        "public glob leaked a crate-visible declaration");
+        "public glob leaked a crate-visible declaration as public");
     destroy_all(&sources, &graph, &resolver);
     return ok;
 }

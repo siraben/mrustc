@@ -2,6 +2,8 @@
 
 #include "cm/alloc.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct CmDependencyMacroArtifactState {
@@ -380,6 +382,18 @@ CmDependencyMacroStatus cm_dependency_macro_artifact_resolve_import(
     local_lookup = cm_import_resolve_path_checked(&imports, consumer,
         consumer_revision, consumer_module, 0, local_name, 1u,
         CM_RESOLVE_NAMESPACE_MACRO, &local_binding);
+    /* A binding the consumer's resolver delegated into a dependency
+     * (`use cfg_if::cfg_if;` resolved through cfg_if's macro namespace)
+     * is the very import this artifact certifies, not a local shadow. */
+    if (getenv("CM_MACRO_DEBUG") != NULL)
+        fprintf(stderr, "MACRO dep-import artifact=%s name=%.*s "
+            "local_lookup=%d local_dep=%u local_kind=%d\n",
+            state->extern_name == NULL ? "?" : state->extern_name,
+            (int)local_name->length, (const char *)local_name->bytes,
+            (int)local_lookup, (unsigned)local_binding.dependency,
+            (int)local_binding.item_kind);
+    if (local_lookup == CM_IMPORT_LOOKUP_OK && local_binding.dependency != 0u)
+        local_lookup = CM_IMPORT_LOOKUP_NOT_FOUND;
     if (local_lookup == CM_IMPORT_LOOKUP_OK
         || local_lookup == CM_IMPORT_LOOKUP_AMBIGUOUS
         || local_lookup == CM_IMPORT_LOOKUP_CYCLE) {

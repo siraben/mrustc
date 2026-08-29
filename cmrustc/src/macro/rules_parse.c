@@ -920,6 +920,21 @@ static int cm_rules_parse_sequence(CmMacroRulesParser *parser,
                     cm_rules_node_offset(node);
                 after = cm_token_tree_node(parser->definition->tree,
                     next->next_sibling);
+            } else if (mode == CM_MACRO_PATTERN_TRANSCRIBER
+                && next != NULL && next->kind == CM_TT_NODE_TOKEN
+                && (next->data.token.kind == CM_TOKEN_IDENT
+                    || next->data.token.kind == CM_TOKEN_RAW_IDENT)
+                && cm_rules_find_binding(parser, next)
+                    == CM_MACRO_BINDING_NONE) {
+                /* `$t` of a nested `macro_rules! { ($t:tt,) => .. }`
+                 * written inside the outer transcriber (std_detect's
+                 * `features!`): an unbound metavariable passes through
+                 * as the tokens `$` `t`. */
+                id = cm_rules_new_token_pattern(parser->definition, node);
+                cm_rules_link_pattern(parser->definition, first, last, id);
+                id = cm_rules_new_token_pattern(parser->definition, next);
+                after = cm_token_tree_node(parser->definition->tree,
+                    next->next_sibling);
             } else {
                 if (!cm_rules_parse_metavariable(parser, next, mode,
                     repetition_depth, &after, &id)) {

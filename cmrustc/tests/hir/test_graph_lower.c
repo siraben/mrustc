@@ -5787,17 +5787,13 @@ static void test_preflight_rejections(void)
 {
     static const char *const rejected_sources[] = {
         "unsafe extern \"system\" { safe fn foreign(); }\n",
-        "#[link(name = \"native\")] unsafe extern \"C\" { "
-            "fn foreign(); }\n",
         "unsafe extern \"C\" { safe fn foreign<T>(); }\n",
-        "unsafe extern \"C\" { static FOREIGN: u8; }\n",
         "unsafe extern \"C\" { type Generic<T>; }\n",
         "unsafe extern \"C\" { type Bounded: Sized; }\n",
         "unsafe extern \"C\" { type Alias = u8; }\n",
         "unsafe extern \"C\" { pub(crate) type Restricted; }\n",
         "static mut SOURCE: u8 = 1;\n",
-        "trait Values {} struct Number; impl Values for Number { "
-            "const VALUE: u8 = 1; }\n"
+        "trait Values {} struct Number; impl Values for Number { const VALUE: u8 = 1; }\n"
     };
     static const CmCfgEntry enabled[] = {
         { "enabled", NULL }
@@ -7011,11 +7007,11 @@ static void test_source_static_with_named_array_length(void)
         && hir_attributes_match_graph(&graph, &hir, power_item,
             &power_attribute, 1u)
         && array_type != NULL && array_type->kind == CM_HIR_TYPE_ARRAY_KIND
-        && array_type->data.array_type.length.kind
-            == CM_HIR_CONST_UNEVALUATED
-        && cm_hir_def_id_equal(
-            array_type->data.array_type.length.data.definition,
-            length_item->definition)
+        /* `LEN` aliases `N_POWERS_OF_FIVE = 1usize`: a suffixed literal
+         * initializer folds to the value. */
+        && array_type->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && array_type->data.array_type.length.data.value.low_bits == 1u
+        && length_item != NULL
         && hir_type_is_usize(&hir,
             array_type->data.array_type.length.type)
         && tuple_type != NULL && tuple_type->kind == CM_HIR_TYPE_TUPLE_KIND

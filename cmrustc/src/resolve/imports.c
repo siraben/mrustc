@@ -445,7 +445,11 @@ static int cm_glob_binding_is_visible(const CmImportResolverState *state,
     const CmResolvedBinding *binding)
 {
     if (state == NULL || leaf == NULL || binding == NULL) return 0;
-    if (leaf->is_public) return binding->is_public;
+    /* `pub use x86::*;` also carries a `pub(crate) enum Feature`
+     * (std_detect): the glob lands it at the narrower visibility. */
+    if (leaf->is_public)
+        return binding->is_public
+            || (leaf->is_glob && binding->is_crate_visible);
     if (leaf->is_crate_visible) {
         return binding->is_public || binding->is_crate_visible;
     }
@@ -1109,6 +1113,41 @@ static uint32_t cm_import_dependency_tag(
         - (const CmImportDependency *)state->dependencies.data) + 1u;
 }
 
+/* The outer tag for a binding found in `dep`'s resolver.  A re-export from
+ * one of dep's own dependencies (alloc's `pub use core::alloc::Layout`)
+ * arrives tagged in dep's numbering; map it to this resolver's entry for
+ * the same crate (same resolver object, else same name), falling back to
+ * dep itself. */
+static uint32_t cm_import_delegated_tag(const CmImportResolverState *state,
+    const CmImportDependency *dep, uint32_t inner_tag)
+{
+    const CmImportResolverState *inner;
+    const CmImportDependency *entry;
+    size_t index;
+
+    if (inner_tag == 0u) return cm_import_dependency_tag(state, dep);
+    inner = cm_import_state_const(dep->resolver);
+    if (inner == NULL || (size_t)inner_tag > inner->dependencies.len)
+        return cm_import_dependency_tag(state, dep);
+    entry = (const CmImportDependency *)cm_vec_at_const(&inner->dependencies,
+        (size_t)inner_tag - 1u);
+    for (index = 0u; entry != NULL && index < state->dependencies.len;
+         ++index) {
+        const CmImportDependency *candidate = (const CmImportDependency *)
+            cm_vec_at_const(&state->dependencies, index);
+        if (candidate != NULL && candidate->resolver == entry->resolver)
+            return (uint32_t)index + 1u;
+    }
+    for (index = 0u; entry != NULL && index < state->dependencies.len;
+         ++index) {
+        const CmImportDependency *candidate = (const CmImportDependency *)
+            cm_vec_at_const(&state->dependencies, index);
+        if (candidate != NULL && strcmp(candidate->name, entry->name) == 0)
+            return (uint32_t)index + 1u;
+    }
+    return cm_import_dependency_tag(state, dep);
+}
+
 static const CmImportDependency *cm_import_find_dependency(
     const CmImportResolverState *state, CmResolveStringId name)
 {
@@ -1163,12 +1202,27 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
     const CmResolveStringId *ids;
     CmResolvePathSegmentView views[64];
     size_t count;
+    size_t skip;
     uint32_t dependency_tag;
     int changed = 0;
-    if (leaf->ever_resolved || leaf->segments.len == 0u
-        || leaf->absolute) return 0;
+    /* `::core::clone::Clone` (libc's `prelude!`): a leading `::` names an
+     * extern crate in editions 2018+, so an absolute leaf whose first
+     * segment is a registered dependency is delegated like a bare one. */
+    if (leaf->ever_resolved || leaf->segments.len == 0u) return 0;
     ids = (const CmResolveStringId *)leaf->segments.data;
     dep = cm_import_find_dependency(state, ids[0]);
+    if (leaf->absolute && dep == NULL) return 0;
+    skip = 1u;
+    if (dep == NULL && leaf->segments.len > 1u
+        && cm_import_string_is(state, ids[0], "crate")
+        && cm_direct_child(state, state->root, ids[1]) == CM_MODULE_NONE) {
+        /* `use crate::alloc::alloc::Layout` (hashbrown): `crate::alloc`
+         * names the root's `extern crate alloc;` item, which has no
+         * module of this crate behind it — the rest of the path belongs
+         * to the dependency. */
+        dep = cm_import_find_dependency(state, ids[1]);
+        skip = 2u;
+    }
     if (dep == NULL) return 0;
     {
         const CmImportDependency *base = (const CmImportDependency *)
@@ -1177,19 +1231,21 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
     }
     destination = cm_import_module(state, leaf->module);
     if (destination == NULL) return 0;
-    count = cm_import_segment_views(state, ids + 1u,
-        leaf->segments.len - 1u, views, 64u);
-    if (leaf->segments.len > 1u && count == 0u) return 0;
-    if (!leaf->is_glob && count != 0u
-        && views[count - 1u].length == 4u
-        && memcmp(views[count - 1u].bytes, "self", 4u) == 0) {
+    count = cm_import_segment_views(state, ids + skip,
+        leaf->segments.len - skip, views, 64u);
+    if (leaf->segments.len > skip && count == 0u) return 0;
+    if (!leaf->is_glob && ((count != 0u
+            && views[count - 1u].length == 4u
+            && memcmp(views[count - 1u].bytes, "self", 4u) == 0)
+        /* `use unwind as uw;` (panic_unwind): the bare crate, aliased. */
+        || (count == 0u && leaf->segments.len == skip))) {
         /*
          * `use core::x::{self, ...}` — drop the `self` segment and import
          * whatever the prefix names (module, enum, type) under the leaf's
          * published name via the namespace loop below.  A bare crate
          * `{self}` synthesizes the root module binding directly.
          */
-        count -= 1u;
+        if (count != 0u) count -= 1u;
         if (count == 0u) {
             CmResolvedBinding imported;
             memset(&imported, 0, sizeof(imported));
@@ -1241,7 +1297,8 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
                 imported.revision = state->revision;
                 imported.module = leaf->module;
                 imported.import_declaration = leaf->declaration;
-                imported.dependency = dependency_tag;
+                imported.dependency = cm_import_delegated_tag(state, dep,
+                    imported.dependency);
                 cm_import_apply_leaf_visibility(&imported, leaf);
                 imported.is_import = 1;
                 imported.is_ambiguous = 0;
@@ -1271,7 +1328,8 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
             imported.name = leaf->import_name;
             imported.module = leaf->module;
             imported.import_declaration = leaf->declaration;
-            imported.dependency = dependency_tag;
+            imported.dependency = cm_import_delegated_tag(state, dep,
+                imported.dependency);
             cm_import_apply_leaf_visibility(&imported, leaf);
             imported.is_import = 1;
             imported.is_ambiguous = 0;
@@ -1561,6 +1619,10 @@ static int cm_leaf_dependency(const CmImportResolverState *state,
 
         candidate = (const CmImportLeaf *)cm_vec_at_const(&state->leaves,
             index);
+        /* `use cfg_if::cfg_if;` blocks on `cfg_if` in its own module: a
+         * leaf is not its own dependency (the dependency-macro artifact
+         * certifies it later), so it stays unresolved, not cyclic. */
+        if (index == leaf_index) continue;
         if (candidate != NULL && !candidate->ever_resolved &&
             candidate->module == leaf->blocked_module &&
             candidate->import_name == leaf->blocked_name) return (int)index;
@@ -1628,7 +1690,8 @@ static void cm_import_inject_dependency_prelude(CmImportResolverState *state)
                 if (imported.name == CM_RESOLVE_STRING_NONE) continue;
                 imported.revision = state->revision;
                 imported.module = state->root;
-                imported.dependency = cm_import_dependency_tag(state, dep);
+                imported.dependency = cm_import_delegated_tag(state, dep,
+                    imported.dependency);
                 imported.is_import = 1;
                 imported.is_ambiguous = 0;
                 (void)cm_vec_push(&state->prelude_bindings, &imported);
@@ -2451,8 +2514,8 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                         dep->root, 0, segments + 1u, segment_count - 1u,
                         namespace_kind, out_binding);
                     if (dep_status == CM_IMPORT_LOOKUP_OK)
-                        out_binding->dependency =
-                            cm_import_dependency_tag(state, dep);
+                        out_binding->dependency = cm_import_delegated_tag(
+                            state, dep, out_binding->dependency);
                     return dep_status;
                 }
                 return CM_IMPORT_LOOKUP_NOT_FOUND;
@@ -2506,8 +2569,8 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                         dep->root, 0, segments + 1u, segment_count - 1u,
                         namespace_kind, out_binding);
                     if (dep_status == CM_IMPORT_LOOKUP_OK) {
-                        out_binding->dependency =
-                            cm_import_dependency_tag(state, dep);
+                        out_binding->dependency = cm_import_delegated_tag(
+                            state, dep, out_binding->dependency);
                     }
                     return dep_status;
                 }
@@ -2531,8 +2594,8 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                     segments + index + 1u, segment_count - index - 1u,
                     namespace_kind, out_binding);
                 if (dep_status == CM_IMPORT_LOOKUP_OK) {
-                    out_binding->dependency =
-                        cm_import_dependency_tag(state, dep);
+                    out_binding->dependency = cm_import_delegated_tag(
+                        state, dep, out_binding->dependency);
                 }
                 return dep_status;
             }
@@ -2554,8 +2617,8 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                     segments + index + 1u, segment_count - index - 1u,
                     namespace_kind, out_binding);
                 if (dep_status == CM_IMPORT_LOOKUP_OK)
-                    out_binding->dependency =
-                        cm_import_dependency_tag(state, dep);
+                    out_binding->dependency = cm_import_delegated_tag(
+                        state, dep, out_binding->dependency);
                 return dep_status;
             }
             if (scope_binding != NULL
@@ -2641,8 +2704,8 @@ static CmImportLookupStatus cm_import_resolve_path_inner(
                     out_binding->target_module = dep->root;
                     out_binding->is_public = 1;
                     out_binding->is_crate_visible = 1;
-                    out_binding->dependency =
-                        cm_import_dependency_tag(state, dep);
+                    out_binding->dependency = cm_import_delegated_tag(
+                        state, dep, out_binding->dependency);
                     return CM_IMPORT_LOOKUP_OK;
                 }
             }

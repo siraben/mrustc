@@ -363,9 +363,9 @@ static void test_diagnostics_and_limits(void)
     expect_parse_error("fragment",
         "{ ($x:unknown) => { $x }; }", NULL,
         CM_MACRO_DIAG_RULES_UNKNOWN_FRAGMENT);
-    expect_parse_error("unknown-binding",
-        "{ () => { $missing }; }", NULL,
-        CM_MACRO_DIAG_RULES_UNKNOWN_BINDING);
+    /* `{ () => { $missing }; }` parses: an unbound metavariable in a
+     * transcriber passes through as the tokens `$` `missing` (nested
+     * `macro_rules!` write the inner macro's captures that way). */
     expect_parse_error("question-separator",
         "{ ($( $x:ident ),?) => { $x }; }", NULL,
         CM_MACRO_DIAG_RULES_INVALID_SEPARATOR);

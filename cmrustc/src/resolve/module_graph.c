@@ -134,6 +134,9 @@ typedef struct CmModuleGraphState {
     CmVec external_ast_owners;
     CmVec external_macros;
     CmVec external_macro_imports;
+    /* Extern names of `#[macro_use] extern crate X;` items (std's
+     * `alloc`): X's exported macros resolve unqualified. */
+    CmVec macro_use_crates;
     CmVec units;
     CmVec errors;
     CmSourceSet *building_sources;
@@ -146,6 +149,9 @@ typedef struct CmModuleGraphState {
     CmModuleGraphRevision revision;
     int revision_exhausted;
 } CmModuleGraphState;
+
+static int cm_graph_compact_item_cfg_fields(CmModuleGraphState *state,
+    const CmAst *ast, CmAstItemId item_id, const CmAstItem *item);
 
 static uint64_t cm_module_graph_lifetime_counter;
 
@@ -308,6 +314,7 @@ static void cm_graph_state_init(CmModuleGraphState *state)
         sizeof(CmResolveExternalAstOwner));
     cm_vec_init(&state->external_macros,
         sizeof(CmResolveExternalMacro));
+    cm_vec_init(&state->macro_use_crates, 64u);
     cm_vec_init(&state->external_macro_imports,
         sizeof(CmResolveExternalMacroImport));
     cm_vec_init(&state->units, sizeof(CmResolveUnit));
@@ -333,6 +340,7 @@ static void cm_graph_state_destroy(CmModuleGraphState *state)
     }
     cm_vec_destroy(&state->errors);
     cm_vec_destroy(&state->units);
+    cm_vec_destroy(&state->macro_use_crates);
     cm_vec_destroy(&state->external_macro_imports);
     cm_vec_destroy(&state->external_macros);
     cm_vec_destroy(&state->external_ast_owners);
@@ -1239,6 +1247,19 @@ static CmResolveUnitId cm_add_unit(CmModuleGraphState *state,
     unit.parse_ok = parse_result.error_count == 0u;
     /* Builtin derives: synthesized impls join the unit's items. */
     if (unit.parse_ok) {
+        size_t compact_index;
+
+        /* Derives read the fields, so cfg-inactive ones go first: core's
+         * `#[derive(Debug)] struct BorrowError { #[cfg(feature =
+         * "debug_refcell")] location: .. }` must not derive `location`. */
+        for (compact_index = 0u; compact_index < unit.ast.items.len;
+             ++compact_index) {
+            const CmAstItem *parsed_item = cm_ast_get_item(&unit.ast,
+                (CmAstItemId)(compact_index + 1u));
+            if (parsed_item == NULL) continue;
+            (void)cm_graph_compact_item_cfg_fields(state, &unit.ast,
+                (CmAstItemId)(compact_index + 1u), parsed_item);
+        }
         /* Crate-wide: a dependency provides `::core`, or the root unit
          * (parsed first) declares `extern crate self as core`. */
         if (!state->derive_core_reachable
@@ -1330,6 +1351,83 @@ static int cm_module_path_exists(const CmModuleGraphState *state,
     return 0;
 }
 
+/* Drop cfg-inactive fields in place (`#[cfg(gnu_time_bits64)] pub
+ * tv_usec: __suseconds64_t` beside its `not(..)` twin in libc's
+ * `timeval`): fields carry no effective view of their own, so the
+ * unit-owned AST is compacted once and every consumer sees the active
+ * set.  Idempotent across graph rounds. */
+static int cm_graph_compact_cfg_fields(CmModuleGraphState *state,
+    const CmAst *ast, CmAstItemId item_id, CmAstField *fields,
+    uint32_t *count)
+{
+    CmExpandOptions expand_options;
+    uint32_t read;
+    uint32_t write = 0u;
+
+    if (fields == NULL || count == NULL) return 1;
+    if (getenv("CM_GRAPH_KEEP_CFG_FIELDS") != NULL) return 1;
+    for (read = 0u; read < *count; ++read) {
+        CmExpandedAttributeList expanded;
+        CmExpandResult expand_result;
+        int active = 1;
+
+        if (fields[read].attribute_count != 0u) {
+            cm_expand_options_init(&expand_options, state->options.cfg);
+            cm_expanded_attribute_list_init(&expanded);
+            expand_result = cm_expand_cfg_attribute_list(ast, item_id,
+                fields[read].attributes, fields[read].attribute_count,
+                &expand_options, &expanded);
+            if (expand_result.status != CM_MACRO_OK) {
+                cm_expanded_attribute_list_destroy(&expanded);
+                return 0;
+            }
+            active = expanded.is_active;
+            cm_expanded_attribute_list_destroy(&expanded);
+        }
+        if (!active) {
+            if (getenv("CM_MACRO_DEBUG") != NULL) {
+                const CmInternedString *fname = fields[read].name
+                        == CM_INTERN_ID_NONE ? NULL
+                    : cm_ast_get_string(ast, fields[read].name);
+                fprintf(stderr, "MACRO cfg-inactive field dropped "
+                    "item=%lu field=%.*s index=%lu\n",
+                    (unsigned long)item_id, fname == NULL ? 1
+                        : (int)fname->len,
+                    fname == NULL ? "_" : (const char *)fname->bytes,
+                    (unsigned long)read);
+            }
+            continue;
+        }
+        if (write != read) fields[write] = fields[read];
+        write += 1u;
+    }
+    *count = write;
+    return 1;
+}
+
+static int cm_graph_compact_item_cfg_fields(CmModuleGraphState *state,
+    const CmAst *ast, CmAstItemId item_id, const CmAstItem *item)
+{
+    CmAstItem *mutable_item = (CmAstItem *)item;
+    uint32_t index;
+
+    if (item->kind == CM_AST_ITEM_STRUCT || item->kind == CM_AST_ITEM_UNION) {
+        return cm_graph_compact_cfg_fields(state, ast, item_id,
+            mutable_item->data.aggregate_item.fields,
+            &mutable_item->data.aggregate_item.field_count);
+    }
+    if (item->kind == CM_AST_ITEM_ENUM) {
+        for (index = 0u; index < item->data.enum_item.variant_count;
+             ++index) {
+            CmAstVariant *variant = &mutable_item->data.enum_item
+                .variants[index];
+            if (!cm_graph_compact_cfg_fields(state, ast, item_id,
+                    variant->fields, &variant->field_count)) return 0;
+        }
+    }
+    return 1;
+}
+
 static int cm_record_effective_plan_item(CmModuleGraphState *state,
     const CmResolveUnit *unit, const CmItemMacroPlanNode *node,
     CmResolveEffectiveItemId *next_id,
@@ -1346,6 +1444,8 @@ static int cm_record_effective_plan_item(CmModuleGraphState *state,
     item = cm_ast_get_item(ast, node->item_id);
     if (source == 0u || item == NULL || next_id == NULL || out_record == NULL
         || *next_id == CM_RESOLVE_EFFECTIVE_ITEM_NONE) return 0;
+    if (!cm_graph_compact_item_cfg_fields(state, ast, node->item_id, item))
+        return 0;
     memset(out_record, 0, sizeof(*out_record));
     out_record->item.id = *next_id;
     *next_id += 1u;
@@ -1612,7 +1712,10 @@ static CmResolveEffectiveAttribute *cm_record_effective_inner_attributes(
         effective.source_attribute = attributes[index].source_id;
         effective.owner = owner;
         effective.style = attributes[index].style;
-        if (generated) {
+        /* A generated out-of-line `mod libunwind;` (unwind's cfg_if!)
+         * still has source-written inner attributes in its own file:
+         * anchor only what the invocation itself produced. */
+        if (generated && generated_span.source == unit->source) {
             effective.span = generated_span;
         } else {
             effective.span.source = unit->source;
@@ -2319,6 +2422,34 @@ static int cm_build_module_macro_scope(CmModuleGraphState *state,
             else if (match < 0) malformed = 1;
         }
         if (macro_use_count == 0u && !malformed) continue;
+        if (!malformed && macro_use_count == 1u
+            && item->item.item_kind == CM_AST_ITEM_EXTERN_CRATE) {
+            /* `#[macro_use] extern crate alloc as alloc_crate;` (std):
+             * remember the crate's extern name; its exported macros are
+             * looked up unqualified through the dependency artifacts. */
+            const CmResolveUnit *crate_unit = cm_get_unit_const(state,
+                module->unit);
+            const CmAstItem *crate_item = crate_unit == NULL ? NULL
+                : cm_ast_get_item(&crate_unit->ast,
+                    item->item.declaration.item);
+            const CmInternedString *crate_name = crate_item == NULL ? NULL
+                : cm_ast_get_string(&crate_unit->ast, crate_item->name);
+            if (crate_name != NULL && crate_name->len < 64u) {
+                char stored[64];
+                size_t scan;
+                int known = 0;
+                memset(stored, 0, sizeof(stored));
+                memcpy(stored, crate_name->bytes, crate_name->len);
+                for (scan = 0u; scan < state->macro_use_crates.len; ++scan) {
+                    const char *have = (const char *)cm_vec_at_const(
+                        &state->macro_use_crates, scan);
+                    if (have != NULL && strcmp(have, stored) == 0) known = 1;
+                }
+                if (!known) (void)cm_vec_push(&state->macro_use_crates,
+                    stored);
+            }
+            continue;
+        }
         if (malformed || macro_use_count != 1u
             || item->item.item_kind != CM_AST_ITEM_MODULE
             || item->item.is_generated) {
@@ -2567,12 +2698,16 @@ static const CmResolveModuleNode *cm_pending_owner_module(
 {
     size_t index;
 
+    const CmResolveModuleNode *file_module = NULL;
+
     for (index = 0u; index < state->modules.len; ++index) {
         const CmResolveModuleNode *module;
 
         module = (const CmResolveModuleNode *)cm_vec_at_const(
             &state->modules, index);
         if (module == NULL || module->unit != unit_id) continue;
+        if (!module->info.is_inline && file_module == NULL)
+            file_module = module;
         if (container_item == CM_AST_ITEM_NONE) {
             if (!module->info.is_inline) return module;
         } else if (module->info.is_inline
@@ -2580,7 +2715,9 @@ static const CmResolveModuleNode *cm_pending_owner_module(
             return module;
         }
     }
-    return NULL;
+    /* A non-module container (std's `extern "C" { cfg_if::cfg_if! {..} }`
+     * in cmath.rs) resolves names in the unit's file module. */
+    return container_item == CM_AST_ITEM_NONE ? NULL : file_module;
 }
 
 /* "<reason>: <name>" for a macro invocation without a binding; the name
@@ -2710,6 +2847,46 @@ static CmImportLookupStatus cm_resolve_pending_qualified(
     return CM_IMPORT_LOOKUP_OK;
 }
 
+/* `use crate::sys::thread_local::local_pointer; local_pointer! { .. }`
+ * (std): an unqualified invocation whose name a `use` brought in
+ * resolves through the import resolver's macro namespace to a
+ * local-crate declaration (`pub(crate) macro local_pointer { .. }`). */
+static CmImportLookupStatus cm_resolve_pending_unqualified_import(
+    const CmImportResolver *imports, const CmModuleGraph *graph,
+    const CmResolveModuleNode *module, const CmResolveUnit *unit,
+    CmInternId name, CmResolveMacroScopeEntry *out_entry)
+{
+    const CmInternedString *text;
+    CmResolvePathSegmentView segment;
+    CmResolvedBinding binding;
+    CmImportLookupStatus status;
+
+    memset(out_entry, 0, sizeof(*out_entry));
+    text = name == CM_INTERN_ID_NONE ? NULL
+        : cm_ast_get_string(&unit->ast, name);
+    if (imports == NULL || graph == NULL || module == NULL || text == NULL)
+        return CM_IMPORT_LOOKUP_INVALID;
+    segment.bytes = text->bytes;
+    segment.length = text->len;
+    memset(&binding, 0, sizeof(binding));
+    status = cm_import_resolve_path_checked(imports, graph,
+        cm_module_graph_revision(graph), module->info.id, 0, &segment, 1u,
+        CM_RESOLVE_NAMESPACE_MACRO, &binding);
+    if (status != CM_IMPORT_LOOKUP_OK
+        || binding.item_kind != CM_AST_ITEM_MACRO
+        || !binding.is_import
+        || binding.dependency != 0u
+        || binding.declaration.source == 0u
+        || binding.declaration.item == CM_AST_ITEM_NONE) {
+        return status == CM_IMPORT_LOOKUP_OK
+            ? CM_IMPORT_LOOKUP_INVALID : status;
+    }
+    out_entry->name = binding.name;
+    out_entry->declaration = binding.declaration;
+    out_entry->introduced_by = binding.import_declaration;
+    return CM_IMPORT_LOOKUP_OK;
+}
+
 static const CmResolveMacroDeclarationRecord *
 cm_graph_find_macro_declaration_record(const CmModuleGraphState *state,
     CmResolveItemRef declaration)
@@ -2809,6 +2986,94 @@ static void cm_include_error(CmModuleGraphState *state,
     CmResolveErrorKind kind, CmSourceId source, const CmAstItem *item,
     const char *detail_a, const char *detail_b);
 
+/* `cfg_if::cfg_if! { .. }` (unwind, std): a qualified invocation whose path
+ * leads into a registered dependency resolves through that crate's macro
+ * artifact (first segment = extern name, remaining = public path). */
+static CmDependencyMacroStatus cm_resolve_pending_qualified_dependency_macro(
+    CmModuleGraphState *state, const CmResolveUnit *unit,
+    const CmItemMacroPendingInvocation *pending,
+    CmDependencyMacroDefinition *out_definition)
+{
+    const CmAstItem *item;
+    const CmAstPath *path;
+    CmResolvePathSegmentView segments[16];
+    size_t count;
+    size_t index;
+    size_t selected = 0u;
+    CmDependencyMacroStatus status = CM_DEPENDENCY_MACRO_NOT_FOUND;
+
+    memset(out_definition, 0, sizeof(*out_definition));
+    item = cm_ast_get_item(&unit->ast, pending->invocation.item);
+    if (item == NULL || item->kind != CM_AST_ITEM_MACRO
+        || item->data.macro_item.form != CM_AST_MACRO_INVOCATION)
+        return CM_DEPENDENCY_MACRO_NOT_FOUND;
+    path = cm_ast_get_path(&unit->ast, item->data.macro_item.path);
+    if (path == NULL || path->segment_count < 2u
+        || path->segment_count > 16u) return CM_DEPENDENCY_MACRO_NOT_FOUND;
+    count = path->segment_count;
+    for (index = 0u; index < count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(&unit->ast,
+            path->segments[index].name);
+        if (name == NULL || path->segments[index].argument_count != 0u)
+            return CM_DEPENDENCY_MACRO_NOT_FOUND;
+        segments[index].bytes = name->bytes;
+        segments[index].length = name->len;
+    }
+    for (index = 0u; index < state->options.dependency_macro_count; ++index) {
+        CmDependencyMacroDefinition definition;
+        CmDependencyMacroStatus one;
+
+        memset(&definition, 0, sizeof(definition));
+        one = cm_dependency_macro_artifact_lookup(
+            state->options.dependency_macros[index], segments, count,
+            &definition);
+        if (one == CM_DEPENDENCY_MACRO_OK) {
+            *out_definition = definition;
+            selected += 1u;
+        } else if (one != CM_DEPENDENCY_MACRO_NOT_FOUND
+            && status == CM_DEPENDENCY_MACRO_NOT_FOUND) {
+            status = one;
+        }
+    }
+    if (selected > 1u) return CM_DEPENDENCY_MACRO_AMBIGUOUS;
+    if (selected == 1u) return CM_DEPENDENCY_MACRO_OK;
+    return status;
+}
+
+/* core's `#[rustc_builtin_macro] macro_rules! include { .. => {{ }} }`
+ * reached through a dependency (std's `include!("keyword_docs.rs")`):
+ * the compiler-provided include, not a transcription of `{}`. */
+static int cm_dependency_definition_is_builtin_include(
+    const CmDependencyMacroDefinition *definition)
+{
+    const CmAstItem *item;
+    const CmInternedString *name;
+    uint32_t index;
+    size_t builtin_count = 0u;
+
+    if (definition == NULL || definition->definition_ast == NULL
+        || definition->declaration.item == CM_AST_ITEM_NONE) return 0;
+    item = cm_ast_get_item(definition->definition_ast,
+        definition->declaration.item);
+    name = item == NULL ? NULL
+        : cm_ast_get_string(definition->definition_ast, item->name);
+    if (item == NULL || item->kind != CM_AST_ITEM_MACRO || name == NULL
+        || name->len != 7u || memcmp(name->bytes, "include", 7u) != 0)
+        return 0;
+    for (index = 0u; index < item->attribute_count; ++index) {
+        const CmAstAttribute *attribute = cm_ast_get_attribute(
+            definition->definition_ast, item->attributes[index]);
+        const CmInternedString *text = attribute == NULL ? NULL
+            : cm_ast_get_string(definition->definition_ast,
+                attribute->text);
+        /* Attribute text keeps its `#[..]` wrapper. */
+        if (text != NULL && text->len == 22u
+            && memcmp(text->bytes, "#[rustc_builtin_macro]", 22u) == 0)
+            builtin_count += 1u;
+    }
+    return builtin_count == 1u;
+}
+
 static CmDependencyMacroStatus cm_resolve_pending_dependency_macro(
     CmModuleGraphState *state, const CmModuleGraph *graph_view,
     CmModuleId module, const CmResolvePathSegmentView *local_name,
@@ -2849,10 +3114,37 @@ static CmDependencyMacroStatus cm_resolve_pending_dependency_macro(
     return selected_status;
 }
 
+static int cm_graph_other_units_have_pending(
+    const CmModuleGraphState *state, size_t unit_index)
+{
+    size_t index;
+
+    for (index = 0u; index < state->units.len; ++index) {
+        const CmResolveUnit *other;
+
+        if (index == unit_index) continue;
+        other = (const CmResolveUnit *)cm_vec_at_const(&state->units, index);
+        if (other != NULL && other->plan.pending_invocation_count != 0u)
+            return 1;
+    }
+    return 0;
+}
+
 static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
     int *out_spliced_include)
 {
     size_t unit_index;
+    int progress = 0;
+    size_t pending_before;
+    size_t units_before;
+    int deferred_any = 0;
+    int deferred_saved = 0;
+    CmSourceId deferred_source = 0u;
+    uint32_t deferred_start = 0u;
+    uint32_t deferred_end = 0u;
+    CmResolveStringId deferred_path = CM_RESOLVE_STRING_NONE;
+    CmResolveStringId deferred_kind = CM_RESOLVE_STRING_NONE;
+    CmResolveStringId deferred_detail = CM_RESOLVE_STRING_NONE;
 
     if (out_spliced_include != NULL) *out_spliced_include = 0;
     if (out_spliced_include == NULL) return 0;
@@ -2871,6 +3163,13 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
         unit = (CmResolveUnit *)cm_vec_at(&state->units, unit_index);
         if (unit == NULL || !unit->plan_ok
             || unit->plan.pending_invocation_count == 0u) continue;
+        /* A unit whose module is still deferred (the root has a generated
+         * pending invocation — libc's `prelude!()` — so non-macro_use
+         * modules are not built yet) has no scope to resolve against:
+         * its generated invocations wait for the round that builds it. */
+        if (cm_pending_owner_module(state,
+                (CmResolveUnitId)(unit_index + 1u), CM_AST_ITEM_NONE)
+                == NULL) continue;
         cm_vec_init(&resolved, sizeof(CmItemMacroResolvedInvocation));
         cm_vec_init(&authenticated_includes,
             sizeof(CmItemMacroPendingInvocation));
@@ -2966,6 +3265,26 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                 entry = cm_resolve_pending_from_namespace(state, module,
                     unit, name, &namespace_entry);
             }
+            if (entry == NULL && module != NULL && !pending->is_qualified
+                && !pending->is_generated && has_name
+                && name != CM_INTERN_ID_NONE) {
+                /* A `use`-imported macro: consult the import resolver
+                 * (initialized on demand). */
+                if (!imports_initialized) {
+                    cm_import_resolver_init(&imports);
+                    imports_initialized = 1;
+                    import_result = cm_import_resolve(&imports, &graph_view,
+                        state->revision);
+                    imports_ready = import_result.revision
+                        == state->revision;
+                }
+                if (imports_ready
+                    && cm_resolve_pending_unqualified_import(&imports,
+                        &graph_view, module, unit, name, &qualified_entry)
+                        == CM_IMPORT_LOOKUP_OK) {
+                    entry = &qualified_entry;
+                }
+            }
             if (entry == NULL && module != NULL && has_name
                 && !pending->is_qualified && !pending->is_generated
                 && state->options.dependency_macro_count != 0u) {
@@ -2992,8 +3311,181 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             definition_unit_id = entry == NULL ? 0u : cm_find_unit(state,
                 entry->declaration.source);
             definition_unit = cm_get_unit_const(state, definition_unit_id);
+            if (!has_dependency_definition && pending->is_qualified
+                && (entry == NULL || definition_unit == NULL)
+                && state->options.dependency_macro_count != 0u) {
+                CmDependencyMacroDefinition qualified_definition;
+                CmDependencyMacroStatus qualified_status;
+
+                qualified_status =
+                    cm_resolve_pending_qualified_dependency_macro(state,
+                        unit, pending, &qualified_definition);
+                if (qualified_status == CM_DEPENDENCY_MACRO_OK) {
+                    has_dependency_definition = 1;
+                    dependency_definition = qualified_definition;
+                    /* No `use` leaf brought the name in: the invocation
+                     * itself is the retained consumer import. */
+                    dependency_import.consumer_graph = &graph_view;
+                    dependency_import.consumer_revision = state->revision;
+                    dependency_import.consumer_module = module == NULL
+                        ? CM_MODULE_NONE : module->info.id;
+                    dependency_import.import_declaration.source =
+                        invocation_source;
+                    dependency_import.import_declaration.item =
+                        pending->invocation.item;
+                    dependency_import.definition = qualified_definition;
+                    entry = NULL;
+                } else if (qualified_status
+                        != CM_DEPENDENCY_MACRO_NOT_FOUND) {
+                    dependency_status = qualified_status;
+                }
+            }
+            if (!has_dependency_definition && !pending->is_qualified
+                && has_name && name != CM_INTERN_ID_NONE
+                && (entry == NULL || definition_unit == NULL)
+                && state->options.dependency_macro_count != 0u) {
+                /* `vec!` in std after `#[macro_use] extern crate alloc`:
+                 * `alloc::vec` through the artifacts. */
+                const CmInternedString *macro_name = cm_ast_get_string(
+                    &unit->ast, name);
+                size_t crate_index;
+                size_t selected = 0u;
+                CmDependencyMacroDefinition found;
+                /* rustc injects `#[macro_use] extern crate core;` (and
+                 * `std`) implicitly: their exported macros (`include!`,
+                 * `panic!`) are always in scope. */
+                static const char *const implicit_crates[] = { "core",
+                    "std" };
+                size_t total = state->macro_use_crates.len
+                    + sizeof(implicit_crates) / sizeof(implicit_crates[0]);
+
+                memset(&found, 0, sizeof(found));
+                for (crate_index = 0u; macro_name != NULL
+                        && crate_index < total; ++crate_index) {
+                    const char *crate_name = crate_index
+                            < state->macro_use_crates.len
+                        ? (const char *)cm_vec_at_const(
+                            &state->macro_use_crates, crate_index)
+                        : implicit_crates[crate_index
+                            - state->macro_use_crates.len];
+                    CmResolvePathSegmentView segments[2];
+                    size_t artifact_index;
+
+                    if (crate_name == NULL) continue;
+                    segments[0].bytes = (const unsigned char *)crate_name;
+                    segments[0].length = strlen(crate_name);
+                    segments[1].bytes = macro_name->bytes;
+                    segments[1].length = macro_name->len;
+                    for (artifact_index = 0u; artifact_index
+                            < state->options.dependency_macro_count;
+                            ++artifact_index) {
+                        CmDependencyMacroDefinition candidate;
+                        memset(&candidate, 0, sizeof(candidate));
+                        if (cm_dependency_macro_artifact_lookup(
+                                state->options.dependency_macros[
+                                    artifact_index], segments, 2u,
+                                &candidate) == CM_DEPENDENCY_MACRO_OK) {
+                            found = candidate;
+                            selected += 1u;
+                        }
+                    }
+                }
+                if (selected == 1u) {
+                    has_dependency_definition = 1;
+                    dependency_definition = found;
+                    dependency_import.consumer_graph = &graph_view;
+                    dependency_import.consumer_revision = state->revision;
+                    dependency_import.consumer_module = module == NULL
+                        ? CM_MODULE_NONE : module->info.id;
+                    dependency_import.import_declaration.source =
+                        invocation_source;
+                    dependency_import.import_declaration.item =
+                        pending->invocation.item;
+                    dependency_import.definition = found;
+                    entry = NULL;
+                } else if (selected > 1u) {
+                    dependency_status = CM_DEPENDENCY_MACRO_AMBIGUOUS;
+                }
+            }
+            if (!has_dependency_definition
+                && (entry == NULL || definition_unit == NULL)
+                && (state->defer_non_macro_use_modules
+                    || cm_graph_other_units_have_pending(state, unit_index))) {
+                /* The name may come from an expansion or a module the
+                 * next round builds (std's `use crate::sys::thread_local::
+                 * local_pointer` reaches a cfg_if!-generated re-export):
+                 * leave the invocation pending; error only when a whole
+                 * round makes no progress. */
+                if (!deferred_saved) {
+                    deferred_saved = 1;
+                    deferred_source = invocation_source;
+                    deferred_start = pending->span.start;
+                    deferred_end = pending->span.end;
+                    deferred_path = module == NULL ? CM_RESOLVE_STRING_NONE
+                        : module->info.absolute_path;
+                    deferred_kind = cm_graph_intern_c_str(state,
+                        pending->is_qualified ? "qualified macro"
+                            : "unsupported macro");
+                    deferred_detail = dependency_status
+                            != CM_DEPENDENCY_MACRO_NOT_FOUND
+                        ? cm_graph_intern_c_str(state,
+                            cm_dependency_macro_status_name(
+                                dependency_status))
+                        : cm_graph_intern_c_str(state,
+                            cm_graph_missing_macro_detail(state, unit,
+                                name, pending->is_qualified));
+                }
+                if (getenv("CM_MACRO_DEBUG") != NULL) {
+                    const CmInternedString *dn = name == CM_INTERN_ID_NONE
+                        ? NULL : cm_ast_get_string(&unit->ast, name);
+                    fprintf(stderr, "MACRO deferred name=%.*s unit=%lu "
+                        "generated=%d defer_modules=%d others=%d "
+                        "entry=%p defunit=%p\n",
+                        dn == NULL ? 1 : (int)dn->len,
+                        dn == NULL ? "?" : (const char *)dn->bytes,
+                        (unsigned long)unit_index, pending->is_generated,
+                        state->defer_non_macro_use_modules,
+                        cm_graph_other_units_have_pending(state, unit_index),
+                        (const void *)entry, (const void *)definition_unit);
+                }
+                deferred_any = 1;
+                continue;
+            }
             if (!has_dependency_definition
                 && (entry == NULL || definition_unit == NULL)) {
+                if (getenv("CM_MACRO_DEBUG") != NULL) {
+                    size_t h;
+                    const CmInternedString *pname = name == CM_INTERN_ID_NONE
+                        ? NULL : cm_ast_get_string(&unit->ast, name);
+                    fprintf(stderr, "MACRO missing binding name=%.*s "
+                        "module=%lu unit_source=%lu generated=%d "
+                        "span=%lu..%lu history=%lu entry=%p defunit=%p\n",
+                        pname == NULL ? 1 : (int)pname->len,
+                        pname == NULL ? "?" : (const char *)pname->bytes,
+                        module == NULL ? 0ul : (unsigned long)module->info.id,
+                        (unsigned long)unit->source, pending->is_generated,
+                        (unsigned long)pending->span.start,
+                        (unsigned long)pending->span.end,
+                        module == NULL ? 0ul
+                            : (unsigned long)module->macro_scope_history_count,
+                        (const void *)entry, (const void *)definition_unit);
+                    for (h = 0u; module != NULL
+                            && h < module->macro_scope_history_count; ++h) {
+                        const CmResolveMacroScopeEntry *he =
+                            &module->macro_scope_history[h];
+                        const CmInternedString *hn = cm_graph_string(state,
+                            he->name);
+                        fprintf(stderr, "  history[%lu] name=%.*s source=%lu "
+                            "span=%lu..%lu decl_source=%lu item=%lu\n",
+                            (unsigned long)h, hn == NULL ? 1 : (int)hn->len,
+                            hn == NULL ? "?" : (const char *)hn->bytes,
+                            (unsigned long)he->introduction_span.source,
+                            (unsigned long)he->introduction_span.start,
+                            (unsigned long)he->introduction_span.end,
+                            (unsigned long)he->declaration.source,
+                            (unsigned long)he->declaration.item);
+                    }
+                }
                 cm_graph_add_error(state, CM_RESOLVE_ERROR_ITEM_MACRO,
                     invocation_source, pending->span.start,
                     pending->span.end,
@@ -3010,6 +3502,26 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
                                 name, pending->is_qualified)),
                     0u, 0u);
                 ok = 0;
+                continue;
+            }
+            if (has_dependency_definition
+                && cm_dependency_definition_is_builtin_include(
+                    &dependency_definition)) {
+                if (pending->is_generated || state->options.include_expansion
+                        != CM_INCLUDE_EXPANSION_AUTHENTICATED) {
+                    cm_include_error(state,
+                        CM_RESOLVE_ERROR_INCLUDE_UNSUPPORTED,
+                        invocation_source,
+                        cm_ast_get_item(&unit->ast,
+                            pending->invocation.item),
+                        pending->is_generated
+                            ? "generated authenticated include is unsupported"
+                            : "authenticated include expansion is disabled",
+                        NULL);
+                    ok = 0;
+                    continue;
+                }
+                (void)cm_vec_push(&authenticated_includes, pending);
                 continue;
             }
             if (has_dependency_definition) {
@@ -3136,6 +3648,9 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             (void)cm_vec_push(&resolved, &value);
         }
         if (imports_initialized) cm_import_resolver_destroy(&imports);
+        pending_before = unit->plan.pending_invocation_count;
+        units_before = state->units.len;
+        if (authenticated_includes.len != 0u) progress = 1;
         if (ok && authenticated_includes.len != 0u) {
             size_t include_index;
 
@@ -3154,15 +3669,33 @@ static int cm_replan_staged_macro_invocations(CmModuleGraphState *state,
             }
             if (ok) *out_spliced_include = 1;
         } else if (ok) {
+            const CmResolveUnit *replanned;
+
             ok = cm_replan_unit_with_resolved(state,
                 (CmResolveUnitId)(unit_index + 1u),
                 (const CmItemMacroResolvedInvocation *)resolved.data,
                 resolved.len);
+            /* A unit is re-planned from scratch: only a shrinking pending
+             * set (or new units) is progress, not re-resolving the same
+             * invocations while a deferred one waits. */
+            replanned = cm_get_unit_const(state,
+                (CmResolveUnitId)(unit_index + 1u));
+            if (ok && ((replanned != NULL
+                        && replanned->plan.pending_invocation_count
+                            < pending_before)
+                    || state->units.len > units_before))
+                progress = 1;
         }
         cm_vec_destroy(&authenticated_includes);
         cm_vec_destroy(&resolved);
         if (!ok) return 0;
         if (*out_spliced_include) return 1;
+    }
+    if (deferred_any && !progress) {
+        cm_graph_add_error(state, CM_RESOLVE_ERROR_ITEM_MACRO,
+            deferred_source, deferred_start, deferred_end, deferred_path,
+            deferred_kind, deferred_detail, 0u, 0u);
+        return 0;
     }
     return 1;
 }
@@ -4003,7 +4536,6 @@ static CmModuleId cm_build_external_module(CmModuleGraphState *state,
     int has_mod;
     const char *selected;
     const struct stat *selected_stat;
-    const char *selected_name;
     char *selected_directory;
     CmSourceId source;
     CmSourceStatus source_status;
@@ -4107,10 +4639,12 @@ static CmModuleId cm_build_external_module(CmModuleGraphState *state,
     }
     selected = has_file ? candidate_file : candidate_mod;
     selected_stat = has_file ? &file_stat : &mod_stat;
-    selected_name = strrchr(selected, '/');
-    selected_name = selected_name == NULL ? selected : selected_name + 1;
     selected_directory = NULL;
-    if (path_count == 1u && strcmp(selected_name, "mod.rs") == 0) {
+    /* A `#[path = "../../backtrace/src/lib.rs"] mod backtrace_rs;` file
+     * owns its own directory for nested modules (std's vendored
+     * backtrace declares `mod backtrace;` beside its lib.rs), like a
+     * mod.rs would. */
+    if (path_count == 1u) {
         selected_directory = cm_path_directory(selected);
         module_directory = cm_graph_intern_c_str(state,
             selected_directory);

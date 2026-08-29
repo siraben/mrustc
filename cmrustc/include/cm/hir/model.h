@@ -735,6 +735,8 @@ typedef struct CmHirItem {
             CmHirMutability mutability;
             /* Trait declaration implemented by an impl const; none otherwise. */
             CmHirDefId trait_item_definition;
+            /* `extern "C" { static X: T; }`: no body, the host's symbol. */
+            int is_foreign;
         } value_item;
         struct {
             CmHirModuleId module_id;

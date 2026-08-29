@@ -253,6 +253,8 @@ static int cm_lower_predicate_equalities(CmLowerState *state,
     const CmLowerTraitTarget *trait_target, CmHirModuleId module,
     CmHirDefId owner, int allow_constraints,
     CmHirAssociatedTypeEquality **out_equalities, uint32_t *out_count);
+static int cm_lower_supertrait_reaches_definition(
+    const CmLowerState *state, CmHirDefId start, CmHirDefId target);
 static int cm_lower_find_instantiated_supertrait(CmLowerState *state,
     const CmHirNamedType *root, CmHirDefId target_definition,
     CmHirTypeId self_type, CmSpan span, CmHirGenericArg **out_arguments,
@@ -1297,8 +1299,23 @@ static unsigned int cm_lower_item_namespace_mask(CmAstItemKind kind)
     }
 }
 
+/* The namespaces one item occupies: a tuple or unit struct also names a
+ * constructor, a named-field struct, union or enum only its type — libc's
+ * `pub struct statx { .. }` coexists with `pub fn statx(..)`. */
+static unsigned int cm_lower_ast_item_namespace_mask(const CmAstItem *item)
+{
+    if (item == NULL) return 0u;
+    if (item->kind == CM_AST_ITEM_STRUCT)
+        return item->data.aggregate_item.form == CM_AST_FIELDS_NAMED
+            ? 1u : 3u;
+    if (item->kind == CM_AST_ITEM_UNION || item->kind == CM_AST_ITEM_ENUM)
+        return 1u;
+    return cm_lower_item_namespace_mask(item->kind);
+}
+
 static int cm_lower_name_exists(const CmLowerState *state,
-    CmHirModuleId module, CmInternId ast_name, CmAstItemKind kind)
+    CmHirModuleId module, CmInternId ast_name, CmAstItemKind kind,
+    const CmAstItem *candidate)
 {
     size_t index;
 
@@ -1320,8 +1337,12 @@ static int cm_lower_name_exists(const CmLowerState *state,
             &state->item_records, index);
         record_item = record == NULL ? NULL
             : cm_ast_get_item(record->ast, record->ast_id);
-        if ((cm_lower_item_namespace_mask(record->kind)
-                & cm_lower_item_namespace_mask(kind)) != 0u
+        if (((record_item != NULL
+                    ? cm_lower_ast_item_namespace_mask(record_item)
+                    : cm_lower_item_namespace_mask(record->kind))
+                & (candidate != NULL
+                    ? cm_lower_ast_item_namespace_mask(candidate)
+                    : cm_lower_item_namespace_mask(kind))) != 0u
             && record->owner_module == module
             && !record->body_local
             && cm_hir_def_id_is_none(record->parent_definition)
@@ -1556,7 +1577,7 @@ static int cm_lower_reserve_items(CmLowerState *state,
         if ((parent_kind == CM_LOWER_PARENT_NONE
                 && !cm_lower_anonymous_const(state->ast, item)
                 && cm_lower_name_exists(state, owner_module, item->name,
-                    item->kind))
+                    item->kind, item))
             || (parent_kind != CM_LOWER_PARENT_NONE
                 && cm_lower_associated_name_exists(state, parent_definition,
                     item->name, item->kind))) {
@@ -1819,7 +1840,7 @@ static int cm_lower_reserve_expanded_items(CmLowerState *state,
         }
         if ((parent_kind == CM_LOWER_PARENT_NONE
                 && cm_lower_name_exists(state, owner_module, item->name,
-                    item->kind))
+                    item->kind, item))
             || (parent_kind != CM_LOWER_PARENT_NONE
                 && cm_lower_associated_name_exists(state, parent_definition,
                     item->name, item->kind))) {
@@ -2522,7 +2543,67 @@ static const CmLowerItemRecord *cm_lower_named_const_length(
     size_t index;
 
     memset(&segment, 0, sizeof(segment));
-    if (!cm_lower_simple_identifier(text, &segment)) return NULL;
+    if (!cm_lower_simple_identifier(text, &segment)) {
+        /* `[c_uchar; crate::MAX_ADDR_LEN]` (libc): a `::`-separated path
+         * of identifiers resolves through the import resolver, which
+         * understands `crate::`/`self::`/`super::` prefixes. */
+        CmResolvePathSegmentView segments[8];
+        size_t segment_count = 0u;
+        size_t position = 0u;
+        uint32_t matches;
+        CmResolvedBinding binding;
+        CmImportLookupStatus status;
+
+        if (text == NULL || state->graph == NULL || state->imports == NULL
+            || state->module_map == NULL
+            || state->graph_module == CM_MODULE_NONE) return NULL;
+        while (position < text->len) {
+            size_t start;
+            while (position < text->len
+                && (text->bytes[position] == ' '
+                    || text->bytes[position] == '\t'
+                    || text->bytes[position] == '\r'
+                    || text->bytes[position] == '\n')) ++position;
+            start = position;
+            while (position < text->len
+                && ((text->bytes[position] >= 'A'
+                        && text->bytes[position] <= 'Z')
+                    || (text->bytes[position] >= 'a'
+                        && text->bytes[position] <= 'z')
+                    || (text->bytes[position] >= '0'
+                        && text->bytes[position] <= '9')
+                    || text->bytes[position] == '_')) ++position;
+            if (position == start || segment_count >= 8u) return NULL;
+            segments[segment_count].bytes = text->bytes + start;
+            segments[segment_count].length = position - start;
+            segment_count += 1u;
+            while (position < text->len
+                && (text->bytes[position] == ' '
+                    || text->bytes[position] == '\t'
+                    || text->bytes[position] == '\r'
+                    || text->bytes[position] == '\n')) ++position;
+            if (position == text->len) break;
+            if (position + 1u >= text->len || text->bytes[position] != ':'
+                || text->bytes[position + 1u] != ':') return NULL;
+            position += 2u;
+        }
+        if (segment_count < 2u) return NULL;
+        memset(&binding, 0, sizeof(binding));
+        status = cm_import_resolve_path_checked(state->imports,
+            state->graph, state->graph_revision, state->graph_module, 0,
+            segments, segment_count, CM_RESOLVE_NAMESPACE_VALUE, &binding);
+        if (status != CM_IMPORT_LOOKUP_OK
+            || binding.namespace_kind != CM_RESOLVE_NAMESPACE_VALUE
+            || binding.item_kind != CM_AST_ITEM_CONST
+            || binding.target_module != CM_MODULE_NONE
+            || binding.is_ambiguous || binding.is_anonymous
+            || binding.declaration.source == 0u
+            || binding.declaration.item == CM_AST_ITEM_NONE) return NULL;
+        record = cm_lower_find_graph_declaration(state,
+            binding.declaration, &matches);
+        return record != NULL && matches == 1u
+            && record->kind == CM_AST_ITEM_CONST ? record : NULL;
+    }
     if (state->graph == NULL) {
         for (index = 0u; index < state->item_records.len; ++index) {
             const CmInternedString *name;
@@ -2589,23 +2670,74 @@ static int cm_lower_parse_u64(const CmInternedString *text,
     }
     value = 0u;
     saw_digit = 0;
-    for (index = 0u; index < text->len; ++index) {
-        unsigned int digit;
-        unsigned char byte;
+    {
+        /* `[u8; 0x051C]` (libc), `0o`, `0b`, `_` separators and an
+         * integer suffix (`16usize`). */
+        unsigned int radix = 10u;
+        size_t end = text->len;
+        index = 0u;
+        if (text->len >= 2u && text->bytes[0] == (unsigned char)'0') {
+            unsigned char marker = text->bytes[1];
+            if (marker == (unsigned char)'x' || marker == (unsigned char)'X')
+                radix = 16u;
+            else if (marker == (unsigned char)'o')
+                radix = 8u;
+            else if (marker == (unsigned char)'b')
+                radix = 2u;
+            if (radix != 10u) index = 2u;
+        }
+        while (end > index) {
+            unsigned char tail = text->bytes[end - 1u];
+            if (tail == (unsigned char)'_' || (radix != 16u
+                    && ((tail >= (unsigned char)'a'
+                            && tail <= (unsigned char)'z')
+                        || (tail >= (unsigned char)'A'
+                            && tail <= (unsigned char)'Z')))) {
+                end -= 1u;
+                continue;
+            }
+            break;
+        }
+        if (radix == 16u) {
+            /* A hex literal's suffix cannot be told from digits by
+             * letter alone: strip `usize`/`u8`..`u128`/`i*` explicitly. */
+            static const char *const suffixes[] = { "usize", "isize",
+                "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16",
+                "u8", "i8" };
+            size_t suffix;
+            for (suffix = 0u; suffix < sizeof(suffixes) / sizeof(*suffixes);
+                 ++suffix) {
+                size_t length = strlen(suffixes[suffix]);
+                if (end - index > length && memcmp(text->bytes + end - length,
+                        suffixes[suffix], length) == 0) {
+                    end -= length;
+                    break;
+                }
+            }
+        }
+        for (; index < end; ++index) {
+            unsigned int digit;
+            unsigned char byte;
 
-        byte = text->bytes[index];
-        if (byte == (unsigned char)'_') {
-            continue;
+            byte = text->bytes[index];
+            if (byte == (unsigned char)'_') {
+                continue;
+            }
+            if (byte >= (unsigned char)'0' && byte <= (unsigned char)'9')
+                digit = (unsigned int)(byte - (unsigned char)'0');
+            else if (byte >= (unsigned char)'a' && byte <= (unsigned char)'f')
+                digit = 10u + (unsigned int)(byte - (unsigned char)'a');
+            else if (byte >= (unsigned char)'A' && byte <= (unsigned char)'F')
+                digit = 10u + (unsigned int)(byte - (unsigned char)'A');
+            else
+                return 0;
+            if (digit >= radix) return 0;
+            if (value > (UINT64_MAX - (uint64_t)digit) / radix) {
+                return 0;
+            }
+            value = value * radix + (uint64_t)digit;
+            saw_digit = 1;
         }
-        if (byte < (unsigned char)'0' || byte > (unsigned char)'9') {
-            return 0;
-        }
-        digit = (unsigned int)(byte - (unsigned char)'0');
-        if (value > (UINT64_MAX - (uint64_t)digit) / 10u) {
-            return 0;
-        }
-        value = value * 10u + (uint64_t)digit;
-        saw_digit = 1;
     }
     if (!saw_digit) {
         return 0;
@@ -2820,6 +2952,10 @@ static int cm_lower_eval_literal_const_ast(const CmAst *ast,
         return cm_lower_parse_u64(cm_ast_get_string(ast,
             expression->data.literal.text), out_value);
     }
+    if (expression->kind == CM_AST_EXPR_CAST) {
+        return cm_lower_eval_literal_const_ast(ast,
+            expression->data.cast.value, depth + 1u, out_value);
+    }
     if (expression->kind == CM_AST_EXPR_BLOCK) {
         if (expression->data.block.inner_attribute_count != 0u
             || expression->data.block.inner_attributes != NULL
@@ -2878,6 +3014,124 @@ static const CmLowerItemRecord *cm_lower_named_const_length(
     const CmLowerState *state, CmHirModuleId module,
     const CmInternedString *text);
 
+/* `size_of::<T>()` / `align_of::<T>()` in a const length (std's
+ * `static_assert!(@usize_eq: size_of::<NonNull<()>>(), 8)` writes
+ * `const _: [(); size_of::<NonNull<()>>()] = [(); 8]`): x86-64 sizes of
+ * primitives, pointer-shaped types and their `Option`s, unit and arrays. */
+static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
+    CmAstTypeId type_id, int want_align, unsigned int pointer_bits,
+    size_t depth, uint64_t *out_value)
+{
+    const CmAstType *type;
+    const CmAstPath *path;
+    const CmInternedString *name;
+    static const struct { const char *name; uint64_t size; } primitives[] = {
+        { "bool", 1u }, { "u8", 1u }, { "i8", 1u }, { "u16", 2u },
+        { "i16", 2u }, { "u32", 4u }, { "i32", 4u }, { "f32", 4u },
+        { "char", 4u }, { "u64", 8u }, { "i64", 8u }, { "f64", 8u },
+        { "u128", 16u }, { "i128", 16u }
+    };
+    const uint64_t pointer_size = (uint64_t)pointer_bits / 8u;
+    size_t index;
+
+    if (ast == NULL || out_value == NULL || depth > 8u) return 0;
+    type = cm_ast_get_type(ast, type_id);
+    if (type == NULL) return 0;
+    switch (type->kind) {
+    case CM_AST_TYPE_REFERENCE:
+    case CM_AST_TYPE_POINTER:
+    case CM_AST_TYPE_FUNCTION:
+        if (pointer_bits == 0u) return 0;
+        *out_value = pointer_size;
+        return 1;
+    case CM_AST_TYPE_TUPLE:
+        if (type->element_count == 0u) {
+            *out_value = want_align ? 1u : 0u;
+            return 1;
+        }
+        return 0;
+    case CM_AST_TYPE_ARRAY: {
+        uint64_t element;
+        uint64_t length;
+        const CmInternedString *text = cm_ast_get_string(ast, type->text);
+        if (!cm_lower_eval_size_of_ast_type(ast, type->child, want_align,
+                pointer_bits, depth + 1u, &element)) return 0;
+        if (want_align) { *out_value = element; return 1; }
+        if (!cm_lower_parse_u64(text, &length)) return 0;
+        *out_value = element * length;
+        return 1;
+    }
+    case CM_AST_TYPE_PATH:
+        break;
+    default:
+        return 0;
+    }
+    path = cm_ast_get_path(ast, type->path);
+    if (path == NULL || path->segment_count == 0u) return 0;
+    name = cm_ast_get_string(ast,
+        path->segments[path->segment_count - 1u].name);
+    if (name == NULL) return 0;
+    for (index = 0u; index < sizeof(primitives) / sizeof(primitives[0]);
+         ++index) {
+        size_t length = strlen(primitives[index].name);
+        if (name->len == length
+            && memcmp(name->bytes, primitives[index].name, length) == 0) {
+            *out_value = primitives[index].size;
+            return 1;
+        }
+    }
+    if ((name->len == 5u && memcmp(name->bytes, "usize", 5u) == 0)
+        || (name->len == 5u && memcmp(name->bytes, "isize", 5u) == 0)
+        || (name->len == 7u && memcmp(name->bytes, "NonNull", 7u) == 0)
+        || (name->len == 3u && memcmp(name->bytes, "Box", 3u) == 0)
+        || (name->len == 2u && memcmp(name->bytes, "Rc", 2u) == 0)
+        || (name->len == 3u && memcmp(name->bytes, "Arc", 3u) == 0)) {
+        if (pointer_bits == 0u) return 0;
+        *out_value = pointer_size;
+        return 1;
+    }
+    if (name->len == 6u && memcmp(name->bytes, "Option", 6u) == 0) {
+        /* `Option<NonNull<T>>` / `Option<&T>` / `Option<Box<T>>`: the
+         * null niche keeps the pointer size. */
+        const CmAstPathSegment *segment =
+            &path->segments[path->segment_count - 1u];
+        if (segment->argument_count == 1u
+            && segment->arguments[0].kind == CM_AST_GENERIC_TYPE) {
+            uint64_t inner;
+            const CmAstType *inner_type = cm_ast_get_type(ast,
+                segment->arguments[0].type);
+            if (inner_type != NULL && (inner_type->kind
+                    == CM_AST_TYPE_REFERENCE
+                    || inner_type->kind == CM_AST_TYPE_FUNCTION)) {
+                if (pointer_bits == 0u) return 0;
+                *out_value = pointer_size;
+                return 1;
+            }
+            if (cm_lower_eval_size_of_ast_type(ast,
+                    segment->arguments[0].type, want_align, pointer_bits,
+                    depth + 1u, &inner) && inner == pointer_size
+                && inner_type != NULL
+                && inner_type->kind == CM_AST_TYPE_PATH) {
+                const CmAstPath *inner_path = cm_ast_get_path(ast,
+                    inner_type->path);
+                const CmInternedString *inner_name = inner_path == NULL
+                        || inner_path->segment_count == 0u ? NULL
+                    : cm_ast_get_string(ast, inner_path->segments[
+                        inner_path->segment_count - 1u].name);
+                if (inner_name != NULL && ((inner_name->len == 7u
+                        && memcmp(inner_name->bytes, "NonNull", 7u) == 0)
+                    || (inner_name->len == 3u
+                        && memcmp(inner_name->bytes, "Box", 3u) == 0))) {
+                    *out_value = pointer_size;
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
 /*
  * Lenient const-length evaluation (M9): literals, +,-,*,/,<<, blocks, and
  * single-segment const names resolved through the module scope with their
@@ -2910,10 +3164,40 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
         const CmLowerItemRecord *record;
         const CmAstItem *const_item;
 
-        if (path == NULL || path->segment_count != 1u
+        if (path == NULL || path->segment_count == 0u
             || path->absolute) return 0;
-        name = cm_ast_get_string(ast, path->segments[0].name);
-        record = cm_lower_named_const_length(state, module, name);
+        if (path->segment_count == 1u) {
+            name = cm_ast_get_string(ast, path->segments[0].name);
+            record = cm_lower_named_const_length(state, module, name);
+        } else {
+            /* `crate::MAX_ADDR_LEN` inside a const initializer: rejoin
+             * the segments for the path-text lookup. */
+            CmInternedString *joined;
+            size_t total = 0u;
+            uint32_t seg;
+            unsigned char *cursor;
+            for (seg = 0u; seg < path->segment_count; ++seg) {
+                const CmInternedString *part = cm_ast_get_string(ast,
+                    path->segments[seg].name);
+                if (part == NULL || path->segments[seg].argument_count != 0u)
+                    return 0;
+                total += part->len + 2u;
+            }
+            joined = (CmInternedString *)cm_alloc_zeroed(1u,
+                sizeof(*joined) + total + 1u);
+            cursor = (unsigned char *)(joined + 1);
+            joined->bytes = cursor;
+            for (seg = 0u; seg < path->segment_count; ++seg) {
+                const CmInternedString *part = cm_ast_get_string(ast,
+                    path->segments[seg].name);
+                if (seg != 0u) { *cursor++ = ':'; *cursor++ = ':'; }
+                memcpy(cursor, part->bytes, part->len);
+                cursor += part->len;
+            }
+            joined->len = (size_t)(cursor - (unsigned char *)(joined + 1));
+            record = cm_lower_named_const_length(state, module, joined);
+            cm_free(joined);
+        }
         if (record == NULL || record->ast == NULL) return 0;
         const_item = cm_ast_get_item(record->ast, record->ast_id);
         if (const_item == NULL || const_item->kind != CM_AST_ITEM_CONST
@@ -2922,6 +3206,39 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
         return cm_lower_eval_const_length_ast(state, record->owner_module,
             record->ast, const_item->data.value_item.initializer,
             depth + 1u, out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_CAST) {
+        /* `FD_SETSIZE as usize / ULONG_SIZE` (libc's fd_set): the cast
+         * does not change an in-range length. */
+        return cm_lower_eval_const_length_ast(state, module, ast,
+            expression->data.cast.value, depth + 1u, out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_CALL
+        && expression->data.call.argument_count == 0u) {
+        const CmAstExpr *callee = cm_ast_get_expr(ast,
+            expression->data.call.callee);
+        const CmAstPath *callee_path = callee == NULL
+                || callee->kind != CM_AST_EXPR_PATH ? NULL
+            : cm_ast_get_path(ast, callee->data.path.path);
+        const CmAstPathSegment *last = callee_path == NULL
+                || callee_path->segment_count == 0u ? NULL
+            : &callee_path->segments[callee_path->segment_count - 1u];
+        const CmInternedString *callee_name = last == NULL ? NULL
+            : cm_ast_get_string(ast, last->name);
+        int want_align;
+
+        if (callee_name == NULL || last->argument_count != 1u
+            || last->arguments[0].kind != CM_AST_GENERIC_TYPE) return 0;
+        if (callee_name->len == 7u
+            && memcmp(callee_name->bytes, "size_of", 7u) == 0)
+            want_align = 0;
+        else if (callee_name->len == 8u
+            && memcmp(callee_name->bytes, "align_of", 8u) == 0)
+            want_align = 1;
+        else
+            return 0;
+        return cm_lower_eval_size_of_ast_type(ast, last->arguments[0].type,
+            want_align, state->options->pointer_bits, 0u, out_value);
     }
     if (expression->kind == CM_AST_EXPR_BLOCK) {
         if (expression->data.block.inner_attribute_count != 0u
@@ -2941,11 +3258,33 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
         && !cm_lower_interned_string_is(operator_name, "-")
         && !cm_lower_interned_string_is(operator_name, "<<")
         && !cm_lower_interned_string_is(operator_name, "*")
-        && !cm_lower_interned_string_is(operator_name, "/")) return 0;
+        && !cm_lower_interned_string_is(operator_name, "/")
+        && !cm_lower_interned_string_is(operator_name, "&")
+        && !cm_lower_interned_string_is(operator_name, "|")
+        && !cm_lower_interned_string_is(operator_name, ">>")
+        && !cm_lower_interned_string_is(operator_name, "%")) return 0;
     if (!cm_lower_eval_const_length_ast(state, module, ast,
             expression->data.binary.left, depth + 1u, &left)
         || !cm_lower_eval_const_length_ast(state, module, ast,
             expression->data.binary.right, depth + 1u, &right)) return 0;
+    if (cm_lower_interned_string_is(operator_name, "&")) {
+        *out_value = left & right;
+        return 1;
+    }
+    if (cm_lower_interned_string_is(operator_name, "|")) {
+        *out_value = left | right;
+        return 1;
+    }
+    if (cm_lower_interned_string_is(operator_name, ">>")) {
+        if (right >= 64u) return 0;
+        *out_value = left >> right;
+        return 1;
+    }
+    if (cm_lower_interned_string_is(operator_name, "%")) {
+        if (right == 0u) return 0;
+        *out_value = left % right;
+        return 1;
+    }
     if (cm_lower_interned_string_is(operator_name, "+")) {
         if (left > UINT64_MAX - right) return 0;
         value = left + right;
@@ -6076,6 +6415,24 @@ static CmHirTypeId cm_lower_path_type(CmLowerState *state,
         return CM_HIR_TYPE_NONE;
     }
     if (resolution.kind == CM_HIR_LOWER_UNRESOLVED) {
+        if (getenv("CM_LOWER_DEBUG") != NULL) {
+            const CmAstPath *dbg_path = cm_ast_get_path(state->ast,
+                ast_type->path);
+            uint32_t dbg_index;
+            fprintf(stderr, "LOWER unresolved type path:");
+            for (dbg_index = 0u; dbg_path != NULL
+                    && dbg_index < dbg_path->segment_count; ++dbg_index) {
+                const CmInternedString *seg = cm_ast_get_string(state->ast,
+                    dbg_path->segments[dbg_index].name);
+                fprintf(stderr, "%s%.*s", dbg_index == 0u
+                    ? (dbg_path->absolute ? " ::" : " ") : "::",
+                    seg == NULL ? 1 : (int)seg->len,
+                    seg == NULL ? "?" : (const char *)seg->bytes);
+            }
+            fprintf(stderr, " (source=%lu span=%lu..%lu)\n",
+                (unsigned long)span.source, (unsigned long)span.start,
+                (unsigned long)span.end);
+        }
         cm_lower_fail(state, CM_HIR_LOWER_UNRESOLVED_PATH, span,
             CM_AST_ITEM_NONE, ast_type_id, ast_type->path, CM_HIR_OK,
             "type path is unresolved");
@@ -6882,6 +7239,11 @@ static CmHirTypeId cm_lower_type(CmLowerState *state, CmAstTypeId ast_type_id,
                 return CM_HIR_TYPE_NONE;
             }
         } else if (!has_literal_length && length_record == NULL) {
+            if (getenv("CM_LOWER_DEBUG") != NULL)
+                fprintf(stderr, "LOWER array length unresolved: [%.*s]\n",
+                    length_text == NULL ? 1 : (int)length_text->len,
+                    length_text == NULL ? "?"
+                        : (const char *)length_text->bytes);
             cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE, span,
                 CM_AST_ITEM_NONE, ast_type_id, CM_AST_PATH_NONE, CM_HIR_OK,
                 "array length is neither a plain, in-range decimal or "
@@ -8937,6 +9299,9 @@ static const CmLowerItemRecord *cm_lower_associated_const_length(
     size_t position;
     size_t name_start;
     size_t name_end;
+    size_t prefix_start;
+    size_t prefix_end;
+    int prefix_is_self;
     uint32_t matches;
 
     if (state == NULL || text == NULL || text->bytes == NULL) return NULL;
@@ -8947,17 +9312,26 @@ static const CmLowerItemRecord *cm_lower_associated_const_length(
         && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
             || text->bytes[position] == '\r'
             || text->bytes[position] == '\n')) ++position;
-    if (text->len - position < 4u
-        || memcmp(text->bytes + position, "Self", 4u) != 0) return NULL;
-    position += 4u;
-    if (position < text->len
+    /* `Self::WIDTH`, or a named type's inherent const (`Group::WIDTH`
+     * in hashbrown's `[Tag; Group::WIDTH]`). */
+    if (position >= text->len
+        || !((text->bytes[position] >= 'A'
+                && text->bytes[position] <= 'Z')
+            || (text->bytes[position] >= 'a'
+                && text->bytes[position] <= 'z')
+            || text->bytes[position] == '_')) return NULL;
+    prefix_start = position++;
+    while (position < text->len
         && ((text->bytes[position] >= 'A'
                 && text->bytes[position] <= 'Z')
             || (text->bytes[position] >= 'a'
                 && text->bytes[position] <= 'z')
             || (text->bytes[position] >= '0'
                 && text->bytes[position] <= '9')
-            || text->bytes[position] == '_')) return NULL;
+            || text->bytes[position] == '_')) ++position;
+    prefix_end = position;
+    prefix_is_self = prefix_end - prefix_start == 4u
+        && memcmp(text->bytes + prefix_start, "Self", 4u) == 0;
     while (position < text->len
         && (text->bytes[position] == ' ' || text->bytes[position] == '\t'
             || text->bytes[position] == '\r'
@@ -8995,7 +9369,41 @@ static const CmLowerItemRecord *cm_lower_associated_const_length(
     if (owner_record == NULL) return NULL;
     type_record = owner_record;
     direct_impl = NULL;
-    if (owner_record->kind == CM_AST_ITEM_IMPL) {
+    if (!prefix_is_self) {
+        const CmLowerItemRecord *named = NULL;
+        uint32_t named_matches = 0u;
+        int same_module_pass;
+
+        for (same_module_pass = 1; same_module_pass >= 0
+                && named_matches != 1u; --same_module_pass) {
+            named = NULL;
+            named_matches = 0u;
+            for (index = 0u; index < state->item_records.len; ++index) {
+                const CmLowerItemRecord *candidate;
+                const CmInternedString *candidate_name;
+
+                candidate = (const CmLowerItemRecord *)cm_vec_at_const(
+                    &state->item_records, index);
+                if (candidate == NULL
+                    || (candidate->kind != CM_AST_ITEM_STRUCT
+                        && candidate->kind != CM_AST_ITEM_ENUM
+                        && candidate->kind != CM_AST_ITEM_UNION)
+                    || (same_module_pass && candidate->owner_module
+                        != owner_record->owner_module)) continue;
+                candidate_name = cm_interner_get(&state->hir->strings,
+                    candidate->hir_name);
+                if (candidate_name == NULL
+                    || candidate_name->len != prefix_end - prefix_start
+                    || memcmp(candidate_name->bytes,
+                        text->bytes + prefix_start,
+                        prefix_end - prefix_start) != 0) continue;
+                named = candidate;
+                named_matches += 1u;
+            }
+        }
+        if (named_matches != 1u) return NULL;
+        type_record = named;
+    } else if (owner_record->kind == CM_AST_ITEM_IMPL) {
         direct_impl = owner_record;
         type_record = NULL;
     } else if (owner_record->parent_kind == CM_LOWER_PARENT_IMPL) {
@@ -13390,8 +13798,13 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                             "authenticated declaration");
                         goto fail;
                     }
-                    if (!cm_hir_def_id_equal(parent_definition,
-                            trait.definition)
+                    /* `dyn FnMut(usize) -> bool` (hashbrown): `Output`
+                     * is declared by the supertrait `FnOnce`, reached
+                     * from the principal trait. */
+                    if ((!cm_hir_def_id_equal(parent_definition,
+                                trait.definition)
+                            && !cm_lower_supertrait_reaches_definition(
+                                state, trait.definition, parent_definition))
                         || generic_parameter_count != 0u) {
                         cm_free(equalities);
                         cm_free(trait.arguments);
@@ -13401,8 +13814,8 @@ static CmHirTypeId cm_lower_dyn_trait_type(CmLowerState *state,
                             CM_AST_ITEM_NONE, ast_type_id, bound_type->path,
                             CM_HIR_OK,
                             "dynamic associated equalities are limited to "
-                            "nongeneric types declared directly by the "
-                            "principal trait");
+                            "nongeneric types declared by the principal "
+                            "trait or its supertraits");
                         goto fail;
                     }
                 }
@@ -16393,6 +16806,7 @@ static int cm_lower_value_item(CmLowerState *state,
     CmHirTypeId type;
     CmSpan span;
     uint32_t matches;
+    int foreign_static;
 
     span = cm_lower_span(state, ast_item->span);
     trait_item_definition = cm_hir_def_id_none();
@@ -16423,17 +16837,26 @@ static int cm_lower_value_item(CmLowerState *state,
             trait_item_definition;
         return !state->failed;
     }
-    if (ast_item->data.value_item.type == CM_AST_TYPE_NONE
+    /* `extern "C" { pub static in6addr_any: in6_addr; }` (libc): a
+     * foreign static has a type and no initializer; it names the host's
+     * symbol. */
+    foreign_static = record->is_foreign
+        && ast_item->kind == CM_AST_ITEM_STATIC
+        && !ast_item->data.value_item.has_value
+        && ast_item->data.value_item.initializer == CM_AST_EXPR_NONE
+        && ast_item->data.value_item.type != CM_AST_TYPE_NONE;
+    if (!foreign_static
+        && (ast_item->data.value_item.type == CM_AST_TYPE_NONE
         || !ast_item->data.value_item.has_value
-        || ast_item->data.value_item.initializer == CM_AST_EXPR_NONE) {
+        || ast_item->data.value_item.initializer == CM_AST_EXPR_NONE)) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM, span,
             ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "const/static declaration lacks an explicit type or initializer");
         return 0;
     }
-    initializer = cm_ast_get_expr(state->ast,
+    initializer = foreign_static ? NULL : cm_ast_get_expr(state->ast,
         ast_item->data.value_item.initializer);
-    if (initializer == NULL) {
+    if (!foreign_static && initializer == NULL) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span, ast_item_id,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "const/static initializer has an invalid expression ID");
@@ -16482,9 +16905,11 @@ static int cm_lower_value_item(CmLowerState *state,
     hir_item->data.value_item.has_default_body = 0;
     hir_item->data.value_item.trait_item_definition =
         trait_item_definition;
-    hir_item->data.value_item.body = cm_lower_body(state,
-        record->definition, type, ast_item->data.value_item.initializer,
-        NULL, 0u, 0u, span, ast_item_id);
+    hir_item->data.value_item.is_foreign = foreign_static;
+    hir_item->data.value_item.body = foreign_static ? 0u : cm_lower_body(
+        state, record->definition, type,
+        ast_item->data.value_item.initializer, NULL, 0u, 0u, span,
+        ast_item_id);
     return !state->failed;
 }
 
@@ -16940,8 +17365,18 @@ static int cm_lower_graph_extern_block_attributes_supported(
         metadata = (char *)cm_alloc(length + 1u);
         matches = cm_module_graph_copy_string(graph, attribute.metadata,
                 metadata, length + 1u)
-            && length == sizeof(supported) - 1u
-            && memcmp(metadata, supported, length) == 0;
+            && ((length == sizeof(supported) - 1u
+                    && memcmp(metadata, supported, length) == 0)
+                /* Linking (`#[link(name = "util", kind = "static", ..)]`
+                 * on libc's blocks) is the host linker's concern; lint
+                 * levels, docs and leftover cfgs carry no HIR meaning. */
+                || strncmp(metadata, "link(", 5) == 0
+                || strncmp(metadata, "allow(", 6) == 0
+                || strncmp(metadata, "warn(", 5) == 0
+                || strncmp(metadata, "deny(", 5) == 0
+                || strncmp(metadata, "expect(", 7) == 0
+                || strncmp(metadata, "doc", 3) == 0
+                || strncmp(metadata, "cfg", 3) == 0);
         cm_free(metadata);
         if (!matches) return 0;
     }
@@ -16995,8 +17430,9 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
         return 0;
     }
     if (item->kind == CM_AST_ITEM_EXTERN_BLOCK
+        /* libc's cfg_if! branches generate whole `extern "C" { .. }`
+         * blocks; a generated block is retained like a written one. */
         && (parent_kind != CM_LOWER_PARENT_NONE || is_foreign
-            || effective->is_generated
             || item->name != CM_INTERN_ID_NONE
             || item->visibility.kind != CM_AST_VIS_INHERITED
             || item->generic_parameter_count != 0u
@@ -17006,6 +17442,8 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
              * (libc, hashbrown); the block is retained either way. */
             || (!cm_lower_string_is(state,
                     item->data.extern_block_item.abi, "C")
+                && !cm_lower_string_is(state,
+                    item->data.extern_block_item.abi, "C-unwind")
                 && !cm_lower_string_is(state,
                     item->data.extern_block_item.abi, "unadjusted")
                 && !cm_lower_string_is(state,
@@ -17022,7 +17460,6 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
     }
     if (is_foreign
         && (parent_kind != CM_LOWER_PARENT_NONE
-            || effective->is_generated
             || item->generic_parameter_count != 0u
             || cm_lower_item_has_where_clause(item)
             || item->is_default
@@ -17040,13 +17477,19 @@ static int cm_lower_graph_validate_effective_node(CmLowerState *state,
                     || item->data.value_item.initializer != CM_AST_EXPR_NONE
                     || item->data.value_item.bound_count != 0u
                     || item->data.value_item.is_mutable))
+            || (item->kind == CM_AST_ITEM_STATIC
+                && (item->data.value_item.has_value
+                    || item->data.value_item.initializer != CM_AST_EXPR_NONE
+                    || item->data.value_item.type == CM_AST_TYPE_NONE))
             || (item->kind != CM_AST_ITEM_FUNCTION
-                && item->kind != CM_AST_ITEM_TYPE_ALIAS))) {
+                && item->kind != CM_AST_ITEM_TYPE_ALIAS
+                && item->kind != CM_AST_ITEM_STATIC))) {
         cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_ITEM,
             effective->span, effective->declaration.item,
             CM_AST_TYPE_NONE, CM_AST_PATH_NONE, CM_HIR_OK,
             "extern-block children must be source-written non-generic "
-            "foreign types or structurally attributed bodyless functions");
+            "foreign types, bodyless statics or structurally attributed "
+            "bodyless functions");
         return 0;
     }
     if (parent_kind != CM_LOWER_PARENT_NONE
@@ -17346,11 +17789,14 @@ static int cm_lower_graph_validate_inner_attributes(CmLowerState *state,
             || source_attribute->style != CM_AST_ATTR_INNER
             || !cm_lower_ast_attribute_id_in(source_attributes,
                 source_attribute_count, attribute.source_attribute)
+            /* A generated out-of-line `mod libunwind;` keeps
+             * source-written inner attributes in its own file. */
             || (declaration_is_generated
-                && (attribute.span.source != declaration_span.source
-                    || attribute.span.start != declaration_span.start
+                && attribute.span.source == declaration_span.source
+                && (attribute.span.start != declaration_span.start
                     || attribute.span.end != declaration_span.end))
-            || (!declaration_is_generated
+            || ((!declaration_is_generated
+                    || attribute.span.source != declaration_span.source)
                 && (attribute.span.start < source_attribute->span.start
                     || attribute.span.end > source_attribute->span.end))
             || (information->parent == CM_MODULE_NONE
@@ -18544,7 +18990,8 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
     }
     if (is_foreign
         && ((item->kind != CM_AST_ITEM_FUNCTION
-                && item->kind != CM_AST_ITEM_TYPE_ALIAS)
+                && item->kind != CM_AST_ITEM_TYPE_ALIAS
+                && item->kind != CM_AST_ITEM_STATIC)
             || inherited_abi == CM_INTERN_ID_NONE)) {
         cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST, span,
             reference.item, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
@@ -18664,7 +19111,7 @@ static int cm_lower_graph_reserve_effective_item(CmLowerState *state,
     if ((parent_kind == CM_LOWER_PARENT_NONE
             && !cm_lower_anonymous_const(ast, item)
             && cm_lower_name_exists(state, owner_module, item->name,
-                item->kind))
+                item->kind, item))
         || (parent_kind != CM_LOWER_PARENT_NONE
             && cm_lower_associated_name_exists(state, parent_definition,
                 item->name, item->kind))) {
@@ -19934,6 +20381,31 @@ static int cm_lower_graph_apply_imports(CmLowerState *state,
                 "module import count differs from effective use items");
         }
         if (!state->failed) {
+            /* A glob re-import of a dependency's builtin derive macro
+             * (libc's `use crate::prelude::*` pulling core's `Clone`
+             * macro side beside the trait) has no HIR macro definition:
+             * drop the macro-namespace binding, the trait's stays. */
+            size_t compact_import;
+
+            for (compact_import = 0u; compact_import < structural_import_count;
+                 ++compact_import) {
+                CmHirImport *compact = &imports[compact_import];
+                uint32_t read;
+                uint32_t write = 0u;
+
+                for (read = 0u; read < compact->binding_count; ++read) {
+                    const CmHirImportBinding *candidate =
+                        &compact->bindings[read];
+                    if (candidate->namespace_kind == CM_HIR_NAMESPACE_MACRO
+                        && cm_hir_def_id_is_none(candidate->target)
+                        && candidate->primitive_kind
+                            == CM_HIR_PRIMITIVE_NONE) continue;
+                    if (write != read)
+                        compact->bindings[write] = compact->bindings[read];
+                    write += 1u;
+                }
+                compact->binding_count = write;
+            }
             hir_status = cm_hir_set_module_imports(state->hir, hir_module,
                 imports, (uint32_t)structural_import_count);
             if (hir_status != CM_HIR_OK) {

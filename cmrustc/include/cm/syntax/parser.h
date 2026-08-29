@@ -34,7 +34,9 @@ typedef struct CmItemListFragment {
 
 typedef enum CmItemListFragmentContext {
     CM_ITEM_LIST_FRAGMENT_ROOT = 0,
-    CM_ITEM_LIST_FRAGMENT_IMPL
+    CM_ITEM_LIST_FRAGMENT_IMPL,
+    /* Children of an `extern "C" { .. }` block: `safe fn` is permitted. */
+    CM_ITEM_LIST_FRAGMENT_EXTERN
 } CmItemListFragmentContext;
 
 CmParseResult cm_parse_crate(CmAst *ast, const char *source,

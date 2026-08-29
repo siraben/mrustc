@@ -547,6 +547,13 @@ static CmInternId cm_parser_capture_until(CmParser *parser,
         else if (kind == CM_TOKEN_RBRACE && braces != 0u) --braces;
         else if (kind == CM_TOKEN_LT) ++angles;
         else if (kind == CM_TOKEN_GT && angles != 0u) --angles;
+        /* `[(); size_of::<NonNull<()>>()]` (std): `>>` closes two. */
+        else if (kind == CM_TOKEN_SHR && angles != 0u)
+            angles = angles >= 2u ? angles - 2u : 0u;
+        else if ((kind == CM_TOKEN_GT_EQ || kind == CM_TOKEN_SHR_EQ)
+            && angles != 0u)
+            angles = kind == CM_TOKEN_GT_EQ ? angles - 1u
+                : (angles >= 2u ? angles - 2u : 0u);
         previous = cm_parser_token(parser);
         cm_parser_bump(parser);
     }
@@ -1590,6 +1597,12 @@ static int cm_parser_starts_local_item(const CmParser *parser)
     }
     if (token == NULL) return 0;
     if (cm_parser_token_text_is(parser, token, "macro_rules")) return 1;
+    /* `macro spec_str($T:ty) { .. }` in a body (std's OsString). */
+    if (token->keyword == CM_KW_MACRO) {
+        const struct cm_token *next = cm_parser_token_at(parser,
+            position + 1u);
+        return next != NULL && cm_parser_ordinary_identifier(next);
+    }
     if (token->keyword == CM_KW_FN || token->keyword == CM_KW_IMPL
         || token->keyword == CM_KW_STATIC
         || token->keyword == CM_KW_STRUCT
@@ -3159,6 +3172,12 @@ static void cm_parser_parse_trait_type_bounds(CmParser *parser,
             cm_parser_bump(parser);
             trait_type = NULL;
         } else {
+            /* `impl (FnOnce() -> Capture) + Send` (std's backtrace): a
+             * parenthesized trait bound. */
+            int parenthesized = cm_parser_eat(parser, CM_TOKEN_LPAREN);
+            if (parenthesized && cm_parser_keyword(parser, CM_KW_FOR)) {
+                cm_parser_parse_lifetime_binder(parser, &bound.binder);
+            }
             bound.trait_type = cm_parser_parse_type(parser);
             trait_type = cm_ast_get_type(parser->ast, bound.trait_type);
             if (trait_type != NULL && trait_type->kind == CM_AST_TYPE_PATH
@@ -3167,6 +3186,10 @@ static void cm_parser_parse_trait_type_bounds(CmParser *parser,
                     bound.trait_type);
                 trait_type = cm_ast_get_type(parser->ast,
                     bound.trait_type);
+            }
+            if (parenthesized) {
+                (void)cm_parser_expect(parser, CM_TOKEN_RPAREN,
+                    "expected ')' after parenthesized trait bound");
             }
             if (trait_type == NULL
                 || trait_type->kind != CM_AST_TYPE_PATH) {
@@ -3880,13 +3903,16 @@ static CmAstField *cm_parser_parse_fields(CmParser *parser,
         CM_TOKEN_RPAREN;
     while (cm_parser_kind(parser) != closing &&
            cm_parser_kind(parser) != CM_TOKEN_EOF) {
-        CmVec ignored_attributes;
+        CmVec attributes;
         CmAstField field;
 
-        cm_vec_init(&ignored_attributes, sizeof(CmAstAttributeId));
-        cm_parser_parse_attributes(parser, &ignored_attributes);
-        cm_vec_destroy(&ignored_attributes);
+        cm_vec_init(&attributes, sizeof(CmAstAttributeId));
+        cm_parser_parse_attributes(parser, &attributes);
         memset(&field, 0, sizeof(field));
+        field.attributes = (CmAstAttributeId *)cm_parser_copy_array(
+            parser, &attributes);
+        field.attribute_count = cm_parser_count_u32(&attributes);
+        cm_vec_destroy(&attributes);
         field.visibility = cm_parser_parse_visibility(parser);
         if (form == CM_AST_FIELDS_NAMED) {
             field.name = cm_parser_parse_name(parser,
@@ -4838,15 +4864,20 @@ CmItemListFragment cm_parse_item_list_fragment_in_context(CmAst *ast,
         return fragment;
     }
     if (context != CM_ITEM_LIST_FRAGMENT_ROOT
-        && context != CM_ITEM_LIST_FRAGMENT_IMPL) {
+        && context != CM_ITEM_LIST_FRAGMENT_IMPL
+        && context != CM_ITEM_LIST_FRAGMENT_EXTERN) {
         cm_parser_direct_error(&parser,
             "invalid item-list fragment context");
         fragment.parse = parser.result;
         cm_parser_end(&parser);
         return fragment;
     }
+    if (context == CM_ITEM_LIST_FRAGMENT_EXTERN)
+        parser.extern_block_depth += 1u;
     items = cm_parser_parse_item_list(&parser, CM_TOKEN_EOF, &item_count,
         context == CM_ITEM_LIST_FRAGMENT_IMPL);
+    if (context == CM_ITEM_LIST_FRAGMENT_EXTERN)
+        parser.extern_block_depth -= 1u;
     if (cm_parser_kind(&parser) != CM_TOKEN_EOF) {
         cm_parser_error(&parser,
             "unexpected trailing input after item-list fragment");

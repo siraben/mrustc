@@ -508,6 +508,10 @@ typedef struct CmAstField {
     CmInternId name;
     CmAstVisibility visibility;
     CmAstTypeId type;
+    /* Outer attributes (`#[cfg(..)] pub tv_usec: T` in libc): the module
+     * graph drops cfg-inactive fields in place. */
+    CmAstAttributeId *attributes;
+    uint32_t attribute_count;
 } CmAstField;
 
 typedef struct CmAstVariant {

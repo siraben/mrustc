@@ -393,6 +393,44 @@ static void test_arbitrary_item_sequence(void)
     cm_ast_destroy(&ast);
 }
 
+/* libc's `s!` emits `#[::core::prelude::v1::derive(..)]` in token-spaced
+ * generated text: a path-headed attribute is kept, not rejected. */
+static void test_path_headed_attribute(void)
+{
+    static const char source[] =
+        "#[:: core :: prelude :: v1 :: derive (:: core :: clone :: Clone)]\n"
+        "#[cfg_attr(unix, ::core::prelude::v1::derive(Copy))]\n"
+        "struct Keep;\n";
+    CmAst ast;
+    CmCfgSet cfg;
+    CmExpandOptions options;
+    CmExpandedItemSequence expanded;
+    CmExpandResult result;
+    CmAstItemId selected[1];
+
+    if (!parse_source(&ast, source)) {
+        failures += 1;
+        return;
+    }
+    selected[0] = *(const CmAstItemId *)cm_vec_at_const(
+        &ast.root_items, 0u);
+    cm_cfg_set_init(&cfg);
+    cfg.environment.target_family = "unix";
+    cm_expand_options_init(&options, &cfg);
+    cm_expanded_item_sequence_init(&expanded);
+    result = cm_expand_cfg_item_sequence(&ast, selected, 1u, &options,
+        &expanded);
+    if (result.status != CM_MACRO_OK || expanded.item_count != 1u
+        || expanded.items[0].attribute_count != 2u
+        || !meta_is(&expanded.items[0].attributes[1],
+            "::core::prelude::v1::derive(Copy)")) {
+        fail("path-headed-attribute",
+            "a path-headed attribute was rejected or dropped");
+    }
+    cm_expanded_item_sequence_destroy(&expanded);
+    cm_ast_destroy(&ast);
+}
+
 static void test_inline_module_inner_cfg(void)
 {
     static const char source[] =
@@ -434,6 +472,7 @@ int main(void)
     test_diagnostics_and_limits();
     test_inactive_crate();
     test_arbitrary_item_sequence();
+    test_path_headed_attribute();
     test_inline_module_inner_cfg();
     if (failures != 0) {
         fprintf(stderr, "cfg expansion tests: %d failure(s)\n", failures);

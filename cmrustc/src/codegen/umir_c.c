@@ -1666,23 +1666,89 @@ static long cm_umir_c_vtable(CmUMirProgram *program, CmHirDefId trait_def,
     return (long)(program->vtables.len - 1u);
 }
 
-/* Position of a trait method among the trait's fn declarations. */
+/* A `dyn P` vtable lays out every trait in P's supertrait closure —
+ * supertraits first, in declaration order, then P — so `dyn FnMut(A) ->
+ * R` dispatches `FnOnce::call_once` and `dyn Sub<Out = T>` a `Base`
+ * method through one table.  Returns the number of traits written. */
+#define CM_UMIR_C_MAX_TRAIT_CLOSURE 64u
+static size_t cm_umir_c_trait_closure(const CmHirContext *hir,
+    CmHirDefId trait_def, CmHirDefId *out, size_t count)
+{
+    const CmHirItem *item;
+    size_t index;
+    uint32_t super_index;
+
+    for (index = 0u; index < count; ++index)
+        if (cm_hir_def_id_equal(out[index], trait_def)) return count;
+    if (count >= CM_UMIR_C_MAX_TRAIT_CLOSURE) return count;
+    item = cm_umir_c_item_of(hir, trait_def);
+    if (item != NULL && item->kind == CM_HIR_ITEM_TRAIT) {
+        for (super_index = 0u;
+             super_index < item->data.trait_item.supertrait_count;
+             ++super_index) {
+            count = cm_umir_c_trait_closure(hir,
+                item->data.trait_item.supertraits[super_index].trait_type
+                    .definition, out, count);
+        }
+    }
+    for (index = 0u; index < count; ++index)
+        if (cm_hir_def_id_equal(out[index], trait_def)) return count;
+    if (count < CM_UMIR_C_MAX_TRAIT_CLOSURE) out[count++] = trait_def;
+    return count;
+}
+
+/* Position of a trait method in `dyn principal`'s vtable. */
 static long cm_umir_c_trait_method_index(const CmHirContext *hir,
-    CmHirDefId method)
+    CmHirDefId principal, CmHirDefId method)
 {
     const CmHirItem *item = cm_umir_c_item_of(hir, method);
+    CmHirDefId closure[CM_UMIR_C_MAX_TRAIT_CLOSURE];
+    size_t closure_count;
+    size_t trait_index;
     size_t index;
     long slot = 0;
     if (item == NULL || cm_hir_def_id_is_none(item->parent_definition))
         return -1;
-    for (index = 0u; index < hir->items.len; ++index) {
-        const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
-            &hir->items, index);
-        if (cand == NULL || cand->kind != CM_HIR_ITEM_FUNCTION
-            || !cm_hir_def_id_equal(cand->parent_definition,
-                item->parent_definition)) continue;
-        if (cm_hir_def_id_equal(cand->definition, method)) return slot;
-        slot += 1;
+    {
+        /* A dyn type reached through a closure capture may carry a
+         * non-trait def: lay the table out from the method's own trait. */
+        const CmHirItem *principal_item = cm_hir_def_id_is_none(principal)
+            ? NULL : cm_umir_c_item_of(hir, principal);
+        if (principal_item == NULL || principal_item->kind != CM_HIR_ITEM_TRAIT)
+            principal = item->parent_definition;
+    }
+    closure_count = cm_umir_c_trait_closure(hir, principal, closure, 0u);
+    for (trait_index = 0u; trait_index < closure_count; ++trait_index) {
+        for (index = 0u; index < hir->items.len; ++index) {
+            const CmHirItem *cand = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, index);
+            if (cand == NULL || cand->kind != CM_HIR_ITEM_FUNCTION
+                || !cm_hir_def_id_equal(cand->parent_definition,
+                    closure[trait_index])) continue;
+            if (cm_hir_def_id_equal(cand->definition, method)) return slot;
+            slot += 1;
+        }
+    }
+    /* The receiver's recorded principal does not reach the method's
+     * trait (an upcast or a differently recorded dyn): the table was
+     * built for the method's own trait — index it there. */
+    if (!cm_hir_def_id_equal(principal, item->parent_definition)) {
+        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+            const CmHirItem *pi = cm_umir_c_item_of(hir, principal);
+            const CmHirItem *ti = cm_umir_c_item_of(hir,
+                item->parent_definition);
+            const CmInternedString *pn = pi == NULL ? NULL
+                : cm_interner_get(&hir->strings, pi->name);
+            const CmInternedString *tn = ti == NULL ? NULL
+                : cm_interner_get(&hir->strings, ti->name);
+            fprintf(stderr, "UMIR dyn-slot fallback principal=%.*s "
+                "method-trait=%.*s\n", pn == NULL ? 1 : (int)pn->len,
+                pn == NULL ? "?" : (const char *)pn->bytes,
+                tn == NULL ? 1 : (int)tn->len,
+                tn == NULL ? "?" : (const char *)tn->bytes);
+        }
+        return cm_umir_c_trait_method_index(hir, item->parent_definition,
+            method);
     }
     return -1;
 }
@@ -4004,7 +4070,15 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         cm_ty_resolve((CmTyArena *)&tyck->arena,
                             cm_umir_c_peel(tyck, rtype)));
                     long slot = rt != NULL && rt->kind == CM_TY_DYN
-                        ? cm_umir_c_trait_method_index(hir, method_def) : -1;
+                        ? cm_umir_c_trait_method_index(hir, rt->def,
+                            method_def) : -1;
+                    if (rt != NULL && rt->kind == CM_TY_DYN && slot < 0
+                        && getenv("CMRUSTC_UMIR_DEBUG") != NULL)
+                        fprintf(stderr, "UMIR dyn-slot miss def=%u:%u "
+                            "method=%u:%u\n", (unsigned)rt->def.crate_id,
+                            (unsigned)rt->def.index,
+                            (unsigned)method_def.crate_id,
+                            (unsigned)method_def.index);
                     if (slot >= 0) {
                         uint32_t arg;
                         cm_str_buf_append(output,
@@ -4288,6 +4362,29 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                     }
                 }
                 if (stub_item != NULL && stub_item->kind
+                        == CM_HIR_ITEM_STATIC
+                    && stub_item->data.value_item.body == 0u
+                    && stub_item->data.value_item.is_foreign) {
+                    /* A foreign static is the host's symbol: `_addr` is
+                     * its address, the getter reads the first word. */
+                    cm_str_buf_append(output, "_addr(void) { extern char ");
+                    cm_str_buf_append_n(output,
+                        (const char *)stub_name->bytes, stub_name->len);
+                    cm_str_buf_append(output, "[]; return (long long)"
+                        "(intptr_t)");
+                    cm_str_buf_append_n(output,
+                        (const char *)stub_name->bytes, stub_name->len);
+                    cm_str_buf_append(output, "; } /* foreign static */\n"
+                        "long long ");
+                    cm_umir_c_render_symbol(output, instance->definition);
+                    cm_str_buf_append(output, "(void) { return *(long long *)"
+                        "(intptr_t)");
+                    cm_umir_c_render_symbol(output, instance->definition);
+                    cm_str_buf_append(output, "_addr(); }\n");
+                    shims += 1u;
+                    continue;
+                }
+                if (stub_item != NULL && stub_item->kind
                         == CM_HIR_ITEM_FUNCTION
                     && stub_item->data.function_item.body == 0u
                     && stub_item->data.function_item.is_foreign) {
@@ -4379,15 +4476,21 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         CmStrBuf protos;
         size_t scan;
         unsigned long count = 0ul;
+        CmHirDefId closure[CM_UMIR_C_MAX_TRAIT_CLOSURE];
+        size_t closure_count = vt == NULL ? 0u
+            : cm_umir_c_trait_closure(hir, vt->trait_def, closure, 0u);
+        size_t closure_index;
         cm_str_buf_init(&entries);
         cm_str_buf_init(&protos);
+        for (closure_index = 0u; closure_index < closure_count;
+             ++closure_index)
         for (scan = 0u; vt != NULL && scan < hir->items.len; ++scan) {
             const CmHirItem *method = (const CmHirItem *)cm_vec_at_const(
                 &hir->items, scan);
             CmStrBuf symbol;
             if (method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
                 || !cm_hir_def_id_equal(method->parent_definition,
-                    vt->trait_def)) continue;
+                    closure[closure_index])) continue;
             cm_str_buf_init(&symbol);
             cm_umir_c_exact_self = 1;
             cm_umir_c_render_callee_symbol(&symbol, hir, tyck,

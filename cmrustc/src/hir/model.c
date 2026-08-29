@@ -2,6 +2,7 @@
 
 #include "cm/alloc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -862,6 +863,23 @@ CmHirStatus cm_hir_set_module_imports(CmHirContext *context,
                 && import_value->binding_count > 1u)
             || (import_value->binding_count != 0u
                 && import_value->bindings == NULL)) {
+            if (getenv("CM_LOWER_DEBUG") != NULL) {
+                fprintf(stderr, "LOWER module import rejected index=%lu "
+                    "kind=%d tree=%d vis=%d span_source=%lu ordered=%d "
+                    "source_item=%lu attrs=%d bindings=%lu/%p\n",
+                    (unsigned long)import_index, (int)import_value->kind,
+                    cm_hir_intern_id_nonempty(context, import_value->tree),
+                    cm_hir_import_visibility_valid(context, module_id,
+                        &import_value->visibility),
+                    (unsigned long)import_value->span.source,
+                    cm_hir_span_is_ordered(import_value->span),
+                    (unsigned long)import_value->source_item,
+                    cm_hir_attributes_valid(context,
+                        import_value->attributes,
+                        import_value->attribute_count),
+                    (unsigned long)import_value->binding_count,
+                    (const void *)import_value->bindings);
+            }
             return CM_HIR_INVALID_ARGUMENT;
         }
         for (binding_index = 0u;
@@ -914,6 +932,28 @@ CmHirStatus cm_hir_set_module_imports(CmHirContext *context,
                 || (target != NULL
                     && !cm_hir_import_variant_target_valid(context, target,
                         binding->namespace_kind))) {
+                if (getenv("CM_LOWER_DEBUG") != NULL) {
+                    const CmInternedString *bn = cm_interner_get(
+                        &context->strings, binding->name);
+                    fprintf(stderr, "LOWER module import binding rejected "
+                        "import=%lu binding=%lu name=%.*s ns=%d prim=%d "
+                        "anon=%d pub=%d crate=%d target=%u:%u kind=%d "
+                        "state=%d variant_ok=%d\n",
+                        (unsigned long)import_index,
+                        (unsigned long)binding_index,
+                        bn == NULL ? 1 : (int)bn->len,
+                        bn == NULL ? "?" : (const char *)bn->bytes,
+                        (int)binding->namespace_kind,
+                        (int)binding->primitive_kind, binding->is_anonymous,
+                        binding->is_public, binding->is_crate_visible,
+                        (unsigned)binding->target.crate_id,
+                        (unsigned)binding->target.index,
+                        target == NULL ? -1 : (int)target->kind,
+                        target == NULL ? -1 : (int)target->state,
+                        target == NULL ? -1
+                            : cm_hir_import_variant_target_valid(context,
+                                target, binding->namespace_kind));
+                }
                 return CM_HIR_INVALID_ARGUMENT;
             }
             if (binding->primitive_kind == CM_HIR_PRIMITIVE_NONE
@@ -1383,6 +1423,28 @@ static int cm_hir_def_id_less(CmHirDefId left, CmHirDefId right)
         || (left.crate_id == right.crate_id && left.index < right.index);
 }
 
+
+/* Whether `target` is `start` or one of its (transitive) supertraits;
+ * bounded so a malformed cycle cannot spin. */
+static int cm_hir_trait_reaches_supertrait(const CmHirContext *context,
+    CmHirDefId start, CmHirDefId target, unsigned int depth)
+{
+    const CmHirItem *item;
+    uint32_t index;
+
+    if (cm_hir_def_id_equal(start, target)) return 1;
+    if (depth >= 16u) return 0;
+    item = cm_hir_bound_definition_item(context, start);
+    if (item == NULL || item->kind != CM_HIR_ITEM_TRAIT) return 0;
+    for (index = 0u; index < item->data.trait_item.supertrait_count;
+         ++index) {
+        if (cm_hir_trait_reaches_supertrait(context,
+                item->data.trait_item.supertraits[index].trait_type
+                    .definition, target, depth + 1u)) return 1;
+    }
+    return 0;
+}
+
 static int cm_hir_dyn_trait_valid(const CmHirContext *context,
     const CmHirType *type)
 {
@@ -1448,8 +1510,15 @@ static int cm_hir_dyn_trait_valid(const CmHirContext *context,
                 || associated->generic_parameter_count != 0u
                 || associated->data.type_alias_item.target
                     != CM_HIR_TYPE_NONE
-                || !cm_hir_def_id_equal(associated->parent_definition,
-                    type->data.dyn_trait_type.principal_trait.definition)) {
+                || (!cm_hir_def_id_equal(associated->parent_definition,
+                        type->data.dyn_trait_type.principal_trait
+                            .definition)
+                    /* `dyn FnMut(A) -> R`: `Output` belongs to the
+                     * supertrait `FnOnce`. */
+                    && !cm_hir_trait_reaches_supertrait(context,
+                        type->data.dyn_trait_type.principal_trait
+                            .definition,
+                        associated->parent_definition, 0u))) {
                 return 0;
             }
         } else if (definition->state != CM_HIR_DEFINITION_RESERVED
@@ -3712,7 +3781,10 @@ static int cm_hir_value_item_payload_valid(const CmHirContext *context,
                             == CM_HIR_IMMUTABLE))
                 && item->data.value_item.body == CM_HIR_BODY_NONE;
         }
-        if (item->data.value_item.body == CM_HIR_BODY_NONE) return 0;
+        /* `extern "C" { static X: T; }`: the host owns the storage. */
+        if (item->data.value_item.body == CM_HIR_BODY_NONE)
+            return item->kind == CM_HIR_ITEM_STATIC
+                && item->data.value_item.is_foreign;
     } else {
         if (item->data.value_item.definition_kind
             != CM_HIR_VALUE_DEFINITION_SOURCE) return 0;

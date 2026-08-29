@@ -2489,13 +2489,63 @@ static int cm_decl_plain_visibility(const CmHirItem *item)
         && cm_hir_def_id_is_none(item->visibility.restriction);
 }
 
+/* Offset of an attribute's final path segment: `::core::prelude::v1::derive`
+ * (libc's `s!`) names the same builtin as `derive`. */
+static size_t cm_decl_attribute_name_start(const CmInternedString *metadata)
+{
+    /* Only the prelude re-export spellings of builtin attributes are
+     * stripped; tool namespaces (`diagnostic::on_unimplemented`,
+     * `clippy::..`) name different attributes.  Generated text is
+     * token-spaced (`:: core :: prelude :: v1 :: derive`). */
+    static const char *const prefixes[] = {
+        "::core::prelude::v1::", "core::prelude::v1::",
+        "::std::prelude::v1::", "std::prelude::v1::"
+    };
+    size_t prefix_index;
+
+    if (metadata == NULL) return 0u;
+    for (prefix_index = 0u;
+         prefix_index < sizeof(prefixes) / sizeof(prefixes[0]);
+         ++prefix_index) {
+        const char *prefix = prefixes[prefix_index];
+        size_t position = 0u;
+        size_t offset = 0u;
+        int matched = 1;
+
+        while (prefix[offset] != '\0') {
+            while (position < metadata->len
+                && metadata->bytes[position] == (unsigned char)' ')
+                position += 1u;
+            if (position >= metadata->len
+                || metadata->bytes[position] != (unsigned char)prefix[offset]) {
+                matched = 0;
+                break;
+            }
+            position += 1u;
+            offset += 1u;
+        }
+        if (!matched) continue;
+        while (position < metadata->len
+            && metadata->bytes[position] == (unsigned char)' ')
+            position += 1u;
+        return position;
+    }
+    return 0u;
+}
+
 static int cm_decl_attribute_call_is(const CmInternedString *metadata,
     const char *head)
 {
     size_t head_length = strlen(head);
-    return metadata != NULL && metadata->len > head_length + 2u
-        && memcmp(metadata->bytes, head, head_length) == 0
-        && metadata->bytes[head_length] == (unsigned char)'('
+    size_t start = cm_decl_attribute_name_start(metadata);
+    size_t open;
+    if (metadata == NULL || metadata->len < start + head_length + 2u
+        || memcmp(metadata->bytes + start, head, head_length) != 0) return 0;
+    open = start + head_length;
+    while (open < metadata->len && metadata->bytes[open] == (unsigned char)' ')
+        open += 1u;
+    return open + 1u < metadata->len
+        && metadata->bytes[open] == (unsigned char)'('
         && metadata->bytes[metadata->len - 1u] == (unsigned char)')';
 }
 
@@ -2503,8 +2553,9 @@ static int cm_decl_attribute_bare_is(const CmInternedString *metadata,
     const char *name)
 {
     size_t length = strlen(name);
-    return metadata != NULL && metadata->len == length
-        && memcmp(metadata->bytes, name, length) == 0;
+    size_t start = cm_decl_attribute_name_start(metadata);
+    return metadata != NULL && metadata->len == start + length
+        && memcmp(metadata->bytes + start, name, length) == 0;
 }
 
 static int cm_decl_ascii_identifier(const unsigned char *bytes, size_t length)

@@ -33,7 +33,8 @@ void cm_macro_reparse_options_init(CmMacroReparseOptions *options)
 static int cm_reparse_options_valid(const CmMacroReparseOptions *options)
 {
     return (options->item_context == CM_ITEM_LIST_FRAGMENT_ROOT
-            || options->item_context == CM_ITEM_LIST_FRAGMENT_IMPL)
+            || options->item_context == CM_ITEM_LIST_FRAGMENT_IMPL
+            || options->item_context == CM_ITEM_LIST_FRAGMENT_EXTERN)
         && options->maximum_output_bytes != 0u
         && options->maximum_items != 0u;
 }

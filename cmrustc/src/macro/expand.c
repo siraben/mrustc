@@ -3,6 +3,8 @@
 #include "cm/alloc.h"
 #include "cm/vec.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CM_EXPAND_DEFAULT_NESTING 64u
@@ -460,13 +462,38 @@ static int cm_expand_attribute_head(CmMetaSlice meta,
     unsigned char byte;
 
     position = 0u;
-    if (!cm_expand_is_ident_start(meta.bytes[position])) {
-        return 0;
+    /* A path-headed attribute (`#[::core::prelude::v1::derive(..)]`, as
+     * libc's `s!` emits): the head is the whole path. */
+    if (position + 1u < meta.length && meta.bytes[position] == '\x3a'
+        && meta.bytes[position + 1u] == '\x3a') {
+        position += 2u;
+        while (position < meta.length
+            && cm_expand_is_space(meta.bytes[position])) position += 1u;
     }
-    position += 1u;
-    while (position < meta.length
-        && cm_expand_is_ident_continue(meta.bytes[position])) {
+    for (;;) {
+        size_t probe;
+
+        if (position >= meta.length
+            || !cm_expand_is_ident_start(meta.bytes[position])) {
+            return 0;
+        }
         position += 1u;
+        while (position < meta.length
+            && cm_expand_is_ident_continue(meta.bytes[position])) {
+            position += 1u;
+        }
+        /* Generated text is token-spaced: `:: core :: prelude :: v1`. */
+        probe = position;
+        while (probe < meta.length && cm_expand_is_space(meta.bytes[probe]))
+            probe += 1u;
+        if (probe + 1u < meta.length && meta.bytes[probe] == '\x3a'
+            && meta.bytes[probe + 1u] == '\x3a') {
+            position = probe + 2u;
+            while (position < meta.length
+                && cm_expand_is_space(meta.bytes[position])) position += 1u;
+            continue;
+        }
+        break;
     }
     *name_length = position;
     while (position < meta.length && cm_expand_is_space(meta.bytes[position])) {
@@ -706,6 +733,11 @@ static int cm_expand_process_meta(CmExpandContext *context,
     context->attribute_expansions += 1u;
     if (meta.length == 0u || !cm_expand_attribute_head(meta, &name_length,
         &arguments_start, &arguments, &has_arguments)) {
+        if (getenv("CM_MACRO_DEBUG") != NULL) {
+            fprintf(stderr, "MACRO attribute head rejected: [%.*s]\n",
+                (int)(meta.length > 300u ? 300u : meta.length),
+                (const char *)meta.bytes);
+        }
         cm_expand_error(context, CM_MACRO_UNSUPPORTED,
             CM_EXPAND_DIAG_UNSUPPORTED_ATTRIBUTE, item_id, attribute_id,
             cm_expand_slice_span(attribute, meta),

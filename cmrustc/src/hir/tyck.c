@@ -5361,6 +5361,17 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     }
     out->status = out->unresolved_nodes == 0u && out->error_nodes == 0u
         ? CM_TYCK_BODY_TYPED : CM_TYCK_BODY_PARTIAL;
+    if (out->status == CM_TYCK_BODY_PARTIAL
+        && getenv("CM_TYCK_DEBUG_PARTIAL") != NULL) {
+        /* One line per partial body, for diffing two builds. */
+        const CmInternedString *owner_name = env.item == NULL ? NULL
+            : cm_interner_get(&env.state->hir->strings, env.item->name);
+        fprintf(stderr, "TYCK-PARTIAL fn=%.*s unresolved=%lu errors=%lu\n",
+            owner_name == NULL ? 1 : (int)owner_name->len,
+            owner_name == NULL ? "?" : (const char *)owner_name->bytes,
+            (unsigned long)out->unresolved_nodes,
+            (unsigned long)out->error_nodes);
+    }
 }
 
 CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,

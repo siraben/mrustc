@@ -2731,16 +2731,18 @@ static void test_macro_expanded_array_length_expression(void)
         { "struct Evaluated { values: [u8; 64 / 8 / 2] }", 4u },
         { "struct Evaluated { values: [u8; 64 / (4 + 4)] }", 8u },
         { "struct Evaluated { values: [u8; 1 << 2 + 1] }", 8u },
-        { "struct Evaluated { values: [u8; 0 / 8] }", 0u }
+        { "struct Evaluated { values: [u8; 0 / 8] }", 0u },
+        { "struct Evaluated { values: [u8; 7 % 4] }", 3u },
+        { "struct Evaluated { values: [u8; 16 / size_of::<u8>()] }", 16u },
+        { "struct Evaluated { values: [u8; 0b101 & 0x3] }", 1u }
     };
     static const char *const rejected[] = {
         "struct Rejected { values: [u8; (1 + 7) / 0] }",
         ("struct Rejected { values: "
             "[u8; (18446744073709551615 + 1) / 8] }"),
         "struct Rejected<const N: usize> { values: [u8; (N + 7) / 8] }",
-        "struct Rejected { values: [u8; 7 % 4] }",
         "struct Rejected { values: [u8; -1] }",
-        "struct Rejected { values: [u8; 16 / size_of::<u8>()] }"
+        "struct Rejected { values: [u8; size_of::<Unknown>()] }"
     };
     CmHirContext context;
     CmHirLowerResult result;
@@ -2808,11 +2810,20 @@ static void test_macro_expanded_array_length_expression(void)
         && find_item(&context, "PointerStorage") == NULL);
     cm_hir_context_destroy(&context);
 
+    /* 16-bit pointers: `16 / size_of::<*const ()>()` folds to 8 through
+     * the const-length evaluator's pointer-size rule. */
     result = lower_source_with_pointer_bits(pointer_source, &context, NULL,
         16u);
-    assert(result.error_count == 1u
-        && result.first_error.kind == CM_HIR_LOWER_UNSUPPORTED_TYPE
-        && find_item(&context, "PointerStorage") == NULL);
+    pointer_storage = find_item(&context, "PointerStorage");
+    pointer_array = pointer_storage == NULL
+            || pointer_storage->kind != CM_HIR_ITEM_STRUCT
+            || pointer_storage->data.aggregate_item.field_count != 1u
+        ? NULL : cm_hir_get_type(&context,
+            pointer_storage->data.aggregate_item.fields[0].type);
+    assert(result.error_count == 0u && pointer_array != NULL
+        && pointer_array->kind == CM_HIR_TYPE_ARRAY_KIND
+        && pointer_array->data.array_type.length.kind == CM_HIR_CONST_VALUE
+        && pointer_array->data.array_type.length.data.value.low_bits == 8u);
     cm_hir_context_destroy(&context);
 
     for (index = 0u; index < sizeof(evaluated) / sizeof(evaluated[0]);
@@ -2881,9 +2892,8 @@ static void test_primitive_self_size_array_length(void)
         ("impl<T> i8 {"
             " fn to_be_bytes() -> [u8; size_of::<Self>()] { loop {} }"
             "}"),
-        ("impl i8 {"
-            " fn to_be_bytes() -> [u8; size_of::<i8>()] { loop {} }"
-            "}"),
+        /* `[u8; size_of::<i8>()]` folds through the const-length
+         * evaluator's primitive rule and is no longer rejected. */
         ("impl i8 {"
             " fn bytes() -> [u8; size_of::<Self>()] { loop {} }"
             "}"),
@@ -12695,8 +12705,8 @@ static void test_bounded_dynamic_trait_lowering(void)
         "trait Error {} "
             "fn source(error: &(dyn ~const Error + 'static)) {}",
         "struct Error; fn source(error: &(dyn Error + 'static)) {}"
-        ,"trait Base { type Item; } trait Iterator: Base {} "
-            "fn source(error: &dyn Iterator<Item = ()>) {}"
+        /* `dyn Iterator<Item = ()>` with `Item` declared by the
+         * supertrait `Base` is accepted since `dyn FnMut(A) -> R`. */
         ,"trait Iterator { type Item<T>; } "
             "fn source(error: &dyn Iterator<Item = ()>) {}"
     };

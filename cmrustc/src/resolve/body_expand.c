@@ -2340,14 +2340,45 @@ static void cm_body_walk_item(CmBodyExpandState *state, CmAstItemId id,
     if (item == NULL) return;
     switch (item->kind) {
     case CM_AST_ITEM_FUNCTION:
+        for (index = 0u; index < item->data.function_item.parameter_count;
+             ++index)
+            cm_body_expand_type_macros(state,
+                item->data.function_item.parameters[index].type, depth);
+        cm_body_expand_type_macros(state,
+            item->data.function_item.return_type, depth);
         state->result.bodies += 1u;
         cm_body_walk_expr(state, item->data.function_item.body, depth);
         break;
     case CM_AST_ITEM_CONST:
     case CM_AST_ITEM_STATIC:
+        cm_body_expand_type_macros(state, item->data.value_item.type,
+            depth);
         if (item->data.value_item.initializer != CM_AST_EXPR_NONE)
             state->result.bodies += 1u;
         cm_body_walk_expr(state, item->data.value_item.initializer, depth);
+        break;
+    case CM_AST_ITEM_TYPE_ALIAS:
+        /* libc's `c_enum!`: `pub type pid_type = c_enum!(@repr);`. */
+        cm_body_expand_type_macros(state, item->data.value_item.type,
+            depth);
+        break;
+    case CM_AST_ITEM_STRUCT:
+    case CM_AST_ITEM_UNION:
+        for (index = 0u; index < item->data.aggregate_item.field_count;
+             ++index)
+            cm_body_expand_type_macros(state,
+                item->data.aggregate_item.fields[index].type, depth);
+        break;
+    case CM_AST_ITEM_ENUM:
+        for (index = 0u; index < item->data.enum_item.variant_count;
+             ++index) {
+            const CmAstVariant *variant =
+                &item->data.enum_item.variants[index];
+            uint32_t field;
+            for (field = 0u; field < variant->field_count; ++field)
+                cm_body_expand_type_macros(state,
+                    variant->fields[field].type, depth);
+        }
         break;
     case CM_AST_ITEM_IMPL:
         cm_body_expand_type_macros(state, item->data.impl_item.self_type,
