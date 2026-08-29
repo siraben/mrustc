@@ -636,6 +636,130 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         cm_str_buf_append(output, "; }");
         return 1;
     }
+    if (CM_SHIM_IS("unchecked_add") || CM_SHIM_IS("wrapping_add")
+        || CM_SHIM_IS("saturating_add")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return a + b; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_sub") || CM_SHIM_IS("wrapping_sub")
+        || CM_SHIM_IS("saturating_sub")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return a - b; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_mul") || CM_SHIM_IS("wrapping_mul")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return a * b; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_div") || CM_SHIM_IS("exact_div")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return b == 0 ? 0 : a / b; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_rem")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return b == 0 ? 0 : a % b; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_shl")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return (long long)((unsigned long long)a << (b & 63)); }");
+        return 1;
+    }
+    if (CM_SHIM_IS("unchecked_shr")) {
+        cm_str_buf_append(output, "(long long a, long long b) "
+            "{ return (long long)((unsigned long long)a >> (b & 63)); }");
+        return 1;
+    }
+    if (CM_SHIM_IS("ctpop") || CM_SHIM_IS("ctlz") || CM_SHIM_IS("cttz")
+        || CM_SHIM_IS("ctlz_nonzero") || CM_SHIM_IS("cttz_nonzero")
+        || CM_SHIM_IS("bswap") || CM_SHIM_IS("bitreverse")
+        || CM_SHIM_IS("rotate_left") || CM_SHIM_IS("rotate_right")) {
+        /* Bit intrinsics at the instance's scalar width. */
+        unsigned long bits = 8ul * cm_umir_c_scalar_size(tyck, first);
+        char text[512];
+        const char *body;
+        if (CM_SHIM_IS("ctpop"))
+            body = "(long long a) { unsigned long long v = (unsigned long long)a;"
+                " long long n = 0; unsigned i; for (i = 0; i < %lu; ++i)"
+                " { n += (long long)(v & 1u); v >>= 1; } return n; }";
+        else if (CM_SHIM_IS("ctlz") || CM_SHIM_IS("ctlz_nonzero"))
+            body = "(long long a) { unsigned long long v = (unsigned long long)a;"
+                " long long n = 0; unsigned i; for (i = 0; i < %lu; ++i)"
+                " { if ((v >> (%lu - 1 - i)) & 1u) break; n += 1; }"
+                " return n; }";
+        else if (CM_SHIM_IS("cttz") || CM_SHIM_IS("cttz_nonzero"))
+            body = "(long long a) { unsigned long long v = (unsigned long long)a;"
+                " long long n = 0; unsigned i; for (i = 0; i < %lu; ++i)"
+                " { if ((v >> i) & 1u) break; n += 1; } return n; }";
+        else if (CM_SHIM_IS("bswap"))
+            body = "(long long a) { unsigned long long v = (unsigned long long)a,"
+                " r = 0; unsigned i; for (i = 0; i < %lu / 8; ++i)"
+                " { r = (r << 8) | (v & 0xffu); v >>= 8; } return (long long)r; }";
+        else if (CM_SHIM_IS("bitreverse"))
+            body = "(long long a) { unsigned long long v = (unsigned long long)a,"
+                " r = 0; unsigned i; for (i = 0; i < %lu; ++i)"
+                " { r = (r << 1) | (v & 1u); v >>= 1; } return (long long)r; }";
+        else if (CM_SHIM_IS("rotate_left"))
+            body = "(long long a, long long n) { unsigned long long v ="
+                " (unsigned long long)a; unsigned long long m = %lu == 64 ?"
+                " ~0ull : ((1ull << %lu) - 1); unsigned s = (unsigned)n %% %lu;"
+                " v &= m; return (long long)(((v << s) | (v >> ((%lu - s) %% %lu)))"
+                " & m); }";
+        else
+            body = "(long long a, long long n) { unsigned long long v ="
+                " (unsigned long long)a; unsigned long long m = %lu == 64 ?"
+                " ~0ull : ((1ull << %lu) - 1); unsigned s = (unsigned)n %% %lu;"
+                " v &= m; return (long long)(((v >> s) | (v << ((%lu - s) %% %lu)))"
+                " & m); }";
+        (void)snprintf(text, sizeof text, body, bits, bits, bits, bits, bits);
+        cm_str_buf_append(output, text);
+        return 1;
+    }
+    if (CM_SHIM_IS("copy_nonoverlapping") || CM_SHIM_IS("copy")) {
+        /* (src, dst, count) at the element's byte size. */
+        cm_str_buf_append(output, "(long long s, long long d, long long n) "
+            "{ memmove((void *)(intptr_t)d, (const void *)(intptr_t)s, "
+            "(unsigned long)n * ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "); return 0; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("write_bytes")) {
+        cm_str_buf_append(output, "(long long d, long long v, long long n) "
+            "{ memset((void *)(intptr_t)d, (int)v, (unsigned long)n * ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "); return 0; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("read_via_copy") || CM_SHIM_IS("volatile_load")) {
+        const char *scalar = cm_umir_c_scalar_type(tyck, first);
+        cm_str_buf_append(output, "(long long p) { return (long long)*(");
+        cm_str_buf_append(output, scalar == NULL ? "long long" : scalar);
+        cm_str_buf_append(output, " *)(intptr_t)p; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("write_via_move") || CM_SHIM_IS("volatile_store")) {
+        const char *scalar = cm_umir_c_scalar_type(tyck, first);
+        cm_str_buf_append(output, "(long long p, long long v) { *(");
+        cm_str_buf_append(output, scalar == NULL ? "long long" : scalar);
+        cm_str_buf_append(output, " *)(intptr_t)p = (");
+        cm_str_buf_append(output, scalar == NULL ? "long long" : scalar);
+        cm_str_buf_append(output, ")v; return 0; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("needs_drop")) {
+        cm_str_buf_append(output, "() { return 0; }");
+        return 1;
+    }
+    if (CM_SHIM_IS("size_of_val") || CM_SHIM_IS("min_align_of_val")) {
+        cm_str_buf_append(output, "(long long p) { (void)p; return ");
+        cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
+        cm_str_buf_append(output, "; }");
+        return 1;
+    }
     if (CM_SHIM_IS("size_of")) {
         cm_str_buf_append(output, "() { return ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, first));
@@ -793,6 +917,9 @@ static int cm_umir_c_ty_equal(const CmTyckSet *tyck, CmTyId left,
     case CM_TY_DYN:
         if (!cm_hir_def_id_equal(a->def, b->def)) return 0;
         break;
+    case CM_TY_CONST:
+        if (a->lo != b->lo || a->hi != b->hi) return 0;
+        break;
     default:
         break;
     }
@@ -814,7 +941,8 @@ static int cm_umir_c_ty_match(const CmTyckSet *tyck, CmTyId pattern,
     const CmTy *b = cm_ty_get(arena, cm_ty_resolve(arena, actual));
     uint32_t index;
     if (a == NULL || b == NULL || depth > 16u) return 0;
-    if (a->kind == CM_TY_PARAM) {
+    if (a->kind == CM_TY_PARAM || a->kind == CM_TY_CONST_PARAM) {
+        /* Type and const generic parameters bind alike (`[T; N]`). */
         for (index = 0u; index < *count; ++index)
             if (params[index] == (CmHirGenericParamId)a->a)
                 return cm_umir_c_ty_equal(tyck, binds[index], actual,
@@ -840,6 +968,9 @@ static int cm_umir_c_ty_match(const CmTyckSet *tyck, CmTyId pattern,
     case CM_TY_FOREIGN:
     case CM_TY_DYN:
         if (!cm_hir_def_id_equal(a->def, b->def)) return 0;
+        break;
+    case CM_TY_CONST:
+        if (a->lo != b->lo || a->hi != b->hi) return 0;
         break;
     default:
         break;
@@ -1206,7 +1337,26 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
         CmHirGenericParamId parameters[32];
         uint32_t parameter_count = cm_umir_c_collect_parameters(hir, item,
             parameters, 32u);
-        if (count < parameter_count) {
+        uint32_t unknown = 0u;
+        {
+            /* Arguments the callee type left unresolved (an inferred
+             * const length, a leftover variable) count as unbound. */
+            uint32_t check;
+            for (check = 0u; check < count; ++check) {
+                const CmTy *have = args[check] == CM_TY_NONE ? NULL
+                    : cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena,
+                            args[check]));
+                if (have == NULL || have->kind == CM_TY_CONST_UNKNOWN
+                    || have->kind == CM_TY_INFER
+                    || have->kind == CM_TY_CONST_PARAM
+                    || have->kind == CM_TY_PARAM) {
+                    args[check] = CM_TY_NONE;
+                    unknown += 1u;
+                }
+            }
+        }
+        if (count < parameter_count || unknown != 0u) {
             const CmHirFunctionSignature *sig =
                 &item->data.function_item.signature;
             CmTyArena *arena = (CmTyArena *)&tyck->arena;
@@ -1235,16 +1385,18 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                         cm_umir_c_subst(statement->type), bound_params,
                         bound_types, &bound, 32u, 0u);
             }
-            if (bound != 0u) {
-                for (param = count; param < parameter_count && param < 32u;
+            {
+                for (param = 0u; param < parameter_count && param < 32u;
                         ++param) {
                     uint32_t scan;
+                    if (param < count && args[param] != CM_TY_NONE) continue;
                     args[param] = cm_ty_param(arena, parameters[param]);
                     for (scan = 0u; scan < bound; ++scan)
                         if (bound_params[scan] == parameters[param])
                             args[param] = bound_types[scan];
                 }
-                count = parameter_count > 32u ? 32u : parameter_count;
+                if (bound != 0u || unknown != 0u)
+                    count = parameter_count > 32u ? 32u : parameter_count;
             }
         }
     }
@@ -2625,7 +2777,9 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         cm_str_buf_append(output, "#include <stdio.h>\n");
     cm_str_buf_append(output, "#include <stdint.h>\nvoid abort(void);\n"
         "void *malloc(unsigned long);\n"
-        "void *calloc(unsigned long, unsigned long);\n");
+        "void *calloc(unsigned long, unsigned long);\n"
+        "void *memmove(void *, const void *, unsigned long);\n"
+        "void *memset(void *, int, unsigned long);\n");
     /* Roots: `#[no_mangle]` exports only; everything else is reached
      * through call instances, so a core-linked program emits just what
      * the exports need. */
