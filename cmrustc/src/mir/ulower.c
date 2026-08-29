@@ -809,9 +809,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     &callee_expr->data.path.resolution));
             break;
         }
-        if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
-            && callee_expr->data.path.resolution.kind
-                != CM_U_RESOLVED_LOCAL) {
+        if (callee_expr != NULL
+            && ((callee_expr->kind == CM_U_EXPR_PATH
+                    && callee_expr->data.path.resolution.kind
+                        != CM_U_RESOLVED_LOCAL)
+                || callee_expr->kind == CM_U_EXPR_QUALIFIED_PATH)) {
             /* An item path as callee is resolved by the call itself; its
              * operand slot is a placeholder, never a fn value. */
             callee = cm_umir_new_local(builder,

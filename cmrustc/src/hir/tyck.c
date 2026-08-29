@@ -523,11 +523,12 @@ static CmTyId cm_tyck_fn_def(CmTyckEnv *env, const CmHirItem *item,
     CmTyckInstance instance;
     /* A trait method reached as a plain definition: Self is inferred from
      * use, and the call site expects it in the first argument slot. */
-    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT
-        && self_type == CM_TY_NONE) {
+    if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
         CmTyId args[CM_TYCK_MAX_ARGS];
         uint32_t index;
-        CmTyId self = cm_ty_fresh(env->state->arena, CM_HIR_INFER_GENERAL);
+        CmTyId self = self_type == CM_TY_NONE
+            ? cm_ty_fresh(env->state->arena, CM_HIR_INFER_GENERAL)
+            : self_type;
         cm_tyck_instance_init(&instance, self);
         cm_tyck_instance_fresh(env, &instance, parent);
         cm_tyck_instance_fresh(env, &instance, item);
@@ -645,6 +646,38 @@ static const CmHirItem *cm_tyck_trait_method(CmTyckEnv *env,
         if (found != NULL) return found;
     }
     return NULL;
+}
+
+/* The trait a body AST path names (`<T as fmt::Display>::fmt`), or none. */
+static const CmHirItem *cm_tyck_trait_from_ast_path(CmTyckEnv *env,
+    CmAstPathId path_id)
+{
+    const CmAstPath *path = path_id == CM_AST_PATH_NONE ? NULL
+        : cm_ast_get_path(env->ast, path_id);
+    CmResolvePathSegmentView views[CM_TYCK_MAX_ARGS];
+    CmResolvedBinding binding;
+    uint32_t count;
+    uint32_t index;
+    if (path == NULL || path->segment_count == 0u
+        || path->segment_count > CM_TYCK_MAX_ARGS) return NULL;
+    count = path->segment_count;
+    for (index = 0u; index < count; ++index) {
+        const CmInternedString *name = cm_ast_get_string(env->ast,
+            path->segments[index].name);
+        if (name == NULL) return NULL;
+        views[index].bytes = name->bytes;
+        views[index].length = name->len;
+    }
+    if (cm_import_resolve_path_checked(env->state->imports, env->state->graph,
+            env->state->revision, env->module, path->absolute, views, count,
+            CM_RESOLVE_NAMESPACE_TYPE, &binding) != CM_IMPORT_LOOKUP_OK)
+        return NULL;
+    if (binding.primitive_kind != CM_RESOLVE_PRIMITIVE_NONE) return NULL;
+    {
+        const CmHirItem *item = cm_tyck_item_from_binding(env->state,
+            &binding);
+        return item != NULL && item->kind == CM_HIR_ITEM_TRAIT ? item : NULL;
+    }
 }
 
 typedef struct CmTyckFound {
@@ -3569,6 +3602,26 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                 name = cm_interner_intern(
                     (CmInterner *)&env->state->ubodies->strings,
                     text->bytes, text->len);
+        }
+        {
+            /* An explicit trait names the declaration outright: emission
+             * resolves it against the (substituted) self type. */
+            const CmHirItem *trait_item = cm_tyck_trait_from_ast_path(env,
+                expr->data.qualified_path.trait_path.path);
+            if (name != CM_INTERN_ID_NONE && trait_item != NULL) {
+                CmHirDefId owner = cm_hir_def_id_none();
+                const CmHirItem *declared = cm_tyck_trait_method(env,
+                    trait_item->definition, name, 0u, &owner);
+                if (declared != NULL
+                    && declared->kind == CM_HIR_ITEM_FUNCTION) {
+                    if (env->out->method_targets != NULL
+                        && id != CM_U_EXPR_NONE)
+                        env->out->method_targets[id] = declared->definition;
+                    result = cm_tyck_fn_def(env, declared,
+                        cm_tyck_item(env->state, owner), self_type, NULL);
+                    break;
+                }
+            }
         }
         if (name != CM_INTERN_ID_NONE
             && cm_tyck_lookup_assoc_generic(env, self_type, name, &found)) {

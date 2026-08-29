@@ -1143,7 +1143,25 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
          * still reaches the `usize` impl (`SliceIndex<[T]> for usize`). */
         const CmTy *self_ty = cm_ty_get((CmTyArena *)&tyck->arena,
             self_resolved);
-        if (self_ty != NULL && self_ty->kind == CM_TY_INT) {
+        int exact_impl = 0;
+        /* An impl for the exact integer type (even one inheriting the
+         * method as a default) must not be shadowed by another width. */
+        for (index = 0u; self_ty != NULL && self_ty->kind == CM_TY_INT
+                && index < hir->items.len; ++index) {
+            const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, index);
+            if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
+                || !cm_hir_def_id_equal(
+                    impl->data.impl_item.trait_type.definition,
+                    trait_item->definition)) continue;
+            if (cm_umir_c_ty_equal(tyck, cm_ty_from_hir(
+                    (CmTyArena *)&tyck->arena, hir,
+                    impl->data.impl_item.self_type), self_resolved, 0u)) {
+                exact_impl = 1;
+                break;
+            }
+        }
+        if (self_ty != NULL && self_ty->kind == CM_TY_INT && !exact_impl) {
             for (index = 0u; index < hir->items.len; ++index) {
                 const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
                     &hir->items, index);
@@ -1252,10 +1270,19 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
         const CmHirItem *parent = cm_umir_c_item_of(hir,
             item->parent_definition);
         if (parent != NULL && parent->kind == CM_HIR_ITEM_TRAIT) {
-            /* Declaration: resolve against the substituted receiver; a
-             * trait default method stays itself with Self bound. */
+            /* Declaration: resolve against the substituted receiver (a
+             * qualified `<T as Tr>::f(..)` carries Self in the FN_DEF's
+             * first slot); a trait default method stays itself with Self
+             * bound. */
             CmTyId self = cm_umir_c_subst(receiver_type);
             CmHirDefId resolved;
+            if (self == CM_TY_NONE && callee_type != CM_TY_NONE) {
+                const CmTy *ct = cm_ty_get((CmTyArena *)&tyck->arena,
+                    cm_ty_resolve((CmTyArena *)&tyck->arena,
+                        cm_umir_c_subst(callee_type)));
+                if (ct != NULL && ct->kind == CM_TY_FN_DEF && ct->count != 0u)
+                    self = cm_umir_c_subst(ct->children[0]);
+            }
             CmTyId bound_types[32];
             uint32_t bound_count = 0u;
             CmHirReceiverKind receiver =
@@ -1384,9 +1411,18 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena,
                 cm_umir_c_subst(callee_type)));
-    if (fn_ty != NULL && fn_ty->kind == CM_TY_FN_DEF)
-        for (index = 0u; index < fn_ty->count && count < 32u; ++index)
+    if (fn_ty != NULL && fn_ty->kind == CM_TY_FN_DEF) {
+        /* A trait method's FN_DEF carries Self in slot 0, which is not a
+         * generic argument. */
+        const CmHirItem *fn_item = cm_umir_c_item_of(hir, fn_ty->def);
+        const CmHirItem *fn_parent = fn_item == NULL
+                || cm_hir_def_id_is_none(fn_item->parent_definition) ? NULL
+            : cm_umir_c_item_of(hir, fn_item->parent_definition);
+        uint32_t first = fn_parent != NULL
+            && fn_parent->kind == CM_HIR_ITEM_TRAIT ? 1u : 0u;
+        for (index = first; index < fn_ty->count && count < 32u; ++index)
             args[count++] = cm_umir_c_subst(fn_ty->children[index]);
+    }
     {
         /* Receiver-derived Self: strip the reference layers a method
          * receiver carries. */
