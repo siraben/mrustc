@@ -143,6 +143,7 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                         break;
                     case CM_UMIR_RVALUE_TRY_UNWRAP:
                     case CM_UMIR_RVALUE_ITER_NEXT:
+                    case CM_UMIR_RVALUE_DEREF_CALL:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
@@ -2273,6 +2274,35 @@ static CmHirDefId cm_umir_c_iterator_next(const CmHirContext *hir)
     return cm_hir_def_id_none();
 }
 
+/* `Deref::deref` (`DerefMut::deref_mut` when `mutable`): the lang trait's
+ * declaration, resolved per receiver type at the call. */
+static CmHirDefId cm_umir_c_deref_fn(const CmHirContext *hir, int mutable)
+{
+    const char *trait_name = mutable ? "DerefMut" : "Deref";
+    const char *fn_name = mutable ? "deref_mut" : "deref";
+    size_t trait_len = strlen(trait_name);
+    size_t fn_len = strlen(fn_name);
+    size_t index;
+    for (index = 0u; index < hir->items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, index);
+        const CmInternedString *name;
+        const CmHirItem *parent;
+        if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+            || cm_hir_def_id_is_none(item->parent_definition)) continue;
+        name = cm_interner_get(&hir->strings, item->name);
+        if (name == NULL || name->len != fn_len
+            || memcmp(name->bytes, fn_name, fn_len) != 0) continue;
+        parent = cm_umir_c_item_of(hir, item->parent_definition);
+        if (parent == NULL || parent->kind != CM_HIR_ITEM_TRAIT) continue;
+        name = cm_interner_get(&hir->strings, parent->name);
+        if (name != NULL && name->len == trait_len
+            && memcmp(name->bytes, trait_name, trait_len) == 0)
+            return item->definition;
+    }
+    return cm_hir_def_id_none();
+}
+
 int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirBody *body, const CmUBodySet *ubodies, const CmUBody *ub,
     const CmTyckSet *tyck)
@@ -3491,6 +3521,46 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_append(output, " = ");
                     cm_str_buf_append_n(output, symbol.data, symbol.len);
                     cm_str_buf_append(output, "((long long)(intptr_t)&");
+                    cm_umir_c_render_local(output, statement->operands[0]);
+                    cm_str_buf_append(output, "); }");
+                    cm_str_buf_destroy(&symbol);
+                }
+                break;
+            }
+            case CM_UMIR_RVALUE_DEREF_CALL: {
+                /* `Deref::deref(&receiver)`: the operand is already the
+                 * reference; the impl is the pointee's. */
+                CmHirDefId deref_def = cm_umir_c_deref_fn(hir,
+                    statement->immediate != 0u);
+                CmTyId ref_type = statement->operand_count == 1u
+                    ? cm_umir_c_local_type(body, statement->operands[0])
+                    : CM_TY_NONE;
+                const CmTy *ref_ty = ref_type == CM_TY_NONE ? NULL
+                    : cm_ty_get((CmTyArena *)&tyck->arena,
+                        cm_ty_resolve((CmTyArena *)&tyck->arena,
+                            cm_umir_c_subst(ref_type)));
+                if (cm_hir_def_id_is_none(deref_def) || ref_ty == NULL) {
+                    cm_str_buf_append(output, "0 /* deref-call */");
+                    complete = 0;
+                    break;
+                }
+                {
+                    /* An address-of local keeps the referent's type
+                     * (lowering's convention); a real reference peels. */
+                    CmTyId self_type = ref_ty->kind == CM_TY_REF
+                            || ref_ty->kind == CM_TY_PTR
+                        ? ref_ty->children[0] : cm_umir_c_subst(ref_type);
+                    CmStrBuf symbol;
+                    cm_str_buf_init(&symbol);
+                    cm_umir_c_render_callee_symbol(&symbol, hir, tyck,
+                        deref_def, CM_TY_NONE, self_type, NULL, 0u);
+                    cm_str_buf_append(output, "0; { long long ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "(); ");
+                    cm_umir_c_render_local(output, statement->destination);
+                    cm_str_buf_append(output, " = ");
+                    cm_str_buf_append_n(output, symbol.data, symbol.len);
+                    cm_str_buf_append(output, "(");
                     cm_umir_c_render_local(output, statement->operands[0]);
                     cm_str_buf_append(output, "); }");
                     cm_str_buf_destroy(&symbol);

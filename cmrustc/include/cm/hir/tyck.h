@@ -37,6 +37,11 @@ typedef struct CmTyckBody {
      * whose target is an associated item: emission substitutes it per
      * instance to reach the impl's item (none elsewhere). */
     CmTyId *path_self_types;
+    /* The `Deref::Target` a METHOD_CALL receiver was auto-dereferenced
+     * through to reach its method (`v.iter()` on a `Vec<T>` -> `[T]`):
+     * lowering calls `Deref::deref` / `DerefMut::deref_mut` on the
+     * receiver first (none elsewhere). */
+    CmTyId *receiver_derefs;
     CmTyId return_type;
     uint32_t unresolved_nodes;
     uint32_t error_nodes;

@@ -176,6 +176,7 @@ void cm_tyck_set_destroy(CmTyckSet *set)
         cm_free(body->method_targets);
         cm_free(body->unsize_targets);
         cm_free(body->path_self_types);
+        cm_free(body->receiver_derefs);
     }
     cm_vec_destroy(&set->storage);
     cm_vec_destroy(&set->bodies);
@@ -3135,6 +3136,38 @@ static int cm_tyck_method_args_compatible(CmTyckEnv *env,
     return 1;
 }
 
+/* A compatible candidate whose written parameter is a bare generic
+ * (`spec_extend(&mut self, iterator: I)`) accepts anything: when a
+ * concrete argument is passed it is only a fallback behind a candidate
+ * written for that shape (`SpecExtend<&T, slice::Iter<T>>`'s
+ * `iterator: slice::Iter<'a, T>`) — rustc's specialization order. */
+static int cm_tyck_candidate_loose(CmTyckEnv *env, const CmTyckFound *found,
+    const CmTyId *arg_types, uint32_t arg_count)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmHirFunctionSignature *sig;
+    uint32_t skip;
+    uint32_t param;
+    if (found->item == NULL || found->item->kind != CM_HIR_ITEM_FUNCTION)
+        return 0;
+    sig = &found->item->data.function_item.signature;
+    skip = sig->receiver != CM_HIR_RECEIVER_NONE ? 1u : 0u;
+    for (param = skip; param < sig->parameter_count; ++param) {
+        uint32_t arg = param - skip;
+        const CmTy *written;
+        const CmTy *actual;
+        if (arg >= arg_count || arg_types[arg] == CM_TY_NONE) continue;
+        written = cm_ty_get(arena, cm_ty_resolve(arena, cm_ty_from_hir(
+            arena, env->state->hir, sig->parameters[param].type)));
+        actual = cm_ty_get(arena, cm_ty_resolve(arena, arg_types[arg]));
+        if (written != NULL && written->kind == CM_TY_PARAM
+            && actual != NULL && actual->kind != CM_TY_INFER
+            && actual->kind != CM_TY_PARAM)
+            return 1;
+    }
+    return 0;
+}
+
 static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
     CmUExprId id, CmTyId expected)
 {
@@ -3190,12 +3223,17 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
         CmTyckFound fallback;
         CmTyId fallback_candidate = CM_TY_NONE;
         int have_fallback = 0;
+        /* Same-step fallback: a loosely written compatible candidate
+         * waits for a tighter one among the remaining variants. */
+        unsigned int loose_variant = 0u;
+        int have_loose = 0;
         found.item = NULL;
         /* A receiver typed by a parameter (`self.start` with `T:
          * TrustedStep`) resolves through its bounds' declarations first:
          * a blanket `impl<T: Clone> SpecArrayClone for T { fn clone }`
          * must not capture `Clone::clone`. */
         int generic_receiver = 0;
+        CmTyId deref_target = CM_TY_NONE;
         {
             /* Through the reference layers, normalized: a projection that
              * resolves to a concrete type (`<usize as SliceIndex<[T]>>::
@@ -3333,7 +3371,17 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                                     expected)) return_ok = 0;
                             cm_ty_undo_to(arena, probe_mark);
                         }
-                        if (return_ok) break;
+                        if (return_ok && !cm_tyck_candidate_loose(env,
+                                &found, arg_types, arg_count)) break;
+                        if (return_ok) {
+                            if (!have_loose) {
+                                loose_variant = variant;
+                                have_loose = 1;
+                            }
+                            cm_ty_undo_to(arena, undo_mark);
+                            found.item = NULL;
+                            continue;
+                        }
                         if (!have_fallback) {
                             fallback = found;
                             fallback_candidate = candidate;
@@ -3352,6 +3400,16 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                     cm_ty_undo_to(arena, undo_mark);
                     found.item = NULL;
                 }
+                if (found.item == NULL && have_loose) {
+                    /* No tighter candidate at this step: the loosely
+                     * written one stands (looked up afresh — its earlier
+                     * bindings were undone). */
+                    if (!cm_tyck_lookup_assoc_in(env, candidate,
+                            expr->data.method_call.name, &found, mask,
+                            loose_variant))
+                        found.item = NULL;
+                }
+                have_loose = 0;
                 if (found.item != NULL) break;
                 candidate_kind = cm_ty_get(arena, candidate)->kind;
                 if (candidate_kind == CM_TY_ARRAY) {
@@ -3390,6 +3448,7 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                                 if (cm_tyck_method_args_compatible(env,
                                         &found, arg_types, arg_count)) {
                                     candidate = derefed;
+                                    deref_target = derefed;
                                     break;
                                 }
                                 cm_ty_undo_to(arena, deref_mark);
@@ -3408,6 +3467,10 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
             candidate = fallback_candidate;
         }
         if (found.item == NULL) candidate = CM_TY_NONE;
+        if (found.item != NULL && deref_target != CM_TY_NONE
+            && candidate == deref_target && env->out->receiver_derefs != NULL
+            && id != CM_U_EXPR_NONE)
+            env->out->receiver_derefs[id] = deref_target;
     }
     if (found.item != NULL && env->out->method_targets != NULL
         && id != CM_U_EXPR_NONE)
@@ -4962,6 +5025,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     out->unsize_targets = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->path_self_types = (CmTyId *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(CmTyId));
+    out->receiver_derefs = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     item = cm_tyck_item(state, hir_body->origin.definition);
     env.item = item;

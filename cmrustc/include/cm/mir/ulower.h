@@ -70,6 +70,7 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_RANGE_TEST,    /* operands[1] <= operands[0] <= operands[2] */
     CM_UMIR_RVALUE_REF_FIELD,     /* &operands[0].field(expr) (field address) */
     CM_UMIR_RVALUE_CONST_PATTERN, /* value of the const a path pattern names */
+    CM_UMIR_RVALUE_DEREF_CALL,    /* Deref::deref(operands[0]); immediate 1: deref_mut */
     CM_UMIR_RVALUE_OPAQUE         /* representable later; keeps type */
 } CmUMirRvalueKind;
 

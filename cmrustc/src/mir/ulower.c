@@ -1308,6 +1308,61 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         receiver_type));
             int receiver_is_ref = rt != NULL
                 && (rt->kind == CM_TY_REF || rt->kind == CM_TY_PTR);
+            if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION
+                && builder->tb->receiver_derefs != NULL
+                && builder->tb->receiver_derefs[id] != CM_TY_NONE) {
+                /* The method lives on the receiver's `Deref::Target`
+                 * (`v.iter()` on a `Vec<T>` is `<[T]>::iter`): borrow the
+                 * receiver and call `Deref::deref` (`deref_mut` for a
+                 * `&mut self` callee); the result is the receiver from
+                 * here on. */
+                CmTyArena *arena = (CmTyArena *)&builder->tyck->arena;
+                int mutable = callee->data.function_item.signature.receiver
+                    == CM_HIR_RECEIVER_REF_MUTABLE;
+                CmTyId target_ref = cm_ty_ref(arena,
+                    builder->tb->receiver_derefs[id], mutable);
+                CmUMirLocalId borrowed = receiver;
+                CmUMirLocalId derefed;
+                if (!receiver_is_ref) {
+                    borrowed = cm_umir_address_of(builder,
+                        expr->data.method_call.receiver, receiver_type);
+                    if (borrowed == ((CmUMirLocalId)0u)) {
+                        borrowed = cm_umir_new_local(builder, receiver_type);
+                        cm_umir_push_operands(builder, borrowed,
+                            CM_UMIR_RVALUE_REF,
+                            expr->data.method_call.receiver, receiver_type,
+                            &receiver, 1u);
+                    }
+                } else {
+                    /* `&&Vec<T>`: load down to the single layer the
+                     * `&self` of `deref` takes. */
+                    const CmTy *layer = rt;
+                    while (layer != NULL && (layer->kind == CM_TY_REF
+                            || layer->kind == CM_TY_PTR)) {
+                        const CmTy *inner = cm_ty_get(arena, cm_ty_resolve(
+                            arena, layer->children[0]));
+                        CmUMirLocalId loaded;
+                        if (inner == NULL || (inner->kind != CM_TY_REF
+                                && inner->kind != CM_TY_PTR)) break;
+                        loaded = cm_umir_new_local(builder,
+                            layer->children[0]);
+                        cm_umir_push_operands(builder, loaded,
+                            CM_UMIR_RVALUE_LOAD,
+                            expr->data.method_call.receiver,
+                            layer->children[0], &borrowed, 1u);
+                        borrowed = loaded;
+                        layer = inner;
+                    }
+                }
+                derefed = cm_umir_new_local(builder, target_ref);
+                cm_umir_push_immediate(builder, derefed,
+                    CM_UMIR_RVALUE_DEREF_CALL, expr->data.method_call.receiver,
+                    target_ref, &borrowed, 1u, mutable ? 1u : 0u);
+                receiver = derefed;
+                receiver_type = target_ref;
+                rt = cm_ty_get(arena, cm_ty_resolve(arena, target_ref));
+                receiver_is_ref = 1;
+            }
             if (callee != NULL && callee->kind == CM_HIR_ITEM_FUNCTION) {
                 CmHirReceiverKind kind =
                     callee->data.function_item.signature.receiver;
