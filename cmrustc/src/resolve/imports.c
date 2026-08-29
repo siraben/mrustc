@@ -2349,7 +2349,35 @@ static const CmResolvedBinding *cm_import_prelude_binding(
     return NULL;
 }
 
+static CmImportLookupStatus cm_import_resolve_path_inner(
+    const CmImportResolver *resolver, CmModuleId module, int absolute,
+    const CmResolvePathSegmentView *segments, size_t segment_count,
+    CmResolveNamespace namespace_kind, CmResolvedBinding *out_binding);
+
 CmImportLookupStatus cm_import_resolve_path(
+    const CmImportResolver *resolver, CmModuleId module, int absolute,
+    const CmResolvePathSegmentView *segments, size_t segment_count,
+    CmResolveNamespace namespace_kind, CmResolvedBinding *out_binding)
+{
+    CmImportLookupStatus status = cm_import_resolve_path_inner(resolver,
+        module, absolute, segments, segment_count, namespace_kind,
+        out_binding);
+    if (getenv("CM_IMPORT_DEBUG") != NULL && segments != NULL
+        && segment_count > 1u) {
+        size_t index;
+        fprintf(stderr, "IMPORT path module=%u abs=%d ns=%d ",
+            (unsigned)module, absolute, (int)namespace_kind);
+        for (index = 0u; index < segment_count; ++index)
+            fprintf(stderr, "%s%.*s", index == 0u ? "" : "::",
+                (int)segments[index].length,
+                (const char *)segments[index].bytes);
+        fprintf(stderr, " -> status=%d dep=%u\n", (int)status,
+            out_binding == NULL ? 0u : (unsigned)out_binding->dependency);
+    }
+    return status;
+}
+
+static CmImportLookupStatus cm_import_resolve_path_inner(
     const CmImportResolver *resolver, CmModuleId module, int absolute,
     const CmResolvePathSegmentView *segments, size_t segment_count,
     CmResolveNamespace namespace_kind, CmResolvedBinding *out_binding)
@@ -2407,13 +2435,44 @@ CmImportLookupStatus cm_import_resolve_path(
                     &segment)) {
                 return CM_IMPORT_LOOKUP_INVALID;
             }
-            if (segment == CM_RESOLVE_STRING_NONE)
+            if (segment == CM_RESOLVE_STRING_NONE) {
+                /* A name this crate never interned can still be a
+                 * registered dependency (`core::hint::must_use` in a
+                 * crate with no `use core::...`): delegate by the raw
+                 * segment. */
+                const CmImportDependency *dep = index == 0u && !absolute
+                    ? cm_import_find_dependency_view(state, &segments[0])
+                    : NULL;
+                if (dep != NULL) {
+                    CmImportLookupStatus dep_status;
+                    dep_status = cm_import_resolve_path(dep->resolver,
+                        dep->root, 0, segments + 1u, segment_count - 1u,
+                        namespace_kind, out_binding);
+                    if (dep_status == CM_IMPORT_LOOKUP_OK)
+                        out_binding->dependency =
+                            cm_import_dependency_tag(state, dep);
+                    return dep_status;
+                }
                 return CM_IMPORT_LOOKUP_NOT_FOUND;
+            }
             ambiguous = 0;
             current_module = cm_import_module_const(state, current);
             scope_binding = cm_find_binding_const(current_module,
                 CM_RESOLVE_NAMESPACE_TYPE, segment);
             prelude_binding = NULL;
+            if (getenv("CM_IMPORT_DEBUG") != NULL)
+                fprintf(stderr, "IMPORT walk index=%u seg=%.*s scope=%d"
+                    " kind=%d target=%u dep=%u deps=%lu\n", (unsigned)index,
+                    (int)segments[index].length,
+                    (const char *)segments[index].bytes,
+                    scope_binding != NULL,
+                    scope_binding == NULL ? -1
+                        : (int)scope_binding->value.item_kind,
+                    scope_binding == NULL ? 0u
+                        : (unsigned)scope_binding->value.target_module,
+                    scope_binding == NULL ? 0u
+                        : (unsigned)scope_binding->value.dependency,
+                    (unsigned long)state->dependencies.len);
             if (scope_binding == NULL && !absolute && index == 0u) {
                 prelude_binding = cm_import_prelude_binding(state,
                     CM_RESOLVE_NAMESPACE_TYPE, segment);
@@ -2425,8 +2484,16 @@ CmImportLookupStatus cm_import_resolve_path(
                 ambiguous = 1;
             }
             if (ambiguous) return CM_IMPORT_LOOKUP_AMBIGUOUS;
-            if (scope_binding == NULL && prelude_binding == NULL
-                && index == 0u && !absolute) {
+            if (prelude_binding == NULL && index == 0u && !absolute
+                && (scope_binding == NULL
+                    /* `#![no_std]`'s implicit `extern crate core` (and an
+                     * explicit one) binds the name to an extern-crate item
+                     * with no module of this crate behind it: the path
+                     * belongs to the dependency. */
+                    || (scope_binding->value.item_kind
+                            == CM_AST_ITEM_EXTERN_CRATE
+                        && scope_binding->value.target_module
+                            == CM_MODULE_NONE))) {
                 /* M9-03: `core::...` paths delegate to the registered
                  * dependency crate's own resolver. */
                 const CmImportDependency *dep =
@@ -2502,6 +2569,11 @@ CmImportLookupStatus cm_import_resolve_path(
         }
         if (!cm_import_path_segment_id(state, &segments[index], &last))
             return CM_IMPORT_LOOKUP_INVALID;
+        if (getenv("CM_IMPORT_DEBUG") != NULL)
+            fprintf(stderr, "IMPORT final module=%u name=%.*s interned=%d\n",
+                (unsigned)current, (int)segments[index].length,
+                (const char *)segments[index].bytes,
+                last != CM_RESOLVE_STRING_NONE);
         if (last == CM_RESOLVE_STRING_NONE)
             return CM_IMPORT_LOOKUP_NOT_FOUND;
         if (enumeration == NULL) {
@@ -2510,6 +2582,12 @@ CmImportLookupStatus cm_import_resolve_path(
             module_state = cm_import_module_const(state, current);
             binding = cm_find_binding_const(module_state, namespace_kind,
                 last);
+            if (getenv("CM_IMPORT_DEBUG") != NULL)
+                fprintf(stderr, "IMPORT last module=%u ns=%d name=%.*s"
+                    " found=%d kind=%d\n", (unsigned)current,
+                    (int)namespace_kind, (int)segments[index].length,
+                    (const char *)segments[index].bytes, binding != NULL,
+                    binding == NULL ? -1 : (int)binding->value.item_kind);
             prelude_binding = NULL;
             if (binding == NULL && !absolute && segment_count == 1u) {
                 prelude_binding = cm_import_prelude_binding(state,

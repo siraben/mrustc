@@ -416,7 +416,16 @@ static int cm_u_binding_definition(const CmULowerState *state,
         out->primitive = (CmHirPrimitiveKind)binding->primitive_kind;
         return 1;
     }
-    if (binding->declaration.item == CM_AST_ITEM_NONE) return 0;
+    if (binding->declaration.item == CM_AST_ITEM_NONE) {
+        if (cm_u_debug_enabled())
+            fprintf(stderr, "ubody-debug binding without declaration:"
+                " kind=%d module=%u target=%u dep=%u import=%d reexport=%d\n",
+                (int)binding->item_kind, (unsigned)binding->module,
+                (unsigned)binding->target_module,
+                (unsigned)binding->dependency, binding->is_import,
+                binding->is_reexport);
+        return 0;
+    }
     if (!cm_u_find_item_definition(state, binding->declaration.source,
             binding->declaration.item, &definition)) {
         if (cm_u_debug_enabled())
@@ -775,13 +784,20 @@ static int cm_u_resolve_path(CmULowerState *state, const CmAstPath *path,
         for (attempt = 0; attempt < 2; ++attempt) {
             CmResolveNamespace ns = (attempt == 0) == (first_type != 0)
                 ? CM_RESOLVE_NAMESPACE_TYPE : CM_RESOLVE_NAMESPACE_VALUE;
-            if (cm_import_resolve_path_checked(state->imports, state->graph,
-                    state->revision, state->module, path->absolute, views,
-                    count, ns, &binding) == CM_IMPORT_LOOKUP_OK
+            CmImportLookupStatus status = cm_import_resolve_path_checked(
+                state->imports, state->graph, state->revision, state->module,
+                path->absolute, views, count, ns, &binding);
+            if (status == CM_IMPORT_LOOKUP_OK
                 && cm_u_binding_definition(state, &binding, out)) {
                 out->rest_from = count;
                 return 1;
             }
+            if (cm_u_debug_enabled() && count > 1u)
+                fprintf(stderr, "ubody-debug lookup ns=%d status=%d"
+                    " source=%u item=%u dep=%u\n", (int)ns, (int)status,
+                    (unsigned)binding.declaration.source,
+                    (unsigned)binding.declaration.item,
+                    (unsigned)binding.dependency);
         }
     }
     /* The implicit prelude: `crate::prelude::v1::<path>` (core) or the
