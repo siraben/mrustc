@@ -2312,15 +2312,26 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             statement->operands[1]);
                     else
                         cm_umir_c_render_number(&count_text, n);
+                    /* An array block carries its element count in a
+                     * hidden header slot (`block[-1]`) so an unsize to a
+                     * slice knows the length even when the type's length
+                     * is a const the typechecker could not evaluate. */
                     cm_str_buf_append(output, "0; _agg");
                     cm_umir_c_render_number(output,
                         (unsigned long)statement->destination);
-                    cm_str_buf_append(output, " = (long long *)malloc((");
+                    cm_str_buf_append(output,
+                        " = (long long *)((char *)malloc(8 + (");
                     cm_str_buf_append_n(output, count_text.data,
                         count_text.len);
                     cm_str_buf_append(output, " + 1) * ");
                     cm_umir_c_render_number(output, esize);
-                    cm_str_buf_append(output, "); ");
+                    cm_str_buf_append(output, ") + 8); ((long long *)_agg");
+                    cm_umir_c_render_number(output,
+                        (unsigned long)statement->destination);
+                    cm_str_buf_append(output, ")[-1] = ");
+                    cm_str_buf_append_n(output, count_text.data,
+                        count_text.len);
+                    cm_str_buf_append(output, "; ");
                     if (repeat && statement->operand_count >= 1u) {
                         cm_str_buf_append(output,
                             "{ unsigned long _k; for (_k = 0; _k < ");
@@ -2908,8 +2919,16 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     cm_umir_c_render_number(output,
                         (unsigned long)statement->destination);
                     cm_str_buf_append(output, "[2] = ");
-                    cm_umir_c_render_number(output,
-                        cm_umir_c_array_len(tyck, concrete));
+                    if (cm_umir_c_array_len(tyck, concrete) != 0ul)
+                        cm_umir_c_render_number(output,
+                            cm_umir_c_array_len(tyck, concrete));
+                    else {
+                        /* Length unknown to the type: the block header. */
+                        cm_str_buf_append(output, "((long long *)(intptr_t)_agg");
+                        cm_umir_c_render_number(output,
+                            (unsigned long)statement->destination);
+                        cm_str_buf_append(output, "[1])[-1]");
+                    }
                     cm_str_buf_append(output, "; _agg");
                     cm_umir_c_render_number(output,
                         (unsigned long)statement->destination);

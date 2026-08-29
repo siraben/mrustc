@@ -15,11 +15,22 @@ impl S {
     }
 }
 
+#[rustc_intrinsic]
+pub unsafe fn ptr_metadata<P: ?Sized>(ptr: *const P) -> usize;
+
+fn slice_len(s: &[u32]) -> usize {
+    unsafe { ptr_metadata(s) }
+}
+
 fn nested(x: u32) -> u32 {
     // A body-local const, used as an array length.
     const LEN: usize = 3;
     let a = [x; LEN];
-    a[0] + a[2] + LEN as u32
+    // A length the typechecker cannot fold: the block header carries it
+    // into the slice.
+    const LEN2: usize = 2 + 2;
+    let b = [x; LEN2];
+    a[0] + a[2] + LEN as u32 + slice_len(&b) as u32
 }
 
 #[no_mangle]
