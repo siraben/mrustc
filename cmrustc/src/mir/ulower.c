@@ -1746,9 +1746,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         if (callee_expr != NULL && callee_expr->kind == CM_U_EXPR_PATH
             && callee_expr->data.path.resolution.kind
                 == CM_U_RESOLVED_SELF_TYPE
+            && callee_expr->data.path.segment_count == 1u
             && builder->hir != NULL && builder->tyck != NULL) {
-            /* `Self(v)` in a tuple struct's impl (std's `FileDesc::
-             * from_raw_fd`): the call's own type is the struct. */
+            /* A bare `Self(v)` in a tuple struct's impl (std's `FileDesc::
+             * from_raw_fd`): the call's own type is the struct.  `Self::
+             * new_unchecked(x)` returning Self is a call, not a ctor. */
             CmTyArena *arena = (CmTyArena *)&builder->tyck->arena;
             const CmTy *ct = type == CM_TY_NONE ? NULL
                 : cm_ty_get(arena, cm_ty_resolve(arena, type));
