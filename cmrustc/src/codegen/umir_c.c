@@ -750,6 +750,16 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         /* `*const T` moves by the scalar width of T (slots otherwise). */
         CmTyId elem = ft != NULL && (ft->kind == CM_TY_PTR
             || ft->kind == CM_TY_REF) ? ft->children[0] : CM_TY_NONE;
+        if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+            CmStrBuf text;
+            cm_str_buf_init(&text);
+            cm_ty_print((CmTyArena *)&tyck->arena, cm_umir_c_hir, elem,
+                &text);
+            fprintf(stderr, "UMIR shim offset elem=%.*s size=%lu\n",
+                (int)text.len, text.data,
+                cm_umir_c_scalar_size(tyck, elem));
+            cm_str_buf_destroy(&text);
+        }
         cm_str_buf_append(output, "(long long p, long long n) "
             "{ return p + n * ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, elem));
@@ -1080,6 +1090,30 @@ static long cm_umir_c_instance(CmUMirProgram *program, CmHirDefId def,
         sizeof(CmTyId));
     instance.parameters = (CmHirGenericParamId *)cm_alloc_zeroed(
         count == 0u ? 1u : count, sizeof(CmHirGenericParamId));
+    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+        /* `UMIR instance <name> #<n> [args]` — a bare parameter argument
+         * marks an instance created without a binding for it. */
+        const CmInternedString *name = cm_interner_get(&program->hir->strings,
+            item->name);
+        CmStrBuf text;
+        int bare = 0;
+        cm_str_buf_init(&text);
+        for (arg = 0u; arg < count; ++arg) {
+            const CmTy *at = cm_ty_get((CmTyArena *)&program->tyck->arena,
+                cm_ty_resolve((CmTyArena *)&program->tyck->arena,
+                    types[arg]));
+            if (arg != 0u) cm_str_buf_append(&text, ", ");
+            cm_ty_print((CmTyArena *)&program->tyck->arena, program->hir,
+                types[arg], &text);
+            if (at != NULL && at->kind == CM_TY_PARAM) bare = 1;
+        }
+        fprintf(stderr, "UMIR instance %.*s #%lu%s [%.*s]\n",
+            name == NULL ? 1 : (int)name->len,
+            name == NULL ? "?" : (const char *)name->bytes,
+            (unsigned long)program->instances.len,
+            bare ? " BARE" : "", (int)text.len, text.data);
+        cm_str_buf_destroy(&text);
+    }
     for (arg = 0u; arg < count; ++arg) {
         instance.types[arg] = types[arg];
         instance.parameters[arg] = parameters[arg];
@@ -1206,8 +1240,12 @@ static int cm_umir_c_method_accepts(const CmHirContext *hir,
     for (param = 0u; param < sig->parameter_count; ++param) {
         CmTyId pattern = cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
             sig->parameters[param].type);
-        CmTyId actual = cm_umir_c_local_type(cm_umir_c_active_body,
-            statement->operands[first_arg + skip + param]);
+        /* The operand's type through the active instance: a bare `T'`
+         * in the caller's body is concrete here, and must bind the impl's
+         * own `T` (the offset shim scales by the element it binds). */
+        CmTyId actual = cm_umir_c_subst(cm_umir_c_local_type(
+            cm_umir_c_active_body,
+            statement->operands[first_arg + skip + param]));
         const CmTy *pt;
         const CmTy *at;
         if (pattern == CM_TY_NONE || actual == CM_TY_NONE) continue;
