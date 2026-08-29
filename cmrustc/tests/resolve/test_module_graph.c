@@ -3150,14 +3150,29 @@ static int test_staged_generated_invocation_rejection(void)
             strlen(sources_text[index]), &root_source) == CM_SOURCE_OK,
             "failed to add staged generated-error source");
         result = build_with_empty_cfg(&graph, &sources, root_source);
-        ok &= check(result.root == CM_MODULE_NONE
-            && result.error_count == 1u
-            && cm_module_graph_get_error(&graph, 0u, &error)
-            && error.kind == CM_RESOLVE_ERROR_ITEM_MACRO
-            && error.span.source == root_source
-            && error.span.end > error.span.start,
-            "final staged replan accepted or misanchored a generated "
-            "unknown or qualified call");
+        if (index == 1u) {
+            /* A generated `crate::target!()` (std's thread_local! expands
+             * to `$crate::thread::local_impl::thread_local_inner!`) is
+             * certified by path through the import resolver and expands. */
+            CmResolveEffectiveItem wrong;
+
+            ok &= check(result.root != CM_MODULE_NONE
+                && result.error_count == 0u
+                && effective_named(&graph, result.revision, result.root,
+                    "Wrong", &wrong, NULL)
+                && wrong.is_generated,
+                "final staged replan rejected a generated qualified call "
+                "to a local macro");
+        } else {
+            ok &= check(result.root == CM_MODULE_NONE
+                && result.error_count == 1u
+                && cm_module_graph_get_error(&graph, 0u, &error)
+                && error.kind == CM_RESOLVE_ERROR_ITEM_MACRO
+                && error.span.source == root_source
+                && error.span.end > error.span.start,
+                "final staged replan accepted or misanchored a generated "
+                "unknown call");
+        }
         cm_module_graph_destroy(&graph);
         cm_source_set_destroy(&sources);
     }

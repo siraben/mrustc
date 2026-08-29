@@ -662,6 +662,109 @@ static long cm_umir_c_variant_field_index(const CmHirContext *hir,
     return -1;
 }
 
+
+/* `Ordering as i8` / `STATX_STATE::Present as u8`: an enum value is an
+ * aggregate whose slot 0 holds the variant index; casting it to an
+ * integer yields the variant's declared discriminant. */
+static const CmHirItem *cm_umir_c_enum_item_of(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty;
+    const CmHirDefinition *record;
+    const CmHirItem *item;
+    if (type == CM_TY_NONE) return NULL;
+    ty = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    if (ty == NULL || ty->kind != CM_TY_ADT) return NULL;
+    record = cm_hir_lookup_definition(hir, ty->def);
+    item = record == NULL || record->kind != CM_HIR_DEFINITION_ITEM ? NULL
+        : cm_hir_get_item(hir, record->entity.item_id);
+    return item != NULL && item->kind == CM_HIR_ITEM_ENUM ? item : NULL;
+}
+
+/* Declared discriminants (implicit ones follow their predecessor);
+ * returns whether every variant's discriminant is its index. */
+static int cm_umir_c_enum_discriminants(const CmHirItem *item,
+    long long *values, uint32_t count)
+{
+    uint32_t index;
+    long long next = 0;
+    int sequential = 1;
+    for (index = 0u; index < count; ++index) {
+        const CmHirVariant *variant = &item->data.enum_item.variants[index];
+        if (variant->has_discriminant
+            && variant->discriminant.kind == CM_HIR_CONST_VALUE)
+            next = (long long)variant->discriminant.data.value.low_bits;
+        values[index] = next;
+        if (next != (long long)index) sequential = 0;
+        next += 1;
+    }
+    return sequential;
+}
+
+/* Every variant fieldless: values are index blocks, castable to their
+ * declared discriminant. */
+static int cm_umir_c_enum_is_fieldless(const CmHirItem *item)
+{
+    uint32_t index;
+    if (item == NULL || item->kind != CM_HIR_ITEM_ENUM
+        || item->data.enum_item.variant_count == 0u) return 0;
+    for (index = 0u; index < item->data.enum_item.variant_count; ++index)
+        if (item->data.enum_item.variants[index].field_count != 0u) return 0;
+    return 1;
+}
+
+static int cm_umir_c_render_enum_cast(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck, CmTyId from, CmTyId to,
+    CmUMirLocalId operand)
+{
+    const CmHirItem *item;
+    const CmTy *target;
+    uint32_t count;
+    long long *values;
+    uint32_t index;
+    if (cm_umir_c_ref_depth(tyck, from) != 0u
+        || cm_umir_c_ref_depth(tyck, to) != 0u) return 0;
+    item = cm_umir_c_enum_item_of(hir, tyck, from);
+    if (!cm_umir_c_enum_is_fieldless(item)) return 0;
+    if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
+        const CmInternedString *nm = cm_interner_get(&hir->strings,
+            item->name);
+        fprintf(stderr, "UMIR enum-cast enum=%.*s from=%u to=%u\n",
+            nm == NULL ? 1 : (int)nm->len,
+            nm == NULL ? "?" : (const char *)nm->bytes,
+            (unsigned)from, (unsigned)to);
+    }
+    target = to == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, to));
+    if (target == NULL || target->kind != CM_TY_INT) return 0;
+    count = item->data.enum_item.variant_count;
+    if (count == 0u) return 0;
+    values = (long long *)cm_alloc_zeroed(count, sizeof(*values));
+    cm_str_buf_append(output, "(long long)(");
+    cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena, to));
+    cm_str_buf_append(output, ")(");
+    if (cm_umir_c_enum_discriminants(item, values, count)) {
+        cm_str_buf_append(output, "((long long *)(intptr_t)");
+        cm_umir_c_render_local(output, operand);
+        cm_str_buf_append(output, ")[0]");
+    } else {
+        for (index = 0u; index < count; ++index) {
+            char text[48];
+            cm_str_buf_append(output, "((long long *)(intptr_t)");
+            cm_umir_c_render_local(output, operand);
+            snprintf(text, sizeof(text), ")[0] == %lu ? %lldLL : ",
+                (unsigned long)index, values[index]);
+            cm_str_buf_append(output, text);
+        }
+        cm_str_buf_append(output, "0LL");
+    }
+    cm_str_buf_append(output, ")");
+    cm_free(values);
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Instances                                                            */
 
@@ -756,6 +859,54 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
         CmTyId to = instance->count >= 2u ? instance->types[1] : CM_TY_NONE;
         int from_option = cm_umir_c_is_option(hir, tyck, first);
         int to_option = cm_umir_c_is_option(hir, tyck, to);
+        /* `transmute::<usize, Alignment>(align)` (core's ptr::Alignment
+         * wraps a fieldless enum whose discriminants are 1 << n): an
+         * enum value is a block whose slot 0 is the variant index, so an
+         * integer becomes the block of the variant with that
+         * discriminant, and back. */
+        const CmHirItem *from_enum = cm_umir_c_enum_item_of(hir, tyck,
+            cm_umir_c_representation(hir, tyck, first));
+        const CmHirItem *to_enum = to == CM_TY_NONE ? NULL
+            : cm_umir_c_enum_item_of(hir, tyck,
+                cm_umir_c_representation(hir, tyck, to));
+        if (!cm_umir_c_enum_is_fieldless(from_enum)) from_enum = NULL;
+        if (!cm_umir_c_enum_is_fieldless(to_enum)) to_enum = NULL;
+        if (to_enum != NULL && from_enum == NULL && !from_option) {
+            uint32_t count = to_enum->data.enum_item.variant_count;
+            long long *values = (long long *)cm_alloc_zeroed(count,
+                sizeof(*values));
+            uint32_t index;
+            (void)cm_umir_c_enum_discriminants(to_enum, values, count);
+            cm_str_buf_append(output, "(long long a) { long long *b = "
+                "(long long *)calloc(2, 8); b[0] = (");
+            for (index = 0u; index < count; ++index) {
+                char text[48];
+                snprintf(text, sizeof(text), "a == %lldLL ? %lu : ",
+                    values[index], (unsigned long)index);
+                cm_str_buf_append(output, text);
+            }
+            cm_str_buf_append(output, "0); return (long long)(intptr_t)b; }");
+            cm_free(values);
+            return 1;
+        }
+        if (from_enum != NULL && to_enum == NULL && !to_option) {
+            uint32_t count = from_enum->data.enum_item.variant_count;
+            long long *values = (long long *)cm_alloc_zeroed(count,
+                sizeof(*values));
+            uint32_t index;
+            (void)cm_umir_c_enum_discriminants(from_enum, values, count);
+            cm_str_buf_append(output, "(long long a) { long long i = "
+                "((long long *)(intptr_t)a)[0]; return (");
+            for (index = 0u; index < count; ++index) {
+                char text[48];
+                snprintf(text, sizeof(text), "i == %lu ? %lldLL : ",
+                    (unsigned long)index, values[index]);
+                cm_str_buf_append(output, text);
+            }
+            cm_str_buf_append(output, "0LL); }");
+            cm_free(values);
+            return 1;
+        }
         if (to_option && !from_option)
             cm_str_buf_append(output, "(long long a) { long long *b = "
                 "(long long *)malloc(16); if (a == 0) { b[0] = 0; } else "
@@ -3400,6 +3551,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                         break;
                     }
                 }
+                if (cm_umir_c_render_enum_cast(output, hir, tyck, from, to,
+                        statement->operands[0])) break;
                 cm_str_buf_append(output, "(long long)(");
                 cm_str_buf_append(output, cm_umir_c_abi_type(&tyck->arena,
                     to));

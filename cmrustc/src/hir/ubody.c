@@ -26,6 +26,9 @@ typedef struct CmUScopeEntry {
 typedef struct CmUNestedItem {
     CmInternId name;
     CmAstItemId item;
+    /* Enclosing body-local `mod name { .. }`, or NONE: its items are
+     * named `module::item`, never bare. */
+    CmInternId module;
 } CmUNestedItem;
 
 #define CM_U_NESTED_LIMIT 512u
@@ -732,16 +735,85 @@ static int cm_u_resolve_path(CmULowerState *state, const CmAstPath *path,
     if (!path->absolute) {
         /* Items declared in an enclosing block. */
         CmInternId name = cm_u_intern_ast(state, path->segments[0].name);
+        CmInternId second = count >= 2u
+            ? cm_u_intern_ast(state, path->segments[1].name)
+            : CM_INTERN_ID_NONE;
         size_t nested = state->nested_count;
         while (nested != 0u) {
+            uint32_t consumed;
             nested -= 1u;
-            if (state->nested[nested].name == name) {
-                out->kind = CM_U_RESOLVED_NESTED_ITEM;
-                out->nested_source = state->source;
-                out->nested_item = state->nested[nested].item;
-                out->rest_from = 1u;
-                return 1;
+            if (state->nested[nested].module == CM_INTERN_ID_NONE) {
+                if (state->nested[nested].name != name) continue;
+                consumed = 1u;
+            } else {
+                /* `sigpipe::DEFAULT` names an item of a body-local mod. */
+                if (count < 2u || state->nested[nested].module != name
+                    || state->nested[nested].name != second) continue;
+                consumed = 2u;
             }
+            out->kind = CM_U_RESOLVED_NESTED_ITEM;
+            out->nested_source = state->source;
+            out->nested_item = state->nested[nested].item;
+            out->rest_from = consumed;
+            {
+                /* Body-local consts and statics are lowered as body_local
+                 * HIR items: resolve them as definitions so their values
+                 * are read like module-level ones. */
+                const CmAstItem *nested_item = cm_ast_get_item(state->ast,
+                    state->nested[nested].item);
+                CmHirDefId definition;
+                if (nested_item != NULL
+                    && (nested_item->kind == CM_AST_ITEM_CONST
+                        || nested_item->kind == CM_AST_ITEM_STATIC)
+                    && cm_u_find_item_definition(state, state->source,
+                        state->nested[nested].item, &definition)) {
+                    out->kind = CM_U_RESOLVED_DEFINITION;
+                    out->definition = definition;
+                }
+                /* A body-local enum's variants (`STATX_STATE::Present`
+                 * in std's try_statx) are reserved HIR variant records
+                 * naming the enum item. */
+                if (nested_item != NULL
+                    && nested_item->kind == CM_AST_ITEM_ENUM
+                    && count > consumed
+                    && cm_u_find_item_definition(state, state->source,
+                        state->nested[nested].item, &definition)) {
+                    const CmHirDefinition *record =
+                        cm_hir_lookup_definition(state->hir, definition);
+                    CmInternId variant_name = cm_u_intern_ast(state,
+                        path->segments[consumed].name);
+                    uint32_t variant;
+                    for (variant = 0u; record != NULL
+                            && record->kind == CM_HIR_DEFINITION_ITEM
+                            && variant < nested_item->data.enum_item
+                                .variant_count; ++variant) {
+                        size_t scan;
+                        if (cm_u_intern_ast(state, nested_item->data
+                                .enum_item.variants[variant].name)
+                            != variant_name) continue;
+                        for (scan = 0u; scan < state->hir->definitions.len;
+                             ++scan) {
+                            const CmHirDefinition *candidate =
+                                (const CmHirDefinition *)cm_vec_at_const(
+                                    &state->hir->definitions, scan);
+                            if (candidate == NULL
+                                || candidate->kind
+                                    != CM_HIR_DEFINITION_ENUM_VARIANT
+                                || candidate->entity.enum_variant
+                                    .enum_item_id
+                                    != record->entity.item_id
+                                || candidate->entity.enum_variant
+                                    .variant_index != variant) continue;
+                            out->kind = CM_U_RESOLVED_VARIANT;
+                            out->definition = candidate->id;
+                            out->rest_from = consumed + 1u;
+                            return 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            return 1;
         }
     }
     if (!path->absolute) {
@@ -1430,6 +1502,30 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
                     state->nested[state->nested_count].name =
                         cm_u_intern_ast(state, foreign->name);
                     state->nested[state->nested_count].item = child_id;
+                    state->nested[state->nested_count].module =
+                        CM_INTERN_ID_NONE;
+                    state->nested_count += 1u;
+                }
+                continue;
+            }
+            if (item->kind == CM_AST_ITEM_MODULE) {
+                /* A body-local `mod m { .. }`: its items are visible as
+                 * `m::item` throughout the block. */
+                uint32_t child;
+                if (item->name == CM_INTERN_ID_NONE) continue;
+                for (child = 0u; child < item->data.module_item.item_count;
+                     ++child) {
+                    CmAstItemId child_id = item->data.module_item.items[child];
+                    const CmAstItem *member = cm_ast_get_item(state->ast,
+                        child_id);
+                    if (member == NULL || member->name == CM_INTERN_ID_NONE
+                        || state->nested_count == CM_U_NESTED_LIMIT)
+                        continue;
+                    state->nested[state->nested_count].name =
+                        cm_u_intern_ast(state, member->name);
+                    state->nested[state->nested_count].item = child_id;
+                    state->nested[state->nested_count].module =
+                        cm_u_intern_ast(state, item->name);
                     state->nested_count += 1u;
                 }
                 continue;
@@ -1440,6 +1536,7 @@ static CmUExprId cm_u_lower_expr(CmULowerState *state, CmAstExprId id)
                 item->name);
             state->nested[state->nested_count].item =
                 stmt->data.item_stmt.item;
+            state->nested[state->nested_count].module = CM_INTERN_ID_NONE;
             state->nested_count += 1u;
         }
         for (index = 0u; index < count; ++index)

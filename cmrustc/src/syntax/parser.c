@@ -1605,10 +1605,18 @@ static int cm_parser_starts_local_item(const CmParser *parser)
     }
     if (token->keyword == CM_KW_FN || token->keyword == CM_KW_IMPL
         || token->keyword == CM_KW_STATIC
+        || token->keyword == CM_KW_ENUM
         || token->keyword == CM_KW_STRUCT
         || token->keyword == CM_KW_TRAIT
         || token->keyword == CM_KW_UNION
         || token->keyword == CM_KW_USE) return 1;
+    if (token->keyword == CM_KW_MOD) {
+        /* `mod sigpipe { pub const DEFAULT: u8 = 0; .. }` inside a body
+         * (std's unix `init`). */
+        const struct cm_token *next = cm_parser_token_at(parser,
+            position + 1u);
+        return cm_parser_ordinary_identifier(next);
+    }
     if (token->keyword == CM_KW_TYPE) {
         /* `type HM = HashMap<i32, i32>;` inside a body (hashbrown's tests
          * modules) is an item; `type` never starts an expression. */
@@ -2651,6 +2659,8 @@ static CmAstExprId cm_parser_parse_block_mode(CmParser *parser,
                     && item->kind != CM_AST_ITEM_TRAIT
                     && item->kind != CM_AST_ITEM_USE
                     && item->kind != CM_AST_ITEM_UNION
+                    && item->kind != CM_AST_ITEM_MODULE
+                    && item->kind != CM_AST_ITEM_ENUM
                     && item->kind != CM_AST_ITEM_TYPE_ALIAS)) {
                 cm_parser_error(parser,
                     "expected supported item in block statement");
@@ -4059,6 +4069,15 @@ static CmAstItemId cm_parser_parse_function(CmParser *parser,
             break;
         }
         memset(&parameter, 0, sizeof(parameter));
+        if (cm_parser_kind(parser) == CM_TOKEN_POUND) {
+            /* `fn f(#[allow(unused_variables)] x: u8)`: outer attributes
+             * on a parameter carry lints only; parse and drop them. */
+            CmVec parameter_attributes;
+
+            cm_vec_init(&parameter_attributes, sizeof(CmAstAttributeId));
+            cm_parser_parse_attributes(parser, &parameter_attributes);
+            cm_vec_destroy(&parameter_attributes);
+        }
         if (cm_parser_kind(parser) == CM_TOKEN_AMP
             && cm_parser_next_token(parser) != NULL
             && cm_parser_next_token(parser)->kind == CM_TOKEN_LIFETIME) {

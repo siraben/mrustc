@@ -1170,6 +1170,44 @@ static CmTyId cm_tyck_closure_expectation(CmTyckEnv *env,
 
 static int cm_tyck_debug_fn_matches(CmTyckEnv *env);
 
+/* `T: DisplayInt` where `trait DisplayInt: Rem<Output = Self>`: an
+ * equality on `<T as Rem>::Output` declared by a supertrait of a bound
+ * on T.  Returns the equality's HIR type (written against the trait's
+ * `Self`), or none. */
+static CmHirTypeId cm_tyck_supertrait_equality(CmTyckEnv *env,
+    CmHirDefId trait_id, CmHirDefId wanted_trait, CmHirDefId wanted_assoc,
+    unsigned int depth)
+{
+    const CmHirItem *trait_item;
+    uint32_t index;
+
+    if (depth > 8u) return CM_HIR_TYPE_NONE;
+    trait_item = cm_tyck_item(env->state, trait_id);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT)
+        return CM_HIR_TYPE_NONE;
+    for (index = 0u; index < trait_item->data.trait_item.supertrait_count;
+         ++index) {
+        const CmHirSupertrait *super_bound =
+            &trait_item->data.trait_item.supertraits[index];
+        uint32_t equality;
+        CmHirTypeId nested;
+        if (cm_hir_def_id_equal(super_bound->trait_type.definition,
+                wanted_trait)) {
+            for (equality = 0u; equality < super_bound->equality_count;
+                 ++equality)
+                if (cm_hir_def_id_equal(
+                        super_bound->equalities[equality].associated_type,
+                        wanted_assoc))
+                    return super_bound->equalities[equality].value;
+        }
+        nested = cm_tyck_supertrait_equality(env,
+            super_bound->trait_type.definition, wanted_trait, wanted_assoc,
+            depth + 1u);
+        if (nested != CM_HIR_TYPE_NONE) return nested;
+    }
+    return CM_HIR_TYPE_NONE;
+}
+
 /*
  * Normalize `<Self as Trait>::Assoc`: through a matching impl's associated
  * type when the self type is concrete, or through an equality on a bound
@@ -1252,11 +1290,29 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                     ++predicate) {
                 const CmHirTraitPredicate *pred = &item->predicates[predicate];
                 uint32_t equality;
-                if (!cm_hir_def_id_equal(pred->trait_type.definition,
-                        trait_def)) continue;
                 if (cm_ty_resolve(arena, cm_ty_from_hir(arena,
                         env->state->hir, pred->subject))
                     != cm_ty_resolve(arena, self_type)) continue;
+                if (!cm_hir_def_id_equal(pred->trait_type.definition,
+                        trait_def)) {
+                    /* The bound's supertraits: `T: DisplayInt` with
+                     * `DisplayInt: Rem<Output = Self>` normalizes
+                     * `<T as Rem>::Output` to `T`. */
+                    CmHirTypeId inherited = cm_tyck_supertrait_equality(
+                        env, pred->trait_type.definition, trait_def,
+                        assoc_def, 0u);
+                    if (inherited != CM_HIR_TYPE_NONE) {
+                        CmTyckInstance bound_instance;
+                        CmTyId value = cm_ty_from_hir(arena,
+                            env->state->hir, inherited);
+                        if (value == CM_TY_NONE) continue;
+                        cm_tyck_instance_init(&bound_instance, self_type);
+                        return cm_tyck_normalize(env, cm_ty_subst(arena,
+                            value, cm_tyck_subst_of(&bound_instance)),
+                            depth + 1u);
+                    }
+                    continue;
+                }
                 for (equality = 0u; equality < pred->equality_count;
                         ++equality)
                     if (cm_hir_def_id_equal(
