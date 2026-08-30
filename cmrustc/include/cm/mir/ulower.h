@@ -49,12 +49,14 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_CALL,          /* callee + args are prior locals */
     CM_UMIR_RVALUE_METHOD_CALL,   /* receiver + args are prior locals */
     CM_UMIR_RVALUE_REF,           /* borrow of a prior local */
+    CM_UMIR_RVALUE_REBORROW,      /* &*pointer; aggregate raw pointees need a value slot */
     CM_UMIR_RVALUE_CAST,
     CM_UMIR_RVALUE_ASSIGN,        /* store value into target place */
     CM_UMIR_RVALUE_FIELD,         /* place read: field / tuple index */
     CM_UMIR_RVALUE_AGGREGATE,     /* tuple / array / struct literal */
     CM_UMIR_RVALUE_INDEX,         /* place read: base[index] */
     CM_UMIR_RVALUE_TRY_UNWRAP,    /* ok-value of a ? operand */
+    CM_UMIR_RVALUE_INTO_ITER,     /* IntoIterator::into_iter for a for loop */
     CM_UMIR_RVALUE_ITER_NEXT,     /* next() element in a for loop */
     CM_UMIR_RVALUE_CLOSURE,       /* closure value; body lowered at use */
     CM_UMIR_RVALUE_ASM,           /* retained inline-asm text (S10) */

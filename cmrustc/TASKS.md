@@ -3352,3 +3352,19 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   stubs pending C-layout aggregates).  Final gates: GCC, strict Clang,
   TinyCC, and GCC ASan/UBSan/leak lanes each pass all 125 executable fixtures;
   core-linked 3/3 and alloc-linked 2/2.
+
+- Measured pass (M9-06, std stress rung, probe-param88): a real Rust 1.90
+  program now runs through `lang_start`, argument collection, tokenization,
+  `String` formatting/comparison, `HashMap` insertion/iteration, sorting,
+  ranges, iterator adapters, and normal cleanup.  The final nondeterministic
+  UTF-8 abort was an inconsistent bootstrap `String` layout: the
+  `str -> String` specialization retained a `Unique` wrapper even though
+  transparent ADTs are flattened everywhere else.  Its raw Vec data slot now
+  holds the byte pointer directly, while `String::{as_str,as_bytes}` build a
+  fat descriptor from that pointer and the live length.  A fresh full-std
+  artifact passes 20/20 repeated runs and its six-argument `process::exit(3)`
+  branch.  Gates: native suite, 136/136 executable u-MIR fixtures,
+  core-linked 3/3, and alloc-linked 2/2.  The two C-layout-dependent runtime
+  functions remain the only forced std startup stubs.  Next: enter rustc's
+  own crate graph and drive the first compiler binary to a self-hosted
+  fixpoint.

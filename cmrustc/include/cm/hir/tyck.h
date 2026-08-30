@@ -42,6 +42,10 @@ typedef struct CmTyckBody {
      * lowering calls `Deref::deref` / `DerefMut::deref_mut` on the
      * receiver first (none elsewhere). */
     CmTyId *receiver_derefs;
+    /* Concrete result of `IntoIterator::into_iter` for each FOR
+     * expression.  MIR uses this to materialize the iterator before
+     * calling `Iterator::next`. */
+    CmTyId *for_iterator_types;
     /* 1 + the autoderef step at which a METHOD_CALL's method was found
      * (0 = not recorded): step 0 on a reference receiver means the impl
      * is for the reference itself and `&self` autorefs it (`impl

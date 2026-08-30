@@ -182,6 +182,7 @@ static void cm_tyck_body_release(CmTyckBody *body)
     cm_free(body->unsize_targets);
     cm_free(body->path_self_types);
     cm_free(body->receiver_derefs);
+    cm_free(body->for_iterator_types);
     cm_free(body->receiver_steps);
 }
 
@@ -2253,7 +2254,7 @@ static CmTyId cm_tyck_pat_expect(CmTyArena *arena, int behind,
  * associated types before trait solving exists.
  */
 static int cm_tyck_iterator_item(CmTyckEnv *env, CmTyId iterable,
-    CmTyId item_type)
+    CmTyId item_type, CmTyId *iterator_type)
 {
     CmTyArena *arena = env->state->arena;
     CmTyId iterator = iterable;
@@ -2274,6 +2275,7 @@ static int cm_tyck_iterator_item(CmTyckEnv *env, CmTyId iterable,
             cm_tyck_subst_of(&found.instance), params, CM_TYCK_MAX_ARGS,
             &ret);
         iterator = ret;
+        if (iterator_type != NULL) *iterator_type = iterator;
     }
     if (next == CM_INTERN_ID_NONE
         || !cm_tyck_lookup_assoc(env, iterator, next, &found)
@@ -5449,13 +5451,22 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
                         || pt->kind == CM_TY_SLICE))
                     (void)cm_ty_unify(arena, item_type,
                         cm_ty_ref(arena, pt->children[0], it->a != 0u));
-                else if (!cm_tyck_iterator_item(env, iterable, item_type))
+                else if (!cm_tyck_iterator_item(env, iterable, item_type,
+                        &env->out->for_iterator_types[id]))
                     cm_tyck_error(env, "for loop iterable is not iterable");
             } else if (it != NULL && it->kind == CM_TY_ARRAY) {
                 (void)cm_ty_unify(arena, item_type, it->children[0]);
-            } else if (!cm_tyck_iterator_item(env, iterable, item_type)) {
+                (void)cm_tyck_iterator_item(env, iterable, item_type,
+                    &env->out->for_iterator_types[id]);
+            } else if (!cm_tyck_iterator_item(env, iterable, item_type,
+                    &env->out->for_iterator_types[id])) {
                 cm_tyck_error(env, "for loop iterable is not iterable");
             }
+            /* The direct array/slice item path above still needs the
+             * conversion's result type for MIR. */
+            if (env->out->for_iterator_types[id] == CM_TY_NONE)
+                (void)cm_tyck_iterator_item(env, iterable, item_type,
+                    &env->out->for_iterator_types[id]);
             cm_tyck_pat(env, expr->data.for_expr.pattern, item_type);
             (void)cm_tyck_expr(env, expr->data.for_expr.body, arena->unit);
         }
@@ -5965,6 +5976,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
     out->path_self_types = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->receiver_derefs = (CmTyId *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(CmTyId));
+    out->for_iterator_types = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->receiver_steps = (uint8_t *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(uint8_t));

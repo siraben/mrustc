@@ -2057,6 +2057,24 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         ? (steps == 0u ? 0u : steps - 1u) : 0u;
                 unsigned int index_load;
                 const CmTy *layer = rt;
+                if ((kind == CM_HIR_RECEIVER_REF_SHARED
+                        || kind == CM_HIR_RECEIVER_REF_MUTABLE)
+                    && !cm_umir_self_is_reference(builder->hir, callee)) {
+                    /* Tyck can under-report the final primitive autoderef
+                     * (`other: &&str; other.as_bytes()`).  A method whose
+                     * Self is not itself a reference must receive the last
+                     * reference layer, so peel every outer layer but one. */
+                    const CmTy *depth_ty = rt;
+                    unsigned int depth = 0u;
+                    while (depth_ty != NULL && (depth_ty->kind == CM_TY_REF
+                            || depth_ty->kind == CM_TY_PTR)) {
+                        depth += 1u;
+                        depth_ty = cm_ty_get(arena, cm_ty_resolve(arena,
+                            depth_ty->children[0]));
+                    }
+                    if (depth > 1u && loads < depth - 1u)
+                        loads = depth - 1u;
+                }
                 if (kind == CM_HIR_RECEIVER_REF_SHARED
                     || kind == CM_HIR_RECEIVER_REF_MUTABLE
                     || kind == CM_HIR_RECEIVER_VALUE) {
@@ -2194,7 +2212,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 pointer = cm_umir_emit_expr(builder,
                     inner->data.unary.operand);
             cm_umir_push_operands(builder, destination,
-                CM_UMIR_RVALUE_LOCAL, id, type, &pointer, 1u);
+                CM_UMIR_RVALUE_REBORROW, id, type, &pointer, 1u);
             break;
         }
         {
@@ -3021,8 +3039,17 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         CmUMirBlockId exit_block;
         CmUMirLocalId element;
         CmUMirLocalId item;
-        CmUMirLocalId iterable = cm_umir_emit_expr(builder,
+        CmUMirLocalId source = cm_umir_emit_expr(builder,
             expr->data.for_expr.iterable);
+        CmTyId iterator_type = builder->tb != NULL
+                && builder->tb->for_iterator_types != NULL
+            ? builder->tb->for_iterator_types[id] : CM_TY_NONE;
+        CmUMirLocalId iterable = source;
+        if (iterator_type != CM_TY_NONE) {
+            iterable = cm_umir_new_local(builder, iterator_type);
+            cm_umir_push_operands(builder, iterable,
+                CM_UMIR_RVALUE_INTO_ITER, id, iterator_type, &source, 1u);
+        }
         header = cm_umir_new_block(builder);
         body_block = cm_umir_new_block(builder);
         exit_block = cm_umir_new_block(builder);
