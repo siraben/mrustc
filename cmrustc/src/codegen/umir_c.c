@@ -3920,6 +3920,30 @@ static CmHirDefId cm_umir_c_drop_impl(const CmHirContext *hir,
         NULL, 0u);
 }
 
+static int cm_umir_c_is_core_refmut(const CmHirContext *hir,
+    const CmHirItem *item)
+{
+    const CmHirModule *module;
+    const CmHirCrate *crate;
+    const CmInternedString *item_name;
+    const CmInternedString *module_name;
+    const CmInternedString *crate_name;
+    if (item == NULL || item->kind != CM_HIR_ITEM_STRUCT) return 0;
+    item_name = cm_interner_get(&hir->strings, item->name);
+    module = cm_hir_get_module(hir, item->owner_module);
+    module_name = module == NULL ? NULL
+        : cm_interner_get(&hir->strings, module->name);
+    crate = module == NULL ? NULL : cm_hir_get_crate(hir, module->crate_id);
+    crate_name = crate == NULL ? NULL
+        : cm_interner_get(&hir->strings, crate->name);
+    return item_name != NULL && item_name->len == 6u
+        && memcmp(item_name->bytes, "RefMut", 6u) == 0
+        && module_name != NULL && module_name->len == 4u
+        && memcmp(module_name->bytes, "cell", 4u) == 0
+        && crate_name != NULL && crate_name->len == 4u
+        && memcmp(crate_name->bytes, "core", 4u) == 0;
+}
+
 /* Drop glue reaches: a `Drop` impl on the type, or one inside a struct's
  * fields (a RefMut's BorrowRefMut).  Enums and pointers are not walked. */
 static int cm_umir_c_type_needs_drop(const CmHirContext *hir,
@@ -5697,9 +5721,10 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 CmStrBuf address;
                 if (scope_drop) {
                     /* General local drops need move-path flags.  Until those
-                     * land, run only an outer type's own RAII destructor and
-                     * exclude Vec, whose value is routinely moved through
-                     * return/aggregate temporaries in the lenient u-MIR. */
+                     * land, run an outer type's own RAII destructor, plus
+                     * RefMut's field-owned borrow guard, and exclude Vec,
+                     * whose value is routinely moved through return/aggregate
+                     * temporaries in the lenient u-MIR. */
                     CmHirDefId own = cm_umir_c_drop_impl(hir, tyck,
                         drop_decl, dropped_type);
                     const CmTy *dt = dropped_type == CM_TY_NONE ? NULL
@@ -5712,7 +5737,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     const CmInternedString *type_name = type_item == NULL
                         ? NULL : cm_interner_get(&hir->strings,
                             type_item->name);
-                    allowed = !cm_hir_def_id_is_none(own)
+                    allowed = (!cm_hir_def_id_is_none(own)
+                            || cm_umir_c_is_core_refmut(hir, type_item))
                         && !(type_name != NULL && type_name->len == 3u
                             && memcmp(type_name->bytes, "Vec", 3u) == 0);
                 }

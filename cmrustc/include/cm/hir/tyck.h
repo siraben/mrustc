@@ -20,6 +20,8 @@ typedef enum CmTyckBodyStatus {
     CM_TYCK_BODY_SKIPPED        /* no ubody available */
 } CmTyckBodyStatus;
 
+#define CM_TYCK_MAX_RECEIVER_DEREFS 4u
+
 typedef struct CmTyckBody {
     CmHirBodyId body;
     CmTyckBodyStatus status;
@@ -41,11 +43,12 @@ typedef struct CmTyckBody {
      * whose target is an associated item: emission substitutes it per
      * instance to reach the impl's item (none elsewhere). */
     CmTyId *path_self_types;
-    /* The `Deref::Target` a METHOD_CALL receiver was auto-dereferenced
-     * through to reach its method (`v.iter()` on a `Vec<T>` -> `[T]`):
-     * lowering calls `Deref::deref` / `DerefMut::deref_mut` on the
-     * receiver first (none elsewhere). */
-    CmTyId *receiver_derefs;
+    /* Ordered `Deref::Target`s a METHOD_CALL receiver traversed to reach
+     * its method (`RefMut<Vec<T>>.last_mut()` -> `Vec<T>` -> `[T]`).
+     * Targets occupy expression_id * MAX + step; the parallel count is
+     * zero elsewhere. */
+    CmTyId *receiver_deref_targets;
+    uint8_t *receiver_deref_counts;
     /* Concrete result of `IntoIterator::into_iter` for each FOR
      * expression.  MIR uses this to materialize the iterator before
      * calling `Iterator::next`. */

@@ -182,7 +182,8 @@ static void cm_tyck_body_release(CmTyckBody *body)
     cm_free(body->method_targets);
     cm_free(body->unsize_targets);
     cm_free(body->path_self_types);
-    cm_free(body->receiver_derefs);
+    cm_free(body->receiver_deref_targets);
+    cm_free(body->receiver_deref_counts);
     cm_free(body->for_iterator_types);
     cm_free(body->receiver_steps);
 }
@@ -4196,7 +4197,8 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
          * a blanket `impl<T: Clone> SpecArrayClone for T { fn clone }`
          * must not capture `Clone::clone`. */
         int generic_receiver = 0;
-        CmTyId deref_target = CM_TY_NONE;
+        CmTyId deref_targets[CM_TYCK_MAX_RECEIVER_DEREFS];
+        unsigned int deref_count = 0u;
         unsigned int found_step = 0u;
         unsigned int fallback_step = 0u;
         int step_set = 0;
@@ -4406,13 +4408,19 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                 }
                 if (candidate_kind != CM_TY_REF
                     && candidate_kind != CM_TY_PTR) {
-                    /* One user-Deref step (`ByteStr` -> `[u8]`) before
-                     * giving up on this chain. */
+                    /* Follow a bounded user-Deref chain before giving up.
+                     * `RefMut<Vec<T>>::last_mut` needs two steps:
+                     * RefMut<Vec<T>> -> Vec<T> -> [T]. */
                     if (candidate_kind == CM_TY_ADT) {
-                        CmTyId derefed = cm_tyck_user_deref(env,
-                            candidate);
-                        if (derefed != CM_TY_NONE) {
+                        CmTyId derefed = candidate;
+                        CmTyId chain[CM_TYCK_MAX_RECEIVER_DEREFS];
+                        unsigned int chain_count = 0u;
+                        while (chain_count < CM_TYCK_MAX_RECEIVER_DEREFS) {
                             unsigned int deref_variant;
+                            const CmTy *deref_ty;
+                            derefed = cm_tyck_user_deref(env, derefed);
+                            if (derefed == CM_TY_NONE) break;
+                            chain[chain_count++] = derefed;
                             for (deref_variant = 0u; deref_variant < 32u;
                                     ++deref_variant) {
                                 size_t deref_mark = cm_ty_undo_mark(arena);
@@ -4428,12 +4436,20 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                                 if (cm_tyck_method_args_compatible(env,
                                         &found, arg_types, arg_count)) {
                                     candidate = derefed;
-                                    deref_target = derefed;
+                                    memcpy(deref_targets, chain,
+                                        chain_count * sizeof(CmTyId));
+                                    deref_count = chain_count;
                                     break;
                                 }
                                 cm_ty_undo_to(arena, deref_mark);
                                 found.item = NULL;
                             }
+                            if (found.item != NULL) break;
+                            deref_ty = cm_ty_get(arena,
+                                cm_ty_resolve(arena, derefed));
+                            if (deref_ty == NULL
+                                || deref_ty->kind != CM_TY_ADT)
+                                break;
                         }
                     }
                     if (found.item != NULL) {
@@ -4451,10 +4467,17 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
             found_step = fallback_step;
         }
         if (found.item == NULL) candidate = CM_TY_NONE;
-        if (found.item != NULL && deref_target != CM_TY_NONE
-            && candidate == deref_target && env->out->receiver_derefs != NULL
-            && id != CM_U_EXPR_NONE)
-            env->out->receiver_derefs[id] = deref_target;
+        if (found.item != NULL && deref_count != 0u
+            && env->out->receiver_deref_targets != NULL
+            && env->out->receiver_deref_counts != NULL
+            && id != CM_U_EXPR_NONE) {
+            unsigned int deref_index;
+            env->out->receiver_deref_counts[id] = (uint8_t)deref_count;
+            for (deref_index = 0u; deref_index < deref_count; ++deref_index)
+                env->out->receiver_deref_targets[
+                    (size_t)id * CM_TYCK_MAX_RECEIVER_DEREFS + deref_index]
+                        = deref_targets[deref_index];
+        }
         if (found.item != NULL && env->out->receiver_steps != NULL
             && id != CM_U_EXPR_NONE && found_step < 250u) {
             env->out->receiver_steps[id] = (uint8_t)(found_step + 1u);
@@ -6133,8 +6156,11 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->path_self_types = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
-    out->receiver_derefs = (CmTyId *)cm_alloc_zeroed(
-        ub->expressions.len + 1u, sizeof(CmTyId));
+    out->receiver_deref_targets = (CmTyId *)cm_alloc_zeroed(
+        (ub->expressions.len + 1u) * CM_TYCK_MAX_RECEIVER_DEREFS,
+        sizeof(CmTyId));
+    out->receiver_deref_counts = (uint8_t *)cm_alloc_zeroed(
+        ub->expressions.len + 1u, sizeof(uint8_t));
     out->for_iterator_types = (CmTyId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmTyId));
     out->receiver_steps = (uint8_t *)cm_alloc_zeroed(

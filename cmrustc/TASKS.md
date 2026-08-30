@@ -3424,3 +3424,22 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   suite, 140/140 standalone u-MIR fixtures, core-linked 4/4, and alloc-linked
   2/2.  Next: continue through the low-dependency rustc crates toward the
   compiler binary.
+
+- Measured pass (M9-06, fourth compiler-crate rung, probe-param88):
+  `compiler/rustc_arena` now runs as a real dependency above the complete
+  core/alloc/std stack and its vendored `smallvec` dependency.  Its first
+  `TypedArena::alloc` exposed method lookup stopping after one user `Deref`:
+  `RefMut<Vec<ArenaChunk<T>>>.last_mut()` needs the two-step chain
+  `RefMut<Vec<_>> -> Vec<_> -> [_]`.  Tyck now records a bounded ordered
+  receiver-deref chain and u-MIR emits each `Deref`/`DerefMut` call in turn.
+  Arena teardown then exposed lexical scope cleanup omitting `RefMut`, whose
+  RAII destructor lives on its `BorrowRefMut` field rather than on the outer
+  type; the conservative scope-drop renderer now admits that field-owned
+  guard while the wider move-path limitation remains.  Regressions cover
+  two-step method autoderef and a locally bound `RefMut`-shaped guard.  The
+  generated 1,374,090-byte C unit has 1,908 reachable instances: 1,610 real
+  bodies, 270 shims, 28 residual stubs, and 16 vtables.  It prints
+  `rustc_arena: 42`, drops the arena cleanly, and exits 0 through real
+  `lang_start` and cleanup.  Gates: native suite, 142/142 standalone u-MIR
+  fixtures, core-linked 4/4, and alloc-linked 2/2.  Next: continue through
+  the low-dependency rustc crates toward the compiler binary.
