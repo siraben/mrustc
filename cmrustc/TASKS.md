@@ -3408,3 +3408,19 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   paths.  Gates: native suite, 139/139 standalone u-MIR fixtures, core-linked
   4/4, and alloc-linked 2/2.  Next: continue through the low-dependency rustc
   crates toward the compiler binary.
+
+- Measured pass (M9-06, third compiler-crate rung, probe-param88):
+  `compiler/rustc_error_codes` now runs as a real dependency above the
+  complete core/alloc/std stack.  Its exported `error_codes!` macro expands
+  the compiler's full diagnostic-code table into caller-provided items; the
+  probe verifies that its first entry is `E0001: 1`.  This exposed primitive
+  `&str` comparisons falling through to C descriptor-pointer equality, so
+  the C emitter now compares the fat references' lengths and byte contents
+  for `==` and `!=`.  The generated 1,468,471-byte C unit has 1,805 reachable
+  instances: 1,525 real bodies, 249 shims, 31 residual stubs, and 15 vtables.
+  It prints `rustc_error_codes: E0001 1` and exits 0 through real
+  `lang_start` and cleanup.  A standalone regression compares independently
+  materialized equal strings as well as unequal strings.  Gates: native
+  suite, 140/140 standalone u-MIR fixtures, core-linked 4/4, and alloc-linked
+  2/2.  Next: continue through the low-dependency rustc crates toward the
+  compiler binary.

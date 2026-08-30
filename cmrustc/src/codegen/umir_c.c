@@ -3686,6 +3686,62 @@ static int cm_umir_c_render_operator_call(CmStrBuf *output,
     return 1;
 }
 
+static void cm_umir_c_render_str_slot(CmStrBuf *output,
+    CmUMirLocalId local, unsigned int slot)
+{
+    cm_str_buf_append(output, "((long long *)(intptr_t)");
+    cm_umir_c_render_local(output, local);
+    cm_str_buf_append(output, ")[");
+    cm_umir_c_render_number(output, slot);
+    cm_str_buf_push(output, ']');
+}
+
+/* `&str` is a fat reference represented by a descriptor whose slots 1 and
+ * 2 are the byte pointer and length.  Scalar C equality would compare the
+ * descriptor addresses, so equal text materialized by two expressions
+ * would compare unequal.  Keep this primitive case local instead of
+ * retaining the generic `PartialEq<&B> for &A` forwarding graph. */
+static int cm_umir_c_render_str_comparison(CmStrBuf *output,
+    const CmTyckSet *tyck, const CmUMirBody *body,
+    const CmUMirStatement *statement, CmUBinaryOp op)
+{
+    CmTyId left = cm_umir_c_local_type(body, statement->operands[0]);
+    CmTyId right = cm_umir_c_local_type(body, statement->operands[1]);
+    const CmTy *lt = left == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, left));
+    const CmTy *rt = right == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, right));
+    const CmTy *lp;
+    const CmTy *rp;
+    if ((op != CM_U_BINARY_EQ && op != CM_U_BINARY_NE)
+        || lt == NULL || lt->kind != CM_TY_REF
+        || rt == NULL || rt->kind != CM_TY_REF)
+        return 0;
+    lp = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, lt->children[0]));
+    rp = cm_ty_get((CmTyArena *)&tyck->arena,
+        cm_ty_resolve((CmTyArena *)&tyck->arena, rt->children[0]));
+    if (lp == NULL || lp->kind != CM_TY_STR
+        || rp == NULL || rp->kind != CM_TY_STR)
+        return 0;
+    cm_str_buf_append(output, "(long long)(");
+    if (op == CM_U_BINARY_NE) cm_str_buf_push(output, '!');
+    cm_str_buf_push(output, '(');
+    cm_umir_c_render_str_slot(output, statement->operands[0], 2u);
+    cm_str_buf_append(output, " == ");
+    cm_umir_c_render_str_slot(output, statement->operands[1], 2u);
+    cm_str_buf_append(output, " && memcmp((const void *)(intptr_t)");
+    cm_umir_c_render_str_slot(output, statement->operands[0], 1u);
+    cm_str_buf_append(output, ", (const void *)(intptr_t)");
+    cm_umir_c_render_str_slot(output, statement->operands[1], 1u);
+    cm_str_buf_append(output, ", (unsigned long)");
+    cm_umir_c_render_str_slot(output, statement->operands[0], 2u);
+    cm_str_buf_append(output, ") == 0))");
+    return 1;
+}
+
 /* A fn item used as a value: the address of its instance symbol (a
  * trait method path takes Self from the FN_DEF's first argument). */
 static void cm_umir_c_render_fn_value(CmStrBuf *output,
@@ -4434,6 +4490,11 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 break;
             case CM_UMIR_RVALUE_BINARY:
                 if (statement->operand_count == 2u && expr != NULL
+                    && expr->kind == CM_U_EXPR_BINARY
+                    && cm_umir_c_render_str_comparison(output, tyck, body,
+                        statement, expr->data.binary.op)) {
+                    /* Fat string references compare their byte contents. */
+                } else if (statement->operand_count == 2u && expr != NULL
                     && expr->kind == CM_U_EXPR_BINARY
                     && cm_umir_c_render_operator_call(output, hir, tyck,
                         body, statement)) {
@@ -6732,6 +6793,7 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         "void *calloc(unsigned long, unsigned long);\n"
         "void *memmove(void *, const void *, unsigned long);\n"
         "void *memset(void *, int, unsigned long);\n"
+        "int memcmp(const void *, const void *, unsigned long);\n"
         "static int cm_umir_simd_compare;\n");
     /* Roots: `#[no_mangle]` exports, and the root crate's `fn main`
      * (the crate compiled last has the highest crate id); everything
