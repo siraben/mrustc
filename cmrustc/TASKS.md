@@ -3388,3 +3388,23 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   u-MIR fixtures, core-linked 4/4 (including the new `Iterator::all`
   semantic probe), and alloc-linked 2/2.  Next: advance through the next
   low-dependency rustc crates toward the compiler binary.
+
+- Measured pass (M9-06, second compiler-crate rung, probe-param88):
+  `compiler/rustc_graphviz` now runs as a real dependency above the complete
+  core/alloc/std stack.  Its HTML escaping path exposed three semantic gaps:
+  nested `TYPE_ASSOC` enum patterns retained only the enclosing enum
+  resolution, so tyck now records the exact variant target for u-MIR's
+  discriminant tests and payload offsets; comparison lookup selected the
+  first receiver-compatible `PartialEq` impl without checking the implicitly
+  borrowed right operand, so `[T] == [U]` was miscompiled through the earlier
+  `[T] == [U; N]` impl and its `TryFrom`/`as_array` path; and explicit const
+  turbofish values were neither carried in the `FN_DEF` instance nor rendered
+  from the active monomorphization.  The generated 1,608,847-byte C unit has
+  1,962 reachable instances: 1,662 real bodies, 265 shims, 35 residual stubs,
+  and 19 vtables.  It prints exactly
+  `rustc_graphviz: a&amp;&quot;&lt;&gt;<br align="left"/>` and exits 0 through real
+  `lang_start` and cleanup.  Regressions cover nested enum variants,
+  overlapping slice/array comparison impls, and concrete const-generic value
+  paths.  Gates: native suite, 139/139 standalone u-MIR fixtures, core-linked
+  4/4, and alloc-linked 2/2.  Next: continue through the low-dependency rustc
+  crates toward the compiler binary.

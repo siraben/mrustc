@@ -464,6 +464,41 @@ static long cm_umir_variant_index(const CmHirContext *hir,
     return (long)record->entity.enum_variant.variant_index;
 }
 
+/* Pattern paths can resolve to the enum type plus an associated tail
+ * (`Utf8Pattern::CharPattern`) rather than directly to the variant.  Tyck
+ * records the exact constructor after matching that tail against the enum;
+ * prefer it so nested tests use the discriminant and skip slot 0 when
+ * reading payloads. */
+static long cm_umir_pattern_variant_index(const CmUMirBuilder *builder,
+    const CmUPat *pat)
+{
+    const CmUResolution *resolution = NULL;
+    const CmUPat *base;
+    size_t index;
+    if (builder == NULL || pat == NULL) return -1;
+    if (pat->kind == CM_U_PAT_PATH) resolution = &pat->data.path.resolution;
+    else if (pat->kind == CM_U_PAT_TUPLE_STRUCT
+        || pat->kind == CM_U_PAT_STRUCT)
+        resolution = &pat->data.struct_pat.resolution;
+    if (resolution == NULL) return -1;
+    if (builder->tb != NULL && builder->tb->pattern_targets != NULL
+        && builder->ub != NULL && builder->ub->patterns.len != 0u) {
+        base = (const CmUPat *)cm_vec_at_const(&builder->ub->patterns, 0u);
+        if (base != NULL && pat >= base
+            && (size_t)(pat - base) < builder->ub->patterns.len) {
+            const CmHirDefId target =
+                builder->tb->pattern_targets[(size_t)(pat - base) + 1u];
+            const CmHirDefinition *record = cm_hir_def_id_is_none(target)
+                ? NULL : cm_hir_lookup_definition(builder->hir, target);
+            if (record != NULL
+                && record->kind == CM_HIR_DEFINITION_ENUM_VARIANT)
+                return (long)record->entity.enum_variant.variant_index;
+        }
+    }
+    index = (size_t)cm_umir_variant_index(builder->hir, resolution);
+    return index == (size_t)-1 ? -1 : (long)index;
+}
+
 /* Declared field index of `name` within a VARIANT-resolved struct-like
  * variant, or -1. */
 static long cm_umir_variant_field_index(const CmHirContext *hir,
@@ -796,8 +831,7 @@ static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
     case CM_U_PAT_LITERAL: return nested;
     case CM_U_PAT_PATH:
         if (cm_umir_pattern_is_const(builder, pat)) return 1;
-        return nested && cm_umir_variant_index(builder->hir,
-            &pat->data.path.resolution) >= 0;
+        return nested && cm_umir_pattern_variant_index(builder, pat) >= 0;
     case CM_U_PAT_BINDING:
         return pat->data.binding.subpattern != CM_U_PAT_NONE
             && cm_umir_pattern_needs_test(builder,
@@ -833,16 +867,16 @@ static int cm_umir_pattern_needs_test(const CmUMirBuilder *builder,
         return 0;
     }
     case CM_U_PAT_TUPLE_STRUCT:
-        if (nested && cm_umir_variant_index(builder->hir,
-                &pat->data.struct_pat.resolution) >= 0) return 1;
+        if (nested && cm_umir_pattern_variant_index(builder, pat) >= 0)
+            return 1;
         for (alt = 0u; alt < pat->data.struct_pat.pattern_count; ++alt)
             if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
                     builder->ub, pat->data.struct_pat.patterns[alt]), 1))
                 return 1;
         return 0;
     case CM_U_PAT_STRUCT:
-        if (nested && cm_umir_variant_index(builder->hir,
-                &pat->data.struct_pat.resolution) >= 0) return 1;
+        if (nested && cm_umir_pattern_variant_index(builder, pat) >= 0)
+            return 1;
         for (alt = 0u; alt < pat->data.struct_pat.field_count; ++alt)
             if (cm_umir_pattern_needs_test(builder, cm_ubody_get_pat(
                     builder->ub, pat->data.struct_pat.fields[alt].pattern),
@@ -1143,8 +1177,7 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
         break;
     }
     case CM_U_PAT_PATH: {
-        long index = cm_umir_variant_index(builder->hir,
-            &pat->data.path.resolution);
+        long index = cm_umir_pattern_variant_index(builder, pat);
         if (index >= 0) {
             cm_umir_variant_check(builder, value, index, id, fails);
         } else if (cm_umir_pattern_is_const(builder, pat)) {
@@ -1248,8 +1281,7 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
         break;
     }
     case CM_U_PAT_TUPLE_STRUCT: {
-        long index = cm_umir_variant_index(builder->hir,
-            &pat->data.struct_pat.resolution);
+        long index = cm_umir_pattern_variant_index(builder, pat);
         uint32_t base = index >= 0 ? 1u : 0u;
         if (index >= 0)
             cm_umir_variant_check(builder, value, index, id, fails);
@@ -1273,8 +1305,7 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
         break;
     }
     case CM_U_PAT_STRUCT: {
-        long index = cm_umir_variant_index(builder->hir,
-            &pat->data.struct_pat.resolution);
+        long index = cm_umir_pattern_variant_index(builder, pat);
         if (index >= 0)
             cm_umir_variant_check(builder, value, index, id, fails);
         for (sub = 0u; sub < pat->data.struct_pat.field_count; ++sub) {
@@ -1369,7 +1400,8 @@ static long cm_umir_pattern_discriminant(const CmUMirBuilder *builder,
         || pat->kind == CM_U_PAT_STRUCT)
         res = &pat->data.struct_pat.resolution;
     if (res == NULL) return -1;
-    return cm_umir_variant_index(builder->hir, res);
+    (void)res;
+    return cm_umir_pattern_variant_index(builder, pat);
 }
 
 /* Field index of `name` in the struct behind a DEFINITION resolution. */
@@ -1474,8 +1506,7 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
         break;
     }
     case CM_U_PAT_TUPLE_STRUCT: {
-        int variant = cm_umir_variant_index(builder->hir,
-            &pat->data.struct_pat.resolution) >= 0;
+        int variant = cm_umir_pattern_variant_index(builder, pat) >= 0;
         for (index = 0u; index < pat->data.struct_pat.pattern_count;
                 ++index) {
             const CmUPat *sub = cm_ubody_get_pat(builder->ub,
@@ -1496,8 +1527,7 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
         break;
     }
     case CM_U_PAT_STRUCT: {
-        int variant = cm_umir_variant_index(builder->hir,
-            &pat->data.struct_pat.resolution) >= 0;
+        int variant = cm_umir_pattern_variant_index(builder, pat) >= 0;
         for (index = 0u; index < pat->data.struct_pat.field_count; ++index) {
             const CmUPat *sub = cm_ubody_get_pat(builder->ub,
                 pat->data.struct_pat.fields[index].pattern);
@@ -2736,8 +2766,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 fails.count = 0u;
                 if (pat->kind == CM_U_PAT_TUPLE_STRUCT
                     || pat->kind == CM_U_PAT_STRUCT) {
-                    long index = cm_umir_variant_index(builder->hir,
-                        &pat->data.struct_pat.resolution);
+                    long index = cm_umir_pattern_variant_index(builder, pat);
                     if (index >= 0) key = index;
                 }
                 cm_umir_emit_pattern_checks(builder,
@@ -2770,7 +2799,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         || sub->kind == CM_U_PAT_STRUCT)
                         sub_res = &sub->data.struct_pat.resolution;
                     if (sub_res != NULL) {
-                        sub_disc = cm_umir_variant_index(builder->hir, sub_res);
+                        sub_disc = cm_umir_pattern_variant_index(builder, sub);
                         if (sub_disc < 0) sub_disc = CM_UMIR_ARM_DEFAULT;
                     }
                     else if (sub->kind == CM_U_PAT_LITERAL)
@@ -2790,7 +2819,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                     || pat->kind == CM_U_PAT_STRUCT)
                     res = &pat->data.struct_pat.resolution;
                 if (res != NULL) {
-                    disc = cm_umir_variant_index(builder->hir, res);
+                    disc = cm_umir_pattern_variant_index(builder, pat);
                     if (disc < 0) disc = CM_UMIR_ARM_DEFAULT;
                 } else if (pat->kind == CM_U_PAT_LITERAL)
                     (void)cm_umir_pattern_literal_value(builder, pat, &disc);

@@ -26,6 +26,10 @@ typedef struct CmTyckBody {
     CmTyId *expr_types;   /* indexed by expression id (1-based) */
     CmTyId *pat_types;
     CmTyId *local_types;
+    /* Enum variant selected for a pattern whose syntax resolved only to its
+     * enum type (`Enum::Variant(..)` as TYPE_ASSOC).  u-MIR needs the exact
+     * variant for nested discriminant tests and payload offsets. */
+    CmHirDefId *pattern_targets;
     /* Chosen method definition per METHOD_CALL expression (none when
      * unresolved); MIR emission renders the callee symbol from it. */
     CmHirDefId *method_targets;

@@ -2772,6 +2772,36 @@ static CmTyId cm_umir_c_subst(CmTyId type)
         type, &subst);
 }
 
+/* Render a value-path naming a const generic from the active monomorphized
+ * instance (`self.len() == N`).  Type substitution already carries const
+ * arguments as CM_TY_CONST; unlike type parameters there is no runtime value
+ * or item body to call. */
+static int cm_umir_c_render_const_parameter(CmStrBuf *output,
+    const CmTyckSet *tyck, const CmUExpr *expr)
+{
+    uint32_t index;
+    if (expr == NULL || expr->kind != CM_U_EXPR_PATH
+        || expr->data.path.resolution.kind
+            != CM_U_RESOLVED_GENERIC_PARAM
+        || cm_umir_c_active_instance == NULL
+        || cm_umir_c_active_instance->parameters == NULL
+        || cm_umir_c_active_instance->types == NULL) return 0;
+    for (index = 0u; index < cm_umir_c_active_instance->count; ++index) {
+        const CmTy *argument;
+        if (cm_umir_c_active_instance->parameters[index]
+                != expr->data.path.resolution.generic_parameter)
+            continue;
+        argument = cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                cm_umir_c_active_instance->types[index]));
+        if (argument == NULL || argument->kind != CM_TY_CONST
+            || argument->hi != 0u) return 0;
+        cm_umir_c_render_number(output, (unsigned long)argument->lo);
+        return 1;
+    }
+    return 0;
+}
+
 /* 1 + the autoderef step tyck found a METHOD_CALL's method at (0 when
  * unknown).  Lowering shapes the receiver operand from it: at step 0 the
  * operand is an autoref whose local keeps the referent's type (so it
@@ -4297,6 +4327,9 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                      * its initializer body (tyck recorded the item), a
                      * unit struct is an empty block; fn items stay
                      * symbolic (callee operands never read them). */
+                    if (cm_umir_c_render_const_parameter(output, tyck,
+                            expr))
+                        break;
                     const CmTyckBody *ptb = cm_tyck_get(tyck, body->source);
                     CmHirDefId value_def = ptb == NULL
                             || ptb->method_targets == NULL

@@ -178,6 +178,7 @@ static void cm_tyck_body_release(CmTyckBody *body)
     cm_free(body->expr_types);
     cm_free(body->pat_types);
     cm_free(body->local_types);
+    cm_free(body->pattern_targets);
     cm_free(body->method_targets);
     cm_free(body->unsize_targets);
     cm_free(body->path_self_types);
@@ -496,6 +497,77 @@ static const CmHirItem *cm_tyck_body_item_named(const CmTyckState *state,
 
 /* ------------------------------------------------------------------ */
 /* Generic instantiation                                                */
+
+static int cm_tyck_parse_u64(const CmInternedString *text,
+    uint64_t *out_value)
+{
+    static const char *const suffixes[] = { "usize", "isize",
+        "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16",
+        "u8", "i8" };
+    unsigned int radix = 10u;
+    size_t index = 0u;
+    size_t end;
+    uint64_t value = 0u;
+    int saw_digit = 0;
+
+    if (text == NULL || out_value == NULL) return 0;
+    end = text->len;
+    if (end >= 2u && text->bytes[0] == (unsigned char)'0') {
+        unsigned char marker = text->bytes[1];
+        if (marker == (unsigned char)'x' || marker == (unsigned char)'X')
+            radix = 16u;
+        else if (marker == (unsigned char)'o')
+            radix = 8u;
+        else if (marker == (unsigned char)'b')
+            radix = 2u;
+        if (radix != 10u) index = 2u;
+    }
+    if (radix == 16u) {
+        size_t suffix;
+        for (suffix = 0u; suffix < sizeof(suffixes) / sizeof(*suffixes);
+             ++suffix) {
+            size_t length = strlen(suffixes[suffix]);
+            if (end - index > length && memcmp(text->bytes + end - length,
+                    suffixes[suffix], length) == 0) {
+                end -= length;
+                break;
+            }
+        }
+    } else {
+        while (end > index) {
+            unsigned char tail = text->bytes[end - 1u];
+            if (tail == (unsigned char)'_'
+                || (tail >= (unsigned char)'a'
+                    && tail <= (unsigned char)'z')
+                || (tail >= (unsigned char)'A'
+                    && tail <= (unsigned char)'Z')) {
+                end -= 1u;
+                continue;
+            }
+            break;
+        }
+    }
+    for (; index < end; ++index) {
+        unsigned char byte = text->bytes[index];
+        unsigned int digit;
+        if (byte == (unsigned char)'_') continue;
+        if (byte >= (unsigned char)'0' && byte <= (unsigned char)'9')
+            digit = (unsigned int)(byte - (unsigned char)'0');
+        else if (byte >= (unsigned char)'a' && byte <= (unsigned char)'f')
+            digit = 10u + (unsigned int)(byte - (unsigned char)'a');
+        else if (byte >= (unsigned char)'A' && byte <= (unsigned char)'F')
+            digit = 10u + (unsigned int)(byte - (unsigned char)'A');
+        else
+            return 0;
+        if (digit >= radix
+            || value > (UINT64_MAX - (uint64_t)digit) / radix) return 0;
+        value = value * radix + (uint64_t)digit;
+        saw_digit = 1;
+    }
+    if (!saw_digit) return 0;
+    *out_value = value;
+    return 1;
+}
 
 
 static void cm_tyck_instance_init(CmTyckInstance *instance, CmTyId self_type)
@@ -2444,11 +2516,13 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
         }
         if (item->kind == CM_HIR_ITEM_FUNCTION) {
             CmTyckInstance instance;
+            const CmHirItem *parent = cm_tyck_parent_item(env->state, item);
             CmTyId fn_type;
+            int replaced_const = 0;
             if (env->out->method_targets != NULL && id != CM_U_EXPR_NONE)
                 env->out->method_targets[id] = item->definition;
-            fn_type = cm_tyck_fn_def(env, item, cm_tyck_parent_item(env->state,
-                item), CM_TY_NONE, &instance);
+            fn_type = cm_tyck_fn_def(env, item, parent, CM_TY_NONE,
+                &instance);
             /* `mk::<u32>(x)`: bind the fn's own type generics to the
              * path's explicit arguments (the FN_DEF shares the instance's
              * variables). */
@@ -2467,21 +2541,61 @@ static CmTyId cm_tyck_path_type(CmTyckEnv *env, const CmUExpr *expr,
                             ++argument) {
                         const CmAstGenericArg *garg =
                             &segment->arguments[argument];
-                        if (garg->kind != CM_AST_GENERIC_TYPE) continue;
+                        CmHirGenericParamKind wanted;
+                        CmTyId actual;
+                        if (garg->kind == CM_AST_GENERIC_TYPE) {
+                            wanted = CM_HIR_GENERIC_TYPE;
+                            actual = cm_tyck_ast_type(env, garg->type);
+                        } else if (garg->kind == CM_AST_GENERIC_CONST) {
+                            const CmInternedString *text = cm_ast_get_string(
+                                env->ast, garg->text);
+                            uint64_t value;
+                            if (!cm_tyck_parse_u64(text, &value)) continue;
+                            wanted = CM_HIR_GENERIC_CONST;
+                            actual = cm_ty_const_value(arena, value, 0u);
+                        } else {
+                            continue;
+                        }
                         while (slot < instance.count) {
                             const CmHirGenericParam *parameter =
                                 cm_hir_get_generic_param(env->state->hir,
                                     instance.parameters[slot]);
                             if (parameter != NULL
-                                && parameter->kind == CM_HIR_GENERIC_TYPE)
+                                && parameter->kind == wanted)
                                 break;
                             slot += 1u;
                         }
                         if (slot >= instance.count) break;
-                        (void)cm_ty_unify(arena, instance.types[slot],
-                            cm_tyck_ast_type(env, garg->type));
+                        if (wanted == CM_HIR_GENERIC_CONST) {
+                            instance.types[slot] = actual;
+                            replaced_const = 1;
+                        } else
+                            (void)cm_ty_unify(arena, instance.types[slot],
+                                actual);
                         slot += 1u;
                     }
+                }
+            }
+            /* Const slots are values rather than inference variables, so
+             * the explicit binding above replaces the instance entry.
+             * Rebuild the FN_DEF children to carry that replacement to
+             * call typing and monomorphisation.  A trait declaration has
+             * one leading Self child which is preserved. */
+            if (replaced_const) {
+                const CmTy *written = cm_ty_get(arena, fn_type);
+                CmTyId arguments[CM_TYCK_MAX_ARGS + 1u];
+                uint32_t prefix;
+                uint32_t generic;
+                if (written != NULL && written->kind == CM_TY_FN_DEF
+                    && written->count >= instance.count
+                    && written->count <= CM_TYCK_MAX_ARGS + 1u) {
+                    prefix = written->count - instance.count;
+                    for (generic = 0u; generic < prefix; ++generic)
+                        arguments[generic] = written->children[generic];
+                    for (generic = 0u; generic < instance.count; ++generic)
+                        arguments[prefix + generic] = instance.types[generic];
+                    fn_type = cm_ty_with_def(arena, CM_TY_FN_DEF,
+                        item->definition, arguments, written->count);
                 }
             }
             return fn_type;
@@ -4666,15 +4780,55 @@ static CmTyId cm_tyck_binary(CmTyckEnv *env, CmUExprId id,
             if (slot < 6u) {
                 CmInternId method = cm_tyck_intern_text(env->state,
                     cmp_names[slot], strlen(cmp_names[slot]));
-                CmTyckFound found;
-                size_t undo_mark = cm_ty_undo_mark(arena);
-                if (method != CM_INTERN_ID_NONE
-                    && cm_tyck_lookup_assoc_in(env, left, method, &found, 7u,
-                        0u)
-                    && found.item != NULL
-                    && found.item->kind == CM_HIR_ITEM_FUNCTION)
-                    env->out->method_targets[id] = found.item->definition;
-                cm_ty_undo_to(arena, undo_mark);
+                CmHirDefId target = cm_hir_def_id_none();
+                CmHirDefId fallback = cm_hir_def_id_none();
+                const CmTy *sequence = cm_ty_get(arena,
+                    cm_ty_resolve(arena, right));
+                while (sequence != NULL && (sequence->kind == CM_TY_REF
+                        || sequence->kind == CM_TY_PTR))
+                    sequence = cm_ty_get(arena, cm_ty_resolve(arena,
+                        sequence->children[0]));
+                if (sequence != NULL && (sequence->kind == CM_TY_ARRAY
+                        || sequence->kind == CM_TY_SLICE)) {
+                    unsigned int variant;
+                    CmTyId borrowed_right = cm_ty_ref(arena, right, 0);
+                    /* Several PartialEq impls share slice Self
+                     * (`[T] == [U]` and `[T] == [U; N]`).  Select with
+                     * the implicitly borrowed right operand; taking the
+                     * first receiver-only match invents an unconstrained
+                     * array length. */
+                    for (variant = 0u; method != CM_INTERN_ID_NONE
+                            && variant < 32u; ++variant) {
+                        CmTyckFound found;
+                        size_t undo_mark = cm_ty_undo_mark(arena);
+                        if (!cm_tyck_lookup_assoc_in(env, left, method,
+                                &found, 7u, variant)) {
+                            cm_ty_undo_to(arena, undo_mark);
+                            break;
+                        }
+                        if (found.item != NULL
+                            && found.item->kind == CM_HIR_ITEM_FUNCTION) {
+                            if (cm_hir_def_id_is_none(fallback))
+                                fallback = found.item->definition;
+                            if (cm_tyck_method_args_compatible(env, &found,
+                                    &borrowed_right, 1u))
+                                target = found.item->definition;
+                        }
+                        cm_ty_undo_to(arena, undo_mark);
+                        if (!cm_hir_def_id_is_none(target)) break;
+                    }
+                } else if (method != CM_INTERN_ID_NONE) {
+                    CmTyckFound found;
+                    size_t undo_mark = cm_ty_undo_mark(arena);
+                    if (cm_tyck_lookup_assoc_in(env, left, method, &found,
+                            7u, 0u) && found.item != NULL
+                        && found.item->kind == CM_HIR_ITEM_FUNCTION)
+                        target = found.item->definition;
+                    cm_ty_undo_to(arena, undo_mark);
+                }
+                if (cm_hir_def_id_is_none(target)) target = fallback;
+                if (!cm_hir_def_id_is_none(target))
+                    env->out->method_targets[id] = target;
             }
         }
         return arena->boolean;
@@ -5785,6 +5939,8 @@ static void cm_tyck_pat(CmTyckEnv *env, CmUPatId id, CmTyId expected)
                         ctor.field_count = v->field_count;
                         ctor.form = v->form;
                         ctor.valid = 1;
+                        if (env->out->pattern_targets != NULL)
+                            env->out->pattern_targets[id] = v->definition;
                         break;
                     }
                 }
@@ -5969,6 +6125,8 @@ static void cm_tyck_body(CmTyckState *state, CmHirBodyId body_id,
         sizeof(CmTyId));
     out->local_types = (CmTyId *)cm_alloc_zeroed(ub->locals.len + 1u,
         sizeof(CmTyId));
+    out->pattern_targets = (CmHirDefId *)cm_alloc_zeroed(
+        ub->patterns.len + 1u, sizeof(CmHirDefId));
     out->method_targets = (CmHirDefId *)cm_alloc_zeroed(
         ub->expressions.len + 1u, sizeof(CmHirDefId));
     out->unsize_targets = (CmTyId *)cm_alloc_zeroed(
