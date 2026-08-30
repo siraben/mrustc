@@ -7,6 +7,8 @@ set -u
 : "${PROBE:=build/probe-ref6/probe_core_hir}"
 : "${CC:=gcc}"
 command -v "$CC" >/dev/null 2>&1 || { echo "umir-fixtures: SKIP ($CC unavailable)"; exit 0; }
+# Emitted C reads `long long` slots through narrower and pointer types.
+case "$CC" in *tcc*) EMIT_CFLAGS="" ;; *) EMIT_CFLAGS="-fno-strict-aliasing" ;; esac
 test -x "$PROBE" || { echo "umir-fixtures: SKIP (probe not built)"; exit 0; }
 test_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 out_dir=$(mktemp -d "${TMPDIR:-/tmp}/cmrustc-umir-fixtures.XXXXXX")
@@ -20,7 +22,7 @@ for harness in "$test_dir"/fixtures/*-harness.c; do
     if CMRUSTC_CC="$CC" "$PROBE" "$fixture" --emit-umir-c "$out_dir/$base.c" \
             >"$out_dir/$base.probe" 2>&1 \
         && grep -q '^emit-umir-c' "$out_dir/$base.probe" \
-        && "$CC" -std=c99 -w -o "$out_dir/$base" "$out_dir/$base.c" "$harness" \
+        && "$CC" -std=c99 -w $EMIT_CFLAGS -o "$out_dir/$base" "$out_dir/$base.c" "$harness" \
             >"$out_dir/$base.cc" 2>&1 \
         && timeout 10 "$out_dir/$base" >/dev/null 2>&1; then
         pass=$((pass + 1)); echo "umir-fixture $base=pass"

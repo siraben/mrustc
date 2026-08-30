@@ -3464,6 +3464,7 @@ static int test_chained_let_condition(void)
     const CmAstExpr *if_expression;
     const CmAstExpr *condition;
     const CmAstExpr *let_condition;
+    const CmAstExpr *first_let;
     const CmAstExpr *initializer;
     const CmAstPattern *first_pattern;
     const CmAstPattern *second_pattern;
@@ -3486,18 +3487,24 @@ static int test_chained_let_condition(void)
     let_condition = condition == NULL
             || condition->kind != CM_AST_EXPR_BINARY
         ? NULL : cm_ast_get_expr(&ast, condition->data.binary.right);
+    first_let = condition == NULL
+            || condition->kind != CM_AST_EXPR_BINARY
+        ? NULL : cm_ast_get_expr(&ast, condition->data.binary.left);
     initializer = let_condition == NULL
             || let_condition->kind != CM_AST_EXPR_LET
         ? NULL : cm_ast_get_expr(&ast,
             let_condition->data.let_expr.initializer);
-    first_pattern = if_expression == NULL
+    /* A let chain is `LET && LET`: the if node carries no pattern (its
+     * condition is a boolean), each `let` binds on success. */
+    first_pattern = first_let == NULL || first_let->kind != CM_AST_EXPR_LET
         ? NULL : cm_ast_get_pattern(&ast,
-            if_expression->data.if_expr.pattern);
+            first_let->data.let_expr.pattern);
     second_pattern = let_condition == NULL
             || let_condition->kind != CM_AST_EXPR_LET
         ? NULL : cm_ast_get_pattern(&ast,
             let_condition->data.let_expr.pattern);
     ok = result.error_count == 0u && if_expression != NULL
+        && if_expression->data.if_expr.pattern == CM_AST_PATTERN_NONE
         && first_pattern != NULL
         && first_pattern->kind == CM_AST_PATTERN_STRUCT
         && condition != NULL && condition->kind == CM_AST_EXPR_BINARY

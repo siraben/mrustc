@@ -9,6 +9,8 @@ set -u
 : "${CORE_LIB:=/tmp/cmrustc-rust190-source/rustc-1.90.0-src/library/core/src/lib.rs}"
 : "${ALLOC_LIB:=/tmp/cmrustc-rust190-source/rustc-1.90.0-src/library/alloc/src/lib.rs}"
 command -v "$CC" >/dev/null 2>&1 || { echo "umir-alloc: SKIP ($CC unavailable)"; exit 0; }
+# Emitted C reads `long long` slots through narrower and pointer types.
+case "$CC" in *tcc*) EMIT_CFLAGS="" ;; *) EMIT_CFLAGS="-fno-strict-aliasing" ;; esac
 test -x "$PROBE" || { echo "umir-alloc: SKIP (probe not built)"; exit 0; }
 test -f "$CORE_LIB" || { echo "umir-alloc: SKIP (core source unavailable)"; exit 0; }
 test -f "$ALLOC_LIB" || { echo "umir-alloc: SKIP (alloc source unavailable)"; exit 0; }
@@ -25,7 +27,7 @@ for harness in "$test_dir"/alloc-fixtures/*-harness.c; do
             --with-dep alloc "$ALLOC_LIB" --crate-name probe \
             --emit-umir-c "$out_dir/$base.c" >"$out_dir/$base.probe" 2>&1 \
         && grep -q '^emit-umir-c' "$out_dir/$base.probe" \
-        && "$CC" -std=c99 -w -o "$out_dir/$base" "$out_dir/$base.c" "$harness" \
+        && "$CC" -std=c99 -w $EMIT_CFLAGS -o "$out_dir/$base" "$out_dir/$base.c" "$harness" \
             >"$out_dir/$base.cc" 2>&1 \
         && timeout 10 "$out_dir/$base" >/dev/null 2>&1; then
         pass=$((pass + 1)); echo "umir-alloc $base=pass"

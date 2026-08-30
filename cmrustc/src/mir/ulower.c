@@ -298,6 +298,9 @@ typedef struct CmUMirBuilder {
     CmUMirBlockId loop_headers[64];
     CmUMirBlockId loop_exits[64];
     unsigned int loop_depth;
+    /* Lexically active let patterns, for cleanup on early return. */
+    CmUPatId scope_patterns[256];
+    unsigned int scope_pattern_count;
 } CmUMirBuilder;
 
 /* Census: opaque statements tallied by originating expression kind, so
@@ -924,6 +927,26 @@ static int cm_umir_slice_pattern_behind_ref(const CmUMirBuilder *builder,
     return ty != NULL && (ty->kind == CM_TY_REF || ty->kind == CM_TY_PTR);
 }
 
+/* The rvalue that reads payload slot for the sub-pattern `sub_id` of
+ * `pat_id`: the slot's address when the scrutinee sits behind a reference
+ * and the sub-pattern binds by reference (default binding modes: `match
+ * self { Some(v) => *v }` in a `&self` method), else its value. */
+static CmUMirRvalueKind cm_umir_payload_rvalue(const CmUMirBuilder *builder,
+    CmUPatId pat_id, CmUPatId sub_id)
+{
+    const CmUPat *sub = cm_ubody_get_pat(builder->ub, sub_id);
+    if (sub == NULL) return CM_UMIR_RVALUE_SLOT;
+    /* Behind a reference tyck matched the sub-pattern against `&Field`:
+     * the slot's address is the value of that type.  An explicit `ref`
+     * binding wants the address as well. */
+    if (cm_umir_slice_pattern_behind_ref(builder, pat_id)
+        && cm_umir_slice_pattern_behind_ref(builder, sub_id))
+        return CM_UMIR_RVALUE_REF_SLOT;
+    if (sub->kind == CM_U_PAT_BINDING && sub->data.binding.by_ref)
+        return CM_UMIR_RVALUE_REF_SLOT;
+    return CM_UMIR_RVALUE_SLOT;
+}
+
 static CmUMirLocalId cm_umir_literal_local(CmUMirBuilder *builder, long v)
 {
     CmUMirLocalId local = cm_umir_new_local(builder, CM_TY_NONE);
@@ -1167,7 +1190,7 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                 builder->tb != NULL && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[pat->data.list.patterns[sub]]
                 : CM_TY_NONE);
-            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, payload, cm_umir_payload_rvalue(builder, pat_id, pat->data.list.patterns[sub]), id,
                 CM_TY_NONE, &value, 1u, sub);
             cm_umir_emit_pattern_checks(builder,
                 pat->data.list.patterns[sub], payload, id, fails, depth + 1u);
@@ -1240,7 +1263,8 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                 && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[pat->data.struct_pat.patterns[sub]]
                 : CM_TY_NONE);
-            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, payload, cm_umir_payload_rvalue(
+                    builder, pat_id, pat->data.struct_pat.patterns[sub]), id,
                 CM_TY_NONE, &value, 1u, base + sub);
             cm_umir_emit_pattern_checks(builder,
                 pat->data.struct_pat.patterns[sub], payload, id, fails,
@@ -1271,7 +1295,7 @@ static void cm_umir_emit_pattern_checks(CmUMirBuilder *builder,
                 && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[
                     pat->data.struct_pat.fields[sub].pattern] : CM_TY_NONE);
-            cm_umir_push_immediate(builder, payload, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, payload, cm_umir_payload_rvalue(builder, pat_id, pat->data.struct_pat.fields[sub].pattern), id,
                 CM_TY_NONE, &value, 1u,
                 (index >= 0 ? 1u : 0u) + (uint32_t)slot);
             cm_umir_emit_pattern_checks(builder,
@@ -1407,7 +1431,7 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
                 && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[pat->data.list.patterns[index]]
                 : CM_TY_NONE);
-            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, slot, cm_umir_payload_rvalue(builder, pat_id, pat->data.list.patterns[index]), id,
                 CM_TY_NONE, &value, 1u, index);
             cm_umir_bind_pattern(builder, pat->data.list.patterns[index],
                 slot, id);
@@ -1463,7 +1487,8 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
                 && builder->tb->pat_types != NULL
                 ? builder->tb->pat_types[pat->data.struct_pat.patterns[index]]
                 : CM_TY_NONE);
-            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, slot, cm_umir_payload_rvalue(
+                    builder, pat_id, pat->data.struct_pat.patterns[index]), id,
                 CM_TY_NONE, &value, 1u, (variant ? 1u : 0u) + index);
             cm_umir_bind_pattern(builder,
                 pat->data.struct_pat.patterns[index], slot, id);
@@ -1491,7 +1516,7 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
                 ? builder->tb->pat_types[
                     pat->data.struct_pat.fields[index].pattern]
                 : CM_TY_NONE);
-            cm_umir_push_immediate(builder, slot, CM_UMIR_RVALUE_SLOT, id,
+            cm_umir_push_immediate(builder, slot, cm_umir_payload_rvalue(builder, pat_id, pat->data.struct_pat.fields[index].pattern), id,
                 CM_TY_NONE, &value, 1u,
                 (variant ? 1u : 0u) + (uint32_t)slot_index);
             cm_umir_bind_pattern(builder,
@@ -1517,6 +1542,69 @@ static void cm_umir_bind_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
     default:
         break;
     }
+}
+
+/* Drop every local introduced by a let pattern when its scope ends.  The
+ * renderer filters these through the type's actual drop glue, so Copy/plain
+ * scalar bindings become no-ops. */
+static void cm_umir_drop_pattern(CmUMirBuilder *builder, CmUPatId pat_id,
+    CmUExprId id)
+{
+    const CmUPat *pat = cm_ubody_get_pat(builder->ub, pat_id);
+    uint32_t index;
+    if (pat == NULL) return;
+    switch (pat->kind) {
+    case CM_U_PAT_BINDING:
+        if (pat->data.binding.subpattern != CM_U_PAT_NONE)
+            cm_umir_drop_pattern(builder, pat->data.binding.subpattern, id);
+        if (pat->data.binding.local != CM_U_LOCAL_NONE
+            && builder->tb != NULL && builder->tb->local_types != NULL) {
+            CmTyId type = builder->tb->local_types[
+                pat->data.binding.local];
+            CmUMirLocalId local = (CmUMirLocalId)(
+                1u + pat->data.binding.local);
+            CmUMirLocalId dropped = cm_umir_new_local(builder, CM_TY_NONE);
+            cm_umir_push_operands(builder, dropped,
+                CM_UMIR_RVALUE_SCOPE_DROP,
+                id, type, &local, 1u);
+        }
+        break;
+    case CM_U_PAT_TUPLE:
+    case CM_U_PAT_SLICE:
+        for (index = pat->data.list.pattern_count; index > 0u; --index)
+            cm_umir_drop_pattern(builder,
+                pat->data.list.patterns[index - 1u], id);
+        break;
+    case CM_U_PAT_OR:
+        /* Every alternative names the same bindings. */
+        if (pat->data.list.pattern_count != 0u)
+            cm_umir_drop_pattern(builder, pat->data.list.patterns[0], id);
+        break;
+    case CM_U_PAT_TUPLE_STRUCT:
+        for (index = pat->data.struct_pat.pattern_count; index > 0u; --index)
+            cm_umir_drop_pattern(builder,
+                pat->data.struct_pat.patterns[index - 1u], id);
+        break;
+    case CM_U_PAT_STRUCT:
+        for (index = pat->data.struct_pat.field_count; index > 0u; --index)
+            cm_umir_drop_pattern(builder,
+                pat->data.struct_pat.fields[index - 1u].pattern, id);
+        break;
+    case CM_U_PAT_REF:
+        cm_umir_drop_pattern(builder, pat->data.ref.pattern, id);
+        break;
+    default:
+        break;
+    }
+}
+
+static void cm_umir_drop_active_scopes(CmUMirBuilder *builder,
+    CmUExprId id)
+{
+    unsigned int index;
+    for (index = builder->scope_pattern_count; index > 0u; --index)
+        cm_umir_drop_pattern(builder, builder->scope_patterns[index - 1u],
+            id);
 }
 
 /* Branch on whether `value` matches `pat`: a variant pattern switches on
@@ -1693,6 +1781,41 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     }
     case CM_U_EXPR_BINARY: {
         CmUMirLocalId operands[2];
+        if (expr->data.binary.op == CM_U_BINARY_AND
+            || expr->data.binary.op == CM_U_BINARY_OR) {
+            /* Short-circuit: the right operand runs only when the left
+             * leaves the result open (a let chain's later operands read
+             * the bindings of an earlier `let`). */
+            int is_and = expr->data.binary.op == CM_U_BINARY_AND;
+            CmUMirLocalId left = cm_umir_emit_expr(builder,
+                expr->data.binary.left);
+            CmUMirBlockId rest = cm_umir_new_block(builder);
+            CmUMirBlockId done = cm_umir_new_block(builder);
+            CmUMirBlockId join = cm_umir_new_block(builder);
+            CmUMirBlock *current = (CmUMirBlock *)cm_vec_at(
+                &builder->body->blocks, builder->current);
+            if (current != NULL) {
+                current->terminator = CM_UMIR_TERMINATOR_SWITCH_BOOL;
+                current->condition = left;
+                current->true_target = is_and ? rest : done;
+                current->false_target = is_and ? done : rest;
+            }
+            builder->current = rest;
+            {
+                CmUMirLocalId right = cm_umir_emit_expr(builder,
+                    expr->data.binary.right);
+                cm_umir_push_operands(builder, destination,
+                    CM_UMIR_RVALUE_LOCAL, expr->data.binary.right, type,
+                    &right, 1u);
+            }
+            cm_umir_seal_goto(builder, join);
+            builder->current = done;
+            cm_umir_push_immediate(builder, destination,
+                CM_UMIR_RVALUE_LITERAL, id, type, NULL, 0u, is_and ? 0u : 1u);
+            cm_umir_seal_goto(builder, join);
+            builder->current = join;
+            break;
+        }
         operands[0] = cm_umir_emit_expr(builder, expr->data.binary.left);
         operands[1] = cm_umir_emit_expr(builder, expr->data.binary.right);
         cm_umir_push_operands(builder, destination, CM_UMIR_RVALUE_BINARY,
@@ -2300,6 +2423,9 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                 cm_umir_expr_type(builder, expr->data.flow.value), &value,
                 1u);
         }
+        /* Rust drops every still-live lexical binding before returning.
+         * The renderer currently limits this to direct RAII destructors. */
+        cm_umir_drop_active_scopes(builder, id);
         current = (CmUMirBlock *)cm_vec_at(&builder->body->blocks,
             builder->current);
         if (current != NULL)
@@ -2312,6 +2438,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
     }
     case CM_U_EXPR_BLOCK: {
         uint32_t index;
+        unsigned int scope_start = builder->scope_pattern_count;
         for (index = 0u; index < expr->data.block.statement_count
                 && builder->blocked == NULL; ++index) {
             const CmUStmt *stmt = cm_ubody_get_stmt(builder->ub,
@@ -2345,6 +2472,12 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                             stmt->data.let_stmt.pattern, init_local,
                             stmt->data.let_stmt.initializer);
                     }
+                    if (builder->scope_pattern_count
+                            < sizeof(builder->scope_patterns)
+                                / sizeof(builder->scope_patterns[0]))
+                        builder->scope_patterns[
+                            builder->scope_pattern_count++] =
+                            stmt->data.let_stmt.pattern;
                 }
             } else if (stmt->kind == CM_U_STMT_EXPR) {
                 (void)cm_umir_emit_expr(builder,
@@ -2359,6 +2492,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
             cm_umir_push_operands(builder, destination,
                 CM_UMIR_RVALUE_LOCAL, expr->data.block.tail, type, &tail,
                 1u);
+        }
+        /* Locals leave scope after the tail value has been captured. */
+        if (builder->blocked == NULL) {
+            while (builder->scope_pattern_count > scope_start)
+                cm_umir_drop_pattern(builder, builder->scope_patterns[
+                    --builder->scope_pattern_count], id);
+        } else {
+            builder->scope_pattern_count = scope_start;
         }
         break;
     }
@@ -2654,8 +2795,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                             && sub->data.binding.local != CM_U_LOCAL_NONE)
                             cm_umir_push_immediate(builder,
                                 (CmUMirLocalId)(1u + sub->data.binding.local),
-                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
-                                &scrutinee, 1u, 1u + position);
+                                cm_umir_payload_rvalue(builder,
+                                    expr->data.match_expr.arms[arm].pattern,
+                                    pat->data.struct_pat.patterns[position]),
+                                id, CM_TY_NONE, &scrutinee, 1u,
+                                1u + position);
                         else if (sub != NULL && sub->kind != CM_U_PAT_WILD
                             && sub->kind != CM_U_PAT_REST) {
                             /* `Some(&v)`, `Some((a, b))`: the payload slot
@@ -2667,8 +2811,11 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                                     pat->data.struct_pat.patterns[position]]
                                 : CM_TY_NONE);
                             cm_umir_push_immediate(builder, payload,
-                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
-                                &scrutinee, 1u, 1u + position);
+                                cm_umir_payload_rvalue(builder,
+                                    expr->data.match_expr.arms[arm].pattern,
+                                    pat->data.struct_pat.patterns[position]),
+                                id, CM_TY_NONE, &scrutinee, 1u,
+                                1u + position);
                             cm_umir_bind_pattern(builder,
                                 pat->data.struct_pat.patterns[position],
                                 payload, id);
@@ -2688,8 +2835,12 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                             && slot >= 0)
                             cm_umir_push_immediate(builder,
                                 (CmUMirLocalId)(1u + sub->data.binding.local),
-                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
-                                &scrutinee, 1u, 1u + (uint32_t)slot);
+                                cm_umir_payload_rvalue(builder,
+                                    expr->data.match_expr.arms[arm].pattern,
+                                    pat->data.struct_pat.fields[field]
+                                        .pattern),
+                                id, CM_TY_NONE, &scrutinee, 1u,
+                                1u + (uint32_t)slot);
                         else if (sub != NULL && sub->kind != CM_U_PAT_WILD
                             && sub->kind != CM_U_PAT_REST && slot >= 0) {
                             CmUMirLocalId payload = cm_umir_new_local(
@@ -2699,8 +2850,12 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                                     pat->data.struct_pat.fields[field].pattern]
                                 : CM_TY_NONE);
                             cm_umir_push_immediate(builder, payload,
-                                CM_UMIR_RVALUE_SLOT, id, CM_TY_NONE,
-                                &scrutinee, 1u, 1u + (uint32_t)slot);
+                                cm_umir_payload_rvalue(builder,
+                                    expr->data.match_expr.arms[arm].pattern,
+                                    pat->data.struct_pat.fields[field]
+                                        .pattern),
+                                id, CM_TY_NONE, &scrutinee, 1u,
+                                1u + (uint32_t)slot);
                             cm_umir_bind_pattern(builder,
                                 pat->data.struct_pat.fields[field].pattern,
                                 payload, id);
@@ -2712,6 +2867,14 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
                         (CmUMirLocalId)(1u + pat->data.binding.local),
                         CM_UMIR_RVALUE_LOCAL, expr->data.match_expr.scrutinee,
                         CM_TY_NONE, &scrutinee, 1u);
+                } else if (pat->kind == CM_U_PAT_TUPLE
+                    || pat->kind == CM_U_PAT_REF) {
+                    /* An irrefutable tuple arm (`assert_eq!`'s `match
+                     * (&a, &b) { (left_val, right_val) => .. }`): the
+                     * irrefutable binder extracts the element slots. */
+                    cm_umir_bind_pattern(builder,
+                        expr->data.match_expr.arms[arm].pattern, scrutinee,
+                        id);
                 }
             }
             if (pat != NULL && entries < capacity) {

@@ -74,6 +74,10 @@ typedef enum CmUMirRvalueKind {
     CM_UMIR_RVALUE_SLICE_LEN,     /* length of the slice / array operands[0] (through references) */
     CM_UMIR_RVALUE_STATIC_ADDR,   /* address of the static item the path expr names */
     CM_UMIR_RVALUE_DROP,          /* drop glue for the temporary operands[0] */
+    CM_UMIR_RVALUE_SCOPE_DROP,    /* conservative fall-through local drop;
+                                   * direct RAII Drop impls only */
+    CM_UMIR_RVALUE_REF_SLOT,      /* &operands[0][immediate]: payload slot address
+                                   * (a by-reference binding behind a reference) */
     CM_UMIR_RVALUE_SUBSLICE,      /* operands[0][range]: a fresh [data, len] pair;
                                      immediate = range form (1 from, 2 to, 3 range,
                                      4 full, 5 inclusive, 6 to-inclusive) */

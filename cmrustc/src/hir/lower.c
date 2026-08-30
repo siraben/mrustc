@@ -11273,6 +11273,8 @@ static int cm_lower_item_header(CmLowerState *state, CmAstItemId ast_item_id,
     out_item->definition = record->definition;
     out_item->owner_module = record->owner_module;
     out_item->parent_definition = record->parent_definition;
+    out_item->body_owner = record->body_local ? record->body_owner
+        : cm_hir_def_id_none();
     out_item->is_specializable = ast_item->is_default;
     out_item->name = record->hir_name;
     out_item->span = span;

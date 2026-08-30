@@ -657,6 +657,10 @@ typedef struct CmHirItem {
     CmHirModuleId owner_module;
     /* Non-none only for a function, const, or type alias in a trait/impl. */
     CmHirDefId parent_definition;
+    /* Outermost enclosing function for an item declared inside a body
+     * (`union Data` and `fn do_call` in std's `panicking::try`); none for
+     * module-level and associated items. */
+    CmHirDefId body_owner;
     /*
      * An impl-associated `default fn/type/const` may be overridden by a
      * more-specific impl.  This is mrustc's per-ImplEnt marker and the

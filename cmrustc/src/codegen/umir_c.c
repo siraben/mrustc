@@ -148,8 +148,10 @@ CmUMirCEmitResult cm_umir_c_emit_dry(const CmUMirSet *umir,
                     case CM_UMIR_RVALUE_STATIC_ADDR:
                     case CM_UMIR_RVALUE_SUBSLICE:
                     case CM_UMIR_RVALUE_DROP:
+                    case CM_UMIR_RVALUE_SCOPE_DROP:
                     case CM_UMIR_RVALUE_VARIANT:
                     case CM_UMIR_RVALUE_SLOT:
+                    case CM_UMIR_RVALUE_REF_SLOT:
                     case CM_UMIR_RVALUE_STORE_FIELD:
                     case CM_UMIR_RVALUE_STORE_INDEX:
                     case CM_UMIR_RVALUE_STORE_DEREF:
@@ -1393,9 +1395,18 @@ static const char *cm_umir_c_intrinsic_shim(const CmInternedString *name)
         { "black_box", "(long long a) { return a; }" },
         { "assume", "(long long a) { (void)a; return 0; }" },
         { "forget", "(long long a) { (void)a; return 0; }" },
+        /* `#[lang = "drop_in_place"]` has an intentionally recursive Rust
+         * body: rustc replaces it with compiler drop glue.  Our DROP rvalue
+         * already invokes the concrete Drop impl and walks struct fields. */
+        { "drop_in_place", "(long long p) { (void)p; return 0; }" },
         { "caller_location", "(void) { return 0; }" },
         { "abort", "(void) { abort(); return 0; }" },
         { "unreachable", "(void) { abort(); return 0; }" },
+        /* No unwinding: the try fn runs to completion and the catch fn
+         * is never invoked (`std::panicking::try` then reads `data.r`). */
+        { "catch_unwind", "(long long f, long long d, long long c) { "
+            "(void)c; ((long long (*)(long long))(intptr_t)f)(d); "
+            "return 0; }" },
     };
     size_t scan;
     if (name == NULL) return NULL;
@@ -1765,6 +1776,14 @@ static CmHirDefId cm_umir_c_impl_method(const CmHirContext *hir,
 static CmUMirProgram *cm_umir_c_active_program;
 /* The crate compiled last: its `fn main` is the program's entry. */
 static CmHirCrateId cm_umir_c_root_crate;
+/* The program's `fn main` (none when absent) and, when std provides
+ * it, the `#[lang = "start"]` instance for `T = ()` that wraps it. */
+static int cm_umir_c_have_root_main;
+static CmHirDefId cm_umir_c_root_main_def;
+static long cm_umir_c_lang_start_instance = -1;
+/* Set when the lang_start instance rendered as a stub: the entry then
+ * calls `main` directly rather than a runtime that returns at once. */
+static int cm_umir_c_lang_start_stubbed;
 
 /* A parameterless, parentless `fn main` of the root crate. */
 static int cm_umir_c_is_root_main(const CmHirContext *hir,
@@ -3861,6 +3880,35 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_push(output, ']');
                 break;
             }
+            case CM_UMIR_RVALUE_REF_SLOT: {
+                /* The payload slot's address (a by-reference binding
+                 * behind a reference scrutinee). */
+                CmTyId base_type = cm_umir_c_local_type(body,
+                    statement->operands[0]);
+                unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                long representative = cm_umir_c_transparent_field(hir,
+                    tyck, cm_umir_c_peel(tyck, base_type));
+                if (representative >= 0) {
+                    /* A transparent wrapper is its field: the reference
+                     * itself is the field's address. */
+                    if (depth >= 1u) {
+                        cm_umir_c_render_loaded(output,
+                            statement->operands[0], depth - 1u);
+                    } else {
+                        cm_str_buf_append(output, "(long long)(intptr_t)&");
+                        cm_umir_c_render_local(output,
+                            statement->operands[0]);
+                    }
+                    break;
+                }
+                cm_str_buf_append(output, "(long long)(intptr_t)&");
+                cm_umir_c_render_base(output, statement->operands[0], depth);
+                cm_str_buf_push(output, '[');
+                cm_umir_c_render_number(output,
+                    (unsigned long)statement->immediate);
+                cm_str_buf_push(output, ']');
+                break;
+            }
             case CM_UMIR_RVALUE_REF:
                 /* A reference is the address of the referent's slot. */
                 cm_str_buf_append(output, "(long long)(intptr_t)&");
@@ -4508,16 +4556,41 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_str_buf_append(output, "_addr(); }");
                 break;
             }
-            case CM_UMIR_RVALUE_DROP: {
+            case CM_UMIR_RVALUE_DROP:
+            case CM_UMIR_RVALUE_SCOPE_DROP: {
                 /* The temporary's drop glue; `&mut self` is its slot. */
                 CmHirDefId drop_decl = cm_umir_c_drop_fn(hir);
                 CmTyId dropped_type = cm_umir_c_subst(statement->type);
+                int scope_drop = statement->kind
+                    == CM_UMIR_RVALUE_SCOPE_DROP;
+                int allowed = 1;
                 CmStrBuf address;
+                if (scope_drop) {
+                    /* General local drops need move-path flags.  Until those
+                     * land, run only an outer type's own RAII destructor and
+                     * exclude Vec, whose value is routinely moved through
+                     * return/aggregate temporaries in the lenient u-MIR. */
+                    CmHirDefId own = cm_umir_c_drop_impl(hir, tyck,
+                        drop_decl, dropped_type);
+                    const CmTy *dt = dropped_type == CM_TY_NONE ? NULL
+                        : cm_ty_get((CmTyArena *)&tyck->arena,
+                            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                dropped_type));
+                    const CmHirItem *type_item = dt == NULL
+                            || dt->kind != CM_TY_ADT ? NULL
+                        : cm_umir_c_item_of(hir, dt->def);
+                    const CmInternedString *type_name = type_item == NULL
+                        ? NULL : cm_interner_get(&hir->strings,
+                            type_item->name);
+                    allowed = !cm_hir_def_id_is_none(own)
+                        && !(type_name != NULL && type_name->len == 3u
+                            && memcmp(type_name->bytes, "Vec", 3u) == 0);
+                }
                 cm_str_buf_init(&address);
                 cm_str_buf_append(&address, "(long long)(intptr_t)&");
                 cm_umir_c_render_local(&address, statement->operands[0]);
                 cm_str_buf_append(output, "0; ");
-                if (!cm_hir_def_id_is_none(drop_decl)
+                if (allowed && !cm_hir_def_id_is_none(drop_decl)
                     && cm_umir_c_type_needs_drop(hir, tyck, drop_decl,
                         dropped_type, 0u))
                     cm_umir_c_render_drop(output, hir, tyck, drop_decl,
@@ -4940,8 +5013,28 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                 cm_umir_c_render_local(output, block->condition);
                 cm_str_buf_append(output, ") {");
             } else {
-                cm_str_buf_append(output,
-                    "switch ((int)((long long *)(intptr_t)");
+                /* A `&Enum` scrutinee (`match self` in a `&self` method,
+                 * default binding modes): the discriminant sits behind
+                 * the reference, as the payload slots already assume. */
+                int behind_ref = 0;
+                if (cm_umir_c_active_body != NULL) {
+                    CmTyArena *arena = (CmTyArena *)&tyck->arena;
+                    CmTyId ct = cm_umir_c_subst(cm_umir_c_local_type(
+                        cm_umir_c_active_body, block->condition));
+                    const CmTy *t = ct == CM_TY_NONE ? NULL
+                        : cm_ty_get(arena, cm_ty_resolve(arena, ct));
+                    if (t != NULL && (t->kind == CM_TY_REF
+                            || t->kind == CM_TY_PTR) && t->count != 0u) {
+                        const CmTy *pointee = cm_ty_get(arena,
+                            cm_ty_resolve(arena, t->children[0]));
+                        behind_ref = pointee != NULL
+                            && pointee->kind == CM_TY_ADT;
+                    }
+                }
+                cm_str_buf_append(output, behind_ref
+                    ? "switch ((int)((long long *)(intptr_t)"
+                        "*(long long *)(intptr_t)"
+                    : "switch ((int)((long long *)(intptr_t)");
                 cm_umir_c_render_local(output, block->condition);
                 cm_str_buf_append(output, ")[0]) {");
             }
@@ -5053,14 +5146,6 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
         cm_str_buf_append(output, ");\n}\n");
     }
     cm_umir_c_active_body = NULL;
-    /* The root crate's `fn main`: the C entry point calls it (std's
-     * runtime setup -- lang_start -- is skipped for now). */
-    if (body->closure_expr == CM_U_EXPR_NONE && owner != NULL
-        && cm_umir_c_is_root_main(hir, owner, def)) {
-        cm_str_buf_append(output, "int main(void)\n{\n    ");
-        cm_umir_c_render_symbol(output, def);
-        cm_str_buf_append(output, "();\n    return 0;\n}\n");
-    }
     /* `#[no_mangle]` exports: an ABI-typed wrapper with the item name. */
     if (body->closure_expr == CM_U_EXPR_NONE && owner != NULL
         && owner->kind == CM_HIR_ITEM_FUNCTION
@@ -5110,6 +5195,153 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
     return complete;
 }
 
+/* CMRUSTC_UMIR_FORCE_STUB="module::fn,module::fn": functions the host
+ * replaces with a stub even though they lowered (the lenient runtime:
+ * std's `stack_overflow::init` needs C-layout `sigaction` / `stack_t`
+ * structs the slot representation cannot yet pass to libc). */
+static int cm_umir_c_forced_stub(const CmHirContext *hir, CmHirDefId def)
+{
+    const char *list = getenv("CMRUSTC_UMIR_FORCE_STUB");
+    const CmHirItem *item;
+    const CmHirModule *module;
+    const CmInternedString *name;
+    const CmInternedString *mname;
+    if (list == NULL || *list == 0) return 0;
+    item = cm_umir_c_item_of(hir, def);
+    if (item == NULL) return 0;
+    name = cm_interner_get(&hir->strings, item->name);
+    module = cm_hir_get_module(hir, item->owner_module);
+    mname = module == NULL ? NULL
+        : cm_interner_get(&hir->strings, module->name);
+    if (name == NULL || mname == NULL) return 0;
+    (void)mname;
+    while (*list != 0) {
+        /* `a::b::fn`: the fn name, then each module segment against the
+         * owner module and its parents (`stack_overflow::imp::init`). */
+        const char *entry = list;
+        const char *end;
+        const char *cursor;
+        const CmHirModule *walk = module;
+        int matched = 1;
+        while (*list != 0 && *list != ',') list += 1;
+        end = list;
+        if (*list == ',') list += 1;
+        cursor = end;
+        while (cursor > entry && !(cursor[-1] == ':' && cursor - 2 >= entry
+                && cursor[-2] == ':')) cursor -= 1;
+        if (cursor == entry) continue; /* no module segment */
+        if ((size_t)(end - cursor) != name->len
+            || memcmp(cursor, name->bytes, name->len) != 0) continue;
+        end = cursor - 2;
+        while (matched && end > entry) {
+            const char *seg_start = end;
+            const CmInternedString *wname;
+            while (seg_start > entry && !(seg_start[-1] == ':'
+                    && seg_start - 2 >= entry && seg_start[-2] == ':'))
+                seg_start -= 1;
+            wname = walk == NULL ? NULL
+                : cm_interner_get(&hir->strings, walk->name);
+            if (wname == NULL || (size_t)(end - seg_start) != wname->len
+                || memcmp(seg_start, wname->bytes, wname->len) != 0) {
+                matched = 0;
+                break;
+            }
+            walk = cm_hir_get_module(hir, walk->parent);
+            end = seg_start == entry ? entry : seg_start - 2;
+        }
+        if (matched) return 1;
+    }
+    return 0;
+}
+
+/* Host symbols the prelude prototypes itself (`void abort(void)`,
+ * `void *malloc(unsigned long)`, ...): a wrapper re-declaring them as
+ * `long long NAME()` would conflict, so those forward with the C types.
+ * Returns 1 when `host` was one of them. */
+static int cm_umir_c_render_prelude_foreign(CmStrBuf *output,
+    const char *host, size_t host_len, uint32_t params)
+{
+    if (host_len == 5u && memcmp(host, "abort", 5u) == 0) {
+        cm_str_buf_append(output, ") { abort(); return 0; } /* foreign */\n");
+        return 1;
+    }
+    if (host_len == 6u && memcmp(host, "malloc", 6u) == 0 && params == 1u) {
+        cm_str_buf_append(output, ") { return (long long)(intptr_t)"
+            "malloc((unsigned long)p0); } /* foreign */\n");
+        return 1;
+    }
+    if (host_len == 6u && memcmp(host, "calloc", 6u) == 0 && params == 2u) {
+        cm_str_buf_append(output, ") { return (long long)(intptr_t)"
+            "calloc((unsigned long)p0, (unsigned long)p1); } /* foreign */\n");
+        return 1;
+    }
+    if (host_len == 7u && memcmp(host, "memmove", 7u) == 0 && params == 3u) {
+        cm_str_buf_append(output, ") { return (long long)(intptr_t)"
+            "memmove((void *)(intptr_t)p0, (const void *)(intptr_t)p1, "
+            "(unsigned long)p2); } /* foreign */\n");
+        return 1;
+    }
+    if (host_len == 6u && memcmp(host, "memset", 6u) == 0 && params == 3u) {
+        cm_str_buf_append(output, ") { return (long long)(intptr_t)"
+            "memset((void *)(intptr_t)p0, (int)p1, (unsigned long)p2); }"
+            " /* foreign */\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Arrays in the slot runtime keep their length in the word immediately
+ * before the data pointer.  Give allocations made through Rust's global
+ * allocator the same one-word prefix, and translate back to the host base
+ * for realloc/dealloc.  This also makes a boxed array handed to Vec safe to
+ * free after its data pointer has crossed the Rust allocation APIs. */
+static int cm_umir_c_render_rust_allocator(CmStrBuf *output,
+    const char *host, size_t host_len, uint32_t params)
+{
+    if (host_len == 12u && memcmp(host, "__rust_alloc", 12u) == 0
+        && params == 2u) {
+        cm_str_buf_append(output, ") { long long ");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(); long long b = (long long)");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(p0 + 8, p1); if (!b) return 0; "
+            "*(long long *)(intptr_t)b = 0; return b + 8; }"
+            " /* rust allocator */\n");
+        return 1;
+    }
+    if (host_len == 19u && memcmp(host, "__rust_alloc_zeroed", 19u) == 0
+        && params == 2u) {
+        cm_str_buf_append(output, ") { long long ");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(); long long b = (long long)");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(p0 + 8, p1); return b ? b + 8 : 0; }"
+            " /* rust allocator */\n");
+        return 1;
+    }
+    if (host_len == 14u && memcmp(host, "__rust_realloc", 14u) == 0
+        && params == 4u) {
+        cm_str_buf_append(output, ") { long long ");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(); long long b = (long long)");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(p0 ? p0 - 8 : 0, p1 + 8, p2, p3 + 8); "
+            "return b ? b + 8 : 0; } /* rust allocator */\n");
+        return 1;
+    }
+    if (host_len == 14u && memcmp(host, "__rust_dealloc", 14u) == 0
+        && params == 3u) {
+        cm_str_buf_append(output, ") { void ");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(); if (p0) ");
+        cm_str_buf_append_n(output, host, host_len);
+        cm_str_buf_append(output, "(p0 - 8, p1 + 8, p2); return 0; }"
+            " /* rust allocator */\n");
+        return 1;
+    }
+    return 0;
+}
+
 size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     const CmUMirSet *umir, const CmUBodySet *ubodies,
     const CmTyckSet *tyck)
@@ -5133,7 +5365,11 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     program.tyck = tyck;
     if (getenv("CMRUSTC_UMIR_TRACE") != NULL)
         cm_str_buf_append(output, "#include <stdio.h>\n");
-    cm_str_buf_append(output, "#include <stdint.h>\nvoid abort(void);\n"
+    /* Slots are `long long` and are read back through narrower and
+     * pointer types: the unit relies on `-fno-strict-aliasing` (the
+     * pragma covers gcc; drivers pass the flag for every host cc). */
+    cm_str_buf_append(output, "#pragma GCC optimize(\"no-strict-aliasing\")\n"
+        "#include <stdint.h>\nvoid abort(void);\n"
         "void *malloc(unsigned long);\n"
         "void *calloc(unsigned long, unsigned long);\n"
         "void *memmove(void *, const void *, unsigned long);\n"
@@ -5187,6 +5423,31 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                 != 0u) continue;
         (void)cm_umir_c_instance(&program, hir_body->origin.definition,
             CM_U_EXPR_NONE, NULL, 0u, CM_TY_NONE);
+        if (cm_umir_c_is_root_main(hir, owner, hir_body->origin.definition)) {
+            cm_umir_c_have_root_main = 1;
+            cm_umir_c_root_main_def = hir_body->origin.definition;
+        }
+    }
+    cm_umir_c_lang_start_instance = -1;
+    cm_umir_c_lang_start_stubbed = 0;
+    if (cm_umir_c_have_root_main) {
+        /* std's `#[lang = "start"] fn lang_start<T: Termination>(main:
+         * fn() -> T, argc, argv, sigpipe) -> isize` wraps `main` with the
+         * runtime's setup (args, panics, exit code); instanced for `()`. */
+        size_t scan;
+        for (scan = 0u; scan < hir->items.len; ++scan) {
+            const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+                &hir->items, scan);
+            CmTyId unit_type;
+            if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+                || !cm_umir_c_item_has_attribute(hir, item, "lang = \"start\""))
+                continue;
+            unit_type = tyck->arena.unit;
+            cm_umir_c_lang_start_instance = cm_umir_c_instance(&program,
+                item->definition, CM_U_EXPR_NONE, &unit_type, 1u,
+                CM_TY_NONE);
+            break;
+        }
     }
     cm_umir_c_active_program = &program;
     cm_str_buf_init(&bodies);
@@ -5200,12 +5461,21 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
             &program.instances, index);
         const CmUMirBody *body;
         const CmUBody *ub;
+        const CmHirItem *render_item;
+        int builtin_drop_in_place;
         if (instance == NULL || instance->rendered) continue;
         instance->rendered = 1;
         body = cm_umir_c_umir_body(umir, hir, instance->definition,
             instance->closure_expr);
         ub = body == NULL ? NULL : cm_ubody_get(ubodies, body->source);
-        if (body == NULL || ub == NULL) {
+        render_item = cm_umir_c_item_of(hir, instance->definition);
+        builtin_drop_in_place = render_item != NULL
+            && render_item->kind == CM_HIR_ITEM_FUNCTION
+            && cm_umir_c_item_has_attribute(hir, render_item,
+                "lang = \"drop_in_place\"");
+        if (body == NULL || ub == NULL
+            || cm_umir_c_forced_stub(hir, instance->definition)
+            || builtin_drop_in_place) {
             /* No complete u-MIR body (partial typeck, declaration without
              * a default, unsupported construct): emit a stub so the unit
              * links; the census counts these as the remaining frontier. */
@@ -5218,11 +5488,14 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
             }
             {
                 /* Name and reason, so the census names the frontier. */
-                const CmHirItem *stub_item = cm_umir_c_item_of(hir,
-                    instance->definition);
+                const CmHirItem *stub_item = render_item;
                 const CmInternedString *stub_name = stub_item == NULL
                     ? NULL : cm_interner_get(&hir->strings, stub_item->name);
-                const char *reason = "no u-MIR body";
+                const char *reason = builtin_drop_in_place
+                    ? "compiler drop glue"
+                    : cm_umir_c_forced_stub(hir, instance->definition)
+                        ? "forced (CMRUSTC_UMIR_FORCE_STUB)"
+                        : "no u-MIR body";
                 size_t scan;
                 for (scan = 0u; scan < umir->bodies.len; ++scan) {
                     const CmUMirBody *candidate = (const CmUMirBody *)
@@ -5299,23 +5572,47 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                         shims += 1u;
                         continue;
                     }
-                    cm_str_buf_append(output, ") { long long ");
-                    cm_str_buf_append_n(output, host, host_len);
-                    cm_str_buf_append(output, "(); return (long long)");
-                    cm_str_buf_append_n(output, host, host_len);
-                    cm_str_buf_push(output, '(');
-                    for (fp = 0u; fp < params; ++fp) {
-                        if (fp != 0u) cm_str_buf_append(output, ", ");
-                        cm_str_buf_push(output, 'p');
-                        cm_umir_c_render_number(output, (unsigned long)fp);
+                    if (cm_umir_c_render_rust_allocator(output, host,
+                            host_len, params)) {
+                        shims += 1u;
+                        continue;
                     }
-                    cm_str_buf_append(output, "); } /* foreign */\n");
+                    if (cm_umir_c_render_prelude_foreign(output, host,
+                            host_len, params)) {
+                        shims += 1u;
+                        continue;
+                    }
+                    {
+                        const CmHirType *ret = cm_hir_get_type(hir, stub_item
+                            ->data.function_item.signature.return_type);
+                        int never = ret != NULL
+                            && ret->kind == CM_HIR_TYPE_NEVER_KIND;
+                        /* `fn exit(code) -> !` binds a `void` host symbol:
+                         * its value cannot be cast, so the wrapper calls it
+                         * and then traps. */
+                        cm_str_buf_append(output, never ? ") { void "
+                            : ") { long long ");
+                        cm_str_buf_append_n(output, host, host_len);
+                        cm_str_buf_append(output, never ? "(); "
+                            : "(); return (long long)");
+                        cm_str_buf_append_n(output, host, host_len);
+                        cm_str_buf_push(output, '(');
+                        for (fp = 0u; fp < params; ++fp) {
+                            if (fp != 0u) cm_str_buf_append(output, ", ");
+                            cm_str_buf_push(output, 'p');
+                            cm_umir_c_render_number(output, (unsigned long)fp);
+                        }
+                        cm_str_buf_append(output, never
+                            ? "); abort(); return 0; } /* foreign never */\n"
+                            : "); } /* foreign */\n");
+                    }
                     shims += 1u;
                     continue;
                 }
                 if (stub_item != NULL && stub_item->kind
                         == CM_HIR_ITEM_FUNCTION
-                    && stub_item->data.function_item.body == 0u) {
+                    && (stub_item->data.function_item.body == 0u
+                        || builtin_drop_in_place)) {
                     const char *shim = cm_umir_c_intrinsic_shim(stub_name);
                     reason = "declaration without body";
                     if (shim == NULL && cm_umir_c_render_typed_shim(output,
@@ -5350,6 +5647,9 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                     cm_str_buf_append_n(output,
                         (const char *)stub_name->bytes, stub_name->len);
                 cm_str_buf_append(output, " */ }\n");
+                if (cm_umir_c_lang_start_instance >= 0
+                    && (long)index == cm_umir_c_lang_start_instance)
+                    cm_umir_c_lang_start_stubbed = 1;
                 if (getenv("CMRUSTC_UMIR_DEBUG") != NULL)
                     fprintf(stderr, "UMIR stub %.*s reason=%s def=%u:%u\n",
                         stub_name == NULL ? 1 : (int)stub_name->len,
@@ -5456,6 +5756,38 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
     cm_str_buf_append_n(output, vtables.data, vtables.len);
     cm_str_buf_destroy(&bodies);
     cm_str_buf_destroy(&vtables);
+    if (cm_umir_c_have_root_main) {
+        /* The C entry: std's lang_start around `main` when the program
+         * has std, else `main` itself. */
+        if (cm_umir_c_lang_start_instance >= 0
+            && !cm_umir_c_lang_start_stubbed) {
+            const CmUMirInstance *start = (const CmUMirInstance *)
+                cm_vec_at_const(&program.instances,
+                    (size_t)cm_umir_c_lang_start_instance);
+            cm_str_buf_append(output, "int main(int argc, char **argv)\n{\n"
+                "    long long ");
+            cm_umir_c_render_symbol(output, start->definition);
+            cm_str_buf_append(output, "_i");
+            cm_umir_c_render_number(output, (unsigned long)start->index);
+            cm_str_buf_append(output, "();\n    long long ");
+            cm_umir_c_render_symbol(output, cm_umir_c_root_main_def);
+            cm_str_buf_append(output, "();\n    return (int)");
+            cm_umir_c_render_symbol(output, start->definition);
+            cm_str_buf_append(output, "_i");
+            cm_umir_c_render_number(output, (unsigned long)start->index);
+            cm_str_buf_append(output, "((long long)(intptr_t)&");
+            cm_umir_c_render_symbol(output, cm_umir_c_root_main_def);
+            cm_str_buf_append(output, ", (long long)argc, "
+                "(long long)(intptr_t)argv, 0);\n}\n");
+        } else {
+            cm_str_buf_append(output, "int main(void)\n{\n    long long ");
+            cm_umir_c_render_symbol(output, cm_umir_c_root_main_def);
+            cm_str_buf_append(output, "();\n    ");
+            cm_umir_c_render_symbol(output, cm_umir_c_root_main_def);
+            cm_str_buf_append(output, "();\n    return 0;\n}\n");
+        }
+        cm_umir_c_have_root_main = 0;
+    }
     cm_umir_c_active_program = NULL;
     cm_str_buf_append(output, "/* cm_umir instances=");
     cm_umir_c_render_number(output, (unsigned long)program.instances.len);

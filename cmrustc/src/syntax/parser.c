@@ -1178,6 +1178,10 @@ static CmAstExprId cm_parser_parse_expression_bp_mode(CmParser *parser,
     int stop_after_block_like);
 static CmAstExprId cm_parser_parse_expression_without_struct(
     CmParser *parser);
+static CmAstExprId cm_parser_parse_expression_from(CmParser *parser,
+    const struct cm_token *first, CmAstExprId left,
+    unsigned int minimum_precedence, int allow_struct_literal,
+    int stop_after_block_like);
 static CmAstExprId cm_parser_parse_block(CmParser *parser);
 static CmAstExprId cm_parser_parse_block_mode(CmParser *parser,
     const struct cm_token *first, int is_unsafe, int is_const);
@@ -1814,6 +1818,38 @@ static CmAstExprId cm_parser_parse_control_flow(CmParser *parser,
     return cm_ast_add_expr(parser->ast, &expression);
 }
 
+/* After `if let` / `while let`: the pattern and its scrutinee, parsed
+ * like a `let` condition expression (stopping before `&&`).  A let
+ * chain (`if let Some(t) = t && t.ok()`, Rust 2024) becomes a plain
+ * `LET && ..` condition with no pattern on the if/while node: `LET` is
+ * a boolean whose pattern binds on success. */
+static void cm_parser_parse_let_condition(CmParser *parser,
+    CmAstPatternId *out_pattern, CmAstExprId *out_condition)
+{
+    const struct cm_token *let_first = cm_parser_previous(parser);
+    CmAstPatternId pattern = cm_parser_parse_pattern(parser);
+    CmAstExprId scrutinee;
+    (void)cm_parser_expect(parser, CM_TOKEN_EQ,
+        "expected '=' in let condition");
+    scrutinee = cm_parser_parse_expression_bp_mode(parser, 5u, 0, 0);
+    if (cm_parser_kind(parser) == CM_TOKEN_AMP_AMP) {
+        CmAstExpr let_expr;
+        CmAstExprId let_id;
+        memset(&let_expr, 0, sizeof(let_expr));
+        let_expr.kind = CM_AST_EXPR_LET;
+        let_expr.data.let_expr.pattern = pattern;
+        let_expr.data.let_expr.initializer = scrutinee;
+        let_expr.span = cm_parser_span_from(parser, let_first);
+        let_id = cm_ast_add_expr(parser->ast, &let_expr);
+        *out_pattern = CM_AST_PATTERN_NONE;
+        *out_condition = cm_parser_parse_expression_from(parser, let_first,
+            let_id, 1u, 0, 0);
+        return;
+    }
+    *out_pattern = pattern;
+    *out_condition = scrutinee;
+}
+
 static CmAstExprId cm_parser_parse_if(CmParser *parser,
     const struct cm_token *first)
 {
@@ -1822,12 +1858,13 @@ static CmAstExprId cm_parser_parse_if(CmParser *parser,
     memset(&expression, 0, sizeof(expression));
     expression.kind = CM_AST_EXPR_IF;
     if (cm_parser_eat_keyword(parser, CM_KW_LET)) {
-        expression.data.if_expr.pattern = cm_parser_parse_pattern(parser);
-        (void)cm_parser_expect(parser, CM_TOKEN_EQ,
-            "expected '=' in if let expression");
+        cm_parser_parse_let_condition(parser,
+            &expression.data.if_expr.pattern,
+            &expression.data.if_expr.condition);
+    } else {
+        expression.data.if_expr.condition =
+            cm_parser_parse_expression_without_struct(parser);
     }
-    expression.data.if_expr.condition =
-        cm_parser_parse_expression_without_struct(parser);
     expression.data.if_expr.then_expr = cm_parser_parse_block(parser);
     if (cm_parser_eat_keyword(parser, CM_KW_ELSE)) {
         if (cm_parser_eat_keyword(parser, CM_KW_IF)) {
@@ -2166,13 +2203,13 @@ static CmAstExprId cm_parser_parse_prefix(CmParser *parser,
     } else if (cm_parser_eat_keyword(parser, CM_KW_WHILE)) {
         expression.kind = CM_AST_EXPR_WHILE;
         if (cm_parser_eat_keyword(parser, CM_KW_LET)) {
-            expression.data.while_expr.pattern = cm_parser_parse_pattern(
-                parser);
-            (void)cm_parser_expect(parser, CM_TOKEN_EQ,
-                "expected '=' in while let expression");
+            cm_parser_parse_let_condition(parser,
+                &expression.data.while_expr.pattern,
+                &expression.data.while_expr.condition);
+        } else {
+            expression.data.while_expr.condition =
+                cm_parser_parse_expression_without_struct(parser);
         }
-        expression.data.while_expr.condition =
-            cm_parser_parse_expression_without_struct(parser);
         expression.data.while_expr.body = cm_parser_parse_block(parser);
     } else if (cm_parser_eat_keyword(parser, CM_KW_FOR)) {
         expression.kind = CM_AST_EXPR_FOR;
@@ -2399,6 +2436,17 @@ static CmAstExprId cm_parser_parse_expression_bp_mode(CmParser *parser,
 
     first = cm_parser_token(parser);
     left = cm_parser_parse_prefix(parser, allow_struct_literal);
+    return cm_parser_parse_expression_from(parser, first, left,
+        minimum_precedence, allow_struct_literal, stop_after_block_like);
+}
+
+/* The infix continuation of `left` (parsed from `first`): postfix
+ * operators and binary operators of at least `minimum_precedence`. */
+static CmAstExprId cm_parser_parse_expression_from(CmParser *parser,
+    const struct cm_token *first, CmAstExprId left,
+    unsigned int minimum_precedence, int allow_struct_literal,
+    int stop_after_block_like)
+{
     for (;;) {
         if (stop_after_block_like
             && cm_parser_expr_is_block_like(parser, left)) {
