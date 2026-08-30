@@ -541,6 +541,7 @@ static void test_structural_aliases(void)
         "type Later<T> = Pair<T>;"
         "type Id<T> = T;"
         "type Callback<T> = fn(*const T) -> bool;"
+        "type Borrowed = unsafe fn(&u8, &mut u8) -> bool;"
         "struct Marker;"
         "struct Uses<'s> {"
         " primitive: Word,"
@@ -550,7 +551,8 @@ static void test_structural_aliases(void)
         " placeholder: Ref<'_, Marker>,"
         " forward: Forward<u16>,"
         " nested: Id<Id<Marker>>,"
-        " callback: Callback<u8>"
+        " callback: Callback<u8>,"
+        " borrowed_callback: Borrowed"
         "}";
     CmSourceSet sources;
     CmModuleGraph graph;
@@ -593,12 +595,12 @@ static void test_structural_aliases(void)
     marker = find_item(&hir, "Marker");
     forward = find_item(&hir, "Forward");
     check(uses != NULL && uses->kind == CM_HIR_ITEM_STRUCT
-        && uses->data.aggregate_item.field_count == 8u
+        && uses->data.aggregate_item.field_count == 9u
         && marker != NULL && marker->kind == CM_HIR_ITEM_STRUCT
         && forward != NULL && forward->kind == CM_HIR_ITEM_TYPE_ALIAS,
         "structural alias items or fields are missing");
     if (uses == NULL || uses->kind != CM_HIR_ITEM_STRUCT
-        || uses->data.aggregate_item.field_count != 8u || marker == NULL
+        || uses->data.aggregate_item.field_count != 9u || marker == NULL
         || forward == NULL) {
         goto cleanup;
     }
@@ -661,6 +663,13 @@ static void test_structural_aliases(void)
         check(pointee != NULL && pointee->kind == CM_HIR_TYPE_BOOL_KIND,
             "Callback<u8> did not preserve its bool return type");
     }
+
+    type = cm_hir_get_type(&hir, uses->data.aggregate_item.fields[8].type);
+    check(type != NULL && type->kind == CM_HIR_TYPE_FN_POINTER_KIND
+        && type->data.fn_pointer_type.safety == CM_HIR_UNSAFE
+        && type->data.fn_pointer_type.parameter_count == 2u
+        && type->data.fn_pointer_type.binder.lifetime_count == 2u,
+        "bound function-pointer alias did not preserve its binder");
 
     forward_type = find_generic(&hir, forward->definition,
         CM_HIR_GENERIC_TYPE);

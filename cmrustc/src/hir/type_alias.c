@@ -1069,7 +1069,14 @@ static int cm_alias_expand(CmAliasNormalizeState *state,
             CM_HIR_INVARIANT_VIOLATION);
     }
     replacement = *target_type;
-    replacement.span = source->span;
+    /* A function-pointer binder is sourced from the alias declaration and
+     * its span must remain enclosed by the function pointer's span.  Moving
+     * only the container to the application site makes valid elided/explicit
+     * bound lifetimes fail HIR validation. */
+    if (replacement.kind != CM_HIR_TYPE_FN_POINTER_KIND
+        || replacement.data.fn_pointer_type.binder.lifetime_count == 0u) {
+        replacement.span = source->span;
+    }
     return cm_alias_add_type(state, source_id, &replacement, out_type);
 }
 

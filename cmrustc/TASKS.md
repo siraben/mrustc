@@ -3368,3 +3368,23 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   functions remain the only forced std startup stubs.  Next: enter rustc's
   own crate graph and drive the first compiler binary to a self-hosted
   fixpoint.
+
+- Measured pass (M9-06, first compiler-crate rung, probe-param88):
+  `compiler/rustc_lexer` now runs as a real dependency above the complete
+  core/alloc/std stack and its vendored `memchr`, `unicode-xid`, and
+  `unicode-properties` dependencies.  `rustc_lexer::is_ident` exercises the
+  Unicode-XID tables and `Iterator::all`; the latter arrives through the
+  lenient dependency artifact as a declaration-only trait default, so the C
+  emitter now supplies its short-circuiting loop over the concrete
+  `Iterator::next` for fn-item, fn-pointer, and closure predicates.  The
+  generated 1,573,477-byte C unit has 1,732 reachable instances: 1,461 real
+  bodies, 242 shims, 29 residual stubs, and 14 vtables.  It prints
+  `rustc_lexer: true true false true` and exits 0 through real `lang_start`
+  and cleanup.  Opening `memchr` also found that applying an alias for an
+  `unsafe fn(&T, &mut U)` moved only the function-pointer container span to
+  the use site while retaining its synthesized lifetime-binder spans from
+  the declaration; alias normalization now preserves the enclosing span
+  whenever that binder is nonempty.  Gates: native suite, 136/136 standalone
+  u-MIR fixtures, core-linked 4/4 (including the new `Iterator::all`
+  semantic probe), and alloc-linked 2/2.  Next: advance through the next
+  low-dependency rustc crates toward the compiler binary.

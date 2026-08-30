@@ -6488,6 +6488,99 @@ static int cm_umir_c_render_iterator_find(CmStrBuf *output,
     return 1;
 }
 
+/* `Iterator::all` is another declaration-only default when core is loaded
+ * through the lenient dependency path.  Its semantics are a short-circuiting
+ * loop over `next`; support both an ordinary function item/pointer and the
+ * closure representation used by generated iterator adapters. */
+static int cm_umir_c_render_iterator_all(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck,
+    const CmHirItem *method, const CmUMirInstance *instance)
+{
+    const CmHirItem *trait_item;
+    const CmInternedString *trait_name;
+    const CmInternedString *method_name;
+    CmHirDefId next = cm_hir_def_id_none();
+    CmTyId predicate_type;
+    const CmTy *predicate;
+    CmStrBuf next_symbol;
+    CmStrBuf predicate_symbol;
+    size_t scan;
+    long closure_instance = -1;
+
+    if (method == NULL || method->kind != CM_HIR_ITEM_FUNCTION
+        || instance == NULL || instance->self_type == CM_TY_NONE
+        || instance->count == 0u) return 0;
+    trait_item = cm_umir_c_item_of(hir, method->parent_definition);
+    trait_name = trait_item == NULL ? NULL
+        : cm_interner_get(&hir->strings, trait_item->name);
+    method_name = cm_interner_get(&hir->strings, method->name);
+    if (trait_item == NULL || trait_item->kind != CM_HIR_ITEM_TRAIT
+        || trait_name == NULL || trait_name->len != 8u
+        || memcmp(trait_name->bytes, "Iterator", 8u) != 0
+        || method_name == NULL || method_name->len != 3u
+        || memcmp(method_name->bytes, "all", 3u) != 0) return 0;
+
+    for (scan = 0u; scan < hir->items.len; ++scan) {
+        const CmHirItem *candidate = (const CmHirItem *)cm_vec_at_const(
+            &hir->items, scan);
+        const CmInternedString *candidate_name;
+        if (candidate == NULL || candidate->kind != CM_HIR_ITEM_FUNCTION
+            || !cm_hir_def_id_equal(candidate->parent_definition,
+                trait_item->definition)) continue;
+        candidate_name = cm_interner_get(&hir->strings, candidate->name);
+        if (candidate_name != NULL && candidate_name->len == 4u
+            && memcmp(candidate_name->bytes, "next", 4u) == 0) {
+            next = candidate->definition;
+            break;
+        }
+    }
+    if (cm_hir_def_id_is_none(next)) return 0;
+
+    predicate_type = cm_ty_resolve((CmTyArena *)&tyck->arena,
+        instance->types[instance->count - 1u]);
+    predicate = cm_ty_get((CmTyArena *)&tyck->arena, predicate_type);
+    if (predicate == NULL || (predicate->kind != CM_TY_FN_DEF
+            && predicate->kind != CM_TY_FN_PTR
+            && predicate->kind != CM_TY_CLOSURE)) return 0;
+
+    cm_str_buf_init(&next_symbol);
+    cm_umir_c_render_callee_symbol(&next_symbol, hir, tyck, next,
+        CM_TY_NONE, instance->self_type, NULL, 0u);
+    cm_str_buf_init(&predicate_symbol);
+    if (predicate->kind == CM_TY_CLOSURE) {
+        closure_instance = cm_umir_c_closure_instance_of(hir, tyck,
+            predicate);
+        cm_umir_c_render_closure_symbol(&predicate_symbol,
+            (CmHirBodyId)predicate->a, (CmUExprId)predicate->b,
+            closure_instance);
+    }
+
+    cm_str_buf_append(output, "(long long self, long long pred) { long long ");
+    cm_str_buf_append_n(output, next_symbol.data, next_symbol.len);
+    cm_str_buf_append(output, "(); for (;;) { long long o = ");
+    cm_str_buf_append_n(output, next_symbol.data, next_symbol.len);
+    cm_str_buf_append(output, "(self); long long item; if (!o || "
+        "((long long *)(intptr_t)o)[0] == 0) return 1; item = "
+        "((long long *)(intptr_t)o)[1]; if (!");
+    if (predicate->kind == CM_TY_CLOSURE) {
+        cm_str_buf_append(output, "({ long long ");
+        cm_str_buf_append_n(output, predicate_symbol.data,
+            predicate_symbol.len);
+        cm_str_buf_append(output, "(); ");
+        cm_str_buf_append_n(output, predicate_symbol.data,
+            predicate_symbol.len);
+        cm_str_buf_append(output,
+            "((long long *)(intptr_t)pred, item); })");
+    } else {
+        cm_str_buf_append(output,
+            "((long long (*)())(intptr_t)pred)(item)");
+    }
+    cm_str_buf_append(output, ") return 0; } }");
+    cm_str_buf_destroy(&predicate_symbol);
+    cm_str_buf_destroy(&next_symbol);
+    return 1;
+}
+
 /* Searcher::{next_match,next_reject} and their reverse counterparts are
  * declaration-only default methods when core arrives through metadata.  Each
  * is a small filter over the concrete searcher's required next/next_back. */
@@ -6916,6 +7009,8 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
                     CmUMirInstance active_copy = *instance;
                     cm_umir_c_active_instance = &active_copy;
                     if (cm_umir_c_render_iterator_find(output, hir, tyck,
+                            stub_item, &active_copy)
+                        || cm_umir_c_render_iterator_all(output, hir, tyck,
                             stub_item, &active_copy)
                         || cm_umir_c_render_searcher_step_filter(output, hir,
                             tyck, stub_item, &active_copy)) {
