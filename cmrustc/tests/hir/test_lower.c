@@ -11660,6 +11660,10 @@ static void test_typed_parameter_patterns_remain_bounded(void)
         "fn mutable((mut left, right): (u8, u8)) {}",
         "fn wildcard((_, right): (u8, u8)) {}",
         "fn wrong_arity((left, middle, right): (u8, u8, u8)) {}",
+        "struct Hash([u64; 2]);"
+        "fn array_newtype(Hash([left, right]): Hash) {"
+        " let _ = left + right;"
+        "}",
         "fn declaration((left, right): (u8, u8));"
     };
     static const char *const sources[] = {

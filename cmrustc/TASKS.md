@@ -3443,3 +3443,22 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   `lang_start` and cleanup.  Gates: native suite, 142/142 standalone u-MIR
   fixtures, core-linked 4/4, and alloc-linked 2/2.  Next: continue through
   the low-dependency rustc crates toward the compiler binary.
+
+- Measured pass (M9-06, fifth compiler-crate rung, probe-param88):
+  `compiler/rustc_hashes` now runs as a real dependency above the complete
+  core/alloc/std stack and vendored `rustc-stable-hash`.  Its
+  `FromStableHash::from` implementations destructure
+  `SipHasher128Hash([low, high])` directly in a function parameter; HIR's
+  narrow tuple-newtype signature form rejected that nested array pattern.
+  A one-field tuple struct with an array parameter pattern now uses the
+  existing synthetic ABI binding, leaving u-body to type and lower the nested
+  leaves.  The generated 1,338,014-byte C unit has 1,782 reachable instances:
+  1,509 real bodies, 245 shims, 28 residual stubs, and 17 vtables.  The probe
+  exercises `Hash64`/`Hash128` construction, wrapping addition, XOR assignment,
+  truncation, and accessors; it prints `rustc_hashes: 15 13` and exits 0 through
+  real `lang_start` and cleanup.  Values stay within 64 bits because upper-word
+  `u128` scalar storage remains a separate backend representation milestone.
+  A standalone regression executes `Pair([left, right])` parameter binding.
+  Gates: native suite, 143/143 standalone u-MIR fixtures, core-linked 4/4,
+  and alloc-linked 2/2.  Next: continue through the low-dependency rustc crates
+  toward the compiler binary.

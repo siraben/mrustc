@@ -10330,6 +10330,24 @@ static int cm_lower_newtype_parameter_pattern(CmLowerState *state,
     return 1;
 }
 
+/* A tuple-struct parameter whose sole field is destructured as an array is
+ * represented by the ordinary synthetic parameter.  The u-body owns the
+ * nested pattern and types its leaves; the bounded NEWTYPE_PATTERN signature
+ * form can describe only one direct binding. */
+static int cm_lower_newtype_parameter_has_array_pattern(
+    const CmLowerState *state, const CmAstPattern *pattern)
+{
+    const CmAstPattern *field;
+    if (pattern == NULL || pattern->kind != CM_AST_PATTERN_STRUCT
+        || !pattern->data.struct_pattern.is_tuple
+        || pattern->data.struct_pattern.has_rest
+        || pattern->data.struct_pattern.field_count != 1u
+        || pattern->data.struct_pattern.fields == NULL) return 0;
+    field = cm_ast_get_pattern(state->ast,
+        pattern->data.struct_pattern.fields[0].pattern);
+    return field != NULL && field->kind == CM_AST_PATTERN_SLICE;
+}
+
 /* The bounded tuple-parameter lowering takes exactly two plain immutable
  * move bindings (`(k, v): (K, V)`); every other tuple pattern (nested,
  * `..`, `ref`/`mut`/`_` elements, other arities) is a synthetic
@@ -11769,7 +11787,9 @@ static int cm_lower_function_item(CmLowerState *state,
                 function->parameters[index].pattern);
             if (ast_pattern != NULL
                 && ast_pattern->kind == CM_AST_PATTERN_STRUCT
-                && ast_pattern->data.struct_pattern.is_tuple) {
+                && ast_pattern->data.struct_pattern.is_tuple
+                && !cm_lower_newtype_parameter_has_array_pattern(state,
+                    ast_pattern)) {
                 int has_newtype_local;
 
                 if (record->is_foreign
