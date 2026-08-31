@@ -3506,3 +3506,21 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   C-layout cleanup abort, so native evidence uses the emitted root directly.
   Next: continue through the remaining low-dependency compiler crates toward
   the compiler binary.
+
+- Measured pass (M9-06, eighth compiler-crate rung, probe-param89):
+  `compiler/rustc_llvm` now runs above the complete core/alloc/std stack and
+  `libc`.  Its opaque `RustString` bridge exposed method-receiver coercion for
+  an array reference selecting a slice inherent method: `b"...".as_ptr()`
+  selected `[T]::as_ptr`, but u-MIR passed the `&[T; N]` representation without
+  materializing the slice's `[data, len]` pair.  Direct method calls now
+  recognize `impl<T> [T]` with an array receiver and build that pair from the
+  array data block and its existing hidden runtime length header.  A native
+  fixture covers both `as_ptr()` and `len()` on an inferred byte-string array.
+  The generated 1,915,671-byte C unit has 2,369 reachable instances: 2,003
+  real bodies, 327 shims, 39 residual stubs, and 16 vtables.  Its direct Rust
+  root calls `RustString::build_byte_buffer`, writes through
+  `LLVMRustStringWriteImpl`, checks the resulting `Vec<u8>` allocation through
+  its raw pointer, prints `rustc_llvm: 10 true`, and exits 0.  The generated
+  std `lang_start` path still reaches the known C-layout cleanup abort, so
+  native evidence uses the emitted root directly.  Next: continue through the
+  remaining low-dependency compiler crates toward the compiler binary.

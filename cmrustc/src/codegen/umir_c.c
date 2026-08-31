@@ -209,6 +209,13 @@ static const CmUMirBody *cm_umir_c_active_body = NULL;
 static const CmUBody *cm_umir_c_active_ub = NULL;
 /* Set while rendering a vtable: the receiver type is the exact Self. */
 static int cm_umir_c_exact_self = 0;
+static unsigned int cm_umir_c_ref_depth(const CmTyckSet *tyck,
+    CmTyId type);
+static CmTyId cm_umir_c_peel(const CmTyckSet *tyck, CmTyId type);
+static void cm_umir_c_render_base(CmStrBuf *output, CmUMirLocalId local,
+    unsigned int depth);
+static CmTyId cm_umir_c_local_type(const CmUMirBody *body,
+    CmUMirLocalId local);
 
 /* Locals live in one frame array so closures can alias it as their
  * environment: `_l[i]` for the frame, `env[i]` for an enclosing frame's
@@ -266,14 +273,46 @@ static int cm_umir_c_render_call(CmStrBuf *output,
     CmStrBuf symbol;
     CmHirDefId deref_args[CM_UMIR_STATEMENT_OPERANDS];
     CmTyId deref_self[CM_UMIR_STATEMENT_OPERANDS];
+    CmTyId array_unsize[CM_UMIR_STATEMENT_OPERANDS];
     const CmHirItem *callee_item;
     if (cm_hir_def_id_is_none(def) || statement->operand_overflow != 0u)
         return 0;
     for (index = 0u; index < CM_UMIR_STATEMENT_OPERANDS; ++index) {
         deref_args[index] = cm_hir_def_id_none();
         deref_self[index] = CM_TY_NONE;
+        array_unsize[index] = CM_TY_NONE;
     }
     callee_item = cm_umir_c_item_of(hir, def);
+    if (callee_item != NULL && callee_item->kind == CM_HIR_ITEM_FUNCTION
+        && cm_umir_c_active_body != NULL
+        && receiver_type != CM_TY_NONE
+        && first_arg < statement->operand_count
+        && callee_item->data.function_item.signature.receiver
+            != CM_HIR_RECEIVER_NONE) {
+        const CmHirItem *parent = cm_hir_def_id_is_none(
+                callee_item->parent_definition)
+            ? NULL : cm_umir_c_item_of(hir,
+                callee_item->parent_definition);
+        CmTyId actual = cm_umir_c_local_type(cm_umir_c_active_body,
+            statement->operands[first_arg]);
+        CmTyId actual_pointee = cm_umir_c_peel(tyck, actual);
+        const CmTy *actual_ty = actual_pointee == CM_TY_NONE ? NULL
+            : cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, actual_pointee));
+        CmTyId impl_self = parent == NULL || parent->kind != CM_HIR_ITEM_IMPL
+            ? CM_TY_NONE : cm_ty_from_hir((CmTyArena *)&tyck->arena, hir,
+                parent->data.impl_item.self_type);
+        const CmTy *impl_ty = impl_self == CM_TY_NONE ? NULL
+            : cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, impl_self));
+        /* A method selected from `impl<T> [T]` may have an array receiver:
+         * `b"...".as_ptr()` is `&[u8; N]` at the call site.  Method-call
+         * lowering records the selected slice method but has no explicit
+         * coercion rvalue, so materialize the `[data, len]` receiver here. */
+        if (actual_ty != NULL && actual_ty->kind == CM_TY_ARRAY
+            && impl_ty != NULL && impl_ty->kind == CM_TY_SLICE)
+            array_unsize[first_arg] = actual;
+    }
     if (callee_item != NULL && callee_item->kind == CM_HIR_ITEM_FUNCTION
         && cm_umir_c_active_body != NULL && cm_umir_c_active_ub != NULL) {
         const CmUExpr *call = cm_ubody_get_expr(cm_umir_c_active_ub,
@@ -375,6 +414,39 @@ static int cm_umir_c_render_call(CmStrBuf *output,
             cm_umir_c_render_local(output, statement->operands[index]);
             cm_str_buf_append(output, "); } ");
             cm_str_buf_destroy(&deref_symbol);
+        } else if (array_unsize[index] != CM_TY_NONE) {
+            cm_str_buf_append(output, "long long _cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[3]; _cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[1] = (long long)(intptr_t)");
+            cm_umir_c_render_base(output, statement->operands[index],
+                cm_umir_c_ref_depth(tyck, array_unsize[index]));
+            cm_str_buf_append(output, "; _cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[2] = ((long long *)(intptr_t)");
+            cm_umir_c_render_base(output, statement->operands[index],
+                cm_umir_c_ref_depth(tyck, array_unsize[index]));
+            cm_str_buf_append(output, ")[-1]; _cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[0] = (long long)(intptr_t)&_cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[1]; ");
         }
     }
     cm_umir_c_render_local(output, statement->destination);
@@ -390,6 +462,13 @@ static int cm_umir_c_render_call(CmStrBuf *output,
                 (unsigned long)statement->destination);
             cm_str_buf_push(output, '_');
             cm_umir_c_render_number(output, (unsigned long)index);
+        } else if (array_unsize[index] != CM_TY_NONE) {
+            cm_str_buf_append(output, "(long long)(intptr_t)&_cu");
+            cm_umir_c_render_number(output,
+                (unsigned long)statement->destination);
+            cm_str_buf_push(output, '_');
+            cm_umir_c_render_number(output, (unsigned long)index);
+            cm_str_buf_append(output, "[0]");
         } else
             cm_umir_c_render_local(output, statement->operands[index]);
     }
