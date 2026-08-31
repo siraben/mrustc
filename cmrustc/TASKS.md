@@ -3462,3 +3462,26 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   Gates: native suite, 143/143 standalone u-MIR fixtures, core-linked 4/4,
   and alloc-linked 2/2.  Next: continue through the low-dependency rustc crates
   toward the compiler binary.
+
+- Measured pass (M9-06, sixth compiler-crate rung, probe-param88):
+  `compiler/rustc_parse_format` now runs as a real dependency above the
+  complete core/alloc/std stack, `rustc_lexer`, `rustc_literal_escaper`, and
+  their vendored Unicode dependencies.  Concrete associated-type projections
+  used as closure tuple inputs are normalized through a trait-indexed impl
+  chain and cached, avoiding repeated whole-index scans while pending bodies
+  converge.  The runtime slice also adds shared reborrows during impl lookup,
+  closure calls through references, compiler-derived `Clone` fallback for
+  concrete pointees, value-bearing `break`, and owned-box field projection.
+  Focused regressions cover each of those boundaries.  The generated
+  2,716,653-byte C unit has 2,908 reachable instances: 2,456 real bodies, 398
+  shims, 54 residual stubs, and 19 vtables.  Its direct Rust root prints
+  `rustc_parse_format: 10 1 true true true 0` and exits 0 after parsing a named
+  argument with right alignment and numeric width.  The generated std
+  `lang_start` path remains blocked independently in the known C-layout
+  startup boundary (`pthread_attr_t` cleanup aborts with an invalid pointer),
+  so this rung uses the same emitted graph with a native allocator/panic
+  harness calling the Rust root directly.  Gates: native suite, 147/147
+  standalone u-MIR fixtures, core-linked 4/4, and alloc-linked 2/2.  Next:
+  continue through the low-dependency rustc crates toward the
+  compiler binary, while retaining C-layout aggregates as the std-startup
+  follow-up milestone.

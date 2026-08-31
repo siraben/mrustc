@@ -19,6 +19,7 @@ typedef struct CmTyckImpl {
     const CmHirItem *item;
     CmTyId self_pattern;     /* impl self type with generics as PARAM */
     CmHirDefId trait_def;    /* none for inherent impls */
+    size_t next_for_trait;   /* one-based index, zero ends the chain */
     int has_trait;
 } CmTyckImpl;
 
@@ -45,6 +46,9 @@ typedef struct CmTyckState {
     size_t dependency_count;
     CmTyckImpl *impls;
     size_t impl_count;
+    /* Trait def -> one-based first index in impls.  The linked chains retain
+     * source/index order so candidate precedence is unchanged. */
+    CmMap trait_impl_heads;
     CmTyckChild *children; /* sorted by parent def */
     size_t child_count;
     /* Body-local items keyed by their outermost enclosing fn. */
@@ -66,6 +70,10 @@ typedef struct CmTyckState {
     struct CmTyckHidden { CmHirDefId def; CmTyId type; } *hidden;
     size_t hidden_count;
     size_t hidden_cap;
+    /* Concrete associated projections normalized for tuple-pattern inputs.
+     * Pending passes revisit the same body; caching avoids a fresh full
+     * impl-index scan on every retry. */
+    CmMap normalizations; /* key CmTyId -> normalized CmTyId */
     CmTyckResult result;
 } CmTyckState;
 
@@ -461,6 +469,28 @@ static void cm_tyck_build_index(CmTyckState *state)
         cm_tyck_child_compare);
     qsort(state->body_items, state->body_item_count,
         sizeof(*state->body_items), cm_tyck_child_compare);
+    /* Prepending in reverse retains the original impl-array order. */
+    for (index = state->impl_count; index != 0u; --index) {
+        CmTyckImpl *entry = &state->impls[index - 1u];
+        size_t *head;
+        size_t value;
+        int inserted = 0;
+        if (!entry->has_trait) continue;
+        head = (size_t *)cm_map_get(&state->trait_impl_heads,
+            &entry->trait_def, sizeof(entry->trait_def));
+        entry->next_for_trait = head == NULL ? 0u : *head;
+        value = index;
+        (void)cm_map_insert(&state->trait_impl_heads, &entry->trait_def,
+            sizeof(entry->trait_def), &value, &inserted);
+    }
+}
+
+static size_t cm_tyck_trait_impl_head(const CmTyckState *state,
+    CmHirDefId trait_def)
+{
+    const size_t *head = (const size_t *)cm_map_get_const(
+        &state->trait_impl_heads, &trait_def, sizeof(trait_def));
+    return head == NULL ? 0u : *head;
 }
 
 /* A type-namespace item declared inside the body owned by `owner` (or in
@@ -969,6 +999,7 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
             const CmTyckImpl *impl = &env->state->impls[index];
             const CmHirItem *child;
             CmHirDefId owner_trait;
+            CmTyId matched_self = self_type;
             if ((pass == 0) != (impl->has_trait == 0)) continue;
             if (pass == 1 || pass == 2) {
                 const CmTy *pattern = cm_ty_get(arena, cm_ty_resolve(arena,
@@ -983,7 +1014,22 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                         || pattern->kind == CM_TY_SELF);
                 if (blanket != (pass == 2)) continue;
             }
-            if (!cm_tyck_matches(env, impl->self_pattern, self_type)) continue;
+            if (!cm_tyck_matches(env, impl->self_pattern, matched_self)) {
+                const CmTy *receiver = cm_ty_get(arena,
+                    cm_ty_resolve(arena, self_type));
+                CmTyId pointee;
+                /* A mutable reference can reborrow as shared for method
+                 * lookup.  Try that against specific trait impls before a
+                 * predicate-constrained blanket impl (`Pattern for F` must
+                 * not capture `&mut str` ahead of `Pattern for &str`). */
+                if (pass != 1 || receiver == NULL
+                    || receiver->kind != CM_TY_REF || receiver->a == 0u)
+                    continue;
+                pointee = receiver->children[0];
+                matched_self = cm_ty_ref(arena, pointee, 0);
+                if (!cm_tyck_matches(env, impl->self_pattern,
+                        matched_self)) continue;
+            }
             if (impl->has_trait) {
                 child = cm_tyck_child_named(env->state, impl->item->definition,
                     name, (CmHirItemKind)-1);
@@ -1019,14 +1065,14 @@ static int cm_tyck_lookup_assoc_in(CmTyckEnv *env, CmTyId self_type,
                 skip -= 1u;
                 continue;
             }
-            cm_tyck_instance_init(&out->instance, self_type);
+            cm_tyck_instance_init(&out->instance, matched_self);
             cm_tyck_instance_fresh(env, &out->instance, impl->item);
-            (void)cm_ty_unify(arena, self_type, cm_ty_subst(arena,
+            (void)cm_ty_unify(arena, matched_self, cm_ty_subst(arena,
                 impl->self_pattern, cm_tyck_subst_of(&out->instance)));
             cm_tyck_instance_fresh(env, &out->instance, child);
             out->item = child;
             out->parent = impl->item;
-            out->self_type = self_type;
+            out->self_type = matched_self;
             return 1;
         }
     }
@@ -1348,6 +1394,72 @@ static int cm_tyck_fn_bound_of(CmTyckEnv *env, const CmHirItem *item,
     return 0;
 }
 
+static int cm_tyck_type_cacheable(CmTyArena *arena, CmTyId type,
+    unsigned int depth)
+{
+    const CmTy *ty;
+    uint32_t index;
+    if (depth > 16u) return 0;
+    ty = cm_ty_get(arena, cm_ty_resolve(arena, type));
+    if (ty == NULL || ty->kind == CM_TY_INFER || ty->kind == CM_TY_PARAM
+        || ty->kind == CM_TY_SELF || ty->kind == CM_TY_OPAQUE
+        || ty->kind == CM_TY_CONST_PARAM || ty->kind == CM_TY_CONST_UNKNOWN)
+        return 0;
+    for (index = 0u; index < ty->count; ++index)
+        if (!cm_tyck_type_cacheable(arena, ty->children[index], depth + 1u))
+            return 0;
+    return 1;
+}
+
+static CmTyId cm_tyck_normalize_pattern_projection(CmTyckEnv *env,
+    CmTyId type)
+{
+    CmTyckState *state = env->state;
+    CmTyArena *arena = state->arena;
+    const CmTy *ty;
+    CmTyId normalized;
+    CmTyId *cached;
+    int inserted = 0;
+    type = cm_ty_resolve(arena, type);
+    ty = cm_ty_get(arena, type);
+    if (ty == NULL || ty->kind != CM_TY_PROJECTION) return type;
+    /* Generic projections can produce fresh inference state and are revisited
+     * on every pending pass.  Leave them symbolic; this closure-pattern aid
+     * is only soundly reusable for concrete inputs. */
+    if (!cm_tyck_type_cacheable(arena, type, 0u)) return type;
+    cached = (CmTyId *)cm_map_get(&state->normalizations, &type,
+        sizeof(type));
+    if (cached != NULL) return *cached;
+    normalized = cm_tyck_normalize(env, type, 0u);
+    if (!cm_tyck_type_cacheable(arena, normalized, 0u)) return normalized;
+    (void)cm_map_insert(&state->normalizations, &type, sizeof(type),
+        &normalized, &inserted);
+    return normalized;
+}
+
+/* Normalize projections throughout a tuple-shaped closure input.  Iterator
+ * adapters expose nested items such as
+ * `(<A as Iterator>::Item, <B as Iterator>::Item)`; normalizing only the
+ * outer `Zip::Item` projection still leaves both destructured halves
+ * unknown. */
+static CmTyId cm_tyck_normalize_pattern_input(CmTyckEnv *env, CmTyId type,
+    unsigned int depth)
+{
+    CmTyArena *arena = env->state->arena;
+    const CmTy *resolved;
+    CmTyId elements[CM_TYCK_MAX_ARGS];
+    uint32_t index;
+    if (depth > 1u) return type;
+    type = cm_tyck_normalize_pattern_projection(env, type);
+    resolved = cm_ty_get(arena, cm_ty_resolve(arena, type));
+    if (resolved == NULL || resolved->kind != CM_TY_TUPLE
+        || resolved->count > CM_TYCK_MAX_ARGS || depth == 1u) return type;
+    for (index = 0u; index < resolved->count; ++index)
+        elements[index] = cm_tyck_normalize_pattern_input(env,
+            resolved->children[index], depth + 1u);
+    return cm_ty_tuple(arena, elements, resolved->count);
+}
+
 /* The expectation for a closure passed where the callee declares a
  * parameter of generic type `param_type` bounded by an Fn-family trait:
  * a FN_PTR `(params..) -> ret` built from that bound, or NONE. */
@@ -1489,7 +1601,6 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
     CmTyId self_type;
     const CmTy *self;
     const CmHirItem *associated;
-    size_t index;
     if (depth > 8u) return type;
     CmHirDefId trait_def;
     CmHirDefId assoc_def;
@@ -1606,9 +1717,12 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
      * for T` must not shadow `impl TryFrom<u16> for u8`. */
     {
         int scan;
+        size_t cursor;
         for (scan = 0; scan < 2; ++scan)
-        for (index = 0u; index < env->state->impl_count; ++index) {
-            const CmTyckImpl *impl = &env->state->impls[index];
+        for (cursor = cm_tyck_trait_impl_head(env->state, trait_def);
+                cursor != 0u;
+                cursor = env->state->impls[cursor - 1u].next_for_trait) {
+            const CmTyckImpl *impl = &env->state->impls[cursor - 1u];
             const CmHirItem *definition;
             CmTyckInstance instance;
             const CmTy *pattern;
@@ -1677,11 +1791,13 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
                     size_t scan0_trait = 0u;
                     size_t scan0_self = 0u;
                     size_t probe_index;
-                    for (probe_index = 0u;
-                            probe_index < env->state->impl_count;
-                            ++probe_index) {
+                    for (probe_index = cm_tyck_trait_impl_head(env->state,
+                                trait_def);
+                            probe_index != 0u;
+                            probe_index = env->state->impls[probe_index - 1u]
+                                .next_for_trait) {
                         const CmTyckImpl *other =
-                            &env->state->impls[probe_index];
+                            &env->state->impls[probe_index - 1u];
                         const CmTy *other_pattern;
                         if (!other->has_trait
                             || !cm_hir_def_id_equal(other->trait_def,
@@ -1782,8 +1898,11 @@ static CmTyId cm_tyck_normalize(CmTyckEnv *env, CmTyId type,
         size_t by_trait = 0u;
         size_t by_self = 0u;
         size_t no_child = 0u;
-        for (index = 0u; index < env->state->impl_count; ++index) {
-            const CmTyckImpl *impl = &env->state->impls[index];
+        size_t cursor;
+        for (cursor = cm_tyck_trait_impl_head(env->state, trait_def);
+                cursor != 0u;
+                cursor = env->state->impls[cursor - 1u].next_for_trait) {
+            const CmTyckImpl *impl = &env->state->impls[cursor - 1u];
             if (!impl->has_trait
                 || !cm_hir_def_id_equal(impl->trait_def, trait_def))
                 continue;
@@ -4069,7 +4188,8 @@ static int cm_tyck_candidate_loose(CmTyckEnv *env, const CmTyckFound *found,
  * reference candidate's bindings are undone first). */
 static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
     CmTyId *candidate, unsigned int mask, const CmTyId *arg_types,
-    uint32_t arg_count, size_t undo_mark, CmTyckFound *found)
+    uint32_t arg_count, CmTyId expected, size_t undo_mark,
+    CmTyckFound *found)
 {
     CmTyArena *arena = env->state->arena;
     const CmTy *ct = cm_ty_get(arena, cm_ty_resolve(arena, *candidate));
@@ -4077,6 +4197,9 @@ static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
     CmTyId pointee;
     CmTyckFound alt;
     size_t probe_mark;
+    int alt_ok;
+    const CmHirItem *derived_clone = NULL;
+    const CmHirItem *derived_trait = NULL;
     if (ct == NULL || (ct->kind != CM_TY_REF && ct->kind != CM_TY_PTR)
         || ct->count == 0u || found->item == NULL
         || found->item->kind != CM_HIR_ITEM_FUNCTION) return 0;
@@ -4104,8 +4227,8 @@ static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
                     arg_count) : -1);
         cm_ty_undo_to(arena, probe_mark);
     }
-    if (cm_tyck_lookup_assoc_in(env, pointee, expr->data.method_call.name,
-            &alt, mask, 0u)
+    alt_ok = cm_tyck_lookup_assoc_in(env, pointee,
+            expr->data.method_call.name, &alt, mask, 0u)
         && alt.item != NULL && alt.item->kind == CM_HIR_ITEM_FUNCTION
         && (alt.item->data.function_item.signature.receiver
                 == CM_HIR_RECEIVER_REF_SHARED
@@ -4117,7 +4240,47 @@ static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
         && !(alt.item->data.function_item.signature.receiver
                 == CM_HIR_RECEIVER_REF_MUTABLE
             && ct->kind == CM_TY_REF && ct->a == 0u)
-        && cm_tyck_method_args_compatible(env, &alt, arg_types, arg_count)) {
+        && cm_tyck_method_args_compatible(env, &alt, arg_types, arg_count);
+    if (alt_ok && expected != CM_TY_NONE) {
+        CmTyId alt_params[CM_TYCK_MAX_ARGS];
+        CmTyId alt_ret = CM_TY_NONE;
+        (void)cm_tyck_signature(env, alt.item,
+            cm_tyck_subst_of(&alt.instance), alt_params,
+            CM_TYCK_MAX_ARGS, &alt_ret);
+        if (alt_ret != CM_TY_NONE
+            && !cm_tyck_coerce(env, alt_ret, expected))
+            alt_ok = 0;
+    }
+    if (!alt_ok && expected != CM_TY_NONE) {
+        /* Built-in derives are not materialized as ordinary HIR impls.
+         * Recover the common autoderef case from the visible forwarding
+         * `Clone for &T`: when the expected result is the concrete ADT
+         * pointee, model its compiler-derived Clone declaration with
+         * Self = pointee. */
+        const CmTy *pt = cm_ty_get(arena, cm_ty_resolve(arena, pointee));
+        const CmHirItem *parent = found->parent;
+        const CmHirItem *trait_item = parent == NULL
+                || parent->kind != CM_HIR_ITEM_IMPL
+                || !parent->data.impl_item.has_trait ? NULL
+            : cm_tyck_item(env->state,
+                parent->data.impl_item.trait_type.definition);
+        const CmInternedString *trait_name = trait_item == NULL ? NULL
+            : cm_interner_get(&env->state->hir->strings, trait_item->name);
+        const CmInternedString *method_name = found->item == NULL ? NULL
+            : cm_interner_get(&env->state->hir->strings, found->item->name);
+        if (pt != NULL && pt->kind == CM_TY_ADT
+            && trait_name != NULL && trait_name->len == 5u
+            && memcmp(trait_name->bytes, "Clone", 5u) == 0
+            && method_name != NULL && method_name->len == 5u
+            && memcmp(method_name->bytes, "clone", 5u) == 0
+            && cm_tyck_coerce(env, pointee, expected)) {
+            derived_clone = cm_tyck_child_named(env->state,
+                trait_item->definition, found->item->name,
+                CM_HIR_ITEM_FUNCTION);
+            derived_trait = trait_item;
+        }
+    }
+    if (alt_ok) {
         cm_ty_undo_to(arena, undo_mark);
         if (cm_tyck_lookup_assoc_in(env, pointee,
                 expr->data.method_call.name, &alt, mask, 0u)
@@ -4127,6 +4290,17 @@ static int cm_tyck_prefer_pointee(CmTyckEnv *env, const CmUExpr *expr,
             return 1;
         }
         return 0;
+    }
+    if (derived_clone != NULL) {
+        cm_ty_undo_to(arena, undo_mark);
+        memset(found, 0, sizeof(*found));
+        found->item = derived_clone;
+        found->parent = derived_trait;
+        found->self_type = pointee;
+        found->via_trait_declaration = 1;
+        cm_tyck_instance_init(&found->instance, pointee);
+        *candidate = pointee;
+        return 1;
     }
     cm_ty_undo_to(arena, probe_mark);
     return 0;
@@ -4339,14 +4513,15 @@ static CmTyId cm_tyck_method_call(CmTyckEnv *env, const CmUExpr *expr,
                                     expected)) return_ok = 0;
                             cm_ty_undo_to(arena, probe_mark);
                         }
+                        if (cm_tyck_prefer_pointee(env, expr, &candidate,
+                                mask, arg_types, arg_count, expected,
+                                undo_mark, &found)) {
+                            found_step = step + 1u;
+                            step_set = 1;
+                            break;
+                        }
                         if (return_ok && !cm_tyck_candidate_loose(env,
                                 &found, arg_types, arg_count)) {
-                            if (cm_tyck_prefer_pointee(env, expr, &candidate,
-                                    mask, arg_types, arg_count, undo_mark,
-                                    &found)) {
-                                found_step = step + 1u;
-                                step_set = 1;
-                            }
                             break;
                         }
                         if (return_ok) {
@@ -5667,11 +5842,22 @@ static CmTyId cm_tyck_expr(CmTyckEnv *env, CmUExprId id, CmTyId expected)
         }
         for (index = 0u; index < expr->data.closure.parameter_count; ++index) {
             const CmUClosureParam *param = &expr->data.closure.parameters[index];
+            const CmUPat *pattern = cm_ubody_get_pat(env->ub, param->pattern);
             CmTyId type = param->type.type == CM_AST_TYPE_NONE
                 ? cm_ty_fresh(arena, CM_HIR_INFER_GENERAL)
                 : cm_tyck_ast_type(env, param->type.type);
-            if (sig != NULL && index + 1u < sig->count)
-                (void)cm_ty_unify(arena, type, sig->children[index]);
+            if (sig != NULL && index + 1u < sig->count) {
+                CmTyId input = sig->children[index];
+                const CmTy *input_type = cm_ty_get(arena,
+                    cm_ty_resolve(arena, input));
+                /* Pay the recursive projection cost only for a pattern
+                 * which needs the tuple's concrete child shapes. */
+                if (pattern != NULL && pattern->kind == CM_U_PAT_TUPLE
+                    && input_type != NULL
+                    && input_type->kind == CM_TY_PROJECTION)
+                    input = cm_tyck_normalize_pattern_input(env, input, 0u);
+                (void)cm_ty_unify(arena, type, input);
+            }
             cm_tyck_pat(env, param->pattern, type);
         }
         {
@@ -5886,6 +6072,14 @@ static void cm_tyck_pat(CmTyckEnv *env, CmUPatId id, CmTyId expected)
             behind = 1;
             behind_mut = (int)et->a;
             inner = et->children[0];
+            /* SliceIndex::Output and similar associated items can be
+             * concrete only after the scrutinee call is instantiated.
+             * Normalize before a tuple pattern invents unrelated fresh
+             * element variables (`Some((range, _, _)) = slice.get(i)`). */
+            inner = cm_tyck_normalize_pattern_input(env, inner, 0u);
+            et = cm_ty_get(arena, cm_ty_resolve(arena, inner));
+        } else if (et != NULL && et->kind == CM_TY_PROJECTION) {
+            inner = cm_tyck_normalize_pattern_input(env, inner, 0u);
             et = cm_ty_get(arena, cm_ty_resolve(arena, inner));
         }
         if (pat->data.list.has_rest || count > CM_TYCK_MAX_ARGS) {
@@ -6416,6 +6610,8 @@ CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     state->local_modules = modules;
     state->dependencies = dependencies;
     state->dependency_count = dependency_count;
+    cm_map_init(&state->trait_impl_heads, sizeof(size_t));
+    cm_map_init(&state->normalizations, sizeof(CmTyId));
     cm_tyck_build_source_asts(state);
     cm_tyck_build_index(state);
     cm_vec_clear(&set->bodies);
@@ -6442,6 +6638,8 @@ CmTyckResult cm_tyck_all(CmTyckSet *set, const CmHirContext *hir,
     cm_free(state->body_items);
     cm_free(state->impls);
     cm_free(state->hidden);
+    cm_map_destroy(&state->trait_impl_heads);
+    cm_map_destroy(&state->normalizations);
     cm_free(state);
     return result;
 }

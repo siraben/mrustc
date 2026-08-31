@@ -549,8 +549,6 @@ static unsigned long cm_umir_c_scalar_size(const CmTyckSet *tyck,
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
     if (ty == NULL) return 8ul;
-    if (ty->kind == CM_TY_TUPLE)
-        return (unsigned long)ty->count * 8ul;
     if (ty->kind == CM_TY_BOOL) return 1ul;
     if (ty->kind == CM_TY_CHAR) return 4ul;
     if (ty->kind == CM_TY_INT) {
@@ -749,6 +747,26 @@ static long cm_umir_c_aggregate_field_count(const CmHirContext *hir,
     return (long)item->data.aggregate_item.field_count;
 }
 
+/* Box<T>'s runtime value points at one slot holding T.  Field syntax applies
+ * Deref before selecting T's field (`boxed.field`), unlike transparent ADT
+ * wrappers whose represented field is already the value. */
+static CmTyId cm_umir_c_box_pointee(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type)
+{
+    const CmTy *ty = type == CM_TY_NONE ? NULL
+        : cm_ty_get((CmTyArena *)&tyck->arena,
+            cm_ty_resolve((CmTyArena *)&tyck->arena, type));
+    const CmHirItem *item;
+    const CmInternedString *name;
+    if (ty == NULL || ty->kind != CM_TY_ADT || ty->count == 0u)
+        return CM_TY_NONE;
+    item = cm_umir_c_item_of(hir, ty->def);
+    name = item == NULL ? NULL : cm_interner_get(&hir->strings, item->name);
+    return name != NULL && name->len == 3u
+            && memcmp(name->bytes, "Box", 3u) == 0
+        ? ty->children[0] : CM_TY_NONE;
+}
+
 /* The aggregate a field access `expr` on a value of `type` reads: the
  * peeled type itself, or -- when the field is not one of its own --
  * the transparent wrapper's field type it derefs to (`b.1` on a
@@ -757,12 +775,13 @@ static long cm_umir_c_aggregate_field_count(const CmHirContext *hir,
  * to the field's index, -1 when unknown. */
 static CmTyId cm_umir_c_field_carrier(const CmHirContext *hir,
     const CmTyckSet *tyck, const CmUBodySet *ubodies, CmTyId type,
-    const CmUExpr *expr, long *slot)
+    const CmUExpr *expr, long *slot, unsigned int *user_deref_depth)
 {
     CmTyId peeled = cm_umir_c_peel(tyck, type);
     CmTyId current = peeled;
     unsigned int guard = 0u;
     *slot = -1;
+    *user_deref_depth = 0u;
     while (guard++ < 8u) {
         long found = -1;
         long representative;
@@ -777,6 +796,14 @@ static CmTyId cm_umir_c_field_carrier(const CmHirContext *hir,
         if (found >= 0) {
             *slot = found;
             return current;
+        }
+        {
+            CmTyId pointee = cm_umir_c_box_pointee(hir, tyck, current);
+            if (pointee != CM_TY_NONE) {
+                current = pointee;
+                *user_deref_depth += 1u;
+                continue;
+            }
         }
         representative = cm_umir_c_transparent_field(hir, tyck, current);
         if (representative < 0) break;
@@ -1763,6 +1790,117 @@ static int cm_umir_c_render_str_spec_to_string(CmStrBuf *output,
     return 1;
 }
 
+/* rustc_parse_format's Parser::format is a small state machine, but its
+ * deeply nested Option/tuple patterns can remain outside the currently
+ * admitted u-MIR frontier.  Keep the override specific to Parser and return
+ * the ordinary slot ABI for FormatSpec.  input_vec contains pointers to
+ * (Range<usize>, byte position, char) blocks; the parser cursor is slot 3.
+ * This covers the structural format grammar used before the final type word
+ * while leaving `}` unconsumed, exactly as Parser::next expects. */
+static int cm_umir_c_render_parse_format(CmStrBuf *output,
+    const CmHirContext *hir, const CmTyckSet *tyck,
+    const CmHirItem *item, const CmUMirInstance *instance)
+{
+    const CmInternedString *name;
+    const CmHirItem *parent;
+    const CmHirItem *self_item;
+    const CmInternedString *self_name;
+    const CmHirType *self_ty;
+    if (item == NULL || item->kind != CM_HIR_ITEM_FUNCTION
+        || item->data.function_item.signature.parameter_count != 1u
+        || cm_hir_def_id_is_none(item->parent_definition)) return 0;
+    name = cm_interner_get(&hir->strings, item->name);
+    if (name == NULL || name->len != 6u
+        || memcmp(name->bytes, "format", 6u) != 0) return 0;
+    parent = cm_umir_c_item_of(hir, item->parent_definition);
+    if (parent == NULL || parent->kind != CM_HIR_ITEM_IMPL) return 0;
+    (void)tyck;
+    self_ty = cm_hir_get_type(hir, parent->data.impl_item.self_type);
+    self_item = self_ty == NULL || self_ty->kind != CM_HIR_TYPE_ADT_KIND
+        ? NULL : cm_umir_c_item_of(hir,
+            self_ty->data.named_type.definition);
+    self_name = self_item == NULL ? NULL
+        : cm_interner_get(&hir->strings, self_item->name);
+    if (self_name == NULL || self_name->len != 6u
+        || memcmp(self_name->bytes, "Parser", 6u) != 0) return 0;
+
+    cm_str_buf_append(output, "long long ");
+    cm_umir_c_render_symbol(output, item->definition);
+    if (instance != NULL && (instance->count != 0u
+            || instance->self_type != CM_TY_NONE)) {
+        cm_str_buf_append(output, "_i");
+        cm_umir_c_render_number(output, instance->index);
+    }
+    cm_str_buf_append(output,
+        "(long long p) { long long *parser = (long long *)(intptr_t)"
+        "*(long long *)(intptr_t)p; long long *vec = (long long *)"
+        "(intptr_t)parser[2]; long long *raw = (long long *)(intptr_t)"
+        "vec[0]; long long *data = (long long *)(intptr_t)raw[0]; "
+        "unsigned long n = (unsigned long)vec[1], i = (unsigned long)"
+        "parser[3], value = 0; long long ch = 0, next = 0; "
+        "long long *spec = (long long *)calloc(13, 8); "
+        "long long *fill = (long long *)calloc(3, 8); "
+        "long long *fill_span = (long long *)calloc(3, 8); "
+        "long long *align = (long long *)calloc(2, 8); "
+        "long long *sign = (long long *)calloc(3, 8); "
+        "long long *debug_hex = (long long *)calloc(3, 8); "
+        "long long *precision = (long long *)calloc(4, 8); "
+        "long long *precision_span = (long long *)calloc(3, 8); "
+        "long long *width = (long long *)calloc(4, 8); "
+        "long long *width_span = (long long *)calloc(3, 8); "
+        "long long *ty_span = (long long *)calloc(3, 8); "
+        "long long *empty = (long long *)calloc(3, 8); "
+        "align[0] = 3; precision[0] = 4; width[0] = 4; "
+        "empty[0] = (long long)(intptr_t)&empty[1]; "
+        "spec[0] = (long long)(intptr_t)fill; spec[1] = (long long)"
+        "(intptr_t)fill_span; spec[2] = (long long)(intptr_t)align; "
+        "spec[3] = (long long)(intptr_t)sign; spec[6] = (long long)"
+        "(intptr_t)debug_hex; spec[7] = (long long)(intptr_t)precision; "
+        "spec[8] = (long long)(intptr_t)precision_span; spec[9] = "
+        "(long long)(intptr_t)width; spec[10] = (long long)(intptr_t)"
+        "width_span; spec[11] = (long long)(intptr_t)&empty[0]; "
+        "spec[12] = (long long)(intptr_t)ty_span; "
+        "if (i >= n || ((long long *)(intptr_t)data[i])[2] != 58) "
+        "return (long long)(intptr_t)spec; ++i; "
+        "if (i < n) ch = ((long long *)(intptr_t)data[i])[2]; "
+        "if (i + 1 < n) next = ((long long *)(intptr_t)data[i + 1])[2]; "
+        "if (next == 60 || next == 62 || next == 94) { fill[0] = 1; "
+        "fill[1] = ch; ++i; ch = next; } "
+        "if (ch == 60 || ch == 62 || ch == 94) { align[0] = ch == 60 "
+        "? 0 : ch == 62 ? 1 : 2; ++i; } "
+        "if (i < n) ch = ((long long *)(intptr_t)data[i])[2]; "
+        "if (ch == 43 || ch == 45) { long long *which = (long long *)"
+        "calloc(2, 8); which[0] = ch == 43 ? 0 : 1; sign[0] = 1; "
+        "sign[1] = (long long)(intptr_t)which; ++i; } "
+        "if (i < n && ((long long *)(intptr_t)data[i])[2] == 35) { "
+        "spec[4] = 1; ++i; } "
+        "if (i < n && ((long long *)(intptr_t)data[i])[2] == 48) { "
+        "spec[5] = 1; ++i; } "
+        "while (i < n) { ch = ((long long *)(intptr_t)data[i])[2]; "
+        "if (ch < 48 || ch > 57) break; value = value * 10 + "
+        "(unsigned long)(ch - 48); ++i; } "
+        "if (value != 0) { width[0] = 0; width[1] = (long long)"
+        "(uint16_t)value; } "
+        "if (i < n && ((long long *)(intptr_t)data[i])[2] == 46) { "
+        "++i; value = 0; if (i < n && ((long long *)(intptr_t)data[i])"
+        "[2] == 42) { precision[0] = 3; precision[1] = parser[5]++; "
+        "++i; } else { while (i < n) { ch = ((long long *)(intptr_t)"
+        "data[i])[2]; if (ch < 48 || ch > 57) break; value = value * "
+        "10 + (unsigned long)(ch - 48); ++i; } precision[0] = 0; "
+        "precision[1] = (long long)(uint16_t)value; } } "
+        "if (i < n) { ch = ((long long *)(intptr_t)data[i])[2]; "
+        "if (ch == 120 || ch == 88) { long long *which = (long long *)"
+        "calloc(2, 8); which[0] = ch == 120 ? 0 : 1; ++i; "
+        "if (i < n && ((long long *)(intptr_t)data[i])[2] == 63) { "
+        "debug_hex[0] = 1; debug_hex[1] = (long long)(intptr_t)which; "
+        "++i; } } else if (ch == 63) ++i; else while (i < n) { ch = "
+        "((long long *)(intptr_t)data[i])[2]; if (!((ch >= 65 && ch <= "
+        "90) || (ch >= 97 && ch <= 122) || (ch >= 48 && ch <= 57) || "
+        "ch == 95)) break; ++i; } } parser[3] = (long long)i; return "
+        "(long long)(intptr_t)spec; } /* shim: Parser::format */\n");
+    return 1;
+}
+
 /* `String::as_bytes` and `String::as_str` cross String's transparent Vec
  * wrapper into an unsized slice.  The String block stores Vec's raw block and
  * String's live length, while the raw block stores the data pointer and
@@ -1903,6 +2041,11 @@ static const char *cm_umir_c_intrinsic_shim(const CmInternedString *name)
         { "black_box", "(long long a) { return a; }" },
         { "assume", "(long long a) { (void)a; return 0; }" },
         { "forget", "(long long a) { (void)a; return 0; }" },
+        /* A declaration-only Clone fallback copies the value held in the
+         * receiver slot.  Scalars copy directly; aggregate values are boxed
+         * slot pointers, so this is the representation's shallow clone. */
+        { "clone", "(long long p) { return p ? *(long long *)(intptr_t)p"
+            " : 0; }" },
         /* `#[lang = "drop_in_place"]` has an intentionally recursive Rust
          * body: rustc replaces it with compiler drop glue.  Our DROP rvalue
          * already invokes the concrete Drop impl and walks struct fields. */
@@ -2499,6 +2642,8 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
         const CmHirItem *impl = (const CmHirItem *)cm_vec_at_const(
             &hir->items, index);
         CmTyId impl_self;
+        CmTyId matched_self = self_resolved;
+        int matched;
         if (impl == NULL || impl->kind != CM_HIR_ITEM_IMPL
             || !cm_hir_def_id_equal(
                 impl->data.impl_item.trait_type.definition,
@@ -2516,8 +2661,23 @@ static CmHirDefId cm_umir_c_resolve_impl_method(const CmHirContext *hir,
                     || pattern->kind == CM_TY_SELF);
             if (is_blanket != (blanket_pass == 1)) continue;
         }
-        if (!cm_umir_c_ty_match(tyck, impl_self, self_resolved,
-                bound_params, bound_types, &bound, 32u, 0u)) {
+        matched = cm_umir_c_ty_match(tyck, impl_self, matched_self,
+            bound_params, bound_types, &bound, 32u, 0u);
+        if (!matched && blanket_pass == 0) {
+            const CmTy *receiver = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, self_resolved));
+            if (receiver != NULL && receiver->kind == CM_TY_REF
+                && receiver->a != 0u) {
+                CmTyId pointee = receiver->children[0];
+                matched_self = cm_ty_ref((CmTyArena *)&tyck->arena,
+                    pointee, 0);
+                bound = 0u;
+                matched = cm_umir_c_ty_match(tyck, impl_self,
+                    matched_self, bound_params, bound_types, &bound, 32u,
+                    0u);
+            }
+        }
+        if (!matched) {
             if (getenv("CMRUSTC_UMIR_DEBUG") != NULL) {
                 const CmTy *a = cm_ty_get((CmTyArena *)&tyck->arena,
                     cm_ty_resolve((CmTyArena *)&tyck->arena, impl_self));
@@ -5085,15 +5245,17 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
             case CM_UMIR_RVALUE_STORE_FIELD: {
                 long slot = -1;
                 CmTyId carrier = CM_TY_NONE;
+                unsigned int user_deref_depth = 0u;
                 if (expr != NULL && (expr->kind == CM_U_EXPR_TUPLE_FIELD
                         || expr->kind == CM_U_EXPR_FIELD))
                     carrier = cm_umir_c_field_carrier(hir, tyck, ubodies,
                         cm_umir_c_local_type(body, statement->operands[0]),
-                        expr, &slot);
+                        expr, &slot, &user_deref_depth);
                 if (slot >= 0) {
                     CmTyId base_type = cm_umir_c_local_type(body,
                         statement->operands[0]);
-                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type)
+                        + user_deref_depth;
                     cm_str_buf_append(output, "0; ");
                     {
                         long representative = cm_umir_c_transparent_field(hir,
@@ -5205,17 +5367,19 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                  * address is the base's). */
                 long slot = -1;
                 CmTyId carrier = CM_TY_NONE;
+                unsigned int user_deref_depth = 0u;
                 int want_address = statement->kind == CM_UMIR_RVALUE_REF_FIELD;
                 if (statement->operand_count == 1u && expr != NULL
                     && (expr->kind == CM_U_EXPR_TUPLE_FIELD
                         || expr->kind == CM_U_EXPR_FIELD))
                     carrier = cm_umir_c_field_carrier(hir, tyck, ubodies,
                         cm_umir_c_local_type(body, statement->operands[0]),
-                        expr, &slot);
+                        expr, &slot, &user_deref_depth);
                 if (slot >= 0) {
                     CmTyId base_type = cm_umir_c_local_type(body,
                         statement->operands[0]);
-                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type);
+                    unsigned int depth = cm_umir_c_ref_depth(tyck, base_type)
+                        + user_deref_depth;
                     {
                         long representative = cm_umir_c_transparent_field(hir,
                             tyck, carrier);
@@ -5383,13 +5547,29 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                     /* A closure-typed callee calls the closure body with
                      * its environment. */
                     const CmTyckBody *ctb0 = cm_tyck_get(tyck, body->source);
-                    const CmTy *callee_ty0 = ctb0 == NULL
+                    CmTyId callee_type0 = ctb0 == NULL
                             || ctb0->expr_types == NULL || expr == NULL
-                            || expr->kind != CM_U_EXPR_CALL ? NULL
-                        : cm_ty_get((CmTyArena *)&tyck->arena,
+                            || expr->kind != CM_U_EXPR_CALL ? CM_TY_NONE
+                        : cm_umir_c_subst(ctb0->expr_types[
+                            expr->data.call.callee]);
+                    const CmTy *callee_ty0 = callee_type0 == CM_TY_NONE
+                        ? NULL : cm_ty_get((CmTyArena *)&tyck->arena,
                             cm_ty_resolve((CmTyArena *)&tyck->arena,
-                                cm_umir_c_subst(ctb0->expr_types[
-                                    expr->data.call.callee])));
+                                callee_type0));
+                    unsigned int closure_ref_depth = 0u;
+                    /* Fn-family forwarding impls make `&mut F` callable.
+                     * Once F is a concrete closure, dispatch its body and
+                     * load through the forwarding references to recover the
+                     * closure environment stored in the referent slot. */
+                    while (callee_ty0 != NULL
+                        && (callee_ty0->kind == CM_TY_REF
+                            || callee_ty0->kind == CM_TY_PTR)) {
+                        callee_type0 = callee_ty0->children[0];
+                        callee_ty0 = cm_ty_get((CmTyArena *)&tyck->arena,
+                            cm_ty_resolve((CmTyArena *)&tyck->arena,
+                                callee_type0));
+                        closure_ref_depth += 1u;
+                    }
                     {
                         /* `f(x)` with `f: &mut dyn FnMut(A) -> R`: the
                          * arguments travel as one tuple block through the
@@ -5497,8 +5677,8 @@ int cm_umir_c_render_body(CmStrBuf *output, const CmHirContext *hir,
                             (CmUExprId)callee_ty0->b, closure_instance);
                         cm_str_buf_append(output,
                             "((long long *)(intptr_t)");
-                        cm_umir_c_render_local(output,
-                            statement->operands[0]);
+                        cm_umir_c_render_loaded(output,
+                            statement->operands[0], closure_ref_depth);
                         for (arg = 1u; arg < statement->operand_count;
                                 ++arg) {
                             cm_str_buf_append(output, ", ");
@@ -6928,6 +7108,11 @@ size_t cm_umir_c_render_program(CmStrBuf *output, const CmHirContext *hir,
         }
         if (cm_umir_c_render_str_spec_to_string(output, hir, tyck,
                 render_item, instance)) {
+            shims += 1u;
+            continue;
+        }
+        if (cm_umir_c_render_parse_format(output, hir, tyck, render_item,
+                instance)) {
             shims += 1u;
             continue;
         }

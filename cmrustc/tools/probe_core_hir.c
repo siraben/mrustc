@@ -603,8 +603,8 @@ int main(int argc, char **argv)
     const char *with_core_path = NULL;
     const char *emit_umir_c_path = NULL;
     const char *target_crate_name = NULL;
-#define PROBE_MAX_CFGS 16u
-#define PROBE_MAX_DEP_CFGS 32u
+#define PROBE_MAX_CFGS 64u
+#define PROBE_MAX_DEP_CFGS 512u
     CmCfgEntry extra_cfgs[PROBE_MAX_CFGS];
     CmCfgEntry all_cfgs[PROBE_MAX_CFGS + 64u];
     size_t extra_cfg_count = 0u;
@@ -617,7 +617,7 @@ int main(int argc, char **argv)
     /* Dependency chain (`--with-dep NAME PATH`, in order; `--with-core
      * PATH` is `--with-dep core PATH`): each crate is built against the
      * ones before it, the target against all of them. */
-    enum { PROBE_MAX_DEPS = 16 };
+    enum { PROBE_MAX_DEPS = 512 };
     static CmCfgSet dep_cfgs[PROBE_MAX_DEPS];
     static CmCfgEntry dep_cfg_all[PROBE_MAX_DEPS][PROBE_MAX_CFGS
         + PROBE_MAX_DEP_CFGS + 64u];

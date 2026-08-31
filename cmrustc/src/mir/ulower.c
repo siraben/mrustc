@@ -297,6 +297,7 @@ typedef struct CmUMirBuilder {
     /* Innermost-first loop context for break/continue targets. */
     CmUMirBlockId loop_headers[64];
     CmUMirBlockId loop_exits[64];
+    CmUMirLocalId loop_results[64];
     unsigned int loop_depth;
     /* Lexically active let patterns, for cleanup on early return. */
     CmUPatId scope_patterns[256];
@@ -2676,6 +2677,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         if (builder->loop_depth < 64u) {
             builder->loop_headers[builder->loop_depth] = header;
             builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_results[builder->loop_depth] = destination;
             builder->loop_depth += 1u;
         }
         builder->current = header;
@@ -2720,6 +2722,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         if (builder->loop_depth < 64u) {
             builder->loop_headers[builder->loop_depth] = header;
             builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_results[builder->loop_depth] = 0u;
             builder->loop_depth += 1u;
         }
         builder->current = body_block;
@@ -2997,8 +3000,21 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         CmUMirBlock *current;
         CmUMirBlockId target;
         if (expr->kind == CM_U_EXPR_BREAK
-            && expr->data.flow.value != CM_U_EXPR_NONE)
-            (void)cm_umir_emit_expr(builder, expr->data.flow.value);
+            && expr->data.flow.value != CM_U_EXPR_NONE) {
+            CmUMirLocalId value = cm_umir_emit_expr(builder,
+                expr->data.flow.value);
+            /* A value-bearing `break` is the incoming value of the loop
+             * expression at its exit block.  All break edges write the
+             * loop's preallocated result local before they branch. */
+            if (builder->loop_depth != 0u
+                && builder->loop_results[builder->loop_depth - 1u] != 0u) {
+                CmUMirLocalId result =
+                    builder->loop_results[builder->loop_depth - 1u];
+                cm_umir_push_operands(builder, result,
+                    CM_UMIR_RVALUE_LOCAL, expr->data.flow.value,
+                    CM_TY_NONE, &value, 1u);
+            }
+        }
         if (builder->loop_depth == 0u) break;
         target = expr->kind == CM_U_EXPR_BREAK
             ? builder->loop_exits[builder->loop_depth - 1u]
@@ -3130,6 +3146,7 @@ static CmUMirLocalId cm_umir_emit_expr(CmUMirBuilder *builder, CmUExprId id)
         if (builder->loop_depth < 64u) {
             builder->loop_headers[builder->loop_depth] = header;
             builder->loop_exits[builder->loop_depth] = exit_block;
+            builder->loop_results[builder->loop_depth] = 0u;
             builder->loop_depth += 1u;
         }
         builder->current = body_block;
