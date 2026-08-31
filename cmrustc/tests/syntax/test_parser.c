@@ -817,8 +817,6 @@ static int test_generic_parameter_bound_error_paths(void)
             "const generic parameter bounds" },
         { "type A<T: const Trait> = T;", "const generic parameter bounds" },
         { "type A<T: ~Trait> = T;", "expected 'const' after '~'" },
-        { "type A<T: for<'a> FnMut(&'a T)> = T;",
-            "HRTB generic parameter bounds" },
         { "type A<T: use<U>> = T;", "use generic parameter bounds" },
         { "type A<T: Iterator<Item:, T>> = T;",
             "expected associated-type constraint" },
@@ -853,6 +851,49 @@ static int test_generic_parameter_bound_error_paths(void)
         }
         cm_ast_destroy(&ast);
     }
+    return ok;
+}
+
+static int test_hrtb_generic_parameter_bound(void)
+{
+    static const char source[] =
+        "fn decode<A: for<'a, 's> DecodeMut<'a, 's, ()>>(a: A) {}";
+    static const char *const decode_path[] = { "DecodeMut" };
+    CmAst ast;
+    CmParseResult result;
+    const CmAstItemId *root_id;
+    const CmAstItem *item;
+    const CmAstGenericParamBound *bound;
+    int ok;
+
+    cm_ast_init(&ast);
+    result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
+        CM_EDITION_2024);
+    root_id = (const CmAstItemId *)cm_vec_at_const(&ast.root_items, 0u);
+    item = root_id == NULL ? NULL : cm_ast_get_item(&ast, *root_id);
+    bound = item == NULL || item->generic_parameter_count != 1u
+            || item->generic_parameters == NULL
+            || item->generic_parameters[0].bound_count != 1u
+            || item->generic_parameters[0].bounds == NULL
+        ? NULL : &item->generic_parameters[0].bounds[0];
+    ok = result.error_count == 0u && bound != NULL
+        && bound->kind == CM_AST_GENERIC_BOUND_TRAIT
+        && bound->binder.lifetime_count == 2u
+        && bound->binder.lifetimes != NULL
+        && ast_string_is(&ast, bound->binder.lifetimes[0], "'a")
+        && ast_string_is(&ast, bound->binder.lifetimes[1], "'s")
+        && ast_span_is(source, bound->binder.span, "for<'a, 's>")
+        && ast_path_segments_are(&ast, bound->trait_type,
+            decode_path, 1u)
+        && ast_span_is(source, bound->span,
+            "for<'a, 's> DecodeMut<'a, 's, ()>")
+        && ast_dump_contains(&ast,
+            "(generic-bound required for<\"'a\", \"'s\"> path(\"DecodeMut\"");
+    if (!ok) {
+        fprintf(stderr, "HRTB generic parameter bound was incorrect: %s\n",
+            result.first_error.message);
+    }
+    cm_ast_destroy(&ast);
     return ok;
 }
 
@@ -5334,6 +5375,7 @@ int main(int argc, char **argv)
         && test_post_value_type_alias_where_clause()
         && test_post_value_associated_type_where_clause()
         && test_generic_parameter_bound_error_paths()
+        && test_hrtb_generic_parameter_bound()
         && test_nested_generic_associated_type_constraint()
         && test_relaxed_sized_generic_parameter_bounds()
         && test_conditionally_const_generic_parameter_bounds()

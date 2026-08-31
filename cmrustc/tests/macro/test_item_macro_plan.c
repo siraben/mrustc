@@ -372,6 +372,35 @@ static void test_impl_item_macro_invocation(void)
     cm_item_macro_plan_destroy(&plan);
 }
 
+static void test_trait_item_macro_invocation(void)
+{
+    static const char source[] =
+        "macro_rules! make_method { () => { fn generated(&self); }; }"
+        "trait Thing { make_method!(); }";
+    CmAst ast;
+    CmExpandedAst active;
+    CmItemMacroPlan plan;
+    CmItemMacroPlanResult result;
+    CmItemMacroPlanOptions options;
+    CmCfgSet cfg;
+
+    if (!parse_active(&ast, &active, &cfg, source)) return;
+    cm_item_macro_plan_init(&plan);
+    cm_item_macro_plan_options_init(&options, &cfg);
+    result = cm_plan_item_macros(&active, &ast, &options, &plan);
+    if (result.status != CM_MACRO_OK || result.expansions != 1u
+        || plan.root_count != 1u
+        || plan.roots[0].child_kind != CM_EXPANDED_CHILD_TRAIT
+        || plan.roots[0].child_count != 1u
+        || !plan.roots[0].children[0].is_generated
+        || !planned_name_is(&ast, &plan.roots[0].children[0],
+            "generated")) {
+        fail("trait-invocation",
+            "trait item macro did not produce an associated item");
+    }
+    cleanup(&ast, &active, &plan);
+}
+
 static void test_generated_cfg_and_provenance(void)
 {
     static const char source[] =
@@ -1360,6 +1389,7 @@ int main(void)
     test_rules_style_declarative_macro();
     test_local_parameterized_declarative_macro();
     test_impl_item_macro_invocation();
+    test_trait_item_macro_invocation();
     test_generated_cfg_and_provenance();
     test_declaration_retention();
     test_resolution_diagnostics();

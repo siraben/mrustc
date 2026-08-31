@@ -13877,6 +13877,89 @@ static void test_bounded_free_const_input_lifetime_erasure(void)
     cm_source_set_destroy(&sources);
 }
 
+static void test_placeholder_trait_lifetimes_and_concrete_receiver(void)
+{
+    static const unsigned char source[] =
+        "trait DecodeMut<'a, 's, S> {}\n"
+        "impl<S> DecodeMut<'_, '_, S> for () {}\n"
+        "struct Handle;\n"
+        "impl Handle { fn drop(self: Handle) {} }\n";
+    CmSourceSet sources;
+    CmSourceId root;
+    CmModuleGraph graph;
+    CmModuleGraphOptions graph_options;
+    CmCfgSet cfg;
+    CmModuleGraphResult graph_result;
+    CmHirContext hir;
+    CmHirModuleMap map;
+    CmHirLowerOptions options;
+    CmHirLowerResult result;
+    const CmHirItem *trait_item;
+    const CmHirItem *trait_impl;
+    const CmHirItem *drop_method;
+    size_t index;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&graph);
+    check(cm_source_add_memory(&sources, "placeholder-receiver/lib.rs",
+        source, sizeof(source) - 1u, &root) == CM_SOURCE_OK,
+        "could not add placeholder lifetime/custom receiver fixture");
+    cm_cfg_set_init(&cfg);
+    cm_module_graph_options_init(&graph_options);
+    graph_options.cfg = &cfg;
+    graph_result = cm_module_graph_build(&graph, &sources, root,
+        &graph_options);
+    cm_hir_context_init(&hir);
+    cm_hir_module_map_init(&map);
+    cm_hir_lower_options_init(&options);
+    result = lower_module_graph(&hir, &graph, graph_result.revision, &map,
+        &options);
+    if (result.error_count != 0u) {
+        fprintf(stderr, "hir-graph-lower placeholder receiver: %s: %s\n",
+            cm_hir_lower_error_kind_name(result.first_error.kind),
+            result.first_error.message);
+    }
+    trait_item = find_hir_item_anywhere(&hir, "DecodeMut");
+    drop_method = find_hir_item_anywhere(&hir, "drop");
+    trait_impl = NULL;
+    for (index = 0u; index < hir.items.len; ++index) {
+        const CmHirItem *item = (const CmHirItem *)cm_vec_at_const(
+            &hir.items, index);
+        if (item != NULL && item->kind == CM_HIR_ITEM_IMPL
+            && item->data.impl_item.has_trait && trait_item != NULL
+            && cm_hir_def_id_equal(item->data.impl_item.trait_type.definition,
+                trait_item->definition)) {
+            trait_impl = item;
+            break;
+        }
+    }
+    check(graph_result.error_count == 0u && result.error_count == 0u
+        && trait_impl != NULL
+        && trait_impl->data.impl_item.trait_type.argument_count == 3u
+        && trait_impl->data.impl_item.trait_type.arguments != NULL
+        && trait_impl->data.impl_item.trait_type.arguments[0].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && trait_impl->data.impl_item.trait_type.arguments[0].data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && trait_impl->data.impl_item.trait_type.arguments[1].kind
+            == CM_HIR_GENERIC_ARG_LIFETIME
+        && trait_impl->data.impl_item.trait_type.arguments[1].data.lifetime.kind
+            == CM_HIR_REGION_INFER
+        && trait_impl->data.impl_item.trait_type.arguments[0].data.lifetime
+                .data.inference_variable
+            != trait_impl->data.impl_item.trait_type.arguments[1]
+                .data.lifetime.data.inference_variable,
+        "explicit trait placeholder lifetimes were not preserved distinctly");
+    check(drop_method != NULL
+        && drop_method->data.function_item.signature.receiver
+            == CM_HIR_RECEIVER_CUSTOM,
+        "inherent concrete custom receiver was not authenticated");
+    cm_hir_module_map_destroy(&map);
+    cm_hir_context_destroy(&hir);
+    cm_module_graph_destroy(&graph);
+    cm_source_set_destroy(&sources);
+}
+
 int main(void)
 {
     test_imported_graph_paths();
@@ -13950,6 +14033,7 @@ int main(void)
     test_supertrait_associated_equalities();
     test_core_trait_alias_declaration();
     test_core_auto_trait_negative_impl_cluster();
+    test_placeholder_trait_lifetimes_and_concrete_receiver();
     if (failures == 0) puts("HIR graph lowering tests: ok");
     return failures == 0 ? 0 : 1;
 }

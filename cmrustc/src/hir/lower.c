@@ -5664,6 +5664,46 @@ static int cm_lower_projection_type_equal(const CmHirContext *hir,
     return 0;
 }
 
+/* In an inherent impl, `self: Concrete` and wrappers such as
+ * `self: Box<Concrete>` name the impl self type directly rather than through
+ * the `Self` keyword.  They are the same authenticated receiver chain; accept
+ * either spelling while retaining the existing bounded wrapper walk. */
+static int cm_lower_concrete_custom_receiver_valid(
+    const CmHirContext *hir, CmHirTypeId type_id, CmHirTypeId impl_self,
+    size_t depth)
+{
+    const CmHirType *type;
+    const CmHirGenericArg *first;
+    if (hir == NULL || depth > hir->types.len) return 0;
+    if (cm_lower_projection_type_equal(hir, type_id, impl_self, depth))
+        return 1;
+    type = cm_hir_get_type(hir, type_id);
+    if (type == NULL) return 0;
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND)
+        return cm_lower_concrete_custom_receiver_valid(hir,
+            type->data.reference_type.pointee, impl_self, depth + 1u);
+    if (type->kind != CM_HIR_TYPE_ADT_KIND
+        && type->kind != CM_HIR_TYPE_ALIAS_APPLICATION_KIND) return 0;
+    if (type->data.named_type.argument_count == 0u
+        || type->data.named_type.arguments == NULL) return 0;
+    first = &type->data.named_type.arguments[0];
+    return first->kind == CM_HIR_GENERIC_ARG_TYPE
+        && cm_lower_concrete_custom_receiver_valid(hir, first->data.type,
+            impl_self, depth + 1u);
+}
+
+static int cm_lower_custom_receiver_valid(const CmLowerState *state,
+    CmHirTypeId type_id, CmHirDefId parent)
+{
+    const CmHirItem *item;
+    if (cm_hir_custom_receiver_type_valid(state->hir, type_id, parent))
+        return 1;
+    item = cm_lower_bound_item(state, parent);
+    return item != NULL && item->kind == CM_HIR_ITEM_IMPL
+        && cm_lower_concrete_custom_receiver_valid(state->hir, type_id,
+            item->data.impl_item.self_type, 0u);
+}
+
 static int cm_lower_parameter_projection_defining_trait(
     CmLowerState *state, const CmHirTraitPredicate *predicate,
     const CmLowerAssociatedTarget *associated, CmHirNamedType *out_trait,
@@ -5905,7 +5945,8 @@ static int cm_lower_find_parameter_projection_in_ast(
     if (generic_bound != NULL) {
         return cm_lower_one_trait_predicate(state, record->ast_id, record,
             subject, generic_bound->trait_type,
-            cm_lower_span(state, generic_bound->span), NULL,
+            cm_lower_span(state, generic_bound->span),
+            &generic_bound->binder,
             generic_bound->modifier == CM_AST_GENERIC_BOUND_CONDITIONALLY_CONST
                 ? CM_HIR_PREDICATE_CONST_IF_CONST
                 : CM_HIR_PREDICATE_REQUIRED, out_predicate);
@@ -8803,6 +8844,8 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
                 if (bound->modifier != CM_AST_GENERIC_BOUND_REQUIRED
                     || bound->trait_type != CM_AST_TYPE_NONE
                     || bound->lifetime == CM_INTERN_ID_NONE
+                    || bound->binder.lifetime_count != 0u
+                    || bound->binder.lifetimes != NULL
                     || cm_ast_get_string(state->ast, bound->lifetime)
                         == NULL) {
                     cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
@@ -8814,7 +8857,10 @@ static int cm_lower_predeclare_generic_parameters(CmLowerState *state,
                 continue;
             }
             if (bound->trait_type == CM_AST_TYPE_NONE
-                || bound->lifetime != CM_INTERN_ID_NONE) {
+                || bound->lifetime != CM_INTERN_ID_NONE
+                || !cm_lower_lifetime_binder_is_valid(&bound->binder,
+                    bound->span,
+                    cm_ast_get_type(state->ast, bound->trait_type))) {
                 cm_lower_fail(state, CM_HIR_LOWER_INVALID_AST,
                     cm_lower_span(state, bound->span), ast_item_id,
                     bound->trait_type, CM_AST_PATH_NONE, CM_HIR_OK,
@@ -11750,7 +11796,7 @@ static int cm_lower_function_item(CmLowerState *state,
                     record->definition, parameter_span, ast_item_id,
                     function->parameters[index].receiver_lifetime);
             if (!state->failed && receiver == CM_HIR_RECEIVER_CUSTOM
-                && !cm_hir_custom_receiver_type_valid(state->hir,
+                && !cm_lower_custom_receiver_valid(state,
                     parameters[index].type, record->parent_definition)) {
                 cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_TYPE,
                     parameter_span, ast_item_id,
@@ -13463,15 +13509,24 @@ static int cm_lower_trait_positional_arguments(CmLowerState *state,
                         && arguments[explicit_count].data.lifetime
                                 .data.binder_index
                             < state->active_lifetime_binder
-                                ->lifetime_count));
+                                ->lifetime_count)
+                    /* `Trait<'_>` is an explicit, compiler-authenticated
+                     * placeholder region.  Preserve its fresh inference
+                     * identity in impl headers instead of treating it as an
+                     * unauthenticated named lifetime. */
+                    || (arguments[explicit_count].data.lifetime.kind
+                            == CM_HIR_REGION_INFER
+                        && !allow_bindings && !allow_constraints
+                        && cm_lower_string_is(state, ast_argument->text,
+                            "'_")));
             if (!lifetime_valid) {
                 if (!state->failed) {
                     cm_lower_fail(state, CM_HIR_LOWER_UNSUPPORTED_GENERIC,
                         cm_lower_span(state, ast_argument->span),
                         ast_item_id, CM_AST_TYPE_NONE, CM_AST_PATH_NONE,
                         CM_HIR_OK,
-                        "explicit trait lifetime argument must be 'static "
-                        "or an authenticated early- or late-bound "
+                        "explicit trait lifetime argument must be 'static, "
+                        "'_, or an authenticated early- or late-bound "
                         "lifetime");
                 }
                 break;
@@ -15092,7 +15147,7 @@ static int cm_lower_item_trait_predicates(CmLowerState *state,
             if (!cm_lower_one_trait_predicate(state, ast_item_id, record,
                     subject, bound->trait_type,
                     cm_lower_span(state, bound->span),
-                    NULL,
+                    &bound->binder,
                     bound->modifier
                             == CM_AST_GENERIC_BOUND_CONDITIONALLY_CONST
                         ? CM_HIR_PREDICATE_CONST_IF_CONST

@@ -1159,6 +1159,7 @@ static int cm_plan_process_children(CmItemMacroPlanContext *context,
         ? CM_PLAN_MACROS_ALL
         : (item->kind == CM_AST_ITEM_EXTERN_BLOCK ? CM_PLAN_MACROS_EXTERN
         : (item->kind == CM_AST_ITEM_IMPL
+            || item->kind == CM_AST_ITEM_TRAIT
             ? CM_PLAN_MACROS_INVOCATIONS_ONLY : CM_PLAN_MACROS_NONE));
     if (!cm_plan_process_sequence(context, child_inputs, child_count,
         &child_scope, nesting + 1u, expansion_depth, allow_child_macros,

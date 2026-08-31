@@ -3485,3 +3485,24 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   continue through the low-dependency rustc crates toward the
   compiler binary, while retaining C-layout aggregates as the std-startup
   follow-up milestone.
+
+- Measured pass (M9-06, seventh compiler-crate rung, probe-param88):
+  `compiler/rustc_proc_macro` now runs as the `library/proc_macro` dependency
+  above the complete core/alloc/std stack and `rustc-literal-escaper`.  Its
+  bridge source exposed higher-ranked binders on inline generic bounds,
+  generated macro invocations inside trait bodies, explicit `'_` lifetime
+  arguments in impl trait references, and inherent methods spelling a custom
+  receiver as their concrete self type.  The syntax AST and HIR predicates now
+  preserve inline binders; the item planner admits invocation-only trait
+  children; impl placeholders retain distinct inference regions; and custom
+  receiver validation accepts either `Self` or the authenticated inherent impl
+  self type through the existing bounded wrapper chain.  Focused parser,
+  planner, and graph-lowering regressions cover those boundaries.  The
+  generated 1,921,893-byte C unit has 2,372 reachable instances: 2,002 real
+  bodies, 330 shims, 40 residual stubs, and 16 vtables.  Its direct Rust root
+  prints `rustc_proc_macro: false true` and exits 0, verifying that an ordinary
+  binary sees no active proc-macro bridge and can construct an empty
+  `TokenStream`.  The generated std `lang_start` path still reaches the known
+  C-layout cleanup abort, so native evidence uses the emitted root directly.
+  Next: continue through the remaining low-dependency compiler crates toward
+  the compiler binary.

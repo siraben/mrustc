@@ -1260,6 +1260,22 @@ static void cm_dump_generics(FILE *stream, const CmAst *ast,
                             == CM_AST_GENERIC_BOUND_CONDITIONALLY_CONST
                         ? "(generic-bound conditionally-const "
                         : "(generic-bound required "), stream);
+                if (parameter->bounds[bound_index].binder.lifetime_count
+                        != 0u) {
+                    uint32_t lifetime_index;
+
+                    fputs("for<", stream);
+                    for (lifetime_index = 0u;
+                         lifetime_index < parameter->bounds[bound_index]
+                            .binder.lifetime_count;
+                         ++lifetime_index) {
+                        if (lifetime_index != 0u) fputs(", ", stream);
+                        cm_dump_string(stream, ast,
+                            parameter->bounds[bound_index].binder
+                                .lifetimes[lifetime_index]);
+                    }
+                    fputs("> ", stream);
+                }
                 cm_dump_type(stream, ast,
                     parameter->bounds[bound_index].trait_type);
                 fputs(")\n", stream);

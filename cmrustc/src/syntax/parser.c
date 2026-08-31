@@ -3321,10 +3321,7 @@ static void cm_parser_parse_generic_constraint_bounds(CmParser *parser,
             cm_parser_bump(parser);
             unsupported = 1;
         } else if (cm_parser_keyword(parser, CM_KW_FOR)) {
-            cm_parser_error(parser,
-                "HRTB generic parameter bounds are unsupported");
-            cm_parser_bump(parser);
-            unsupported = 1;
+            cm_parser_parse_lifetime_binder(parser, &bound.binder);
         } else if (cm_parser_keyword(parser, CM_KW_USE)) {
             cm_parser_error(parser,
                 "use generic parameter bounds are unsupported");

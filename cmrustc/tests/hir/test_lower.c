@@ -5021,7 +5021,8 @@ static void test_cross_trait_projection_default_entry_points(void)
         "associated type defaults",
         "unresolved or unnameable HIR type",
         "unresolved, erased, or unauthenticated bound lifetime",
-        "must be 'static or an authenticated early- or late-bound lifetime",
+        "must be 'static, '_, or an authenticated early- or late-bound "
+        "lifetime",
         "undeclared lifetime",
         "no associated type named by equality"
     };

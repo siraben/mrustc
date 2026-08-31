@@ -199,6 +199,7 @@ struct CmAstGenericParamBound {
     CmAstGenericParamBoundModifier modifier;
     CmAstTypeId trait_type;
     CmInternId lifetime;
+    CmAstLifetimeBinder binder;
     CmAstSpan span;
 };
 

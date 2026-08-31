@@ -1297,8 +1297,9 @@ const CmHirDefinition *cm_hir_lookup_definition(const CmHirContext *context,
 
 /*
  * Structural custom-receiver boundary used before Receiver-trait solving.
- * Accept Self behind references and single-type-argument nominal wrappers;
- * reject receiver types that are not rooted in the enclosing trait/impl Self.
+ * Accept Self, or an inherent impl's concrete self spelling, behind references
+ * and single-type-argument nominal wrappers; reject receiver types that are
+ * not rooted in the enclosing trait/impl Self.
  */
 int cm_hir_custom_receiver_type_valid(const CmHirContext *context,
     CmHirTypeId type, CmHirDefId expected_owner);

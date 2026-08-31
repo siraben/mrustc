@@ -2751,11 +2751,49 @@ static int cm_hir_custom_receiver_type_valid_inner(
             argument->data.type, expected_owner, depth + 1u);
 }
 
+static int cm_hir_custom_receiver_concrete_inner(
+    const CmHirContext *context, CmHirTypeId type_id,
+    CmHirTypeId impl_self_id, size_t depth)
+{
+    const CmHirType *type;
+    const CmHirType *impl_self;
+    const CmHirGenericArg *argument;
+    if (context == NULL || depth > context->types.len) return 0;
+    type = cm_hir_get_type(context, type_id);
+    impl_self = cm_hir_get_type(context, impl_self_id);
+    if (type == NULL || impl_self == NULL) return 0;
+    if (type->kind == impl_self->kind
+        && (type->kind == CM_HIR_TYPE_ADT_KIND
+            || type->kind == CM_HIR_TYPE_ALIAS_APPLICATION_KIND)
+        && cm_hir_named_type_equal(&type->data.named_type,
+            &impl_self->data.named_type)) return 1;
+    if (type->kind == CM_HIR_TYPE_REFERENCE_KIND)
+        return cm_hir_custom_receiver_concrete_inner(context,
+            type->data.reference_type.pointee, impl_self_id, depth + 1u);
+    if (type->kind != CM_HIR_TYPE_ADT_KIND
+        && type->kind != CM_HIR_TYPE_ALIAS_APPLICATION_KIND) return 0;
+    if (type->data.named_type.argument_count == 0u
+        || type->data.named_type.arguments == NULL) return 0;
+    argument = &type->data.named_type.arguments[0];
+    return argument->kind == CM_HIR_GENERIC_ARG_TYPE
+        && cm_hir_custom_receiver_concrete_inner(context,
+            argument->data.type, impl_self_id, depth + 1u);
+}
+
 int cm_hir_custom_receiver_type_valid(const CmHirContext *context,
     CmHirTypeId type, CmHirDefId expected_owner)
 {
-    return cm_hir_custom_receiver_type_valid_inner(context, type,
-        expected_owner, 0u);
+    const CmHirDefinition *definition;
+    const CmHirItem *item;
+    if (cm_hir_custom_receiver_type_valid_inner(context, type,
+            expected_owner, 0u)) return 1;
+    definition = cm_hir_lookup_definition(context, expected_owner);
+    item = definition == NULL || definition->kind != CM_HIR_DEFINITION_ITEM
+            || definition->state != CM_HIR_DEFINITION_BOUND
+        ? NULL : cm_hir_get_item(context, definition->entity.item_id);
+    return item != NULL && item->kind == CM_HIR_ITEM_IMPL
+        && cm_hir_custom_receiver_concrete_inner(context, type,
+            item->data.impl_item.self_type, 0u);
 }
 
 static int cm_hir_function_self_roots_valid(const CmHirContext *context,
