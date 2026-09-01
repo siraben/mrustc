@@ -3018,9 +3018,16 @@ static const CmLowerItemRecord *cm_lower_named_const_length(
  * `static_assert!(@usize_eq: size_of::<NonNull<()>>(), 8)` writes
  * `const _: [(); size_of::<NonNull<()>>()] = [(); 8]`): x86-64 sizes of
  * primitives, pointer-shaped types and their `Option`s, unit and arrays. */
+typedef struct CmLowerConstEvalContext {
+    const CmInternedString *type_parameter;
+    uint64_t type_size;
+    uint64_t type_align;
+} CmLowerConstEvalContext;
+
 static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
     CmAstTypeId type_id, int want_align, unsigned int pointer_bits,
-    size_t depth, uint64_t *out_value)
+    const CmLowerConstEvalContext *context, size_t depth,
+    uint64_t *out_value)
 {
     const CmAstType *type;
     const CmAstPath *path;
@@ -3055,7 +3062,7 @@ static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
         uint64_t length;
         const CmInternedString *text = cm_ast_get_string(ast, type->text);
         if (!cm_lower_eval_size_of_ast_type(ast, type->child, want_align,
-                pointer_bits, depth + 1u, &element)) return 0;
+                pointer_bits, context, depth + 1u, &element)) return 0;
         if (want_align) { *out_value = element; return 1; }
         if (!cm_lower_parse_u64(text, &length)) return 0;
         *out_value = element * length;
@@ -3071,6 +3078,13 @@ static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
     name = cm_ast_get_string(ast,
         path->segments[path->segment_count - 1u].name);
     if (name == NULL) return 0;
+    if (context != NULL && context->type_parameter != NULL
+        && name->len == context->type_parameter->len
+        && memcmp(name->bytes, context->type_parameter->bytes,
+            name->len) == 0) {
+        *out_value = want_align ? context->type_align : context->type_size;
+        return 1;
+    }
     for (index = 0u; index < sizeof(primitives) / sizeof(primitives[0]);
          ++index) {
         size_t length = strlen(primitives[index].name);
@@ -3109,7 +3123,7 @@ static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
             }
             if (cm_lower_eval_size_of_ast_type(ast,
                     segment->arguments[0].type, want_align, pointer_bits,
-                    depth + 1u, &inner) && inner == pointer_size
+                    context, depth + 1u, &inner) && inner == pointer_size
                 && inner_type != NULL
                 && inner_type->kind == CM_AST_TYPE_PATH) {
                 const CmAstPath *inner_path = cm_ast_get_path(ast,
@@ -3137,9 +3151,40 @@ static int cm_lower_eval_size_of_ast_type(const CmAst *ast,
  * single-segment const names resolved through the module scope with their
  * initializers evaluated recursively (`[T; 2 * B]`, `CAPACITY = 2 * B - 1`).
  */
+static const CmLowerItemRecord *cm_lower_const_function_record(
+    const CmLowerState *state, CmHirModuleId module,
+    const CmInternedString *name)
+{
+    const CmLowerItemRecord *result = NULL;
+    size_t index;
+    uint32_t matches = 0u;
+
+    if (state == NULL || name == NULL) return NULL;
+    for (index = 0u; index < state->item_records.len; ++index) {
+        const CmLowerItemRecord *record;
+        const CmInternedString *record_name;
+
+        record = (const CmLowerItemRecord *)cm_vec_at_const(
+            &state->item_records, index);
+        record_name = record == NULL ? NULL
+            : cm_interner_get(&state->hir->strings, record->hir_name);
+        if (record != NULL && record->owner_module == module
+            && cm_hir_def_id_is_none(record->parent_definition)
+            && record->kind == CM_AST_ITEM_FUNCTION
+            && cm_lower_record_visible(state, record)
+            && record_name != NULL && record_name->len == name->len
+            && memcmp(record_name->bytes, name->bytes, name->len) == 0) {
+            result = record;
+            matches += 1u;
+        }
+    }
+    return matches == 1u ? result : NULL;
+}
+
 static int cm_lower_eval_const_length_ast(const CmLowerState *state,
     CmHirModuleId module, const CmAst *ast, CmAstExprId expression_id,
-    size_t depth, uint64_t *out_value)
+    const CmLowerConstEvalContext *context, size_t depth,
+    uint64_t *out_value)
 {
     const CmAstExpr *expression;
     const CmInternedString *operator_name;
@@ -3204,14 +3249,14 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
             || const_item->data.value_item.initializer
                 == CM_AST_EXPR_NONE) return 0;
         return cm_lower_eval_const_length_ast(state, record->owner_module,
-            record->ast, const_item->data.value_item.initializer,
+            record->ast, const_item->data.value_item.initializer, context,
             depth + 1u, out_value);
     }
     if (expression->kind == CM_AST_EXPR_CAST) {
         /* `FD_SETSIZE as usize / ULONG_SIZE` (libc's fd_set): the cast
          * does not change an in-range length. */
         return cm_lower_eval_const_length_ast(state, module, ast,
-            expression->data.cast.value, depth + 1u, out_value);
+            expression->data.cast.value, context, depth + 1u, out_value);
     }
     if (expression->kind == CM_AST_EXPR_CALL
         && expression->data.call.argument_count == 0u) {
@@ -3235,10 +3280,66 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
         else if (callee_name->len == 8u
             && memcmp(callee_name->bytes, "align_of", 8u) == 0)
             want_align = 1;
-        else
-            return 0;
+        else {
+            const CmLowerItemRecord *function_record;
+            const CmAstItem *function_item;
+            const CmAstGenericParam *parameter;
+            const CmInternedString *parameter_name;
+            CmLowerConstEvalContext function_context;
+
+            function_record = cm_lower_const_function_record(state, module,
+                callee_name);
+            function_item = function_record == NULL ? NULL
+                : cm_ast_get_item(function_record->ast,
+                    function_record->ast_id);
+            parameter = function_item == NULL
+                    || function_item->kind != CM_AST_ITEM_FUNCTION
+                    || !function_item->data.function_item.is_const
+                    || function_item->data.function_item.parameter_count != 0u
+                    || function_item->data.function_item.body
+                        == CM_AST_EXPR_NONE
+                    || function_item->generic_parameter_count != 1u
+                    || function_item->generic_parameters == NULL
+                ? NULL : &function_item->generic_parameters[0];
+            parameter_name = parameter == NULL
+                    || parameter->kind != CM_AST_PARAM_TYPE
+                ? NULL : cm_ast_get_string(function_record->ast,
+                    parameter->name);
+            if (parameter_name == NULL
+                || !cm_lower_eval_size_of_ast_type(ast,
+                    last->arguments[0].type, 0,
+                    state->options->pointer_bits, context, 0u,
+                    &function_context.type_size)
+                || !cm_lower_eval_size_of_ast_type(ast,
+                    last->arguments[0].type, 1,
+                    state->options->pointer_bits, context, 0u,
+                    &function_context.type_align)) return 0;
+            function_context.type_parameter = parameter_name;
+            return cm_lower_eval_const_length_ast(state,
+                function_record->owner_module, function_record->ast,
+                function_item->data.function_item.body, &function_context,
+                depth + 1u, out_value);
+        }
         return cm_lower_eval_size_of_ast_type(ast, last->arguments[0].type,
-            want_align, state->options->pointer_bits, 0u, out_value);
+            want_align, state->options->pointer_bits, context, 0u,
+            out_value);
+    }
+    if (expression->kind == CM_AST_EXPR_METHOD_CALL) {
+        const CmInternedString *method = cm_ast_get_string(ast,
+            expression->data.method_call.name);
+
+        if (!cm_lower_interned_string_is(method, "div_ceil")
+            || expression->data.method_call.generic_argument_count != 0u
+            || expression->data.method_call.argument_count != 1u
+            || !cm_lower_eval_const_length_ast(state, module, ast,
+                expression->data.method_call.receiver, context, depth + 1u,
+                &left)
+            || !cm_lower_eval_const_length_ast(state, module, ast,
+                expression->data.method_call.arguments[0], context,
+                depth + 1u, &right)
+            || right == 0u) return 0;
+        *out_value = left / right + (left % right != 0u ? 1u : 0u);
+        return 1;
     }
     if (expression->kind == CM_AST_EXPR_BLOCK) {
         if (expression->data.block.inner_attribute_count != 0u
@@ -3249,7 +3350,7 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
             || expression->data.block.is_unsafe
             || expression->data.block.is_const) return 0;
         return cm_lower_eval_const_length_ast(state, module, ast,
-            expression->data.block.tail, depth + 1u, out_value);
+            expression->data.block.tail, context, depth + 1u, out_value);
     }
     if (expression->kind != CM_AST_EXPR_BINARY) return 0;
     operator_name = cm_ast_get_string(ast,
@@ -3264,9 +3365,11 @@ static int cm_lower_eval_const_length_ast(const CmLowerState *state,
         && !cm_lower_interned_string_is(operator_name, ">>")
         && !cm_lower_interned_string_is(operator_name, "%")) return 0;
     if (!cm_lower_eval_const_length_ast(state, module, ast,
-            expression->data.binary.left, depth + 1u, &left)
+            expression->data.binary.left, context, depth + 1u, &left)
         || !cm_lower_eval_const_length_ast(state, module, ast,
-            expression->data.binary.right, depth + 1u, &right)) return 0;
+            expression->data.binary.right, context, depth + 1u, &right)) {
+        return 0;
+    }
     if (cm_lower_interned_string_is(operator_name, "&")) {
         *out_value = left & right;
         return 1;
@@ -3321,7 +3424,7 @@ static int cm_lower_eval_named_const_expression(const CmLowerState *state,
         cm_lower_syntax_edition(state->options->edition));
     evaluated = fragment.parse.error_count == 0u
         && cm_lower_eval_const_length_ast(state, module, &expression_ast,
-            fragment.expression, 0u, &value);
+            fragment.expression, NULL, 0u, &value);
     cm_ast_destroy(&expression_ast);
     if (!evaluated) return 0;
     *out_value = value;

@@ -2740,7 +2740,14 @@ static void test_macro_expanded_array_length_expression(void)
         { "struct Evaluated { values: [u8; 0 / 8] }", 0u },
         { "struct Evaluated { values: [u8; 7 % 4] }", 3u },
         { "struct Evaluated { values: [u8; 16 / size_of::<u8>()] }", 16u },
-        { "struct Evaluated { values: [u8; 0b101 & 0x3] }", 1u }
+        { "struct Evaluated { values: [u8; 0b101 & 0x3] }", 1u },
+        {
+            "const fn max_len<T>() -> usize {"
+            " (size_of::<T>() * 8).div_ceil(7)"
+            "}"
+            "struct Evaluated { values: [u8; max_len::<u32>()] }",
+            5u
+        }
     };
     static const char *const rejected[] = {
         "struct Rejected { values: [u8; (1 + 7) / 0] }",

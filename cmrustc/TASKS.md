@@ -3524,3 +3524,28 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   std `lang_start` path still reaches the known C-layout cleanup abort, so
   native evidence uses the emitted root directly.  Next: continue through the
   remaining low-dependency compiler crates toward the compiler binary.
+
+- Measured pass (M9-06, ninth compiler-crate rung, probe-param89):
+  `compiler/rustc_serialize` now runs above the complete core/alloc/std stack,
+  `rustc_hashes`, and the vendored `equivalent`, `indexmap`, `smallvec`, and
+  `thin-vec` dependencies.  Its LEB128 buffers exposed the generic const
+  function `max_leb128_len::<T>()`, whose body combines `size_of::<T>()` with
+  integer `div_ceil`; conservative array-length evaluation now interprets
+  that bounded same-module const-function form.  The byte writer then exposed
+  a lost element type in `[T]::get_unchecked_mut`: method-signature matching
+  only replaced a top-level `Self`, and did not match a slice pattern against
+  an array receiver.  Recursive impl-`Self` substitution and element-wise
+  array-to-slice matching now retain concrete `T`, while projection
+  normalization matches the impl's trait arguments before selecting its
+  associated output.  The `slice_get_unchecked` shim consequently uses the
+  concrete pointee width rather than the fallback word width.  The generated
+  1,910,282-byte C unit has 2,325 reachable instances: 1,962 real bodies, 325
+  shims, 38 residual stubs, and 16 vtables.  Its direct Rust root writes and
+  validates unsigned `624485` and signed `-123` LEB128 encodings, prints
+  `rustc_serialize: 3 2 true true`, and exits 0.  Regressions cover the const
+  array length and byte/word unchecked-slice strides through an inherent
+  slice method called on arrays.  The generated std `lang_start` path still
+  reaches the known C-layout cleanup abort, so native evidence uses the
+  emitted root directly.  Gates: native suite and 149/149 standalone u-MIR
+  fixtures.  Next: continue through the remaining low-dependency compiler
+  crates toward the compiler binary.

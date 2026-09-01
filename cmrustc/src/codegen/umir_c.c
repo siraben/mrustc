@@ -601,12 +601,16 @@ static unsigned int cm_umir_c_ref_depth(const CmTyckSet *tyck, CmTyId type)
  * for everything else, which travels in a full slot. */
 static CmTyId cm_umir_c_representation(const CmHirContext *hir,
     const CmTyckSet *tyck, CmTyId type);
+static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
+    const CmTyckSet *tyck, CmTyId type);
 
 static const char *cm_umir_c_scalar_type(const CmTyckSet *tyck, CmTyId type)
 {
     const CmTy *ty;
-    if (cm_umir_c_hir != NULL && type != CM_TY_NONE)
+    if (cm_umir_c_hir != NULL && type != CM_TY_NONE) {
+        type = cm_umir_c_normalize_projection(cm_umir_c_hir, tyck, type);
         type = cm_umir_c_representation(cm_umir_c_hir, tyck, type);
+    }
     ty = type == CM_TY_NONE ? NULL
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
@@ -622,8 +626,10 @@ static unsigned long cm_umir_c_scalar_size(const CmTyckSet *tyck,
     CmTyId type)
 {
     const CmTy *ty;
-    if (cm_umir_c_hir != NULL && type != CM_TY_NONE)
+    if (cm_umir_c_hir != NULL && type != CM_TY_NONE) {
+        type = cm_umir_c_normalize_projection(cm_umir_c_hir, tyck, type);
         type = cm_umir_c_representation(cm_umir_c_hir, tyck, type);
+    }
     ty = type == CM_TY_NONE ? NULL
         : cm_ty_get((CmTyArena *)&tyck->arena,
             cm_ty_resolve((CmTyArena *)&tyck->arena, type));
@@ -1414,8 +1420,42 @@ static int cm_umir_c_render_typed_shim(CmStrBuf *output,
     }
     if (CM_SHIM_IS("slice_get_unchecked")) {
         /* <ItemPtr, SlicePtr, T>(slice, index): element address at the
-         * element's width (slots for non-scalars). */
+         * element's width (slots for non-scalars).  `T` is constrained only
+         * through `ItemPtr: ChangePointee<[T], Pointee = T>` and can remain
+         * an inference variable in lenient dependency metadata.  The first
+         * argument is the concrete item pointer, so recover its pointee when
+         * that happens (`*mut u8` must advance one byte, not one slot). */
         CmTyId elem = instance->count >= 3u ? instance->types[2] : CM_TY_NONE;
+        const CmTy *element = elem == CM_TY_NONE ? NULL
+            : cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, elem));
+        CmTyId slice_ptr = instance->count >= 2u
+            ? instance->types[1] : CM_TY_NONE;
+        const CmTy *slice_pointer = slice_ptr == CM_TY_NONE ? NULL
+            : cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, slice_ptr));
+        if ((element == NULL || element->kind == CM_TY_INFER
+                || element->kind == CM_TY_PARAM)
+            && ft != NULL && (ft->kind == CM_TY_PTR
+                || ft->kind == CM_TY_REF) && ft->count != 0u) {
+            elem = ft->children[0];
+            element = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, elem));
+        }
+        if ((element == NULL || element->kind == CM_TY_INFER
+                || element->kind == CM_TY_PARAM)
+            && slice_pointer != NULL
+            && (slice_pointer->kind == CM_TY_PTR
+                || slice_pointer->kind == CM_TY_REF)
+            && slice_pointer->count != 0u) {
+            CmTyId slice = slice_pointer->children[0];
+            const CmTy *slice_type = cm_ty_get((CmTyArena *)&tyck->arena,
+                cm_ty_resolve((CmTyArena *)&tyck->arena, slice));
+            if (slice_type != NULL
+                && (slice_type->kind == CM_TY_SLICE
+                    || slice_type->kind == CM_TY_ARRAY)
+                && slice_type->count != 0u) elem = slice_type->children[0];
+        }
         cm_str_buf_append(output, "(long long s, long long i) { return "
             "((long long *)(intptr_t)*(long long *)(intptr_t)s)[0] + i * ");
         cm_umir_c_render_number(output, cm_umir_c_scalar_size(tyck, elem));
@@ -2317,6 +2357,14 @@ static int cm_umir_c_ty_match(const CmTyckSet *tyck, CmTyId pattern,
         return 1;
     }
     if (a == b) return 1;
+    /* A method declared on `[T]` can receive `&[U; N]` through the ordinary
+     * array-to-slice coercion.  Match the element here so an inherent impl's
+     * `T` is still recovered from the concrete receiver. */
+    if (a->kind == CM_TY_SLICE && b->kind == CM_TY_ARRAY
+        && a->count != 0u && b->count != 0u) {
+        return cm_umir_c_ty_match(tyck, a->children[0], b->children[0],
+            params, binds, count, capacity, depth + 1u);
+    }
     if (a->kind != b->kind || a->count != b->count) return 0;
     switch (a->kind) {
     case CM_TY_INT:
@@ -2357,11 +2405,26 @@ static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
     for (depth = 0u; depth < 8u; ++depth) {
         const CmTy *projection = type == CM_TY_NONE ? NULL
             : cm_ty_get(arena, cm_ty_resolve(arena, type));
+        CmHirDefId trait_definition;
+        CmHirDefId associated_definition;
+        CmTyId projection_self;
+        CmTyId projection_arguments[32];
+        uint32_t projection_trait_arg_total;
+        uint32_t projection_argument_count;
         CmTyId selected = CM_TY_NONE;
         int blanket_pass;
         size_t impl_index;
         if (projection == NULL || projection->kind != CM_TY_PROJECTION
             || projection->count == 0u) break;
+        trait_definition = projection->def;
+        associated_definition = projection->def2;
+        projection_self = projection->children[0];
+        projection_trait_arg_total = projection->b;
+        projection_argument_count = projection_trait_arg_total > 32u
+            ? 32u : projection_trait_arg_total;
+        if (projection_argument_count != 0u)
+            memcpy(projection_arguments, projection->children + 1u,
+                projection_argument_count * sizeof(*projection_arguments));
         /* A concrete structural impl wins over a bare-parameter blanket
          * impl.  Without predicate solving both appear to match (for
          * example `IntoIterator for &Vec<T>` and `IntoIterator for I`),
@@ -2382,7 +2445,7 @@ static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
                     != CM_HIR_IMPL_POSITIVE
                 || !cm_hir_def_id_equal(
                     impl_item->data.impl_item.trait_type.definition,
-                    projection->def)) continue;
+                    trait_definition)) continue;
             impl_self = cm_ty_from_hir(arena, hir,
                 impl_item->data.impl_item.self_type);
             {
@@ -2394,8 +2457,30 @@ static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
                 if (is_blanket != (blanket_pass == 1)) continue;
             }
             if (!cm_umir_c_ty_match(tyck, impl_self,
-                    projection->children[0], parameters, arguments,
+                    projection_self, parameters, arguments,
                     &argument_count, 32u, 0u)) continue;
+            {
+                const CmHirNamedType *impl_trait =
+                    &impl_item->data.impl_item.trait_type;
+                uint32_t trait_argument;
+                int trait_arguments_match =
+                    impl_trait->argument_count == projection_trait_arg_total
+                    && projection_trait_arg_total <= 32u;
+                for (trait_argument = 0u; trait_arguments_match
+                        && trait_argument < projection_argument_count;
+                        ++trait_argument) {
+                    const CmHirGenericArg *written =
+                        &impl_trait->arguments[trait_argument];
+                    CmTyId pattern;
+                    if (written->kind != CM_HIR_GENERIC_ARG_TYPE) continue;
+                    pattern = cm_ty_from_hir(arena, hir,
+                        written->data.type);
+                    trait_arguments_match = cm_umir_c_ty_match(tyck,
+                        pattern, projection_arguments[trait_argument],
+                        parameters, arguments, &argument_count, 32u, 0u);
+                }
+                if (!trait_arguments_match) continue;
+            }
             for (member_index = 0u; member_index < hir->items.len;
                     ++member_index) {
                 const CmHirItem *member = (const CmHirItem *)cm_vec_at_const(
@@ -2407,7 +2492,7 @@ static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
                         impl_item->definition)
                     || !cm_hir_def_id_equal(
                         member->data.type_alias_item.trait_item_definition,
-                        projection->def2)
+                        associated_definition)
                     || member->data.type_alias_item.target
                         == CM_HIR_TYPE_NONE) continue;
                 target = cm_ty_from_hir(arena, hir,
@@ -2415,7 +2500,7 @@ static CmTyId cm_umir_c_normalize_projection(const CmHirContext *hir,
                 subst.parameters = parameters;
                 subst.types = arguments;
                 subst.count = argument_count;
-                subst.self_type = projection->children[0];
+                subst.self_type = projection_self;
                 target = cm_ty_subst(arena, target, &subst);
                 if (selected != CM_TY_NONE
                     && !cm_umir_c_ty_equal(tyck, selected, target, 0u))
@@ -3556,13 +3641,15 @@ static void cm_umir_c_render_callee_symbol(CmStrBuf *output,
                         sig->parameters[param].type);
                     CmTyId actual = cm_umir_c_local_type(cm_umir_c_active_body,
                         statement->operands[first_arg + skip + param]);
-                    const CmTy *pattern_ty = pattern == CM_TY_NONE ? NULL
-                        : cm_ty_get(arena, cm_ty_resolve(arena, pattern));
-                    if (pattern_ty != NULL && pattern_ty->kind == CM_TY_SELF
-                        && parent != NULL
-                        && parent->kind == CM_HIR_ITEM_IMPL)
-                        pattern = cm_ty_from_hir(arena, hir,
+                    if (parent != NULL && parent->kind == CM_HIR_ITEM_IMPL) {
+                        CmTySubst self_subst;
+                        self_subst.parameters = NULL;
+                        self_subst.types = NULL;
+                        self_subst.count = 0u;
+                        self_subst.self_type = cm_ty_from_hir(arena, hir,
                             parent->data.impl_item.self_type);
+                        pattern = cm_ty_subst(arena, pattern, &self_subst);
+                    }
                     if (pattern == CM_TY_NONE || actual == CM_TY_NONE)
                         continue;
                     if (param == 0u && skip == 0u
