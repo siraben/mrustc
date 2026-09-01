@@ -1451,6 +1451,16 @@ static CmAstPatternId cm_parser_parse_pattern_atom(CmParser *parser)
     return cm_ast_add_pattern(parser->ast, &pattern);
 }
 
+static int cm_parser_pattern_range_end_omitted(const CmParser *parser)
+{
+    enum cm_token_kind kind = cm_parser_kind(parser);
+
+    return kind == CM_TOKEN_COMMA || kind == CM_TOKEN_FAT_ARROW
+        || kind == CM_TOKEN_PIPE || kind == CM_TOKEN_RPAREN
+        || kind == CM_TOKEN_RBRACKET || kind == CM_TOKEN_RBRACE
+        || cm_parser_keyword(parser, CM_KW_IF);
+}
+
 static CmAstPatternId cm_parser_parse_range_pattern(CmParser *parser)
 {
     const struct cm_token *first;
@@ -1467,7 +1477,10 @@ static CmAstPatternId cm_parser_parse_range_pattern(CmParser *parser)
         operator_kind = cm_parser_kind(parser);
         cm_parser_bump(parser);
         pattern.kind = CM_AST_PATTERN_RANGE;
-        pattern.data.range.end = cm_parser_parse_pattern_atom(parser);
+        if (operator_kind != CM_TOKEN_DOT_DOT
+            || !cm_parser_pattern_range_end_omitted(parser)) {
+            pattern.data.range.end = cm_parser_parse_pattern_atom(parser);
+        }
         pattern.data.range.is_inclusive =
             operator_kind != CM_TOKEN_DOT_DOT;
         pattern.span = cm_parser_span_from(parser, first);
@@ -1485,7 +1498,10 @@ static CmAstPatternId cm_parser_parse_range_pattern(CmParser *parser)
         cm_parser_bump(parser);
         pattern.kind = CM_AST_PATTERN_RANGE;
         pattern.data.range.start = left;
-        pattern.data.range.end = cm_parser_parse_pattern_atom(parser);
+        if (operator_kind != CM_TOKEN_DOT_DOT
+            || !cm_parser_pattern_range_end_omitted(parser)) {
+            pattern.data.range.end = cm_parser_parse_pattern_atom(parser);
+        }
         pattern.data.range.is_inclusive =
             operator_kind != CM_TOKEN_DOT_DOT;
         pattern.span = cm_parser_span_from(parser, first);
@@ -2235,7 +2251,12 @@ static CmAstExprId cm_parser_parse_prefix(CmParser *parser,
         return cm_parser_parse_closure(parser, first, 0);
     } else if (cm_parser_kind(parser) == CM_TOKEN_AMP
                && cm_parser_next_token(parser) != NULL
-               && cm_parser_next_token(parser)->keyword == CM_KW_RAW) {
+               && cm_parser_next_token(parser)->keyword == CM_KW_RAW
+               && cm_parser_token_at(parser, parser->position + 2u) != NULL
+               && (cm_parser_token_at(parser,
+                    parser->position + 2u)->keyword == CM_KW_CONST
+                   || cm_parser_token_at(parser,
+                    parser->position + 2u)->keyword == CM_KW_MUT)) {
         expression.kind = CM_AST_EXPR_RAW_REFERENCE;
         cm_parser_bump(parser);
         cm_parser_bump(parser);
@@ -2244,9 +2265,6 @@ static CmAstExprId cm_parser_parse_prefix(CmParser *parser,
                 CM_AST_RAW_REFERENCE_CONST;
         } else if (cm_parser_eat_keyword(parser, CM_KW_MUT)) {
             expression.data.raw_reference.kind = CM_AST_RAW_REFERENCE_MUT;
-        } else {
-            cm_parser_error(parser,
-                "expected 'const' or 'mut' after '&raw'");
         }
         expression.data.raw_reference.operand =
             cm_parser_parse_expression_bp_mode(parser, 14u,

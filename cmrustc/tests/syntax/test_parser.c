@@ -3803,6 +3803,30 @@ static int test_binding_rest_subpattern(void)
     return ok;
 }
 
+static int test_binding_open_ended_range_subpattern(void)
+{
+    static const char source[] =
+        "fn classify(value: Option<usize>) -> usize {"
+        " match value { Some(x @ 1..) => x, _ => 0 }"
+        "}";
+    CmAst ast;
+    CmParseResult result;
+    int ok;
+
+    cm_ast_init(&ast);
+    result = cm_parse_crate(&ast, source, sizeof(source) - 1u,
+        CM_EDITION_2024);
+    ok = result.error_count == 0u
+        && ast_dump_contains(&ast,
+            "bind(\"x\" @ range(literal(\"1\")..))");
+    if (!ok) {
+        fprintf(stderr, "binding open-ended range was incorrect: %s\n",
+            result.first_error.message);
+    }
+    cm_ast_destroy(&ast);
+    return ok;
+}
+
 static int test_nested_reference_pattern_token_splitting(void)
 {
     static const char source[] = "fn take() { consume(|&&b| b) }";
@@ -4861,9 +4885,7 @@ static int test_raw_reference_expressions(void)
 {
     static const char source[] =
         "fn probe(mut value: u32) { "
-        "(&raw const value, &raw mut value, &value, &mut value) }";
-    static const char invalid_source[] =
-        "fn probe(value: u32) { &raw value }";
+        "(&raw const value, &raw mut value, &value, &mut value, &raw) }";
     const CmAstItemId *root_id;
     const CmAstItem *function;
     const CmAstExpr *body;
@@ -4872,6 +4894,7 @@ static int test_raw_reference_expressions(void)
     const CmAstExpr *raw_mut;
     const CmAstExpr *shared;
     const CmAstExpr *mutable;
+    const CmAstExpr *shared_raw;
     CmAst ast;
     CmParseResult result;
     int ok;
@@ -4886,21 +4909,25 @@ static int test_raw_reference_expressions(void)
     tuple = body == NULL || body->kind != CM_AST_EXPR_BLOCK
         ? NULL : cm_ast_get_expr(&ast, body->data.block.tail);
     raw_const = tuple == NULL || tuple->kind != CM_AST_EXPR_TUPLE
-            || tuple->data.list.element_count != 4u
+            || tuple->data.list.element_count != 5u
             || tuple->data.list.elements == NULL
         ? NULL : cm_ast_get_expr(&ast, tuple->data.list.elements[0]);
     raw_mut = tuple == NULL || tuple->kind != CM_AST_EXPR_TUPLE
-            || tuple->data.list.element_count != 4u
+            || tuple->data.list.element_count != 5u
             || tuple->data.list.elements == NULL
         ? NULL : cm_ast_get_expr(&ast, tuple->data.list.elements[1]);
     shared = tuple == NULL || tuple->kind != CM_AST_EXPR_TUPLE
-            || tuple->data.list.element_count != 4u
+            || tuple->data.list.element_count != 5u
             || tuple->data.list.elements == NULL
         ? NULL : cm_ast_get_expr(&ast, tuple->data.list.elements[2]);
     mutable = tuple == NULL || tuple->kind != CM_AST_EXPR_TUPLE
-            || tuple->data.list.element_count != 4u
+            || tuple->data.list.element_count != 5u
             || tuple->data.list.elements == NULL
         ? NULL : cm_ast_get_expr(&ast, tuple->data.list.elements[3]);
+    shared_raw = tuple == NULL || tuple->kind != CM_AST_EXPR_TUPLE
+            || tuple->data.list.element_count != 5u
+            || tuple->data.list.elements == NULL
+        ? NULL : cm_ast_get_expr(&ast, tuple->data.list.elements[4]);
     ok = result.error_count == 0u
         && raw_const != NULL
         && raw_const->kind == CM_AST_EXPR_RAW_REFERENCE
@@ -4920,6 +4947,10 @@ static int test_raw_reference_expressions(void)
         && ast_string_is(&ast, mutable->data.unary.operator_name, "&mut")
         && ast_expression_path_is(&ast, mutable->data.unary.operand,
             "value")
+        && shared_raw != NULL && shared_raw->kind == CM_AST_EXPR_UNARY
+        && ast_string_is(&ast, shared_raw->data.unary.operator_name, "&")
+        && ast_expression_path_is(&ast, shared_raw->data.unary.operand,
+            "raw")
         && ast_dump_contains(&ast,
             "raw-reference(const, path(\"value\"))")
         && ast_dump_contains(&ast,
@@ -4928,14 +4959,6 @@ static int test_raw_reference_expressions(void)
         fprintf(stderr, "raw reference AST was incorrect: %s\n",
             result.first_error.message);
     }
-    cm_ast_destroy(&ast);
-
-    cm_ast_init(&ast);
-    result = cm_parse_crate(&ast, invalid_source,
-        sizeof(invalid_source) - 1u, CM_EDITION_2024);
-    ok = ok && result.error_count != 0u
-        && strstr(result.first_error.message,
-            "expected 'const' or 'mut' after '&raw'") != NULL;
     cm_ast_destroy(&ast);
     return ok;
 }
@@ -5419,6 +5442,7 @@ int main(int argc, char **argv)
         && test_or_pattern_with_range_alternatives()
         && test_omitted_start_range_pattern()
         && test_binding_rest_subpattern()
+        && test_binding_open_ended_range_subpattern()
         && test_nested_reference_pattern_token_splitting()
         && test_block_match_arm_without_comma()
         && test_nonblock_match_arm_requires_comma()

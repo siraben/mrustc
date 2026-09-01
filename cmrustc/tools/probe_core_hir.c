@@ -785,7 +785,35 @@ int main(int argc, char **argv)
                 (unsigned long)dep_result.error_count,
                 (unsigned long)cm_module_graph_module_count(
                     &dep_graphs[dep]));
-            if (dep_result.error_count != 0u) goto cleanup;
+            if (dep_result.error_count != 0u) {
+                uint32_t error_index;
+                for (error_index = 0u; error_index < 20u; ++error_index) {
+                    CmResolveError resolve_error;
+                    const CmSourceFile *error_file;
+                    char detail_a[1024];
+                    char detail_b[4096];
+                    if (!cm_module_graph_get_error(&dep_graphs[dep],
+                            error_index, &resolve_error)) break;
+                    error_file = cm_source_get(&sources,
+                        resolve_error.span.source);
+                    detail_a[0] = '\0';
+                    detail_b[0] = '\0';
+                    (void)cm_module_graph_copy_string(&dep_graphs[dep],
+                        resolve_error.detail_a, detail_a,
+                        sizeof(detail_a));
+                    (void)cm_module_graph_copy_string(&dep_graphs[dep],
+                        resolve_error.detail_b, detail_b,
+                        sizeof(detail_b));
+                    printf("%s-graph-error kind=%s source=%s line=%lu "
+                        "column=%lu detail=%s: %s\n", dep_name,
+                        cm_resolve_error_kind_name(resolve_error.kind),
+                        error_file == NULL ? "<none>" : error_file->path,
+                        (unsigned long)resolve_error.line,
+                        (unsigned long)resolve_error.column, detail_a,
+                        detail_b);
+                }
+                goto cleanup;
+            }
             artifact_result = cm_dependency_macro_artifact_build(
                 &dep_macros[dep], &dep_graphs[dep], dep_result.revision,
                 dep_name, dep == 0u ? "core_crate" : dep_name);
@@ -805,6 +833,30 @@ int main(int argc, char **argv)
                     &dep_graphs[dep], dep_result.revision);
                 printf("%s-imports errors=%lu\n", dep_name,
                     (unsigned long)dep_import_result.error_count);
+                if (dep_import_result.error_count != 0u) {
+                    uint32_t import_index;
+                    for (import_index = 0u; import_index < 60u;
+                            ++import_index) {
+                        CmImportError import_error;
+                        char error_name[128];
+                        char error_detail[256];
+                        if (!cm_import_get_error(&dep_imports[dep],
+                                import_index, &import_error)) break;
+                        error_name[0] = '\0';
+                        error_detail[0] = '\0';
+                        (void)cm_import_copy_string(&dep_imports[dep],
+                            import_error.name, error_name,
+                            sizeof(error_name));
+                        (void)cm_import_copy_string(&dep_imports[dep],
+                            import_error.detail, error_detail,
+                            sizeof(error_detail));
+                        printf("%s-import-error kind=%s module=%lu name=%s "
+                            "detail=%s\n", dep_name,
+                            cm_import_error_kind_name(import_error.kind),
+                            (unsigned long)import_error.module, error_name,
+                            error_detail);
+                    }
+                }
                 (void)cm_import_resolver_add_dependency(&imports, dep_name,
                     &dep_imports[dep], &dep_graphs[dep], dep_result.revision);
             }

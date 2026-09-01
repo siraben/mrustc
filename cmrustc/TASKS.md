@@ -3549,3 +3549,26 @@ scratchpad/hello-main.rs -- `fn main() { let v = vec![1, 2, 3]; let name = Strin
   emitted root directly.  Gates: native suite and 149/149 standalone u-MIR
   fixtures.  Next: continue through the remaining low-dependency compiler
   crates toward the compiler binary.
+
+- Measured pass (M9-06, tenth compiler-crate rung, probe-param89):
+  `compiler/rustc_thread_pool` now runs above the complete core/alloc/std
+  stack and the vendored `crossbeam-utils`, `crossbeam-epoch`,
+  `crossbeam-deque`, and `smallvec` dependencies.  Crossbeam exposed a nested
+  import through a locally re-exported dependency enum
+  (`Ordering::SeqCst`); dependency delegation now retains the exact enum
+  declaration and resolves its variants, including glob imports, with source
+  identity and visibility intact.  Its `Atomic` debug implementation also
+  showed that `raw` is contextual after `&` only when followed by `const` or
+  `mut`, so an ordinary variable named `raw` remains a shared-reference
+  operand.  The thread-pool builder then exercised the open-ended range
+  subpattern `x @ 1..`; range patterns now allow an omitted exclusive upper
+  bound at pattern delimiters.  Focused resolver and parser regressions cover
+  all three forms, and the dependency probe now reports structured import and
+  graph diagnostics instead of only their counts.  The generated
+  1,881,235-byte C unit has 2,283 reachable instances: 1,925 real bodies, 320
+  shims, 38 residual stubs, and 16 vtables.  Its direct Rust root evaluates
+  the real sleep-counter limit, prints `rustc_thread_pool: 65535 true`, and
+  exits 0.  The generated std `lang_start` path remains on the known C-layout
+  cleanup boundary, so native evidence uses the emitted root directly.
+  Gates: native suite and 149/149 standalone u-MIR fixtures.  Next: continue
+  through the remaining compiler crates toward the compiler binary.

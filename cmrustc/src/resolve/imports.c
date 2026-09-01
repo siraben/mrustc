@@ -1229,7 +1229,10 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
     size_t skip;
     uint32_t dependency_tag;
     CmModuleId base_module = CM_MODULE_NONE;
+    CmResolveItemRef dependency_enumeration;
+    int has_dependency_enumeration = 0;
     int changed = 0;
+    memset(&dependency_enumeration, 0, sizeof(dependency_enumeration));
     /* `::core::clone::Clone` (libc's `prelude!`): a leading `::` names an
      * extern crate in editions 2018+, so an absolute leaf whose first
      * segment is a registered dependency is delegated like a bare one. */
@@ -1295,6 +1298,23 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
                 skip = index + 1u;
                 break;
             }
+            if (binding->value.dependency != 0u
+                && binding->value.target_module == CM_MODULE_NONE
+                && binding->value.item_kind == CM_AST_ITEM_ENUM
+                && (size_t)binding->value.dependency
+                    <= state->dependencies.len) {
+                /* `Ordering::SeqCst` where `Ordering` is a local re-export
+                 * of an enum owned by a dependency.  The dependency binding
+                 * has no module target to continue through; retain its exact
+                 * enum declaration and resolve the final variant below. */
+                dep = (const CmImportDependency *)cm_vec_at_const(
+                    &state->dependencies,
+                    (size_t)binding->value.dependency - 1u);
+                dependency_enumeration = binding->value.declaration;
+                has_dependency_enumeration = 1;
+                skip = index + 1u;
+                break;
+            }
             if (binding->value.target_module == CM_MODULE_NONE) break;
             current = binding->value.target_module;
         }
@@ -1317,6 +1337,68 @@ static int cm_resolve_leaf_dependency(CmImportResolverState *state,
     }
     destination = cm_import_module(state, leaf->module);
     if (destination == NULL) return 0;
+    if (has_dependency_enumeration
+        && ((leaf->is_glob && skip == leaf->segments.len)
+            || (!leaf->is_glob && skip + 1u == leaf->segments.len))) {
+        const CmImportResolverState *dep_state =
+            cm_import_state_const(dep->resolver);
+        const CmImportEnumState *enumeration = dep_state == NULL ? NULL
+            : cm_import_enumeration_const(dep_state,
+                dependency_enumeration);
+        const CmInternedString *wanted = leaf->is_glob ? NULL
+            : cm_import_string(state, ids[skip]);
+        size_t variant_index;
+        int found = 0;
+
+        if (enumeration == NULL || (!leaf->is_glob && wanted == NULL))
+            return 0;
+        for (variant_index = 0u; variant_index < enumeration->variants.len;
+                ++variant_index) {
+            const CmImportEnumVariant *variant =
+                (const CmImportEnumVariant *)cm_vec_at_const(
+                    &enumeration->variants, variant_index);
+            const CmInternedString *variant_name = variant == NULL ? NULL
+                : cm_import_string(dep_state, variant->name);
+            int namespace_index;
+            if (variant_name == NULL
+                || (!leaf->is_glob && (variant_name->len != wanted->len
+                    || memcmp(variant_name->bytes, wanted->bytes,
+                        wanted->len) != 0))) continue;
+            for (namespace_index = 0; namespace_index < 2;
+                    ++namespace_index) {
+                CmResolvedBinding imported;
+                if (namespace_index == (int)CM_RESOLVE_NAMESPACE_VALUE
+                    && variant->form == CM_AST_FIELDS_NAMED) continue;
+                memset(&imported, 0, sizeof(imported));
+                imported.revision = state->revision;
+                imported.module = leaf->module;
+                imported.name = leaf->is_glob
+                    ? (CmResolveStringId)cm_interner_intern(&state->strings,
+                        variant_name->bytes, variant_name->len)
+                    : leaf->import_name;
+                imported.namespace_kind =
+                    (CmResolveNamespace)namespace_index;
+                imported.declaration = variant->declaration.enumeration;
+                imported.variant = variant->declaration;
+                imported.item_kind = CM_AST_ITEM_ENUM;
+                imported.import_declaration = leaf->declaration;
+                imported.dependency = dependency_tag;
+                imported.is_public = 1;
+                imported.is_crate_visible = 1;
+                cm_import_apply_leaf_visibility(&imported, leaf);
+                imported.is_import = 1;
+                imported.is_ambiguous = 0;
+                imported.is_anonymous = leaf->is_anonymous;
+                cm_record_leaf_binding(leaf, &imported);
+                if (!leaf->is_anonymous)
+                    changed |= cm_add_binding(destination, &imported, 1);
+            }
+            found = 1;
+            if (!leaf->is_glob) break;
+        }
+        if (found) leaf->ever_resolved = 1;
+        return changed;
+    }
     count = cm_import_segment_views(state, ids + skip,
         leaf->segments.len - skip, views, 64u);
     if (leaf->segments.len > skip && count == 0u) return 0;

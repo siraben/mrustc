@@ -1568,6 +1568,71 @@ static int test_builtin_primitive_imports(void)
     return ok;
 }
 
+static int test_dependency_reexported_enum_variant_import(void)
+{
+    static const char dependency_source[] =
+        "pub enum Ordering { Relaxed, SeqCst }\n";
+    static const char consumer_source[] =
+        "mod primitive { pub use dep::Ordering; }\n"
+        "use crate::primitive::Ordering::SeqCst;\n";
+    CmSourceSet sources;
+    CmModuleGraph dependency_graph;
+    CmModuleGraph consumer_graph;
+    CmImportResolver dependency_resolver;
+    CmImportResolver consumer_resolver;
+    CmModuleGraphResult dependency_result;
+    CmModuleGraphResult consumer_result;
+    CmImportResult dependency_imports;
+    CmImportResult consumer_imports;
+    CmSourceId dependency_root;
+    CmSourceId consumer_root;
+    CmResolvedBinding binding;
+    int ok;
+
+    cm_source_set_init(&sources);
+    cm_module_graph_init(&dependency_graph);
+    cm_module_graph_init(&consumer_graph);
+    cm_import_resolver_init(&dependency_resolver);
+    cm_import_resolver_init(&consumer_resolver);
+    ok = check(cm_source_add_memory(&sources, "dep/lib.rs",
+            (const unsigned char *)dependency_source,
+            strlen(dependency_source), &dependency_root) == CM_SOURCE_OK
+        && cm_source_add_memory(&sources, "consumer/lib.rs",
+            (const unsigned char *)consumer_source,
+            strlen(consumer_source), &consumer_root) == CM_SOURCE_OK,
+        "could not load dependency enum-variant fixture");
+    dependency_result = build_graph_with_empty_cfg(&dependency_graph,
+        &sources, dependency_root);
+    dependency_imports = cm_import_resolve(&dependency_resolver,
+        &dependency_graph, dependency_result.revision);
+    ok &= check(dependency_result.error_count == 0u
+        && dependency_imports.error_count == 0u
+        && cm_import_resolver_add_dependency(&consumer_resolver, "dep",
+            &dependency_resolver, &dependency_graph,
+            dependency_result.revision),
+        "could not register dependency enum fixture");
+    consumer_result = build_graph_with_empty_cfg(&consumer_graph, &sources,
+        consumer_root);
+    consumer_imports = cm_import_resolve(&consumer_resolver,
+        &consumer_graph, consumer_result.revision);
+    memset(&binding, 0, sizeof(binding));
+    ok &= check(consumer_result.error_count == 0u
+        && consumer_imports.error_count == 0u
+        && find_binding(&consumer_resolver, consumer_result.root,
+            CM_RESOLVE_NAMESPACE_VALUE, "SeqCst", &binding)
+        && binding.item_kind == CM_AST_ITEM_ENUM
+        && binding.variant.enumeration.source != 0u
+        && binding.variant.index == 1u
+        && binding.dependency != 0u,
+        "dependency enum re-export did not expose its nested variant");
+    cm_import_resolver_destroy(&consumer_resolver);
+    cm_import_resolver_destroy(&dependency_resolver);
+    cm_module_graph_destroy(&consumer_graph);
+    cm_module_graph_destroy(&dependency_graph);
+    cm_source_set_destroy(&sources);
+    return ok;
+}
+
 static int test_dependency_macro_artifact(void)
 {
     static const char source[] =
@@ -2035,6 +2100,7 @@ int main(void)
     ok &= test_core_shaped_macro_identity();
     ok &= test_prelude_import_scope();
     ok &= test_builtin_primitive_imports();
+    ok &= test_dependency_reexported_enum_variant_import();
     ok &= test_core_target_cfg_import_frontier(
         getenv("RUST190_CORE_ROOT"));
     ok &= test_dependency_macro_artifact();
